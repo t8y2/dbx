@@ -20,7 +20,7 @@ vi.mock("@/lib/common/clipboard", () => ({
 
 const mountedApps: App[] = [];
 
-async function mountDialog(sql: string) {
+async function mountDialog(sql: string, extraProps: Record<string, unknown> = {}, listeners: Record<string, (...args: any[]) => void> = {}) {
   const state = reactive({ open: true });
   const container = document.createElement("div");
   document.body.append(container);
@@ -30,6 +30,8 @@ async function mountDialog(sql: string) {
         h(DangerConfirmDialog, {
           open: state.open,
           sql,
+          ...extraProps,
+          ...listeners,
           "onUpdate:open": (value: boolean) => {
             state.open = value;
           },
@@ -104,5 +106,53 @@ describe("DangerConfirmDialog SQL preview", () => {
     await nextTick();
 
     expect(copyToClipboard).toHaveBeenCalledWith(sql);
+  });
+});
+
+describe("DangerConfirmDialog running/cancel footer state", () => {
+  function footerButtons() {
+    const footer = document.body.querySelectorAll("button");
+    return Array.from(footer);
+  }
+
+  it("keeps the default Cancel button unchanged when cancelable is not set (existing callers)", async () => {
+    await mountDialog("DROP TABLE users;", { loading: true });
+
+    const buttons = footerButtons();
+    const cancelButton = buttons.find((button) => button.textContent?.trim() === "Cancel");
+    expect(cancelButton).toBeDefined();
+    expect(cancelButton?.disabled).toBe(true);
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel Query")).toBe(false);
+  });
+
+  it("shows an active Cancel Query button while loading when cancelable is true", async () => {
+    const onCancelRunning = vi.fn();
+    await mountDialog("DELETE FROM big_orders;", { loading: true, cancelable: true }, { onCancelRunning });
+
+    const buttons = footerButtons();
+    const cancelRunningButton = buttons.find((button) => button.textContent?.trim() === "Cancel Query");
+    expect(cancelRunningButton).toBeDefined();
+    expect(cancelRunningButton?.disabled).toBe(false);
+
+    cancelRunningButton?.click();
+    await nextTick();
+
+    expect(onCancelRunning).toHaveBeenCalledOnce();
+  });
+
+  it("disables the Cancel Query button while the cancel itself is in flight", async () => {
+    await mountDialog("DELETE FROM big_orders;", { loading: true, cancelable: true, cancelRunningLoading: true });
+
+    const buttons = footerButtons();
+    const cancelRunningButton = buttons.find((button) => button.textContent?.trim() === "Cancel Query");
+    expect(cancelRunningButton?.disabled).toBe(true);
+  });
+
+  it("does not show the Cancel Query button when cancelable is true but not loading", async () => {
+    await mountDialog("DELETE FROM big_orders;", { loading: false, cancelable: true });
+
+    const buttons = footerButtons();
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel Query")).toBe(false);
+    expect(buttons.some((button) => button.textContent?.trim() === "Cancel")).toBe(true);
   });
 });

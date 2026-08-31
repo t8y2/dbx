@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dialogSource = readFileSync(new URL("../SchemaDiffDialog.vue", import.meta.url), "utf8");
+const configStepSource = readFileSync(new URL("../SchemaDiffConfigStep.vue", import.meta.url), "utf8");
 
 describe("SchemaDiffDialog fullscreen layout", () => {
   it("fits the dialog to its portal instead of the viewport width", () => {
@@ -21,5 +22,105 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(dialogSource).toContain("if (!showOptionsPanel.value) return;");
     expect(dialogSource).toContain("event.preventDefault();");
     expect(dialogSource).toContain("showOptionsPanel.value = false;");
+  });
+
+  it("lets the deploy confirm dialog body shrink so a long destructive statement can't push the footer buttons off-screen", () => {
+    expect(dialogSource).toContain('<div class="py-2 space-y-3 min-w-0">');
+  });
+
+  it("lets the config step scroll vertically so the Compare button stays reachable when 'compare specific tables' is enabled", () => {
+    // Regression for #6627: the "compare specific tables" feature (#6533/#6540) grows the
+    // config step (table multi-select + same-name match). Under a fixed-height dialog that
+    // step used to be clipped (`overflow-hidden`), pushing the Compare button below the
+    // visible area with no way to scroll to it. The container must scroll on all steps
+    // except the result step, which relies on splitpanes to manage its own height.
+    expect(dialogSource).toContain("step === 'result' ? 'overflow-hidden' : 'overflow-y-auto'");
+    // The config step must not be flex-shrunk (which would swallow its height and suppress
+    // the scrollbar); only then does the taller-than-dialog content actually overflow and
+    // become reachable via scrolling.
+    expect(dialogSource).toMatch(/<SchemaDiffConfigStep\n[\s\S]*?class="shrink-0"/);
+  });
+
+  it("clears stale result and progress state whenever a new dialog session opens", () => {
+    expect(dialogSource).toContain("function resetComparisonResultState() {");
+    expect(dialogSource).toMatch(/if \(isOpen\) \{\s+resetComparisonResultState\(\);/);
+    expect(dialogSource).toContain("diffObjects.value = [];");
+    expect(dialogSource).toContain("lastDiffResult.value = null;");
+    expect(dialogSource).toContain("schemaDiffProgress.value = null;");
+  });
+
+  it("shows real metadata progress and indeterminate comparison phases without fabricated percentages", () => {
+    expect(dialogSource).toContain('phase: "loading-table-lists"');
+    expect(dialogSource).toContain('phase: "loading-source-details"');
+    expect(dialogSource).toContain('phase: "loading-target-details"');
+    expect(dialogSource).toContain('phase: "loading-extra-objects"');
+    expect(dialogSource).toContain('phase: "comparing"');
+    expect(dialogSource).toContain('phase: "generating"');
+    expect(dialogSource).toContain("onProgress: (progress) =>");
+    expect(dialogSource).toContain("schemaDiffProgressCount");
+    expect(dialogSource).toContain('role="progressbar"');
+    expect(dialogSource).toContain("schema-diff-progress-indeterminate");
+    expect(dialogSource).not.toMatch(/\b(?:20|40|60|80)%/);
+  });
+
+  it("renders a localized next-step label alongside the current progress state", () => {
+    expect(dialogSource).toContain("getSchemaDiffNextProgressStep");
+    expect(dialogSource).toContain("schemaDiffNextProgressLabel");
+    expect(dialogSource).toContain('t("diff.progress.next"');
+    expect(dialogSource).toContain('v-if="schemaDiffNextProgressLabel"');
+    expect(dialogSource).toContain("shouldLoadSchemaDiffExtraObjects");
+  });
+
+  it("clears progress before preserving the existing comparison error flow", () => {
+    expect(dialogSource).toMatch(/\} catch \(e: any\) \{\s+if \(!isCurrentRequest\(\)\) return;\s+schemaDiffProgress\.value = null;/);
+    expect(dialogSource).toContain("toast(e?.message || String(e), 5000);");
+    expect(dialogSource).toContain('step.value = "config";');
+  });
+
+  it("invalidates an active comparison when the dialog closes", () => {
+    expect(dialogSource).toContain("const requestId = ++comparisonRequestId;");
+    expect(dialogSource).toContain("if (!isCurrentRequest()) return;");
+    expect(dialogSource).toMatch(/\} else \{\s+comparisonRequestId\+\+;\s+loading\.value = false;\s+schemaDiffProgress\.value = null;/);
+  });
+
+  it("does not restore persisted table matches before source and target identities are ready", () => {
+    expect(configStepSource).toContain('if (!isTableIdentityReady("source")) {');
+    expect(configStepSource).toContain("clearUnavailableTableSelection();");
+    expect(configStepSource).toContain('v-if="restrictTables && canConfigureTableSelection"');
+    expect(configStepSource).toContain("restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')");
+  });
+
+  it("keeps explicit table selection in a shared scope below both sides", () => {
+    const comparisonScope = configStepSource.indexOf("<!-- Comparison Scope -->");
+    const targetInfo = configStepSource.indexOf("<!-- Target Info -->");
+    const options = configStepSource.indexOf("<!-- Options -->");
+    const tableSelectors = configStepSource.match(/<TableMultiSelect\b/g) ?? [];
+    const tableSelector = configStepSource.indexOf("<TableMultiSelect", comparisonScope);
+    const targetMatch = configStepSource.indexOf("<!-- Target Same-Name Match -->", comparisonScope);
+
+    expect(comparisonScope).toBeGreaterThan(targetInfo);
+    expect(comparisonScope).toBeLessThan(options);
+    expect(tableSelectors).toHaveLength(1);
+    expect(tableSelector).toBeGreaterThan(comparisonScope);
+    expect(tableSelector).toBeLessThan(options);
+    expect(targetMatch).toBeGreaterThan(comparisonScope);
+    expect(targetMatch).toBeLessThan(options);
+  });
+
+  it("keeps focused and selected deployment SQL projections separate", () => {
+    expect(dialogSource).toContain('const focusedDeploySql = ref("");');
+    expect(dialogSource).toContain('const selectedDeploySql = ref("");');
+    expect(dialogSource).toContain("const input = selectSchemaDiffInputForObject(result, diffObjects.value, objectId);");
+    expect(dialogSource).toContain(':deploy-sql="focusedDeploySql"');
+    expect(dialogSource).toContain(':deploy-sql-all="selectedDeploySql"');
+    expect(dialogSource).not.toContain("deploySqlAll.value = result.syncSql");
+  });
+
+  it("executes the selected SQL rather than the focused preview", () => {
+    expect(dialogSource).toContain("sql: selectedDeploySql.value");
+    expect(dialogSource).toContain("[selectedDeploySql.value]");
+    expect(dialogSource).toContain("selectedObjectId.value !== objectId");
+    expect(dialogSource).toContain('selectedDeploySql.value = "";');
+    expect(dialogSource).toContain("const sql = selectedDeploySql.value.trim();");
   });
 });

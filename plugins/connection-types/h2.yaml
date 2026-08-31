@@ -1,0 +1,59 @@
+schemaVersion: 1
+order: 470
+dbType: h2
+rustVariant: H2
+label: H2
+dialect: H2
+runtimeMode: agent
+mcpMode: bridge
+agentKey: h2
+driverStoreVisible: true
+driverStoreOrder: 19
+driverProfiles:
+  - profile: h2-legacy
+    agentKey: h2
+    packageKey: h2-legacy
+    label: H2 2.1 Legacy
+    storeVisible: false
+  - profile: h2-v1
+    agentKey: h2
+    label: H2 1.x
+    storeVisible: false
+  - profile: h2-v2
+    agentKey: h2
+    label: H2 2.0–2.1
+    storeVisible: false
+  - profile: h2-v3
+    agentKey: h2
+    label: H2 2.2+
+    storeVisible: false
+  - profile: h2-custom
+    agentKey: h2
+    label: H2 Custom JAR
+    storeVisible: false
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+localFile: true
+defaultPort: 9092
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: true
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

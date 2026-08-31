@@ -1166,7 +1166,7 @@ const KnownColumnPatterns: Array<{ pattern: RegExp; generatorKey: string }> = [
 export function findGeneratorKey(columnName: string, dataType: string, isAutoIncrement?: boolean): string {
   if (isAutoIncrement) return "sequence";
   const type = dataType.toLowerCase();
-  const isNumeric = type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
+  const isNumeric = /^number(?:\s*\([^)]*\))?$/.test(type.trim()) || type.includes("int") || type === "smallint" || type === "bigint" || type.includes("bool") || type.includes("decimal") || type.includes("numeric") || type.includes("float") || type.includes("double") || type === "real";
   const isDateTime = type.includes("date") || type.includes("timestamp") || type === "time";
   const isBinary = type.includes("binary") || type.includes("blob") || type.includes("bytea");
   const isBoolType = type === "bool" || type === "boolean" || type === "bit" || type === "tinyint(1)";
@@ -1204,7 +1204,7 @@ export function defaultGeneratorParams(_columnName: string, attrs: ColumnAttrs, 
   const scale = attrs.numericScale ?? null;
   const charLen = attrs.characterMaximumLength ?? null;
   if (!attrs.isAutoIncrement && generatedDefaultValue(attrs.columnDefault, attrs.dataType) !== undefined) {
-    params.includeDefault = true;
+    params.includeDefault = false;
     params.defaultPercent = 100;
   }
 
@@ -1552,7 +1552,7 @@ export function generateValue(columnName: string, dataType: string, generatorKey
   if (params?.includeNull && params.nullPercent && Math.random() * 100 < params.nullPercent) return null;
   const defaultValue = generatedDefaultValue(columnDefault, dataType);
   if (defaultValue !== undefined) {
-    const includeDefault = params?.includeDefault ?? true;
+    const includeDefault = params?.includeDefault ?? false;
     const defaultPercent = params?.defaultPercent ?? 100;
     if (includeDefault && defaultPercent > 0 && Math.random() * 100 < defaultPercent) return defaultValue;
   }
@@ -1774,6 +1774,29 @@ export interface GenerateResult {
   statements: string[];
 }
 
+const MAX_UNIQUE_GENERATION_ATTEMPTS = 100;
+
+export class UniqueValueGenerationError extends Error {
+  constructor(
+    public readonly tableName: string,
+    public readonly columnName: string,
+    public readonly attempts: number,
+  ) {
+    super(`Unable to generate a unique value for column "${columnName}" in table "${tableName}" after ${attempts} attempts.`);
+    this.name = "UniqueValueGenerationError";
+  }
+}
+
+function generatedValueIdentity(value: unknown): string {
+  if (isGeneratedSqlExpression(value)) return `sql:${value.sql}`;
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "number") return `number:${value}`;
+  if (typeof value === "boolean") return `boolean:${value}`;
+  if (typeof value === "string") return `string:${value}`;
+  return `${typeof value}:${JSON.stringify(value)}`;
+}
+
 export function supportsGeneratedMultiRowValues(databaseType?: DatabaseType): boolean {
   return databaseType !== "oracle" && databaseType !== "oceanbase-oracle" && databaseType !== "iris";
 }
@@ -1810,15 +1833,34 @@ export function generateTableData(config: TableGenerateConfig, databaseType?: Da
   const shouldAddTbname = isTdengineStable && !hasTbnameColumn;
   const tdengineChildTableName = shouldAddTbname ? generateTdengineChildTableName() : null;
   const tagValues = new Map<string, unknown>();
+  const uniqueValues = config.columns.map((column) => (column.generatorParams?.unique ? new Set<string>() : null));
   const colNames = shouldAddTbname ? ["tbname", ...config.columns.map((c) => c.columnName)] : config.columns.map((c) => c.columnName);
   const rows: unknown[][] = [];
 
   for (let i = 0; i < config.rowCount; i++) {
-    const row = config.columns.map((col) => {
+    const row = config.columns.map((col, columnIndex) => {
       if (isTdengineStable && col.isTag && tagValues.has(col.columnName)) {
         return tagValues.get(col.columnName);
       }
-      const value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+      let value: unknown;
+      if (col.generatorParams?.unique) {
+        const seen = uniqueValues[columnIndex]!;
+        let found = false;
+        for (let attempt = 0; attempt < MAX_UNIQUE_GENERATION_ATTEMPTS; attempt++) {
+          value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+          const identity = generatedValueIdentity(value);
+          if (!seen.has(identity)) {
+            seen.add(identity);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          throw new UniqueValueGenerationError(config.tableName, col.columnName, MAX_UNIQUE_GENERATION_ATTEMPTS);
+        }
+      } else {
+        value = generateValue(col.columnName, col.dataType, col.generatorKey, i, col.generatorParams, col.isAutoIncrement ? null : col.columnDefault);
+      }
       if (isTdengineStable && col.isTag) {
         tagValues.set(col.columnName, value);
       }

@@ -129,6 +129,54 @@ class PostgresLikeAgentTest {
     }
 
     @Test
+    void listIndexesPreservesRealColumnVsExpressionProvenance() {
+        // PR #6312 review (round 2): the Highgo/Java Agent metadata path itself must carry
+        // per-key column-vs-expression provenance, not just the native Rust postgres.rs path.
+        // Fakes a mixed index: a plain column, a real column whose name is deliberately
+        // collision-prone (the round-1 review's own "order item" example — spaces, so it would
+        // be misclassified by the old character-based heuristic), and a genuine expression key
+        // part sourced from pg_get_indexdef (attnum = 0, so a.attname comes back null and
+        // COALESCE falls through to the expression text).
+        String expressionKeyPart = "COALESCE(height, '-1'::integer::double precision)";
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent(preparedConnection(resultSet(
+            new String[]{"index_name", "index_type", "is_unique", "is_primary", "column_text", "is_expression"},
+            new Object[][]{
+                {"uq_tankong", "btree", true, false, "sta_id", false},
+                {"uq_tankong", "btree", true, false, "order item", false},
+                {"uq_tankong", "btree", true, false, expressionKeyPart, true}
+            }
+        )));
+        agent.connect(new ConnectParams());
+
+        List<IndexInfo> indexes = agent.listIndexes("public", "tankong_data");
+
+        assertEquals(1, indexes.size());
+        IndexInfo index = indexes.get(0);
+        assertEquals(java.util.Arrays.asList("sta_id", "order item", expressionKeyPart), index.getColumns());
+        assertEquals(java.util.Arrays.asList(false, false, true), index.getKey_is_expression());
+        assertTrue(index.getIs_unique());
+        assertFalse(index.getIs_primary());
+        assertEquals("btree", index.getIndex_type());
+    }
+
+    @Test
+    void listIndexesQueryLeftJoinsAttributesInsteadOfDroppingExpressionKeys() {
+        // Regression guard for the actual #6295/#6312 bug: an inner JOIN on pg_attribute has no
+        // matching row for an expression key part (attnum = 0), so it silently disappears from
+        // the result instead of surfacing as an expression. The join must be a LEFT JOIN gated
+        // on k.attnum > 0, and expression text must come from pg_get_indexdef.
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent();
+        agent.connect(new ConnectParams());
+
+        agent.listIndexes("app", "orders");
+
+        String sql = String.join("\n", MetadataSqlFake.statements);
+        assertTrue(sql.contains("LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0"), sql);
+        assertTrue(sql.contains("pg_catalog.pg_get_indexdef(ix.indexrelid, k.n, true)"), sql);
+        assertTrue(sql.contains("ix.indisunique AND ix.indisvalid"), sql);
+    }
+
+    @Test
     void tableDdlIncludesNamedCheckConstraints() {
         ConstraintDdlAgent agent = new ConstraintDdlAgent();
 

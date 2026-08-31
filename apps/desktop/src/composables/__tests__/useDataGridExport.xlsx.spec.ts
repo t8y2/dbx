@@ -13,8 +13,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/components/export/XlsxHeaderDialog.vue", () => ({
   default: {
     emits: ["confirm"],
-    mounted(this: { $emit: (event: string, value: boolean) => void }) {
-      queueMicrotask(() => this.$emit("confirm", true));
+    mounted(this: { $emit: (event: string, value: { headerMode: string; autoFilter: boolean }) => void }) {
+      queueMicrotask(() => this.$emit("confirm", { headerMode: "name-comment", autoFilter: false }));
     },
     render() {
       return null;
@@ -37,7 +37,9 @@ vi.mock("@/composables/useToast", () => ({
 vi.mock("@/composables/useDataGridExtractor", () => ({
   useDataGridExtractor: () => ({
     copyWithExtractor: vi.fn(),
+    copyWithPreference: vi.fn(),
     previewWithExtractor: vi.fn(),
+    previewWithPreference: vi.fn(),
     canCopyWithExtractor: vi.fn(),
   }),
 }));
@@ -118,11 +120,27 @@ describe("useDataGridExport XLSX headers", () => {
     vi.clearAllMocks();
   });
 
-  it("maps comments independently for every result sheet", async () => {
+  it("maps combined headers independently for every result sheet", async () => {
     const state = useDataGridExport(createOptions());
 
     await state.exportAllResultsXlsx();
 
-    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["Identifier"] }), expect.objectContaining({ sheetName: "Names", columnComments: ["Display name"] })]));
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Identifier)"], autoFilter: false }), expect.objectContaining({ sheetName: "Names", columnComments: ["name (Display name)"], autoFilter: false })]),
+      false,
+    );
+  });
+
+  it("uses ordinal result comments when single-table metadata is unavailable", async () => {
+    const options = createOptions();
+    options.tableMeta = computed(() => undefined);
+    options.columnComments = computed(() => ["Joined identifier"]);
+    options.allColumnComments = computed(() => ["Joined identifier"]);
+    const state = useDataGridExport(options);
+
+    await state.exportAllResultsXlsx();
+
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false);
   });
 });

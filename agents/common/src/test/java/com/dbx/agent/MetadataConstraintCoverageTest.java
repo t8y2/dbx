@@ -62,6 +62,8 @@ class MetadataConstraintCoverageTest {
                     result.add(driversRoot.relativize(file).getName(0).toString());
                 } else if ("main.go".equals(fileName) && hasGoMetadataDispatcher(file)) {
                     result.add(driversRoot.relativize(file).getName(0).toString());
+                } else if (fileName.endsWith(".rs") && hasRustMetadataDispatcher(file)) {
+                    result.add(driversRoot.relativize(file).getName(0).toString());
                 }
             });
         }
@@ -77,6 +79,15 @@ class MetadataConstraintCoverageTest {
     }
 
     private static boolean hasGoMetadataDispatcher(Path file) {
+        try {
+            String source = readUtf8(file);
+            return source.contains("\"list_tables\"") || source.contains("\"list_objects\"");
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static boolean hasRustMetadataDispatcher(Path file) {
         try {
             String source = readUtf8(file);
             return source.contains("\"list_tables\"") || source.contains("\"list_objects\"");

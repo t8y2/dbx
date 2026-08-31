@@ -134,6 +134,11 @@ export class MetadataLoadCoordinator {
     return this.inFlight.has(key);
   }
 
+  inFlightPromise<T>(scope: MetadataScopeInput | string): Promise<T> | undefined {
+    const key = typeof scope === "string" ? scope : metadataScopeKey(scope);
+    return this.inFlight.get(key)?.promise as Promise<T> | undefined;
+  }
+
   clear(scope?: MetadataScopeInput | string) {
     if (scope === undefined) {
       this.inFlight.clear();

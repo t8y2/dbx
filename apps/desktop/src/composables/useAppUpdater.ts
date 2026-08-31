@@ -22,6 +22,62 @@ export function canDownloadAndInstallUpdate(info: api.UpdateInfo | null, isDeskt
   return isDesktop && info?.update_available === true && info.manual_update_only !== true;
 }
 
+interface ParsedUpdateVersion {
+  core: [string, string, string];
+  prerelease: string[];
+}
+
+function normalizeUpdateVersion(version: string): string {
+  return version.trim().replace(/^[vV]/, "");
+}
+
+function parseUpdateVersion(version: string): ParsedUpdateVersion | null {
+  const match = normalizeUpdateVersion(version).match(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
+  if (!match) return null;
+  return {
+    core: [match[1], match[2], match[3]],
+    prerelease: match[4]?.split(".") ?? [],
+  };
+}
+
+function compareNumericVersionIdentifier(left: string, right: string): number {
+  if (left.length !== right.length) return left.length < right.length ? -1 : 1;
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
+function compareParsedUpdateVersions(left: ParsedUpdateVersion, right: ParsedUpdateVersion): number {
+  for (let index = 0; index < left.core.length; index += 1) {
+    const comparison = compareNumericVersionIdentifier(left.core[index], right.core[index]);
+    if (comparison !== 0) return comparison;
+  }
+  if (!left.prerelease.length || !right.prerelease.length) {
+    if (left.prerelease.length === right.prerelease.length) return 0;
+    return left.prerelease.length ? -1 : 1;
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftIdentifier = left.prerelease[index];
+    const rightIdentifier = right.prerelease[index];
+    if (leftIdentifier === undefined || rightIdentifier === undefined) return leftIdentifier === undefined ? -1 : 1;
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumeric = /^\d+$/.test(leftIdentifier);
+    const rightNumeric = /^\d+$/.test(rightIdentifier);
+    if (leftNumeric && rightNumeric) return compareNumericVersionIdentifier(leftIdentifier, rightIdentifier);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftIdentifier < rightIdentifier ? -1 : 1;
+  }
+  return 0;
+}
+
+export function isUpdateIgnored(info: api.UpdateInfo | null, ignoredVersion: string | undefined): boolean {
+  const latest = info?.latest_version;
+  if (!latest || !ignoredVersion) return false;
+  const parsedLatest = parseUpdateVersion(latest);
+  const parsedIgnored = parseUpdateVersion(ignoredVersion);
+  if (!parsedLatest || !parsedIgnored) return normalizeUpdateVersion(latest) === normalizeUpdateVersion(ignoredVersion);
+  return compareParsedUpdateVersions(parsedLatest, parsedIgnored) <= 0;
+}
+
 export function normalizeUpdateDownloadSource(value: unknown): SettingsUpdateDownloadSource {
   // Old persisted AtomGit preferences should retain their mainland mirror behavior.
   if (value === "atomgit") return "cnb";
@@ -65,8 +121,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateDownloaded = ref(false);
   const isInstallingUpdate = ref(false);
   const updateReady = ref(false);
+  const isIgnoringUpdate = ref(false);
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
-  const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true);
+  const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
   let activeDownloadAttempt = 0;
   let pendingCancellation: Promise<void> | undefined;
@@ -121,6 +178,21 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   function openLatestRelease() {
     const url = resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl);
     openUrl(url);
+  }
+
+  async function ignoreCurrentVersion() {
+    const latest = updateInfo.value?.latest_version;
+    if (!latest || isIgnoringUpdate.value) return;
+    isIgnoringUpdate.value = true;
+    try {
+      await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: latest });
+      showUpdateDialog.value = false;
+      toast(t("updates.versionIgnored", { version: tagVersion(latest) }), 5000);
+    } catch (error) {
+      toast(t("updates.ignoreVersionFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+    } finally {
+      isIgnoringUpdate.value = false;
+    }
   }
 
   function blockUpdateForActiveTasks(): boolean {
@@ -250,6 +322,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     updateDownloaded,
     isInstallingUpdate,
     updateReady,
+    isIgnoringUpdate,
     activeTaskCount,
     hasUpdateAvailable,
     latestReleaseUrl,
@@ -257,6 +330,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkUpdates,
     formatUpdateError,
     openLatestRelease,
+    ignoreCurrentVersion,
     downloadAndInstallUpdate,
     cancelDownload,
     installDownloadedUpdate,

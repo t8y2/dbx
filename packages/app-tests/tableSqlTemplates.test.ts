@@ -31,6 +31,10 @@ test("builds SELECT template with explicit table columns", () => {
   );
 });
 
+test("builds a MetricsQL range query for VictoriaMetrics metrics", () => {
+  assert.equal(buildTableSelectTemplate({ databaseType: "victoriametrics", tableName: "flag" }), '{__name__="flag"}[1h]');
+});
+
 test("builds INSERT template without auto generated columns", () => {
   assert.equal(
     buildTableInsertTemplate({
@@ -93,4 +97,20 @@ test("builds GaussDB M templates with the detected backtick identifier mode", ()
   assert.equal(buildTableInsertTemplate(options), "INSERT INTO app_schema.`order` (id, `DisplayName`)\nVALUES (0, 'DisplayName_value');");
   assert.equal(buildTableUpdateTemplate(options), "UPDATE app_schema.`order`\nSET `DisplayName` = 'DisplayName_value'\nWHERE id = 0;");
   assert.equal(buildTableDeleteTemplate(options), "DELETE FROM app_schema.`order`\nWHERE id = 0;");
+});
+
+test("preserves the Phoenix schema in all SQL templates", () => {
+  const options = {
+    databaseType: "jdbc" as const,
+    driverProfile: "phoenix",
+    identifierQuote: '"',
+    schema: "APP",
+    tableName: "USERS",
+    columns: [col({ name: "ID", data_type: "integer", is_primary_key: true }), col({ name: "NAME", data_type: "varchar" })],
+  };
+
+  assert.equal(buildTableSelectTemplate(options), 'SELECT "ID", "NAME"\nFROM "APP"."USERS";');
+  assert.equal(buildTableInsertTemplate(options), `INSERT INTO "APP"."USERS" ("ID", "NAME")\nVALUES (0, 'NAME_value');`);
+  assert.equal(buildTableUpdateTemplate(options), `UPDATE "APP"."USERS"\nSET "NAME" = 'NAME_value'\nWHERE "ID" = 0;`);
+  assert.equal(buildTableDeleteTemplate(options), `DELETE FROM "APP"."USERS"\nWHERE "ID" = 0;`);
 });

@@ -9,6 +9,7 @@ export interface XlsxWorksheetData {
   columnComments?: readonly (string | null)[] | undefined;
   rows: readonly (readonly XlsxCellValue[])[];
   numericColumnRightAlign?: boolean;
+  autoFilter?: boolean;
 }
 
 interface XlsxWorksheetSegment {
@@ -125,7 +126,8 @@ function estimateColumnWidths(columns: readonly string[], rows: readonly (readon
 function safeExcelNumber(value: string): string | undefined {
   const trimmed = value.trim();
   if (!trimmed || !Number.isFinite(Number(trimmed))) return undefined;
-  const significantDigits = (trimmed.split(/[eE]/, 1)[0].match(/\d/g) || []).join("").replace(/^0+/, "").length;
+  const [integerPart, fractionPart = ""] = trimmed.split(/[eE]/, 1)[0].split(".", 2);
+  const significantDigits = `${integerPart}${fractionPart.replace(/0+$/, "")}`.replace(/\D/g, "").replace(/^0+/, "").length;
   return significantDigits <= 15 ? trimmed : undefined;
 }
 
@@ -173,14 +175,15 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
     return `<row r="${excelRowIndex}">${cells}</row>`;
   }).join("");
 
+  const autoFilterXml = data.autoFilter === false ? "" : `\n  <autoFilter ref="${range}"/>`;
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="${range}"/>
   <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
   <cols>${colsXml}</cols>
-  <sheetData>${headerXml}${bodyXml}</sheetData>
-  <autoFilter ref="${range}"/>
+  <sheetData>${headerXml}${bodyXml}</sheetData>${autoFilterXml}
 </worksheet>`;
 }
 

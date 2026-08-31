@@ -1,7 +1,8 @@
-import type { ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
+import type { CatalogInfo, ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
 import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
-import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, PG_VACUUM_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { supportsRegisteredConnectionScopedQueryExecution, supportsRegisteredQueryTargetDatabaseListing, usesRegisteredConnectionOnlyQueryTarget } from "@/lib/database/sqlExecutionTargetRegistry";
 
 export function isSchemaAware(dbType?: DatabaseType): boolean {
   return !!dbType && SCHEMA_AWARE_TYPES.has(dbType);
@@ -44,6 +45,15 @@ export function isInternalDorisCatalog(catalogType?: string | null, catalogName?
   return (catalogName ?? "").trim() === "internal";
 }
 
+/**
+ * Keep the catalog grouping layer whenever SHOW CATALOGS exposes an external
+ * catalog. A single visible external catalog still carries namespace
+ * information that cannot be represented by the flat database tree.
+ */
+export function shouldShowDorisCatalogTree(catalogs: readonly CatalogInfo[]): boolean {
+  return catalogs.some((catalog) => !isInternalDorisCatalog(catalog.catalog_type, catalog.name));
+}
+
 export function usesTreeSchemaMode(dbType?: DatabaseType): boolean {
   return !!dbType && TREE_SCHEMA_TYPES.has(dbType);
 }
@@ -63,8 +73,33 @@ export function databaseObjectTreeQuerySchema(dbType: DatabaseType | undefined, 
   return schema || database;
 }
 
+/**
+ * Cloud Spanner is the one schema-aware type whose default schema is the empty string: that is the
+ * literal name of GoogleSQL's user schema, and the agent forwards it to the driver verbatim. Every
+ * `schema || database` fallback therefore has to be bypassed, because `database` holds a resource
+ * path (`projects/…/databases/db`) that is never a schema name and matches no metadata.
+ *
+ * Named schemas (Spanner 2024+) pass through unchanged. Callers that already collapsed
+ * `schema || node.database` are normalized back to the blank schema, which is safe because a Spanner
+ * schema identifier is letters, digits and underscores and can never contain the path separator.
+ */
+export function spannerObjectTreeSchema(schema?: string): string {
+  return schema && !schema.includes("/") ? schema : "";
+}
+
+/**
+ * Whether a schema tree node carries a name its children can be loaded for. Cloud Spanner is the one
+ * type where the empty string is a real schema name (GoogleSQL's user schema), so a plain truthiness
+ * check would leave that node expandable but permanently empty. Every other type keeps the
+ * truthiness test, which also filters the undefined schema on nodes that have no schema level.
+ */
+export function schemaNodeHasLoadableName(dbType: DatabaseType | undefined, schema?: string): boolean {
+  return dbType === "spanner" ? schema != null : !!schema;
+}
+
 export function databaseObjectTreeNodeSchema(dbType: DatabaseType | undefined, database: string, schema?: string): string | undefined {
   if (usesDatabaseObjectTreeMode(dbType)) return undefined;
+  if (dbType === "spanner") return spannerObjectTreeSchema(schema);
   if (schema) return schema;
   return isSchemaAware(dbType) ? database : undefined;
 }
@@ -78,7 +113,50 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
 }
 
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "hbase";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase";
+}
+
+/**
+ * Whether the current product surface exposes a query execution path for the
+ * database type. This is intentionally distinct from sqlFileExecution:
+ * document/vector/key-value editors can execute commands from a query tab
+ * even when importing a SQL file is not supported.
+ */
+export function supportsQueryExecution(dbType?: DatabaseType): boolean {
+  return supportsDatabaseFeature(dbType, "queryExecution");
+}
+
+/**
+ * The AI assistant currently builds its context from database/table metadata.
+ * Connection-only query targets (for example etcd and ZooKeeper) do not expose
+ * that hierarchy, so they must not be offered by sidebar "Add to AI" actions.
+ */
+export function supportsAiAssistantContext(dbType?: DatabaseType): boolean {
+  return supportsQueryExecution(dbType) && !usesConnectionOnlyQueryTarget(dbType);
+}
+
+export function supportsConnectionScopedQueryExecution(dbType?: DatabaseType): boolean {
+  return supportsRegisteredConnectionScopedQueryExecution(dbType);
+}
+
+/**
+ * Query surfaces whose target is the connection itself and which do not expose
+ * a database namespace to select. Keep this separate from
+ * supportsConnectionScopedQueryExecution: document/vector stores may execute
+ * without a selected database while still exposing database-like namespaces
+ * (for example indexes or collections) for browsing and target selection.
+ */
+export function usesConnectionOnlyQueryTarget(dbType?: DatabaseType): boolean {
+  return usesRegisteredConnectionOnlyQueryTarget(dbType);
+}
+
+/**
+ * Database-like namespaces exposed by connection-scoped document/vector
+ * query surfaces. This is the extension point for drivers whose query target
+ * is still selected from a database/index list rather than from SQL metadata.
+ */
+export function supportsQueryTargetDatabaseListing(dbType?: DatabaseType): boolean {
+  return supportsRegisteredQueryTargetDatabaseListing(dbType);
 }
 
 export function usesFetchFirst(dbType?: DatabaseType): boolean {
@@ -94,6 +172,11 @@ const NON_SQL_IN_LIST_PASTE_TYPES = new Set<DatabaseType>(["neo4j"]);
 export function supportsSqlInListPaste(dbType?: DatabaseType): boolean {
   if (!dbType) return true;
   return supportsSqlFileExecution(dbType) && !NON_SQL_IN_LIST_PASTE_TYPES.has(dbType);
+}
+
+export function supportsQueryEditorBlockComments(dbType?: DatabaseType): boolean {
+  if (!dbType) return true;
+  return supportsSqlFileExecution(dbType);
 }
 
 export function supportsSchemaDiagram(dbType?: DatabaseType): boolean {
@@ -132,22 +215,32 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
   return supportsDatabaseFeature(dbType, "objectBrowser");
 }
 
+export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
+  // MongoDB reuses the object browser for collections, not the SQL database list.
+  return supportsObjectBrowser(dbType) && dbType !== "mongodb";
+}
+
 export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType): boolean {
   if (!supportsObjectBrowser(dbType)) return false;
+  if (dbType === "mongodb") return nodeType === "mongo-db";
   if (nodeType === "database" && usesDatabaseObjectTreeMode(dbType)) return true;
   if (nodeType === "database" && isSchemaAware(dbType) && dbType !== "sqlserver") return false;
   return nodeType === "database" || nodeType === "schema" || nodeType === "object-browser";
 }
 
 export function supportsTableTruncate(dbType?: DatabaseType): boolean {
-  return !!dbType && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "manticoresearch";
+  return !!dbType && dbType !== "impala" && dbType !== "sqlite" && dbType !== "rqlite" && dbType !== "turso" && dbType !== "cloudflare-d1" && dbType !== "duckdb" && dbType !== "influxdb" && dbType !== "victoriametrics" && dbType !== "manticoresearch";
+}
+
+export function supportsTableVacuum(dbType?: DatabaseType): boolean {
+  return !!dbType && PG_VACUUM_TYPES.has(dbType);
 }
 
 export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc"];
 
 /**
  * Returns true if the given database type supports explicit transaction control
@@ -155,4 +248,23 @@ const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql"];
  */
 export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
+}
+
+/**
+ * Default auto-commit mode when opening a query tab for the given database type.
+ * Query tabs default to auto-commit; users can explicitly switch to manual transactions.
+ *
+ * When the user has configured `manual` as their default, manual mode only applies to
+ * databases that actually support explicit transaction control — otherwise the tab is
+ * forced back to auto-commit so it does not start in an unsupported state. (For
+ * non-transaction databases, `queryStore` also forces auto-commit on first execution,
+ * but that would leave the new tab's initial state misleading; gating here avoids that.)
+ *
+ * The `defaultMode` selector is the user-configured default (Settings > Editor);
+ * it is supplied by the caller rather than read here so this module stays free of
+ * any Pinia store dependency.
+ */
+export function defaultAutoCommitForDbType(dbType: string | undefined, defaultMode: "auto" | "manual" = "auto"): boolean {
+  if (defaultMode !== "manual") return true;
+  return !supportsTransaction(dbType);
 }

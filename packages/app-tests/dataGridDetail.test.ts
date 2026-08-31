@@ -53,6 +53,25 @@ test("buildDataGridCellDetail preserves full value metadata", () => {
   });
 });
 
+test("buildDataGridCellDetail preserves a leading newline in the full value", () => {
+  const status = "\n=====================================\nINNODB MONITOR OUTPUT\nbody";
+  const detail = buildDataGridCellDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: [status],
+    columns: ["Status"],
+    columnIndex: 0,
+    displayValue: (value) => String(value),
+    isEditable: false,
+  });
+
+  assert.equal(detail?.value, status);
+  assert.equal(detail?.rawValue, status);
+  assert.equal(detail?.rawValuePreview, status);
+  assert.equal(detail?.displayValue, status);
+  assert.equal(detail?.displayValuePreview, status);
+});
+
 test("buildDataGridCellDetail reports image preview URLs", () => {
   const detail = buildDataGridCellDetail({
     rowIndex: 0,
@@ -203,7 +222,7 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
 
   assert.equal(dataGridRowDetailJson(detail), '{\n  "id": 1,\n  "name": "Ada",\n  "nickname": null\n}');
   assert.equal(dataGridRowDetailJson(detail, { id: 1, profile: { city: "Shanghai" } }), '{\n  "id": 1,\n  "profile": {\n    "city": "Shanghai"\n  }\n}');
-  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
+  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\t");
 });
 
 test("dataGridRowDetailJson uses the original MongoDB document for nested values", () => {
@@ -286,7 +305,7 @@ test("dataGridColumnDetailJson and dataGridColumnDetailTsv format copy payloads"
 
   assert.ok(detail);
   assert.equal(dataGridColumnDetailJson(detail), '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]');
-  assert.equal(dataGridColumnDetailTsv(detail), "Ada\nNULL");
+  assert.equal(dataGridColumnDetailTsv(detail), "Ada\n");
 });
 
 const detailFields: DataGridCellDetail[] = [

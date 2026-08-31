@@ -51,11 +51,27 @@ function objectGroup(type: "group-views" | "group-procedures", key: string, chil
   };
 }
 
-function installApiMocks(options?: { listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn> }) {
+function column(name: string) {
+  return {
+    name,
+    data_type: "VARCHAR",
+    is_nullable: true,
+    column_default: null,
+    is_primary_key: false,
+    extra: null,
+    comment: null,
+    numeric_precision: null,
+    numeric_scale: null,
+    character_maximum_length: 255,
+  };
+}
+
+function installApiMocks(options?: { getColumns?: ReturnType<typeof vi.fn>; listTables?: ReturnType<typeof vi.fn>; listObjects?: ReturnType<typeof vi.fn> }) {
   vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
   vi.doMock("@/lib/backend/api", () => ({
     checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
     deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+    getColumns: options?.getColumns ?? vi.fn().mockResolvedValue([]),
     listInstalledAgents: vi.fn().mockResolvedValue([]),
     listObjects: options?.listObjects ?? vi.fn().mockResolvedValue([]),
     listTables: options?.listTables ?? vi.fn().mockResolvedValue([]),
@@ -130,5 +146,24 @@ describe("connectionStore tree refresh state", () => {
     expect(store.isTreeNodeChildrenLoaded(root.id)).toBe(true);
     expect(store.isTreeNodeChildrenLoaded(viewsGroupId)).toBe(false);
     expect(store.isTreeNodeChildrenLoaded(proceduresGroupId)).toBe(false);
+  });
+
+  it("reloads completion columns after refreshing their schema tree", async () => {
+    const getColumns = vi
+      .fn()
+      .mockResolvedValueOnce([column("id")])
+      .mockResolvedValueOnce([column("id"), column("new_column")]);
+    const listTables = vi.fn().mockResolvedValue([{ name: "users", table_type: "BASE TABLE", comment: null }]);
+    installApiMocks({ getColumns, listTables });
+    const root = schemaNode([]);
+    const store = await createStore(root);
+
+    await expect(store.listCompletionColumns("pg-1", "app", "users", "public")).resolves.toEqual([expect.objectContaining({ name: "id" })]);
+
+    await store.refreshTreeNode(root);
+
+    await expect(store.listCompletionColumns("pg-1", "app", "users", "public")).resolves.toEqual([expect.objectContaining({ name: "id" }), expect.objectContaining({ name: "new_column" })]);
+    expect(getColumns).toHaveBeenCalledTimes(2);
+    expect(store.completionCacheRevision("pg-1", "app")).toBeGreaterThan(0);
   });
 });

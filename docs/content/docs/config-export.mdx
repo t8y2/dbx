@@ -3,7 +3,7 @@ title: Config Export/Import
 description: Export database connections with AES-256-GCM encrypted passwords. Migrate securely between machines.
 ---
 
-<Callout type="info">Export your database connections with encrypted passwords (AES-256-GCM). Securely migrate between machines.</Callout>
+<Callout type="info">Export your database connections with encrypted passwords (AES-256-GCM). Securely migrate between machines. Encrypted export remains the default.</Callout>
 
 <Callout type="warn">This exports DBX connection configuration, not business database schema or data, and it is not a database backup. Use [Database Export](/en/docs/database-export) or [Database Backup](/en/docs/database-backup) for database contents.</Callout>
 
@@ -11,38 +11,45 @@ description: Export database connections with AES-256-GCM encrypted passwords. M
 
 <Steps>
   <Step>### Start Export Click the **Export** button in the sidebar header.</Step>
-  <Step>### Set Passphrase Enter a passphrase to encrypt your passwords.</Step>
-  <Step>### Save File Choose a save location. The exported file contains all connections with passwords, encrypted.</Step>
+  <Step>### Select Connections Choose one or more connections. All connections are selected by default. Only the selected connections, their sidebar groups and ordering, and referenced tunnel profiles are exported.</Step>
+  <Step>
+    ### Choose Export Protection Enter a passphrase to encrypt your passwords. For a one-time migration in a trusted environment, you may instead choose **Export without encryption** and confirm the warning. The plaintext file may contain database passwords, SSH Tunnel credentials, and other
+    sensitive information.
+  </Step>
+  <Step>### Save File Choose a save location. The exported file contains only the selected connections, their related layout, and referenced tunnel profiles. Encrypted export is recommended.</Step>
 </Steps>
 
 ## Import
 
 <Steps>
   <Step>### Start Import Click the **Import** button in the sidebar header.</Step>
-  <Step>### Select File and Decrypt Select the exported file and enter the passphrase.</Step>
-  <Step>### Done Connections are imported with passwords restored. Deduplicated by name + host + port.</Step>
+  <Step>### Select File and Decrypt Select the exported file. DBX automatically detects encrypted and plain configuration files. Encrypted files ask for the passphrase first so DBX can decrypt and preview them without writing anything yet.</Step>
+  <Step>### Select Connections Choose which connections from the file to import. All connections are selected by default.</Step>
+  <Step>### Done Only the selected connections are imported, with passwords restored. Deduplicated by name + host + port. Sidebar groups and ordering for the selected connections can still be applied after import.</Step>
 </Steps>
 
 ## Security
 
 - Passwords are encrypted using **AES-256-GCM** with **PBKDF2** key derivation
-- Without the passphrase, the file cannot be decrypted
+- Without the passphrase, an encrypted file cannot be decrypted
+- Plaintext export is not encrypted and may expose database passwords, SSH Tunnel credentials, and other secrets; use it only for temporary migration in a trusted environment
 - The export file is standard JSON, transferable via USB drive, cloud storage, etc.
-- DBX stores ordinary connection fields separately from secrets such as database passwords, SSH passwords, SSH key passphrases, and full connection strings; export brings them together only inside the encrypted export file.
+- DBX stores ordinary connection fields separately from secrets such as database passwords, SSH passwords, SSH key passphrases, and full connection strings. Encrypted export protects the combined data; plaintext export writes those secrets as readable JSON.
 - Treat the passphrase like a secret. Anyone with both the export file and passphrase can restore the saved connections.
 
 ## Backward Compatibility
 
-Import also supports plain JSON files from older versions (without passwords) and raw connection config arrays.
+Import automatically detects encrypted or plain configuration files. It also supports plain JSON files from older versions (without passwords) and raw connection config arrays.
 
 ## What Is Included
 
-| Item                                                                   | Included                                                 |
-| ---------------------------------------------------------------------- | -------------------------------------------------------- |
-| Connection name, type, host, port, database, color                     | Yes                                                      |
-| URL parameters, SSL, SSH, proxy, visible database settings             | Yes                                                      |
-| Database password, SSH password, SSH key passphrase, connection string | Yes, encrypted in the export file                        |
-| Vendor JDBC driver JAR files                                           | No; reinstall or re-import drivers on the target machine |
-| Saved SQL, UI/editor settings, and sidebar layout                      | No; use [Cloud Sync](/en/docs/cloud-sync) to migrate them |
+| Item                                                                   | Included                                                              |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Connection name, type, host, port, database, color                     | Yes                                                                   |
+| URL parameters, SSL, SSH, proxy, visible database settings             | Yes                                                                   |
+| Database password, SSH password, SSH key passphrase, connection string | Yes; encrypted in encrypted exports and readable in plaintext exports |
+| Vendor JDBC driver JAR files                                           | No; reinstall or re-import drivers on the target machine              |
+| Sidebar groups and ordering for selected connections                   | Yes; choose whether to apply them after import                        |
+| Saved SQL and UI/editor settings                                       | No; use [Cloud Sync](/en/docs/cloud-sync) to migrate them             |
 
 For JDBC migrations, export the connection settings here, then use [JDBC Plugin](/en/docs/plugins) to install the plugin and import driver JARs on the destination machine.

@@ -1,87 +1,24 @@
-import type { DatabaseType } from "@/types/database";
+import { databaseTypesWithTrait } from "@/lib/database/databaseDriverManifest";
 
-export const SCHEMA_AWARE_TYPES = new Set<DatabaseType>([
-  "postgres",
-  "sqlserver",
-  "oracle",
-  "redshift",
-  "dameng",
-  "gaussdb",
-  "kwdb",
-  "kingbase",
-  "highgo",
-  "uxdb",
-  "vastbase",
-  "yashandb",
-  "databricks",
-  "saphana",
-  "teradata",
-  "vertica",
-  "exasol",
-  "opengauss",
-  "oceanbase-oracle",
-  "gbase",
-  "jdbc",
-  "h2",
-  "snowflake",
-  "trino",
-  "prestosql",
-  "hive",
-  "spark",
-  "databend",
-  "db2",
-  "informix",
-  "xugu",
-  "oscar",
-  "iotdb",
-  "iris",
-  "duckdb",
-]);
+export const SCHEMA_AWARE_TYPES = databaseTypesWithTrait("schemaAware");
 
 // Engines where an object can be addressed as database/catalog.schema.table.
 // Keep this narrower than SCHEMA_AWARE_TYPES: PostgreSQL, for example, cannot
 // query another database through a three-part name on the same connection.
-export const DATABASE_SCHEMA_QUALIFIED_TYPES = new Set<DatabaseType>(["sqlserver", "trino", "prestosql"]);
+export const DATABASE_SCHEMA_QUALIFIED_TYPES = databaseTypesWithTrait("databaseSchemaQualified");
 
-export const SINGLE_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "firebird", "oceanbase-oracle", "access", "questdb"]);
+export const SINGLE_DATABASE_TYPES = databaseTypesWithTrait("singleDatabase");
 
-export const CLEARABLE_QUERY_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "gaussdb", "oceanbase-oracle"]);
+export const CLEARABLE_QUERY_SCHEMA_TYPES = databaseTypesWithTrait("clearableQuerySchema");
 
-export const FETCH_FIRST_TYPES = new Set<DatabaseType>(["oracle", "dameng"]);
+export const FETCH_FIRST_TYPES = databaseTypesWithTrait("fetchFirst");
 
-export const TREE_SCHEMA_TYPES = new Set<DatabaseType>([
-  "postgres",
-  "redshift",
-  "sqlserver",
-  "db2",
-  "gaussdb",
-  "kwdb",
-  "kingbase",
-  "highgo",
-  "uxdb",
-  "vastbase",
-  "yashandb",
-  "databricks",
-  "saphana",
-  "teradata",
-  "vertica",
-  "exasol",
-  "opengauss",
-  "oceanbase-oracle",
-  "gbase",
-  "jdbc",
-  "trino",
-  "prestosql",
-  "h2",
-  "informix",
-  "xugu",
-  "oscar",
-  "iris",
-  "duckdb",
-]);
+export const TREE_SCHEMA_TYPES = databaseTypesWithTrait("treeSchema");
 
-export const DATABASE_OBJECT_TREE_TYPES = new Set<DatabaseType>(["jdbc"]);
+export const DATABASE_OBJECT_TREE_TYPES = databaseTypesWithTrait("databaseObjectTree");
 
-export const PG_LIKE_STRUCTURE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "opengauss", "questdb"]);
+export const PG_VACUUM_TYPES = databaseTypesWithTrait("pgVacuum");
 
-export const DIAGRAM_SQL_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlite", "rqlite", "turso", "cloudflare-d1", "sqlserver", "oracle", "redshift", "dameng", "gaussdb", "kwdb", "opengauss", "questdb", "oceanbase-oracle"]);
+export const PG_LIKE_STRUCTURE_TYPES = databaseTypesWithTrait("pgLikeStructure");
+
+export const DIAGRAM_SQL_TYPES = databaseTypesWithTrait("diagramSql");

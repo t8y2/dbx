@@ -49,4 +49,26 @@ describe("right sidebar panel entry points", () => {
     }
     expect(appSource).not.toMatch(/watch\([\s\S]{0,180}toolbarItems\.(ai|history|sqlLibrary|sqlFileTree)[\s\S]{0,180}closeRightSidebarPanel/);
   });
+
+  it("keeps the maximized AI surface in the parent layout", () => {
+    expect(appSource).toContain("const isAiPanelMaximized = ref(false);");
+    expect(appSource).toContain(':maximized="isAiPanelMaximized"');
+    expect(appSource).toContain('@toggle-maximize="toggleAiPanelMaximized"');
+    expect(appSource).toContain("isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[180px] max-w-full'");
+    expect(appSource).toContain('v-show="!isAiPanelMaximized && !isZenMode"');
+    expect(functionSource("setRightSidebarPanelOpen", "toggleRightSidebarPanel")).toContain("isAiPanelMaximized.value = false;");
+  });
+
+  it("keeps Zen mode as a temporary data-tab layout", () => {
+    expect(appSource).toContain("const isZenMode = ref(false);");
+    expect(appSource).toContain('if (mode !== "data") isZenMode.value = false;');
+    expect(appSource).toContain("function toggleZenMode() {");
+    expect(appSource).toContain('if (activeTab.value?.mode !== "data") return;');
+    expect(appSource).toContain('isToggleZenModeShortcut(e, shortcuts) && activeTab.value?.mode === "data"');
+    expect(appSource).toContain('@toggle-zen-mode="toggleZenMode"');
+    expect(appSource).toContain('v-show="sidebarOpen && !isZenMode"');
+    expect(appSource).toContain('v-show="!sidebarOpen && !isZenMode"');
+    expect(appSource).toContain('v-show="!isAiPanelMaximized || isZenMode"');
+    expect(appSource).toContain('v-show="!isZenMode"');
+  });
 });

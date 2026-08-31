@@ -19,6 +19,6 @@ test("count queries preserve disabled timeouts", () => {
 test("count queries use the frontend default for missing configurations", () => {
   assert.deepEqual(dataGridCountQueryOptions(undefined), {
     maxRows: 1,
-    timeoutSecs: 60,
+    timeoutSecs: 30,
   });
 });

@@ -18,9 +18,11 @@ import {
   isNacosErrorCode,
   isNacosConfigSaveSnapshotCurrent,
   isNacosConfigDeleteSnapshotInScope,
+  mergeNacosNamespacePermissionAssignments,
   nacosConfigFileExtension,
   nacosMetricsCandidates,
   normalizeNacosMetricsUrl,
+  parseNacosManagedNamespaces,
   parseNacosRawBody,
   parseNacosRawQuery,
   normalizeNacosEndpoint,
@@ -47,6 +49,16 @@ describe("nacosAdmin helpers", () => {
     expect(normalizeNacosEndpoint("http://127.0.0.1:8848", { implementation: "nacos", versionMode: "v3" })).toMatchObject({
       serverAddr: "http://127.0.0.1:8848",
       contextPath: "/nacos",
+      detectedVersion: "v3",
+    });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:8080", { implementation: "nacos", versionMode: "v3", apiPlane: "console" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:8080",
+      contextPath: "",
+      detectedVersion: "v3",
+    });
+    expect(normalizeNacosEndpoint("http://127.0.0.1:18080/console", { implementation: "nacos", versionMode: "v3", apiPlane: "console" })).toMatchObject({
+      serverAddr: "http://127.0.0.1:18080",
+      contextPath: "/console",
       detectedVersion: "v3",
     });
     expect(normalizeNacosEndpoint("http://127.0.0.1:8848", { implementation: "nacos", versionMode: "v3", contextPath: "/" })).toMatchObject({
@@ -79,11 +91,30 @@ describe("nacosAdmin helpers", () => {
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#fragment")).toThrow(/fragment/);
     expect(() => normalizeNacosMetricsUrl("http://localhost/metrics#")).toThrow(/fragment/);
   });
+
   it("parses raw query and body text", () => {
     expect(parseNacosRawQuery("?dataId=a&group=DEFAULT_GROUP")).toEqual({ dataId: "a", group: "DEFAULT_GROUP" });
     expect(parseNacosRawQuery("")).toBeUndefined();
     expect(parseNacosRawBody('{"enabled":false}')).toEqual({ enabled: false });
     expect(parseNacosRawBody("plain text")).toBe("plain text");
+  });
+
+  it("parses, trims, and deduplicates managed namespace IDs", () => {
+    expect(parseNacosManagedNamespaces(" public, team-a\nteam-a，team-b\n\n")).toEqual(["public", "team-a", "team-b"]);
+    expect(parseNacosManagedNamespaces("  ")).toEqual([]);
+  });
+
+  it("combines split read and write permission rows before role editing", () => {
+    expect(
+      mergeNacosNamespacePermissionAssignments([
+        { actionRaw: "r", parsedScope: { kind: "namespace", namespaceId: "team-a" } },
+        { actionRaw: "w", parsedScope: { kind: "namespace", namespaceId: "team-a" } },
+        { actionRaw: "r", parsedScope: { kind: "namespace", namespaceId: "team-b" } },
+      ]),
+    ).toEqual([
+      { namespaceId: "team-a", action: "rw" },
+      { namespaceId: "team-b", action: "r" },
+    ]);
   });
 
   it("builds raw requests and detects mutations", () => {
@@ -195,8 +226,10 @@ describe("nacosAdmin helpers", () => {
 
   it("includes identifying fields in confirmations", () => {
     expect(buildNacosConfigDeleteConfirm({ namespace: "", dataId: "app.yaml", group: "DEFAULT_GROUP" })).toContain("dataId=app.yaml");
-    const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, enabled: true, metadata: null }, { enabled: false }, "", "public");
+    const details = buildNacosInstanceConfirm({ serviceName: "DEFAULT_GROUP@@svc", groupName: "DEFAULT_GROUP" }, { ip: "127.0.0.1", port: 8080, clusterName: "blue", ephemeral: false, enabled: true, metadata: null }, { enabled: false }, "", "public");
     expect(details).toContain("serviceName=DEFAULT_GROUP@@svc");
+    expect(details).toContain("cluster=blue");
+    expect(details).toContain("ephemeral=false");
     expect(details).toContain("targetEnabled=false");
   });
 

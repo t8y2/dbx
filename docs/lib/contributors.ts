@@ -8,6 +8,17 @@ export type Contributor = {
   type?: string;
 };
 
+export function contributorAvatarUrl(avatarUrl: string, size = 64): string {
+  try {
+    const url = new URL(avatarUrl);
+    if (url.hostname !== "avatars.githubusercontent.com") return avatarUrl;
+    url.searchParams.set("s", String(size));
+    return url.toString();
+  } catch {
+    return avatarUrl;
+  }
+}
+
 export function dedupeContributors(contributors: Contributor[]): Contributor[] {
   const seenLogins = new Set<string>();
 

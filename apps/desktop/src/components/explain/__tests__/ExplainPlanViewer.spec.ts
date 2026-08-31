@@ -44,3 +44,21 @@ describe("ExplainPlanViewer canvas view", () => {
     expect(tabOrder).toEqual(["canvas", "tree", "summary", "raw", "table"]);
   });
 });
+
+describe("ExplainPlanViewer header at narrow widths", () => {
+  it("keeps the title badge and node-count label on one line instead of letting them wrap", () => {
+    const headerMatch = viewerSource.match(/<div class="h-9 shrink-0[^"]*"[^>]*>([\s\S]*?)<\/div>\s*\n\s*<div v-if="loading/);
+    expect(headerMatch, "explain plan header block not found").not.toBeNull();
+    const header = headerMatch![0];
+    expect(header).toContain("overflow-x-auto");
+    // Title badge and "MYSQL · N nodes" label must not be flex-shrinkable, or a
+    // narrow host (e.g. the AI chat panel) squeezes their text into a
+    // near-zero width and the browser wraps it one character per line.
+    expect(header).toMatch(/<span class="shrink-0 whitespace-nowrap inline-flex[^"]*">\s*<GitBranch/);
+    expect(header).toMatch(/<span v-if="plan \|\| hasTableView" class="shrink-0 whitespace-nowrap text-muted-foreground">/);
+  });
+
+  it("keeps the view-switcher button group from shrinking away", () => {
+    expect(viewerSource).toContain('<div v-if="plan || hasTableView" class="shrink-0 inline-flex rounded-md border bg-muted/40 p-0.5">');
+  });
+});

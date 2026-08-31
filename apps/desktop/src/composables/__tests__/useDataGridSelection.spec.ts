@@ -2,7 +2,14 @@ import { computed, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { useDataGridSelection } from "@/composables/useDataGridSelection";
 
-function createSelection(options?: { getScrollElement?: () => HTMLElement | null; cellFromClientPoint?: (clientX: number, clientY: number) => { rowIndex: number; colIndex: number } | null; rowFromClientPoint?: (clientX: number, clientY: number) => number | null; onUserCellSelection?: () => void }) {
+function createSelection(options?: {
+  getScrollElement?: () => HTMLElement | null;
+  cellFromClientPoint?: (clientX: number, clientY: number) => { rowIndex: number; colIndex: number } | null;
+  rowFromClientPoint?: (clientX: number, clientY: number) => number | null;
+  onUserCellSelection?: () => void;
+  shouldUpdateDraggedRowsImmediately?: () => boolean;
+  onDraggedRowSelectionChange?: () => void;
+}) {
   const columns = computed(() => ["id", "name", "email"]);
   const displayItems = computed(() =>
     [1, 2, 3, 4].map((id, index) => ({
@@ -28,6 +35,8 @@ function createSelection(options?: { getScrollElement?: () => HTMLElement | null
     cellFromClientPoint: options?.cellFromClientPoint,
     rowFromClientPoint: options?.rowFromClientPoint,
     onUserCellSelection: options?.onUserCellSelection,
+    shouldUpdateDraggedRowsImmediately: options?.shouldUpdateDraggedRowsImmediately,
+    onDraggedRowSelectionChange: options?.onDraggedRowSelectionChange,
   });
 }
 
@@ -39,7 +48,166 @@ function rowEvent(options: { meta?: boolean; shift?: boolean } = {}): MouseEvent
   } as MouseEvent;
 }
 
+function installPointerDocument() {
+  const originalDocument = globalThis.document;
+  const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+  const listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+  const windowListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+  const animationFrames: FrameRequestCallback[] = [];
+  const fakeDocument = {
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      const handlers = listeners.get(type) ?? new Set();
+      handlers.add(listener);
+      listeners.set(type, handlers);
+    },
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      listeners.get(type)?.delete(listener);
+    },
+  } as Document;
+  const fakeWindow = {
+    addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      const handlers = windowListeners.get(type) ?? new Set();
+      handlers.add(listener);
+      windowListeners.set(type, handlers);
+    },
+    removeEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+      windowListeners.get(type)?.delete(listener);
+    },
+  } as Window;
+  Object.defineProperty(globalThis, "document", { configurable: true, value: fakeDocument });
+  Object.defineProperty(globalThis, "window", { configurable: true, value: fakeWindow });
+  globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+    animationFrames.push(callback);
+    return animationFrames.length;
+  }) as typeof requestAnimationFrame;
+  globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
+
+  return {
+    animationFrames,
+    dispatch(type: string, event: MouseEvent) {
+      listeners.get(type)?.forEach((listener) => {
+        if (typeof listener === "function") listener(event);
+        else listener.handleEvent(event);
+      });
+    },
+    dispatchWindow(type: string, event: Event = { type } as Event) {
+      windowListeners.get(type)?.forEach((listener) => {
+        if (typeof listener === "function") listener(event);
+        else listener.handleEvent(event);
+      });
+    },
+    restore() {
+      Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+      if (originalWindowDescriptor) Object.defineProperty(globalThis, "window", originalWindowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+      globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+    },
+  };
+}
+
 describe("useDataGridSelection", () => {
+  it("keeps selected columns and the range anchor attached to their columns after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectColumn(0);
+    selection.selectColumn(2, rowEvent({ meta: true }));
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([1, 2]));
+
+    selection.selectColumn(0, rowEvent({ shift: true }));
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
+  });
+
+  it("moves a single-column rectangular cell selection with its column after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 0);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 2, endCol: 2 });
+    expect(selection.cellIsSelected(1, 2)).toBe(true);
+    expect(selection.cellIsSelected(2, 0)).toBe(false);
+  });
+
+  it("moves a discrete single-column cell selection with its column after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "2:0"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedCellKeys.value).toEqual(new Set(["0:2", "2:2"]));
+    expect(selection.cellIsSelected(0, 2)).toBe(true);
+    expect(selection.cellIsSelected(2, 0)).toBe(false);
+  });
+
+  it("keeps a multi-column rectangular cell selection when its columns remain contiguous", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 1);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [2, 0, 1]);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 1, endCol: 2 });
+    expect(selection.cellIsSelected(1, 1)).toBe(true);
+    expect(selection.cellIsSelected(2, 2)).toBe(true);
+    expect(selection.cellIsSelected(1, 0)).toBe(false);
+  });
+
+  it.each([
+    { edge: "left", nextColumnIndexes: [1, 0, 2] },
+    { edge: "right", nextColumnIndexes: [0, 2, 1] },
+  ])("keeps the whole rectangular selection when an inner column moves to its $edge edge", ({ nextColumnIndexes }) => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 2);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], nextColumnIndexes);
+
+    expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 2, startCol: 0, endCol: 2 });
+    expect(selection.cellIsSelected(1, nextColumnIndexes.indexOf(1))).toBe(true);
+    expect(selection.selectedCellCount.value).toBe(6);
+  });
+
+  it("clears a multi-column rectangular cell selection when its columns split apart", () => {
+    const selection = createSelection();
+
+    selection.selectSingleCell(1, 0);
+    selection.extendCellSelectionTo(2, 1);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toBeNull();
+    expect(selection.selectedCellKeys.value).toEqual(new Set());
+    expect(selection.hasCellSelection.value).toBe(false);
+  });
+
+  it("keeps a discrete multi-column cell selection when its columns become contiguous", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:2", "2:0", "2:2"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedCellKeys.value).toEqual(new Set(["0:2", "0:1", "2:2", "2:1"]));
+    expect(selection.cellIsSelected(0, 1)).toBe(true);
+    expect(selection.cellIsSelected(2, 2)).toBe(true);
+    expect(selection.cellIsSelected(0, 0)).toBe(false);
+  });
+
+  it("clears a discrete multi-column cell selection when its columns split apart", () => {
+    const selection = createSelection();
+
+    selection.selectedCellKeys.value = new Set(["0:0", "0:1", "2:0", "2:1"]);
+    selection.reconcileSelectionAfterColumnReorder([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedRange.value).toBeNull();
+    expect(selection.selectedCellKeys.value).toEqual(new Set());
+    expect(selection.hasCellSelection.value).toBe(false);
+  });
+
   it("invalidates synthetic context state for ordinary, Ctrl, and Cmd cell selection", () => {
     const originalDocument = globalThis.document;
     const fakeDocument = {
@@ -136,6 +304,192 @@ describe("useDataGridSelection", () => {
 
     expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
     expect(selection.hasCellSelection.value).toBe(false);
+  });
+
+  it("ignores cell jitter until the drag threshold and exposes confirmation for hover extension", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 2, colIndex: 2 }) });
+
+    try {
+      selection.beginCellSelection(0, 0, { button: 0, clientX: 100, clientY: 100, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { clientX: 111, clientY: 100 } as MouseEvent);
+      if (selection.isCellSelectionDragConfirmed()) selection.extendCellSelection(2, 2);
+
+      expect(selection.isCellSelectionDragConfirmed()).toBe(false);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 0, startCol: 0, endCol: 0 });
+
+      pointerDocument.dispatch("mousemove", { clientX: 112, clientY: 100 } as MouseEvent);
+
+      expect(selection.isCellSelectionDragConfirmed()).toBe(true);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 2, startCol: 0, endCol: 2 });
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("does not extend an unconfirmed cell drag on mouseup", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ cellFromClientPoint: () => ({ rowIndex: 2, colIndex: 2 }) });
+
+    try {
+      selection.beginCellSelection(0, 0, { button: 0, clientX: 100, clientY: 100, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { clientX: 111, clientY: 100 } as MouseEvent);
+      pointerDocument.dispatch("mouseup", { clientX: 111, clientY: 100 } as MouseEvent);
+
+      expect(selection.isSelectingCells.value).toBe(false);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 0, startCol: 0, endCol: 0 });
+    } finally {
+      selection.finishCellSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("ignores row gutter jitter until the drag threshold", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ rowFromClientPoint: () => 3 });
+
+    try {
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 100, clientY: 100, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { clientX: 111, clientY: 100 } as MouseEvent);
+
+      expect(selection.selectedRowIds.value).toEqual(new Set([2]));
+
+      pointerDocument.dispatch("mousemove", { clientX: 112, clientY: 100 } as MouseEvent);
+      pointerDocument.animationFrames.shift()?.(0);
+
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
+    } finally {
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("does not extend an unconfirmed row gutter drag on mouseup", () => {
+    const pointerDocument = installPointerDocument();
+    const selection = createSelection({ rowFromClientPoint: () => 3 });
+
+    try {
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 100, clientY: 100, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mouseup", { clientX: 111, clientY: 100 } as MouseEvent);
+
+      expect(selection.isSelectingRows.value).toBe(false);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2]));
+    } finally {
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("ends active cell and row drags when the window loses focus", () => {
+    const pointerDocument = installPointerDocument();
+    let pointerRow = 2;
+    let pointerCell = { rowIndex: 2, colIndex: 2 };
+    const selection = createSelection({
+      cellFromClientPoint: () => pointerCell,
+      rowFromClientPoint: () => pointerRow,
+      shouldUpdateDraggedRowsImmediately: () => true,
+    });
+
+    try {
+      selection.beginCellSelection(0, 0, { button: 0, clientX: 10, clientY: 10, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 2, startCol: 0, endCol: 2 });
+
+      pointerDocument.dispatchWindow("blur");
+      expect(selection.isSelectingCells.value).toBe(false);
+      pointerCell = { rowIndex: 3, colIndex: 2 };
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 40, clientY: 40 } as MouseEvent);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 2, startCol: 0, endCol: 2 });
+
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 5, clientY: 10, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 5, clientY: 40 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+
+      pointerDocument.dispatchWindow("blur");
+      expect(selection.isSelectingRows.value).toBe(false);
+      pointerRow = 3;
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 5, clientY: 70 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+    } finally {
+      selection.finishCellSelection();
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("recovers from a lost mouseup when mouse movement reports no primary button", () => {
+    const pointerDocument = installPointerDocument();
+    let pointerRow = 2;
+    let pointerCell = { rowIndex: 2, colIndex: 2 };
+    const selection = createSelection({
+      cellFromClientPoint: () => pointerCell,
+      rowFromClientPoint: () => pointerRow,
+      shouldUpdateDraggedRowsImmediately: () => true,
+    });
+
+    try {
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 5, clientY: 10, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 5, clientY: 40 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+
+      pointerRow = 3;
+      pointerDocument.dispatch("mousemove", { buttons: 0, clientX: 5, clientY: 70 } as MouseEvent);
+      expect(selection.isSelectingRows.value).toBe(false);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+
+      pointerRow = 0;
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 5, clientY: 90 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+
+      selection.clearRowSelection();
+      selection.beginCellSelection(0, 0, { button: 0, clientX: 10, clientY: 10, preventDefault() {} } as MouseEvent);
+      pointerDocument.dispatch("mousemove", { buttons: 1, clientX: 30, clientY: 30 } as MouseEvent);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 2, startCol: 0, endCol: 2 });
+
+      pointerCell = { rowIndex: 3, colIndex: 2 };
+      pointerDocument.dispatch("mousemove", { buttons: 0, clientX: 40, clientY: 40 } as MouseEvent);
+      expect(selection.isSelectingCells.value).toBe(false);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 2, startCol: 0, endCol: 2 });
+    } finally {
+      selection.finishCellSelection();
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
+  });
+
+  it("updates row drags synchronously and invalidates the final mouseup selection", () => {
+    const pointerDocument = installPointerDocument();
+    const onDraggedRowSelectionChange = vi.fn();
+    let pointerRow = 1;
+    const selection = createSelection({
+      rowFromClientPoint: () => pointerRow,
+      shouldUpdateDraggedRowsImmediately: () => true,
+      onDraggedRowSelectionChange,
+    });
+
+    try {
+      selection.beginRowSelection(1, 2, { button: 0, clientX: 5, clientY: 10, preventDefault() {} } as MouseEvent);
+      onDraggedRowSelectionChange.mockClear();
+
+      pointerRow = 2;
+      pointerDocument.dispatch("mousemove", { clientX: 5, clientY: 40 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(1);
+
+      pointerRow = 3;
+      pointerDocument.dispatch("mouseup", { clientX: 5, clientY: 66 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(2);
+
+      pointerRow = 0;
+      pointerDocument.dispatch("mousemove", { clientX: 5, clientY: 92 } as MouseEvent);
+      expect(selection.selectedRowIds.value).toEqual(new Set([2, 3, 4]));
+      expect(onDraggedRowSelectionChange).toHaveBeenCalledTimes(2);
+    } finally {
+      selection.finishRowSelection();
+      pointerDocument.restore();
+    }
   });
 
   it("selects a continuous row range while dragging the row-number gutter", () => {
@@ -268,6 +622,34 @@ describe("useDataGridSelection", () => {
       selection.finishCellSelection();
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+      Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+    }
+  });
+
+  it("keeps a restored range stable until a new pointer gesture begins", () => {
+    const originalDocument = globalThis.document;
+    const fakeDocument = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as Document;
+    Object.defineProperty(globalThis, "document", { configurable: true, value: fakeDocument });
+    const selection = createSelection();
+
+    try {
+      selection.restoreCellSelectionState({
+        anchor: { rowIndex: 0, colIndex: 0 },
+        focus: { rowIndex: 1, colIndex: 1 },
+      });
+
+      selection.extendCellSelection(3, 2);
+      expect(selection.isSelectingCells.value).toBe(false);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 1, startCol: 0, endCol: 1 });
+
+      selection.beginCellSelection(1, 1, { button: 0, clientX: 0, clientY: 0, preventDefault() {} } as MouseEvent);
+      selection.extendCellSelection(3, 2);
+      expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 3, startCol: 1, endCol: 2 });
+    } finally {
+      selection.finishCellSelection();
       Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
     }
   });

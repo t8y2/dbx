@@ -1,23 +1,33 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
-import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, spannerObjectTreeSchema, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "url_params" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
+export type GaussdbTargetServerType = "master" | "slave" | "any";
+export type GaussdbCountQueryDop = 1 | 2 | 4 | 8 | 16;
 
 const GAUSSDB_IDENTIFIER_QUOTE_STYLE_KEY = "gaussdbIdentifierQuoteStyle";
+const GAUSSDB_TARGET_SERVER_TYPE_KEY = "gaussdbTargetServerType";
+const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
-const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "spark"]);
+const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
   { type: "starrocks", patterns: [/starrocks/i] },
+  // Phoenix remains a generic JDBC connection, but exposes queryable schemas.
+  // Returning `jdbc` keeps its generic SQL behavior while enabling the schema tree.
+  { type: "jdbc", patterns: [/phoenix/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
+  // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and must stay on jdbc.
+  { type: "gbase", patterns: [/jdbc:gbase:/i, /cn\.gbase\./i, /gbase(?!dbt)(?!8s).*jdbc/i] },
   { type: "mysql", patterns: [/kyuubi/i] },
   { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },
@@ -42,11 +52,16 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
+  if (isGbase8sProfile(connection.driver_profile)) return undefined;
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");
   if (!haystack) return undefined;
   return JDBC_DIALECT_MATCHERS.find((matcher) => matcher.patterns.some((pattern) => pattern.test(haystack)))?.type;
+}
+
+export function jdbcDriverProfileUsesSchemaQualification(driverProfile?: string): boolean {
+  return inferJdbcDialect({ db_type: "jdbc", driver_profile: driverProfile }) === "jdbc";
 }
 
 export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
@@ -67,13 +82,42 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
+/**
+ * Database type the data-transfer pipeline treats a connection as. Doris-family
+ * engines (Doris/SelectDB/StarRocks) are saved as `db_type=mysql` with a
+ * doris/starrocks `driver_profile`, and the transfer backend routes them through
+ * the MySQL object family (catalog routing is driver_profile-aware); the
+ * standalone `doris`/`starrocks` manifest entries are not transfer-capable.
+ * Resolve those connections back to their raw db_type so they stay selectable in
+ * the transfer dialog and keep the MySQL object kinds — the effective type alone
+ * would drop them from the connection list and disable every non-table kind.
+ */
+export function transferDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  const effective = effectiveDatabaseTypeForConnection(connection);
+  if (effective === "doris" || effective === "starrocks") return connection?.db_type;
+  return effective;
+}
+
+export function connectionUsesConnectionRootSchemaMode(connection?: JdbcDialectConnection): boolean {
+  const type = effectiveDatabaseTypeForConnection(connection);
+  return !!type && CONNECTION_ROOT_SCHEMA_TYPES.has(type);
+}
+
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
   if (!connection) return false;
+  if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   if (connection.db_type === "kingbase") return true;
+  // Cloud Spanner is dual-dialect: the agent reports a backtick for GoogleSQL and
+  // a double quote for PostgreSQL-dialect databases. The backend counts Spanner
+  // unconditionally in `uses_connection_identifier_quote`, so the UI must fetch
+  // the reported quote or every locally built statement would use the GoogleSQL
+  // default against a PostgreSQL-dialect database.
+  if (connection.db_type === "spanner") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
   if (connection.db_type !== "jdbc") return false;
-  return ["gaussdb", "opengauss", "postgres"].includes(inferJdbcDialect(connection) ?? "");
+  const dialect = inferJdbcDialect(connection);
+  return dialect === "jdbc" || ["gaussdb", "opengauss", "postgres"].includes(dialect ?? "");
 }
 
 export function supportsGaussdbIdentifierQuoteStyle(connection: JdbcDialectConnection | undefined): boolean {
@@ -118,6 +162,36 @@ export function setGaussdbIdentifierQuoteStyle(
   connection.external_config = Object.keys(external).length > 0 ? external : undefined;
 }
 
+export function gaussdbTargetServerType(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType {
+  const external = externalConfigRecord(connection?.external_config);
+  return normalizeGaussdbTargetServerType(external[GAUSSDB_TARGET_SERVER_TYPE_KEY]) ?? gaussdbTargetServerTypeFromUrl(connection) ?? "any";
+}
+
+export function setGaussdbTargetServerType(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>, value: GaussdbTargetServerType) {
+  const external = externalConfigRecord(connection.external_config);
+  external[GAUSSDB_TARGET_SERVER_TYPE_KEY] = value;
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+function normalizeGaussdbTargetServerType(value: unknown): GaussdbTargetServerType | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "master" || normalized === "slave" || normalized === "any" ? normalized : undefined;
+}
+
+function gaussdbTargetServerTypeFromUrl(connection: JdbcDialectConnection | undefined): GaussdbTargetServerType | undefined {
+  const values = [connection?.url_params, connection?.connection_string?.split("?", 2)[1]?.split("#", 1)[0]];
+  for (const value of values) {
+    const params = new URLSearchParams((value || "").trim().replace(/^\?/, "").replace(/;/g, "&"));
+    for (const [key, paramValue] of params) {
+      if (key.toLowerCase() === "targetservertype") {
+        return normalizeGaussdbTargetServerType(paramValue);
+      }
+    }
+  }
+  return undefined;
+}
+
 export function sqlSnippetDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
   // ASE uses T-SQL snippets, but mapping it globally to SQL Server would also
   // enable incompatible SQL Server metadata and pagination behavior.
@@ -134,6 +208,7 @@ export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialect
 export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectConnection): boolean {
   if (!connection) return false;
   if (connection.db_type !== "jdbc") return usesDatabaseObjectTreeMode(effectiveDatabaseTypeForConnection(connection));
+  if (connectionUsesConnectionRootSchemaMode(connection)) return false;
   const dialect = inferJdbcDialect(connection);
   if (!dialect) return true;
   if (dialect === "hive" || dialect === "trino") return false;
@@ -142,10 +217,13 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
 }
 
 export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConnection): boolean {
+  // GBase 8s exposes owner schemas only when the current database can use them
+  // in DML; non-ANSI databases fall back to the flat table tree.
+  if (connection?.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
 }
 
-export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
+export function connectionUsesSchemaExecutionContext(connection?: JdbcDialectConnection): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
 
@@ -162,8 +240,22 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
-  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
+  const type = effectiveDatabaseTypeForConnection(connection);
+  if (type === "informix") return schema || "";
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
   return schema || database;
+}
+
+/**
+ * Metadata schema for query paths that treat the database name as the schema when a
+ * connection exposes no schema level (MySQL, HBase, and the other flat engines).
+ * Cloud Spanner is the exception: its database is a resource path, so the blank
+ * GoogleSQL schema has to be sent instead of the path. Behavior for every other
+ * database type is exactly `schema || database`.
+ */
+export function connectionDatabaseMetadataSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
+  if (schema) return schema;
+  return effectiveDatabaseTypeForConnection(connection) === "spanner" ? "" : database;
 }
 
 export function metadataSchemaForConnection(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
@@ -175,11 +267,12 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
-  if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
-  if (type === "informix") return undefined;
-  if (type === "sqlite") return database;
-  return isSchemaAware(type) ? database : undefined;
+  if (type === "informix") return schema || undefined;
+  if (type === "sqlite") return schema || database;
+  if (type === "spanner") return spannerObjectTreeSchema(schema);
+  if (!type) return schema;
+  return isSchemaAware(type) ? schema || database : undefined;
 }
 
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */
@@ -194,6 +287,27 @@ export function codeMirrorSqlDialectForConnection(connection?: JdbcDialectConnec
   const databaseType = effectiveDatabaseTypeForConnection(connection);
   if (databaseType === "clickhouse") return "clickhouse";
   return codeMirrorSqlDialect(databaseType);
+}
+
+export function gaussdbCountQueryDop(connection: JdbcDialectConnection | undefined): GaussdbCountQueryDop {
+  const external = externalConfigRecord(connection?.external_config);
+  const value = external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  return value === 2 || value === 4 || value === 8 || value === 16 ? value : 1;
+}
+
+export function setGaussdbCountQueryDop(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "external_config">>, value: GaussdbCountQueryDop) {
+  const external = externalConfigRecord(connection.external_config);
+  if (value === 1) {
+    delete external[GAUSSDB_COUNT_QUERY_DOP_KEY];
+  } else {
+    external[GAUSSDB_COUNT_QUERY_DOP_KEY] = value;
+  }
+  connection.external_config = Object.keys(external).length > 0 ? external : undefined;
+}
+
+export function gaussdbCountQueryDopHint(connection: JdbcDialectConnection | undefined): string | undefined {
+  const dop = gaussdbCountQueryDop(connection);
+  return dop > 1 ? `/*+ set(query_dop ${dop}) */` : undefined;
 }
 
 function isJdbcAseProfile(connection?: JdbcDialectConnection): boolean {

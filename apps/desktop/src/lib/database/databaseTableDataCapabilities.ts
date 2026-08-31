@@ -84,12 +84,35 @@ const NAVICAT_STYLE_TABLE_DATA_TYPES = new Set<DatabaseType>([
   "db2",
   "informix",
   "bigquery",
+  "spanner",
   "sundb",
   "oscar",
   "databend",
 ]);
 
 const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<DatabaseCapability>>> = {
+  kyuubi: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
+  impala: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
   hive: {
     tableData: {
       insert: true,
@@ -165,6 +188,18 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
     },
   },
   influxdb: {
+    tableData: {
+      insert: false,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: true,
+      keylessRowPredicate: false,
+      requiresTransactionalTableForExistingRows: false,
+      existingRowsReadonly: true,
+      transaction: false,
+      readonly: true,
+    },
+  },
+  victoriametrics: {
     tableData: {
       insert: false,
       updateRequiresPrimaryKey: false,

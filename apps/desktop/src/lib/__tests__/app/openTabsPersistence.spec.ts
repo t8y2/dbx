@@ -57,4 +57,56 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.database).toBe("dbx_catalog_completion");
     expect(restored.catalog).toBe("dbx_mysql_catalog");
   });
+
+  it("preserves external file versions and acknowledged state across tab restore", () => {
+    const version = { sizeBytes: 9, modifiedNs: "100", contentHash: "original" };
+    const ignoredVersion = { sizeBytes: 9, modifiedNs: "200", contentHash: "changed" };
+    const [restored] = roundTrip([
+      queryTab({
+        sql: "SELECT 1",
+        originalSql: "SELECT 1",
+        externalSqlPath: "/tmp/query.sql",
+        externalSqlFileVersion: version,
+        externalSqlIgnoredFileVersion: ignoredVersion,
+        externalSqlFileMissing: true,
+      }),
+    ]);
+
+    expect(restored.externalSqlFileVersion).toEqual(version);
+    expect(restored.externalSqlIgnoredFileVersion).toEqual(ignoredVersion);
+    expect(restored.externalSqlFileMissing).toBe(true);
+  });
+
+  it("preserves the disk baseline for a dirty external file after an ignored change", () => {
+    const version = { sizeBytes: 9, modifiedNs: "100", contentHash: "original" };
+    const ignoredVersion = { sizeBytes: 9, modifiedNs: "200", contentHash: "changed" };
+    const [restored] = roundTrip([
+      queryTab({
+        sql: "SELECT 2",
+        originalSql: "SELECT 1",
+        externalSqlPath: "/tmp/query.sql",
+        externalSqlFileVersion: version,
+        externalSqlIgnoredFileVersion: ignoredVersion,
+      }),
+    ]);
+
+    expect(restored.sql).toBe("SELECT 2");
+    expect(restored.originalSql).toBe("SELECT 1");
+    expect(restored.externalSqlIgnoredFileVersion).toEqual(ignoredVersion);
+  });
+
+  it("preserves the disk baseline for a dirty external file acknowledged as missing", () => {
+    const [restored] = roundTrip([
+      queryTab({
+        sql: "SELECT 2",
+        originalSql: "SELECT 1",
+        externalSqlPath: "/tmp/query.sql",
+        externalSqlFileMissing: true,
+      }),
+    ]);
+
+    expect(restored.sql).toBe("SELECT 2");
+    expect(restored.originalSql).toBe("SELECT 1");
+    expect(restored.externalSqlFileMissing).toBe(true);
+  });
 });

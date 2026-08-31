@@ -3,6 +3,18 @@ import { BackendErrorException, type BackendError } from "@/lib/backend/errorUti
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
+import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
+
+/** Normalize Tauri rejections once at the public backend boundary. */
+async function invokeBackend<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(command, args);
+  } catch (error) {
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
+  }
+}
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -18,11 +30,14 @@ import type {
   CompletionAssistantRequest,
   CompletionAssistantResponse,
   ObjectStatistics,
+  CustomTypeDetails,
   ObjectSource,
   ObjectSourceKind,
+  MysqlEventInfo,
   ColumnInfo,
   SqlServerColumnMetadata,
   IndexInfo,
+  ReferenceKeyInfo,
   ForeignKeyInfo,
   TriggerInfo,
   ConstraintInfo,
@@ -47,8 +62,10 @@ import type {
   SshConfigHostEntry,
   TunnelProfile,
   TransactionLog,
+  ExternalSqlFileVersion,
 } from "@/types/database";
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
+import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
@@ -59,6 +76,7 @@ import type {
   DataGridColumnValueFilterConditionOptions,
   DataGridColumnValuesFilterConditionOptions,
   DataGridContextFilterConditionOptions,
+  DataGridConditionalUpdateSqlOptions,
   DataGridCountSqlOptions,
   DataGridCopyInsertStatementOptions,
   DataGridCopyUpdateStatementOptions,
@@ -67,15 +85,26 @@ import type {
 } from "@/lib/dataGrid/dataGridSql";
 import type { DataGridExtractRequest, DataGridExtractResult } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataCompareFromTablesOptions, DataCompareFromTablesPreparation, DataCompareSyncPlan, DataCompareSyncPlanOptions, DataComparePreparation, DataComparePreparationOptions } from "@/lib/dataGrid/dataCompare";
-import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
-import type { BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
+import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
+import type { BuildTableOwnerChangeSqlOptions, BuildTableStructureChangeSqlOptions, BuildSingleColumnAlterSqlOptions, SqliteTableStructureChangePreview, TableStructureChangeSql } from "@/lib/table/tableStructureEditorSql";
 import type { BuildTableSelectSqlOptions } from "@/lib/table/tableSelectSql";
 import type { DatabaseSearchSql, DatabaseSearchSqlOptions, SearchResultWhereOptions } from "@/lib/database/databaseSearch";
 import type { BuildEditableObjectSourceSqlInput, BuildRoutineRenameObjectSourceInput } from "@/lib/table/objectSourceEditor";
 import type { BuildViewDdlInput } from "@/lib/table/viewDdl";
 import type { BuildRenameObjectSqlOptions } from "@/lib/table/objectRenameSql";
 import type { CreateDatabaseSqlOptions } from "@/lib/database/createDatabaseSql";
-import type { DatabaseNameSqlOptions, DatabasePropertyEditSqlOptions, DropTableChildObjectSqlOptions, DropObjectSqlOptions, DuplicateTableStructureSqlOptions, CopyTableDataSqlOptions, SchemaNameSqlOptions, TableAdminSqlOptions } from "@/lib/database/dbAdminSql";
+import type {
+  DatabaseNameSqlOptions,
+  DatabasePropertyEditSqlOptions,
+  DropTableChildObjectSqlOptions,
+  DropObjectSqlOptions,
+  DuplicateTableStructureSqlOptions,
+  CopyTableDataSqlOptions,
+  MysqlAutoIncrementSqlOptions,
+  SchemaNameSqlOptions,
+  TableAdminSqlOptions,
+  VacuumTableSqlOptions,
+} from "@/lib/database/dbAdminSql";
 import type { BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions } from "@/lib/export/databaseExport";
 
 export interface SshPromptResolution {
@@ -105,12 +134,41 @@ export interface AgentDriverUpdateIssue {
 
 export interface UpgradeAllAgentDriversResult {
   upgraded: number;
+  /** Drivers whose install was aborted by a user cancel (single-driver or batch). */
+  cancelled: number;
   failed: AgentDriverUpdateIssue[];
 }
 
 export interface AgentUpdateBlocker {
   db_type: string;
   label: string;
+}
+
+export type AgentOfflineArtifactKind = "jar" | "native";
+
+export type AgentOfflineExportUnavailableReason = "unmanagedInstall" | "localInstall" | "launchConfig" | "missingArtifact" | "invalidArtifact" | "unsafeSource" | "externalDriverRequired" | "missingManagedJre" | "invalidManagedJre";
+
+export interface AgentOfflineExportCandidate {
+  dbType: string;
+  label: string;
+  version: string;
+  size: number;
+  artifactKind: AgentOfflineArtifactKind | null;
+  requiredJre: string | null;
+  eligible: boolean;
+  unavailableReason: AgentOfflineExportUnavailableReason | null;
+}
+
+export interface AgentOfflineExportPreview {
+  platform: string;
+  candidates: AgentOfflineExportCandidate[];
+}
+
+export interface AgentOfflineExportResult {
+  platform: string;
+  driverCount: number;
+  jreCount: number;
+  bytes: number;
 }
 
 export type JavaRuntimeMode = "managed" | "system" | "custom";
@@ -173,6 +231,7 @@ export interface DesktopSettings {
   quit_on_close: boolean;
   close_action_prompted: boolean;
   debug_logging_enabled: boolean;
+  metadata_cache_max_memory_mb: number;
   duckdb_worker_process_isolation: boolean;
   duckdb_worker_max_processes: number;
   saved_sql_sync_dir?: string | null;
@@ -186,7 +245,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedToolNames: string[] | null;
+  connectionPolicies: McpConnectionPolicy[];
   configured: boolean;
+  queryTimeoutSecs: number | null;
+}
+
+export interface McpConnectionPolicy {
+  connectionId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  executionModeConfigured: boolean;
+  databaseScope: "all" | "selected" | "none";
+  allowedDatabases: string[];
 }
 
 export interface SavedSqlSyncEntry {
@@ -296,6 +367,7 @@ export interface QueryPaginationExecutionPlan {
   pageLimit?: number;
   pageOffset?: number;
   countSql?: string;
+  exactQueryRowBound?: number;
   useAgentResultSession: boolean;
 }
 
@@ -351,6 +423,11 @@ export interface DriverInstallProgress {
 export interface AiMessage {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Transient images for this message. Persisted conversation history intentionally omits them. */
+  images?: Array<{
+    mediaType: string;
+    data: string;
+  }>;
 }
 
 export interface AiTaskContract {
@@ -383,6 +460,8 @@ export interface AiStreamChunk {
   delta: string;
   reasoning_delta?: string;
   done: boolean;
+  /** Web-only explicit terminal error; Tauri reports invoke failures directly. */
+  error?: string;
 }
 
 export async function aiStream(sessionId: string, request: AiCompletionRequest, onChunk: (chunk: AiStreamChunk) => void): Promise<void> {
@@ -403,6 +482,8 @@ export async function aiStream(sessionId: string, request: AiCompletionRequest, 
 export type AgentEvent =
   | { type: "turn_start"; turn: number }
   | { type: "text_delta"; delta: string }
+  | { type: "write_sql_confirmation_required"; sql: string }
+  | { type: "production_write_blocked"; sql: string }
   | { type: "reasoning_delta"; delta: string }
   | {
       type: "tool_call_start";
@@ -418,6 +499,16 @@ export type AgentEvent =
       is_error: boolean;
     }
   | { type: "turn_end"; turn: number }
+  | {
+      /**
+       * The reply stream is fully consumed but the run is NOT yet confirmed
+       * successful — the CLI process may still exit non-zero or hang after
+       * closing stdout. Non-terminal: the UI may stop the reply animation on
+       * it, but must keep listening for the real `agent_end` (success) /
+       * `error` (failure).
+       */
+      type: "response_complete";
+    }
   | { type: "agent_end"; input_tokens?: number; output_tokens?: number }
   | {
       type: "context_compacted";
@@ -428,6 +519,10 @@ export type AgentEvent =
       estimated_after: number;
     }
   | { type: "error"; message: string };
+
+type TauriAgentEvent = AgentEvent & {
+  session_id?: string;
+};
 
 export async function aiAgentStream(
   sessionId: string,
@@ -445,9 +540,11 @@ export async function aiAgentStream(
   confirmedSchema?: string,
   _signal?: AbortSignal,
 ): Promise<string> {
-  const unlisten: UnlistenFn = await listen<AgentEvent>("ai-agent-event", (event) => {
-    onEvent(event.payload);
-    if (event.payload.type === "agent_end" || event.payload.type === "error") {
+  const unlisten: UnlistenFn = await listen<TauriAgentEvent>("ai-agent-event", (event) => {
+    const payload = event.payload;
+    if (payload.session_id && payload.session_id !== sessionId) return;
+    onEvent(payload);
+    if (payload.type === "agent_end" || payload.type === "error") {
       unlisten();
     }
   });
@@ -548,6 +645,53 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   return invoke("save_mcp_global_policy", { policy });
 }
 
+export interface McpHttpServerSettings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  path: string;
+  allowRemote: boolean;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export interface McpHttpServerStatus {
+  enabled: boolean;
+  running: boolean;
+  endpoint: string | null;
+  accessToken: string | null;
+  lastError: string | null;
+  recentLogs: string[];
+}
+
+export interface WebMcpHttpStatus {
+  enabled: boolean;
+  endpointPath: string;
+  tokenSource: "environment" | "file" | null;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export async function loadMcpHttpServerSettings(): Promise<McpHttpServerSettings> {
+  return invoke("load_mcp_http_server_settings");
+}
+
+export async function saveMcpHttpServerSettings(settings: McpHttpServerSettings): Promise<McpHttpServerStatus> {
+  return invoke("save_mcp_http_server_settings", { settings });
+}
+
+export async function mcpHttpServerStatus(): Promise<McpHttpServerStatus> {
+  return invoke("mcp_http_server_status");
+}
+
+export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
+  return invoke("rotate_mcp_http_server_token");
+}
+
+export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
+  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [] };
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return invoke("load_max_agent_turns");
 }
@@ -591,6 +735,14 @@ export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
 
 export async function saveSavedSqlEditorPositions(positions: unknown[]): Promise<void> {
   return invoke("save_saved_sql_editor_positions", { positions });
+}
+
+export async function loadTransferTaskLibrary(): Promise<unknown | null> {
+  return invoke("load_transfer_task_library");
+}
+
+export async function saveTransferTaskLibrary(library: unknown): Promise<void> {
+  return invoke("save_transfer_task_library", { library });
 }
 
 export async function completeAppClose(action: "quit" | "hide"): Promise<void> {
@@ -745,19 +897,45 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
   return invoke("pending_open_connection_links");
 }
 
-export async function readExternalSqlFile(path: string): Promise<string> {
-  const result = await invoke<{ kind: "content"; content: string } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+export async function pendingOpenAiConfigLinks(): Promise<string[]> {
+  return invoke("pending_open_ai_config_links");
+}
+
+export interface ExternalSqlFileSnapshot {
+  content: string;
+  version: ExternalSqlFileVersion;
+}
+
+export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifiedNs: string } | { kind: "missing" };
+
+export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
+
+export async function readExternalSqlFileSnapshot(path: string): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
-  return result.content;
+  return { content: result.content, version: result.version };
 }
 
-export async function writeExternalSqlFile(path: string, content: string): Promise<void> {
-  return invoke("write_external_sql_file", { path, content });
+export async function readExternalSqlFile(path: string): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path)).content;
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<string | null> {
+export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
+  return invoke("inspect_external_sql_file", { path });
+}
+
+export async function writeExternalSqlFile(path: string, content: string, options: { expectedContentHash?: string; expectedMissing?: boolean } = {}): Promise<ExternalSqlFileWriteResult> {
+  return invoke("write_external_sql_file", {
+    path,
+    content,
+    expectedContentHash: options.expectedContentHash ?? null,
+    expectedMissing: options.expectedMissing ?? false,
+  });
+}
+
+export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
   return invoke("save_external_sql_file", { defaultFileName, content });
 }
 
@@ -768,8 +946,20 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileEntry[]> {
-  return invoke("list_sql_files_in_folder", { folderPath });
+export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string): Promise<SqlFileEntry[]> {
+  return invoke("list_sql_files_in_folder", { folderPath, fileFilter });
+}
+
+export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
+  return invoke("create_sql_file_in_folder", { rootPath, directoryPath, fileName });
+}
+
+export async function renameSqlFileInFolder(rootPath: string, filePath: string, fileName: string): Promise<string> {
+  return invoke("rename_sql_file_in_folder", { rootPath, filePath, fileName });
+}
+
+export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
+  return invoke("delete_sql_file_in_folder", { rootPath, filePath });
 }
 
 // --- AI Conversations ---
@@ -779,7 +969,7 @@ export interface AiChatMessage {
   content: string;
   mentions?: unknown[];
   reasoning?: string;
-  kind?: "contextSummary";
+  kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
 }
 
 export interface AiConversation {
@@ -788,6 +978,32 @@ export interface AiConversation {
   connectionName: string;
   database: string;
   messages: AiChatMessage[];
+  /** One editable "send later" input saved while an active run occupies the
+   *  conversation (parent PRD §5). Persisted with the conversation. */
+  queuedInput?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type AiRunStatus = "preparing" | "queued" | "running" | "awaiting_write_confirmation" | "completed" | "failed" | "cancelled" | "interrupted" | "pending_recoverable";
+
+export type AiRunFifoCategory = "normal_send" | "write_confirmation_resume";
+
+export interface AiRun {
+  runId: string;
+  conversationId: string;
+  sessionIds: string[];
+  status: AiRunStatus;
+  connectionId: string;
+  database: string;
+  schema?: string;
+  pendingConfirmation?: unknown;
+  fifoCategory?: AiRunFifoCategory;
+  pendingInput?: string;
+  /** Highest event seq assigned to this run across all its sessions (parent
+   *  PRD §8). Drives the unread baseline and the "updates while you were away"
+   *  separator anchor. */
+  maxSeq?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -802,6 +1018,18 @@ export async function loadAiConversations(): Promise<AiConversation[]> {
 
 export async function deleteAiConversation(id: string): Promise<void> {
   return invoke("delete_ai_conversation", { id });
+}
+
+export async function saveAiRun(run: AiRun): Promise<void> {
+  return invoke("save_ai_run", { run });
+}
+
+export async function saveAiRunState(conversation: AiConversation, run: AiRun): Promise<void> {
+  return invoke("save_ai_run_state", { conversation, run });
+}
+
+export async function loadAiRuns(): Promise<AiRun[]> {
+  return invoke("load_ai_runs");
 }
 
 // --- Prompt Templates ---
@@ -835,7 +1063,7 @@ export async function setAiGlobalCustomInstructions(content: string): Promise<vo
 }
 
 export async function testConnection(config: ConnectionConfig): Promise<string> {
-  return invoke("test_connection", { config });
+  return invokeBackend("test_connection", { config });
 }
 
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
@@ -851,31 +1079,61 @@ export async function testConnectionWithInfo(config: ConnectionConfig): Promise<
 }
 
 export async function connectDb(config: ConnectionConfig, clientAttempt?: number): Promise<string> {
-  return invoke("connect_db", { config, clientAttempt });
+  return invokeBackend("connect_db", { config, clientAttempt });
 }
 
 export async function connectionDatabaseInfo(connectionId: string, database?: string): Promise<DatabaseConnectionInfo | undefined> {
-  const info = await invoke<DatabaseConnectionInfo | null>("connection_database_info", { connectionId, database });
+  const info = await invokeBackend<DatabaseConnectionInfo | null>("connection_database_info", { connectionId, database });
   return info ?? undefined;
 }
 
 export async function saveConnectionDatabaseInfo(connectionId: string, databaseInfo: DatabaseConnectionInfo): Promise<void> {
-  return invoke("save_connection_database_info", {
+  return invokeBackend("save_connection_database_info", {
     connectionId,
     databaseInfo,
   });
 }
 
+export interface WriteUnlockState {
+  remainingMs: number;
+}
+
+export async function unlockConnectionWrites(connectionId: string, durationSecs: number): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("unlock_connection_writes", { connectionId, durationSecs });
+  return state.remainingMs;
+}
+
+export async function lockConnectionWrites(connectionId: string): Promise<void> {
+  return invokeBackend("lock_connection_writes", { connectionId });
+}
+
+export async function connectionWriteUnlockState(connectionId: string): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("connection_write_unlock_state", { connectionId });
+  return state.remainingMs;
+}
+
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
-  return invoke("connection_final_proxy_port", { config });
+  return invokeBackend("connection_final_proxy_port", { config });
 }
 
 export async function disconnectDb(connectionId: string, clientAttempt?: number): Promise<void> {
-  return invoke("disconnect_db", { connectionId, clientAttempt });
+  return invokeBackend("disconnect_db", { connectionId, clientAttempt });
+}
+
+export async function sessionCredentialStatus(connectionId: string): Promise<boolean> {
+  return invokeBackend("session_credential_status", { connectionId });
+}
+
+export async function forgetSessionCredential(connectionId: string): Promise<void> {
+  return invokeBackend("forget_session_credential", { connectionId });
+}
+
+export async function replaceNacosSessionCredential(connectionId: string, username: string, password: string): Promise<void> {
+  return invokeBackend("replace_nacos_session_credential", { connectionId, username, password });
 }
 
 export async function checkConnectionHealth(connectionId: string): Promise<void> {
-  return invoke("check_connection_health", { connectionId });
+  return invokeBackend("check_connection_health", { connectionId });
 }
 
 export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
@@ -892,6 +1150,10 @@ export async function closeDatabaseConnection(connectionId: string, database: st
 
 export async function listDatabases(connectionId: string): Promise<DatabaseInfo[]> {
   return invoke("list_databases", { connectionId });
+}
+
+export async function listDatabaseMetadata(connectionId: string): Promise<DatabaseInfo[]> {
+  return invoke("list_database_metadata", { connectionId });
 }
 
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
@@ -977,7 +1239,11 @@ export async function getTableComment(connectionId: string, database: string, sc
   });
 }
 
-export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string): Promise<ObjectInfo[]> {
+export async function getMysqlTableAutoIncrement(connectionId: string, database: string, table: string): Promise<string | null> {
+  return invoke("get_mysql_table_auto_increment", { connectionId, database, table });
+}
+
+export async function listObjects(connectionId: string, database: string, schema: string, objectTypes?: (SidebarObjectKind | "EVENT")[], filter?: string, limit?: number, offset?: number, catalog?: string, tableNameFilter?: import("@/types/database").TableNameFilter): Promise<ObjectInfo[]> {
   return invoke("list_objects", {
     connectionId,
     database,
@@ -987,6 +1253,7 @@ export async function listObjects(connectionId: string, database: string, schema
     limit,
     offset,
     catalog,
+    tableNameFilter,
   });
 }
 
@@ -1014,6 +1281,10 @@ export async function getObjectSource(connectionId: string, database: string, sc
   });
 }
 
+export async function getEventInfo(connectionId: string, database: string, schema: string, name: string): Promise<MysqlEventInfo> {
+  return invoke("get_event_info", { connectionId, database, schema, name });
+}
+
 export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
   return invoke("list_schemas", { connectionId, database, applyVisibleFilter });
 }
@@ -1022,6 +1293,9 @@ export async function listSchemaInfos(connectionId: string, database: string): P
   return invoke("list_schema_infos", { connectionId, database });
 }
 
+export async function getCustomTypeDetails(connectionId: string, database: string, schema: string, name: string): Promise<CustomTypeDetails> {
+  return invoke("get_custom_type_details", { connectionId, database, schema, name });
+}
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string, clientSessionId?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", {
     connectionId,
@@ -1042,6 +1316,16 @@ export async function getSqlServerColumnMetadata(connectionId: string, database:
   });
 }
 
+export interface TableColumnsResult {
+  table_name: string;
+  columns: ColumnInfo[];
+  error?: string;
+}
+
+export async function getAllColumns(connectionId: string, database: string, schema: string): Promise<TableColumnsResult[]> {
+  return invoke("get_all_columns", { connectionId, database, schema });
+}
+
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {
   return invoke("list_data_types", { connectionId, database });
 }
@@ -1057,6 +1341,7 @@ export async function executeQuery(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1065,6 +1350,38 @@ export async function executeQuery(
 ): Promise<QueryResult> {
   try {
     return await invoke("execute_query", {
+      connectionId,
+      database,
+      sql,
+      schema,
+      executionId,
+      ...options,
+    });
+  } catch (error) {
+    throw new BackendErrorException(error);
+  }
+}
+
+export async function executeConditionalUpdate(
+  connectionId: string,
+  database: string,
+  sql: string,
+  schema?: string,
+  executionId?: string,
+  options?: {
+    maxRows?: number;
+    catalog?: string;
+    fetchSize?: number;
+    pageSize?: number;
+    rowOffset?: number;
+    resultSessionId?: string;
+    clientSessionId?: string;
+    timeoutSecs?: number;
+    executionMode?: "simple" | "postgres_read_only_transaction";
+  },
+): Promise<QueryResult> {
+  try {
+    return await invoke("execute_conditional_update", {
       connectionId,
       database,
       sql,
@@ -1088,6 +1405,10 @@ export async function executeMulti(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1096,8 +1417,10 @@ export async function executeMulti(
     executionMode?: "simple";
   },
 ): Promise<QueryResult[]> {
+  const diagnosticsEnabled = isDebugLoggingEnabled();
+  const startedAt = diagnosticsEnabled ? performance.now() : 0;
   try {
-    return await invoke("execute_multi", {
+    const results = await invoke<QueryResult[]>("execute_multi", {
       connectionId,
       database,
       sql,
@@ -1105,7 +1428,23 @@ export async function executeMulti(
       executionId,
       ...options,
     });
+    if (diagnosticsEnabled) {
+      appendDebugLog("info", "[DBX][query-transport:tauri]", {
+        traceId: executionId?.slice(0, 8),
+        totalMs: Math.round(performance.now() - startedAt),
+        resultCount: results.length,
+        rowCounts: results.map((result) => result.rows.length),
+        columnCounts: results.map((result) => result.columns.length),
+      });
+    }
+    return results;
   } catch (error) {
+    if (diagnosticsEnabled) {
+      appendDebugLog("warn", "[DBX][query-transport:tauri:error]", {
+        traceId: executionId?.slice(0, 8),
+        totalMs: Math.round(performance.now() - startedAt),
+      });
+    }
     throw new BackendErrorException(error);
   }
 }
@@ -1132,6 +1471,10 @@ export async function executeMultiWithProgress(
     catalog?: string;
     fetchSize?: number;
     pageSize?: number;
+    rowOffset?: number;
+    maxResultBytes?: number;
+    resultKeyColumns?: string[];
+    tableDataPreview?: boolean;
     resultSessionId?: string;
     clientSessionId?: string;
     timeoutSecs?: number;
@@ -1161,6 +1504,15 @@ export async function refreshConnections(): Promise<void> {
 
 export async function cancelQuery(executionId: string): Promise<boolean> {
   return invoke("cancel_query", { executionId });
+}
+
+export interface ConditionalUpdateCancellationResult {
+  requested: boolean;
+  terminal: boolean;
+}
+
+export async function cancelConditionalUpdate(executionId: string): Promise<ConditionalUpdateCancellationResult> {
+  return invoke("cancel_conditional_update", { executionId });
 }
 
 export async function closeQuerySession(connectionId: string, database: string, sessionId: string, clientSessionId?: string, catalog?: string): Promise<boolean> {
@@ -1196,12 +1548,13 @@ export async function executeScript(connectionId: string, database: string, sql:
   return invoke("execute_script", { connectionId, database, sql, schema });
 }
 
-export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string): Promise<TransactionLog> {
+export async function executeScriptWith2pc(connectionId: string, database: string, statements: string[], schema?: string, destructiveConfirmed = false): Promise<TransactionLog> {
   return invoke("execute_script_with_2pc", {
     connectionId,
     database,
     statements,
     schema,
+    destructiveConfirmed,
   });
 }
 
@@ -1219,13 +1572,17 @@ export async function beginManualTransaction(connectionId: string, database: str
   return invoke("begin_manual_transaction", { connectionId, database, schema, catalog });
 }
 
-export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number): Promise<QueryResult[]> {
+export async function executeInManualTransaction(txnSessionId: string, sql: string, database: string, schema?: string, maxRows?: number, tableDataPreview?: boolean, pageSize?: number, resultSessionId?: string, classificationSql?: string): Promise<QueryResult[]> {
   return invoke("execute_in_manual_transaction", {
     txnSessionId,
     sql,
     database,
     schema,
     maxRows,
+    tableDataPreview,
+    pageSize,
+    resultSessionId,
+    classificationSql,
   });
 }
 
@@ -1280,7 +1637,7 @@ export async function buildDroppedFilePreviewSql(options: DroppedFilePreviewSqlO
 }
 
 export async function buildTableSelectSql(options: BuildTableSelectSqlOptions): Promise<string> {
-  return invoke("build_table_select_sql", { options });
+  return invoke("build_table_select_sql", { options, includeDatabaseName: options.includeDatabaseName === true });
 }
 
 export async function buildDatabaseSearchSql(options: DatabaseSearchSqlOptions): Promise<DatabaseSearchSql | null> {
@@ -1293,6 +1650,22 @@ export async function buildSearchResultWhere(options: SearchResultWhereOptions):
 
 export async function buildRenameObjectSql(options: BuildRenameObjectSqlOptions): Promise<string> {
   return invoke("build_rename_object_sql", { options });
+}
+
+export async function buildRenameDatabaseSql(options: { databaseType?: DatabaseType; oldName: string; newName: string; terminateConnections: boolean }): Promise<string> {
+  return invoke("build_rename_database_sql", {
+    databaseType: options.databaseType,
+    oldName: options.oldName,
+    newName: options.newName,
+    terminateConnections: options.terminateConnections,
+  });
+}
+
+export async function buildRenameDatabasePreflightSql(options: { databaseType?: DatabaseType; databaseName: string }): Promise<string> {
+  return invoke("build_rename_database_preflight_sql", {
+    databaseType: options.databaseType,
+    databaseName: options.databaseName,
+  });
 }
 
 export async function buildCreateDatabaseSql(options: CreateDatabaseSqlOptions): Promise<string> {
@@ -1329,6 +1702,14 @@ export async function buildEmptyTableSql(options: TableAdminSqlOptions): Promise
 
 export async function buildTruncateTableSql(options: TableAdminSqlOptions): Promise<string> {
   return invoke("build_truncate_table_sql", { options });
+}
+
+export async function buildVacuumTableSql(options: VacuumTableSqlOptions): Promise<string> {
+  return invoke("build_vacuum_table_sql", { options });
+}
+
+export async function buildMysqlAutoIncrementSql(options: MysqlAutoIncrementSqlOptions): Promise<string> {
+  return invoke("build_mysql_auto_increment_sql", { options });
 }
 
 export async function buildDropDatabaseSql(options: DatabaseNameSqlOptions): Promise<string> {
@@ -1379,6 +1760,10 @@ export async function buildTableStructureChangeSql(options: BuildTableStructureC
   return invoke("build_table_structure_change_sql", { options });
 }
 
+export async function buildTableOwnerChangeSql(options: BuildTableOwnerChangeSqlOptions): Promise<TableStructureChangeSql> {
+  return invoke("build_table_owner_change_sql", { options });
+}
+
 export async function previewSqliteTableStructureChange(connectionId: string, database: string, options: BuildTableStructureChangeSqlOptions): Promise<SqliteTableStructureChangePreview> {
   return invoke("preview_sqlite_table_structure_change", {
     connectionId,
@@ -1415,8 +1800,8 @@ export interface DataGridSavePreparation {
   executionSchema?: string;
 }
 
-export async function prepareDataGridSave(options: DataGridSaveStatementOptions): Promise<DataGridSavePreparation> {
-  return invoke("prepare_data_grid_save", { options });
+export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
+  return invoke("prepare_data_grid_save", { options, driverProfile });
 }
 
 export async function extractDataGridSelection(request: DataGridExtractRequest): Promise<DataGridExtractResult> {
@@ -1455,6 +1840,11 @@ export async function buildDataGridCountSql(options: DataGridCountSqlOptions): P
   return invoke("build_data_grid_count_sql", { options });
 }
 
+export async function buildDataGridConditionalUpdateSql(options: DataGridConditionalUpdateSqlOptions): Promise<string | undefined> {
+  const result = await invoke<string | null>("build_data_grid_conditional_update_sql", { options });
+  return result ?? undefined;
+}
+
 export async function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptions): Promise<string> {
   return invoke("build_hive_table_properties_sql", { options });
 }
@@ -1489,6 +1879,26 @@ export async function buildDataCompareSyncPlan(options: DataCompareSyncPlanOptio
 
 export async function listIndexes(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<IndexInfo[]> {
   return invoke("list_indexes", {
+    connectionId,
+    database,
+    schema,
+    table,
+    catalog,
+  });
+}
+
+export async function listReferenceKeyColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<string[]> {
+  return invoke("list_reference_key_columns", {
+    connectionId,
+    database,
+    schema,
+    table,
+    catalog,
+  });
+}
+
+export async function listReferenceKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ReferenceKeyInfo[]> {
+  return invoke("list_reference_keys", {
     connectionId,
     database,
     schema,
@@ -1537,6 +1947,29 @@ export async function listPartitions(connectionId: string, database: string, sch
   });
 }
 
+export interface TablePartitionStatus {
+  isPartitionedParent: boolean;
+  isPartition: boolean;
+}
+
+export async function getTablePartitionStatus(connectionId: string, database: string, schema: string, table: string): Promise<TablePartitionStatus> {
+  return invoke("get_table_partition_status", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
+export async function listInvalidIndexes(connectionId: string, database: string, schema: string, table: string): Promise<string[]> {
+  return invoke("list_invalid_indexes", {
+    connectionId,
+    database,
+    schema,
+    table,
+  });
+}
+
 export async function listSubpartitions(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<SubpartitionInfo[]> {
   return invoke("list_subpartitions", {
     connectionId,
@@ -1547,7 +1980,7 @@ export async function listSubpartitions(connectionId: string, database: string, 
   });
 }
 
-export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string): Promise<string> {
+export async function getTableDdl(connectionId: string, database: string, schema: string, table: string, objectType?: ObjectSourceKind, catalog?: string, portable = false): Promise<string> {
   return invoke("get_table_ddl", {
     connectionId,
     database,
@@ -1555,6 +1988,7 @@ export async function getTableDdl(connectionId: string, database: string, schema
     table,
     objectType,
     catalog,
+    portable,
   });
 }
 
@@ -1567,6 +2001,7 @@ export async function getTableDisplayDdl(connectionId: string, database: string,
     objectType,
     catalog,
     includePostgresAccess: true,
+    portable: false,
   });
 }
 
@@ -1591,6 +2026,13 @@ export async function generateSchemaSyncSql(diffs: TableDiff[], databaseType: Da
   });
 }
 
+export async function generateSchemaSyncPlan(input: SelectedSchemaDiffInput, options: GenerateSchemaSyncPlanOptions): Promise<SchemaSyncSqlPlan> {
+  return invoke("generate_schema_sync_plan", {
+    ...input,
+    ...options,
+  });
+}
+
 export async function listFunctions(connectionId: string, database: string, schema: string): Promise<FunctionInfo[]> {
   return invoke("list_functions", { connectionId, database, schema });
 }
@@ -1612,12 +2054,38 @@ export async function listOwners(connectionId: string, database: string, schema:
   return invoke("list_owners", { connectionId, database, schema });
 }
 
+export async function getTableOwner(connectionId: string, database: string, schema: string, table: string): Promise<string | null> {
+  return invoke("get_table_owner", { connectionId, database, schema, table });
+}
+
 export async function listExtensions(connectionId: string, database: string, schema?: string): Promise<ExtensionInfo[]> {
   return invoke("list_extensions", { connectionId, database, schema });
 }
 
 export async function listAvailableExtensions(connectionId: string, database: string): Promise<ExtensionInfo[]> {
   return invoke("list_available_extensions", { connectionId, database });
+}
+
+// --- Docs ---
+
+export async function collectDocsSnapshot(connectionId: string, database: string, schemas: string[], tables: string[], projectName?: string): Promise<SchemaSnapshot> {
+  return invoke("docs_collect_snapshot", { connectionId, database, schemas, tables, projectName });
+}
+
+export async function loadDocsAnnotations(connectionId: string): Promise<AnnotationFile | null> {
+  return invoke("docs_load_annotations", { connectionId });
+}
+
+export async function applyDocsAnnotations(connectionId: string, snapshot: SchemaSnapshot, annotations: AnnotationFile): Promise<SchemaSnapshot> {
+  return invoke("docs_apply_annotations", { connectionId, snapshot, annotations });
+}
+
+export async function saveDocsAnnotations(connectionId: string, annotations: AnnotationFile): Promise<void> {
+  return invoke("docs_save_annotations", { connectionId, annotations });
+}
+
+export async function exportDocsHtml(filePath: string, snapshot: SchemaSnapshot, annotations: AnnotationFile, lang: string): Promise<void> {
+  return invoke("docs_export_html", { filePath, snapshot, annotations, lang });
 }
 
 export async function saveConnections(configs: ConnectionConfig[]): Promise<void> {
@@ -1761,6 +2229,14 @@ export async function upgradeAllAgents(source?: UpdateDownloadSource, operationI
   return invoke("upgrade_all_agents", { source, operationId });
 }
 
+export async function cancelAgentInstall(dbType: string, operationId?: string): Promise<void> {
+  return invoke("cancel_agent_install", { dbType, operationId });
+}
+
+export async function cancelAgentUpgradeAll(operationId?: string): Promise<void> {
+  return invoke("cancel_agent_upgrade_all", { operationId });
+}
+
 export async function checkAgentUpdateBlockers(dbTypes: string[]): Promise<AgentUpdateBlocker[]> {
   return invoke("check_agent_update_blockers", { dbTypes });
 }
@@ -1788,6 +2264,14 @@ export async function importAgentsFromZip(path: string | File, operationId?: str
   return invoke("import_agents_from_zip", { path, operationId });
 }
 
+export async function previewAgentOfflineExport(): Promise<AgentOfflineExportPreview> {
+  return invoke("preview_agent_offline_export");
+}
+
+export async function exportAgentsOffline(path: string, driverKeys: string[]): Promise<AgentOfflineExportResult> {
+  return invoke("export_agents_offline", { path, driverKeys });
+}
+
 export async function importAgentDriver(dbType: string, path: string | File): Promise<void> {
   if (typeof path !== "string") {
     throw new Error("Desktop driver import requires a local file path");
@@ -1811,6 +2295,10 @@ export async function listenAgentInstallProgress(handler: (progress: DriverInsta
 
 export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return invoke("load_saved_sql_library");
+}
+
+export async function loadSavedSqlFilesForSync(): Promise<SavedSqlFile[]> {
+  return invoke("load_saved_sql_files_for_sync");
 }
 
 export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
@@ -1855,6 +2343,10 @@ export async function isSqliteDatabaseFile(path: string): Promise<boolean> {
 
 export async function backupSqliteDatabase(connectionId: string, destinationPath: string): Promise<void> {
   return invoke("backup_sqlite_database", { connectionId, destinationPath });
+}
+
+export async function restoreSqliteDatabase(connectionId: string, sourcePath: string): Promise<void> {
+  return invoke("restore_sqlite_database", { connectionId, sourcePath });
 }
 
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
@@ -1902,6 +2394,7 @@ export interface McpServerStatus {
   data_dir: string | null;
   install_command: string;
   update_command: string;
+  uninstall_command: string;
   error: string | null;
 }
 
@@ -1911,6 +2404,10 @@ export async function checkMcpServerStatus(): Promise<McpServerStatus> {
 
 export async function installMcpServer(): Promise<string> {
   return invoke("install_mcp_server");
+}
+
+export async function uninstallMcpServer(): Promise<string> {
+  return invoke("uninstall_mcp_server");
 }
 
 export async function checkForUpdates(locale?: string, source?: UpdateDownloadSource): Promise<UpdateInfo> {
@@ -1980,6 +2477,7 @@ export interface RedisSetItem {
 export interface RedisHashItem {
   field: RedisBlob;
   value: RedisBlob;
+  field_ttl?: number;
 }
 
 export interface RedisZsetItem {
@@ -2178,6 +2676,10 @@ export async function redisDeleteKey(connectionId: string, db: number, keyRaw: s
   return invoke("redis_delete_key", { connectionId, db, keyRaw });
 }
 
+export async function redisRenameKey(connectionId: string, db: number, keyRaw: string, newKeyRaw: string): Promise<void> {
+  return invoke("redis_rename_key", { connectionId, db, keyRaw, newKeyRaw });
+}
+
 export async function redisHashSet(connectionId: string, db: number, keyRaw: string, field: string, value: string, ttl?: number): Promise<void> {
   return invoke("redis_hash_set", {
     connectionId,
@@ -2191,6 +2693,25 @@ export async function redisHashSet(connectionId: string, db: number, keyRaw: str
 
 export async function redisHashDel(connectionId: string, db: number, keyRaw: string, field: string): Promise<void> {
   return invoke("redis_hash_del", { connectionId, db, keyRaw, field });
+}
+
+export async function redisHashFieldUpdate(connectionId: string, db: number, keyRaw: string, oldField: string, newField: string, value: string): Promise<void> {
+  return invoke("redis_hash_field_update", {
+    connectionId,
+    db,
+    keyRaw,
+    oldField,
+    newField,
+    value,
+  });
+}
+
+export async function redisHashFieldSetTtl(connectionId: string, db: number, keyRaw: string, field: string, ttl: number): Promise<void> {
+  return invoke("redis_hash_field_set_ttl", { connectionId, db, keyRaw, field, ttl });
+}
+
+export async function redisHashFieldSetExpireAt(connectionId: string, db: number, keyRaw: string, field: string, expireAt: number): Promise<void> {
+  return invoke("redis_hash_field_set_expire_at", { connectionId, db, keyRaw, field, expireAt });
 }
 
 export async function redisListPush(connectionId: string, db: number, keyRaw: string, value: string, ttl?: number): Promise<void> {
@@ -2219,6 +2740,10 @@ export async function redisZadd(connectionId: string, db: number, keyRaw: string
 
 export async function redisZrem(connectionId: string, db: number, keyRaw: string, member: string): Promise<void> {
   return invoke("redis_zrem", { connectionId, db, keyRaw, member });
+}
+
+export async function redisZsetUpdate(connectionId: string, db: number, keyRaw: string, originalMember: string, expectedScore: string, member: string, score: string): Promise<boolean> {
+  return invoke("redis_zset_update", { connectionId, db, keyRaw, originalMember, expectedScore, member, score });
 }
 
 export async function redisStreamAdd(connectionId: string, db: number, keyRaw: string, entryId: string, fields: [string, string][], ttl?: number): Promise<void> {
@@ -2265,7 +2790,7 @@ export async function redisExecuteCommand(connectionId: string, db: number, comm
   });
 }
 
-export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string): Promise<RedisCollectionPage> {
+export async function redisLoadMore(connectionId: string, db: number, keyRaw: string, keyType: string, cursor: number, count: number, filter?: string, sortDirection?: "asc" | "desc"): Promise<RedisCollectionPage> {
   return invoke("redis_load_more", {
     connectionId,
     db,
@@ -2274,6 +2799,7 @@ export async function redisLoadMore(connectionId: string, db: number, keyRaw: st
     cursor,
     count,
     filter,
+    sortDirection,
   });
 }
 
@@ -2325,6 +2851,9 @@ export interface KvKeyMetadata {
   ephemeralOwner?: number | null;
   dataLength?: number | null;
   numChildren?: number | null;
+  flags?: KvInt64 | number | null;
+  lockIndex?: KvInt64 | number | null;
+  session?: string | null;
 }
 
 export interface KvKeySummary extends KvKeyMetadata {
@@ -2338,6 +2867,7 @@ export interface KvListPrefixResponse {
   keys: KvKeySummary[];
   continuation?: string | null;
   revision?: KvInt64 | number | null;
+  filteredByAcls?: boolean | null;
 }
 
 export interface KvListPrefixOptions {
@@ -2381,6 +2911,7 @@ export interface KvPutOptions {
   keyBytes?: KvValue | null;
   expectedModRevision?: KvInt64 | null;
   expectedCreateRevision?: KvInt64 | null;
+  flags?: KvInt64 | null;
 }
 
 export interface KvDeleteOptions {
@@ -2725,6 +3256,351 @@ export async function zookeeperDelete(connectionId: string, key: string): Promis
   return invoke("zookeeper_delete", { connectionId, key });
 }
 
+// --- Consul KV ---
+export async function consulCapabilities(connectionId: string): Promise<import("@/types/consul").ConsulCapabilities> {
+  return invoke("consul_capabilities", { connectionId });
+}
+
+export async function consulTxn(connectionId: string, request: import("@/types/consul").ConsulTxnRequest): Promise<import("@/types/consul").ConsulTxnResult> {
+  return invoke("consul_txn", { connectionId, request });
+}
+
+export async function consulRenameKey(connectionId: string, source: string, target: string, expectedModifyIndex: KvInt64, copy = false): Promise<import("@/types/consul").ConsulTxnResult> {
+  return invoke("consul_rename_key", { connectionId, source, target, expectedModifyIndex, copy });
+}
+
+export async function consulBlockingQuery(connectionId: string, request: import("@/types/consul").ConsulBlockingRequest): Promise<import("@/types/consul").ConsulBlockingResponse> {
+  return invoke("consul_blocking_query", { connectionId, request });
+}
+
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogServices" } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<Record<string, string[]>>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogNodes" } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulCatalogNode[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogServiceNodes"; service: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulCatalogServiceNode[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "catalogNodeServices"; node: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulNodeServices>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthNode"; node: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthServiceChecks"; service: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(
+  connectionId: string,
+  request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthServiceInstances"; service: string; passing: boolean | null } },
+): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulServiceInstance[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest & { target: { kind: "healthState"; state: string } }): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulHealthCheck[]>>;
+export function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulDomainWatchItems>>;
+export async function consulDomainWatch(connectionId: string, request: import("@/types/consul").ConsulDomainWatchRequest): Promise<import("@/types/consul").ConsulDomainWatchResponse<import("@/types/consul").ConsulDomainWatchItems>> {
+  return invoke("consul_domain_watch", { connectionId, request });
+}
+
+export async function consulCancelBlocking(connectionId: string, scope: import("@/types/consul").ConsulScope, generation: number, operationId: string): Promise<boolean> {
+  return invoke("consul_cancel_blocking", { connectionId, scope, generation, operationId });
+}
+
+export async function consulWatchStart(connectionId: string, request: import("@/types/consul").ConsulBlockingRequest): Promise<string> {
+  return invoke("consul_watch_start", { connectionId, request });
+}
+
+export async function consulListRecursive(connectionId: string, prefix: string, maxEntries = 10_000, maxValueBytes = 32 * 1024 * 1024): Promise<import("@/types/consul").ConsulRecursiveListResponse> {
+  return invoke("consul_list_recursive", { connectionId, prefix, maxEntries, maxValueBytes });
+}
+
+export async function consulSearch(connectionId: string, request: import("@/types/consul").ConsulSearchRequest): Promise<import("@/types/consul").ConsulSearchResponse> {
+  return invoke("consul_search", { connectionId, request });
+}
+
+export async function consulSearchProgress(connectionId: string, requestId: string, scope: import("@/types/consul").ConsulScope, generation: number): Promise<import("@/types/consul").ConsulSearchProgress> {
+  return invoke("consul_search_progress", { connectionId, requestId, scope, generation });
+}
+
+export async function consulCancelSearch(connectionId: string, requestId: string, scope: import("@/types/consul").ConsulScope, generation: number): Promise<boolean> {
+  return invoke("consul_cancel_search", { connectionId, requestId, scope, generation });
+}
+
+export async function consulExportBundle(connectionId: string, request: import("@/types/consul").ConsulExportRequest): Promise<import("@/types/consul").ConsulKvBundle> {
+  return invoke("consul_export_bundle", { connectionId, request });
+}
+
+export async function consulImportPreview(connectionId: string, request: import("@/types/consul").ConsulImportRequest): Promise<import("@/types/consul").ConsulImportPreview> {
+  return invoke("consul_import_preview", { connectionId, request });
+}
+
+export async function consulImportExecute(connectionId: string, request: import("@/types/consul").ConsulImportRequest): Promise<import("@/types/consul").ConsulImportReport> {
+  return invoke("consul_import_execute", { connectionId, request });
+}
+
+export async function consulDeletePrefixPreview(connectionId: string, prefix: string): Promise<import("@/types/consul").ConsulDeletePrefixPreview> {
+  return invoke("consul_delete_prefix_preview", { connectionId, prefix });
+}
+
+export async function consulDeletePrefixExecute(connectionId: string, request: import("@/types/consul").ConsulDeletePrefixRequest): Promise<import("@/types/consul").ConsulDeletePrefixReport> {
+  return invoke("consul_delete_prefix_execute", { connectionId, request });
+}
+
+export async function consulListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
+  return invoke("consul_list_prefix", { connectionId, prefix, limit, continuation: continuation ?? null });
+}
+
+export async function consulGet(connectionId: string, key: string): Promise<KvGetResponse> {
+  return invoke("consul_get", { connectionId, key });
+}
+
+export async function consulPut(connectionId: string, key: string, value: KvValue, options?: KvPutOptions | null): Promise<KvPutResponse> {
+  return invoke("consul_put", { connectionId, key, value, options: options ?? null });
+}
+
+export async function consulDelete(connectionId: string, key: string, options?: KvDeleteOptions | null): Promise<KvDeleteResponse> {
+  return invoke("consul_delete", { connectionId, key, options: options ?? null });
+}
+
+export async function consulPreparedQueryList(connectionId: string): Promise<import("@/types/consul").ConsulPreparedQuery[]> {
+  return invoke("consul_prepared_query_list", { connectionId });
+}
+export async function consulPreparedQueryRead(connectionId: string, id: string): Promise<import("@/types/consul").ConsulPreparedQuery> {
+  return invoke("consul_prepared_query_read", { connectionId, id });
+}
+export async function consulPreparedQueryCreate(connectionId: string, input: import("@/types/consul").ConsulPreparedQueryInput): Promise<string> {
+  return invoke("consul_prepared_query_create", { connectionId, input });
+}
+export async function consulPreparedQueryUpdate(connectionId: string, id: string, input: import("@/types/consul").ConsulPreparedQueryInput): Promise<void> {
+  return invoke("consul_prepared_query_update", { connectionId, id, input });
+}
+export async function consulPreparedQueryDelete(connectionId: string, id: string): Promise<void> {
+  return invoke("consul_prepared_query_delete", { connectionId, id });
+}
+export async function consulPreparedQueryExecute(connectionId: string, request: import("@/types/consul").ConsulPreparedQueryExecuteRequest): Promise<import("@/types/consul").ConsulPreparedQueryExecuteResponse> {
+  return invoke("consul_prepared_query_execute", { connectionId, request });
+}
+export async function consulPreparedQueryExplain(connectionId: string, query: string): Promise<unknown> {
+  return invoke("consul_prepared_query_explain", { connectionId, query });
+}
+export async function consulEventList(connectionId: string, name?: string | null): Promise<import("@/types/consul").ConsulEvent[]> {
+  return invoke("consul_event_list", { connectionId, name: name ?? null });
+}
+export async function consulEventFire(connectionId: string, request: import("@/types/consul").ConsulEventFireRequest): Promise<import("@/types/consul").ConsulEvent> {
+  return invoke("consul_event_fire", { connectionId, request });
+}
+export async function consulCoordinateNodes(connectionId: string): Promise<import("@/types/consul").ConsulCoordinate[]> {
+  return invoke("consul_coordinate_nodes", { connectionId });
+}
+export async function consulOperatorRead(connectionId: string, kind: import("@/types/consul").ConsulOperatorReadKind): Promise<import("@/types/consul").ConsulOperatorDocument> {
+  return invoke("consul_operator_read", { connectionId, kind });
+}
+export async function consulSnapshotGenerate(connectionId: string): Promise<import("@/types/consul").ConsulSnapshot> {
+  return invoke("consul_snapshot_generate", { connectionId });
+}
+export async function consulSnapshotRestore(connectionId: string, request: import("@/types/consul").ConsulSnapshotRestoreRequest): Promise<void> {
+  return invoke("consul_snapshot_restore", { connectionId, request });
+}
+export async function consulAutopilotUpdate(connectionId: string, update: import("@/types/consul").ConsulAutopilotUpdate, confirmation: string): Promise<void> {
+  return invoke("consul_autopilot_update", { connectionId, update, confirmation });
+}
+export async function consulRaftTransfer(connectionId: string, request: import("@/types/consul").ConsulRaftWriteRequest): Promise<void> {
+  return invoke("consul_raft_transfer", { connectionId, request });
+}
+export async function consulRaftRemove(connectionId: string, request: import("@/types/consul").ConsulRaftWriteRequest): Promise<void> {
+  return invoke("consul_raft_remove", { connectionId, request });
+}
+export async function consulKeyringWrite(connectionId: string, request: import("@/types/consul").ConsulKeyringWriteRequest): Promise<void> {
+  return invoke("consul_keyring_write", { connectionId, request });
+}
+export async function consulLicenseWrite(connectionId: string, request: import("@/types/consul").ConsulLicenseWriteRequest): Promise<void> {
+  return invoke("consul_license_write", { connectionId, request });
+}
+
+export async function consulStatusLeader(connectionId: string): Promise<string> {
+  return invoke("consul_status_leader", { connectionId });
+}
+export async function consulStatusPeers(connectionId: string): Promise<string[]> {
+  return invoke("consul_status_peers", { connectionId });
+}
+export async function consulAgentSelf(connectionId: string): Promise<import("@/types/consul").ConsulAgentIdentity> {
+  return invoke("consul_agent_self", { connectionId });
+}
+export async function consulAgentMembers(connectionId: string, wan = false, segment?: string | null): Promise<import("@/types/consul").ConsulAgentMember[]> {
+  return invoke("consul_agent_members", { connectionId, wan, segment: segment ?? null });
+}
+export async function consulAgentMetrics(connectionId: string): Promise<unknown> {
+  return invoke("consul_agent_metrics", { connectionId });
+}
+export async function consulCatalogDatacenters(connectionId: string): Promise<string[]> {
+  return invoke("consul_catalog_datacenters", { connectionId });
+}
+export async function consulCatalogNodes(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulCatalogNode[]>> {
+  return invoke("consul_catalog_nodes", { connectionId, options });
+}
+export async function consulCatalogServices(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<Record<string, string[]>>> {
+  return invoke("consul_catalog_services", { connectionId, options });
+}
+export async function consulCatalogServiceNodes(connectionId: string, service: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulCatalogServiceNode[]>> {
+  return invoke("consul_catalog_service_nodes", { connectionId, service, options });
+}
+export async function consulCatalogNodeServices(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulNodeServices>> {
+  return invoke("consul_catalog_node_services", { connectionId, node, options });
+}
+export async function consulHealthNode(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return invoke("consul_health_node", { connectionId, node, options });
+}
+export async function consulHealthChecks(connectionId: string, service: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return invoke("consul_health_checks", { connectionId, service, options });
+}
+export async function consulHealthService(connectionId: string, service: string, passing: boolean | null = null, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulServiceInstance[]>> {
+  return invoke("consul_health_service", { connectionId, service, passing, options });
+}
+export async function consulHealthState(connectionId: string, healthState: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulHealthCheck[]>> {
+  return invoke("consul_health_state", { connectionId, healthState, options });
+}
+export async function consulAgentServices(connectionId: string): Promise<Record<string, import("@/types/consul").ConsulAgentService>> {
+  return invoke("consul_agent_services", { connectionId });
+}
+export async function consulAgentService(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentService> {
+  return invoke("consul_agent_service", { connectionId, id });
+}
+export async function consulAgentChecks(connectionId: string): Promise<Record<string, import("@/types/consul").ConsulHealthCheck>> {
+  return invoke("consul_agent_checks", { connectionId });
+}
+export async function consulAgentRegisterService(connectionId: string, registration: import("@/types/consul").ConsulAgentServiceRegistration): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_register_service", { connectionId, registration });
+}
+export async function consulAgentDeregisterService(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_deregister_service", { connectionId, id });
+}
+export async function consulAgentServiceMaintenance(connectionId: string, id: string, enable: boolean, reason?: string | null): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_service_maintenance", { connectionId, id, enable, reason: reason ?? null });
+}
+export async function consulAgentRegisterCheck(connectionId: string, registration: import("@/types/consul").ConsulAgentCheckRegistration): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_register_check", { connectionId, registration });
+}
+export async function consulAgentDeregisterCheck(connectionId: string, id: string): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_deregister_check", { connectionId, id });
+}
+export async function consulAgentUpdateTtl(connectionId: string, id: string, status: import("@/types/consul").ConsulCheckStatus, output?: string | null): Promise<import("@/types/consul").ConsulAgentWriteResult> {
+  return invoke("consul_agent_update_ttl", { connectionId, id, status, output: output ?? null });
+}
+export async function consulSessions(connectionId: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulSession[]>> {
+  return invoke("consul_sessions", { connectionId, options });
+}
+export async function consulNodeSessions(connectionId: string, node: string, options: import("@/types/consul").ConsulReadOptions = {}): Promise<import("@/types/consul").ConsulListResponse<import("@/types/consul").ConsulSession[]>> {
+  return invoke("consul_node_sessions", { connectionId, node, options });
+}
+export async function consulSession(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSession | null> {
+  return invoke("consul_session", { connectionId, id });
+}
+export async function consulSessionKeys(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSessionKeysResponse> {
+  return invoke("consul_session_keys", { connectionId, id });
+}
+export async function consulSessionDestroyImpact(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSessionDestroyImpact> {
+  return invoke("consul_session_destroy_impact", { connectionId, id });
+}
+export async function consulCreateSession(connectionId: string, request: import("@/types/consul").ConsulSessionCreateRequest): Promise<import("@/types/consul").ConsulSession> {
+  return invoke("consul_create_session", { connectionId, request });
+}
+export async function consulRenewSession(connectionId: string, id: string): Promise<import("@/types/consul").ConsulSession> {
+  return invoke("consul_renew_session", { connectionId, id });
+}
+export async function consulDestroySession(connectionId: string, request: import("@/types/consul").ConsulSessionDestroyRequest): Promise<boolean> {
+  return invoke("consul_destroy_session", { connectionId, request });
+}
+export async function consulAcquireLock(connectionId: string, request: import("@/types/consul").ConsulLockRequest): Promise<import("@/types/consul").ConsulLockResponse> {
+  return invoke("consul_acquire_lock", { connectionId, request });
+}
+export async function consulReleaseLock(connectionId: string, key: string, session: string): Promise<import("@/types/consul").ConsulLockResponse> {
+  return invoke("consul_release_lock", { connectionId, key, session });
+}
+
+export async function consulAclList(connectionId: string, kind: import("@/types/consul").ConsulAclKind): Promise<import("@/types/consul").ConsulAclList> {
+  return invoke("consul_acl_list", { connectionId, kind });
+}
+export async function consulAclTokenSelf(connectionId: string): Promise<import("@/types/consul").ConsulAclToken> {
+  return invoke("consul_acl_token_self", { connectionId });
+}
+export async function consulAclTokenClone(connectionId: string, accessorId: string, description: string): Promise<import("@/types/consul").ConsulAclToken> {
+  return invoke("consul_acl_token_clone", { connectionId, accessorId, request: { Description: description } });
+}
+export async function consulAclGet(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclItem> {
+  return invoke("consul_acl_get", { connectionId, kind, id });
+}
+export async function consulAclApply(connectionId: string, id: string | null, value: import("@/types/consul").ConsulAclWrite): Promise<import("@/types/consul").ConsulAclItem> {
+  return invoke("consul_acl_apply", { connectionId, id, value });
+}
+export async function consulAclReferences(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclReferences> {
+  return invoke("consul_acl_references", { connectionId, kind, id });
+}
+export async function consulAclDelete(connectionId: string, kind: import("@/types/consul").ConsulAclKind, id: string): Promise<import("@/types/consul").ConsulAclReferences> {
+  return invoke("consul_acl_delete", { connectionId, kind, id });
+}
+export async function consulEnterpriseList(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind): Promise<import("@/types/consul").ConsulEnterpriseList> {
+  return invoke("consul_enterprise_list", { connectionId, kind });
+}
+export async function consulEnterpriseGet(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulEnterpriseItem> {
+  return invoke("consul_enterprise_get", { connectionId, kind, name });
+}
+export async function consulEnterpriseApply(connectionId: string, existingName: string | null, item: import("@/types/consul").ConsulEnterpriseWrite): Promise<import("@/types/consul").ConsulEnterpriseItem> {
+  return invoke("consul_enterprise_apply", { connectionId, existingName, item });
+}
+export async function consulEnterpriseImpact(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulScopeImpact> {
+  return invoke("consul_enterprise_impact", { connectionId, kind, name });
+}
+export async function consulEnterpriseDelete(connectionId: string, kind: import("@/types/consul").ConsulEnterpriseKind, name: string): Promise<import("@/types/consul").ConsulScopeImpact> {
+  return invoke("consul_enterprise_delete", { connectionId, kind, name });
+}
+export async function consulMeshConfigList(connectionId: string, kind: string): Promise<import("@/types/consul").ConsulConfigEntry[]> {
+  return invoke("consul_mesh_config_list", { connectionId, kind });
+}
+export async function consulMeshConfigGet(connectionId: string, kind: string, name: string): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return invoke("consul_mesh_config_get", { connectionId, kind, name });
+}
+export async function consulMeshConfigApply(connectionId: string, request: import("@/types/consul").ConsulConfigEntryApply): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return invoke("consul_mesh_config_apply", { connectionId, request });
+}
+export async function consulMeshConfigDelete(connectionId: string, kind: string, name: string, expectedModifyIndex: number): Promise<boolean> {
+  return invoke("consul_mesh_config_delete", { connectionId, kind, name, expectedModifyIndex });
+}
+export async function consulMeshIntentionsList(connectionId: string): Promise<import("@/types/consul").ConsulIntention[]> {
+  return invoke("consul_mesh_intentions_list", { connectionId });
+}
+export async function consulMeshIntentionGet(connectionId: string, id: string): Promise<import("@/types/consul").ConsulIntention> {
+  return invoke("consul_mesh_intention_get", { connectionId, id });
+}
+export async function consulMeshIntentionGetExact(connectionId: string, request: import("@/types/consul").ConsulIntentionExactRequest): Promise<import("@/types/consul").ConsulIntention> {
+  return invoke("consul_mesh_intention_get_exact", { connectionId, request });
+}
+export async function consulMeshIntentionUpsert(connectionId: string, item: import("@/types/consul").ConsulIntention): Promise<import("@/types/consul").ConsulIntention> {
+  return invoke("consul_mesh_intention_upsert", { connectionId, item });
+}
+export async function consulMeshIntentionDelete(connectionId: string, id: string): Promise<boolean> {
+  return invoke("consul_mesh_intention_delete", { connectionId, id });
+}
+export async function consulMeshIntentionDeleteExact(connectionId: string, request: import("@/types/consul").ConsulIntentionExactRequest): Promise<boolean> {
+  return invoke("consul_mesh_intention_delete_exact", { connectionId, request });
+}
+export async function consulMeshIntentionMatch(connectionId: string, request: import("@/types/consul").ConsulIntentionMatchRequest): Promise<import("@/types/consul").ConsulIntention[]> {
+  return invoke("consul_mesh_intention_match", { connectionId, request });
+}
+export async function consulMeshIntentionCheck(connectionId: string, request: import("@/types/consul").ConsulIntentionCheckRequest): Promise<import("@/types/consul").ConsulIntentionCheckResponse> {
+  return invoke("consul_mesh_intention_check", { connectionId, request });
+}
+export async function consulMeshDiscoveryChain(connectionId: string, service: string): Promise<import("@/types/consul").ConsulDiscoveryChain> {
+  return invoke("consul_mesh_discovery_chain", { connectionId, service });
+}
+export async function consulMeshPeeringList(connectionId: string): Promise<import("@/types/consul").ConsulPeering[]> {
+  return invoke("consul_mesh_peering_list", { connectionId });
+}
+export async function consulMeshPeeringGet(connectionId: string, name: string): Promise<import("@/types/consul").ConsulPeering> {
+  return invoke("consul_mesh_peering_get", { connectionId, name });
+}
+export async function consulMeshPeeringGenerateToken(connectionId: string, request: import("@/types/consul").ConsulPeeringGenerateRequest): Promise<import("@/types/consul").ConsulPeeringToken> {
+  return invoke("consul_mesh_peering_generate_token", { connectionId, request });
+}
+export async function consulMeshPeeringEstablish(connectionId: string, request: import("@/types/consul").ConsulPeeringEstablishRequest): Promise<import("@/types/consul").ConsulPeering> {
+  return invoke("consul_mesh_peering_establish", { connectionId, request });
+}
+export async function consulMeshPeeringDelete(connectionId: string, name: string): Promise<boolean> {
+  return invoke("consul_mesh_peering_delete", { connectionId, name });
+}
+export async function consulMeshExportedServicesList(connectionId: string): Promise<import("@/types/consul").ConsulExportedService[]> {
+  return invoke("consul_mesh_exported_services_list", { connectionId });
+}
+export async function consulMeshExportedServicesApply(connectionId: string, name: string, expectedModifyIndex: number, raw: Record<string, unknown>): Promise<import("@/types/consul").ConsulConfigEntry> {
+  return invoke("consul_mesh_exported_services_apply", { connectionId, name, expectedModifyIndex, raw });
+}
+
 // --- HBase ---
 export async function hbaseGetTableSchema(connectionId: string, namespace: string, table: string): Promise<import("@/types/hbase").HBaseTableSchema> {
   return invoke("hbase_get_table_schema", { connectionId, namespace, table });
@@ -2784,6 +3660,31 @@ export interface DocumentQueryResult {
   extended_documents?: any[];
   total: number;
   total_is_exact?: boolean;
+  next_cursor?: string;
+}
+
+export interface DynamoDbKeyInfo {
+  name: string;
+  attributeType: "S" | "N" | "B" | string;
+}
+
+export interface DynamoDbIndexInfo {
+  name: string;
+  kind: "global" | "local" | string;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+  projectionType: "ALL" | "KEYS_ONLY" | "INCLUDE" | string;
+  nonKeyAttributes: string[];
+}
+
+export interface DynamoDbTableDescription {
+  name: string;
+  status: string;
+  itemCount: number;
+  sizeBytes: number;
+  partitionKey: DynamoDbKeyInfo;
+  sortKey?: DynamoDbKeyInfo;
+  indexes: DynamoDbIndexInfo[];
 }
 
 // Kept for callers that are specifically using MongoDB APIs.
@@ -2807,6 +3708,37 @@ export interface MongoDropIndexesResult {
   dropped_names: string[];
   affected_rows: number;
   failures?: MongoDropIndexFailure[];
+}
+
+export interface MongoIndexKey {
+  field: string;
+  /** `1`, `-1`, or a MongoDB key type such as `text` / `2dsphere` / `hashed`. */
+  direction: string;
+}
+
+/** Full MongoDB index specification, carrying the options `IndexInfo` cannot hold. */
+export interface MongoIndexSpec {
+  name: string;
+  keys: MongoIndexKey[];
+  is_unique: boolean;
+  is_primary: boolean;
+  is_sparse: boolean;
+  /** TTL in seconds; null when the index does not expire. */
+  expire_after_seconds: number | null;
+  partial_filter_expression: string | null;
+  /** Ignored by MongoDB 4.2+, still reported by older servers. */
+  background: boolean;
+  /** Only meaningful for geoHaystack indexes, removed in MongoDB 4.4+. */
+  bucket_size: number | null;
+  hidden: boolean;
+  /** False when the driver could not report the properties above (Legacy Agent). */
+  properties_complete: boolean;
+  extra_options: string | null;
+}
+
+export interface MongoCloneCollectionResult {
+  documents_copied: number;
+  indexes_copied: number;
 }
 
 export interface MongoGridFsFileInfo {
@@ -2876,17 +3808,44 @@ export async function mongoRenameCollection(connectionId: string, database: stri
   });
 }
 
+export async function mongoCloneCollection(connectionId: string, database: string, sourceCollection: string, targetCollection: string): Promise<MongoCloneCollectionResult> {
+  return invoke("mongo_clone_collection", {
+    connectionId,
+    database,
+    sourceCollection,
+    targetCollection,
+  });
+}
+
+export async function vectorDropDatabase(connectionId: string, database: string): Promise<void> {
+  return invoke("vector_drop_database", { connectionId, database });
+}
+
+export async function vectorDropCollection(connectionId: string, database: string, collection: string): Promise<void> {
+  return invoke("vector_drop_collection", { connectionId, database, collection });
+}
+
+export async function vectorRenameCollection(connectionId: string, database: string, collection: string, newName: string): Promise<void> {
+  return invoke("vector_rename_collection", { connectionId, database, collection, newName });
+}
+
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
   return collections.map((c) => c.name);
+}
+
+/** Lists every Meilisearch index visible to the current connection credentials. */
+export async function meilisearchListIndexes(connectionId: string): Promise<string[]> {
+  const collections = await documentListCollections(connectionId, "default");
+  return collections.map((collection) => collection.name);
 }
 
 export async function vectorListCollections(connectionId: string, database?: string): Promise<CollectionInfo[]> {
   return documentListCollections(connectionId, database || "default");
 }
 
-export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
-  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, executionId);
+export async function mongoFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string): Promise<MongoDocumentResult> {
+  return documentFindDocuments(connectionId, database, collection, skip, limit, filter, projection, sort, collation, executionId);
 }
 
 export async function mongoFindOne(connectionId: string, database: string, collection: string, filter?: string, projection?: string, options?: string, executionId?: string): Promise<MongoDocumentResult> {
@@ -2906,7 +3865,20 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(
+  connectionId: string,
+  database: string,
+  collection: string,
+  skip: number,
+  limit: number,
+  filter?: string,
+  projection?: string,
+  sort?: string,
+  collation?: string,
+  executionId?: string,
+  cursor?: string,
+  cursorPagination?: boolean,
+): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -2916,8 +3888,24 @@ export async function documentFindDocuments(connectionId: string, database: stri
     filter,
     projection,
     sort,
+    collation,
+    cursor,
+    cursorPagination,
     executionId,
   });
+}
+
+export async function documentCountDocuments(connectionId: string, collection: string, filter?: string, executionId?: string): Promise<number> {
+  return invoke("document_count_documents", {
+    connectionId,
+    collection,
+    filter,
+    executionId,
+  });
+}
+
+export async function dynamodbDescribeTable(connectionId: string, table: string): Promise<DynamoDbTableDescription> {
+  return invoke("dynamodb_describe_table", { connectionId, table });
 }
 
 export async function elasticsearchCountDocuments(connectionId: string, index: string, filter?: string, executionId?: string): Promise<number> {
@@ -2926,6 +3914,33 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
     index,
     filter,
     executionId,
+  });
+}
+
+/** Read-only index metadata endpoints exposed on the Elasticsearch index context menu. */
+export type ElasticsearchIndexMetadataKind = "mapping" | "settings" | "stats";
+
+/** Outcome of clearing an index: mapping and settings are kept, documents are not. */
+export interface ElasticsearchDeleteByQueryResult {
+  total: number;
+  deleted: number;
+  versionConflicts: number;
+  timedOut: boolean;
+  failures: string[];
+}
+
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+  return invoke("elasticsearch_get_index_metadata", {
+    connectionId,
+    index,
+    kind,
+  });
+}
+
+export async function elasticsearchDeleteAllDocuments(connectionId: string, index: string): Promise<ElasticsearchDeleteByQueryResult> {
+  return invoke("elasticsearch_delete_all_documents", {
+    connectionId,
+    index,
   });
 }
 
@@ -3046,6 +4061,14 @@ export async function mongoCollectionStats(connectionId: string, database: strin
   });
 }
 
+export async function mongoListIndexSpecs(connectionId: string, database: string, collection: string): Promise<MongoIndexSpec[]> {
+  return invoke("mongo_list_index_specs", {
+    connectionId,
+    database,
+    collection,
+  });
+}
+
 export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {
   return invoke("mongo_create_index", {
     connectionId,
@@ -3053,6 +4076,24 @@ export async function mongoCreateIndex(connectionId: string, database: string, c
     collection,
     keysJson,
     optionsJson,
+  });
+}
+
+export async function mongoCreateUser(connectionId: string, database: string, userJson: string, writeConcernJson?: string): Promise<{ affected_rows: number }> {
+  return invoke("mongo_create_user", {
+    connectionId,
+    database,
+    userJson,
+    writeConcernJson,
+  });
+}
+
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_run_command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
   });
 }
 
@@ -3070,13 +4111,14 @@ export async function mongoInsertDocument(connectionId: string, database: string
   return documentInsertDocument(connectionId, database, collection, docJson, routing);
 }
 
-export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string): Promise<string> {
+export async function documentInsertDocument(connectionId: string, database: string, collection: string, docJson: string, routing?: string, preserveBsonTypes?: boolean): Promise<string> {
   return invoke("document_insert_document", {
     connectionId,
     database,
     collection,
     docJson,
     routing,
+    preserveBsonTypes,
   });
 }
 
@@ -3131,6 +4173,150 @@ export async function documentDeleteDocument(connectionId: string, database: str
     routing,
     documentType,
   });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
+  });
+}
+
+export async function meilisearchSearchDocuments(
+  connectionId: string,
+  index: string,
+  params: { q?: string | null; filter?: string | null; sort?: string | null; limit: number; offset: number; hybridEmbedder?: string | null; hybridSemanticRatio?: number | null; showRankingScore?: boolean; rankingScoreThreshold?: number | null },
+): Promise<MeilisearchSearchResult> {
+  const result = await invoke<MeilisearchSearchWireResult>("meilisearch_search_documents", {
+    connectionId,
+    index,
+    q: params.q ?? null,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+    hybridEmbedder: params.hybridEmbedder ?? null,
+    hybridSemanticRatio: params.hybridSemanticRatio ?? null,
+    showRankingScore: params.showRankingScore ?? false,
+    rankingScoreThreshold: params.rankingScoreThreshold ?? null,
+  });
+  return decodeMeilisearchSearchResult(result);
+}
+
+export async function meilisearchFetchDocuments(connectionId: string, index: string, params: { filter?: string | null; sort?: string | null; limit: number; offset: number }): Promise<MeilisearchDocumentPage> {
+  const page = await invoke<MeilisearchDocumentPageWire>("meilisearch_fetch_documents", {
+    connectionId,
+    index,
+    filter: params.filter ?? null,
+    sort: params.sort ?? null,
+    limit: params.limit,
+    offset: params.offset,
+  });
+  return decodeMeilisearchDocumentPage(page);
+}
+
+export async function meilisearchGetDocument(connectionId: string, index: string, id: string): Promise<string> {
+  return invoke("meilisearch_get_document", {
+    connectionId,
+    index,
+    id,
+  });
+}
+
+export async function meilisearchGetIndexSettings(connectionId: string, index: string): Promise<Record<string, any>> {
+  return invoke("meilisearch_get_index_settings", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchUpdateIndexSettings(connectionId: string, index: string, settings: Record<string, any>): Promise<void> {
+  return invoke("meilisearch_update_index_settings", {
+    connectionId,
+    index,
+    settings,
+  });
+}
+
+export async function meilisearchGetIndexStats(connectionId: string, index: string): Promise<{ numberOfDocuments: number; isIndexing: boolean; fieldDistribution: Record<string, number> } & Record<string, any>> {
+  return invoke("meilisearch_get_index_stats", {
+    connectionId,
+    index,
+  });
+}
+
+export interface MeilisearchIndexOverview {
+  uid: string;
+  primaryKey: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  numberOfDocuments: number;
+  isIndexing: boolean;
+  databaseSize: number | null;
+}
+
+export async function meilisearchGetIndexOverview(connectionId: string, index: string): Promise<MeilisearchIndexOverview> {
+  return invoke("meilisearch_get_index_overview", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteIndex(connectionId: string, index: string): Promise<void> {
+  return invoke("meilisearch_delete_index", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchDeleteAllDocuments(connectionId: string, index: string): Promise<void> {
+  return invoke("meilisearch_delete_all_documents", {
+    connectionId,
+    index,
+  });
+}
+
+export async function meilisearchGetSystemOverview(connectionId: string): Promise<MeilisearchSystemOverview> {
+  return invokeBackend("meilisearch_get_system_overview", { connectionId });
+}
+
+export async function meilisearchListKeys(connectionId: string, offset = 0, limit = 20): Promise<KeyPage> {
+  return invokeBackend("meilisearch_list_keys", { connectionId, offset, limit });
+}
+
+export async function meilisearchGetKey(connectionId: string, uid: string): Promise<KeyListItem> {
+  return invokeBackend("meilisearch_get_key", { connectionId, uid });
+}
+
+export async function meilisearchCreateKey(connectionId: string, input: KeyCreateInput): Promise<CreatedKey> {
+  return invokeBackend("meilisearch_create_key", { connectionId, input });
+}
+
+export async function meilisearchUpdateKey(connectionId: string, uid: string, input: KeyUpdateInput): Promise<KeyListItem> {
+  return invokeBackend("meilisearch_update_key", { connectionId, uid, input });
+}
+
+export async function meilisearchDeleteKey(connectionId: string, uid: string): Promise<void> {
+  return invokeBackend("meilisearch_delete_key", { connectionId, uid });
+}
+
+export async function meilisearchGetTasks(connectionId: string, input: TaskListInput): Promise<TaskPage> {
+  return invokeBackend("meilisearch_get_tasks", { connectionId, input });
+}
+
+export async function meilisearchGetTask(connectionId: string, uid: number, expectedIndexUid?: string): Promise<MeilisearchTask> {
+  return invokeBackend("meilisearch_get_task", { connectionId, uid, expectedIndexUid: expectedIndexUid ?? null });
+}
+
+export async function meilisearchCancelTasks(connectionId: string, selector: TaskSelector): Promise<EnqueuedTaskSummary> {
+  return invokeBackend("meilisearch_cancel_tasks", { connectionId, selector });
+}
+
+export async function meilisearchDeleteTasks(connectionId: string, selector: TaskSelector): Promise<EnqueuedTaskSummary> {
+  return invokeBackend("meilisearch_delete_tasks", { connectionId, selector });
 }
 
 export async function mongoDeleteDocuments(connectionId: string, database: string, collection: string, filterJson: string, many: boolean): Promise<{ affected_rows: number }> {
@@ -3350,6 +4536,7 @@ export interface TransferRequest {
   objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
 }
@@ -3389,7 +4576,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
         await invoke("start_transfer", { request });
       } catch (e) {
         unlisten?.();
-        reject(e);
+        reject(e instanceof BackendErrorException ? e : new BackendErrorException(e));
       }
     })();
   });
@@ -3425,7 +4612,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
-export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel";
+export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
@@ -3447,6 +4634,7 @@ export interface TableImportParseOptions {
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
+  sqlDialect?: DatabaseType | null;
 }
 
 export interface TableImportPreviewRequest {
@@ -3545,7 +4733,7 @@ export async function importTableFile(request: TableImportRequest, onProgress: (
     return summary;
   } catch (e) {
     unlisten();
-    throw e;
+    throw e instanceof BackendErrorException ? e : new BackendErrorException(e);
   }
 }
 
@@ -3573,6 +4761,7 @@ export interface DatabaseExportRequest {
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;
+  outputCompression?: "none" | "gzip";
   snapshotSessionId?: string;
   batchSize: number;
 }
@@ -3618,6 +4807,7 @@ export interface TableExportRequest {
   rowLimit?: number | null;
   dateTimeFormat?: string;
   numericColumnRightAlign?: boolean;
+  autoFilter?: boolean;
 }
 
 export interface TableCsvExportOptions {
@@ -3645,6 +4835,7 @@ export interface QueryResultExportRequest {
   connectionId: string;
   database: string;
   schema?: string;
+  catalog?: string;
   sql: string;
   queryBaseSql: string;
   setupSql?: string[];
@@ -3665,6 +4856,8 @@ export interface QueryResultExportRequest {
   exportColumnTypes?: Array<string | null | undefined>;
   numericColumnRightAlign?: boolean;
   columnComments?: Array<string | null> | null;
+  autoFilter?: boolean;
+  identifierQuote?: string;
 }
 
 export async function startTableExport(request: TableExportRequest, onProgress: (progress: TableExportProgress) => void): Promise<TableExportProgress> {
@@ -3691,7 +4884,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
       onProgress(event.payload);
       if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
         if (event.payload.status === "Error") {
-          finish(() => rejectTerminal(new Error(event.payload.errorMessage || "Export failed")));
+          finish(() => rejectTerminal(new BackendErrorException(event.payload.errorMessage || "Export failed")));
         } else {
           finish(() => resolveTerminal(event.payload));
         }
@@ -3704,7 +4897,7 @@ export async function startTableExport(request: TableExportRequest, onProgress: 
       settled = true;
       unlisten?.();
     }
-    throw error;
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
   }
 }
 
@@ -3736,7 +4929,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
       onProgress(event.payload);
       if (event.payload.status === "Done" || event.payload.status === "Error" || event.payload.status === "Cancelled") {
         if (event.payload.status === "Error") {
-          finish(() => rejectTerminal(new Error(event.payload.errorMessage || "Export failed")));
+          finish(() => rejectTerminal(new BackendErrorException(event.payload.errorMessage || "Export failed")));
         } else {
           finish(() => resolveTerminal(event.payload));
         }
@@ -3749,7 +4942,7 @@ export async function startQueryResultExport(request: QueryResultExportRequest, 
       settled = true;
       unlisten?.();
     }
-    throw error;
+    throw error instanceof BackendErrorException ? error : new BackendErrorException(error);
   }
 }
 
@@ -3760,8 +4953,8 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
-export async function beginDatabaseBackupSnapshot(connectionId: string, database: string): Promise<DatabaseBackupSnapshot> {
-  return invoke("begin_database_backup_snapshot", { connectionId, database });
+export async function beginDatabaseBackupSnapshot(connectionId: string, database: string, exportId?: string): Promise<DatabaseBackupSnapshot> {
+  return invoke("begin_database_backup_snapshot", { connectionId, database, exportId: exportId || null });
 }
 
 export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
@@ -3785,6 +4978,14 @@ export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await invoke("cancel_database_export", { exportId });
 }
 
+export async function clearDatabaseExportCancellation(exportId: string): Promise<void> {
+  await invoke("clear_database_export_cancellation", { exportId });
+}
+
+export async function recordDatabaseExportDestination(directory: string): Promise<void> {
+  await invoke("record_database_export_destination", { directory });
+}
+
 export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
   return invoke("export_query_result_csv", {
     request: {
@@ -3799,7 +5000,16 @@ export async function exportTableDataCsv(options: TableCsvExportOptions): Promis
   return invoke("export_table_data_csv", { request: options });
 }
 
-export async function exportQueryResultXlsx(filePath: string, sheetName: string | undefined, columns: string[], columnTypes: string[], columnComments: readonly (string | null)[] | undefined, rows: readonly (readonly XlsxCellValue[])[], numericColumnRightAlign?: boolean): Promise<void> {
+export async function exportQueryResultXlsx(
+  filePath: string,
+  sheetName: string | undefined,
+  columns: string[],
+  columnTypes: string[],
+  columnComments: readonly (string | null)[] | undefined,
+  rows: readonly (readonly XlsxCellValue[])[],
+  numericColumnRightAlign?: boolean,
+  autoFilter?: boolean,
+): Promise<void> {
   return invoke("export_query_result_xlsx", {
     request: {
       filePath,
@@ -3809,6 +5019,7 @@ export async function exportQueryResultXlsx(filePath: string, sheetName: string 
       columnComments,
       rows,
       numericColumnRightAlign,
+      autoFilter,
     },
   });
 }
@@ -3822,12 +5033,15 @@ export async function exportQueryResultsXlsx(
     columnComments?: readonly (string | null)[];
     rows: readonly (readonly XlsxCellValue[])[];
     numericColumnRightAlign?: boolean;
+    autoFilter?: boolean;
   }[],
+  autoFilter?: boolean,
 ): Promise<void> {
   return invoke("export_query_results_xlsx", {
     request: {
       filePath,
       worksheets,
+      autoFilter,
     },
   });
 }
@@ -3853,4 +5067,5 @@ export async function exportQueryResultMarkdown(filePath: string, columns: strin
 }
 
 export * from "@/lib/backend/mq-tauri";
+export * from "@/lib/backend/mqtt-tauri";
 export * from "@/lib/backend/nacos-tauri";

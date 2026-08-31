@@ -19,9 +19,11 @@ fn col(name: &str, data_type: &str) -> ColumnInfo {
     ColumnInfo {
         name: name.to_string(),
         data_type: data_type.to_string(),
+        resolved_schema: None,
         is_nullable: false,
         column_default: None,
         is_primary_key: false,
+        is_unique: false,
         extra: None,
         comment: None,
         numeric_precision: None,

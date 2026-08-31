@@ -117,11 +117,10 @@ jobs:
           const updateLockDependency = (dependency, packageDirectory) => {
             const escapedDependency = dependency.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             const dependencyPattern = new RegExp(`('${escapedDependency}':\\n\\s+specifier: )[^\\n]+(\\n\\s+version: )([^\\n]+)`);
-            const updated = lockfile.replace(dependencyPattern, `$1${version}$2link:../${packageDirectory}`);
-            if (updated === lockfile) {
+            if (!dependencyPattern.test(lockfile)) {
               throw new Error(`Unable to update ${dependency} in pnpm-lock.yaml.`);
             }
-            lockfile = updated;
+            lockfile = lockfile.replace(dependencyPattern, `$1${version}$2link:../${packageDirectory}`);
           };
           for (const dependency of Object.keys(mcpPackage.optionalDependencies ?? {})) {
             updateLockDependency(dependency, dependency.replace("@dbx-app/", ""));
@@ -194,6 +193,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          token: ${{ secrets.MCP_RELEASE_TOKEN }}
 
       - name: Download package release patch
         uses: actions/download-artifact@v4
@@ -201,15 +201,10 @@ jobs:
           name: package-release-patch
 
       - name: Apply package release patch and push
-        env:
-          RELEASE_TOKEN: ${{ secrets.MCP_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${{ needs.prepare.outputs.version }}"
-          if [ -n "${RELEASE_TOKEN}" ]; then
-            git remote set-url origin "https://x-access-token:${RELEASE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main --no-tags
@@ -348,6 +343,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -356,6 +367,34 @@ jobs:
           shared-key: dbx-cli-${{ matrix.target }}
           cache-targets: false
           cache-on-failure: true
+
+      - name: Setup full Perl for vendored OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PERL_ARCHIVE_URL: https://github.com/shogo82148/build-perl/releases/download/perl-5.42.3-20260803012115/perl-5.42.3-thr-win32-x64.zip
+          PERL_ARCHIVE_SHA256: 4f0ac6fe1a4221c1fa1804c2d81999bdecebd505a61d0d04720e9b3925cd6db4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "perl-5.42.3-thr-win32-x64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "openssl-perl"
+          curl.exe --fail --location --retry 5 --retry-all-errors $env:PERL_ARCHIVE_URL --output $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download the full Perl runtime."
+          }
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PERL_ARCHIVE_SHA256) {
+            throw "Unexpected Perl archive SHA256: $actualHash"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $perl = Get-ChildItem -Path $destination -Filter perl.exe -Recurse | Where-Object { $_.FullName -match '[\\/]bin[\\/]perl\.exe$' } | Select-Object -First 1
+          if (-not $perl) {
+            throw "Unable to locate perl.exe in the downloaded runtime."
+          }
+          & $perl.FullName -MParams::Check -e 1
+          if ($LASTEXITCODE -ne 0) {
+            throw "The downloaded Perl runtime cannot load Params::Check."
+          }
+          "OPENSSL_SRC_PERL=$($perl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
@@ -460,7 +499,7 @@ jobs:
             echo "@dbx-app/cli@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          pnpm --filter "@dbx-app/cli" publish --access public --provenance --no-git-checks
+          pnpm publish "./packages/cli" --access public --provenance --no-git-checks
 
   publish-mcp-platforms:
     name: Publish ${{ matrix.package-name }}
@@ -538,6 +577,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -546,6 +601,34 @@ jobs:
           shared-key: dbx-mcp-${{ matrix.target }}
           cache-targets: false
           cache-on-failure: true
+
+      - name: Setup full Perl for vendored OpenSSL on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PERL_ARCHIVE_URL: https://github.com/shogo82148/build-perl/releases/download/perl-5.42.3-20260803012115/perl-5.42.3-thr-win32-x64.zip
+          PERL_ARCHIVE_SHA256: 4f0ac6fe1a4221c1fa1804c2d81999bdecebd505a61d0d04720e9b3925cd6db4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "perl-5.42.3-thr-win32-x64.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "openssl-perl"
+          curl.exe --fail --location --retry 5 --retry-all-errors $env:PERL_ARCHIVE_URL --output $archive
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to download the full Perl runtime."
+          }
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:PERL_ARCHIVE_SHA256) {
+            throw "Unexpected Perl archive SHA256: $actualHash"
+          }
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $perl = Get-ChildItem -Path $destination -Filter perl.exe -Recurse | Where-Object { $_.FullName -match '[\\/]bin[\\/]perl\.exe$' } | Select-Object -First 1
+          if (-not $perl) {
+            throw "Unable to locate perl.exe in the downloaded runtime."
+          }
+          & $perl.FullName -MParams::Check -e 1
+          if ($LASTEXITCODE -ne 0) {
+            throw "The downloaded Perl runtime cannot load Params::Check."
+          }
+          "OPENSSL_SRC_PERL=$($perl.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
@@ -660,7 +743,7 @@ jobs:
             echo "@dbx-app/mcp-server@${VERSION} already exists on npm; skipping."
             exit 0
           fi
-          pnpm --filter "@dbx-app/mcp-server" publish --access public --provenance --no-git-checks
+          pnpm publish "./packages/mcp-server" --access public --provenance --no-git-checks
 
   publish-mcp-github-release:
     name: Publish MCP GitHub Release assets

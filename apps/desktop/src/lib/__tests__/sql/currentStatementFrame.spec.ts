@@ -1,56 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { currentStatementFrameRangeTo, estimateInlineHintVisualColumns, isWideSqlChar, visualSqlColumns, visualSqlColumnsWithInlineHints } from "@/lib/sql/currentStatementFrame";
+import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import type { SqlTextRange } from "@/lib/sql/sqlStatementRanges";
+
+function frameDocument(sql: string) {
+  return {
+    length: sql.length,
+    sliceString: (from: number, to: number) => sql.slice(from, to),
+  };
+}
 
 describe("currentStatementFrameRangeTo", () => {
   it("includes a directly adjacent trailing semicolon in frame width calculations", () => {
+    const sql = "SELECT 1;";
     const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
-    expect(currentStatementFrameRangeTo(";", range)).toBe(range.to + 1);
+    expect(currentStatementFrameRangeTo(frameDocument(sql), range)).toBe(sql.length);
   });
 
-  it("does not extend the frame when the next character is not a semicolon", () => {
+  it("includes a trailing semicolon on its own line", () => {
+    const sql = "SELECT 1\n;\n\nSELECT 2;";
     const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
-    expect(currentStatementFrameRangeTo("\n", range)).toBe(range.to);
-  });
-});
-
-describe("visualSqlColumns", () => {
-  it("counts ASCII as one column, tabs as four, and CJK/fullwidth characters as two", () => {
-    expect(visualSqlColumns("A\t中Ｂ")).toBe(1 + 4 + 2 + 2);
+    expect(currentStatementFrameRangeTo(frameDocument(sql), range)).toBe(sql.indexOf(";") + 1);
   });
 
-  it("recognizes common wide SQL text characters", () => {
-    expect(isWideSqlChar("中")).toBe(true);
-    expect(isWideSqlChar("Ａ")).toBe(true);
-    expect(isWideSqlChar("A")).toBe(false);
-  });
-});
-
-describe("visualSqlColumnsWithInlineHints", () => {
-  it("adds estimated columns for insert-value hints on the line", () => {
-    const text = "VALUES (12, 'a')";
-    const lineFrom = 0;
-    const lineTo = text.length;
-    const withoutHints = visualSqlColumns(text);
-    const withHints = visualSqlColumnsWithInlineHints(text, lineFrom, lineTo, [
-      { from: 8, column: "id" },
-      { from: 12, column: "name" },
-    ]);
-    expect(withHints).toBe(withoutHints + estimateInlineHintVisualColumns("id") + estimateInlineHintVisualColumns("name"));
+  it("does not extend the frame across a comment before a later semicolon", () => {
+    const sql = "SELECT 1\n-- comment\n;";
+    const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
+    expect(currentStatementFrameRangeTo(frameDocument(sql), range)).toBe(range.to);
   });
 
-  it("ignores hints that belong to other lines", () => {
-    const text = "VALUES (1)";
-    expect(visualSqlColumnsWithInlineHints(text, 0, text.length, [{ from: 100, column: "id" }])).toBe(visualSqlColumns(text));
+  it("does not extend the frame across a blank line before a later semicolon", () => {
+    const sql = "SELECT 1\n\n;";
+    const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
+    expect(currentStatementFrameRangeTo(frameDocument(sql), range)).toBe(range.to);
   });
 
-  it("dedupes hints that share the same document offset", () => {
-    const text = "VALUES (1)";
-    const once = visualSqlColumnsWithInlineHints(text, 0, text.length, [{ from: 8, column: "id" }]);
-    const twice = visualSqlColumnsWithInlineHints(text, 0, text.length, [
-      { from: 8, column: "id" },
-      { from: 8, column: "id" },
-    ]);
-    expect(twice).toBe(once);
+  it("does not extend the frame when the next non-whitespace character is not a semicolon", () => {
+    const sql = "SELECT 1\n\nSELECT 2";
+    const range: SqlTextRange = { from: 0, to: "SELECT 1".length, sql: "SELECT 1" };
+    expect(currentStatementFrameRangeTo(frameDocument(sql), range)).toBe(range.to);
   });
 });

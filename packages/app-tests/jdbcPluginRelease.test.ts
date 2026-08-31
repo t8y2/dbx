@@ -15,23 +15,17 @@ function importScript(path: string): Promise<Record<string, unknown>> {
 test("allows JDBC plugin runtime changes without a manual version bump before release", () => {
   assert.deepEqual(
     evaluateJdbcPluginVersionChange({
-      changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java"],
-      basePomVersion: "0.1.1",
-      baseManifestVersion: "0.1.1",
-      headPomVersion: "0.1.1",
+      headGradleVersion: "0.1.1",
       headManifestVersion: "0.1.1",
     }),
     [],
   );
 });
 
-test("allows JDBC plugin runtime changes when pom and manifest versions are bumped together", () => {
+test("allows JDBC plugin runtime changes when Gradle and manifest versions are bumped together", () => {
   assert.deepEqual(
     evaluateJdbcPluginVersionChange({
-      changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java"],
-      basePomVersion: "0.1.1",
-      baseManifestVersion: "0.1.1",
-      headPomVersion: "0.1.2",
+      headGradleVersion: "0.1.2",
       headManifestVersion: "0.1.2",
     }),
     [],
@@ -41,47 +35,41 @@ test("allows JDBC plugin runtime changes when pom and manifest versions are bump
 test("does not require a JDBC plugin version bump for docs or release packaging changes", () => {
   assert.deepEqual(
     evaluateJdbcPluginVersionChange({
-      changedFiles: ["plugins/jdbc/README.md", "plugins/jdbc/package.sh"],
-      basePomVersion: "0.1.1",
-      baseManifestVersion: "0.1.1",
-      headPomVersion: "0.1.1",
+      headGradleVersion: "0.1.1",
       headManifestVersion: "0.1.1",
     }),
     [],
   );
 });
 
-test("requires JDBC plugin pom and manifest versions to match", () => {
+test("requires JDBC plugin Gradle and manifest versions to match", () => {
   assert.deepEqual(
     evaluateJdbcPluginVersionChange({
-      changedFiles: ["plugins/jdbc/manifest.json"],
-      basePomVersion: "0.1.1",
-      baseManifestVersion: "0.1.1",
-      headPomVersion: "0.1.2",
+      headGradleVersion: "0.1.2",
       headManifestVersion: "0.1.1",
     }),
-    ["JDBC plugin version mismatch: pom.xml is 0.1.2 but manifest.json is 0.1.1."],
+    ["JDBC plugin version mismatch: build.gradle is 0.1.2 but manifest.json is 0.1.1."],
   );
 });
 
 test("auto bumps JDBC plugin patch version when runtime files changed for release", () => {
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java"],
-    pomXml: "<project><version>0.1.9</version></project>",
+    buildGradle: "version = '0.1.9'\n",
     manifestJson: '{ "version": "0.1.9" }',
   });
 
   assert.equal(result.changed, true);
   assert.equal(result.oldVersion, "0.1.9");
   assert.equal(result.newVersion, "0.1.10");
-  assert.match(result.pomXml, /<version>0\.1\.10<\/version>/);
+  assert.match(result.buildGradle, /version = '0\.1\.10'/);
   assert.match(result.manifestJson, /"version": "0\.1\.10"/);
 });
 
 test("does not auto bump JDBC plugin again when release range already includes a version bump", () => {
   const result = evaluateJdbcPluginReleaseBump({
-    changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java", "plugins/jdbc/pom.xml", "plugins/jdbc/manifest.json"],
-    pomXml: "<project><version>0.1.10</version></project>",
+    changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java", "plugins/jdbc/build.gradle", "plugins/jdbc/manifest.json"],
+    buildGradle: "version = '0.1.10'\n",
     manifestJson: '{ "version": "0.1.10" }',
   });
 
@@ -93,7 +81,7 @@ test("does not auto bump JDBC plugin again when release range already includes a
 test("does not auto bump JDBC plugin version for release packaging-only changes", () => {
   const result = evaluateJdbcPluginReleaseBump({
     changedFiles: ["plugins/jdbc/README.md", "plugins/jdbc/package.sh"],
-    pomXml: "<project><version>0.1.9</version></project>",
+    buildGradle: "version = '0.1.9'\n",
     manifestJson: '{ "version": "0.1.9" }',
   });
 
@@ -107,7 +95,7 @@ test("auto bump refuses mismatched JDBC plugin source versions", () => {
     () =>
       evaluateJdbcPluginReleaseBump({
         changedFiles: ["plugins/jdbc/src/main/java/app/dbx/jdbc/DbxJdbcPlugin.java"],
-        pomXml: "<project><version>0.1.9</version></project>",
+        buildGradle: "version = '0.1.9'\n",
         manifestJson: '{ "version": "0.1.8" }',
       }),
     /JDBC plugin version mismatch/,

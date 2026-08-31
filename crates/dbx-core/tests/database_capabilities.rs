@@ -29,6 +29,8 @@ struct DriverManifestEntry {
     #[serde(default)]
     skip_tcp_probe: bool,
     #[serde(default)]
+    specialized_surface: bool,
+    #[serde(default)]
     driver_profiles: Vec<DriverProfileEntry>,
 }
 
@@ -97,6 +99,8 @@ fn driver_manifest() -> DriverManifest {
 fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Trino, None), Some("trino"));
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
     assert_eq!(agent_key(&DatabaseType::Iotdb, None), Some("iotdb"));
     assert_eq!(agent_key(&DatabaseType::Yashandb, None), Some("yashandb"));
@@ -114,6 +118,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::InfluxDb, None), Some("influxdb"));
     assert_eq!(agent_key(&DatabaseType::Uxdb, None), Some("uxdb"));
     assert_eq!(agent_key(&DatabaseType::ZooKeeper, None), Some("zookeeper"));
+    assert_eq!(agent_key(&DatabaseType::Spanner, None), Some("spanner"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-legacy")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::Oracle, Some("oracle-10g")), Some("oracle"));
     assert_eq!(agent_key(&DatabaseType::SqlServer, Some("sqlserver-legacy")), Some("sqlserver-legacy"));
@@ -139,6 +144,8 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Oracle));
     assert!(is_agent_type(&DatabaseType::Trino));
     assert!(is_agent_type(&DatabaseType::Hive));
+    assert!(is_agent_type(&DatabaseType::Kyuubi));
+    assert!(is_agent_type(&DatabaseType::Impala));
     assert!(is_agent_type(&DatabaseType::Tdengine));
     assert!(is_agent_type(&DatabaseType::Iotdb));
     assert!(is_agent_type(&DatabaseType::Yashandb));
@@ -154,6 +161,7 @@ fn classifies_agent_database_types() {
     assert!(is_agent_type(&DatabaseType::Databend));
     assert!(is_agent_type(&DatabaseType::InfluxDb));
     assert!(is_agent_type(&DatabaseType::ZooKeeper));
+    assert!(is_agent_type(&DatabaseType::Spanner));
     assert!(!is_agent_type(&DatabaseType::Mysql));
     assert!(!is_agent_type(&DatabaseType::Jdbc));
     assert!(!is_agent_type(&DatabaseType::Gaussdb));
@@ -174,7 +182,10 @@ fn identifies_single_connection_pool_types() {
     assert!(is_single_connection_pool(&DatabaseType::Firebird));
     assert!(is_single_connection_pool(&DatabaseType::OceanbaseOracle));
     assert!(is_single_connection_pool(&DatabaseType::Jdbc));
+    assert!(is_single_connection_pool(&DatabaseType::VictoriaMetrics));
     assert!(!is_single_connection_pool(&DatabaseType::Trino));
+    // Spanner is HikariCP-pooled in the agent; a single connection would be a regression.
+    assert!(!is_single_connection_pool(&DatabaseType::Spanner));
     assert!(!is_single_connection_pool(&DatabaseType::Postgres));
     assert!(!is_single_connection_pool(&DatabaseType::Kwdb));
 }
@@ -207,8 +218,11 @@ fn skips_tcp_probe_for_local_file_plugin_and_agent_types() {
     assert!(skips_tcp_probe(&DatabaseType::Gbase));
     assert!(skips_tcp_probe(&DatabaseType::Databend));
     assert!(skips_tcp_probe(&DatabaseType::InfluxDb));
+    assert!(skips_tcp_probe(&DatabaseType::VictoriaMetrics));
     assert!(skips_tcp_probe(&DatabaseType::MessageQueue));
     assert!(skips_tcp_probe(&DatabaseType::ZooKeeper));
+    // Real Cloud Spanner connections have no host to probe.
+    assert!(skips_tcp_probe(&DatabaseType::Spanner));
     assert!(!skips_tcp_probe(&DatabaseType::Postgres));
     assert!(!skips_tcp_probe(&DatabaseType::Mysql));
     assert!(!skips_tcp_probe(&DatabaseType::Gaussdb));
@@ -223,18 +237,14 @@ fn driver_manifest_matches_core_database_capabilities() {
     let support_levels = ["connect", "browse", "understand", "operate"];
 
     for driver in &manifest.drivers {
-        // MQ is a message queue, not a database — skip database capability checks
-        if driver.db_type == DatabaseType::MessageQueue {
-            continue;
-        }
         assert!(
             support_levels.contains(&driver.support_level.as_str()),
             "invalid support level for {:?}",
             driver.db_type
         );
         assert!(
-            driver.capabilities.any_enabled(),
-            "database {:?} should declare at least one product capability",
+            driver.capabilities.any_enabled() || driver.specialized_surface,
+            "database {:?} should declare a product capability or a specialized surface",
             driver.db_type
         );
         assert_eq!(
@@ -328,6 +338,15 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(zookeeper.capabilities.driver_management);
     assert!(!zookeeper.capabilities.metadata_browse);
 
+    let victoriametrics = find_driver(DatabaseType::VictoriaMetrics);
+    assert_eq!(victoriametrics.runtime_mode, "native");
+    assert_eq!(victoriametrics.support_level, "browse");
+    assert!(victoriametrics.capabilities.query_execution);
+    assert!(victoriametrics.capabilities.metadata_browse);
+    assert!(victoriametrics.capabilities.object_browser);
+    assert!(!victoriametrics.capabilities.table_data_edit);
+    assert!(!victoriametrics.capabilities.sql_explain);
+
     let uxdb = find_driver(DatabaseType::Uxdb);
     assert_eq!(uxdb.label, "优炫 UXDB");
     assert_eq!(uxdb.runtime_mode, "agent");
@@ -339,8 +358,70 @@ fn driver_manifest_declares_expected_product_capabilities() {
     assert!(!uxdb.capabilities.data_transfer);
     assert!(!uxdb.capabilities.user_admin);
 
+    let spanner = find_driver(DatabaseType::Spanner);
+    assert_eq!(spanner.label, "Google Cloud Spanner");
+    assert_eq!(spanner.runtime_mode, "agent");
+    assert_eq!(spanner.agent_key.as_deref(), Some("spanner"));
+    assert_eq!(spanner.support_level, "operate");
+    assert!(spanner.capabilities.query_execution);
+    assert!(spanner.capabilities.metadata_browse);
+    assert!(spanner.capabilities.object_browser);
+    assert!(spanner.capabilities.schema_search);
+    assert!(spanner.capabilities.sql_file_execution);
+    assert!(spanner.capabilities.driver_management);
+    // Every table in Spanner has a primary key, so grid edits can locate rows reliably.
+    assert!(spanner.capabilities.table_data_edit);
+    // Structure edits need per-dialect DDL descriptors; database creation needs the
+    // Admin API (`CreateDatabase` gRPC), which the JDBC driver cannot reach.
+    assert!(!spanner.capabilities.table_structure_edit);
+    assert!(!spanner.capabilities.database_create);
+    assert!(!spanner.capabilities.table_import);
+    assert!(!spanner.capabilities.data_transfer);
+    assert!(!spanner.capabilities.object_source);
+    assert!(!spanner.capabilities.diagram);
+    assert!(!spanner.capabilities.sql_explain);
+    assert!(!spanner.capabilities.user_admin);
+
     let starrocks = find_driver(DatabaseType::StarRocks);
     assert!(starrocks.capabilities.user_admin);
+
+    let impala = find_driver(DatabaseType::Impala);
+    assert_eq!(impala.label, "Apache Impala");
+    assert_eq!(impala.runtime_mode, "agent");
+    assert_eq!(impala.agent_key.as_deref(), Some("hive"));
+    assert_eq!(impala.support_level, "operate");
+    assert!(impala.capabilities.query_execution);
+    assert!(impala.capabilities.metadata_browse);
+    assert!(impala.capabilities.object_browser);
+    assert!(impala.capabilities.object_source);
+    assert!(impala.capabilities.schema_search);
+    assert!(impala.capabilities.sql_explain);
+    assert!(impala.capabilities.data_transfer);
+    assert!(impala.capabilities.sql_file_execution);
+    assert!(!impala.capabilities.table_data_edit);
+    assert!(!impala.capabilities.table_structure_edit);
+    assert!(!impala.capabilities.table_import);
+    assert!(!impala.capabilities.diagram);
+    assert!(!impala.capabilities.user_admin);
+
+    let kyuubi = find_driver(DatabaseType::Kyuubi);
+    assert_eq!(kyuubi.label, "Apache Kyuubi");
+    assert_eq!(kyuubi.runtime_mode, "agent");
+    assert_eq!(kyuubi.agent_key.as_deref(), Some("hive"));
+    assert_eq!(kyuubi.support_level, "operate");
+    assert!(kyuubi.capabilities.query_execution);
+    assert!(kyuubi.capabilities.metadata_browse);
+    assert!(kyuubi.capabilities.object_browser);
+    assert!(kyuubi.capabilities.object_source);
+    assert!(kyuubi.capabilities.schema_search);
+    assert!(kyuubi.capabilities.sql_explain);
+    assert!(kyuubi.capabilities.data_transfer);
+    assert!(kyuubi.capabilities.sql_file_execution);
+    assert!(!kyuubi.capabilities.table_data_edit);
+    assert!(!kyuubi.capabilities.table_structure_edit);
+    assert!(!kyuubi.capabilities.table_import);
+    assert!(!kyuubi.capabilities.diagram);
+    assert!(!kyuubi.capabilities.user_admin);
 }
 
 #[test]
@@ -354,4 +435,17 @@ fn kingbase_declares_data_transfer_support() {
 
     assert!(kingbase.capabilities.table_import);
     assert!(kingbase.capabilities.data_transfer);
+}
+
+#[test]
+fn goldendb_declares_data_transfer_support() {
+    let manifest = driver_manifest();
+    let goldendb = manifest
+        .drivers
+        .iter()
+        .find(|driver| driver.db_type == DatabaseType::Goldendb)
+        .expect("GoldenDB manifest entry");
+
+    assert!(goldendb.capabilities.table_import);
+    assert!(goldendb.capabilities.data_transfer);
 }

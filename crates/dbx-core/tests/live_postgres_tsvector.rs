@@ -70,6 +70,7 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
     };
     let copy_insert = build_data_grid_copy_insert_statement(DataGridCopyInsertStatementOptions {
         database_type: Some(DatabaseType::Postgres),
+        identifier_quote: None,
         table_meta: Some(table_meta),
         columns: result.columns.clone(),
         column_types: None,
@@ -85,12 +86,15 @@ async fn postgres_tsvector_generated_columns_are_readable_and_omitted_from_inser
 
     let export_insert = build_export_insert_statements(BuildExportInsertStatementsOptions {
         database_type: Some(DatabaseType::Postgres),
+        identifier_quote: None,
         schema: Some(schema.clone()),
         table_name: Some("articles".to_string()),
         qualified_table_name: None,
         columns: result.columns.clone(),
         column_types: result.column_types.iter().map(|value| Some(value.clone())).collect(),
         column_extras: Vec::new(),
+        spatial_columns: Vec::new(),
+        spatial_values: Vec::new(),
         rows: result.rows.clone(),
         batch_size: Some(10),
     })

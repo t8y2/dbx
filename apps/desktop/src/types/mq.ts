@@ -156,6 +156,30 @@ export interface TopicInfo {
   messageType?: RocketMqTopicMessageType | string;
   /** RabbitMQ: owning virtual host, present when listing across all vhosts. */
   namespace?: string;
+  /** RabbitMQ total queue messages, including ready and unacknowledged messages. */
+  messageCount?: number;
+  /** RabbitMQ messages ready for delivery. */
+  messagesReady?: number;
+  /** RabbitMQ messages delivered but not yet acknowledged. */
+  messagesUnacked?: number;
+  /** RabbitMQ queue: auto-delete flag. */
+  autoDelete?: boolean;
+  /** RabbitMQ queue: exclusive flag. */
+  exclusive?: boolean;
+  /** RabbitMQ queue: state (running / idle / flow / blocked ...). */
+  state?: string;
+  /** RabbitMQ queue: type (classic / quorum / stream), from the management API `type` field or x-queue-type. */
+  queueType?: string;
+  /** RabbitMQ queue: x-arguments preserving the original JSON value types. */
+  arguments?: Record<string, unknown>;
+  /** RabbitMQ queue: consumer count. */
+  consumerCount?: number;
+  /** RabbitMQ queue: publish rate (msg/s) when the management API sampled message_stats. */
+  publishRate?: number;
+  /** RabbitMQ queue: deliver/get rate (msg/s). */
+  deliverRate?: number;
+  /** RabbitMQ queue: ack rate (msg/s). */
+  ackRate?: number;
 }
 
 export interface ListTopicsOpts {
@@ -173,6 +197,8 @@ export interface TopicStats {
   msgOutCounter: number;
   subscriptionCount: number;
   producerCount: number;
+  /** RabbitMQ: true when the management API exposed no message_stats sample, so msgRateIn/Out must be rendered as "no data" rather than a real rate of 0. */
+  ratesUnavailable?: boolean;
   raw?: unknown;
 }
 
@@ -192,6 +218,32 @@ export interface SubscriptionInfo {
   consumerGroupType?: string;
   /** RocketMQ consumer group message model: CLUSTERING / BROADCASTING. */
   messageModel?: string;
+  /** When true, backlog probe failed — do not render msgBacklog as healthy zero. */
+  backlogUnavailable?: boolean;
+}
+
+export interface KafkaConsumerGroupPartitionLag {
+  topic: string;
+  partition: number;
+  currentOffset?: number;
+  endOffset?: number;
+  lag?: number;
+}
+
+export interface KafkaConsumerGroupSummary {
+  groupId: string;
+  state: string;
+  simpleGroup: boolean;
+  memberCount?: number;
+  topics: string[];
+  totalLag?: number;
+  lagAvailable: boolean;
+  partitions: KafkaConsumerGroupPartitionLag[];
+  error?: string;
+}
+
+export interface KafkaConsumerGroupSnapshot {
+  groups: KafkaConsumerGroupSummary[];
 }
 
 export interface RocketMqConsumerGroupConfig {
@@ -224,13 +276,29 @@ export interface ProducerInfo {
   clientVersion: string;
 }
 
-export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "messageId"; ledgerId: number; entryId: number };
+export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "partitionOffset"; partition: number; offset: number } | { kind: "messageId"; ledgerId: number; entryId: number };
 
 export type SkipCount = { kind: "all" } | { kind: "count"; count: number };
+
+/** Per-queue consume progress (RocketMQ Dashboard consume-detail / Kafka lag rows). */
+export interface PartitionBacklog {
+  partition: number;
+  /** Consumer committed offset (`consumerOffset`). */
+  currentOffset: number;
+  /** Broker max offset (`brokerOffset`). */
+  endOffset: number;
+  lag: number;
+  brokerName?: string;
+  /** Last consume message store timestamp (ms). `0` means unavailable. */
+  lastTimestamp?: number;
+  consumerClient?: string;
+}
 
 export interface BacklogStats {
   msgBacklog: number;
   backlogSize: number;
+  /** Optional queue-level progress; omitted or empty when adapter only exposes totals. */
+  partitions?: PartitionBacklog[];
 }
 
 export interface ClusterInfo {
@@ -263,7 +331,15 @@ export interface PeekedMessage {
   payloadText?: string;
 }
 
+export interface PeekMessagesResult {
+  messages: PeekedMessage[];
+  /** True when the broker could not finish the requested snapshot before its limit. */
+  incomplete: boolean;
+}
+
 export interface PeekMessagesOptions {
+  /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
+  startPosition?: "latest" | "earliest" | "offset";
   partition?: number;
   offset?: number;
 }

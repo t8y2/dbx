@@ -1,0 +1,727 @@
+schemaVersion: 1
+profiles:
+  - id: mysql
+    dbType: mysql
+    label: MySQL
+    icon: mysql
+    port: 3306
+    user: root
+    urlParams: ""
+    category: sql
+  - id: postgres
+    dbType: postgres
+    label: PostgreSQL
+    icon: postgres
+    port: 5432
+    user: postgres
+    urlParams: ""
+    category: sql
+  - id: cloudberry
+    dbType: postgres
+    label: Apache Cloudberry
+    icon: cloudberry
+    port: 5432
+    user: postgres
+    urlParams: ""
+    category: analytics
+  - id: opentenbase
+    dbType: postgres
+    label: OpenTenBase
+    icon: opentenbase
+    port: 11000
+    user: opentenbase
+    urlParams: ""
+    category: domestic
+  - id: redis
+    dbType: redis
+    label: Redis
+    icon: redis
+    port: 6379
+    user: ""
+    category: document
+  - id: sqlite
+    dbType: sqlite
+    label: SQLite
+    icon: sqlite
+    port: 0
+    user: ""
+    category: lightweight
+  - id: rqlite
+    dbType: rqlite
+    label: RQLite
+    icon: rqlite
+    port: 4001
+    user: ""
+    category: lightweight
+  - id: turso
+    dbType: turso
+    label: Turso
+    icon: turso
+    port: 443
+    user: ""
+    category: lightweight
+  - id: cloudflare-d1
+    dbType: cloudflare-d1
+    label: Cloudflare D1
+    icon: cloudflare-d1
+    port: 443
+    user: ""
+    category: lightweight
+  - id: duckdb
+    dbType: duckdb
+    label: DuckDB
+    icon: duckdb
+    port: 0
+    user: ""
+    category: lightweight
+  - id: access
+    dbType: access
+    label: Microsoft Access
+    icon: access
+    port: 0
+    user: ""
+    category: lightweight
+  - id: mongodb
+    dbType: mongodb
+    label: MongoDB
+    icon: mongodb
+    port: 27017
+    user: ""
+    category: document
+  - id: mongodb-legacy
+    dbType: mongodb
+    label: MongoDB (Legacy)
+    icon: mongodb
+    port: 27017
+    user: ""
+  - id: dynamodb
+    dbType: dynamodb
+    label: Amazon DynamoDB
+    icon: dynamodb
+    port: 443
+    user: ""
+    host: dynamodb.us-east-1.amazonaws.com
+    category: document
+  - id: clickhouse
+    dbType: clickhouse
+    label: ClickHouse
+    icon: clickhouse
+    port: 8123
+    user: default
+    category: analytics
+  - id: sqlserver
+    dbType: sqlserver
+    label: SQL Server
+    icon: sqlserver
+    port: 1433
+    user: sa
+    category: sql
+  - id: oracle
+    dbType: oracle
+    label: Oracle
+    icon: oracle
+    port: 1521
+    user: system
+    category: sql
+  - id: elasticsearch
+    dbType: elasticsearch
+    label: Elasticsearch
+    icon: elasticsearch
+    port: 9200
+    user: ""
+    category: document
+  - id: easysearch
+    dbType: easysearch
+    label: Easysearch
+    icon: easysearch
+    port: 9200
+    user: ""
+    category: document
+  - id: meilisearch
+    dbType: meilisearch
+    label: Meilisearch
+    icon: meilisearch
+    port: 7700
+    user: ""
+    category: document
+  - id: hbase
+    dbType: hbase
+    label: Apache HBase
+    icon: hbase
+    port: 8080
+    user: ""
+    category: document
+  - id: qdrant
+    dbType: qdrant
+    label: Qdrant
+    icon: qdrant
+    port: 6333
+    user: ""
+    category: graph_ai
+  - id: milvus
+    dbType: milvus
+    label: Milvus
+    icon: milvus
+    port: 19530
+    user: root
+    category: graph_ai
+  - id: weaviate
+    dbType: weaviate
+    label: Weaviate
+    icon: weaviate
+    port: 8080
+    user: ""
+    category: graph_ai
+  - id: chromadb
+    dbType: chromadb
+    label: ChromaDB
+    icon: chromadb
+    port: 8000
+    user: ""
+    category: graph_ai
+  - id: mariadb
+    dbType: mysql
+    label: MariaDB
+    icon: mariadb
+    port: 3306
+    user: root
+    category: sql
+  - id: tidb
+    dbType: mysql
+    label: TiDB
+    icon: tidb
+    port: 4000
+    user: root
+    category: domestic
+  - id: oceanbase
+    dbType: mysql
+    label: OceanBase
+    icon: oceanbase
+    port: 2883
+    user: root
+    category: domestic
+  - id: oceanbase-oracle
+    dbType: oceanbase-oracle
+    label: OceanBase Oracle Mode
+    icon: oceanbase
+    port: 2883
+    user: SYS
+  - id: goldendb
+    dbType: goldendb
+    label: 金篆 GoldenDB
+    icon: goldendb
+    port: 3306
+    user: root
+    category: domestic
+  - id: databend
+    dbType: databend
+    label: Databend
+    icon: databend
+    port: 8000
+    user: databend
+    category: analytics
+  - id: tdsql
+    dbType: mysql
+    label: TDSQL
+    icon: tdsql
+    port: 3306
+    user: root
+    category: domestic
+  - id: polardb
+    dbType: mysql
+    label: PolarDB
+    icon: polardb
+    port: 3306
+    user: root
+    category: domestic
+  - id: greatsql
+    dbType: mysql
+    label: GreatSQL
+    icon: greatsql
+    port: 3306
+    user: root
+    category: domestic
+  - id: databricks
+    dbType: databricks
+    label: Databricks SQL
+    icon: databricks
+    port: 443
+    user: token
+    category: analytics
+  - id: saphana
+    dbType: saphana
+    label: SAP HANA
+    icon: saphana
+    port: 30015
+    user: SYSTEM
+    category: analytics
+  - id: teradata
+    dbType: teradata
+    label: Teradata
+    icon: teradata
+    port: 1025
+    user: ""
+    category: analytics
+  - id: vertica
+    dbType: vertica
+    label: Vertica
+    icon: vertica
+    port: 5433
+    user: dbadmin
+    category: analytics
+  - id: firebird
+    dbType: firebird
+    label: Firebird
+    icon: firebird
+    port: 3050
+    user: SYSDBA
+    category: sql
+  - id: exasol
+    dbType: exasol
+    label: Exasol
+    icon: exasol
+    port: 8563
+    user: sys
+    category: analytics
+  - id: gbase
+    dbType: gbase
+    label: 南大通用 GBase 8a
+    icon: gbase
+    port: 5258
+    user: gbasedbt
+    category: domestic
+    pickerLabel: 南大通用 GBase
+  - id: gbase8a
+    dbType: gbase
+    label: 南大通用 GBase 8a
+    icon: gbase
+    port: 5258
+    user: gbasedbt
+  - id: gbase8s
+    dbType: gbase
+    label: 南大通用 GBase 8s
+    icon: gbase
+    port: 9088
+    user: gbasedbt
+  - id: opengauss
+    dbType: opengauss
+    label: openGauss
+    icon: opengauss
+    port: 5432
+    user: gaussdb
+    category: domestic
+  - id: gaussdb
+    dbType: gaussdb
+    label: GaussDB
+    icon: gaussdb
+    port: 5432
+    user: gaussdb
+    category: domestic
+  - id: kwdb
+    dbType: kwdb
+    label: KWDB
+    icon: kwdb
+    port: 26257
+    user: root
+    category: domestic
+  - id: questdb
+    dbType: questdb
+    label: QuestDB
+    icon: questdb
+    port: 8812
+    user: questdb
+    category: timeseries
+  - id: kingbase
+    dbType: kingbase
+    label: 金仓KingbaseES
+    icon: kingbase
+    port: 54321
+    user: system
+    category: domestic
+  - id: highgo
+    dbType: highgo
+    label: 瀚高 HighGo
+    icon: highgo
+    port: 5866
+    user: highgo
+    category: domestic
+  - id: uxdb
+    dbType: uxdb
+    label: 优炫 UXDB
+    icon: uxdb
+    port: 52025
+    user: uxdb
+    category: domestic
+  - id: yashandb
+    dbType: yashandb
+    label: 崖山 YashanDB
+    icon: yashandb
+    port: 1688
+    user: sys
+    category: domestic
+  - id: vastbase
+    dbType: vastbase
+    label: 海量 Vastbase
+    icon: vastbase
+    port: 5432
+    user: vastbase
+    category: domestic
+  - id: doris
+    dbType: mysql
+    label: Doris
+    icon: doris
+    port: 9030
+    user: root
+    urlParams: ""
+    category: analytics
+  - id: selectdb
+    dbType: mysql
+    label: SelectDB
+    icon: selectdb
+    port: 9030
+    user: root
+    urlParams: ""
+    category: analytics
+  - id: starrocks
+    dbType: mysql
+    label: StarRocks
+    icon: starrocks
+    port: 9030
+    user: root
+    urlParams: ""
+    category: analytics
+  - id: manticoresearch
+    dbType: manticoresearch
+    label: Manticore Search
+    icon: manticoresearch
+    port: 9306
+    user: root
+    urlParams: ""
+    category: document
+  - id: redshift
+    dbType: redshift
+    label: Redshift
+    icon: redshift
+    port: 5439
+    user: awsuser
+    category: analytics
+  - id: cockroachdb
+    dbType: postgres
+    label: CockroachDB
+    icon: cockroachdb
+    port: 26257
+    user: root
+    category: sql
+  - id: dm
+    dbType: dameng
+    label: 达梦 Dameng
+    icon: dm
+    port: 5236
+    user: SYSDBA
+    category: domestic
+  - id: h2
+    dbType: h2
+    label: H2
+    icon: h2
+    port: 9092
+    user: sa
+    category: lightweight
+  - id: h2-legacy
+    dbType: h2
+    label: H2 2.1 Legacy
+    icon: h2
+    port: 9092
+    user: sa
+  - id: snowflake
+    dbType: snowflake
+    label: Snowflake
+    icon: snowflake
+    port: 443
+    user: ""
+    category: analytics
+  - id: trino
+    dbType: trino
+    label: Trino
+    icon: trino
+    port: 8080
+    user: ""
+    category: analytics
+  - id: prestosql
+    dbType: prestosql
+    label: PrestoSQL
+    icon: presto
+    pickerIcon: prestosql
+    port: 8080
+    user: ""
+    category: analytics
+  - id: hive
+    dbType: hive
+    label: Apache Hive
+    icon: hive
+    port: 10000
+    user: ""
+    category: analytics
+    pickerLabel: Hive
+  - id: kyuubi
+    dbType: kyuubi
+    label: Apache Kyuubi
+    icon: kyuubi
+    port: 10009
+    user: ""
+    urlParams: auth=NONE
+    category: analytics
+  - id: impala
+    dbType: impala
+    label: Apache Impala
+    icon: impala
+    port: 21050
+    user: ""
+    urlParams: auth=noSasl
+    category: analytics
+  - id: spark
+    dbType: spark
+    label: Apache Spark
+    icon: spark
+    port: 10015
+    user: ""
+    category: analytics
+  - id: db2
+    dbType: db2
+    label: IBM DB2
+    icon: db2
+    port: 50000
+    user: db2inst1
+    category: sql
+    pickerLabel: DB2
+  - id: informix
+    dbType: informix
+    label: Informix
+    icon: informix
+    port: 9088
+    user: informix
+    category: sql
+  - id: dremio
+    dbType: jdbc
+    label: Dremio
+    icon: dremio
+    port: 31010
+    user: ""
+    category: analytics
+  - id: jdbcx
+    dbType: jdbc
+    label: JDBCX
+    icon: jdbcx
+    port: 0
+    user: ""
+    category: sql
+  - id: neo4j
+    dbType: neo4j
+    label: Neo4j
+    icon: neo4j
+    port: 7687
+    user: neo4j
+    category: graph_ai
+  - id: cassandra
+    dbType: cassandra
+    label: Cassandra
+    icon: cassandra
+    port: 9042
+    user: cassandra
+    category: document
+  - id: bigquery
+    dbType: bigquery
+    label: BigQuery
+    icon: bigquery
+    port: 443
+    user: ""
+    host: https://www.googleapis.com/bigquery/v2
+    category: analytics
+  - id: spanner
+    dbType: spanner
+    label: Cloud Spanner
+    icon: spanner
+    port: 443
+    user: ""
+    category: sql
+  - id: kylin
+    dbType: kylin
+    label: Apache Kylin
+    icon: kylin
+    port: 7070
+    user: ADMIN
+    category: analytics
+    pickerLabel: Kylin
+  - id: ignite
+    dbType: ignite
+    label: Apache Ignite
+    icon: ignite
+    port: 10800
+    user: ""
+    category: analytics
+  - id: ignite3
+    dbType: ignite3
+    label: Apache Ignite 3
+    icon: ignite
+    port: 10800
+    user: ""
+    category: analytics
+  - id: sundb
+    dbType: sundb
+    label: 科蓝 SUNDB
+    icon: sundb
+    port: 22000
+    user: root
+    category: domestic
+  - id: oscar
+    dbType: oscar
+    label: 神通 OSCAR
+    icon: oscar
+    port: 2003
+    user: SYSDBA
+    category: domestic
+  - id: jdbc
+    dbType: jdbc
+    label: JDBC
+    icon: jdbc
+    port: 0
+    user: ""
+  - id: tdengine
+    dbType: tdengine
+    label: TDengine
+    icon: tdengine
+    port: 6041
+    user: root
+    category: timeseries
+  - id: xugu
+    dbType: xugu
+    label: 虚谷 XuguDB
+    icon: xugu
+    port: 5138
+    user: ""
+    category: domestic
+  - id: iotdb
+    dbType: iotdb
+    label: Apache IoTDB
+    icon: iotdb
+    port: 6667
+    user: root
+    category: timeseries
+  - id: etcd
+    dbType: etcd
+    label: etcd
+    icon: etcd
+    port: 2379
+    user: ""
+    category: registry_config
+  - id: zookeeper
+    dbType: zookeeper
+    label: Apache ZooKeeper
+    icon: zookeeper
+    port: 2181
+    user: ""
+    category: registry_config
+  - id: mq
+    dbType: mq
+    label: Apache Pulsar
+    icon: pulsar
+    pickerIcon: mq
+    port: 8080
+    user: ""
+    host: 127.0.0.1
+    category: mq
+  - id: kafka
+    dbType: mq
+    label: Apache Kafka
+    icon: kafka
+    port: 9092
+    user: ""
+    host: 127.0.0.1
+    category: mq
+  - id: rocketmq
+    dbType: mq
+    label: Apache RocketMQ
+    icon: rocketmq
+    port: 9876
+    user: ""
+    host: 127.0.0.1
+    category: mq
+  - id: rabbitmq
+    dbType: mq
+    label: RabbitMQ
+    icon: rabbitmq
+    port: 5672
+    user: ""
+    host: 127.0.0.1
+    category: mq
+  - id: nacos
+    dbType: nacos
+    label: Nacos
+    icon: nacos
+    port: 8848
+    user: nacos
+    host: 127.0.0.1
+    category: registry_config
+  - id: consul
+    dbType: consul
+    label: Consul
+    icon: consul
+    port: 8500
+    user: ""
+    host: 127.0.0.1
+    category: registry_config
+  - id: mqtt
+    dbType: mqtt
+    label: MQTT
+    icon: mqtt
+    port: 1883
+    user: ""
+    host: 127.0.0.1
+    category: mq
+  - id: iris
+    dbType: iris
+    label: IRIS
+    icon: iris
+    port: 1972
+    user: _SYSTEM
+    category: sql
+  - id: influxdb
+    dbType: influxdb
+    label: InfluxDB
+    icon: InfluxDB
+    pickerIcon: influxdb
+    port: 8086
+    user: ""
+    category: timeseries
+  - id: victoriametrics
+    dbType: victoriametrics
+    label: VictoriaMetrics
+    icon: victoriametrics
+    port: 8428
+    user: ""
+    category: timeseries
+  - id: custom_mysql
+    dbType: mysql
+    label: Custom
+    icon: mysql
+    port: 3306
+    user: root
+    urlParams: ""
+    category: sql
+    pickerLabel: Custom (MySQL)
+  - id: dolt
+    dbType: mysql
+    label: Dolt
+    icon: dolt
+    port: 3306
+    user: root
+    urlParams: ""
+    category: sql
+  - id: custom_postgres
+    dbType: postgres
+    label: Custom
+    icon: postgres
+    port: 5432
+    user: postgres
+    urlParams: ""
+    category: sql
+    pickerLabel: Custom (PostgreSQL)

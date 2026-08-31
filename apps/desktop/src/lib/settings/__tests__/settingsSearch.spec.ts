@@ -37,6 +37,47 @@ describe("settings search", () => {
     { id: "desktop", category: "about", titleKey: "hidden", visible: ({ isWeb }) => !isWeb },
   ];
 
+  it("indexes the query editor line-number preference", () => {
+    const definition = SETTINGS_SEARCH_DEFINITIONS.find((entry) => entry.id === "editor-line-numbers");
+    expect(definition).toEqual({
+      id: "editor-line-numbers",
+      category: "editor",
+      titleKey: "settings.showLineNumbers",
+      descriptionKey: "settings.showLineNumbersDescription",
+      targetId: "editor",
+    });
+
+    const entries = resolveSettingsSearchEntries(
+      [definition!],
+      { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor"]) },
+      (key) =>
+        ({
+          "settings.showLineNumbers": "Show line numbers",
+          "settings.showLineNumbersDescription": "Show line numbers in the SQL editor gutter",
+        })[key] ?? key,
+      categoryLabels,
+    );
+
+    expect(searchSettings(entries, "line number", "en").map((entry) => entry.id)).toEqual(["editor-line-numbers"]);
+  });
+
+  it("does not index connection or query timeout under editor settings", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-connect-timeout");
+    expect(SETTINGS_SEARCH_DEFINITIONS.map((definition) => definition.id)).not.toContain("editor-global-query-timeout");
+  });
+
+  it("indexes the multi-statement default view and its settings control", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "multi-statement-default-view",
+      category: "data",
+      titleKey: "settings.multiStatementDefaultView",
+      descriptionKey: "settings.multiStatementDefaultViewDescription",
+      targetId: "multi-statement-default-view",
+    });
+    expect(settingsDialogSource).toContain('data-settings-search-id="multi-statement-default-view"');
+    expect(settingsDialogSource).toContain('v-model="editMultiStatementDefaultView"');
+  });
+
   it("matches translated title, description, and category without changing declared order", () => {
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(entries, "TYPEFACE", "en").map((entry) => entry.id)).toEqual(["font"]);
@@ -48,6 +89,22 @@ describe("settings search", () => {
     const webEntries = resolveSettingsSearchEntries(definitions, { isWeb: true, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(webEntries, "  ", "en")).toEqual([]);
     expect(searchSettings(webEntries, "desktop", "en")).toEqual([]);
+  });
+
+  it("exposes WebDAV sync in Web settings without exposing snippet sync", () => {
+    const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["sync"]) }, translate, categoryLabels);
+
+    expect(webEntries.map((entry) => entry.id)).toEqual(["sync-webdav", "sync-webdav-endpoint", "sync-webdav-username", "sync-webdav-password", "sync-webdav-remote-path", "sync-webdav-auto-upload", "sync-secrets", "sync-secrets-passphrase"]);
+    expect(settingsDialogSource).toContain('{ value: "sync", label: t("settings.syncTab") }');
+    expect(settingsDialogSource).not.toContain('...(isWeb ? [] : [{ value: "sync"');
+    expect(settingsDialogSource).toContain('<TabsList v-if="!isWeb"');
+  });
+
+  it("defines the WebDAV Web-runtime notice in every supported locale", () => {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
+      const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
+      expect(source, locale).toContain("syncWebDavWebDescription:");
+    }
   });
 
   it("matches Chinese text as a Unicode substring", () => {
@@ -122,6 +179,45 @@ describe("settings search", () => {
     expect(searchSettings(entries, "hidden in the background", "en").map((entry) => entry.id)).toEqual(["appearance-tray"]);
   });
 
+  it("indexes the metadata cache memory limit under data settings", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "data-performance",
+        category: "data",
+        titleKey: "settings.performanceSection",
+        targetId: "data-performance",
+      }),
+    );
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual(
+      expect.objectContaining({
+        id: "data-metadata-cache",
+        category: "data",
+        titleKey: "settings.metadataCacheMemoryLimit",
+        targetId: "data-performance",
+      }),
+    );
+  });
+
+  it("renders the metadata cache memory limit in a performance section after export", () => {
+    const exportSectionStart = settingsDialogSource.indexOf('t("settings.exportSection")');
+    const performanceSectionStart = settingsDialogSource.indexOf('data-settings-search-id="data-performance"');
+    const tableStructureSectionStart = settingsDialogSource.indexOf('t("settings.tableStructureSection")');
+    const metadataCacheControl = settingsDialogSource.indexOf('id="metadata-cache-memory-limit"');
+
+    expect(exportSectionStart).toBeGreaterThan(-1);
+    expect(performanceSectionStart).toBeGreaterThan(exportSectionStart);
+    expect(tableStructureSectionStart).toBeGreaterThan(performanceSectionStart);
+    expect(metadataCacheControl).toBeGreaterThan(performanceSectionStart);
+    expect(metadataCacheControl).toBeLessThan(tableStructureSectionStart);
+  });
+
+  it("defines the performance section title in every supported locale", () => {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
+      const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
+      expect(source, locale).toContain("performanceSection:");
+    }
+  });
+
   it("activates result buttons through click for keyboard and assistive technology", () => {
     expect(settingsDialogSource).toMatch(/role="option"[\s\S]*?@mousedown\.prevent[\s\S]*?@click="void selectSettingsSearchResult\(result\)"/);
   });
@@ -131,14 +227,20 @@ describe("settings search", () => {
       { titleKey: "settings.savedSqlOpenTarget", category: "editor", targetId: "editor" },
       { titleKey: "settings.confirmDangerousSqlExecution", category: "editor", targetId: "editor" },
       { titleKey: "settings.continueOnErrorOnBatch", category: "editor", targetId: "editor" },
-      { titleKey: "settings.dataGridQuickEntry", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.dataGridQuickEntry", category: "data", targetId: "data" },
+      { titleKey: "settings.dataGridFilterView", category: "data", targetId: "data-grid-filter-view" },
+      { titleKey: "settings.colorizeDataGridCellTypes", category: "data", targetId: "data" },
       { titleKey: "transfer.dataTransfer", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.driverManager", category: "appearance", targetId: "appearance" },
       { titleKey: "toolbar.theme", category: "appearance", targetId: "appearance" },
       { titleKey: "settings.sidebarObjectInfoMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.insertSpaceAfterCompletion", category: "editor", targetId: "editor" },
+      { titleKey: "settings.completionTriggerMode", category: "editor", targetId: "editor" },
       { titleKey: "settings.autoAliasTables", category: "editor", targetId: "editor" },
-      { titleKey: "settings.clickTableNavigationTarget", category: "editor", targetId: "editor" },
+      { titleKey: "settings.clickTableNavigationTarget", category: "navigation", targetId: "navigation" },
+      { titleKey: "settings.prefillNewQueryWithSelect", category: "navigation", targetId: "navigation" },
+      { titleKey: "settings.generateSqlIncludeDatabaseName", category: "editor", targetId: "editor" },
+      { titleKey: "settings.formatSqlOnSqlFileSave", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterFunctionCase", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDataTypeCase", category: "formatter", targetId: "formatter" },
@@ -149,19 +251,21 @@ describe("settings search", () => {
       { titleKey: "settings.sqlFormatterLogicalOperatorNewline", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterExpressionWidth", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterLinesBetweenQueries", category: "formatter", targetId: "formatter" },
+      { titleKey: "settings.sqlFormatterPreserveEmptyLines", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterDenseOperators", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterNewlineBeforeSemicolon", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.sqlFormatterParamTypes", category: "formatter", targetId: "formatter" },
       { titleKey: "settings.routineSourceOpenMode", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.disconnectTabHandlingMode", category: "navigation", targetId: "navigation" },
-      { titleKey: "settings.compactColumnHeaderActions", category: "appearance", targetId: "appearance" },
-      { titleKey: "settings.infiniteScrollMaxRows", category: "appearance", targetId: "appearance" },
+      { titleKey: "settings.compactColumnHeaderActions", category: "data", targetId: "data" },
+      { titleKey: "settings.infiniteScroll", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeDisplayFormat", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeExportFormat", category: "data", targetId: "data" },
       { titleKey: "settings.globalDateTimeImportFormat", category: "data", targetId: "data" },
       { titleKey: "settings.exportRowLimitEnabled", category: "data", targetId: "data" },
       { titleKey: "settings.exportRowLimit", category: "data", targetId: "data" },
       { titleKey: "settings.queryExportKeysetOptimizationEnabled", category: "data", targetId: "data" },
+      { titleKey: "ai.defaultAiMode", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxAgentTurns", category: "ai", targetId: "ai" },
       { titleKey: "ai.maxRetriesGlobal", category: "ai", targetId: "ai" },
       { titleKey: "ai.globalInstructions", category: "ai", targetId: "ai" },

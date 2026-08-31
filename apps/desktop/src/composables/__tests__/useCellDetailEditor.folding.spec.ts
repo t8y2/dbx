@@ -10,6 +10,7 @@ const cellDetailEditorSource = readFileSync(new URL("../useCellDetailEditor.ts",
 describe("Redis JSON editor folding", () => {
   it("opts the Redis JSON editor into the shared folding controls", () => {
     expect(redisJsonEditorSource).toMatch(/language:\s*"json"[\s\S]*folding:\s*true/);
+    expect(redisJsonEditorSource).toMatch(/lineNumbers:\s*props\.lineNumbers/);
     expect(cellDetailEditorSource).toContain("...(options.folding ? [foldGutter()] : []),");
     expect(cellDetailEditorSource).toContain("...(options.folding ? foldKeymap : []),");
   });

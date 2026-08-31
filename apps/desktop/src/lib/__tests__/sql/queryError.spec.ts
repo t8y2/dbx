@@ -1,5 +1,43 @@
 import { describe, expect, it } from "vitest";
-import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
+import { isConnectionTimeoutErrorMessage, isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
+
+describe("isConnectionTimeoutErrorMessage", () => {
+  it("detects connection creation and handshake timeouts", () => {
+    expect(isConnectionTimeoutErrorMessage("PostgreSQL connection failed: Timeout occurred while creating a new object")).toBe(true);
+    expect(isConnectionTimeoutErrorMessage("MySQL connection failed: TLS handshake timed out after 10 seconds")).toBe(true);
+    expect(isConnectionTimeoutErrorMessage("The connection attempt timed out")).toBe(true);
+  });
+
+  it("detects structured connect-stage timeouts", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2001",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "connect" },
+      source: "jdbcAgent",
+      operationOutcome: "not_started" as const,
+    } as const;
+
+    expect(isConnectionTimeoutErrorMessage("Database operation timed out (stage: connect).", timeoutError)).toBe(true);
+  });
+
+  it("does not classify query, pool checkout, cancellation, or syntax errors as connection timeouts", () => {
+    expect(isConnectionTimeoutErrorMessage("Query timed out after 30 seconds")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage("PostgreSQL connection pool checkout timed out (5s)")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage("Cancel request timed out after 10s.")).toBe(false);
+    expect(isConnectionTimeoutErrorMessage('syntax error at or near "select"')).toBe(false);
+    expect(
+      isConnectionTimeoutErrorMessage("Database operation timed out (stage: execute).", {
+        version: 1,
+        code: "DBX-JDBC-2002",
+        messageKey: "backendErrors.jdbc.operationTimedOut",
+        messageParams: { stage: "execute" },
+        source: "jdbcAgent",
+        operationOutcome: "unknown",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("isQueryTimeoutErrorMessage", () => {
   it("detects DBX query timeout messages", () => {
@@ -24,6 +62,45 @@ describe("isQueryTimeoutErrorMessage", () => {
     expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (30s)")).toBe(true);
     expect(isQueryTimeoutErrorMessage("Agent RPC call timed out (120s)")).toBe(true);
     expect(isQueryTimeoutErrorMessage("Agent RPC error (-1): Agent RPC call timed out (120s)")).toBe(true);
+  });
+
+  it("classifies only execute and fetch Agent RPC stages as query timeouts", () => {
+    for (const stage of ["execute", "fetch"]) {
+      expect(isQueryTimeoutErrorMessage(`Agent RPC call timed out at ${stage}`)).toBe(true);
+    }
+
+    for (const stage of ["request", "checkout", "connect", "validate", "cancel", "close"]) {
+      expect(isQueryTimeoutErrorMessage(`Agent RPC call timed out at ${stage}`)).toBe(false);
+    }
+
+    expect(isConnectionTimeoutErrorMessage("Agent RPC call timed out at connect")).toBe(true);
+  });
+
+  it("detects structured query operation timeouts before localized text matching", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2002",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "execute" },
+      source: "jdbcAgent",
+      operationOutcome: "unknown" as const,
+    } as const;
+
+    expect(isQueryTimeoutErrorMessage("数据库操作超时（阶段：execute）。", timeoutError)).toBe(true);
+    expect(isQueryTimeoutErrorMessage("Database operation timed out (stage: fetch).", { ...timeoutError, messageParams: { stage: "fetch" } })).toBe(true);
+  });
+
+  it("does not offer query timeout settings for structured infrastructure timeouts", () => {
+    const timeoutError = {
+      version: 1,
+      code: "DBX-JDBC-2001",
+      messageKey: "backendErrors.jdbc.operationTimedOut",
+      messageParams: { stage: "connect" },
+      source: "jdbcAgent",
+      operationOutcome: "not_started" as const,
+    } as const;
+
+    expect(isQueryTimeoutErrorMessage("Database operation timed out (stage: connect).", timeoutError)).toBe(false);
   });
 
   it("does not classify unrelated errors as query timeouts", () => {

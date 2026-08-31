@@ -19,41 +19,7 @@ pub enum DialectKind {
 
 impl DialectKind {
     pub fn from_database_type(db_type: DatabaseType) -> Self {
-        match db_type {
-            DatabaseType::Mysql
-            | DatabaseType::Doris
-            | DatabaseType::StarRocks
-            | DatabaseType::Goldendb
-            | DatabaseType::Sundb
-            | DatabaseType::Databend
-            | DatabaseType::Gbase => DialectKind::Mysql,
-            DatabaseType::Postgres
-            | DatabaseType::Gaussdb
-            | DatabaseType::Kwdb
-            | DatabaseType::OpenGauss
-            | DatabaseType::Highgo
-            | DatabaseType::Vastbase
-            | DatabaseType::Kingbase
-            | DatabaseType::Firebird
-            | DatabaseType::Redshift
-            | DatabaseType::Vertica
-            | DatabaseType::Exasol => DialectKind::Postgres,
-            DatabaseType::Sqlite | DatabaseType::Rqlite | DatabaseType::Turso => DialectKind::Sqlite,
-            DatabaseType::DuckDb => DialectKind::DuckDb,
-            DatabaseType::SqlServer | DatabaseType::Access => DialectKind::SqlServer,
-            DatabaseType::Oracle
-            | DatabaseType::Dameng
-            | DatabaseType::OceanbaseOracle
-            | DatabaseType::Iris
-            | DatabaseType::Yashandb
-            | DatabaseType::Xugu => DialectKind::Oracle,
-            DatabaseType::H2 => DialectKind::H2,
-            DatabaseType::ClickHouse => DialectKind::ClickHouse,
-            DatabaseType::ManticoreSearch => DialectKind::ManticoreSearch,
-            DatabaseType::Informix => DialectKind::Informix,
-            DatabaseType::Questdb => DialectKind::Questdb,
-            _ => DialectKind::Unsupported,
-        }
+        crate::database_manifest::dialect_name(&db_type).and_then(Self::from_label).unwrap_or(DialectKind::Unsupported)
     }
 
     pub fn to_database_type(self) -> Option<DatabaseType> {
@@ -102,7 +68,7 @@ impl DialectKind {
             // DuckDB
             "duckdb" => Some(DialectKind::DuckDb),
             // SQL Server family
-            "sqlserver" | "mssql" | "sql server" | "access" => Some(DialectKind::SqlServer),
+            "sqlserver" | "sql_server" | "mssql" | "sql server" | "access" => Some(DialectKind::SqlServer),
             // Oracle family
             "oracle" | "dameng" | "oceanbaseoracle" | "oceanbase" | "iris" | "yashandb" | "xugu" => {
                 Some(DialectKind::Oracle)
@@ -436,7 +402,6 @@ impl DialectCapabilityDescriptor {
                     | CAP_DROP_SEQUENCE
                     | CAP_ALTER_OWNER
                     | CAP_GRANT_REVOKE
-                    | CAP_IF_NOT_EXISTS
                     | CAP_TEMPORARY_TABLE
                     | CAP_TRANSACTIONAL_DDL
                     | CAP_IDENTITY_COLUMNS,
@@ -1015,6 +980,11 @@ mod tests {
         for (db_type, expected) in test_cases {
             assert_eq!(DialectKind::from_database_type(db_type), expected, "Mismatch for {db_type:?}");
         }
+    }
+
+    #[test]
+    fn dialect_kind_accepts_serde_sql_server_label() {
+        assert_eq!(DialectKind::from_label("sql_server"), Some(DialectKind::SqlServer));
     }
 
     #[test]

@@ -8,6 +8,8 @@ use std::time::Duration;
 use tauri::Manager;
 
 const STARTUP_LOG_FILE: &str = "startup.log";
+#[cfg(target_os = "windows")]
+const RUNTIME_RECOVERY_LOG_FILE: &str = "webview2-recovery.log";
 const STARTUP_LOG_DIR_ENV: &str = "DBX_STARTUP_LOG_DIR";
 const KEEP_STARTUP_LOG_ENV: &str = "DBX_KEEP_STARTUP_LOG";
 #[cfg(target_os = "windows")]
@@ -19,7 +21,7 @@ const WINDOWS_APP_DATA_DIR_NAME: &str = "com.dbx.app";
 const COMPATIBILITY_MARKER_FILE: &str = "webview2-enterprise-compat.enabled";
 const COMPATIBILITY_PROFILE_DIR: &str = "webview2-enterprise-compat";
 const STARTUP_LOG_BUFFER_CAPACITY: usize = 256;
-const STARTUP_WATCHDOG_DELAY: Duration = Duration::from_secs(15);
+const STARTUP_WATCHDOG_DELAY: Duration = Duration::from_secs(60);
 #[cfg(target_os = "windows")]
 const RECOVERY_PARENT_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -164,6 +166,21 @@ fn write_line(path: &Path, line: &str) {
         return;
     };
     let _ = writeln!(file, "{line}");
+}
+
+/// Appends a runtime (post-startup) recovery event to a dedicated log file
+/// (`webview2-recovery.log` next to `startup.log`).
+///
+/// Unlike the `log` facade, this is **not** gated by the desktop
+/// `debug_logging_enabled` setting (`apply_debug_log_level` sets the global
+/// `log::set_max_level` to `Off` in packaged builds by default), so packaged
+/// Windows builds always record WebView2 process-failure recovery decisions
+/// on affected devices. The `log`/`eprintln` channels are still used on top
+/// of this in debug builds.
+#[cfg(target_os = "windows")]
+pub(crate) fn record_runtime_recovery_event(message: impl AsRef<str>) {
+    let Some(dir) = startup_log_dir() else { return };
+    write_line(&dir.join(RUNTIME_RECOVERY_LOG_FILE), &format_probe_line(message.as_ref()));
 }
 
 fn format_probe_line(message: &str) -> String {
@@ -351,8 +368,16 @@ fn should_attempt_enterprise_recovery(
     enterprise_compat_disabled: bool,
     run_event_count: usize,
     main_exists: bool,
+    main_visible: bool,
 ) -> bool {
-    active && !enterprise_compat && !enterprise_compat_disabled && run_event_count == 0 && !main_exists
+    if !active || enterprise_compat || enterprise_compat_disabled {
+        return false;
+    }
+
+    // A window object can exist even when WebView2 or a security product has
+    // prevented it from being presented. The event loop may already be
+    // running in that state, so run_event_count cannot be used as a veto.
+    (!main_exists && run_event_count == 0) || (main_exists && !main_visible)
 }
 
 pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -375,9 +400,11 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
         if !active {
             return;
         }
-        let main_exists = app.get_webview_window("main").is_some();
+        let main_window = app.get_webview_window("main");
+        let main_exists = main_window.is_some();
+        let main_visible = main_window.as_ref().is_some_and(|window| window.is_visible().unwrap_or(false));
         record(format!(
-            "startup watchdog after {}s run_event_count={run_event_count} main_exists={main_exists}",
+            "startup watchdog after {}s run_event_count={run_event_count} main_exists={main_exists} main_visible={main_visible}",
             STARTUP_WATCHDOG_DELAY.as_secs()
         ));
         if should_attempt_enterprise_recovery(
@@ -386,9 +413,10 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
             enterprise_compat_disabled,
             run_event_count,
             main_exists,
+            main_visible,
         ) {
             persist_buffer();
-            record("startup stalled before event loop; restarting once with enterprise compatibility mode");
+            record("startup main window was not visible; restarting once with enterprise compatibility mode");
             let restart_result = std::env::current_exe().and_then(|executable| {
                 let mut command = std::process::Command::new(executable);
                 command.args(std::env::args_os().skip(1));
@@ -407,12 +435,11 @@ pub(crate) fn start_watchdog<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
                 }
             }
         }
-        if run_event_count > 0 || main_exists {
-            return;
-        }
-
-        persist_buffer();
         if enterprise_compat {
+            if main_visible {
+                return;
+            }
+            persist_buffer();
             record("enterprise compatibility startup failed; automatic recovery stopped");
             show_recovery_failure_message();
             std::process::exit(1);
@@ -438,7 +465,15 @@ fn deactivate_probe() {
     STARTUP_PROBE_STATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).lines.clear();
 }
 
-pub(crate) fn mark_frontend_ready() {
+pub(crate) fn mark_frontend_ready(main_window_visible: bool) {
+    if !main_window_visible {
+        // Frontend readiness alone is not enough to declare startup healthy:
+        // the WebView can load while the native window remains hidden.
+        record("frontend ready but main window is not visible; keeping startup watchdog active");
+        persist_buffer();
+        return;
+    }
+
     let recovery_attempt = RECOVERY_ATTEMPT.load(Ordering::Acquire);
     let keep_requested = env_flag(KEEP_STARTUP_LOG_ENV);
 
@@ -520,10 +555,10 @@ fn show_recovery_failure_message() {
         startup_log_path().map(|path| path.display().to_string()).unwrap_or_else(|| "startup.log".to_string());
     let locale = sys_locale::get_locale().unwrap_or_default().to_ascii_lowercase();
     let body = if locale.starts_with("zh") {
-        format!("DBX 已尝试企业环境兼容模式，但主窗口仍未创建。\n\n请将此日志发给维护者：{log_path}")
+        format!("DBX 已尝试企业环境兼容模式，但主窗口仍未显示。\n\n请将此日志发给维护者：{log_path}")
     } else {
         format!(
-            "DBX tried enterprise environment compatibility mode, but the main window was still not created.\n\nPlease send this log to the maintainer: {log_path}"
+            "DBX tried enterprise environment compatibility mode, but the main window was still not visible.\n\nPlease send this log to the maintainer: {log_path}"
         )
     };
     windows_ok_message("DBX", &body);
@@ -590,16 +625,24 @@ mod tests {
 
     #[test]
     fn recovery_only_triggers_for_the_observed_hard_startup_stall() {
-        assert!(should_attempt_enterprise_recovery(true, false, false, 0, false));
-        assert!(!should_attempt_enterprise_recovery(false, false, false, 0, false));
-        assert!(!should_attempt_enterprise_recovery(true, true, false, 0, false));
-        assert!(!should_attempt_enterprise_recovery(true, false, false, 1, false));
-        assert!(!should_attempt_enterprise_recovery(true, false, false, 0, true));
+        assert!(should_attempt_enterprise_recovery(true, false, false, 0, false, false));
+        assert!(!should_attempt_enterprise_recovery(false, false, false, 0, false, false));
+        assert!(!should_attempt_enterprise_recovery(true, true, false, 0, false, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, false, 1, false, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, false, 0, true, true));
+    }
+
+    #[test]
+    fn recovery_triggers_when_existing_main_window_is_still_hidden() {
+        assert!(should_attempt_enterprise_recovery(true, false, false, 1, true, false));
+        assert!(should_attempt_enterprise_recovery(true, false, false, 0, true, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, false, 1, true, true));
     }
 
     #[test]
     fn disable_enterprise_compat_prevents_recovery_during_a_hard_stall() {
-        assert!(!should_attempt_enterprise_recovery(true, false, true, 0, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, true, 0, false, false));
+        assert!(!should_attempt_enterprise_recovery(true, false, true, 1, true, false));
     }
 
     #[test]

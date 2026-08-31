@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 
 public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     private static final String GAUSSDB_COMPATIBILITY_SQL =
@@ -89,7 +90,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             loadDriver(params);
             try (Connection conn = openTestConnection(params)) {
-                boolean valid = conn != null && conn.isValid(5);
+                boolean valid = isConnectionValid(conn, 5);
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("ok", valid);
                 if (valid) {
@@ -270,8 +271,41 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         poolRegistry = registry;
     }
 
+    public boolean supportsConnectionPooling() {
+        return true;
+    }
+
+    final boolean isConnectionValid(Connection connection, int timeoutSecs) {
+        if (connection == null) {
+            return false;
+        }
+        try {
+            if (connection.isClosed()) {
+                return false;
+            }
+            String validationQuery = connectionValidationQuery();
+            if (validationQuery == null || validationQuery.isBlank()) {
+                return connection.isValid(timeoutSecs);
+            }
+            try (Statement statement = connection.createStatement()) {
+                try {
+                    statement.setQueryTimeout(timeoutSecs);
+                } catch (Exception | AbstractMethodError ignored) {
+                }
+                statement.execute(validationQuery);
+                return true;
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
+    }
+
     final synchronized boolean usesConnectionPool() {
         return poolRegistry != null;
+    }
+
+    final synchronized boolean hasActivePooledLeases() {
+        return poolRegistry != null && poolIdentity != null && poolRegistry.hasActiveLeases(poolIdentity);
     }
 
     final synchronized boolean quarantinePooledConnection() {
@@ -449,7 +483,18 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected abstract String buildJdbcUrl(ConnectParams params);
 
     protected Connection openConnection(ConnectParams params) throws Exception {
-        return DriverManager.getConnection(buildJdbcUrl(params), params.getUsername(), params.getPassword());
+        return DriverManager.getConnection(buildJdbcUrl(params), buildConnectionProperties(params));
+    }
+
+    protected Properties buildConnectionProperties(ConnectParams params) {
+        Properties properties = new Properties();
+        if (params.getUsername() != null) {
+            properties.setProperty("user", params.getUsername());
+        }
+        if (params.getPassword() != null) {
+            properties.setProperty("password", params.getPassword());
+        }
+        return properties;
     }
 
     protected Connection openTestConnection(ConnectParams params) throws Exception {
@@ -463,6 +508,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void afterDisconnect() throws Exception {
+    }
+
+    protected String connectionValidationQuery() {
+        return null;
     }
 
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
@@ -531,7 +580,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return this::resultValue;
     }
 
-    private Connection openInitializedConnection(ConnectParams params) throws Exception {
+    protected final Connection openInitializedConnection(ConnectParams params) throws Exception {
         Connection opened = openConnection(params);
         try {
             afterPhysicalConnect(params, opened);
@@ -566,6 +615,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return registry.borrow(
             identity,
             JdbcSessionRole.from(params.getSessionRole()),
+            connectionValidationQuery(),
             () -> openInitializedConnection(params)
         );
     }
@@ -630,6 +680,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
                 appendPoolIdentity(identity, "driverPath" + index, driverPaths.get(index));
             }
         }
+        appendPoolIdentity(identity, "driverProfile", params.getDriver_profile());
         return identity.toString();
     }
 

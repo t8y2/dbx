@@ -29,7 +29,8 @@ test("tracks database export progress and cancels through database export API", 
   });
 
   assert.equal(task.kind, "database-export");
-  assert.equal(task.tableName, "users");
+  assert.equal(task.tableName, "app");
+  assert.equal(task.currentObject, "users");
   assert.equal(task.objectIndex, 2);
   assert.equal(task.totalObjects, 5);
   assert.equal(tracker.activeCount.value, 1);
@@ -296,6 +297,7 @@ test("starts independent data transfer background tasks and routes progress by t
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
   const secondRequest = {
@@ -375,6 +377,7 @@ test("blocks concurrent data transfers that write the same target table", () => 
     createTable: true,
     mode: "append",
     targetTableNameCase: "preserve",
+    quoteTargetColumnNames: true,
     batchSize: 1000,
   };
   const secondRequest = {

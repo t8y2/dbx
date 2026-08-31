@@ -19,12 +19,21 @@ describe("AI Redis console routing", () => {
   });
 
   it("keeps the existing SQL editor and execution behavior for non-Redis connections", () => {
-    expect(aiAssistantSource).toContain('emit("replaceSql", code)');
+    expect(aiAssistantSource).toContain('emit("appendSql", code)');
     expect(aiAssistantSource).toContain('emit("executeSql", code)');
     expect(aiAssistantSource).toContain('emit("tempRunSql", code)');
     expect(appSource).toContain("const tabId = ensureQueryTab();");
+    expect(appSource).toContain("buildDeduplicatedAppendedEditorSql(currentSql, sql)");
     expect(appSource).toContain('buildAppendedEditorSql(activeTab.value?.sql || "", sql)');
     expect(appSource).toContain("const decision = classifyAiSqlExecution(sql, activeConnection.value);");
+  });
+
+  it("deduplicates immediate-run editor writes without skipping execution", () => {
+    const handler = appSource.match(/function onAiExecuteSql\(sql: string\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    expect(handler).toContain("buildDeduplicatedAppendedEditorSql(currentSql, sql)");
+    expect(handler).toContain("if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);");
+    expect(handler).toContain("runAiGeneratedSql(sql);");
+    expect(handler).not.toContain("buildAppendedEditorSql(");
   });
 
   it("uses the console safety path and rejects unavailable command input", () => {

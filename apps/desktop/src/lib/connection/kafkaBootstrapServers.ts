@@ -1,5 +1,6 @@
 const KAFKA_BOOTSTRAP_SERVER_SEPARATOR = /[\s,;，；]+/u;
 const KAFKA_BOOTSTRAP_SERVER_SCHEME = /^([a-z][a-z0-9_-]*):\/\/(.+)$/iu;
+const KAFKA_BOOTSTRAP_SERVER_ADDRESS = /^(?:\[([0-9a-z%._:-]+)\]|([0-9a-z%._-]+)):(\d+)$/iu;
 const KAFKA_SECURITY_PROTOCOLS = new Set(["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"] as const);
 
 export type KafkaSecurityProtocol = "PLAINTEXT" | "SSL" | "SASL_PLAINTEXT" | "SASL_SSL";
@@ -9,10 +10,25 @@ export interface ParsedKafkaBootstrapServers {
   inferredSecurityProtocol?: KafkaSecurityProtocol;
 }
 
+export interface KafkaBootstrapServerAddress {
+  host: string;
+  port: number;
+}
+
 function requireKafkaBootstrapServers(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error("Kafka bootstrap servers are required");
   return trimmed;
+}
+
+export function parseKafkaBootstrapServerAddress(address: string): KafkaBootstrapServerAddress {
+  const match = address.match(KAFKA_BOOTSTRAP_SERVER_ADDRESS);
+  const host = match?.[1] || match?.[2];
+  const port = match ? Number(match[3]) : Number.NaN;
+  if (!host || (match?.[1] && !host.includes(":")) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Kafka bootstrap servers are invalid");
+  }
+  return { host, port };
 }
 
 function normalizeKafkaBootstrapServer(server: string): { address: string; securityProtocol?: KafkaSecurityProtocol } {
@@ -30,18 +46,10 @@ function normalizeKafkaBootstrapServer(server: string): { address: string; secur
     throw new Error("Kafka bootstrap server protocol is invalid");
   }
 
-  let parsed: URL;
-  try {
-    parsed = new URL(`kafka://${address}`);
-  } catch {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  if (!parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname && parsed.pathname !== "/")) {
-    throw new Error("Kafka bootstrap servers are invalid");
-  }
-  if (!parsed.port) {
+  if (!address.includes(":")) {
     throw new Error("Kafka bootstrap servers must be host:port values");
   }
+  parseKafkaBootstrapServerAddress(address);
   return { address, securityProtocol };
 }
 

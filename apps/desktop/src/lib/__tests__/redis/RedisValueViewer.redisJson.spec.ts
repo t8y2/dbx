@@ -122,7 +122,7 @@ describe("native RedisJSON editor", () => {
   });
 
   it("uses the same foldable source editor as JSON strings and hash fields", () => {
-    const stringEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "stringValueView === 'json' && stringValueDetail.json");
+    const stringEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'");
     const nativeJsonBranch = findTemplateElement((element) => directiveExpression(element, "else-if") === "redisKind === 'json'");
     const hashEditor = findTemplateElement((element) => element.tag === "RedisJsonEditor" && directiveExpression(element, "if") === "isEditingHashJson");
     const nativeJsonEditors = templateElements(nativeJsonBranch).filter((element) => element.tag === "RedisJsonEditor");
@@ -153,7 +153,7 @@ describe("native RedisJSON editor", () => {
     const normalizeCall = calls.find((call) => calledName(call) === "normalizeRedisJsonDraft");
     const redisJsonSetCall = calls.find((call) => calledName(call) === "api.redisJsonSet");
 
-    expect(normalizeCall?.arguments.map((argument) => argument.getText())).toEqual(["editValue.value"]);
+    expect(normalizeCall?.arguments.map((argument) => argument.getText())).toEqual(["jsonDraftForSave(redisJsonRawBaseline.value, editValue.value)"]);
     expect(redisJsonSetCall?.arguments.map((argument) => argument.getText())).toEqual(["props.connectionId", "props.db", "props.keyRaw", "normalized.compactText"]);
   });
 
@@ -172,13 +172,13 @@ describe("native RedisJSON editor", () => {
     expect(saveStringCalls).toContain("api.redisSetString");
     expect(saveStringText).toMatch(/redisSetString\([\s\S]*\bvalue\b/);
 
-    // Hash JSON draft (editor open or retained after leaving JSON tab) compact-writes via HSET.
+    // Hash JSON draft (editor open or retained after leaving JSON tab) compact-writes via the atomic field update.
     expect(saveMemberText).toContain("savingHashJson");
     expect(saveMemberText).toContain('memberDraftFormat.value === "json"');
     expect(saveMemberCalls).toContain("normalizeRedisJsonDraft");
     expect(saveMemberText).toContain("writeValue = normalized.compactText");
-    expect(saveMemberCalls).toContain("api.redisHashSet");
-    expect(saveMemberText).toMatch(/redisHashSet\([\s\S]*\bwriteValue\b/);
+    expect(saveMemberCalls).toContain("api.redisHashFieldUpdate");
+    expect(saveMemberText).toMatch(/redisHashFieldUpdate\([\s\S]*\bwriteValue\b/);
 
     // Editor pretty baseline also uses the source-preserving formatter.
     expect(findFunction("formatJsonText").getText()).toContain("formatJsonSource");
@@ -208,12 +208,12 @@ describe("native RedisJSON editor", () => {
     const saved = normalizeRedisJsonDraft(opened.json!.formattedText);
     expect(saved).toEqual({ ok: true, compactText: DUPLICATE_MEMBER_COMPACT });
 
-    // Wiring: hash path only normalizes when savingHashJson, then HSETs writeValue.
+    // Wiring: hash path only normalizes when savingHashJson, then atomically updates the field with writeValue.
     const saveMemberEdit = findFunction("saveMemberEdit");
     const text = saveMemberEdit.getText();
     expect(text).toContain("if (savingHashJson)");
     expect(text).toContain("writeValue = normalized.compactText");
-    expect(callsIn(saveMemberEdit).map(calledName)).toEqual(expect.arrayContaining(["normalizeRedisJsonDraft", "api.redisHashSet"]));
+    expect(callsIn(saveMemberEdit).map(calledName)).toEqual(expect.arrayContaining(["normalizeRedisJsonDraft", "api.redisHashFieldUpdate"]));
   });
 
   it("keeps the native editor and export paths on the RedisJSON value-text contract", () => {
@@ -224,7 +224,10 @@ describe("native RedisJSON editor", () => {
 
     expect(valueTextCalls(load).map((call) => call.arguments.map((argument) => argument.getText()))).toContainEqual(["loadedValue.data"]);
     expect(valueTextCalls(exportStatements).map((call) => call.arguments.map((argument) => argument.getText()))).toContainEqual(["data.value.data"]);
-    expect(assignmentsIn(load).some((assignment) => assignment.left.getText() === "redisJsonDraftBaseline.value" && assignment.right.getText() === "jsonDraftForEditor(redisJsonValueText(loadedValue.data))")).toBe(true);
+    expect(callsIn(load).map(calledName)).toContain("jsonDraftPairForEditor");
+    expect(callsIn(load).map(calledName)).toContain("redisJsonValueText");
+    expect(assignmentsIn(load).some((assignment) => assignment.left.getText() === "redisJsonRawBaseline.value" && assignment.right.getText() === "pair.rawBaseline")).toBe(true);
+    expect(assignmentsIn(load).some((assignment) => assignment.left.getText() === "redisJsonDraftBaseline.value" && assignment.right.getText() === "pair.displayBaseline")).toBe(true);
     expect(assignmentsIn(discard).some((assignment) => assignment.left.getText() === "editValue.value" && assignment.right.getText() === "redisJsonDraftBaseline.value")).toBe(true);
 
     for (const node of [load, discard, exportStatements]) {
@@ -238,6 +241,11 @@ describe("native RedisJSON editor", () => {
     const hashSearch = findFunction("onHashSearch");
     const viewMember = findFunction("viewMember");
     const setMemberValueFormat = findFunction("setMemberValueFormat");
+    const selectMember = findFunction("selectMember");
+    const startEditMember = findFunction("startEditMember");
+    const saveMemberEdit = findFunction("saveMemberEdit");
+    const memberValueChanged = findVariableInitializer("memberValueChanged");
+    const memberFieldChanged = findVariableInitializer("memberFieldChanged");
     const unsavedDraft = findVariableInitializer("hasUnsavedRedisDraft");
     const textFormat = findFunction("isTextRedisFormat");
     const labels = templateElements(parsedViewer.descriptor.template!.ast as unknown as TemplateElement);
@@ -253,11 +261,91 @@ describe("native RedisJSON editor", () => {
     expect(setMemberValueFormat.getText()).toContain('memberDraftFormat.value = "utf8"');
     expect(unsavedDraft.getText()).toContain("hasRetainedStringDraft.value");
     expect(unsavedDraft.getText()).toContain("hasRetainedMemberDraft.value");
+    expect(unsavedDraft.getText()).toContain("memberFieldChanged.value");
+    expect(memberFieldChanged.getText()).toContain("memberFieldDraftBaseline.value");
+    expect(memberValueChanged.getText()).toContain("memberFieldChanged.value");
+    expect(selectMember.getText()).toContain("memberFieldDraftBaseline.value");
+    expect(startEditMember.getText()).toContain("!memberFieldChanged.value");
+    expect(saveMemberEdit.getText()).toContain("memberFieldEditValue.value");
+    expect(saveMemberEdit.getText()).not.toContain("memberFieldEditValue.value.trim()");
+    expect(viewerSource).toContain(':disabled="savingMember || !memberValueChanged"');
     expect(textFormat.getText()).toContain('format === "json"');
-    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(stringValueView)")).toBe(true);
-    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(memberValueView)")).toBe(true);
+    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)")).toBe(true);
+    expect(labels.some((element) => element.tag === "label" && directiveExpression(element, "if") === "isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec)")).toBe(true);
     expect(directiveExpression(stringTextarea, "bind", "readonly")).toBe("!canEditCurrentStringFormat || savingString");
     expect(directiveExpression(memberTextarea, "bind", "readonly")).toBe("savingMember");
     expect(directiveExpression(refreshButton, "bind", "disabled")).toBe("loading || refreshingValue || hasUnsavedRedisDraft");
+  });
+
+  it("passes the loaded ZSet score into both update entry points", () => {
+    const inlineSave = findFunction("saveZsetInlineEdit").getText();
+    const detailSave = findFunction("saveMemberEdit").getText();
+
+    expect(inlineSave).toContain("originalMember, item.score, zsetInlineMember.value, scoreText");
+    expect(detailSave).toContain("context.member, context.score, writeValue, context.score");
+  });
+});
+
+describe("Redis JSON unicode display mode", () => {
+  it("exposes a raw/decoded toggle on every JSON editor surface", () => {
+    // String JSON, native RedisJSON, and member JSON edit surfaces each render
+    // the same two-segment "原始 / 解码" control wired to setRedisJsonUnicodeMode.
+    expect(viewerSource.match(/setRedisJsonUnicodeMode\('raw'\)/g)).toHaveLength(3);
+    expect(viewerSource.match(/setRedisJsonUnicodeMode\('decoded'\)/g)).toHaveLength(3);
+    expect(viewerSource.match(/t\("redis\.jsonViewRaw"\)/g)).toHaveLength(3);
+    expect(viewerSource.match(/t\("redis\.jsonViewDecoded"\)/g)).toHaveLength(3);
+  });
+
+  it("defaults to decoded and persists the choice under its own storage key", () => {
+    expect(findFunction("readRedisJsonUnicodeMode").getText()).toContain('=== "raw" ? "raw" : "decoded"');
+    expect(findVariableInitializer("redisJsonUnicodeMode").getText()).toBe("ref(readRedisJsonUnicodeMode())");
+    expect(viewerSource).toContain('const REDIS_JSON_UNICODE_MODE_STORAGE_KEY = "dbx-redis-json-unicode-mode"');
+  });
+
+  it("derives JSON editor baselines through the display-only unicode decode", () => {
+    expect(findFunction("formatJsonText").getText()).toContain("decodeJsonUnicodeEscapes(formatted)");
+    expect(findFunction("jsonDraftBaseline").getText()).toContain("decodeJsonUnicodeEscapes(formattedText)");
+    expect(findFunction("jsonDraftPairForEditor").getText()).toContain("jsonDraftBaseline(rawBaseline, redisJsonDecoded.value)");
+    expect(findFunction("setRedisJsonUnicodeMode").getText()).toContain("rememberRedisJsonUnicodeMode(mode)");
+    expect(findFunction("setRedisJsonUnicodeMode").getText()).toContain("stringJsonDraftBaseline.value = jsonDraftBaseline(stringJsonRawBaseline.value, decoded)");
+    expect(findFunction("setRedisJsonUnicodeMode").getText()).toContain("redisJsonDraftBaseline.value = jsonDraftBaseline(redisJsonRawBaseline.value, decoded)");
+    expect(findFunction("setRedisJsonUnicodeMode").getText()).toContain("memberJsonDraftBaseline.value = jsonDraftBaseline(memberJsonRawBaseline.value, decoded)");
+  });
+
+  it("converts the active draft across a Raw/Decoded toggle instead of resetting it", () => {
+    // Toggling must not drop unsaved edits: the draft goes through the mode
+    // transform (decode when entering decoded, map back to raw when leaving it).
+    expect(findFunction("convertJsonDraftAcrossMode").getText()).toContain("decoded ? decodeJsonUnicodeEscapes(draft) : mapDisplayToRaw(rawBaseline, draft)");
+
+    const setMode = findFunction("setRedisJsonUnicodeMode").getText();
+    expect(setMode).toContain("editValue.value = convertJsonDraftAcrossMode(editValue.value, stringJsonRawBaseline.value, decoded)");
+    expect(setMode).toContain("editValue.value = convertJsonDraftAcrossMode(editValue.value, redisJsonRawBaseline.value, decoded)");
+    expect(setMode).toContain("memberEditValue.value = convertJsonDraftAcrossMode(memberEditValue.value, memberJsonRawBaseline.value, decoded)");
+    // The reset-to-baseline assignments must not reappear; they drop unsaved edits.
+    expect(setMode).not.toContain("editValue.value = stringJsonDraftBaseline.value");
+    expect(setMode).not.toContain("editValue.value = redisJsonDraftBaseline.value");
+    expect(setMode).not.toContain("memberEditValue.value = memberJsonDraftBaseline.value");
+  });
+
+  it("routes every JSON editor save through the raw draft mapping so escapes are preserved", () => {
+    // Save writes the mapped canonical raw draft, never the decoded display text:
+    // opening {"name":"张"} in decoded mode and saving must store the escape.
+    const jsonDraftForSave = findFunction("jsonDraftForSave");
+    expect(jsonDraftForSave.getText()).toContain("mapDisplayToRaw(rawBaseline, displayValue)");
+    expect(jsonDraftForSave.getText()).toContain("redisJsonDecoded.value ? mapDisplayToRaw(rawBaseline, displayValue) : displayValue");
+
+    // String JSON draft, native RedisJSON, and hash member JSON draft all go
+    // through jsonDraftForSave before the source-preserving normalize/compact.
+    const saveString = findFunction("saveString").getText();
+    const saveJson = findFunction("saveJson").getText();
+    const saveMemberEdit = findFunction("saveMemberEdit").getText();
+    expect(saveString).toContain("normalizeRedisJsonDraft(jsonDraftForSave(stringJsonRawBaseline.value, value))");
+    expect(saveJson).toContain("normalizeRedisJsonDraft(jsonDraftForSave(redisJsonRawBaseline.value, editValue.value))");
+    expect(saveMemberEdit).toContain("normalizeRedisJsonDraft(jsonDraftForSave(memberJsonRawBaseline.value, writeValue))");
+
+    // Raw baselines (what saves write back to) are captured on load/select.
+    expect(findFunction("load").getText()).toContain('stringJsonRawBaseline.value = detail.json?.formattedText ?? ""');
+    expect(findFunction("load").getText()).toContain("const pair = jsonDraftPairForEditor(redisJsonValueText(loadedValue.data))");
+    expect(findFunction("selectMember").getText()).toContain('memberJsonRawBaseline.value = detail.json?.formattedText ?? ""');
   });
 });

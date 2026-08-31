@@ -63,12 +63,13 @@ impl KafkaAdmin {
         let mut client = AgentDriverClient::spawn(launch).await?;
 
         // Handshake
-        let _: serde_json::Value = client.call("handshake", serde_json::json!({})).await?;
+        let _: serde_json::Value =
+            client.call_with_timeout("handshake", serde_json::json!({}), cfg.rpc_timeout()).await?;
 
         // Build the connection params from MqAdminConfig
         let conn_params = build_connection_params(&cfg);
         let connect_params = serde_json::json!({ "connection": conn_params });
-        let _: serde_json::Value = client.call("connect", connect_params).await?;
+        let _: serde_json::Value = client.call_with_timeout("connect", connect_params, cfg.rpc_timeout()).await?;
 
         log::info!("Kafka admin connected via agent (bootstrap servers: {})", bootstrap_servers(&cfg));
 
@@ -82,7 +83,18 @@ impl KafkaAdmin {
         params: serde_json::Value,
     ) -> Result<T, String> {
         let mut client = self.client.lock().await;
-        client.call(method, params).await
+        client.call_with_timeout(method, params, self.config.rpc_timeout()).await
+    }
+
+    /// The Kafka agent bounds message browsing with its configured request timeout.
+    /// Do not preempt that with the driver's generic 30-second RPC timeout.
+    async fn call_with_agent_timeout<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        let mut client = self.client.lock().await;
+        client.call_with_timeout(method, params, None).await
     }
 
     /// Send a JSON-RPC call that returns `{ok: true}` on success.
@@ -185,12 +197,19 @@ impl MessageQueueAdmin for KafkaAdmin {
                 TopicInfo {
                     name: name.clone(),
                     short_name: name,
-                    partitioned: partitions.map(|p| p > 1).unwrap_or(false),
+                    // Kafka topics always have partitions; mark as partitioned so the
+                    // "Adjust Partitions" UI button is available even for single-partition
+                    // topics (fixes t8y2/dbx#6208).
+                    partitioned: partitions.map(|p| p > 0).unwrap_or(false),
                     partitions,
                     persistent: true,
                     internal: t.get("internal").and_then(|v| v.as_bool()).unwrap_or(false),
                     message_type: None,
                     namespace: None,
+                    message_count: None,
+                    messages_ready: None,
+                    messages_unacked: None,
+                    ..Default::default()
                 }
             })
             .collect())
@@ -238,6 +257,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             msg_out_counter: 0,
             subscription_count: 0,
             producer_count: 0,
+            rates_unavailable: false,
             raw: result,
         })
     }
@@ -249,36 +269,28 @@ impl MessageQueueAdmin for KafkaAdmin {
     // ---- Subscriptions (mapped to consumer groups) ----
 
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
-        // List consumer groups and filter those subscribed to this topic
-        let result: serde_json::Value = self.call("mq_list_consumer_groups", serde_json::json!({})).await?;
+        // One batched agent RPC: the agent lists every consumer group, batch-describes
+        // them, and resolves committed + end offsets for the requested topic with a
+        // handful of Kafka Admin calls. Subscriptions are filtered in memory below.
+        // (The previous 1 + 2N serial RPC pattern — describe + lag per group — took
+        // tens of seconds on remote clusters with many groups, see #7163.)
+        let result: serde_json::Value =
+            self.call("mq_list_consumer_groups", serde_json::json!({ "topic": topic.topic })).await?;
         let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
         // For each group, check both active assignments and committed offsets.
         let mut subs = Vec::new();
         for group in groups {
             let group_id = group.get("groupId").and_then(|v| v.as_str()).unwrap_or_default();
-            let desc = match self
-                .call::<serde_json::Value>("mq_describe_consumer_group", serde_json::json!({ "groupId": group_id }))
-                .await
-            {
-                Ok(desc) => desc,
-                Err(_) => continue, // Skip groups we can't describe
-            };
-            let lag = self
-                .call::<serde_json::Value>(
-                    "mq_get_consumer_lag",
-                    serde_json::json!({
-                        "groupId": group_id,
-                        "topic": topic.topic,
-                    }),
-                )
-                .await
-                .ok();
-            if let Some(sub) = kafka_subscription_for_topic(group_id, &topic.topic, &desc, lag.as_ref()) {
+            if let Some(sub) = kafka_subscription_from_group_row(group_id, &topic.topic, &group) {
                 subs.push(sub);
             }
         }
         Ok(subs)
+    }
+
+    async fn get_kafka_consumer_group_snapshot(&self) -> Result<KafkaConsumerGroupSnapshot, String> {
+        self.call("mq_get_consumer_group_snapshot", consumer_group_snapshot_params(&self.config)).await
     }
 
     async fn create_subscription(&self, _topic: &TopicRef, _sub: &str, _pos: ResetPosition) -> Result<(), String> {
@@ -317,51 +329,11 @@ impl MessageQueueAdmin for KafkaAdmin {
         _sub: &str,
         count: u32,
         options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
-        let conn_params = build_connection_params(&self.config);
-        let mut params = serde_json::json!({
-            "topic": topic.topic,
-            "count": count,
-            "connection": conn_params,
-        });
-        // Omit partition/offset so the agent defaults to all partitions + earliest.
-        // Do not coerce missing values to 0 — that forced PARTITION 0 OFFSET 0 UX.
-        if let Some(partition) = options.partition {
-            params["partition"] = serde_json::json!(partition);
-        }
-        if let Some(offset) = options.offset {
-            params["offset"] = serde_json::json!(offset);
-        }
-        let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
+    ) -> Result<PeekMessagesResult, String> {
+        let params = peek_messages_params(&self.config, topic, count, options);
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_peek_messages", params).await?;
 
-        let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(messages
-            .into_iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                let mut properties = HashMap::new();
-                if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
-                    properties.insert("partition".to_string(), partition.to_string());
-                }
-                PeekedMessage {
-                    position: (idx + 1) as u32,
-                    message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    key: m.get("key").and_then(|v| v.as_str()).map(String::from),
-                    publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    event_time: None,
-                    properties,
-                    headers: m
-                        .get("headers")
-                        .and_then(|v| v.as_object())
-                        .map(|obj| {
-                            obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
-                        })
-                        .unwrap_or_default(),
-                    payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
-                }
-            })
-            .collect())
+        Ok(peek_messages_result_from_agent(&result))
     }
 
     async fn expire_messages(&self, _topic: &TopicRef, _sub: &str, _expire_seconds: i64) -> Result<(), String> {
@@ -399,17 +371,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             self.call("mq_describe_consumer_group", serde_json::json!({ "groupId": sub })).await?;
 
         let members = result.get("members").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(members
-            .into_iter()
-            .map(|m| ConsumerInfo {
-                consumer_name: m.get("memberId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                msg_rate_out: 0.0,
-                msg_throughput_out: 0.0,
-                available_permits: 0,
-                address: m.get("host").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                client_version: String::new(),
-            })
-            .collect())
+        Ok(members.iter().map(kafka_consumer_from_member).collect())
     }
 
     async fn unload_topic(&self, _topic: &TopicRef) -> Result<(), String> {
@@ -567,8 +529,7 @@ impl MessageQueueAdmin for KafkaAdmin {
             )
             .await?;
 
-        let total_lag = result.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
-        Ok(BacklogStats { msg_backlog: total_lag, backlog_size: 0 })
+        Ok(backlog_stats_from_consumer_lag(&result))
     }
 
     async fn get_cluster_info(&self) -> Result<ClusterInfo, String> {
@@ -684,7 +645,78 @@ fn build_connection_params(cfg: &MqAdminConfig) -> serde_json::Value {
             "skip_verify": cfg.tls_skip_verify,
         },
         "properties": properties,
+        "request_timeout_ms": cfg.request_timeout_ms(),
     })
+}
+
+fn consumer_group_snapshot_params(cfg: &MqAdminConfig) -> serde_json::Value {
+    serde_json::json!({
+        "timeout_ms": cfg.request_timeout_ms(),
+    })
+}
+
+fn peek_messages_params(
+    cfg: &MqAdminConfig,
+    topic: &TopicRef,
+    count: u32,
+    options: PeekMessagesOptions,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "topic": topic.topic,
+        "count": count,
+        "connection": build_connection_params(cfg),
+    });
+    // Keep absent fields absent so older earliest and offset requests retain
+    // their established agent semantics, including offset 0.
+    if let Some(start_position) = options.start_position {
+        params["startPosition"] = serde_json::json!(start_position);
+    }
+    if let Some(partition) = options.partition {
+        params["partition"] = serde_json::json!(partition);
+    }
+    if let Some(offset) = options.offset {
+        params["offset"] = serde_json::json!(offset);
+    }
+    params
+}
+
+fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
+    let (messages, incomplete) = if let Some(messages) = result.as_array() {
+        (messages.clone(), false)
+    } else {
+        (
+            result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+            result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false),
+        )
+    };
+    let messages = messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let mut properties = HashMap::new();
+            if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                properties.insert("partition".to_string(), partition.to_string());
+            }
+            PeekedMessage {
+                position: (idx + 1) as u32,
+                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                event_time: None,
+                properties,
+                headers: m
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                    })
+                    .unwrap_or_default(),
+                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            }
+        })
+        .collect();
+    PeekMessagesResult { messages, incomplete }
 }
 
 fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<serde_json::Value, String> {
@@ -705,50 +737,110 @@ fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Resul
             "position": "timestamp",
             "timestampMs": timestamp_ms,
         })),
+        ResetPosition::PartitionOffset { partition, offset } => {
+            if partition < 0 || offset < 0 {
+                return Err("Kafka partition and offset must be non-negative integers".to_string());
+            }
+            Ok(serde_json::json!({
+                "groupId": sub,
+                "topic": topic.topic,
+                "offsets": [{ "partition": partition, "offset": offset }],
+            }))
+        }
         ResetPosition::MessageId { .. } => Err("Kafka does not support cursor reset by Pulsar message id".to_string()),
     }
 }
 
-fn kafka_subscription_for_topic(
-    group_id: &str,
-    topic: &str,
-    desc: &serde_json::Value,
-    lag: Option<&serde_json::Value>,
-) -> Option<SubscriptionInfo> {
-    let has_active_assignment = desc
+/// Build a `SubscriptionInfo` for `topic` from one row of the batched
+/// `mq_list_consumer_groups` response. The agent already resolved committed
+/// offsets (and end offsets for the requested topic) for every group, so no
+/// per-group RPC happens here.
+fn kafka_subscription_from_group_row(group_id: &str, topic: &str, row: &serde_json::Value) -> Option<SubscriptionInfo> {
+    let consumers = row
         .get("members")
         .and_then(|v| v.as_array())
-        .map(|members| {
-            members.iter().any(|member| {
-                member
-                    .get("assignments")
-                    .and_then(|v| v.as_array())
-                    .map(|assignments| {
-                        assignments.iter().any(|a| a.get("topic").and_then(|v| v.as_str()) == Some(topic))
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false);
-    let has_committed_offsets = lag
-        .and_then(|v| v.get("partitions"))
+        .into_iter()
+        .flatten()
+        .filter(|member| kafka_member_is_assigned_to_topic(member, topic))
+        .map(kafka_consumer_from_member)
+        .collect::<Vec<_>>();
+    let has_active_assignment = !consumers.is_empty();
+
+    let committed = row
+        .get("committedOffsets")
         .and_then(|v| v.as_array())
-        .map(|partitions| !partitions.is_empty())
-        .unwrap_or(false);
+        .into_iter()
+        .flatten()
+        .filter(|partition| partition.get("topic").and_then(|v| v.as_str()) == Some(topic))
+        .collect::<Vec<_>>();
+    let has_committed_offsets = !committed.is_empty();
 
     if !has_active_assignment && !has_committed_offsets {
         return None;
     }
 
+    let end_offsets = row
+        .get("endOffsets")
+        .and_then(|v| v.as_array())
+        .map(|partitions| {
+            partitions
+                .iter()
+                .filter_map(|partition| {
+                    // Defensive: the agent already filters end offsets to the
+                    // requested topic, but keying by partition id alone would
+                    // let a same-numbered partition of another topic collide.
+                    if partition.get("topic").and_then(|v| v.as_str()) != Some(topic) {
+                        return None;
+                    }
+                    let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+                    let offset = partition.get("offset").and_then(|v| v.as_i64())?;
+                    Some((partition_id, offset))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    // Sum lag over the topic's committed partitions. A partition without a
+    // resolved end offset contributes nothing (matches the agent's lag probe:
+    // unknown end offsets are not reported as zero lag).
+    let msg_backlog = committed
+        .iter()
+        .filter_map(|partition| {
+            let partition_id = partition.get("partition").and_then(|v| v.as_i64())?;
+            let committed_offset = partition.get("offset").and_then(|v| v.as_i64())?;
+            let end_offset = end_offsets.get(&partition_id).copied()?;
+            Some((end_offset - committed_offset).max(0))
+        })
+        .sum();
+
     Some(SubscriptionInfo {
         name: group_id.to_string(),
         sub_type: "consumer-group".to_string(),
-        msg_backlog: lag.and_then(|v| v.get("totalLag")).and_then(|v| v.as_i64()).unwrap_or(0),
+        msg_backlog,
         msg_rate_out: 0.0,
         msg_throughput_out: 0.0,
-        consumers: Vec::new(),
+        consumers,
         ..Default::default()
     })
+}
+
+fn kafka_member_is_assigned_to_topic(member: &serde_json::Value, topic: &str) -> bool {
+    member
+        .get("assignments")
+        .and_then(|v| v.as_array())
+        .map(|assignments| assignments.iter().any(|a| a.get("topic").and_then(|v| v.as_str()) == Some(topic)))
+        .unwrap_or(false)
+}
+
+fn kafka_consumer_from_member(member: &serde_json::Value) -> ConsumerInfo {
+    ConsumerInfo {
+        consumer_name: member.get("memberId").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        msg_rate_out: 0.0,
+        msg_throughput_out: 0.0,
+        available_permits: 0,
+        address: member.get("host").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+        client_version: String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -767,8 +859,122 @@ mod tests {
             token_signing: None,
             connect_override: None,
             management_connect_override: None,
+            socks_proxy: None,
+            query_timeout_secs: crate::mq::config::DEFAULT_MQ_QUERY_TIMEOUT_SECS,
+            connect_timeout_secs: crate::mq::config::DEFAULT_MQ_CONNECT_TIMEOUT_SECS,
             extra,
         }
+    }
+
+    fn topic_ref() -> TopicRef {
+        TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: None,
+            message_type: None,
+            ..TopicRef::default()
+        }
+    }
+
+    #[test]
+    fn peek_message_params_forward_explicit_start_position_and_offset_filters() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions {
+                start_position: Some(PeekStartPosition::Offset),
+                partition: Some(2),
+                offset: Some(17),
+            },
+        );
+
+        assert_eq!(params.get("topic").and_then(|value| value.as_str()), Some("events"));
+        assert_eq!(params.get("count").and_then(|value| value.as_u64()), Some(20));
+        assert_eq!(params.get("startPosition").and_then(|value| value.as_str()), Some("offset"));
+        assert_eq!(params.get("partition").and_then(|value| value.as_i64()), Some(2));
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
+    }
+
+    #[test]
+    fn consumer_group_snapshot_params_forward_the_configured_query_timeout() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.query_timeout_secs = 17;
+
+        let params = consumer_group_snapshot_params(&cfg);
+
+        assert_eq!(params.get("timeout_ms").and_then(serde_json::Value::as_u64), Some(17_000));
+        assert_eq!(cfg.rpc_timeout(), Some(std::time::Duration::from_secs(17)));
+    }
+
+    #[test]
+    fn consumer_group_snapshot_params_keep_a_finite_agent_budget_for_unlimited_rpc_timeout() {
+        let mut cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        cfg.query_timeout_secs = 0;
+
+        let params = consumer_group_snapshot_params(&cfg);
+
+        assert_eq!(params.get("timeout_ms").and_then(serde_json::Value::as_u64), Some(3_600_000));
+        assert_eq!(cfg.rpc_timeout(), None);
+    }
+
+    #[test]
+    fn peek_message_params_omit_legacy_optional_fields() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(&cfg, &topic_ref(), 20, PeekMessagesOptions::default());
+
+        assert!(params.get("startPosition").is_none());
+        assert!(params.get("partition").is_none());
+        assert!(params.get("offset").is_none());
+    }
+
+    #[test]
+    fn peek_result_preserves_the_agent_incomplete_status() {
+        let result = peek_messages_result_from_agent(&serde_json::json!({
+            "messages": [{
+                "partition": 2,
+                "offset": 17,
+                "payloadBase64": "aGVsbG8=",
+            }],
+            "incomplete": true,
+        }));
+
+        assert!(result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn peek_result_accepts_legacy_agent_array_responses() {
+        let result = peek_messages_result_from_agent(&serde_json::json!([{
+            "partition": 1,
+            "offset": 9,
+            "payloadBase64": "bGVnYWN5",
+        }]));
+
+        assert!(!result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("1"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("9"));
+        assert_eq!(result.messages[0].payload_base64, "bGVnYWN5");
+    }
+
+    #[test]
+    fn peek_message_params_preserve_legacy_offset_requests() {
+        let cfg = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        let params = peek_messages_params(
+            &cfg,
+            &topic_ref(),
+            20,
+            PeekMessagesOptions { start_position: None, partition: None, offset: Some(17) },
+        );
+
+        assert!(params.get("startPosition").is_none());
+        assert_eq!(params.get("offset").and_then(|value| value.as_i64()), Some(17));
     }
 
     #[test]
@@ -938,63 +1144,194 @@ mod tests {
     }
 
     #[test]
-    fn kafka_subscription_for_topic_includes_offline_group_with_committed_offsets() {
-        let desc = serde_json::json!({
+    fn reset_cursor_params_maps_one_absolute_partition_offset() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        let params =
+            reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 2, offset: 41 })
+                .expect("Kafka should support an absolute offset for one partition");
+
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "groupId": "group-a",
+                "topic": "events",
+                "offsets": [{ "partition": 2, "offset": 41 }]
+            })
+        );
+    }
+
+    #[test]
+    fn reset_cursor_params_rejects_negative_absolute_positions() {
+        let topic = TopicRef {
+            tenant: "_kafka".to_string(),
+            namespace: "_kafka".to_string(),
+            topic: "events".to_string(),
+            persistent: true,
+            partitioned: Some(true),
+            message_type: None,
+            ..TopicRef::default()
+        };
+
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: -1, offset: 41 },)
+            .is_err());
+        assert!(reset_cursor_params(&topic, "group-a", ResetPosition::PartitionOffset { partition: 1, offset: -1 },)
+            .is_err());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_includes_offline_group_with_committed_offsets() {
+        let row = serde_json::json!({
             "groupId": "orders-service",
-            "members": []
-        });
-        let lag = serde_json::json!({
-            "totalLag": 7,
-            "partitions": [
-                { "partition": 0, "currentOffset": 3, "endOffset": 10, "lag": 7 }
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 10 },
+                { "topic": "orders", "partition": 1, "offset": 12 }
             ]
         });
 
-        let sub = kafka_subscription_for_topic("orders-service", "orders", &desc, Some(&lag))
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
             .expect("committed offsets should make an inactive group visible");
 
         assert_eq!(sub.name, "orders-service");
         assert_eq!(sub.sub_type, "consumer-group");
-        assert_eq!(sub.msg_backlog, 7);
+        assert_eq!(sub.msg_backlog, 11); // (10-3) + (12-8)
+        assert!(sub.consumers.is_empty());
     }
 
     #[test]
-    fn kafka_subscription_for_topic_includes_active_assignment_without_committed_offsets() {
-        let desc = serde_json::json!({
+    fn kafka_subscription_from_group_row_includes_active_assignment_without_committed_offsets() {
+        let row = serde_json::json!({
             "groupId": "live-service",
-            "members": [{
-                "assignments": [
-                    { "topic": "events", "partition": 0 }
-                ]
-            }]
-        });
-        let lag = serde_json::json!({
-            "totalLag": 0,
-            "partitions": []
+            "state": "STABLE",
+            "simpleGroup": false,
+            "members": [
+                {
+                    "memberId": "consumer-events",
+                    "host": "/10.0.0.10",
+                    "assignments": [
+                        { "topic": "events", "partition": 0 }
+                    ]
+                },
+                {
+                    "memberId": "consumer-audit",
+                    "host": "/10.0.0.11",
+                    "assignments": [
+                        { "topic": "audit", "partition": 0 }
+                    ]
+                }
+            ],
+            "committedOffsets": [],
+            "endOffsets": []
         });
 
-        let sub = kafka_subscription_for_topic("live-service", "events", &desc, Some(&lag))
+        let sub = kafka_subscription_from_group_row("live-service", "events", &row)
             .expect("active assignments should make the group visible");
 
         assert_eq!(sub.name, "live-service");
         assert_eq!(sub.msg_backlog, 0);
+        assert_eq!(sub.consumers.len(), 1);
+        assert_eq!(sub.consumers[0].consumer_name, "consumer-events");
+        assert_eq!(sub.consumers[0].address, "/10.0.0.10");
     }
 
     #[test]
-    fn kafka_subscription_for_topic_ignores_unrelated_group() {
-        let desc = serde_json::json!({
+    fn kafka_subscription_from_group_row_ignores_unrelated_group() {
+        let row = serde_json::json!({
             "groupId": "billing-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
             "members": [{
                 "assignments": [
                     { "topic": "billing", "partition": 0 }
                 ]
-            }]
-        });
-        let lag = serde_json::json!({
-            "totalLag": 0,
-            "partitions": []
+            }],
+            "committedOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 2 }
+            ],
+            "endOffsets": [
+                { "topic": "billing", "partition": 0, "offset": 5 }
+            ]
         });
 
-        assert!(kafka_subscription_for_topic("billing-service", "orders", &desc, Some(&lag)).is_none());
+        assert!(kafka_subscription_from_group_row("billing-service", "orders", &row).is_none());
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_skips_partitions_without_end_offsets() {
+        let row = serde_json::json!({
+            "groupId": "orders-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "orders", "partition": 1, "offset": 8 }
+            ],
+            "endOffsets": [
+                // partition 1's end offset is unavailable (agent-side failure)
+                { "topic": "orders", "partition": 0, "offset": 10 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("orders-service", "orders", &row)
+            .expect("the group still has visible committed offsets");
+
+        assert_eq!(sub.msg_backlog, 7); // only partition 0 contributes
+    }
+
+    #[test]
+    fn kafka_subscription_from_group_row_filters_committed_offsets_to_the_requested_topic() {
+        let row = serde_json::json!({
+            "groupId": "multi-topic-service",
+            "state": "EMPTY",
+            "simpleGroup": false,
+            "members": [],
+            "committedOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 3 },
+                { "topic": "payments", "partition": 0, "offset": 7 }
+            ],
+            "endOffsets": [
+                { "topic": "orders", "partition": 0, "offset": 8 },
+                { "topic": "payments", "partition": 0, "offset": 9 }
+            ]
+        });
+
+        let sub = kafka_subscription_from_group_row("multi-topic-service", "orders", &row)
+            .expect("committed offsets on the requested topic make the group visible");
+
+        // Lag totals only the requested topic's partitions.
+        assert_eq!(sub.msg_backlog, 5);
+    }
+
+    #[test]
+    fn kafka_topic_partitioned_flag_true_for_any_partition_count() {
+        // Single-partition topics must still be marked as partitioned so the
+        // frontend "Adjust Partitions" button is available (t8y2/dbx#6208).
+        let single = serde_json::json!({ "name": "orders", "partitions": 1 });
+        let partitions = single.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
+
+        let multi = serde_json::json!({ "name": "events", "partitions": 3 });
+        let partitions = multi.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(partitions.map(|p| p > 0).unwrap_or(false));
+
+        let missing = serde_json::json!({ "name": "unknown" });
+        let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
+        assert!(!partitions.map(|p| p > 0).unwrap_or(false));
     }
 }

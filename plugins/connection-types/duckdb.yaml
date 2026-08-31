@@ -1,0 +1,38 @@
+schemaVersion: 1
+order: 80
+dbType: duckdb
+rustVariant: DuckDb
+label: DuckDB
+dialect: DuckDB
+runtimeMode: file
+mcpMode: bridge
+managedDrivers:
+  - key: duckdb
+    label: DuckDB
+    storeVisible: true
+    storeOrder: 43
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+localFile: true
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: true
+  tableImport: true
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

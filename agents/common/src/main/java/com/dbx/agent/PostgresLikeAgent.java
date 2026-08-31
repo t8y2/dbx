@@ -533,47 +533,87 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             return listIndexesFromCatalogArrays(schema, table, attributeCache);
         }
         return unchecked(() -> {
-            List<IndexInfo> result = new ArrayList<>();
+            // One row per index key position rather than array_agg/GROUP BY: avoids
+            // rs.getArray(...), whose JDBC support is flaky enough across these vendor drivers
+            // that readAttributeNumbers() below already has to defensively catch
+            // SQLException/UnsupportedOperationException/IncompatibleClassChangeError around it.
+            // LEFT JOIN pg_attribute (instead of an inner JOIN) so expression key parts
+            // (attnum = 0, e.g. functional index columns) survive instead of being silently
+            // dropped; their text comes from pg_get_indexdef instead of a.attname, and
+            // is_expression records which case applied so Rust never has to guess from
+            // characters in the text (#6312 review).
+            Map<String, IndexBuilder> byName = new LinkedHashMap<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
-                "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
-                "array_agg(a.attname ORDER BY k.n) AS columns " +
+                "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
+                "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
+                "(a.attname IS NULL) AS is_expression " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +
                 "JOIN " + profile.catalogRelation("class") + " i ON i.oid = ix.indexrelid " +
                 "JOIN " + profile.catalogRelation("namespace") + " n ON n.oid = t.relnamespace " +
                 "JOIN " + profile.catalogRelation("am") + " am ON am.oid = i.relam " +
                 "JOIN LATERAL (SELECT unnest(ix.indkey) AS attnum, generate_series(1, array_length(ix.indkey, 1)) AS n) AS k ON true " +
-                "JOIN " + profile.catalogRelation("attribute") + " a ON a.attrelid = t.oid AND a.attnum = k.attnum " +
+                "LEFT JOIN " + profile.catalogRelation("attribute") + " a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 " +
                 "WHERE n.nspname = ? AND t.relname = ? " +
-                "GROUP BY i.relname, am.amname, ix.indisunique, ix.indisprimary " +
-                "ORDER BY i.relname";
+                "ORDER BY i.relname, k.n";
             try (java.sql.PreparedStatement stmt = requireConnection().prepareStatement(sql)) {
                 stmt.setString(1, schema);
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        Object[] columnArray = (Object[]) rs.getArray("columns").getArray();
-                        List<String> columns = new ArrayList<>();
-                        for (Object column : columnArray) {
-                            columns.add(String.valueOf(column));
-                        }
-                        result.add(new IndexInfo(
-                            rs.getString("index_name"),
-                            columns,
-                            rs.getBoolean("is_unique"),
-                            rs.getBoolean("is_primary"),
-                            null,
-                            rs.getString("index_type"),
-                            null,
-                            null
-                        ));
+                        String indexName = rs.getString("index_name");
+                        String indexType = rs.getString("index_type");
+                        boolean isUnique = rs.getBoolean("is_unique");
+                        boolean isPrimary = rs.getBoolean("is_primary");
+                        IndexBuilder builder = byName.computeIfAbsent(
+                            indexName,
+                            name -> new IndexBuilder(name, indexType, isUnique, isPrimary)
+                        );
+                        builder.columns.add(rs.getString("column_text"));
+                        builder.keyIsExpression.add(rs.getBoolean("is_expression"));
                     }
                 }
+            }
+            List<IndexInfo> result = new ArrayList<>();
+            for (IndexBuilder builder : byName.values()) {
+                result.add(new IndexInfo(
+                    builder.name,
+                    builder.columns,
+                    builder.isUnique,
+                    builder.isPrimary,
+                    null,
+                    builder.indexType,
+                    null,
+                    null,
+                    builder.keyIsExpression
+                ));
             }
             return result;
         });
     }
 
+    private static final class IndexBuilder {
+        private final String name;
+        private final String indexType;
+        private final boolean isUnique;
+        private final boolean isPrimary;
+        private final List<String> columns = new ArrayList<>();
+        private final List<Boolean> keyIsExpression = new ArrayList<>();
+
+        private IndexBuilder(String name, String indexType, boolean isUnique, boolean isPrimary) {
+            this.name = name;
+            this.indexType = indexType;
+            this.isUnique = isUnique;
+            this.isPrimary = isPrimary;
+        }
+    }
+
+    // No PostgresLikeAgentProfile currently calls withCatalogAttributeArraysMappedInJava(), so this
+    // path is unreachable by any driver today (Highgo and the rest use listIndexes(...) above). It
+    // still filters out expression key parts (attnum <= 0) via mapRequiredAttributeNumbers and
+    // drops the whole index when that happens, and reports no key_is_expression provenance for the
+    // indexes it does return. Left as-is rather than expanding this fix onto dead code; a future
+    // profile enabling this path would need the same treatment as listIndexes(...) above.
     private List<IndexInfo> listIndexesFromCatalogArrays(
         String schema,
         String table,
@@ -582,7 +622,7 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         return unchecked(() -> {
             List<CatalogIndex> catalogIndexes = new ArrayList<>();
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
-                "ix.indisunique AS is_unique, ix.indisprimary AS is_primary, " +
+                "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
                 "ix.indkey AS column_numbers " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +

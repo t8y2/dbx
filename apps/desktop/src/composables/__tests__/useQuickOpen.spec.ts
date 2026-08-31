@@ -1,8 +1,8 @@
 import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useQuickOpen } from "@/composables/useQuickOpen";
+import { matchQuickOpenText, useQuickOpen } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
-import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
@@ -22,6 +22,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
   const { ref } = await import("vue");
   return {
+    getSqlFileFilter: vi.fn(() => "*.sql"),
     getSqlFileFolderPaths: vi.fn(),
     sqlFileFoldersVersion: ref(0),
   };
@@ -30,7 +31,6 @@ vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
 function emptySavedSqlStore() {
   return {
     allFiles: [] as any[],
-    orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
     getFile: vi.fn().mockReturnValue(undefined),
   };
 }
@@ -69,7 +69,7 @@ describe("useQuickOpen", () => {
 
       const { filteredItems, loadExternalSqlFiles, setQuery } = useQuickOpen();
       const initialLoad = loadExternalSqlFiles();
-      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old");
+      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old", getSqlFileFilter());
 
       sqlFileFoldersVersion.value++;
       await nextTick();
@@ -77,7 +77,7 @@ describe("useQuickOpen", () => {
       await initialLoad;
 
       expect(api.listSqlFilesInFolder).toHaveBeenCalledTimes(2);
-      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new");
+      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new", getSqlFileFilter());
       setQuery(".sql");
       expect(filteredItems.value.map((item) => item.label)).toContain("new.sql");
       expect(filteredItems.value.map((item) => item.label)).not.toContain("old.sql");
@@ -85,6 +85,68 @@ describe("useQuickOpen", () => {
   });
 
   describe("fuzzyMatch function", () => {
+    it("ranks exact names, initials, prefixes, substrings, and fuzzy matches in order", () => {
+      const exact = matchQuickOpenText("shop", "shop");
+      const initials = matchQuickOpenText("gafi", "groupon_apply_finance_invoice");
+      const prefix = matchQuickOpenText("shop", "shop_attribute");
+      const substring = matchQuickOpenText("shop", "sale_payway_shop");
+      const fuzzy = matchQuickOpenText("gafi", "giftcard_define_item");
+
+      expect([exact?.kind, initials?.kind, prefix?.kind, substring?.kind, fuzzy?.kind]).toEqual(["exact", "initials", "prefix", "substring", "fuzzy"]);
+      expect(exact!.score).toBeLessThan(initials!.score);
+      expect(initials!.score).toBeLessThan(prefix!.score);
+      expect(prefix!.score).toBeLessThan(substring!.score);
+      expect(substring!.score).toBeLessThan(fuzzy!.score);
+      expect(initials?.indices).toEqual([0, 8, 14, 22]);
+    });
+
+    it("matches multi-word prefix combinations and highlights their source characters", () => {
+      const label = "giftcard_define_shop_log";
+
+      expect(matchQuickOpenText("gdsl", label)?.kind).toBe("initials");
+      for (const query of ["giftdsl", "gdshopl", "gdesl"]) {
+        const match = matchQuickOpenText(query, label);
+        expect(match?.kind).toBe("word-prefix");
+        expect(match?.indices.map((index) => label[index]).join("")).toBe(query);
+      }
+      expect(matchQuickOpenText("giftcard", label)?.kind).toBe("prefix");
+      expect(matchQuickOpenText("define", label)?.kind).toBe("substring");
+      expect(matchQuickOpenText("shop", label)?.kind).toBe("substring");
+      expect(matchQuickOpenText("cardshoplog", label)?.kind).toBe("fuzzy");
+    });
+
+    it("puts the exact shop result before prefixed and containing names", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [
+          { id: "contains", name: "sale_payway_shop", type: "mssql" },
+          { id: "prefix", name: "shop_attribute", type: "mssql" },
+          { id: "exact", name: "shop", type: "mssql" },
+        ],
+        treeNodes: [],
+      } as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("shop");
+
+      expect(filteredItems.value.map((item) => item.label)).toEqual(["shop", "shop_attribute", "sale_payway_shop"]);
+    });
+
+    it("puts an exact identifier acronym before loose fuzzy matches", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [
+          { id: "fuzzy", name: "giftcard_define_item", type: "mssql" },
+          { id: "initials", name: "groupon_apply_finance_invoice", type: "mssql" },
+        ],
+        treeNodes: [],
+      } as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("gafi");
+
+      expect(filteredItems.value.map((item) => item.label)).toEqual(["groupon_apply_finance_invoice", "giftcard_define_item"]);
+      expect(filteredItems.value[0].matchIndices).toEqual([0, 8, 14, 22]);
+    });
+
     it("should return exact substring match with score 1", () => {
       // Mock store with test data
       const mockStore = {
@@ -187,6 +249,66 @@ describe("useQuickOpen", () => {
   });
 
   describe("filtering and searching", () => {
+    it("keeps database-object highlight indices relative to the visible label", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [{ id: "conn1", name: "Test TiDB", db_type: "mysql" }],
+        treeNodes: [
+          {
+            id: "conn1",
+            connectionId: "conn1",
+            type: "connection",
+            label: "Test TiDB",
+            children: [
+              {
+                id: "conn1:retail_mps",
+                connectionId: "conn1",
+                type: "database",
+                database: "retail_mps",
+                label: "retail_mps",
+                children: [
+                  {
+                    id: "table1",
+                    connectionId: "conn1",
+                    type: "table",
+                    database: "retail_mps",
+                    label: "groupon_apply_finance_invoice",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      } as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("gafi");
+
+      const table = filteredItems.value.find((item) => item.type === "table");
+      expect(table?.label).toBe("groupon_apply_finance_invoice");
+      expect(table?.matchIndices).toEqual([0, 8, 14, 22]);
+    });
+
+    it("does not highlight the label when only connection metadata matches", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [{ id: "conn1", name: "ProdConnection", db_type: "mysql" }],
+        treeNodes: [
+          {
+            connectionId: "conn1",
+            type: "database",
+            database: "UserDB",
+            label: "UserDB",
+          },
+        ],
+      } as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("Prod");
+
+      const database = filteredItems.value.find((item) => item.type === "database");
+      expect(database?.matchIndices).toEqual([]);
+      expect(database?.matchScore).toBeGreaterThan(1000);
+    });
+
     it("indexes database objects under connection groups", () => {
       const mockStore = {
         connections: [{ id: "conn1", name: "Grouped PG", db_type: "postgres" }],
@@ -504,6 +626,23 @@ describe("useQuickOpen", () => {
   });
 
   describe("reset and query setting", () => {
+    it("resets selection when v-model changes the search query directly", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({
+        connections: [
+          { id: "conn1", name: "Connection1", type: "mssql" },
+          { id: "conn2", name: "Connection2", type: "mssql" },
+        ],
+        treeNodes: [],
+      } as any);
+
+      const { searchQuery, selectNext, selectedIndex } = useQuickOpen();
+      selectNext();
+      expect(selectedIndex.value).toBe(1);
+
+      searchQuery.value = "Connection";
+      expect(selectedIndex.value).toBe(0);
+    });
+
     it("should reset selection to 0 when setQuery is called", () => {
       const mockStore = {
         connections: [
@@ -661,7 +800,6 @@ describe("useQuickOpen", () => {
       const fileMap = new Map(files.map((f) => [f.id, f]));
       return {
         allFiles: files,
-        orphanedFileIds: vi.fn().mockReturnValue(new Set<string>()),
         getFile: vi.fn().mockImplementation((id: string) => fileMap.get(id)),
       };
     }
@@ -713,7 +851,7 @@ describe("useQuickOpen", () => {
       expect(sqlItems[0].sqlFileId).toBe("f1");
     });
 
-    it("excludes orphaned SQL library files", () => {
+    it("includes SQL library files whose connection was deleted", () => {
       const mockConnStore = {
         connections: [{ id: "conn1", name: "Active", type: "mssql" }],
         treeNodes: [],
@@ -724,16 +862,24 @@ describe("useQuickOpen", () => {
         { id: "f1", name: "active_query.sql", connectionId: "conn1", updatedAt: "2024-01-01T00:00:00.000Z" },
         { id: "f2", name: "orphaned_query.sql", connectionId: "deleted_conn", updatedAt: "2024-01-02T00:00:00.000Z" },
       ];
-      const store = savedSqlStoreWithFiles(files);
-      store.orphanedFileIds = vi.fn().mockReturnValue(new Set(["f2"]));
-      vi.mocked(useSavedSqlStore).mockReturnValue(store as any);
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles(files) as any);
 
       const { filteredItems, setQuery } = useQuickOpen();
       setQuery("query");
 
       const sqlItems = filteredItems.value.filter((item) => item.type === "sql_library_file");
-      expect(sqlItems).toHaveLength(1);
-      expect(sqlItems[0].label).toBe("active_query.sql");
+      expect(sqlItems).toHaveLength(2);
+      expect(sqlItems.find((item) => item.label === "orphaned_query.sql")?.description).toBe("Connection deleted");
+    });
+
+    it("labels SQL library files without a connection as unassociated", () => {
+      vi.mocked(useConnectionStore).mockReturnValue({ connections: [], treeNodes: [] } as any);
+      vi.mocked(useSavedSqlStore).mockReturnValue(savedSqlStoreWithFiles([{ id: "f1", name: "draft.sql", connectionId: "", updatedAt: "2024-01-01T00:00:00.000Z" }]) as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("draft");
+
+      expect(filteredItems.value.find((item) => item.type === "sql_library_file")?.description).toBe("Unassociated");
     });
   });
 
@@ -780,7 +926,7 @@ describe("useQuickOpen", () => {
       setQuery("ord");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true);
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "ord", 25, undefined, true, undefined, undefined, { activateConnection: false });
       expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "orders", type: "table", database: "app" })]));
     });
 
@@ -851,7 +997,7 @@ describe("useQuickOpen", () => {
       expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
     });
 
-    it("does not request metadata from disconnected contexts", async () => {
+    it("searches disconnected contexts through lazy connection", async () => {
       const mockStore = remoteSearchStore({ connectedIds: new Set<string>() });
       vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
 
@@ -859,7 +1005,125 @@ describe("useQuickOpen", () => {
       setQuery("users");
       await runDebouncedSearch();
 
-      expect(mockStore.listCompletionTables).not.toHaveBeenCalled();
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("conn1", "app", "users", 25, undefined, true, undefined, undefined, { activateConnection: false });
+    });
+
+    it("prioritizes the active connection before applying the remote request cap", async () => {
+      const connections = Array.from({ length: 9 }, (_, index) => ({ id: `conn${index}`, name: `Connection ${index}`, db_type: "mysql", database: `db${index}` }));
+      const mockStore = remoteSearchStore({
+        connections,
+        activeConnectionId: "conn8",
+        connectedIds: new Set(["conn8"]),
+        treeNodes: [],
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      const requestedConnections = mockStore.listCompletionTables.mock.calls.map(([connectionId]) => connectionId);
+      expect(requestedConnections).toContain("conn8");
+      expect(requestedConnections).not.toContain("conn7");
+      expect(mockStore.listCompletionTables).toHaveBeenCalledTimes(8);
+    });
+
+    it("publishes active connection results without waiting for slow cold connections", async () => {
+      const slowSearch = deferred<Array<{ name: string; type: "table" }>>();
+      const mockStore = remoteSearchStore({
+        connections: [
+          { id: "cold", name: "Cold", db_type: "mysql", database: "cold_db" },
+          { id: "active", name: "Active", db_type: "mysql", database: "active_db" },
+        ],
+        activeConnectionId: "active",
+        connectedIds: new Set(["active"]),
+        treeNodes: [],
+        listCompletionTables: vi.fn((connectionId) => (connectionId === "active" ? Promise.resolve([{ name: "active_users", type: "table" as const }]) : slowSearch.promise)),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("users");
+      await runDebouncedSearch();
+
+      expect(filteredItems.value.map((item) => item.label)).toContain("active_users");
+      slowSearch.resolve([]);
+      await flushAsyncWork();
+    });
+
+    it("drops stale queued contexts before scheduling a newer query", async () => {
+      const alphaRequests: Array<ReturnType<typeof deferred<Array<{ name: string; type: "table" }>>>> = [];
+      const listCompletionTables = vi.fn((_connectionId, _database, query) => {
+        if (query === "alpha") {
+          const request = deferred<Array<{ name: string; type: "table" }>>();
+          alphaRequests.push(request);
+          return request.promise;
+        }
+        return Promise.resolve([{ name: "beta_table", type: "table" as const }]);
+      });
+      const mockStore = remoteSearchStore({
+        treeNodes: Array.from({ length: 4 }, (_, index) => ({
+          id: `conn1:db${index}`,
+          connectionId: "conn1",
+          type: "database",
+          database: `db${index}`,
+          label: `db${index}`,
+        })),
+        listCompletionTables,
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("alpha");
+      await runDebouncedSearch();
+      expect(listCompletionTables).toHaveBeenCalledTimes(2);
+
+      setQuery("beta");
+      await runDebouncedSearch();
+      expect(listCompletionTables).toHaveBeenCalledTimes(2);
+
+      alphaRequests[0]!.resolve([]);
+      await flushAsyncWork();
+      expect(listCompletionTables.mock.calls[2]?.[2]).toBe("beta");
+      expect(listCompletionTables.mock.calls.filter(([, , query]) => query === "alpha")).toHaveLength(2);
+
+      alphaRequests[1]!.resolve([]);
+      await flushAsyncWork();
+      expect(filteredItems.value.map((item) => item.label)).toContain("beta_table");
+    });
+
+    it("derives the SQLite main database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "sqlite-1", name: "SQLite", db_type: "sqlite", host: "/tmp/app.sqlite" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "scroll_test", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("scroll_test");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("sqlite-1", "main", "scroll_test", 25, undefined, true, undefined, undefined, { activateConnection: false });
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "scroll_test", type: "table", database: "main" })]));
+    });
+
+    it("searches the PostgreSQL backend default database before its tree is expanded", async () => {
+      const mockStore = remoteSearchStore({
+        connections: [{ id: "pg-1", name: "PostgreSQL", db_type: "postgres", database: "" }],
+        connectedIds: new Set<string>(),
+        treeNodes: [],
+        listCompletionTables: vi.fn().mockResolvedValue([{ name: "cold_start_table", type: "table" }]),
+      });
+      vi.mocked(useConnectionStore).mockReturnValue(mockStore as any);
+
+      const { filteredItems, setQuery } = useQuickOpen();
+      setQuery("cold_start_table");
+      await runDebouncedSearch();
+
+      expect(mockStore.listCompletionTables).toHaveBeenCalledWith("pg-1", "postgres", "cold_start_table", 25, undefined, true, undefined, undefined, { activateConnection: false });
+      expect(filteredItems.value).toEqual(expect.arrayContaining([expect.objectContaining({ label: "cold_start_table", type: "table", database: "postgres" })]));
     });
 
     it("keeps local results when remote metadata search fails", async () => {

@@ -331,6 +331,45 @@ pub struct TopicInfo {
     /// cross-namespace listings such as the RabbitMQ "all vhosts" mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
+    /// RabbitMQ total queue messages, including ready and unacknowledged messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<i64>,
+    /// RabbitMQ messages ready for delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_ready: Option<i64>,
+    /// RabbitMQ messages delivered but not yet acknowledged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_unacked: Option<i64>,
+    /// RabbitMQ queue: auto-delete flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_delete: Option<bool>,
+    /// RabbitMQ queue: exclusive flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<bool>,
+    /// RabbitMQ queue: state (running / idle / flow / blocked ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// RabbitMQ queue: type (classic / quorum / stream), from the management
+    /// API `type` field or the x-queue-type argument on older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_type: Option<String>,
+    /// RabbitMQ queue: x-arguments, preserving the original JSON value types
+    /// (numbers, booleans, nested objects/arrays) returned by the management API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<serde_json::Value>,
+    /// RabbitMQ queue: consumer count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_count: Option<i64>,
+    /// RabbitMQ queue: publish rate (msg/s). Absent when the management API
+    /// sampled no message_stats data for this queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_rate: Option<f64>,
+    /// RabbitMQ queue: deliver/get rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deliver_rate: Option<f64>,
+    /// RabbitMQ queue: ack rate (msg/s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_rate: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -356,6 +395,12 @@ pub struct TopicStats {
     pub msg_out_counter: i64,
     pub subscription_count: u32,
     pub producer_count: u32,
+    /// RabbitMQ: true when the management API exposed no `message_stats`
+    /// sample for the queue, so the msg_rate_* / counter fields are NOT
+    /// meaningful — consumers must render them as "no data" instead of
+    /// presenting the zero placeholder as a real rate of 0.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rates_unavailable: bool,
     /// Original raw stats JSON, for the detail view / advanced inspection.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub raw: serde_json::Value,
@@ -415,6 +460,53 @@ pub struct SubscriptionInfo {
     /// RocketMQ: CLUSTERING / BROADCASTING.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_model: Option<String>,
+    /// When true, backlog probe failed — UI must not treat `msg_backlog` as healthy zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backlog_unavailable: Option<bool>,
+}
+
+/// One Kafka topic-partition's committed and log-end offsets for a consumer group.
+/// Optional offsets distinguish unavailable data from a healthy zero lag.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupPartitionLag {
+    pub topic: String,
+    pub partition: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag: Option<i64>,
+}
+
+/// Cluster-wide Kafka consumer group summary with its partition lag details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSummary {
+    pub group_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub simple_group: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_count: Option<u32>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lag: Option<i64>,
+    #[serde(default)]
+    pub lag_available: bool,
+    #[serde(default)]
+    pub partitions: Vec<KafkaConsumerGroupPartitionLag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaConsumerGroupSnapshot {
+    #[serde(default)]
+    pub groups: Vec<KafkaConsumerGroupSummary>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -453,8 +545,59 @@ pub enum ResetPosition {
     Latest,
     /// A specific point in time (milliseconds since epoch).
     Timestamp { timestamp_ms: i64 },
+    /// An absolute Kafka offset for one partition.
+    PartitionOffset { partition: i32, offset: i64 },
     /// A specific message id.
     MessageId { ledger_id: i64, entry_id: i64 },
+}
+
+#[cfg(test)]
+mod reset_position_tests {
+    use super::ResetPosition;
+
+    #[test]
+    fn partition_offset_uses_the_frontend_camel_case_wire_shape() {
+        let position = ResetPosition::PartitionOffset { partition: 3, offset: 27 };
+        let value = serde_json::to_value(&position).expect("serialize reset position");
+        assert_eq!(value, serde_json::json!({ "kind": "partitionOffset", "partition": 3, "offset": 27 }));
+        let decoded: ResetPosition = serde_json::from_value(value).expect("deserialize reset position");
+        assert!(matches!(decoded, ResetPosition::PartitionOffset { partition: 3, offset: 27 }));
+    }
+}
+
+#[cfg(test)]
+mod kafka_consumer_group_snapshot_tests {
+    use super::KafkaConsumerGroupSnapshot;
+
+    #[test]
+    fn preserves_unavailable_offsets_as_none() {
+        let snapshot: KafkaConsumerGroupSnapshot = serde_json::from_value(serde_json::json!({
+            "groups": [{
+                "groupId": "orders-service",
+                "state": "STABLE",
+                "simpleGroup": false,
+                "memberCount": 1,
+                "topics": ["orders"],
+                "totalLag": null,
+                "lagAvailable": false,
+                "partitions": [{
+                    "topic": "orders",
+                    "partition": 0,
+                    "currentOffset": 8,
+                    "endOffset": null,
+                    "lag": null
+                }],
+                "error": "End offsets unavailable for 1 partition(s)"
+            }]
+        }))
+        .expect("deserialize Kafka consumer group snapshot");
+
+        assert_eq!(snapshot.groups[0].total_lag, None);
+        assert!(!snapshot.groups[0].lag_available);
+        assert_eq!(snapshot.groups[0].partitions[0].current_offset, Some(8));
+        assert_eq!(snapshot.groups[0].partitions[0].end_offset, None);
+        assert_eq!(snapshot.groups[0].partitions[0].lag, None);
+    }
 }
 
 /// How many messages to skip on a subscription.
@@ -465,11 +608,76 @@ pub enum SkipCount {
     Count { count: u32 },
 }
 
+/// Per-queue/partition consume progress (RocketMQ Dashboard consume-detail / Kafka lag rows).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionBacklog {
+    pub partition: i32,
+    /// Consumer committed offset (`consumerOffset` / `currentOffset`).
+    pub current_offset: i64,
+    /// Broker max offset (`brokerOffset` / `endOffset`).
+    pub end_offset: i64,
+    pub lag: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_name: Option<String>,
+    /// Last consume message store timestamp (ms). `0` means unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_timestamp: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer_client: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BacklogStats {
     pub msg_backlog: i64,
     pub backlog_size: i64,
+    /// Optional queue-level progress; empty for adapters that only expose totals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<PartitionBacklog>,
+}
+
+/// Parse agent `mq_get_consumer_lag` JSON (`totalLag` + `partitions[]`) into [`BacklogStats`].
+pub fn backlog_stats_from_consumer_lag(value: &serde_json::Value) -> BacklogStats {
+    let msg_backlog = value.get("totalLag").and_then(|v| v.as_i64()).unwrap_or(0);
+    let partitions = value
+        .get("partitions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| {
+                    let partition = row.get("partition").and_then(|v| v.as_i64()).map(|v| v as i32)?;
+                    let current_offset = row.get("currentOffset").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end_offset = row.get("endOffset").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let lag =
+                        row.get("lag").and_then(|v| v.as_i64()).unwrap_or_else(|| (end_offset - current_offset).max(0));
+                    let broker_name = row
+                        .get("brokerName")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let last_timestamp = row.get("lastTimestamp").and_then(|v| v.as_i64());
+                    let consumer_client = row
+                        .get("consumerClient")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    Some(PartitionBacklog {
+                        partition,
+                        current_offset,
+                        end_offset,
+                        lag,
+                        broker_name,
+                        last_timestamp,
+                        consumer_client,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    BacklogStats { msg_backlog, backlog_size: 0, partitions }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -496,13 +704,45 @@ pub struct PeekedMessage {
     pub payload_text: Option<String>,
 }
 
-/// Optional hints for reading messages. Pulsar ignores these today; Kafka uses
-/// them to optionally narrow a non-committing peek to one partition / offset.
-/// When omitted, Kafka peeks across all partitions from each partition's earliest
-/// readable offset (still capped by `count`).
+/// A message browse response. `incomplete` is set when the adapter could only
+/// return a partial snapshot before its configured deadline or scan limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeekMessagesResult {
+    #[serde(default)]
+    pub messages: Vec<PeekedMessage>,
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+impl PeekMessagesResult {
+    pub fn complete(messages: Vec<PeekedMessage>) -> Self {
+        Self { messages, incomplete: false }
+    }
+}
+
+/// Kafka's explicit starting position for a non-committing message peek.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeekStartPosition {
+    Latest,
+    Earliest,
+    Offset,
+}
+
+/// Optional hints for reading messages. Non-Kafka adapters ignore
+/// `start_position` and retain their existing partition/offset handling.
+/// For Kafka, an omitted position keeps legacy behavior: it starts at the
+/// earliest available message unless an older caller supplies `offset`.
+/// `start_position: Offset` requires a non-negative offset. When no partition
+/// is supplied, Kafka reads forward from that offset in every topic partition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {
+    /// Kafka's explicit read starting point. This remains optional so callers
+    /// that predate it retain their original earliest/offset behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_position: Option<PeekStartPosition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1190,5 +1430,80 @@ mod tests {
         assert!(!caps.supports_policies);
         assert!(!caps.supports_cluster_monitoring);
         assert!(caps.supports_tenants);
+    }
+
+    #[test]
+    fn peek_options_omit_optional_fields_and_serialize_start_position() {
+        let legacy: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"partition":2}"#).expect("legacy peek options");
+        assert_eq!(legacy.start_position, None);
+        assert_eq!(legacy.partition, Some(2));
+        assert_eq!(legacy.offset, None);
+
+        let latest: super::PeekMessagesOptions =
+            serde_json::from_str(r#"{"startPosition":"latest"}"#).expect("latest peek options");
+        assert_eq!(latest.start_position, Some(super::PeekStartPosition::Latest));
+        let json = serde_json::to_value(latest).expect("serialize latest peek options");
+        assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("latest"));
+    }
+
+    #[test]
+    fn peek_result_serializes_completion_status_and_accepts_legacy_responses() {
+        let complete = super::PeekMessagesResult::complete(Vec::new());
+        let json = serde_json::to_value(&complete).expect("serialize complete peek result");
+        assert_eq!(json, serde_json::json!({ "messages": [], "incomplete": false }));
+
+        let legacy: super::PeekMessagesResult =
+            serde_json::from_value(serde_json::json!({ "messages": [] })).expect("deserialize legacy peek result");
+        assert!(!legacy.incomplete);
+        assert!(legacy.messages.is_empty());
+    }
+
+    #[test]
+    fn backlog_stats_from_consumer_lag_maps_dashboard_fields() {
+        let lag = serde_json::json!({
+            "totalLag": 10,
+            "partitions": [
+                {
+                    "partition": 0,
+                    "currentOffset": 90,
+                    "endOffset": 100,
+                    "lag": 10,
+                    "brokerName": "broker-a",
+                    "lastTimestamp": 1725000000000_i64,
+                    "consumerClient": "172.18.2.212@7#1"
+                },
+                {
+                    "partition": 1,
+                    "currentOffset": 50,
+                    "endOffset": 50,
+                    "lag": 0,
+                    "brokerName": "",
+                    "lastTimestamp": 0,
+                    "consumerClient": ""
+                }
+            ]
+        });
+        let stats = super::backlog_stats_from_consumer_lag(&lag);
+        assert_eq!(stats.msg_backlog, 10);
+        assert_eq!(stats.partitions.len(), 2);
+        assert_eq!(stats.partitions[0].broker_name.as_deref(), Some("broker-a"));
+        assert_eq!(stats.partitions[0].consumer_client.as_deref(), Some("172.18.2.212@7#1"));
+        assert_eq!(stats.partitions[0].last_timestamp, Some(1725000000000));
+        // Empty strings are normalized to None so UI can show "-".
+        assert!(stats.partitions[1].broker_name.is_none());
+        assert!(stats.partitions[1].consumer_client.is_none());
+        assert_eq!(stats.partitions[1].last_timestamp, Some(0));
+
+        let json = serde_json::to_value(&stats).expect("serialize backlog stats");
+        assert_eq!(json.get("msgBacklog").and_then(|v| v.as_i64()), Some(10));
+        assert!(json.get("partitions").and_then(|v| v.as_array()).is_some());
+
+        // Legacy callers that only had totals still deserialize with empty partitions.
+        let legacy: super::BacklogStats =
+            serde_json::from_value(serde_json::json!({ "msgBacklog": 3, "backlogSize": 0 }))
+                .expect("legacy backlog stats");
+        assert_eq!(legacy.msg_backlog, 3);
+        assert!(legacy.partitions.is_empty());
     }
 }

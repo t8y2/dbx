@@ -2,7 +2,8 @@
 
 import { effectScope, nextTick, ref } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState } from "@/composables/useDataGridColumnLayout";
+import { dataGridColumnOffsets, dataGridHorizontalColumnWindow, useDataGridColumnLayout, useDataGridColumnLayoutState, type ColumnHeaderReferenceDragController } from "@/composables/useDataGridColumnLayout";
+import { columnHeaderDragAutoScrollDelta, columnHeaderDropTargetIndex } from "@/lib/dataGrid/dataGridColumnHeaderInteraction";
 import { loadDataGridColumnLayout, saveDataGridColumnLayout } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 
 describe("useDataGridColumnLayout", () => {
@@ -15,7 +16,11 @@ describe("useDataGridColumnLayout", () => {
       removeItem: (key: string) => values.delete(key),
     });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    window.dispatchEvent(new Event("blur"));
+    document.querySelectorAll("[data-column-header-drag-preview]").forEach((element) => element.remove());
+    vi.unstubAllGlobals();
+  });
   it("builds cumulative offsets", () => {
     expect(dataGridColumnOffsets([80, 120, 60])).toEqual([0, 80, 200, 260]);
   });
@@ -33,6 +38,47 @@ describe("useDataGridColumnLayout", () => {
       beforeWidth: 0,
       afterWidth: 0,
     });
+  });
+
+  it("accelerates column drag scrolling toward the viewport edges", () => {
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 100, viewportLeft: 0, viewportRight: 400 })).toBe(0);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 32, viewportLeft: 0, viewportRight: 400 })).toBeLessThan(0);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: -10, viewportLeft: 0, viewportRight: 400 })).toBe(-24);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 368, viewportLeft: 0, viewportRight: 400 })).toBeGreaterThan(0);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 410, viewportLeft: 0, viewportRight: 400 })).toBe(24);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 410, viewportLeft: 0, viewportRight: 400, maxStep: 0 })).toBe(0);
+    expect(columnHeaderDragAutoScrollDelta({ clientX: 85, viewportLeft: 50, viewportRight: 100 })).toBeGreaterThan(0);
+  });
+
+  it("calculates drag targets after excluding the source column", () => {
+    const state = {
+      columnWidths: [100, 100, 100, 100],
+      columnOffsets: [0, 100, 200, 300, 400],
+    };
+
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 0, currentTargetIndex: 0, direction: 1, pointerContentX: 150 })).toBe(0);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 0, currentTargetIndex: 0, direction: 1, pointerContentX: 151 })).toBe(1);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 0, currentTargetIndex: 0, direction: 1, pointerContentX: 251 })).toBe(2);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 3, currentTargetIndex: 3, direction: -1, pointerContentX: 250 })).toBe(3);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 3, currentTargetIndex: 3, direction: -1, pointerContentX: 249 })).toBe(2);
+  });
+
+  it("uses the shifted column midpoint when reversing direction", () => {
+    const state = {
+      sourceVisibleIndex: 0,
+      columnWidths: [100, 100, 100, 100],
+      columnOffsets: [0, 100, 200, 300, 400],
+    };
+
+    expect(columnHeaderDropTargetIndex({ ...state, currentTargetIndex: 2, direction: -1, pointerContentX: 151 })).toBe(2);
+    expect(columnHeaderDropTargetIndex({ ...state, currentTargetIndex: 2, direction: -1, pointerContentX: 150 })).toBe(2);
+    expect(columnHeaderDropTargetIndex({ ...state, currentTargetIndex: 2, direction: -1, pointerContentX: 149 })).toBe(1);
+    expect(columnHeaderDropTargetIndex({ ...state, currentTargetIndex: 1, direction: -1, pointerContentX: 51 })).toBe(1);
+    expect(columnHeaderDropTargetIndex({ ...state, currentTargetIndex: 1, direction: -1, pointerContentX: 49 })).toBe(0);
+
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 3, currentTargetIndex: 1, direction: 1, pointerContentX: 249 })).toBe(1);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 3, currentTargetIndex: 1, direction: 1, pointerContentX: 250 })).toBe(1);
+    expect(columnHeaderDropTargetIndex({ ...state, sourceVisibleIndex: 3, currentTargetIndex: 1, direction: 1, pointerContentX: 251 })).toBe(2);
   });
 
   it("owns visibility, null-column toggles, and persisted ordering", () => {
@@ -209,6 +255,28 @@ describe("useDataGridColumnLayout", () => {
     scope.stop();
   });
 
+  it("uses grouped result comments in field filtering without name-map fallback", () => {
+    const scope = effectScope();
+    const state = scope.run(() =>
+      useDataGridColumnLayoutState({
+        columns: ref(["asin_url", "total"]),
+        sourceColumns: ref(undefined),
+        columnComments: ref(["asin亚马逊前台地址", undefined]),
+        commentByColumn: ref(new Map([["total", "Wrong aggregate comment"]])),
+        displayableColumnIndexes: ref([0, 1]),
+        allNullColumnIndexes: ref([]),
+        columnOrderKeys: ref(["asin_url\0\0", "total\0\0"]),
+        layoutScopeKey: ref("grouped-result-comments"),
+        tableScopeKey: ref(""),
+      }),
+    )!;
+
+    expect(state.orderedColumnLayoutOptions.value.map((option) => option.comment)).toEqual(["asin亚马逊前台地址", undefined]);
+    expect(state.filteredColumnLayoutOptions("亚马逊").map((option) => option.column)).toEqual(["asin_url"]);
+    expect(state.filteredColumnLayoutOptions("wrong")).toEqual([]);
+    scope.stop();
+  });
+
   it("keeps a new resize active when the previous resize completion frame is pending", () => {
     const frames = new Map<number, FrameRequestCallback>();
     let nextFrame = 1;
@@ -253,7 +321,7 @@ describe("useDataGridColumnLayout", () => {
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) => {
         callback(0);
-        return 1;
+        return 0;
       }),
     );
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -295,6 +363,518 @@ describe("useDataGridColumnLayout", () => {
     expect(document.body.style.userSelect).toBe("");
     window.dispatchEvent(new PointerEvent("pointerup", { clientX: 180, clientY: 10 }));
     expect(persist).toHaveBeenCalledTimes(1);
+  });
+
+  it("delays rightward sibling previews until the dragged column reaches the target slot", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    for (let index = 0; index < 3; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100, width: 100, right: (index + 1) * 100, top: 0, bottom: 20, height: 20, x: index * 100, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["a", "b", "c"]),
+        visibleColumnIndexes: ref([0, 1, 2]),
+        renderedColumnWidths: ref([100, 100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(300),
+        rowNumberWidth: 0,
+        headerRef: ref(header),
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 120, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([70, 0, 0]);
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 150, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([100, 0, 0]);
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 151, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([101, -100, 0]);
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 150, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([100, -100, 0]);
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 51, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([1, -100, 0]);
+
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 49, clientY: 10 }));
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([-1, 0, 0]);
+    scope.stop();
+  });
+
+  it("keeps a detached drag preview after the source header leaves the virtual window", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    const source = document.createElement("div");
+    source.dataset.visibleColIndex = "0";
+    source.textContent = "source_column";
+    source.getBoundingClientRect = () => ({ left: 40, width: 120, right: 160, top: 20, bottom: 50, height: 30, x: 40, y: 20, toJSON: () => ({}) });
+    header.append(source);
+
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["source_column", "target_column"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([120, 120]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(240),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 80, clientY: 30 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 100, clientY: 30 }));
+    const preview = document.body.querySelector<HTMLElement>("[data-column-header-drag-preview]");
+    expect(preview?.textContent).toBe("source_column");
+    expect(preview?.style.width).toBe("120px");
+
+    source.remove();
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 360, clientY: 30 }));
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).toBe(preview);
+    expect(preview?.style.transform).toBe("translateX(280px)");
+
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 360, clientY: 30 }));
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).toBeNull();
+
+    header.append(source);
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 80, clientY: 30 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 100, clientY: 30 }));
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).not.toBeNull();
+    window.dispatchEvent(new Event("blur"));
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).toBeNull();
+    scope.stop();
+  });
+
+  it("auto-scrolls while dragging a column to the first and last positions", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        const frame = nextFrame++;
+        frames.set(frame, callback);
+        return frame;
+      }),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((frame: number) => frames.delete(frame)),
+    );
+
+    const scroller = document.createElement("div");
+    Object.defineProperties(scroller, {
+      clientWidth: { configurable: true, value: 220 },
+      scrollWidth: { configurable: true, value: 500 },
+    });
+    scroller.getBoundingClientRect = () => ({ left: 0, width: 220, right: 220, top: 20, bottom: 200, height: 180, x: 0, y: 20, toJSON: () => ({}) });
+
+    const header = document.createElement("div");
+    for (let index = 0; index < 5; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100 - scroller.scrollLeft, width: 100, right: (index + 1) * 100 - scroller.scrollLeft, top: 0, bottom: 20, height: 20, x: index * 100 - scroller.scrollLeft, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+    const persist = vi.fn();
+    const syncScroll = vi.fn();
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["a", "b", "c", "d", "e"]),
+        visibleColumnIndexes: ref([0, 1, 2, 3, 4]),
+        renderedColumnWidths: ref([100, 100, 100, 100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(220),
+        rowNumberWidth: 0,
+        headerRef: ref(header),
+        getScrollElement: () => scroller,
+        onHorizontalScroll: syncScroll,
+        onPersistColumnOrder: persist,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 218, clientY: 10 }));
+    for (let iteration = 0; iteration < 30 && frames.size > 0; iteration++) {
+      const [frame, callback] = frames.entries().next().value!;
+      frames.delete(frame);
+      callback(iteration * 16);
+    }
+
+    expect(scroller.scrollLeft).toBe(280);
+    expect(syncScroll).toHaveBeenCalled();
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 218, clientY: 10 }));
+    expect(persist).toHaveBeenCalledWith([1, 2, 3, 4, 0]);
+    expect(frames.size).toBe(0);
+
+    scroller.scrollLeft = 280;
+    layout.startColumnHeaderDrag(4, new PointerEvent("pointerdown", { button: 0, clientX: 170, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 2, clientY: 10 }));
+    for (let iteration = 0; iteration < 30 && frames.size > 0; iteration++) {
+      const [frame, callback] = frames.entries().next().value!;
+      frames.delete(frame);
+      callback(iteration * 16);
+    }
+
+    expect(scroller.scrollLeft).toBe(0);
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 2, clientY: 10 }));
+    expect(persist).toHaveBeenLastCalledWith([4, 0, 1, 2, 3]);
+    expect(frames.size).toBe(0);
+    scope.stop();
+  });
+
+  it("switches to reference mode over the editor and drops without reordering", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    for (let index = 0; index < 2; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100, width: 100, right: (index + 1) * 100, top: 0, bottom: 20, height: 20, x: index * 100, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+    const controller: ColumnHeaderReferenceDragController = {
+      isOverEditorTarget: (clientX) => clientX > 300,
+      onEnter: vi.fn(() => "id"),
+      onMove: vi.fn(),
+      onDrop: vi.fn(() => true),
+      onCancel: vi.fn(),
+    };
+    const persist = vi.fn();
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["id", "name"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+        onPersistColumnOrder: persist,
+        columnReferenceDrag: controller,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    // 网格内：仍是重排序预览
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 120, clientY: 10 }));
+    expect(controller.onEnter).not.toHaveBeenCalled();
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).not.toBeNull();
+
+    // 进入编辑器区域：切换为引用模式，重排序预览移除
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 320, clientY: 10 }));
+    expect(controller.onEnter).toHaveBeenCalledWith(0);
+    expect(controller.onMove).toHaveBeenCalledWith(0, 320, 10);
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).toBeNull();
+    expect(layout.columnHeaderPreviewOffsets.value).toEqual([0, 0]);
+
+    // 在编辑器内释放：插入但不重排列
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 320, clientY: 10 }));
+    expect(controller.onDrop).toHaveBeenCalledWith(0, 320, 10);
+    expect(controller.onCancel).toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("cancels the reference drag and restores reorder preview when leaving the editor", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    for (let index = 0; index < 2; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100, width: 100, right: (index + 1) * 100, top: 0, bottom: 20, height: 20, x: index * 100, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+    const controller: ColumnHeaderReferenceDragController = {
+      isOverEditorTarget: (clientX) => clientX > 300,
+      onEnter: vi.fn(() => "id"),
+      onMove: vi.fn(),
+      onDrop: vi.fn(() => true),
+      onCancel: vi.fn(),
+    };
+    const persist = vi.fn();
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["id", "name"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+        onPersistColumnOrder: persist,
+        columnReferenceDrag: controller,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 320, clientY: 10 }));
+    expect(controller.onEnter).toHaveBeenCalledTimes(1);
+
+    // 拖回网格：还原重排序预览，引用反馈被取消
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 120, clientY: 10 }));
+    expect(controller.onCancel).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).not.toBeNull();
+
+    // 拖出后释放（不在编辑器内）：整体取消，不重排也不插入
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 320, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 120, clientY: 10 }));
+    expect(controller.onDrop).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("keeps reorder mode when the controller refuses the reference drag", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    for (let index = 0; index < 2; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100, width: 100, right: (index + 1) * 100, top: 0, bottom: 20, height: 20, x: index * 100, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+    const controller: ColumnHeaderReferenceDragController = {
+      isOverEditorTarget: () => true,
+      onEnter: vi.fn(() => null),
+      onMove: vi.fn(),
+      onDrop: vi.fn(() => true),
+      onCancel: vi.fn(),
+    };
+    const persist = vi.fn();
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["id", "name"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+        onPersistColumnOrder: persist,
+        columnReferenceDrag: controller,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 320, clientY: 10 }));
+    expect(controller.onEnter).toHaveBeenCalled();
+    expect(controller.onMove).not.toHaveBeenCalled();
+    expect(document.body.querySelector("[data-column-header-drag-preview]")).not.toBeNull();
+
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 320, clientY: 10 }));
+    expect(controller.onDrop).not.toHaveBeenCalled();
+    expect(persist).toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("cancels a plain reorder drag released outside both the grid and the editor", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    header.getBoundingClientRect = () => ({ left: 0, width: 200, right: 200, top: 0, bottom: 20, height: 20, x: 0, y: 0, toJSON: () => ({}) });
+    for (let index = 0; index < 2; index++) {
+      const column = document.createElement("div");
+      column.dataset.visibleColIndex = String(index);
+      column.getBoundingClientRect = () => ({ left: index * 100, width: 100, right: (index + 1) * 100, top: 0, bottom: 20, height: 20, x: index * 100, y: 0, toJSON: () => ({}) });
+      header.append(column);
+    }
+    const controller: ColumnHeaderReferenceDragController = {
+      isOverEditorTarget: () => false,
+      onEnter: vi.fn(() => null),
+      onMove: vi.fn(),
+      onDrop: vi.fn(() => true),
+      onCancel: vi.fn(),
+    };
+    const persist = vi.fn();
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["id", "name"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+        onPersistColumnOrder: persist,
+        columnReferenceDrag: controller,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 120, clientY: 10 }));
+    // 释放点 (320, 500) 不在表头/滚动区，也不在编辑器内：整体取消
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 320, clientY: 500 }));
+    expect(persist).not.toHaveBeenCalled();
+
+    // 对照：网格内释放仍提交重排序
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 180, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 180, clientY: 10 }));
+    expect(persist).toHaveBeenCalledWith([1, 0]);
+    scope.stop();
+  });
+
+  it("blocks native selection and drag while dragging columns", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        callback(0);
+        return 0;
+      }),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+
+    const header = document.createElement("div");
+    const column = document.createElement("div");
+    column.dataset.visibleColIndex = "0";
+    column.getBoundingClientRect = () => ({ left: 0, width: 100, right: 100, top: 0, bottom: 20, height: 20, x: 0, y: 0, toJSON: () => ({}) });
+    header.append(column);
+
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["id", "name"]),
+        visibleColumnIndexes: ref([0, 1]),
+        renderedColumnWidths: ref([100, 100]),
+        scrollLeft: ref(0),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        headerRef: ref(header),
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(0, new PointerEvent("pointerdown", { button: 0, clientX: 50, clientY: 10 }));
+
+    // 拖拽期间原生选择与拖拽启动被拦截
+    const selectStart = new Event("selectstart", { cancelable: true });
+    document.dispatchEvent(selectStart);
+    expect(selectStart.defaultPrevented).toBe(true);
+    const dragStart = new Event("dragstart", { cancelable: true });
+    document.dispatchEvent(dragStart);
+    expect(dragStart.defaultPrevented).toBe(true);
+
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 150, clientY: 10 }));
+    expect(document.body.style.userSelect).toBe("");
+
+    // 手势结束后恢复原生效行为
+    const laterSelect = new Event("selectstart", { cancelable: true });
+    document.dispatchEvent(laterSelect);
+    expect(laterSelect.defaultPrevented).toBe(false);
+    scope.stop();
+  });
+
+  it("uses the edge after frozen columns as the left auto-scroll trigger", () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        const frame = nextFrame++;
+        frames.set(frame, callback);
+        return frame;
+      }),
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((frame: number) => frames.delete(frame)),
+    );
+
+    const scroller = document.createElement("div");
+    scroller.scrollLeft = 200;
+    Object.defineProperties(scroller, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 800 },
+    });
+    scroller.getBoundingClientRect = () => ({ left: 0, width: 400, right: 400, top: 20, bottom: 200, height: 180, x: 0, y: 20, toJSON: () => ({}) });
+
+    const header = document.createElement("div");
+    const column = document.createElement("div");
+    column.dataset.visibleColIndex = "2";
+    column.getBoundingClientRect = () => ({ left: 240, width: 100, right: 340, top: 0, bottom: 20, height: 20, x: 240, y: 0, toJSON: () => ({}) });
+    header.append(column);
+
+    const scope = effectScope();
+    const layout = scope.run(() =>
+      useDataGridColumnLayout({
+        columnNames: ref(["a", "b", "c", "d", "e", "f", "g"]),
+        visibleColumnIndexes: ref([0, 1, 2, 3, 4, 5, 6]),
+        renderedColumnWidths: ref([100, 100, 100, 100, 100, 100, 100]),
+        scrollLeft: ref(200),
+        viewportWidth: ref(400),
+        rowNumberWidth: 40,
+        frozenColumnCount: ref(2),
+        headerRef: ref(header),
+        getScrollElement: () => scroller,
+      }),
+    )!;
+
+    layout.startColumnHeaderDrag(2, new PointerEvent("pointerdown", { button: 0, clientX: 260, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 235, clientY: 10 }));
+    const [frame, callback] = frames.entries().next().value!;
+    frames.delete(frame);
+    callback(0);
+
+    expect(scroller.scrollLeft).toBeLessThan(200);
+    scope.stop();
   });
 
   describe("frozen columns", () => {

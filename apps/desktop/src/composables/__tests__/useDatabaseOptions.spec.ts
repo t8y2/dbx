@@ -135,6 +135,22 @@ describe("namespace options", () => {
     ).toEqual(["analytics"]);
   });
 
+  it("falls back to the configured database when JDBC metadata returns no databases", () => {
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database: "gbase_demo",
+      }),
+    ).toEqual(["gbase_demo"]);
+
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database_info: { currentDatabase: "gbase_from_metadata" },
+      }),
+    ).toEqual(["gbase_from_metadata"]);
+  });
+
   it("preserves visible database filtering for catalog-scoped transfer options", async () => {
     mocks.listDorisCatalogDatabases.mockResolvedValue([{ name: "app" }, { name: "analytics" }]);
 
@@ -177,16 +193,17 @@ describe("namespace options", () => {
     expect(namespaceOptionsAreSchemas({ db_type: "postgres" })).toBe(false);
   });
 
-  it("does not expand the global database options composable to Dameng schemas", async () => {
+  it("expands Dameng schemas via listSchemas", async () => {
     mocks.getConfig.mockReturnValue({ db_type: "dameng" });
-    mocks.listDatabases.mockResolvedValue([]);
+    mocks.listSchemas.mockResolvedValue(["APP_USER", "REPORTING", "SYS"]);
 
     const { databaseOptions, loadDatabaseOptions } = useDatabaseOptions();
     await loadDatabaseOptions("connection-1");
 
-    expect(databaseOptions.value["connection-1"]).toEqual([]);
-    expect(mocks.listDatabases).toHaveBeenCalledWith("connection-1");
-    expect(mocks.listSchemas).not.toHaveBeenCalled();
+    // 达梦现在通过 listSchemas 获取 schema 列表，SYS 作为系统 schema 被过滤掉
+    expect(databaseOptions.value["connection-1"]).toEqual(["APP_USER", "REPORTING"]);
+    expect(mocks.listSchemas).toHaveBeenCalledWith("connection-1", "", true);
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 });
 

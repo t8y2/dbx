@@ -26,6 +26,8 @@ struct CachedAgentQuery {
 
 pub struct AgentRuntimeClient {
     child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
     stdin: Arc<Mutex<BufWriter<ChildStdin>>>,
     pending: Arc<Mutex<HashMap<u64, PendingAgentResponse>>>,
     stderr_tail: Arc<Mutex<StderrTail>>,
@@ -66,6 +68,8 @@ impl AgentRuntimeClient {
 
         let runtime = Arc::new(Self {
             child: Arc::new(Mutex::new(child)),
+            child_reaper_started: Arc::new(AtomicBool::new(false)),
+            child_reaped: Arc::new(AtomicBool::new(false)),
             stdin: Arc::new(Mutex::new(BufWriter::new(child_stdin))),
             pending: Arc::new(Mutex::new(HashMap::new())),
             stderr_tail,
@@ -106,20 +110,16 @@ impl AgentRuntimeClient {
     fn start_response_reader(self: &Arc<Self>, mut stdout: BufReader<ChildStdout>) {
         let pending = self.pending.clone();
         let failed = self.failed.clone();
+        let child = self.child.clone();
+        let child_reaper_started = self.child_reaper_started.clone();
+        let child_reaped = self.child_reaped.clone();
         std::thread::spawn(move || loop {
-            let line = match read_agent_line(&mut stdout, "response") {
-                Ok(line) => line,
+            let response = match read_agent_json_response(&mut stdout) {
+                Ok((_, response)) => response,
                 Err(err) => {
                     failed.store(true, Ordering::Release);
                     fail_pending_requests(&pending, err);
-                    return;
-                }
-            };
-            let response: Value = match serde_json::from_str(line.trim()) {
-                Ok(response) => response,
-                Err(err) => {
-                    failed.store(true, Ordering::Release);
-                    fail_pending_requests(&pending, format!("Invalid JSON response from agent: {err}"));
+                    terminate_and_reap_shared_agent(child, child_reaper_started, child_reaped);
                     return;
                 }
             };
@@ -293,24 +293,72 @@ impl AgentRuntimeClient {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
+        start_shared_agent_reaper(self.child.clone(), self.child_reaper_started.clone(), self.child_reaped.clone());
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
 
     pub async fn kill_and_wait(&self) {
         self.failed.store(true, Ordering::Release);
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        if self.child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            wait_for_shared_agent_reaper(self.child_reaped.clone()).await;
+            return;
+        }
         let child = self.child.clone();
-        match tokio::task::spawn_blocking(move || {
-            let mut child = child.lock().map_err(|_| "Shared agent process lock poisoned".to_string())?;
-            let _ = child.kill();
-            child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+        let child_reaped = self.child_reaped.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let result =
+                child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                    let _ = child.kill();
+                    child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+                });
+            child_reaped.store(true, Ordering::Release);
+            result
         })
-        .await
-        {
+        .await;
+        match result {
             Ok(Ok(())) => {}
             Ok(Err(err)) => log::warn!("{err}"),
             Err(err) => log::warn!("Failed to join shared agent shutdown task: {err}"),
         }
+    }
+}
+
+fn terminate_and_reap_shared_agent(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+    }
+    start_shared_agent_reaper(child, child_reaper_started, child_reaped);
+}
+
+fn start_shared_agent_reaper(
+    child: Arc<Mutex<Child>>,
+    child_reaper_started: Arc<AtomicBool>,
+    child_reaped: Arc<AtomicBool>,
+) {
+    if child_reaper_started.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result =
+            child.lock().map_err(|_| "Shared agent process lock poisoned".to_string()).and_then(|mut child| {
+                child.wait().map(|_| ()).map_err(|err| format!("Failed to wait for shared agent runtime: {err}"))
+            });
+        child_reaped.store(true, Ordering::Release);
+        match result {
+            Ok(()) => {}
+            Err(err) => log::warn!("{err}"),
+        }
+    });
+}
+
+async fn wait_for_shared_agent_reaper(child_reaped: Arc<AtomicBool>) {
+    while !child_reaped.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -818,6 +866,10 @@ pub const AGENT_PROTOCOL_VERSION: u32 = 2;
 const RPC_TIMEOUT_SECS: u64 = 30;
 const STARTUP_TIMEOUT_SECS: u64 = 15;
 const STDERR_TAIL_LINES: usize = 20;
+const MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES: usize = 8;
+const AGENT_STDOUT_NOISE_SAMPLE_LINES: usize = 3;
+const AGENT_STDOUT_NOISE_SAMPLE_CHARS: usize = 160;
+const MAX_AGENT_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_EXIT_DIAGNOSTIC_WAIT_MS: u64 = 1_000;
 const AGENT_EXIT_DIAGNOSTIC_POLL_MS: u64 = 10;
 const SHARED_RUNTIME_IDLE_GRACE_SECS: u64 = 30;
@@ -835,6 +887,9 @@ pub struct AgentDriverClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     cached_query: Option<CachedAgentQuery>,
+    /// Driver-reported identifier quoting, captured once after connect.
+    /// Keeping this on the client avoids a connection-info RPC on every query.
+    identifier_quote: Option<String>,
 }
 
 /// Keeps serialized session RPC access separate from the process-level fail-stop handle.
@@ -844,13 +899,19 @@ pub struct PooledAgentClient {
     client: tokio::sync::Mutex<AgentDriverClient>,
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
+    identifier_quote: Option<String>,
 }
 
 impl PooledAgentClient {
     pub fn new(client: AgentDriverClient) -> Self {
         let shared_runtime = client.shared_runtime.clone();
         let agent_session_id = client.agent_session_id.clone();
-        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id }
+        let identifier_quote = client.identifier_quote.clone();
+        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id, identifier_quote }
+    }
+
+    pub fn identifier_quote(&self) -> Option<&str> {
+        self.identifier_quote.as_deref()
     }
 
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, AgentDriverClient> {
@@ -878,6 +939,11 @@ impl PooledAgentClient {
 
     pub fn is_runtime_available(&self) -> bool {
         self.shared_runtime.as_ref().is_none_or(|runtime| !runtime.is_failed())
+    }
+
+    /// True when this client is attached to a multi-session shared agent process.
+    pub fn uses_shared_runtime(&self) -> bool {
+        self.shared_runtime.is_some()
     }
 
     /// Terminates a protocol-v2 shared runtime without waiting for the logical session lock.
@@ -972,6 +1038,9 @@ pub enum AgentCapability {
     EtcdLease,
     EtcdAuth,
     MongoDropDatabase,
+    MongoCloneCollection,
+    MongoRunCommand,
+    MongoInsertDocuments,
     MultiSession,
     StructuredErrorV1,
 }
@@ -1054,7 +1123,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 24] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1074,6 +1143,9 @@ impl AgentCapability {
         Self::EtcdLease,
         Self::EtcdAuth,
         Self::MongoDropDatabase,
+        Self::MongoCloneCollection,
+        Self::MongoRunCommand,
+        Self::MongoInsertDocuments,
         Self::MultiSession,
         Self::StructuredErrorV1,
     ];
@@ -1099,6 +1171,9 @@ impl AgentCapability {
             Self::EtcdLease => "etcd_lease",
             Self::EtcdAuth => "etcd_auth",
             Self::MongoDropDatabase => "mongo_drop_database",
+            Self::MongoCloneCollection => "mongo_clone_collection",
+            Self::MongoRunCommand => "mongo_run_command",
+            Self::MongoInsertDocuments => "mongo_insert_documents",
             Self::MultiSession => "multi_session",
             Self::StructuredErrorV1 => "structured_error_v1",
         }
@@ -1124,6 +1199,7 @@ pub enum AgentMethod {
     CompletionAssistantSearchV1,
     GetObjectSource,
     GetColumns,
+    GetCustomTypeDetails,
     ListIndexes,
     ListForeignKeys,
     ListTriggers,
@@ -1141,12 +1217,15 @@ pub enum AgentMethod {
     GetExplainInfo,
     ExecuteBatch,
     ExecuteTransaction,
+    BeginManualTransaction,
+    CommitManualTransaction,
+    RollbackManualTransaction,
     Disconnect,
     Shutdown,
 }
 
 impl AgentMethod {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 39] = [
         Self::Handshake,
         Self::Connect,
         Self::OpenSession,
@@ -1181,6 +1260,9 @@ impl AgentMethod {
         Self::GetExplainInfo,
         Self::ExecuteBatch,
         Self::ExecuteTransaction,
+        Self::BeginManualTransaction,
+        Self::CommitManualTransaction,
+        Self::RollbackManualTransaction,
         Self::Disconnect,
         Self::Shutdown,
     ];
@@ -1205,6 +1287,7 @@ impl AgentMethod {
             Self::GetObjectSource => "get_object_source",
             Self::GetTableDdl => "get_table_ddl",
             Self::GetColumns => "get_columns",
+            Self::GetCustomTypeDetails => "get_type_details",
             Self::ListIndexes => "list_indexes",
             Self::ListForeignKeys => "list_foreign_keys",
             Self::ListTriggers => "list_triggers",
@@ -1221,6 +1304,9 @@ impl AgentMethod {
             Self::GetExplainInfo => "get_explain_info",
             Self::ExecuteBatch => "execute_batch",
             Self::ExecuteTransaction => "execute_transaction",
+            Self::BeginManualTransaction => "begin_manual_transaction",
+            Self::CommitManualTransaction => "commit_manual_transaction",
+            Self::RollbackManualTransaction => "rollback_manual_transaction",
             Self::Disconnect => "disconnect",
             Self::Shutdown => "shutdown",
         }
@@ -1272,37 +1358,51 @@ pub enum MongoAgentMethod {
     ListDatabases,
     ListCollections,
     FindDocuments,
+    FindOne,
+    ExplainFind,
+    AggregateDocuments,
     FindDocumentsExtendedJson,
     CountDocuments,
     ServerVersion,
     CreateIndex,
+    CreateUser,
     DropIndexes,
     DropCollection,
+    CloneCollection,
     DropDatabase,
     InsertDocument,
+    InsertDocuments,
     UpdateDocument,
     UpdateDocuments,
     DeleteDocument,
     DeleteDocuments,
+    RunCommand,
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 22] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
+        Self::FindOne,
+        Self::ExplainFind,
+        Self::AggregateDocuments,
         Self::FindDocumentsExtendedJson,
         Self::CountDocuments,
         Self::ServerVersion,
         Self::CreateIndex,
+        Self::CreateUser,
         Self::DropIndexes,
         Self::DropCollection,
+        Self::CloneCollection,
         Self::DropDatabase,
         Self::InsertDocument,
+        Self::InsertDocuments,
         Self::UpdateDocument,
         Self::UpdateDocuments,
         Self::DeleteDocument,
         Self::DeleteDocuments,
+        Self::RunCommand,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -1310,18 +1410,25 @@ impl MongoAgentMethod {
             Self::ListDatabases => "list_databases",
             Self::ListCollections => "list_collections",
             Self::FindDocuments => "find_documents",
+            Self::FindOne => "find_one",
+            Self::ExplainFind => "explain_find",
+            Self::AggregateDocuments => "aggregate_documents",
             Self::FindDocumentsExtendedJson => "find_documents_extended_json",
             Self::CountDocuments => "count_documents",
             Self::ServerVersion => "server_version",
             Self::CreateIndex => "create_index",
+            Self::CreateUser => "create_user",
             Self::DropIndexes => "drop_indexes",
             Self::DropCollection => "drop_collection",
+            Self::CloneCollection => "clone_collection",
             Self::DropDatabase => "drop_database",
             Self::InsertDocument => "insert_document",
+            Self::InsertDocuments => "insert_documents",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
             Self::DeleteDocument => "delete_document",
             Self::DeleteDocuments => "delete_documents",
+            Self::RunCommand => "run_command",
         }
     }
 }
@@ -1534,6 +1641,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         })
     }
 
@@ -1548,6 +1656,7 @@ impl AgentDriverClient {
             shared_runtime: Some(runtime),
             agent_session_id: Some(agent_session_id),
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -1666,16 +1775,9 @@ impl AgentDriverClient {
         let mut reader = self.stdout.take().ok_or("Agent stdout not available")?;
 
         let response_task = tokio::task::spawn_blocking(move || {
-            let line = match read_agent_line(&mut reader, "response") {
-                Ok(line) => line,
+            let (line, resp) = match read_agent_json_response(&mut reader) {
+                Ok(response) => response,
                 Err(e) => return (reader, Err(e)),
-            };
-
-            let resp: Value = match serde_json::from_str(line.trim()) {
-                Ok(v) => v,
-                Err(e) => {
-                    return (reader, Err(format!("Invalid JSON response from agent: {e}")));
-                }
             };
 
             let result = if let Some(err) = resp.get("error") {
@@ -1856,6 +1958,10 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::ConnectionInfo, serde_json::json!({}), timeout_duration).await
     }
 
+    pub(crate) fn set_identifier_quote(&mut self, identifier_quote: Option<String>) {
+        self.identifier_quote = identifier_quote.filter(|quote| !quote.trim().is_empty());
+    }
+
     pub async fn disconnect(&mut self) -> Result<Value, String> {
         self.invalidate_cached_query();
         if self.shared_runtime.is_some() {
@@ -2019,9 +2125,21 @@ impl AgentDriverClient {
         object_type: &K,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
+        self.get_object_source_for_relation(database, schema, name, object_type, None, timeout_duration).await
+    }
+
+    pub async fn get_object_source_for_relation<T: DeserializeOwned + Send + 'static, K: Serialize>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &K,
+        relation_name: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
         self.call_method_with_timeout(
             AgentMethod::GetObjectSource,
-            agent_object_source_params(database, schema, name, object_type),
+            agent_object_source_params_with_relation(database, schema, name, object_type, relation_name),
             timeout_duration,
         )
         .await
@@ -2037,6 +2155,21 @@ impl AgentDriverClient {
         self.call_method_with_timeout(
             AgentMethod::GetColumns,
             agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
+    }
+
+    pub async fn get_custom_type_details<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        name: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::GetCustomTypeDetails,
+            agent_type_details_params(database, schema, name),
             timeout_duration,
         )
         .await
@@ -2156,12 +2289,20 @@ impl AgentDriverClient {
         table: &str,
         timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method_with_timeout(
-            AgentMethod::GetTableDdl,
-            agent_schema_table_params(database, schema, table),
-            timeout_duration,
-        )
-        .await
+        self.get_table_ddl_with_options(database, schema, table, false, timeout_duration).await
+    }
+
+    pub async fn get_table_ddl_with_options<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        schema: &str,
+        table: &str,
+        portable: bool,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let mut params = agent_schema_table_params(database, schema, table);
+        params["portable"] = serde_json::json!(portable);
+        self.call_method_with_timeout(AgentMethod::GetTableDdl, params, timeout_duration).await
     }
 
     pub async fn execute_query<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
@@ -2381,6 +2522,24 @@ impl AgentDriverClient {
             .await
     }
 
+    pub async fn begin_manual_transaction<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        schema: Option<&str>,
+    ) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::BeginManualTransaction, agent_manual_transaction_params(schema)).await
+    }
+
+    pub async fn commit_manual_transaction<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::CommitManualTransaction, serde_json::json!({})).await
+    }
+
+    pub async fn rollback_manual_transaction<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method(AgentMethod::RollbackManualTransaction, serde_json::json!({})).await
+    }
+
     pub async fn execute_batch<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: Option<&str>,
@@ -2464,6 +2623,24 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::FindDocuments, params).await
     }
 
+    pub async fn mongo_find_one<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::FindOne, params).await
+    }
+
+    pub async fn mongo_explain_find<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ExplainFind, params).await
+    }
+
+    pub async fn mongo_aggregate_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::AggregateDocuments, params).await
+    }
+
     /// Calls the Mongo agent read method that returns MongoDB relaxed Extended JSON.
     pub async fn mongo_find_documents_extended_json<T: DeserializeOwned + Send + 'static>(
         &mut self,
@@ -2486,11 +2663,25 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ServerVersion, mongo_database_params(database)).await
     }
 
+    pub async fn mongo_run_command<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::RunCommand, params).await
+    }
+
     pub async fn mongo_create_index<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::CreateIndex, params).await
+    }
+
+    pub async fn mongo_create_user<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CreateUser, params).await
     }
 
     pub async fn mongo_drop_indexes<T: DeserializeOwned + Send + 'static>(
@@ -2507,6 +2698,13 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::DropCollection, params).await
     }
 
+    pub async fn mongo_clone_collection<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::CloneCollection, params).await
+    }
+
     pub async fn mongo_drop_database<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -2519,6 +2717,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::InsertDocument, params).await
+    }
+
+    pub async fn mongo_insert_documents<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::InsertDocuments, params).await
     }
 
     pub async fn mongo_update_document<T: DeserializeOwned + Send + 'static>(
@@ -2687,6 +2892,9 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::EtcdLease
             | AgentCapability::EtcdAuth
             | AgentCapability::MongoDropDatabase
+            | AgentCapability::MongoCloneCollection
+            | AgentCapability::MongoRunCommand
+            | AgentCapability::MongoInsertDocuments
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -2702,7 +2910,26 @@ pub fn agent_schema_table_params(database: &str, schema: &str, table: &str) -> V
 }
 
 pub fn agent_object_source_params<K: Serialize>(database: &str, schema: &str, name: &str, object_type: &K) -> Value {
-    serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type })
+    agent_object_source_params_with_relation(database, schema, name, object_type, None)
+}
+
+pub fn agent_object_source_params_with_relation<K: Serialize>(
+    database: &str,
+    schema: &str,
+    name: &str,
+    object_type: &K,
+    relation_name: Option<&str>,
+) -> Value {
+    let mut params =
+        serde_json::json!({ "database": database, "schema": schema, "name": name, "object_type": object_type });
+    if let Some(relation_name) = relation_name.map(str::trim).filter(|value| !value.is_empty()) {
+        params["relation_name"] = Value::String(relation_name.to_string());
+    }
+    params
+}
+
+pub fn agent_type_details_params(database: &str, schema: &str, name: &str) -> Value {
+    serde_json::json!({ "database": database, "schema": schema, "name": name })
 }
 
 pub fn agent_close_query_session_params(session_id: &str) -> Value {
@@ -2716,6 +2943,14 @@ pub fn agent_transaction_params(database: Option<&str>, statements: &[String], s
         "statements": statements,
         "schema": schema,
     })
+}
+
+pub fn agent_manual_transaction_params(schema: Option<&str>) -> Value {
+    let schema = schema.map(str::trim).filter(|schema| !schema.is_empty());
+    match schema {
+        Some(schema) => serde_json::json!({ "schema": schema }),
+        None => serde_json::json!({}),
+    }
 }
 
 pub fn mongo_database_params(database: &str) -> Value {
@@ -2787,6 +3022,30 @@ fn agent_java_args_with_extra_opts(
 
     if agent_jar_path_matches_key(jar_path, "informix") {
         args.push("-Djava.net.preferIPv4Stack=true".to_string());
+    }
+
+    // Ignite's GridUnsafe/BinaryContext reflect into JDK internals; without these
+    // opens every connect fails with ExceptionInInitializerError on JDK 9+.
+    if agent_jar_path_matches_key(jar_path, "ignite") {
+        args.extend(
+            [
+                "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED",
+                "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+                "--add-opens=java.base/java.util=ALL-UNNAMED",
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+
+    // DM's driver reflects into NetworkInterface.index when the host contains '%'
+    // (multi-NIC addresses or IPv6 zone suffixes); without this open such connects
+    // fail with InaccessibleObjectException on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "dameng") {
+        args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
     }
 
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
@@ -2923,7 +3182,14 @@ fn agent_proxy_env_vars() -> &'static [&'static str] {
 }
 
 fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, String> {
-    const MAX_RESPONSE_BYTES: usize = 512 * 1024 * 1024;
+    read_agent_line_with_limit(reader, context, MAX_AGENT_RESPONSE_BYTES)
+}
+
+fn read_agent_line_with_limit<R: BufRead>(
+    reader: &mut R,
+    context: &str,
+    maximum_bytes: usize,
+) -> Result<String, String> {
     let mut bytes = Vec::new();
     loop {
         let available = reader.fill_buf().map_err(|e| format!("Failed to read {context} from agent: {e}"))?;
@@ -2938,14 +3204,58 @@ fn read_agent_line<R: BufRead>(reader: &mut R, context: &str) -> Result<String, 
         bytes.extend_from_slice(available);
         let len = available.len();
         reader.consume(len);
-        if bytes.len() > MAX_RESPONSE_BYTES {
-            return Err(format!("Agent {context} exceeded maximum size ({} bytes)", MAX_RESPONSE_BYTES));
+        if bytes.len() > maximum_bytes {
+            return Err(format!("Agent {context} exceeded maximum size ({maximum_bytes} bytes)"));
         }
     }
     if bytes.is_empty() {
         return Err(format!("Failed to read {context} from agent: end of stream"));
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_agent_json_response<R: BufRead>(reader: &mut R) -> Result<(String, Value), String> {
+    let mut noise_lines = 0;
+    let mut noise_samples = Vec::with_capacity(AGENT_STDOUT_NOISE_SAMPLE_LINES);
+    loop {
+        let line = read_agent_line(reader, "response").map_err(|error| {
+            if noise_samples.is_empty() {
+                error
+            } else {
+                format!("{error}; sampled agent stdout noise: {}", noise_samples.join(" | "))
+            }
+        })?;
+        match serde_json::from_str::<Value>(line.trim()) {
+            Ok(response) => return Ok((line, response)),
+            Err(parse_error) => {
+                noise_lines += 1;
+                let sample = sample_agent_stdout_noise(&line);
+                log::warn!("[agent:stdout] ignoring non-JSON response line: {sample}");
+                if noise_samples.len() < AGENT_STDOUT_NOISE_SAMPLE_LINES {
+                    noise_samples.push(sample);
+                }
+                if noise_lines > MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+                    return Err(format!(
+                        "Agent response exceeded maximum consecutive stdout noise lines ({MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES}); last JSON error: {parse_error}; sampled agent stdout noise: {}",
+                        noise_samples.join(" | ")
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn sample_agent_stdout_noise(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return "<blank>".to_string();
+    }
+    let mut chars = trimmed.chars();
+    let mut sample = chars.by_ref().take(AGENT_STDOUT_NOISE_SAMPLE_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        sample.push('…');
+    }
+    format!("{sample:?}")
 }
 
 fn start_stderr_collector(stderr: ChildStderr, stderr_tail: Arc<Mutex<StderrTail>>) {
@@ -3050,6 +3360,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -3079,21 +3390,24 @@ impl Drop for AgentDriverClient {
 mod tests {
     use super::{
         agent_close_query_session_params, agent_error_from_legacy, agent_handshake_params, agent_java_args,
-        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params, agent_proxy_env_vars,
-        agent_schema_params, agent_schema_table_params, agent_supports_capability, agent_transaction_params,
-        append_legacy_error_context, decode_agent_response, format_agent_process_error, format_agent_startup_error,
-        is_agent_rpc_response_error, is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params,
-        mongo_database_params, mongo_document_id_params, parse_agent_java_opts, read_agent_line, spawn_agent_process,
-        start_stderr_collector, validate_dameng_java_system_properties, AgentCallError, AgentCapability,
-        AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake, AgentKvMethod,
-        AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient, AgentSessionDisposition,
-        AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams, MongoAgentMethod, StderrTail,
-        AGENT_PROTOCOL_VERSION,
+        agent_java_args_with_extra, agent_java_args_with_extra_opts, agent_object_source_params,
+        agent_object_source_params_with_relation, agent_proxy_env_vars, agent_schema_params, agent_schema_table_params,
+        agent_supports_capability, agent_transaction_params, append_legacy_error_context, decode_agent_response,
+        format_agent_process_error, format_agent_startup_error, is_agent_rpc_response_error,
+        is_unsupported_handshake_error, legacy_agent_call_error, mongo_collection_params, mongo_database_params,
+        mongo_document_id_params, parse_agent_java_opts, read_agent_json_response, read_agent_line,
+        read_agent_line_with_limit, start_stderr_collector, validate_dameng_java_system_properties, AgentCallError,
+        AgentCapability, AgentDriverClient, AgentErrorCategory, AgentErrorContext, AgentErrorStage, AgentHandshake,
+        AgentKvMethod, AgentLaunchSpec, AgentMethod, AgentOperationOutcome, AgentRuntimeClient,
+        AgentSessionDisposition, AgentTableReadCloseParams, AgentTableReadPageParams, AgentTableReadStartParams,
+        MongoAgentMethod, StderrTail, AGENT_PROTOCOL_VERSION, AGENT_STDOUT_NOISE_SAMPLE_CHARS,
+        MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES,
     };
     use crate::agent_recovery::{RecoveryDecision, RecoveryPolicy, RecoveryScope};
     use std::io::Cursor;
     use std::io::Write;
     use std::process::{Command, Stdio};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio_util::sync::CancellationToken;
@@ -3110,7 +3424,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_ne!(fs::metadata(&program).unwrap().permissions().mode() & 0o100, 0);
 
@@ -3129,7 +3443,7 @@ mod tests {
         fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let mut child = spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
+        let mut child = super::spawn_agent_process(&AgentLaunchSpec::new(&program)).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::metadata(&program).unwrap().permissions().mode() & 0o777, 0o700);
 
@@ -3518,6 +3832,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_java_args_open_java_net_for_dameng() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_java_net_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_open_jdk_internals_for_ignite() {
+        let args = agent_java_args("/tmp/dbx/drivers/ignite/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.util=ALL-UNNAMED"));
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.lang=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_jdk_internals_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/kylin/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.nio=ALL-UNNAMED"));
+    }
+
+    #[test]
     fn agent_java_args_include_custom_jvm_options_before_jar() {
         let args = agent_java_args_with_extra(
             "/tmp/dbx/drivers/hive/agent.jar",
@@ -3617,6 +3961,63 @@ mod tests {
     }
 
     #[test]
+    fn reads_agent_json_responses_after_bounded_noise_and_resets_the_limit() {
+        let mut input = String::new();
+        for _ in 0..MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+            input.push_str("driver banner\n");
+        }
+        input.push_str("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":true}\n");
+        for index in 0..MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES {
+            if index % 2 == 0 {
+                input.push('\n');
+            } else {
+                input.push_str("more driver chatter\n");
+            }
+        }
+        input.push_str("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":false}\n");
+        let mut reader = Cursor::new(input.into_bytes());
+
+        let (_, first) = read_agent_json_response(&mut reader).unwrap();
+        let (_, second) = read_agent_json_response(&mut reader).unwrap();
+
+        assert_eq!(first["id"], 1);
+        assert_eq!(second["id"], 2);
+    }
+
+    #[test]
+    fn reads_immediate_agent_json_response_without_noise() {
+        let mut reader = Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":true}\n".to_vec());
+
+        let (line, response) = read_agent_json_response(&mut reader).unwrap();
+
+        assert_eq!(line, "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":true}\n");
+        assert_eq!(response["id"], 7);
+    }
+
+    #[test]
+    fn rejects_unbounded_agent_stdout_noise_with_bounded_diagnostics() {
+        let long_noise = "x".repeat(AGENT_STDOUT_NOISE_SAMPLE_CHARS + 40);
+        let input = format!("{long_noise}\n").repeat(MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES + 1);
+        let mut reader = Cursor::new(input.into_bytes());
+
+        let error = read_agent_json_response(&mut reader).unwrap_err();
+
+        assert!(error.contains("exceeded maximum consecutive stdout noise lines (8)"));
+        assert!(error.contains("sampled agent stdout noise:"));
+        assert!(error.contains('…'));
+        assert!(error.len() < 700, "diagnostic was not bounded: {} bytes", error.len());
+    }
+
+    #[test]
+    fn preserves_agent_response_line_size_limit() {
+        let mut reader = Cursor::new(b"123456789".to_vec());
+
+        let error = read_agent_line_with_limit(&mut reader, "response", 8).unwrap_err();
+
+        assert_eq!(error, "Agent response exceeded maximum size (8 bytes)");
+    }
+
+    #[test]
     fn formats_agent_process_error_with_exit_status_and_stderr_tail() {
         let mut stderr_tail = StderrTail::default();
         stderr_tail.push_line("java.lang.NoClassDefFoundError: org/apache/hive/jdbc/HiveDriver".to_string());
@@ -3685,6 +4086,7 @@ mod tests {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         };
 
         let started_at = std::time::Instant::now();
@@ -3794,6 +4196,39 @@ for line in sys.stdin:
 
     async fn runtime_counter(runtime: &Arc<AgentRuntimeClient>, method: &str) -> u64 {
         runtime.call(method, serde_json::json!({}), Some(Duration::from_secs(2)), None).await.unwrap()
+    }
+
+    async fn wait_for_runtime_reap(runtime: &AgentRuntimeClient) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.child_reaped.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shared Agent child should be reaped");
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_reaps_child_process() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-reap-test").await;
+
+        runtime.kill();
+        wait_for_runtime_reap(&runtime).await;
+
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_kill_and_wait_joins_existing_reaper() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("kill-and-wait-reap-test").await;
+
+        runtime.kill();
+        runtime.kill_and_wait().await;
+
+        assert!(runtime.child_reaped.load(Ordering::Acquire));
+        assert!(runtime.child.lock().unwrap().try_wait().unwrap().is_some());
+        let _ = std::fs::remove_file(script_path);
     }
 
     #[tokio::test]
@@ -3994,6 +4429,149 @@ for line in sys.stdin:
         assert!(client.cached_query.is_none());
 
         runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_tolerates_post_startup_driver_stdout_noise() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-stdout-noise-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': result}
+    elif req['method'] == 'fail':
+        print('Log4j class not found, fallback to sl4j', flush=True)
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -42, 'message': 'synthetic agent error'}}
+    else:
+        print('Log4j class not found, fallback to sl4j', flush=True)
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}
+    print(json.dumps(response), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+
+        let result = runtime
+            .call::<serde_json::Value>(
+                AgentMethod::TestConnection.as_str(),
+                serde_json::json!({}),
+                Some(Duration::from_secs(2)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+
+        let error = runtime
+            .call_typed::<serde_json::Value>("fail", serde_json::json!({}), Some(Duration::from_secs(2)), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentCallError::Legacy { rpc_code: Some(-42), ref message, .. }
+                if message == "synthetic agent error"
+        ));
+        assert!(!runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn shared_runtime_fails_all_pending_requests_after_stdout_noise_limit() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-runtime-stdout-noise-limit-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            format!(
+                r#"import json, sys
+pending = []
+print(json.dumps({{'ready': True}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {{'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}}
+        print(json.dumps({{'jsonrpc': '2.0', 'id': req['id'], 'result': result}}), flush=True)
+    else:
+        pending.append(req)
+        if len(pending) == 2:
+            for index in range({}):
+                print('driver-noise-' + str(index), flush=True)
+"#,
+                MAX_CONSECUTIVE_AGENT_STDOUT_NOISE_LINES + 1
+            ),
+        )
+        .unwrap();
+
+        let runtime = AgentRuntimeClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        let first =
+            runtime.call::<serde_json::Value>("first", serde_json::json!({}), Some(Duration::from_secs(2)), None);
+        let second =
+            runtime.call::<serde_json::Value>("second", serde_json::json!({}), Some(Duration::from_secs(2)), None);
+
+        let (first, second) = tokio::join!(first, second);
+
+        for error in [first.unwrap_err(), second.unwrap_err()] {
+            assert!(error.contains("exceeded maximum consecutive stdout noise lines (8)"));
+            assert!(error.contains("driver-noise-0"));
+        }
+        assert!(runtime.is_failed());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn legacy_client_tolerates_post_startup_driver_stdout_noise() {
+        let script_path =
+            std::env::temp_dir().join(format!("dbx-agent-legacy-stdout-noise-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print('', flush=True)
+    print('Log4j class not found, fallback to sl4j', flush=True)
+    if req['method'] == 'fail':
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -42, 'message': 'synthetic agent error'}}
+    else:
+        response = {'jsonrpc': '2.0', 'id': req['id'], 'result': {'ok': True}}
+    print(json.dumps(response), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let mut client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(test_python()).with_args([script_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .unwrap();
+
+        let result = client.call::<serde_json::Value>("echo", serde_json::json!({})).await.unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
+
+        let error = client.call::<serde_json::Value>("fail", serde_json::json!({})).await.unwrap_err();
+        assert!(error.contains("Agent RPC error (-42): synthetic agent error"));
+
+        client.kill();
         let _ = std::fs::remove_file(script_path);
     }
 
@@ -4213,6 +4791,7 @@ for line in sys.stdin:
             .unwrap_err();
         assert!(error.contains("end of stream") || error.contains("response channel closed"));
         assert!(runtime.is_failed());
+        wait_for_runtime_reap(&runtime).await;
         let _ = std::fs::remove_file(script_path);
     }
 
@@ -4270,9 +4849,12 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::EtcdLease.as_str(), "etcd_lease");
         assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
         assert_eq!(AgentCapability::MongoDropDatabase.as_str(), "mongo_drop_database");
+        assert_eq!(AgentCapability::MongoCloneCollection.as_str(), "mongo_clone_collection");
+        assert_eq!(AgentCapability::MongoRunCommand.as_str(), "mongo_run_command");
+        assert_eq!(AgentCapability::MongoInsertDocuments.as_str(), "mongo_insert_documents");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 21);
+        assert_eq!(AgentCapability::ALL.len(), 24);
     }
 
     #[test]
@@ -4305,6 +4887,9 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::CloseTableReadSession.as_str(), "close_table_read_session");
         assert_eq!(AgentMethod::ExecuteBatch.as_str(), "execute_batch");
         assert_eq!(AgentMethod::ExecuteTransaction.as_str(), "execute_transaction");
+        assert_eq!(AgentMethod::BeginManualTransaction.as_str(), "begin_manual_transaction");
+        assert_eq!(AgentMethod::CommitManualTransaction.as_str(), "commit_manual_transaction");
+        assert_eq!(AgentMethod::RollbackManualTransaction.as_str(), "rollback_manual_transaction");
         assert_eq!(AgentMethod::Disconnect.as_str(), "disconnect");
         assert_eq!(AgentMethod::Shutdown.as_str(), "shutdown");
     }
@@ -4314,14 +4899,20 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::ListDatabases.as_str(), "list_databases");
         assert_eq!(MongoAgentMethod::ListCollections.as_str(), "list_collections");
         assert_eq!(MongoAgentMethod::FindDocuments.as_str(), "find_documents");
+        assert_eq!(MongoAgentMethod::FindOne.as_str(), "find_one");
+        assert_eq!(MongoAgentMethod::ExplainFind.as_str(), "explain_find");
+        assert_eq!(MongoAgentMethod::AggregateDocuments.as_str(), "aggregate_documents");
         assert_eq!(MongoAgentMethod::FindDocumentsExtendedJson.as_str(), "find_documents_extended_json");
         assert_eq!(MongoAgentMethod::CountDocuments.as_str(), "count_documents");
         assert_eq!(MongoAgentMethod::ServerVersion.as_str(), "server_version");
         assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
+        assert_eq!(MongoAgentMethod::CreateUser.as_str(), "create_user");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
+        assert_eq!(MongoAgentMethod::CloneCollection.as_str(), "clone_collection");
         assert_eq!(MongoAgentMethod::DropDatabase.as_str(), "drop_database");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
+        assert_eq!(MongoAgentMethod::InsertDocuments.as_str(), "insert_documents");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
         assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
@@ -4381,12 +4972,14 @@ for line in sys.stdin:
         let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
         let _mongo_list_collection_specs = AgentDriverClient::mongo_list_collection_specs::<serde_json::Value>;
         let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
+        let _mongo_find_one = AgentDriverClient::mongo_find_one::<serde_json::Value>;
         let _mongo_find_documents_extended_json =
             AgentDriverClient::mongo_find_documents_extended_json::<serde_json::Value>;
         let _mongo_server_version = AgentDriverClient::mongo_server_version::<serde_json::Value>;
         let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
         let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
         let _mongo_drop_collection = AgentDriverClient::mongo_drop_collection::<serde_json::Value>;
+        let _mongo_clone_collection = AgentDriverClient::mongo_clone_collection::<serde_json::Value>;
         let _mongo_drop_database = AgentDriverClient::mongo_drop_database::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
@@ -4543,6 +5136,16 @@ for line in sys.stdin:
                 "object_type": "VIEW",
             })
         );
+        assert_eq!(
+            agent_object_source_params_with_relation("sales", "public", "audit_before", &"TRIGGER", Some("orders")),
+            serde_json::json!({
+                "database": "sales",
+                "schema": "public",
+                "name": "audit_before",
+                "object_type": "TRIGGER",
+                "relation_name": "orders",
+            })
+        );
         assert_eq!(agent_close_query_session_params("session-1"), serde_json::json!({ "sessionId": "session-1" }));
         assert_eq!(
             agent_transaction_params(Some("sales"), &["BEGIN".to_string(), "COMMIT".to_string()], Some("public")),
@@ -4620,10 +5223,37 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
         assert!(!agent_supports_capability(None, AgentCapability::MongoDropDatabase));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoDropDatabase));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoCloneCollection));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoCloneCollection));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoRunCommand));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoRunCommand));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoInsertDocuments));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoInsertDocuments));
 
         let mongo_handshake =
             AgentHandshake { capabilities: vec![AgentCapability::MongoDropDatabase.as_str().to_string()], ..handshake };
         assert!(agent_supports_capability(Some(&mongo_handshake), AgentCapability::MongoDropDatabase));
+
+        let mongo_clone_handshake = AgentHandshake {
+            capabilities: vec![AgentCapability::MongoCloneCollection.as_str().to_string()],
+            ..mongo_handshake
+        };
+        assert!(agent_supports_capability(Some(&mongo_clone_handshake), AgentCapability::MongoCloneCollection));
+
+        let mongo_run_command_handshake = AgentHandshake {
+            capabilities: vec![AgentCapability::MongoRunCommand.as_str().to_string()],
+            ..mongo_clone_handshake
+        };
+        assert!(agent_supports_capability(Some(&mongo_run_command_handshake), AgentCapability::MongoRunCommand));
+
+        let mongo_insert_documents_handshake = AgentHandshake {
+            capabilities: vec![AgentCapability::MongoInsertDocuments.as_str().to_string()],
+            ..mongo_run_command_handshake
+        };
+        assert!(agent_supports_capability(
+            Some(&mongo_insert_documents_handshake),
+            AgentCapability::MongoInsertDocuments
+        ));
     }
 
     #[test]

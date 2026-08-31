@@ -1,3 +1,22 @@
+import type { Component } from "vue";
+
+export interface ContextMenuItem {
+  label: string;
+  action?: () => void;
+  disabled?: boolean | (() => boolean);
+  separator?: boolean;
+  icon?: Component;
+  iconClass?: string;
+  title?: string;
+  indentLevel?: number;
+  checked?: boolean;
+  // Raw shortcut syntax such as `Mod+C` or `Shift+Alt+U`; display formatting stays in this component.
+  shortcut?: string;
+  variant?: "default" | "destructive";
+  visible?: boolean;
+  children?: ContextMenuItem[];
+}
+
 export type ContextMenuClose = () => void;
 
 /** Marker attribute on scrollable context menu / submenu roots. */
@@ -9,6 +28,7 @@ export function isContextMenuInternalScroll(event: Event): boolean {
 }
 
 export interface ContextMenuRegistration {
+  activate(): void;
   setOpen(open: boolean): void;
   dispose(): void;
 }
@@ -58,6 +78,15 @@ export function createContextMenuRegistry(documentTarget: EventTarget, windowTar
       let disposed = false;
 
       return {
+        activate() {
+          if (disposed) return;
+          const closers = [...openMenus];
+          openMenus.clear();
+          for (const activeClose of closers) {
+            if (activeClose !== close) activeClose();
+          }
+          openMenus.add(close);
+        },
         setOpen(open) {
           if (disposed) return;
           if (open) openMenus.add(close);

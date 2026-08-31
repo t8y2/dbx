@@ -1,382 +1,72 @@
 use std::collections::HashSet;
 
+use crate::database_manifest;
 use crate::models::connection::DatabaseType;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AgentCatalogEntry {
-    pub db_type: DatabaseType,
-    pub key: &'static str,
-    pub label: &'static str,
-    pub store_visible: bool,
-    pub profiles: &'static [AgentDriverProfile],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AgentDriverProfile {
-    pub profile: &'static str,
-    pub key: &'static str,
-    pub label: &'static str,
-    pub store_visible: bool,
-}
-
-const ORACLE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "oracle-legacy", key: "oracle", label: "Oracle", store_visible: false },
-    AgentDriverProfile { profile: "oracle-10g", key: "oracle", label: "Oracle", store_visible: false },
-];
-
-const GBASE_PROFILES: &[AgentDriverProfile] = &[
-    AgentDriverProfile { profile: "gbase8s", key: "gbase8s", label: "GBase 8s", store_visible: true },
-    AgentDriverProfile { profile: "gbase8a", key: "gbase8a", label: "GBase 8a", store_visible: true },
-];
-
-const MONGODB_PROFILES: &[AgentDriverProfile] = &[AgentDriverProfile {
-    profile: "mongodb-legacy",
-    key: "mongodb",
-    label: "MongoDB (Legacy)",
-    store_visible: false,
-}];
-
-const H2_PROFILES: &[AgentDriverProfile] =
-    &[AgentDriverProfile { profile: "h2-legacy", key: "h2-legacy", label: "H2 2.1 Legacy", store_visible: true }];
-
-const EXTRA_AGENT_LABELS: &[(&str, &str)] = &[
-    ("duckdb", "DuckDB"),
-    ("kafka", "Apache Kafka"),
-    ("rocketmq", "Apache RocketMQ"),
-    ("rabbitmq", "RabbitMQ"),
-    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
-];
-const EXTRA_DRIVER_STORE_ENTRIES: &[(&str, &str)] = &[
-    ("duckdb", "DuckDB"),
-    ("kafka", "Apache Kafka"),
-    ("rocketmq", "Apache RocketMQ"),
-    ("rabbitmq", "RabbitMQ"),
-    ("sqlserver-legacy", "SQL Server legacy compatibility component"),
-];
-
-const AGENT_CATALOG: &[AgentCatalogEntry] = &[
-    AgentCatalogEntry {
-        db_type: DatabaseType::Dameng,
-        key: "dameng",
-        label: "达梦 DM8",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Kingbase,
-        key: "kingbase",
-        label: "人大金仓 KingbaseES",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Highgo,
-        key: "highgo",
-        label: "瀚高 HighGo",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Uxdb,
-        key: "uxdb",
-        label: "优炫 UXDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Vastbase,
-        key: "vastbase",
-        label: "Vastbase",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Goldendb,
-        key: "goldendb",
-        label: "GoldenDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Databend,
-        key: "databend",
-        label: "Databend",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Databricks,
-        key: "databricks",
-        label: "Databricks SQL",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::SapHana,
-        key: "saphana",
-        label: "SAP HANA",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Teradata,
-        key: "teradata",
-        label: "Teradata",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Vertica,
-        key: "vertica",
-        label: "Vertica",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Firebird,
-        key: "firebird",
-        label: "Firebird",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Exasol,
-        key: "exasol",
-        label: "Exasol",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::OceanbaseOracle,
-        key: "oceanbase-oracle",
-        label: "OceanBase Oracle Mode",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Gbase,
-        key: "gbase8a",
-        label: "GBase 8a",
-        store_visible: true,
-        profiles: GBASE_PROFILES,
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Access,
-        key: "access",
-        label: "Microsoft Access",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Oracle,
-        key: "oracle",
-        label: "Oracle",
-        store_visible: true,
-        profiles: ORACLE_PROFILES,
-    },
-    AgentCatalogEntry { db_type: DatabaseType::H2, key: "h2", label: "H2", store_visible: true, profiles: H2_PROFILES },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Snowflake,
-        key: "snowflake",
-        label: "Snowflake",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Trino,
-        key: "trino",
-        label: "Trino",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Hive,
-        key: "hive",
-        label: "Apache Hive",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Spark,
-        key: "spark",
-        label: "Apache Spark",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry { db_type: DatabaseType::Db2, key: "db2", label: "IBM DB2", store_visible: true, profiles: &[] },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Informix,
-        key: "informix",
-        label: "IBM Informix",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::InfluxDb,
-        key: "influxdb",
-        label: "InfluxDB",
-        store_visible: false,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Neo4j,
-        key: "neo4j",
-        label: "Neo4j",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Cassandra,
-        key: "cassandra",
-        label: "Apache Cassandra",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Bigquery,
-        key: "bigquery",
-        label: "Google BigQuery",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Kylin,
-        key: "kylin",
-        label: "Apache Kylin",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Sundb,
-        key: "sundb",
-        label: "SunDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Oscar,
-        key: "oscar",
-        label: "神通 OSCAR",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Yashandb,
-        key: "yashandb",
-        label: "崖山 YashanDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Tdengine,
-        key: "tdengine",
-        label: "TDengine",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Xugu,
-        key: "xugu",
-        label: "虚谷 XuguDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Iotdb,
-        key: "iotdb",
-        label: "Apache IoTDB",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry { db_type: DatabaseType::Etcd, key: "etcd", label: "etcd", store_visible: true, profiles: &[] },
-    AgentCatalogEntry {
-        db_type: DatabaseType::ZooKeeper,
-        key: "zookeeper",
-        label: "Apache ZooKeeper",
-        store_visible: true,
-        profiles: &[],
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::MongoDb,
-        key: "mongodb",
-        label: "MongoDB (Legacy)",
-        store_visible: true,
-        profiles: MONGODB_PROFILES,
-    },
-    AgentCatalogEntry {
-        db_type: DatabaseType::Iris,
-        key: "iris",
-        label: "InterSystems IRIS",
-        store_visible: true,
-        profiles: &[],
-    },
-];
-
-pub fn entries() -> &'static [AgentCatalogEntry] {
-    AGENT_CATALOG
-}
-
 pub fn agent_key(db_type: &DatabaseType, driver_profile: Option<&str>) -> Option<&'static str> {
-    if *db_type == DatabaseType::MessageQueue {
-        return match driver_profile {
-            Some("kafka") => Some("kafka"),
-            Some("rocketmq") => Some("rocketmq"),
-            Some("rabbitmq") => Some("rabbitmq"),
-            _ => None,
-        };
-    }
-    if *db_type == DatabaseType::SqlServer {
-        return driver_profile
-            .is_some_and(|profile| profile.eq_ignore_ascii_case("sqlserver-legacy"))
-            .then_some("sqlserver-legacy");
-    }
-    let entry = entry_for_db_type(db_type)?;
+    let entry = database_manifest::entry(db_type)?;
     if let Some(driver_profile) = driver_profile {
-        if let Some(profile) = entry.profiles.iter().find(|profile| profile.profile == driver_profile) {
-            return Some(profile.key);
+        if let Some(profile) =
+            entry.driver_profiles.iter().find(|profile| profile.profile.eq_ignore_ascii_case(driver_profile))
+        {
+            return Some(profile.agent_key.as_str());
         }
     }
-    Some(entry.key)
+    entry.agent_key.as_deref()
 }
 
 pub fn is_agent_type(db_type: &DatabaseType) -> bool {
-    entry_for_db_type(db_type).is_some()
+    database_manifest::is_agent_runtime(db_type)
 }
 
 pub fn driver_store_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
-    let mut seen = HashSet::new();
-    entries()
+    let mut entries = database_manifest::entries()
         .iter()
-        .flat_map(move |entry| {
-            let base = entry.store_visible.then_some((entry.key, entry.label));
-            let profiles = entry
-                .profiles
+        .flat_map(|entry| {
+            let base = entry.driver_store_visible.then(|| {
+                entry
+                    .agent_key
+                    .as_deref()
+                    .map(|key| (entry.driver_store_order.unwrap_or(u32::MAX), key, entry.label.as_str()))
+            });
+            let profiles = entry.driver_profiles.iter().filter(|profile| profile.store_visible).map(|profile| {
+                (
+                    profile.store_order.unwrap_or(u32::MAX),
+                    profile.package_key.as_deref().unwrap_or(profile.agent_key.as_str()),
+                    profile.label.as_str(),
+                )
+            });
+            let managed = entry
+                .managed_drivers
                 .iter()
-                .filter(|profile| profile.store_visible)
-                .map(|profile| (profile.key, profile.label));
-            base.into_iter().chain(profiles)
+                .filter(|driver| driver.store_visible)
+                .map(|driver| (driver.store_order.unwrap_or(u32::MAX), driver.key.as_str(), driver.label.as_str()));
+            base.flatten().into_iter().chain(profiles).chain(managed)
         })
-        .chain(EXTRA_DRIVER_STORE_ENTRIES.iter().copied())
-        .filter(move |(key, _)| seen.insert(*key))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(order, _, _)| *order);
+
+    let mut seen = HashSet::new();
+    entries.into_iter().filter(move |(_, key, _)| seen.insert(*key)).map(|(_, key, label)| (key, label))
 }
 
 pub fn label_for_key(agent_key: &str) -> Option<&'static str> {
-    if let Some((_, label)) = EXTRA_AGENT_LABELS.iter().find(|(key, _)| *key == agent_key) {
-        return Some(label);
-    }
-    for entry in entries() {
-        if entry.key == agent_key {
-            return Some(entry.label);
+    for entry in database_manifest::entries() {
+        if entry.agent_key.as_deref() == Some(agent_key) {
+            return Some(entry.label.as_str());
         }
-        if let Some(profile) = entry.profiles.iter().find(|profile| profile.key == agent_key) {
-            return Some(profile.label);
+        if let Some(profile) = entry
+            .driver_profiles
+            .iter()
+            .find(|profile| profile.package_key.as_deref() == Some(agent_key) || profile.agent_key == agent_key)
+        {
+            return Some(profile.label.as_str());
+        }
+        if let Some(driver) = entry.managed_drivers.iter().find(|driver| driver.key == agent_key) {
+            return Some(driver.label.as_str());
         }
     }
     None
-}
-
-fn entry_for_db_type(db_type: &DatabaseType) -> Option<&'static AgentCatalogEntry> {
-    entries().iter().find(|entry| entry.db_type == *db_type)
 }
 
 #[cfg(test)]
@@ -384,11 +74,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn h2_legacy_profile_uses_separate_agent() {
+    fn h2_profiles_share_the_same_agent() {
         assert_eq!(agent_key(&DatabaseType::H2, None), Some("h2"));
         assert_eq!(agent_key(&DatabaseType::H2, Some("h2")), Some("h2"));
-        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2-legacy"));
-        assert!(driver_store_entries().any(|(key, label)| key == "h2-legacy" && label == "H2 2.1 Legacy"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-legacy")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v1")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v2")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-v3")), Some("h2"));
+        assert_eq!(agent_key(&DatabaseType::H2, Some("h2-custom")), Some("h2"));
+        assert_eq!(label_for_key("h2-legacy"), Some("H2 2.1 Legacy"));
+        assert!(!driver_store_entries().any(|(key, _)| key == "h2-legacy"));
     }
 
     #[test]
@@ -396,5 +91,36 @@ mod tests {
         assert!(driver_store_entries().any(|(key, label)| key == "duckdb" && label == "DuckDB"));
         assert_eq!(label_for_key("duckdb"), Some("DuckDB"));
         assert!(!is_agent_type(&DatabaseType::DuckDb));
+    }
+
+    #[test]
+    fn sqlite_ssh_worker_is_available_in_driver_store_without_using_agent_runtime() {
+        assert!(driver_store_entries().any(|(key, label)| key == "sqlite-worker" && label == "SQLite SSH Worker"));
+        assert_eq!(label_for_key("sqlite-worker"), Some("SQLite SSH Worker"));
+        assert!(!is_agent_type(&DatabaseType::Sqlite));
+    }
+
+    #[test]
+    fn impala_reuses_hive_agent_without_duplicate_store_entry() {
+        assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
+    }
+
+    #[test]
+    fn kyuubi_reuses_hive_agent_without_duplicate_store_entry() {
+        assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
+        assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
+    }
+
+    #[test]
+    fn manifest_agent_keys_match_catalog_defaults() {
+        for entry in database_manifest::entries().iter().filter(|entry| entry.agent_key.is_some()) {
+            assert_eq!(
+                agent_key(&entry.db_type, None),
+                entry.agent_key.as_deref(),
+                "agent key drift for {:?}",
+                entry.db_type
+            );
+        }
     }
 }

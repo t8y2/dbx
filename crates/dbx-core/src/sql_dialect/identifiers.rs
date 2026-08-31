@@ -129,11 +129,19 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::StarRocks
             | DatabaseType::ManticoreSearch
             | DatabaseType::Hive
+            | DatabaseType::Kyuubi
+            | DatabaseType::Impala
             | DatabaseType::Spark
+            | DatabaseType::Databricks
             | DatabaseType::Databend
             | DatabaseType::Tdengine
             | DatabaseType::Access
             | DatabaseType::Bigquery
+            // GoogleSQL (Spanner's default dialect) quotes identifiers with backticks;
+            // double quotes are string literals there, so `SELECT * FROM "users"` is a
+            // syntax error. PostgreSQL-dialect Spanner databases override this through
+            // the identifier quote reported by the agent on connect.
+            | DatabaseType::Spanner
             | DatabaseType::Questdb,
         ) => {
             format!("`{}`", name.replace('`', "``"))
@@ -378,11 +386,38 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::Doris
         | DatabaseType::StarRocks
         | DatabaseType::Hive
+        | DatabaseType::Kyuubi
+        | DatabaseType::Impala
         | DatabaseType::Spark
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),
     }
+}
+
+pub(crate) fn transfer_column_identifier(
+    name: &str,
+    database_type: &DatabaseType,
+    quote_target_column_names: bool,
+) -> String {
+    if quote_target_column_names
+        || !matches!(database_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss)
+        || !is_simple_unquoted_identifier(name)
+        || is_postgres_reserved_identifier(&name.to_ascii_lowercase())
+    {
+        quote_transfer_identifier(name, database_type)
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_simple_unquoted_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 /// Qualified table name for transfer SQL.

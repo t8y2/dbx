@@ -193,8 +193,9 @@ jobs:
           # ${AI_ANALYSIS}"
           # fi
 
-          MSG=$(echo "$MSG_CONTENT" | jq -Rs .)
-          ssh "root@${HOST}" "curl -s -X POST http://localhost:6185/api/v1/im/message \
+          PAYLOAD=$(jq -nc --arg msg "$MSG_CONTENT" \
+            '{"umo": "default:GroupMessage:1087880322", "message": $msg}')
+          printf '%s' "$PAYLOAD" | ssh "root@${HOST}" "curl -fsS -X POST http://localhost:6185/api/v1/im/message \
             -H 'Authorization: Bearer ${ASTRBOT_API_KEY}' \
             -H 'Content-Type: application/json' \
-            -d '{\"umo\": \"default:GroupMessage:1087880322\", \"message\": ${MSG}}'"
+            --data-binary @-"

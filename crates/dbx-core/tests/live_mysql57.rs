@@ -1,10 +1,15 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dbx_core::connection::AppState;
 use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
-use dbx_core::query::{execute_multi_core, execute_sql_statement};
+use dbx_core::query::{
+    execute_multi_core, execute_multi_core_with_options_for_client_and_progress,
+    execute_multi_core_with_options_for_client_typed, execute_sql_statement, execute_sql_statement_with_options_typed,
+    ExecuteMultiProgressCallback, QueryExecutionOptions,
+};
 use dbx_core::query_result_export::{export_query_result_core, ExportStatus, QueryResultExportRequest};
 use dbx_core::sql::{split_sql_statements_for_database, SqlFileRequest};
 use dbx_core::sql_file_import::execute_sql_file_path;
@@ -101,6 +106,30 @@ async fn live_mysql57_text_protocol_select_succeeds() {
 }
 
 #[tokio::test]
+#[ignore = "requires the remote DBX MySQL 5.7 smoke-test container"]
+async fn live_mysql57_checksum_table_returns_native_result_set() {
+    let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");
+    let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+
+    // 使用部署脚本预置的表验证 MySQL 5.7 原生 CHECKSUM TABLE 返回值没有被执行器丢弃。
+    let result = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        "CHECKSUM TABLE `dbx_smoke`",
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.columns, vec!["Table", "Checksum"]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0].len(), 2);
+    assert!(result.rows[0][0].as_str().is_some_and(|table| table.ends_with(".dbx_smoke")));
+    assert!(!result.rows[0][1].is_null());
+}
+
+#[tokio::test]
 #[ignore = "requires a MySQL endpoint that permits stored procedure creation"]
 async fn live_mysql_stored_procedure_preserves_all_result_sets() {
     let url = std::env::var("DBX_LIVE_MYSQL57_URL").expect("DBX_LIVE_MYSQL57_URL");
@@ -130,6 +159,249 @@ async fn live_mysql_stored_procedure_preserves_all_result_sets() {
         results.iter().map(|result| result.rows[0][0].clone()).collect::<Vec<_>>(),
         vec![serde_json::json!("1"), serde_json::json!("2"), serde_json::json!("3")]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a writable MySQL endpoint for stored procedure creation"]
+async fn live_mysql_single_call_public_route_preserves_all_result_sets() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-multi-result-{suffix}");
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (state, db_path) = app_state_with_config(config).await;
+    let procedure = format!("dbx_issue_5560_{}", &suffix[..8]);
+    let empty_procedure = format!("dbx_issue_5560_empty_{}", &suffix[..8]);
+    let slow_procedure = format!("dbx_issue_5560_slow_{}", &suffix[..8]);
+    let table = format!("dbx_issue_5560_{}", &suffix[..8]);
+    let session_id = format!("dbx-issue-5560-{suffix}");
+    let create_sql = format!(
+        "CREATE PROCEDURE `{procedure}`() BEGIN \
+         SET @dbx_issue_5560_session = 'kept'; \
+         SELECT 11 AS value UNION ALL SELECT 12 AS value; \
+         SELECT 21 AS value UNION ALL SELECT 22 AS value; \
+         SELECT 31 AS value UNION ALL SELECT 32 AS value; \
+         END"
+    );
+
+    execute_sql_statement(&state, &connection_id, &database, &create_sql, None, None)
+        .await
+        .expect("create live multi-result procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE PROCEDURE `{empty_procedure}`() BEGIN SET @dbx_issue_5560_empty = 1; END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live no-result procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE PROCEDURE `{slow_procedure}`() BEGIN SELECT SLEEP(5) AS slept; END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live slow procedure");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live DML table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table}` (id, value) VALUES (1, 1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed live DML table");
+
+    let options =
+        QueryExecutionOptions { max_rows: Some(1), client_session_id: Some(session_id.clone()), ..Default::default() };
+    let results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute single CALL through the public multi-result route");
+    let ordinary_select = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT 42 AS value",
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute ordinary SELECT through the public route");
+    let ordinary_dml = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("UPDATE `{table}` SET value = value + 1 WHERE id = 1"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute ordinary DML through the public route");
+    let session_result = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT @dbx_issue_5560_session AS session_value",
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("reuse the CALL client session");
+    let empty_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{empty_procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("execute no-result CALL through the public route");
+    let sql_error = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `dbx_issue_5560_missing_{}`()", &suffix[..8]),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect("return a structured execution result for a missing procedure");
+
+    state.configs.write().await.get_mut(&connection_id).expect("live config").read_only = true;
+    let read_only_error = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{procedure}`()"),
+        None,
+        None,
+        options.clone(),
+    )
+    .await
+    .expect_err("read-only mode must reject CALL before dispatch");
+    state.configs.write().await.get_mut(&connection_id).expect("live config").read_only = false;
+
+    let timeout_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{slow_procedure}`()"),
+        None,
+        None,
+        QueryExecutionOptions { timeout_secs: Some(1), ..options.clone() },
+    )
+    .await
+    .expect("return a structured timeout result");
+    let cancel_token = CancellationToken::new();
+    let cancel_task = {
+        let cancel_token = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel_token.cancel();
+        })
+    };
+    let canceled_results = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CALL `{slow_procedure}`()"),
+        None,
+        Some(cancel_token),
+        options.clone(),
+    )
+    .await
+    .expect("return a structured cancellation result");
+    cancel_task.await.unwrap();
+    let recovery_result = execute_multi_core_with_options_for_client_typed(
+        &state,
+        &connection_id,
+        &database,
+        "SELECT 7 AS recovered",
+        None,
+        None,
+        options,
+    )
+    .await
+    .expect("recreate the discarded session pool after timeout and cancellation");
+
+    for cleanup_sql in [
+        format!("DROP PROCEDURE `{procedure}`"),
+        format!("DROP PROCEDURE `{empty_procedure}`"),
+        format!("DROP PROCEDURE `{slow_procedure}`"),
+        format!("DROP TABLE `{table}`"),
+    ] {
+        execute_sql_statement(&state, &connection_id, &database, &cleanup_sql, None, None)
+            .await
+            .expect("clean up live issue fixture");
+    }
+    let _ = std::fs::remove_file(db_path);
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(results.iter().map(|result| result.statement_index).collect::<Vec<_>>(), vec![Some(0); 3]);
+    assert_eq!(
+        results.iter().map(|result| result.result.rows[0][0].clone()).collect::<Vec<_>>(),
+        vec![serde_json::json!("11"), serde_json::json!("21"), serde_json::json!("31")]
+    );
+    assert!(results.iter().all(|result| result.result.truncated));
+    assert_eq!(ordinary_select.len(), 1);
+    assert_eq!(ordinary_select[0].statement_index, None);
+    assert_eq!(ordinary_select[0].result.rows, vec![vec![serde_json::json!("42")]]);
+    assert_eq!(ordinary_dml.len(), 1);
+    assert_eq!(ordinary_dml[0].statement_index, None);
+    assert_eq!(ordinary_dml[0].result.affected_rows, 1);
+    assert_eq!(session_result[0].result.rows, vec![vec![serde_json::json!("kept")]]);
+    assert_eq!(empty_results.len(), 1);
+    assert_eq!(empty_results[0].statement_index, Some(0));
+    assert!(empty_results[0].result.columns.is_empty());
+    assert!(empty_results[0].result.rows.is_empty());
+    assert_eq!(sql_error.len(), 1);
+    assert_eq!(sql_error[0].statement_index, Some(0));
+    assert!(sql_error[0].execution_error);
+    let sql_error_message = sql_error[0].result.rows[0][0].as_str().expect("missing procedure error message");
+    assert!(sql_error_message.contains("does not exist"), "unexpected SQL error: {sql_error_message}");
+    assert_eq!(sql_error[0].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-4001"));
+    assert!(read_only_error.into_legacy_string().to_ascii_lowercase().contains("read-only"));
+    assert_eq!(timeout_results.len(), 1);
+    assert!(timeout_results[0].execution_error);
+    assert_eq!(timeout_results[0].statement_index, Some(0));
+    let timeout_message = timeout_results[0].result.rows[0][0].as_str().expect("timeout error message");
+    assert_eq!(timeout_message, "Query timed out after 1 seconds");
+    assert_eq!(timeout_results[0].error.as_ref().map(|error| error.code()), Some("DBX-LEGACY-0001"));
+    assert_eq!(canceled_results.len(), 1);
+    assert!(canceled_results[0].execution_error);
+    assert_eq!(canceled_results[0].statement_index, Some(0));
+    assert_eq!(canceled_results[0].result.rows[0][0], serde_json::json!("Query canceled"));
+    assert_eq!(canceled_results[0].error.as_ref().map(|error| error.code()), Some("DBX-JDBC-2003"));
+    assert_eq!(recovery_result[0].result.rows, vec![vec![serde_json::json!("7")]]);
 }
 
 #[tokio::test]
@@ -185,6 +457,7 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         connection_id: connection_id.clone(),
         database: database.clone(),
         schema: None,
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),
@@ -204,6 +477,8 @@ async fn live_mysql_query_result_export_xlsx_streams_single_query_without_duplic
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let done_seen = AtomicBool::new(false);
@@ -274,6 +549,7 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         connection_id: connection_id.clone(),
         database: database.clone(),
         schema: None,
+        catalog: None,
         sql: sql.clone(),
         query_base_sql: sql,
         setup_sql: Vec::new(),
@@ -293,6 +569,8 @@ async fn live_mysql_xlsx_export_can_outlive_query_timeout_while_rows_keep_arrivi
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
+        auto_filter: None,
+        identifier_quote: None,
         numeric_column_right_align: false,
     };
     let rows_exported = AtomicU64::new(0);
@@ -383,30 +661,44 @@ END
 async fn live_mysql_splitter_executes_routine_without_delimiter() {
     let url = std::env::var("DBX_LIVE_MYSQL_PROCEDURE_URL").expect("DBX_LIVE_MYSQL_PROCEDURE_URL");
     let pool = dbx_core::db::mysql::connect(&url, std::time::Duration::from_secs(10)).await.unwrap();
-    let procedure = "dbx_issue_2695_proc";
+    let procedure = format!("dbx_routine_range_{}", uuid::Uuid::new_v4().simple());
 
     let sql = format!(
         "\
 DROP PROCEDURE IF EXISTS {procedure};
 CREATE PROCEDURE {procedure}()
 BEGIN
-    SET @dbx_issue_2695_value = 2695;
-    SELECT @dbx_issue_2695_value AS value;
+    SET @dbx_routine_range_value = CASE WHEN 1 = 1 THEN 2695 ELSE 0 END;
+    SELECT @dbx_routine_range_value AS value;
 END;
 CALL {procedure}();
 DROP PROCEDURE IF EXISTS {procedure};"
     );
     let statements = split_sql_statements_for_database(&sql, DatabaseType::Mysql);
     assert_eq!(statements.len(), 4);
-    assert!(statements[1].contains("SET @dbx_issue_2695_value = 2695;"));
-    assert!(statements[1].contains("SELECT @dbx_issue_2695_value AS value;"));
+    assert!(statements[1].contains("CASE WHEN 1 = 1 THEN 2695 ELSE 0 END;"));
+    assert!(statements[1].contains("SELECT @dbx_routine_range_value AS value;"));
     assert!(statements[1].ends_with("END"));
 
-    for statement in statements {
-        dbx_core::db::mysql::execute_query_with_max_rows(&pool, &statement, false, Some(10), Default::default())
-            .await
-            .unwrap();
+    let execution = async {
+        for statement in &statements[..3] {
+            dbx_core::db::mysql::execute_query_with_max_rows(&pool, statement, false, Some(10), Default::default())
+                .await?;
+        }
+        Ok::<(), String>(())
     }
+    .await;
+    let cleanup = dbx_core::db::mysql::execute_query_with_max_rows(
+        &pool,
+        statements.last().expect("cleanup statement"),
+        false,
+        Some(10),
+        Default::default(),
+    )
+    .await;
+
+    execution.unwrap();
+    cleanup.unwrap();
 }
 
 #[tokio::test]
@@ -441,9 +733,10 @@ async fn live_oceanbase_mysql_setup_applies_query_timeout() {
 async fn live_mysql_query_cancel_kills_running_sleep() {
     let url = std::env::var("DBX_LIVE_MYSQL_CANCEL_URL").expect("DBX_LIVE_MYSQL_CANCEL_URL");
 
-    let opts = mysql_async::OptsBuilder::from_opts(mysql_async::Opts::from_url(&url).unwrap())
-        .pool_opts(mysql_async::PoolOpts::new().with_constraints(mysql_async::PoolConstraints::new(1, 1).unwrap()));
-    let pool = mysql_async::Pool::new(opts);
+    let pool =
+        dbx_core::db::mysql::connect_bare_with_pool_limit_and_setup(&url, std::time::Duration::from_secs(10), 1, &[])
+            .await
+            .unwrap();
     let mut conn = dbx_core::db::mysql::get_conn_with_health_check(&pool).await.unwrap();
     let connection_id = mysql_async::Conn::id(&conn);
     let kill_opts = conn.opts().clone();
@@ -468,6 +761,124 @@ async fn live_mysql_query_cancel_kills_running_sleep() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     let result = result.unwrap();
     assert_eq!(result.rows, vec![vec![serde_json::json!("1")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_conditional_update_timeout_cancels_before_reload() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-conditional-update-{suffix}");
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (app_state, db_path) = app_state_with_config(config).await;
+    let state = Arc::new(app_state);
+    let table = format!("dbx_conditional_update_{}", &suffix[..8]);
+    let trigger = format!("dbx_conditional_update_delay_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table}` (id INT PRIMARY KEY, value INT NOT NULL)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create conditional update table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table}` (id, value) VALUES (1, 1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed conditional update table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TRIGGER `{trigger}` BEFORE UPDATE ON `{table}` FOR EACH ROW BEGIN DO SLEEP(30); END"),
+        None,
+        None,
+    )
+    .await
+    .expect("create delayed update trigger");
+
+    let execution_id = format!("conditional-update-{suffix}");
+    let registered =
+        state.running_queries.register_task_for_terminal_confirmation(execution_id.clone(), Default::default());
+    let cancel_token = registered.token();
+    let (result_tx, mut result_rx) = tokio::sync::oneshot::channel();
+    let task_state = state.clone();
+    let task_connection_id = connection_id.clone();
+    let task_database = database.clone();
+    let task_table = table.clone();
+    let task_execution_id = execution_id.clone();
+    tokio::spawn(async move {
+        let result = execute_sql_statement_with_options_typed(
+            &task_state,
+            &task_connection_id,
+            &task_database,
+            &format!("UPDATE `{task_table}` SET value = 2 WHERE id = 1"),
+            None,
+            Some(cancel_token),
+            QueryExecutionOptions {
+                // The request-facing timeout belongs to the caller. Keep this
+                // database task running so its registration remains cancellable.
+                timeout_secs: Some(0),
+                await_cancel_completion: true,
+                execution_id: Some(task_execution_id),
+                ..Default::default()
+            },
+        )
+        .await;
+        let _ = result_tx.send(result);
+        drop(registered);
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state.running_queries.diagnostics().interrupt_registrations != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("delayed update should register a MySQL interrupt");
+    assert!(tokio::time::timeout(Duration::from_secs(1), &mut result_rx).await.is_err());
+
+    let cancellation = state.running_queries.cancel_and_wait(&execution_id, Duration::from_secs(10)).await;
+    assert!(cancellation.requested);
+    assert!(cancellation.terminal);
+    let _ = result_rx.await.expect("conditional update task should report a terminal result");
+
+    let reload = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("SELECT value FROM `{table}` WHERE id = 1"),
+        None,
+        None,
+    )
+    .await
+    .expect("reload row after cancellation");
+    assert_eq!(reload.rows.len(), 1);
+    assert_eq!(json_cell_text(&reload.rows[0][0]), "1");
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TRIGGER IF EXISTS `{trigger}`"),
+        None,
+        None,
+    )
+    .await
+    .expect("drop delayed update trigger");
+    execute_sql_statement(&state, &connection_id, &database, &format!("DROP TABLE IF EXISTS `{table}`"), None, None)
+        .await
+        .expect("drop conditional update table");
+    let _ = std::fs::remove_file(db_path);
 }
 
 #[tokio::test]
@@ -574,6 +985,162 @@ async fn live_mysql_multi_statement_stops_after_first_error() {
     assert_eq!(results[1].columns, vec!["Error"]);
     assert_eq!(rows.columns, vec!["id", "label"]);
     assert_eq!(rows.rows, vec![vec![serde_json::json!("1"), serde_json::json!("first")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_pipelined_dml_reports_each_statement_before_the_next_finishes() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-progress-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let (state, db_path) = app_state_with_config(config).await;
+    let table_name = format!("dbx_batch_progress_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table_name}` (id INT PRIMARY KEY)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live progress table");
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("INSERT INTO `{table_name}` VALUES (1)"),
+        None,
+        None,
+    )
+    .await
+    .expect("seed live progress table");
+
+    let started = Instant::now();
+    let progress_events = Arc::new(Mutex::new(Vec::new()));
+    let progress: ExecuteMultiProgressCallback = {
+        let progress_events = Arc::clone(&progress_events);
+        Arc::new(move |event| progress_events.lock().unwrap().push((started.elapsed(), event)))
+    };
+    let sql = format!("DELETE FROM `{table_name}`;\nINSERT INTO `{table_name}` SELECT 2 WHERE SLEEP(3) = 0;");
+    let result = execute_multi_core_with_options_for_client_and_progress(
+        &state,
+        &connection_id,
+        &database,
+        &sql,
+        None,
+        None,
+        QueryExecutionOptions::default(),
+        Some(progress),
+    )
+    .await;
+
+    let _ = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TABLE IF EXISTS `{table_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+
+    let results = result.expect("pipelined DML should succeed");
+    let events = progress_events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].1.statement_index, 0);
+    assert!(events[0].0 < Duration::from_secs(2), "DELETE progress arrived after the slow INSERT");
+    assert_eq!(events[1].1.statement_index, 1);
+    assert!(events[1].0 >= Duration::from_millis(2_500));
+    assert!(results[0].result.execution_time_ms < 2_000);
+    assert!(results[1].result.execution_time_ms >= 2_500);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection"]
+async fn live_mysql_pipelined_dml_keeps_completed_results_before_error() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-progress-error-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let database = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").expect("DBX_LIVE_SQL_FILE_MYSQL_DATABASE");
+    let (state, db_path) = app_state_with_config(config).await;
+    let table_name = format!("dbx_batch_error_{}", &suffix[..8]);
+
+    execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("CREATE TABLE `{table_name}` (id INT PRIMARY KEY)"),
+        None,
+        None,
+    )
+    .await
+    .expect("create live batch error table");
+
+    let progress_events = Arc::new(Mutex::new(Vec::new()));
+    let progress: ExecuteMultiProgressCallback = {
+        let progress_events = Arc::clone(&progress_events);
+        Arc::new(move |event| progress_events.lock().unwrap().push(event))
+    };
+    let sql = format!(
+        "INSERT INTO `{table_name}` VALUES (1);\n\
+         INSERT INTO `{table_name}` VALUES (1);\n\
+         INSERT INTO `{table_name}` VALUES (2);"
+    );
+    let result = execute_multi_core_with_options_for_client_and_progress(
+        &state,
+        &connection_id,
+        &database,
+        &sql,
+        None,
+        None,
+        QueryExecutionOptions::default(),
+        Some(progress),
+    )
+    .await;
+    let rows = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("SELECT id FROM `{table_name}` ORDER BY id"),
+        None,
+        None,
+    )
+    .await;
+
+    let _ = execute_sql_statement(
+        &state,
+        &connection_id,
+        &database,
+        &format!("DROP TABLE IF EXISTS `{table_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+
+    let results = result.expect("pipelined DML should return statement errors as results");
+    assert_eq!(
+        results.len(),
+        2,
+        "results: {:?}",
+        results
+            .iter()
+            .map(|result| (result.statement_index, result.execution_error, result.result.affected_rows))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(results[0].statement_index, Some(0));
+    assert!(!results[0].execution_error);
+    assert_eq!(results[1].statement_index, Some(1));
+    assert!(results[1].execution_error);
+    assert_eq!(
+        progress_events.lock().unwrap().iter().map(|event| (event.statement_index, event.success)).collect::<Vec<_>>(),
+        vec![(0, true), (1, false)]
+    );
+    assert_eq!(rows.expect("read rows after batch error").rows, vec![vec![serde_json::json!("1")]]);
 }
 
 #[tokio::test]

@@ -8,8 +8,8 @@ export const metadata: Metadata = {
   description: DEFAULT_DESCRIPTION,
   metadataBase: new URL(SITE_URL),
   icons: {
-    icon: "/favicon.png",
-    shortcut: "/favicon.png",
+    icon: "/favicon-64.png",
+    shortcut: "/favicon-64.png",
     apple: "/logo.png",
   },
   openGraph: {
@@ -25,7 +25,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#0b1120",
+  themeColor: "#08080a",
   colorScheme: "dark light",
 };
 

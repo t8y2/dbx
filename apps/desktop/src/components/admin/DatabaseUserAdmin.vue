@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { AlertTriangle, Check, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Unlock, UserRound } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, Globe2, KeyRound, Lock, Loader2, Plus, RefreshCcw, Search, ShieldCheck, Table2, Trash2, Unlock, UserRound } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import PasswordInput from "@/components/ui/PasswordInput.vue";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import type { ConnectionConfig } from "@/types/database";
 import * as api from "@/lib/backend/api";
@@ -50,6 +52,7 @@ const loadError = ref("");
 const grantError = ref("");
 
 const createDialogOpen = ref(false);
+const hostDialogOpen = ref(false);
 const passwordDialogOpen = ref(false);
 const sqlDialogOpen = ref(false);
 const pendingSql = ref("");
@@ -61,6 +64,7 @@ const pendingAfterApply = ref<(() => Promise<void>) | undefined>();
 const createUser = ref("app_user");
 const createHost = ref("%");
 const createPassword = ref("");
+const newHost = ref("");
 const newPassword = ref("");
 const privilegeDatabase = ref(props.connection.database || "*");
 const privilegeTable = ref("*");
@@ -74,18 +78,24 @@ const createDatabases = ref<string[]>([]);
 const createDatabasesLoading = ref(false);
 const createDatabaseSearch = ref("");
 const createDatabaseAuthorizations = ref<DatabaseAuthorizationSelection[]>([]);
+const createDatabaseTables = ref<Record<string, string[]>>({});
+const createDatabaseTablesLoading = ref<Record<string, boolean>>({});
+const createDatabaseTableErrors = ref<Record<string, string>>({});
+const createDatabaseTableSearch = ref<Record<string, string>>({});
 let createPlanRequestId = 0;
 
 const provider = computed(() => resolveDatabaseUserAdminProviderForConnection(props.connection));
 const supported = computed(() => provider.value !== null);
 const isPostgres = computed(() => provider.value?.dialect === "postgres");
 const canCreateUser = computed(() => !!provider.value?.createUserSql);
+const canRenameUser = computed(() => !!provider.value?.renameUserSql);
 const canAlterPassword = computed(() => !!provider.value?.alterPasswordSql);
 const canAlterLogin = computed(() => !!provider.value?.alterLoginSql);
 const canDropUser = computed(() => !!provider.value?.dropUserSql);
 const canGrantPrivileges = computed(() => !!provider.value?.grantPrivilegesSql);
 const canRevokePrivileges = computed(() => !!provider.value?.revokePrivilegesSql);
 const canEditPrivileges = computed(() => canGrantPrivileges.value || canRevokePrivileges.value);
+const supportsCreateTableGrants = computed(() => !!provider.value?.supportsTableGrantsOnCreate);
 const selectedUser = computed(() => users.value.find((user) => userKey(user) === selectedUserKey.value));
 const filteredUsers = computed(() => {
   const query = search.value.trim().toLowerCase();
@@ -105,14 +115,23 @@ const selectedDetail = computed(() => {
 const grantsSqlText = computed(() => grants.value.join("\n") || t("userAdmin.noGrants"));
 const highlightedGrantsSql = computed(() => highlight(grantsSqlText.value));
 const highlightedPendingSql = computed(() => highlight(pendingSql.value));
-const createAuthorizationPrivileges = computed(() => (provider.value ? authorizationPrivileges(provider.value) : []));
 const filteredCreateDatabases = computed(() => {
   const query = createDatabaseSearch.value.trim().toLowerCase();
   return query ? createDatabases.value.filter((database) => database.toLowerCase().includes(query)) : createDatabases.value;
 });
 const selectedCreateDatabaseSet = computed(() => new Set(createDatabaseAuthorizations.value.map((selection) => selection.database)));
-const createDatabaseAuthorizationsValid = computed(() => createDatabaseAuthorizations.value.every((selection) => selection.preset !== "custom" || (selection.privileges?.length ?? 0) > 0));
+const createDatabaseAuthorizationsValid = computed(() =>
+  createDatabaseAuthorizations.value.every((selection) => {
+    if (selection.tables !== undefined && selection.tables.length === 0) return false;
+    if (selection.preset !== "custom") return true;
+    return createPrivilegesForAuthorization(selection).some((privilege) => selection.privileges?.includes(privilege));
+  }),
+);
 const pendingStatus = computed(() => (pendingResults.value.length > 0 ? authorizationPlanStatus(pendingResults.value) : undefined));
+const canPreviewHostChange = computed(() => {
+  const host = newHost.value.trim();
+  return !!host && host !== selectedUser.value?.host;
+});
 
 function syncPrivilegeSelectionFromGrants() {
   const selectionFromGrants = provider.value?.privilegeSelectionFromGrants;
@@ -204,6 +223,13 @@ function selectUser(user: DatabaseUserIdentity) {
   selectedUserKey.value = userKey(user);
 }
 
+function openHostDialog() {
+  const user = selectedUser.value;
+  if (!user || !provider.value?.renameUserSql) return;
+  newHost.value = user.host;
+  hostDialogOpen.value = true;
+}
+
 function togglePrivilege(privilege: string) {
   const set = new Set(selectedPrivileges.value);
   if (set.has(privilege)) set.delete(privilege);
@@ -218,12 +244,17 @@ async function openCreateUserDialog() {
   createPassword.value = "";
   createDatabaseSearch.value = "";
   createDatabaseAuthorizations.value = [];
+  createDatabaseTables.value = {};
+  createDatabaseTablesLoading.value = {};
+  createDatabaseTableErrors.value = {};
+  createDatabaseTableSearch.value = {};
   if (createDatabasesLoading.value) return;
   createDatabases.value = [];
   createDatabasesLoading.value = true;
   try {
     await ensureConnection();
-    createDatabases.value = (await api.listDatabases(props.connection.id)).map((database) => database.name);
+    const config = props.connection;
+    createDatabases.value = config.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(config.id, config) : (await api.listDatabases(config.id)).map((database) => database.name);
   } catch (error: any) {
     toast(t("userAdmin.loadDatabasesFailed", { message: error?.message || String(error) }), 5000);
   } finally {
@@ -242,6 +273,82 @@ function toggleCreateDatabase(database: string) {
   } else {
     createDatabaseAuthorizations.value = [...createDatabaseAuthorizations.value, { database, preset: "readOnly", privileges: ["SELECT"] }];
   }
+}
+
+function createPrivilegesForAuthorization(selection?: DatabaseAuthorizationSelection): string[] {
+  const userProvider = provider.value;
+  if (!userProvider || !selection) return [];
+  return authorizationPrivileges(userProvider, selection.tables === undefined ? "database" : "table");
+}
+
+function createAuthorizationUsesSelectedTables(database: string): boolean {
+  return createAuthorization(database)?.tables !== undefined;
+}
+
+function createAuthorizationTableSelected(database: string, table: string): boolean {
+  return createAuthorization(database)?.tables?.includes(table) ?? false;
+}
+
+function allCreateDatabaseTablesSelected(database: string): boolean {
+  const tables = createDatabaseTables.value[database] ?? [];
+  return tables.length > 0 && createAuthorization(database)?.tables?.length === tables.length;
+}
+
+function filteredCreateDatabaseTables(database: string): string[] {
+  const query = (createDatabaseTableSearch.value[database] ?? "").trim().toLowerCase();
+  const tables = createDatabaseTables.value[database] ?? [];
+  return query ? tables.filter((table) => table.toLowerCase().includes(query)) : tables;
+}
+
+async function updateCreateDatabaseTableScope(database: string, selectedTables: boolean) {
+  const selection = createAuthorization(database);
+  if (!selection) return;
+  if (!selectedTables) {
+    delete selection.tables;
+    return;
+  }
+  selection.tables = selection.tables ?? [];
+  if (selection.preset === "custom") {
+    const allowed = new Set(createPrivilegesForAuthorization(selection));
+    selection.privileges = (selection.privileges ?? []).filter((privilege) => allowed.has(privilege));
+  }
+  await loadCreateDatabaseTables(database);
+}
+
+async function loadCreateDatabaseTables(database: string) {
+  if (createDatabaseTables.value[database] || createDatabaseTablesLoading.value[database]) return;
+  createDatabaseTablesLoading.value = { ...createDatabaseTablesLoading.value, [database]: true };
+  createDatabaseTableErrors.value = { ...createDatabaseTableErrors.value, [database]: "" };
+  try {
+    const tables = await api.listTables(props.connection.id, database, "");
+    createDatabaseTables.value = {
+      ...createDatabaseTables.value,
+      [database]: Array.from(new Set(tables.map((table) => table.name.trim()).filter(Boolean))).sort((left, right) => left.localeCompare(right)),
+    };
+  } catch (error: any) {
+    createDatabaseTableErrors.value = {
+      ...createDatabaseTableErrors.value,
+      [database]: error?.message || String(error),
+    };
+  } finally {
+    createDatabaseTablesLoading.value = { ...createDatabaseTablesLoading.value, [database]: false };
+  }
+}
+
+function toggleCreateDatabaseTable(database: string, table: string) {
+  const selection = createAuthorization(database);
+  if (!selection?.tables) return;
+  const tables = new Set(selection.tables);
+  if (tables.has(table)) tables.delete(table);
+  else tables.add(table);
+  selection.tables = Array.from(tables);
+}
+
+function toggleAllCreateDatabaseTables(database: string) {
+  const selection = createAuthorization(database);
+  if (!selection?.tables) return;
+  const tables = createDatabaseTables.value[database] ?? [];
+  selection.tables = selection.tables.length === tables.length ? [] : [...tables];
 }
 
 function updateCreateDatabasePreset(database: string, preset: unknown) {
@@ -355,7 +462,9 @@ function authorizationStepLabel(result: AuthorizationStepResult): string {
   const step = result.step;
   if (step.operation === "createUser") return t("userAdmin.stepCreateUser");
   if (step.operation === "grantAdmin") return t("userAdmin.stepGrantAdmin", { user: step.subject });
-  if (step.operation === "grantDatabase") return t("userAdmin.stepGrantDatabase", { user: step.subject, database: step.targetDatabase });
+  if (step.operation === "grantDatabase") {
+    return step.targetTable ? t("userAdmin.stepGrantTable", { user: step.subject, database: step.targetDatabase, table: step.targetTable }) : t("userAdmin.stepGrantDatabase", { user: step.subject, database: step.targetDatabase });
+  }
   if (step.operation === "grantCurrentObjects") {
     return t("userAdmin.stepGrantCurrentObjects", {
       user: step.subject,
@@ -390,6 +499,21 @@ function previewPasswordChange() {
     afterApply: async () => {
       passwordDialogOpen.value = false;
       newPassword.value = "";
+    },
+  });
+}
+
+function previewHostChange() {
+  const user = selectedUser.value;
+  const renameUserSql = provider.value?.renameUserSql;
+  const host = newHost.value.trim();
+  if (!user || !renameUserSql || !host || host === user.host) return;
+  previewSql(renameUserSql(user, host), {
+    danger: true,
+    afterApply: async () => {
+      hostDialogOpen.value = false;
+      newHost.value = "";
+      selectedUserKey.value = userKey({ ...user, host });
     },
   });
 }
@@ -480,6 +604,10 @@ watch(
     users.value = [];
     createDatabases.value = [];
     createDatabaseAuthorizations.value = [];
+    createDatabaseTables.value = {};
+    createDatabaseTablesLoading.value = {};
+    createDatabaseTableErrors.value = {};
+    createDatabaseTableSearch.value = {};
     selectedUserKey.value = "";
     grants.value = [];
     grantsLoaded.value = false;
@@ -584,6 +712,10 @@ onMounted(loadUsers);
             </Badge>
           </div>
           <div class="ml-auto flex items-center gap-1.5">
+            <Button v-if="canRenameUser" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="openHostDialog">
+              <Globe2 class="h-3.5 w-3.5" />
+              {{ t("userAdmin.changeHost") }}
+            </Button>
             <Button v-if="canAlterPassword" variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click="passwordDialogOpen = true">
               <KeyRound class="h-3.5 w-3.5" />
               {{ t("userAdmin.changePassword") }}
@@ -759,9 +891,65 @@ onMounted(loadUsers);
                     </SelectContent>
                   </Select>
                 </div>
+                <div v-if="supportsCreateTableGrants && selectedCreateDatabaseSet.has(database)" class="mt-2 flex items-center gap-2 pl-5">
+                  <span class="shrink-0 text-[11px] text-muted-foreground">{{ t("userAdmin.tableScope") }}</span>
+                  <div class="flex h-7 shrink-0 items-center rounded-md border bg-muted/30 p-0.5">
+                    <button type="button" class="h-5 rounded px-2 text-[10px]" :class="!createAuthorizationUsesSelectedTables(database) ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'" @click="updateCreateDatabaseTableScope(database, false)">
+                      {{ t("userAdmin.allTables") }}
+                    </button>
+                    <button type="button" class="h-5 rounded px-2 text-[10px]" :class="createAuthorizationUsesSelectedTables(database) ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'" @click="updateCreateDatabaseTableScope(database, true)">
+                      {{ t("userAdmin.specificTables") }}
+                    </button>
+                  </div>
+                  <Popover v-if="createAuthorizationUsesSelectedTables(database)">
+                    <PopoverTrigger as-child>
+                      <button type="button" class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border bg-background px-2 text-left text-[11px] hover:bg-accent">
+                        <Table2 class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span class="min-w-0 flex-1 truncate">
+                          {{ createAuthorization(database)?.tables?.length ? t("userAdmin.selectedTableCount", { count: createAuthorization(database)?.tables?.length }) : t("userAdmin.chooseTables") }}
+                        </span>
+                        <Loader2 v-if="createDatabaseTablesLoading[database]" class="h-3.5 w-3.5 shrink-0 animate-spin" />
+                        <ChevronDown v-else class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="end" class="w-72 p-0">
+                      <div class="flex items-center gap-2 border-b p-2">
+                        <div class="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md border px-2">
+                          <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <input v-model="createDatabaseTableSearch[database]" class="min-w-0 flex-1 bg-transparent text-[11px] outline-none" :placeholder="t('userAdmin.searchTable')" />
+                        </div>
+                        <button type="button" class="shrink-0 text-[11px] text-primary disabled:text-muted-foreground" :disabled="!(createDatabaseTables[database]?.length > 0)" @click="toggleAllCreateDatabaseTables(database)">
+                          {{ t(allCreateDatabaseTablesSelected(database) ? "userAdmin.clearAllTables" : "userAdmin.selectAllTables") }}
+                        </button>
+                      </div>
+                      <div class="max-h-56 overflow-auto p-1">
+                        <div v-if="createDatabaseTablesLoading[database]" class="flex items-center justify-center gap-2 px-3 py-6 text-xs text-muted-foreground">
+                          <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                          {{ t("userAdmin.loadingTables") }}
+                        </div>
+                        <div v-else-if="createDatabaseTableErrors[database]" class="px-3 py-4 text-center text-xs text-destructive">
+                          <p class="break-words">{{ t("userAdmin.loadTablesFailed", { message: createDatabaseTableErrors[database] }) }}</p>
+                          <button type="button" class="mt-2 text-primary" @click="loadCreateDatabaseTables(database)">{{ t("userAdmin.retry") }}</button>
+                        </div>
+                        <div v-else-if="filteredCreateDatabaseTables(database).length === 0" class="px-3 py-6 text-center text-xs text-muted-foreground">
+                          {{ t("userAdmin.emptyTables") }}
+                        </div>
+                        <button v-for="table in filteredCreateDatabaseTables(database)" :key="table" type="button" class="flex h-8 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-accent" @click="toggleCreateDatabaseTable(database, table)">
+                          <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border" :class="createAuthorizationTableSelected(database, table) ? 'border-primary bg-primary text-primary-foreground' : 'border-border'">
+                            <Check v-if="createAuthorizationTableSelected(database, table)" class="h-2.5 w-2.5" />
+                          </span>
+                          <span class="min-w-0 flex-1 truncate">{{ table }}</span>
+                        </button>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <p v-if="createAuthorizationUsesSelectedTables(database) && !createAuthorization(database)?.tables?.length" class="mt-1 pl-5 text-[10px] text-destructive">
+                  {{ t("userAdmin.tableSelectionRequired") }}
+                </p>
                 <div v-if="createAuthorization(database)?.preset === 'custom'" class="mt-2 grid grid-cols-3 gap-1.5 pl-5">
                   <button
-                    v-for="privilege in createAuthorizationPrivileges"
+                    v-for="privilege in createPrivilegesForAuthorization(createAuthorization(database))"
                     :key="privilege"
                     type="button"
                     class="flex h-7 items-center gap-1.5 rounded border px-2 text-[10px]"
@@ -801,6 +989,19 @@ onMounted(loadUsers);
         <DialogFooter>
           <Button variant="outline" @click="passwordDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
           <Button :disabled="!newPassword" @click="previewPasswordChange">{{ t("userAdmin.previewSql") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="hostDialogOpen">
+      <DialogContent class="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{{ t("userAdmin.changeHost") }}</DialogTitle>
+        </DialogHeader>
+        <Input v-model="newHost" :placeholder="t('userAdmin.newHost')" />
+        <DialogFooter>
+          <Button variant="outline" @click="hostDialogOpen = false">{{ t("dangerDialog.cancel") }}</Button>
+          <Button :disabled="!canPreviewHostChange" @click="previewHostChange">{{ t("userAdmin.previewSql") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

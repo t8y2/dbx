@@ -116,6 +116,8 @@ Common examples:
 
 <Callout type="warn">JDBC URL parameters vary by database and driver version. Follow the vendor documentation. If a driver depends on multiple JARs, import or list all required JAR paths.</Callout>
 
+<Callout type="info">For Oracle, also import `com.oracle.database.nls:orai18n` with the same version as `ojdbc`. The base ojdbc jar cannot convert multibyte charsets such as `ZHS16GBK`, so table and column comments fail to load without it. Maven installs of `com.oracle.database.jdbc:ojdbc*` fetch the matching `orai18n` jar automatically. DBX's built-in Oracle connection (default driver) supports these charsets without any extra JAR.</Callout>
+
 ## Step 4: Import JDBC Driver JARs
 
 In DBX:

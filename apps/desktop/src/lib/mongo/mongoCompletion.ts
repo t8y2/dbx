@@ -158,6 +158,9 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
 
 const CALL_METHOD_PATTERN = new RegExp(`\\.(${Object.keys(METHOD_ARG_ROLES).join("|")})\\s*\\(`, "g");
 
+/** Modes reached by walking the `db.collection.method` chain, where a `.` switches item source. */
+const DOT_SCOPED_MODES = new Set<MongoCompletionMode>(["root", "collection", "collectionOrMethod", "method", "cursorMethod"]);
+
 /** Stages whose body is a fixed set of option keys rather than a field map. */
 const OPTION_STAGES = new Set(Object.keys(STAGE_OPTION_KEYS));
 
@@ -325,8 +328,19 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   return false;
 }
 
-export function getMongoCompletionResultValidFor(): RegExp {
-  return /["']?[\w_$.-]*$/;
+/**
+ * How far the editor may keep re-filtering a result before it has to ask us
+ * again. In the `db.…` chain every `.` moves the cursor to a different item
+ * source (root → collection → method → cursor method), so a result must stop
+ * being valid as soon as the typed text gains a dot it did not have — otherwise
+ * the editor keeps filtering collection names against `users.` and shows
+ * nothing. Elsewhere (field paths, quoted collection names) dots are just part
+ * of the identifier and are safe to keep.
+ */
+export function getMongoCompletionResultValidFor(context?: MongoCompletionContext): RegExp {
+  if (!context || !DOT_SCOPED_MODES.has(context.mode)) return /["']?[\w_$.-]*$/;
+  const segments = context.prefix.split(".").length;
+  return new RegExp(`["']?[\\w_$-]*${"\\.[\\w_$-]*".repeat(segments - 1)}$`);
 }
 
 export function inferMongoCompletionFields(documents: unknown[]): MongoCompletionField[] {
@@ -677,6 +691,7 @@ function collectionOrMethodItems(prefix: string, collections: string[]): MongoCo
   const methods = methodItems(methodPrefix).map((item) => ({
     ...item,
     apply: `${collectionRef}.${item.apply}`,
+    filterText: `${collection}.${item.label}`,
     boost: !hasExactCollection && hasDottedCollectionCandidate ? Math.min(item.boost, 110) : item.boost,
   }));
 

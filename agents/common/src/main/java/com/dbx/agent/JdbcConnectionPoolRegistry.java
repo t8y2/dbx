@@ -81,10 +81,14 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
     }
 
     Lease borrow(String identity, ConnectionFactory connectionFactory) throws Exception {
-        return borrow(identity, JdbcSessionRole.WORKLOAD, connectionFactory);
+        return borrow(identity, JdbcSessionRole.WORKLOAD, null, connectionFactory);
     }
 
     Lease borrow(String identity, JdbcSessionRole role, ConnectionFactory connectionFactory) throws Exception {
+        return borrow(identity, role, null, connectionFactory);
+    }
+
+    Lease borrow(String identity, JdbcSessionRole role, String connectionTestQuery, ConnectionFactory connectionFactory) throws Exception {
         String key = digest(identity);
         while (true) {
             if (closed.get()) {
@@ -96,7 +100,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             }
             PoolEntry entry;
             try {
-                entry = pools.computeIfAbsent(key, ignored -> createPoolEntry(key, connectionFactory));
+                entry = pools.computeIfAbsent(key, ignored -> createPoolEntry(key, connectionTestQuery, connectionFactory));
             } catch (PoolCreationException error) {
                 throw error.unwrap();
             }
@@ -125,7 +129,12 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
         return physicalConnectionBudget.activeCount();
     }
 
-    private PoolEntry createPoolEntry(String key, ConnectionFactory connectionFactory) {
+    boolean hasActiveLeases(String identity) {
+        PoolEntry entry = pools.get(digest(identity));
+        return entry != null && entry.hasActiveLeases();
+    }
+
+    private PoolEntry createPoolEntry(String key, String connectionTestQuery, ConnectionFactory connectionFactory) {
         try {
             ConnectionFactoryDataSource factoryDataSource = new ConnectionFactoryDataSource(
                 connectionFactory,
@@ -141,6 +150,9 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             config.setMinimumIdle(settings.minimumIdle);
             config.setConnectionTimeout(settings.connectionTimeoutMillis);
             config.setValidationTimeout(settings.validationTimeoutMillis);
+            if (connectionTestQuery != null && !connectionTestQuery.isBlank()) {
+                config.setConnectionTestQuery(connectionTestQuery);
+            }
             config.setIdleTimeout(settings.idleTimeoutMillis);
             config.setMaxLifetime(settings.maxLifetimeMillis);
             config.setInitializationFailTimeout(-1L);
@@ -693,6 +705,10 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
 
         private synchronized boolean isRetired() {
             return retired;
+        }
+
+        private synchronized boolean hasActiveLeases() {
+            return activeLeases > 0;
         }
 
         private void retireAfterCheckoutFailure(OperationDeadline deadline) {
@@ -1475,7 +1491,7 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             call("physical_set_network_timeout", () -> {
                 connection.setNetworkTimeout(networkTimeoutExecutor, networkTimeoutMillis);
                 return null;
-            }, factoryDataSource, timeoutMillis);
+            }, factoryDataSource, timeoutMillis, true);
         }
 
         private <T> T call(
@@ -1483,6 +1499,16 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
             PhysicalConnectionCall<T> call,
             ConnectionFactoryDataSource factoryDataSource,
             long timeoutMillis
+        ) throws SQLException {
+            return call(operation, call, factoryDataSource, timeoutMillis, false);
+        }
+
+        private <T> T call(
+            String operation,
+            PhysicalConnectionCall<T> call,
+            ConnectionFactoryDataSource factoryDataSource,
+            long timeoutMillis,
+            boolean preserveCompletedFailure
         ) throws SQLException {
             CompletableFuture<T> outcome = new CompletableFuture<>();
             try {
@@ -1511,6 +1537,13 @@ final class JdbcConnectionPoolRegistry implements AutoCloseable {
                 factoryDataSource.poison(failure);
                 throw failure;
             } catch (ExecutionException error) {
+                if (preserveCompletedFailure) {
+                    Throwable cause = error.getCause();
+                    if (cause instanceof SQLException sqlError) {
+                        throw sqlError;
+                    }
+                    throw new SQLException("JDBC physical operation failed: " + operation, cause);
+                }
                 SQLException failure = new PhysicalConnectionStateUnknownException(error.getCause());
                 factoryDataSource.poison(failure);
                 throw failure;

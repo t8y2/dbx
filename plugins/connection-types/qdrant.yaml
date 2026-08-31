@@ -1,0 +1,29 @@
+schemaVersion: 1
+order: 180
+dbType: qdrant
+rustVariant: Qdrant
+label: Qdrant
+runtimeMode: native
+mcpMode: bridge
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: false
+defaultPort: 6333
+supportLevel: browse
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: false
+  objectSource: false
+  schemaSearch: false
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

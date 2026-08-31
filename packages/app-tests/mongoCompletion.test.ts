@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildMongoCompletionItems, getMongoCompletionContext, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
+import { buildMongoCompletionItems, getMongoCompletionContext, getMongoCompletionResultValidFor, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
 import { ACCUMULATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
@@ -60,6 +60,45 @@ test("keeps direct collection method completion while resolving dotted names", (
   const item = buildMongoCompletionItems("db.users.fi", "db.users.fi".length, { collections }).find((candidate) => candidate.label === "find");
 
   assert.equal(item?.apply, "users.find({})");
+});
+
+// The editor filters options against the document text from `from` to the
+// cursor, so every item must be matchable by the whole prefix it replaces —
+// a bare `find` label under a `users.fi` prefix is silently dropped.
+test("makes collection-qualified methods matchable by the prefix they replace", () => {
+  for (const text of ["db.users.", "db.users.fi", "db.audit."]) {
+    const context = getMongoCompletionContext(text, text.length);
+    const prefix = text.slice(context.from);
+    for (const item of buildMongoCompletionItems(text, text.length, { collections })) {
+      const matchable = item.filterText ?? item.label;
+      assert.ok(matchable.toLowerCase().startsWith(prefix.toLowerCase()), `"${matchable}" is not matchable by the typed "${prefix}"`);
+    }
+  }
+
+  const item = buildMongoCompletionItems("db.users.fi", "db.users.fi".length, { collections }).find((candidate) => candidate.label === "find");
+  assert.equal(item?.filterText, "users.find");
+});
+
+test("stops reusing a completion result once the typed text gains a dot", () => {
+  const validFor = (text: string) => {
+    const pattern = getMongoCompletionResultValidFor(getMongoCompletionContext(text, text.length));
+    return (typed: string) => new RegExp(`^(?:${pattern.source})$`).test(typed);
+  };
+
+  // `db.` lists collections; typing `users` keeps that list usable, `users.` does not.
+  const afterDb = validFor("db.");
+  assert.equal(afterDb("users"), true);
+  assert.equal(afterDb("users."), false);
+
+  // `db.users.` lists methods; narrowing to `users.fi` keeps them, a further dot does not.
+  const afterCollection = validFor("db.users.");
+  assert.equal(afterCollection("users.fi"), true);
+  assert.equal(afterCollection("users.find."), false);
+  assert.equal(afterCollection("users"), false);
+
+  // Dots inside a quoted collection name are part of the identifier, not a scope change.
+  const insideGetCollection = validFor('db.getCollection("audit.');
+  assert.equal(insideGetCollection('"audit.logs'), true);
 });
 
 test("suggests dotted names inside getCollection", () => {

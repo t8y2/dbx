@@ -1,4 +1,41 @@
+import {
+  ISSUE_CLAIM_TTL_MS,
+  ISSUE_DRAFT_TTL_MS,
+  ISSUE_RATE_WINDOW_MS,
+  IssueSubmissionError,
+  buildGitHubIssueBody,
+  consumeRollingLimit,
+  createIssuePreview,
+  createPublicGitHubIssue,
+  issueImageObjectKey,
+  normalizeIssueLanguage,
+  readIssueImages,
+  validateEditableIssue,
+  validateIssueDescription,
+  type IssueLanguage,
+} from "./lib/issueSubmission";
+
 type AssetsBinding = { fetch(request: Request): Promise<Response> };
+type R2BucketBinding = {
+  put(key: string, value: Uint8Array, options?: { httpMetadata?: { contentType?: string; cacheControl?: string } }): Promise<unknown>;
+  delete(key: string): Promise<void>;
+};
+type DurableObjectStubBinding = { fetch(input: string | Request, init?: RequestInit): Promise<Response> };
+type DurableObjectNamespaceBinding = {
+  idFromName(name: string): unknown;
+  get(id: unknown): DurableObjectStubBinding;
+};
+type DurableObjectTransactionBinding = {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  delete(key: string): Promise<boolean>;
+};
+type DurableObjectStorageBinding = DurableObjectTransactionBinding & {
+  transaction<T>(closure: (transaction: DurableObjectTransactionBinding) => Promise<T>): Promise<T>;
+  setAlarm(scheduledTime: number): Promise<void>;
+  deleteAll(): Promise<void>;
+};
+type DurableObjectStateBinding = { storage: DurableObjectStorageBinding };
 
 type Env = {
   ASSETS: AssetsBinding;
@@ -6,6 +43,17 @@ type Env = {
   GITHUB_CLIENT_SECRET?: string;
   GITHUB_OAUTH_CALLBACK_URL?: string;
   SESSION_SECRET?: string;
+  ISSUE_AI_API_BASE?: string;
+  ISSUE_AI_API_KEY?: string;
+  ISSUE_AI_MODEL?: string;
+  ISSUE_RATE_LIMIT_SECRET?: string;
+  ISSUE_LIMITER?: DurableObjectNamespaceBinding;
+  ISSUE_IMAGES?: R2BucketBinding;
+  ISSUE_IMAGE_PUBLIC_BASE_URL?: string;
+  GITHUB_APP_ID?: string;
+  GITHUB_APP_PRIVATE_KEY?: string;
+  GITHUB_APP_PRIVATE_KEY_B64?: string;
+  ISSUE_GITHUB_REPOSITORY?: string;
 };
 
 type OAuthState = {
@@ -22,9 +70,43 @@ type SessionUser = {
   expiresAt: number;
 };
 
+type IssueSession = {
+  id: string;
+  expiresAt: number;
+};
+
+type IssueDraftRecord = {
+  id: string;
+  imageCount: number;
+  language: IssueLanguage;
+  createdAt: number;
+  expiresAt: number;
+  status: "ready" | "submitting" | "submitted";
+  claimExpiresAt?: number;
+  issueNumber?: number;
+  issueUrl?: string;
+};
+
+type DurableClaimResult =
+  | { state: "claimed"; draft: IssueDraftRecord }
+  | { state: "completed"; issueNumber: number; issueUrl: string }
+  | { state: "missing" }
+  | { state: "expired" }
+  | { state: "busy" };
+
 const encoder = new TextEncoder();
 const STATE_COOKIE = "dbx_oauth_state";
 const SESSION_COOKIE = "dbx_contributor_session";
+const ISSUE_SESSION_COOKIE = "dbx_issue_session";
+const ISSUE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const IMMUTABLE_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const IMAGE_ASSET_CACHE_CONTROL = "public, max-age=86400, stale-while-revalidate=604800";
+
+export function staticAssetCacheControl(pathname: string): string | null {
+  if (pathname.startsWith("/_next/static/")) return IMMUTABLE_ASSET_CACHE_CONTROL;
+  if (/\.(?:avif|gif|ico|jpe?g|png|svg|webp)$/i.test(pathname)) return IMAGE_ASSET_CACHE_CONTROL;
+  return null;
+}
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -100,7 +182,9 @@ async function codeChallenge(verifier: string): Promise<string> {
 }
 
 function json(data: unknown, status = 200, headers?: HeadersInit): Response {
-  return Response.json(data, { status, headers: { "Cache-Control": "no-store", ...headers } });
+  const responseHeaders = new Headers(headers);
+  responseHeaders.set("Cache-Control", "no-store");
+  return Response.json(data, { status, headers: responseHeaders });
 }
 
 function requiredConfig(env: Env): { clientId: string; clientSecret: string; sessionSecret: string } | null {
@@ -206,14 +290,357 @@ async function contributorAvatar(request: Request): Promise<Response> {
   });
 }
 
+function issueSessionCookie(value: string, maxAge: number): string {
+  return `${ISSUE_SESSION_COOKIE}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Strict`;
+}
+
+function issueRuntimeSecret(env: Env): string {
+  const secret = env.ISSUE_RATE_LIMIT_SECRET || env.SESSION_SECRET;
+  if (!secret) throw new IssueSubmissionError("ISSUE_RATE_LIMIT_NOT_CONFIGURED", 503);
+  return secret;
+}
+
+async function issueIdentityHash(kind: "ip" | "session", value: string, secret: string): Promise<string> {
+  const signature = await crypto.subtle.sign("HMAC", await hmacKey(secret), encoder.encode(`${kind}:${value}`));
+  return base64UrlEncode(new Uint8Array(signature));
+}
+
+function durableStub(env: Env, name: string): DurableObjectStubBinding {
+  if (!env.ISSUE_LIMITER) throw new IssueSubmissionError("ISSUE_LIMITER_NOT_CONFIGURED", 503);
+  return env.ISSUE_LIMITER.get(env.ISSUE_LIMITER.idFromName(name));
+}
+
+async function durableJson<T>(stub: DurableObjectStubBinding, path: string, body: unknown): Promise<T> {
+  let response: Response;
+  try {
+    response = await stub.fetch(`https://issue-internal${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new IssueSubmissionError("ISSUE_STATE_UNAVAILABLE", 503);
+  }
+  if (!response.ok) throw new IssueSubmissionError("ISSUE_STATE_UNAVAILABLE", 503);
+  try {
+    return (await response.json()) as T;
+  } catch {
+    throw new IssueSubmissionError("ISSUE_STATE_UNAVAILABLE", 503);
+  }
+}
+
+async function issueSession(request: Request, env: Env, create: boolean): Promise<{ session: IssueSession; setCookie?: string }> {
+  const secret = issueRuntimeSecret(env);
+  const existing = await verifySignedPayload<IssueSession>(parseCookies(request)[ISSUE_SESSION_COOKIE], secret);
+  if (existing && existing.expiresAt > Date.now() && /^[A-Za-z0-9_-]{24,}$/.test(existing.id)) return { session: existing };
+  if (!create) throw new IssueSubmissionError("ISSUE_SESSION_EXPIRED", 400);
+  const session = { id: randomToken(24), expiresAt: Date.now() + ISSUE_SESSION_TTL_MS } satisfies IssueSession;
+  const signed = await signPayload(session, secret);
+  return { session, setCookie: issueSessionCookie(signed, Math.floor(ISSUE_SESSION_TTL_MS / 1000)) };
+}
+
+function requestIp(request: Request): string {
+  const cloudflareIp = request.headers.get("CF-Connecting-IP")?.trim();
+  if (cloudflareIp) return cloudflareIp;
+  const hostname = new URL(request.url).hostname;
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return "local-development";
+  throw new IssueSubmissionError("IP_ADDRESS_UNAVAILABLE", 400);
+}
+
+function verifyIssueOrigin(request: Request): void {
+  const origin = request.headers.get("Origin");
+  if (origin && origin !== new URL(request.url).origin) throw new IssueSubmissionError("ORIGIN_NOT_ALLOWED", 403);
+}
+
+function issueError(error: unknown, headers?: HeadersInit): Response {
+  if (error instanceof IssueSubmissionError) return json({ error: error.code }, error.status, headers);
+  return json({ error: "ISSUE_REQUEST_FAILED" }, 500, headers);
+}
+
+function countIssueImageEntries(entries: FormDataEntryValue[]): number {
+  return entries.filter((entry) => typeof entry !== "string" && entry.size > 0).length;
+}
+
+function publicImageUrl(baseUrl: string, key: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/${key.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function uploadIssueImages(env: Env, draftId: string, images: Awaited<ReturnType<typeof readIssueImages>>): Promise<{ keys: string[]; urls: string[] }> {
+  if (images.length === 0) return { keys: [], urls: [] };
+  if (!env.ISSUE_IMAGES) throw new IssueSubmissionError("ISSUE_IMAGE_STORAGE_NOT_CONFIGURED", 503);
+  const baseUrl = env.ISSUE_IMAGE_PUBLIC_BASE_URL || "https://dl.dbxio.com";
+  const keys: string[] = [];
+  const urls: string[] = [];
+  for (const [index, image] of images.entries()) {
+    const key = issueImageObjectKey(draftId, image.extension, index);
+    try {
+      await env.ISSUE_IMAGES.put(key, image.bytes, {
+        httpMetadata: { contentType: image.contentType, cacheControl: "public, max-age=31536000, immutable" },
+      });
+    } catch {
+      await Promise.all(keys.map((uploadedKey) => env.ISSUE_IMAGES!.delete(uploadedKey).catch(() => undefined)));
+      throw new IssueSubmissionError("ISSUE_IMAGE_UPLOAD_FAILED", 502);
+    }
+    keys.push(key);
+    urls.push(publicImageUrl(baseUrl, key));
+  }
+  return { keys, urls };
+}
+
+async function deleteIssueImages(env: Env, keys: string[]): Promise<void> {
+  if (!env.ISSUE_IMAGES) return;
+  await Promise.all(keys.map((key) => env.ISSUE_IMAGES!.delete(key).catch(() => undefined)));
+}
+
+async function handleIssueDraft(request: Request, env: Env): Promise<Response> {
+  let responseHeaders: HeadersInit | undefined;
+  try {
+    verifyIssueOrigin(request);
+    const sessionResult = await issueSession(request, env, true);
+    responseHeaders = sessionResult.setCookie ? { "Set-Cookie": sessionResult.setCookie } : undefined;
+    const secret = issueRuntimeSecret(env);
+    const ipHash = await issueIdentityHash("ip", requestIp(request), secret);
+    const sessionHash = await issueIdentityHash("session", sessionResult.session.id, secret);
+    const ipStub = durableStub(env, `ip:${ipHash}`);
+    const sessionStub = durableStub(env, `session:${sessionHash}`);
+    const ipLimit = await durableJson<ReturnType<typeof consumeRollingLimit>>(ipStub, "/limit/consume", {});
+    if (!ipLimit.allowed) {
+      return json({ error: "RATE_LIMITED", retryAfter: Math.max(1, Math.ceil((ipLimit.resetAt - Date.now()) / 1000)) }, 429, responseHeaders);
+    }
+    const sessionLimit = await durableJson<ReturnType<typeof consumeRollingLimit>>(sessionStub, "/limit/consume", {});
+    if (!sessionLimit.allowed) {
+      return json({ error: "RATE_LIMITED", retryAfter: Math.max(1, Math.ceil((sessionLimit.resetAt - Date.now()) / 1000)) }, 429, responseHeaders);
+    }
+
+    const form = await request.formData();
+    const description = validateIssueDescription(form.get("description"));
+    const language = normalizeIssueLanguage(form.get("language"));
+    const images = await readIssueImages(form.getAll("images"));
+    const preview = await createIssuePreview(
+      { apiBase: env.ISSUE_AI_API_BASE, apiKey: env.ISSUE_AI_API_KEY, model: env.ISSUE_AI_MODEL },
+      description,
+      images,
+      language,
+    );
+    const draftId = crypto.randomUUID();
+    const now = Date.now();
+    await durableJson(sessionStub, "/draft/create", {
+      draft: {
+        id: draftId,
+        imageCount: images.length,
+        language,
+        createdAt: now,
+        expiresAt: now + ISSUE_DRAFT_TTL_MS,
+        status: "ready",
+      } satisfies IssueDraftRecord,
+    });
+    return json(
+      {
+        draftId,
+        expiresAt: now + ISSUE_DRAFT_TTL_MS,
+        preview,
+        rateLimit: {
+          remaining: Math.min(ipLimit.remaining, sessionLimit.remaining),
+          resetAt: Math.max(ipLimit.resetAt, sessionLimit.resetAt),
+        },
+      },
+      200,
+      responseHeaders,
+    );
+  } catch (error) {
+    return issueError(error, responseHeaders);
+  }
+}
+
+async function handleIssueSubmit(request: Request, env: Env): Promise<Response> {
+  let claimed = false;
+  let draftId = "";
+  let sessionStub: DurableObjectStubBinding | null = null;
+  let imageKeys: string[] = [];
+
+  try {
+    verifyIssueOrigin(request);
+    const sessionResult = await issueSession(request, env, false);
+    const secret = issueRuntimeSecret(env);
+    const sessionHash = await issueIdentityHash("session", sessionResult.session.id, secret);
+    sessionStub = durableStub(env, `session:${sessionHash}`);
+    const form = await request.formData();
+    const draftValue = form.get("draftId");
+    if (typeof draftValue !== "string" || !/^[0-9a-f-]{36}$/i.test(draftValue)) throw new IssueSubmissionError("DRAFT_INVALID");
+    draftId = draftValue;
+    const imageEntries = form.getAll("images");
+    const claim = await durableJson<DurableClaimResult>(sessionStub, "/draft/claim", { draftId, now: Date.now() });
+    if (claim.state === "completed") return json({ issueNumber: claim.issueNumber, issueUrl: claim.issueUrl, alreadySubmitted: true });
+    if (claim.state === "missing" || claim.state === "expired") throw new IssueSubmissionError("DRAFT_EXPIRED", 410);
+    if (claim.state === "busy") throw new IssueSubmissionError("DRAFT_SUBMITTING", 409);
+    claimed = true;
+    if (countIssueImageEntries(imageEntries) !== claim.draft.imageCount) throw new IssueSubmissionError("DRAFT_IMAGES_CHANGED");
+    const editable = validateEditableIssue({ type: form.get("type"), title: form.get("title"), body: form.get("body") });
+    const images = await readIssueImages(imageEntries);
+    const uploaded = await uploadIssueImages(env, draftId, images);
+    imageKeys = uploaded.keys;
+    const issue = await createPublicGitHubIssue(
+      {
+        appId: env.GITHUB_APP_ID,
+        privateKey: env.GITHUB_APP_PRIVATE_KEY,
+        privateKeyBase64: env.GITHUB_APP_PRIVATE_KEY_B64,
+        repository: env.ISSUE_GITHUB_REPOSITORY,
+      },
+      {
+        title: editable.title,
+        body: buildGitHubIssueBody(editable.body, uploaded.urls, claim.draft.language),
+        labels: editable.labels,
+      },
+    );
+    claimed = false;
+    try {
+      await durableJson(sessionStub, "/draft/complete", { draftId, issueNumber: issue.number, issueUrl: issue.url, now: Date.now() });
+    } catch {
+      return json({ issueNumber: issue.number, issueUrl: issue.url });
+    }
+    return json({ issueNumber: issue.number, issueUrl: issue.url });
+  } catch (error) {
+    await deleteIssueImages(env, imageKeys);
+    if (claimed && sessionStub && draftId) {
+      try {
+        await durableJson(sessionStub, "/draft/release", { draftId });
+      } catch {
+        return issueError(error);
+      }
+    }
+    return issueError(error);
+  }
+}
+
+function preferredIssueLanguage(request: Request): IssueLanguage {
+  return request.headers.get("Accept-Language")?.trim().toLowerCase().startsWith("zh") ? "cn" : "en";
+}
+
+export function issueRedirectPath(pathname: string, language: IssueLanguage): string | null {
+  if (pathname === "/issue" || pathname === "/issue/" || pathname === "/issues" || pathname === "/issues/") return `/${language}/issue`;
+  const localized = pathname.match(/^\/(cn|en)\/issues\/?$/);
+  return localized ? `/${localized[1]}/issue` : null;
+}
+
+export class IssueSubmissionLimiter {
+  constructor(private readonly state: DurableObjectStateBinding) {}
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method !== "POST") return json({ error: "METHOD_NOT_ALLOWED" }, 405);
+
+    if (url.pathname === "/limit/consume") {
+      const now = Date.now();
+      const result = await this.state.storage.transaction(async (transaction) => {
+        const timestamps = (await transaction.get<number[]>("rate")) ?? [];
+        const next = consumeRollingLimit(timestamps, now);
+        if (next.allowed) await transaction.put("rate", next.timestamps);
+        return next;
+      });
+      const lastTimestamp = result.timestamps.at(-1);
+      if (lastTimestamp) await this.state.storage.setAlarm(lastTimestamp + ISSUE_RATE_WINDOW_MS + 1000);
+      return json(result);
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await request.json()) as Record<string, unknown>;
+    } catch {
+      return json({ error: "INVALID_JSON" }, 400);
+    }
+
+    if (url.pathname === "/draft/create") {
+      const draft = payload.draft as IssueDraftRecord | undefined;
+      if (!draft || !/^[0-9a-f-]{36}$/i.test(draft.id)) return json({ error: "DRAFT_INVALID" }, 400);
+      await this.state.storage.put(`draft:${draft.id}`, draft);
+      return json({ created: true });
+    }
+
+    if (url.pathname === "/draft/claim") {
+      const draftId = typeof payload.draftId === "string" ? payload.draftId : "";
+      const now = typeof payload.now === "number" ? payload.now : Date.now();
+      const result = await this.state.storage.transaction<DurableClaimResult>(async (transaction) => {
+        const key = `draft:${draftId}`;
+        const draft = await transaction.get<IssueDraftRecord>(key);
+        if (!draft) return { state: "missing" };
+        if (draft.status === "submitted" && draft.issueNumber && draft.issueUrl) {
+          return { state: "completed", issueNumber: draft.issueNumber, issueUrl: draft.issueUrl };
+        }
+        if (draft.expiresAt <= now) {
+          await transaction.delete(key);
+          return { state: "expired" };
+        }
+        if (draft.status === "submitting" && (draft.claimExpiresAt ?? 0) > now) return { state: "busy" };
+        const claimed = { ...draft, status: "submitting", claimExpiresAt: now + ISSUE_CLAIM_TTL_MS } satisfies IssueDraftRecord;
+        await transaction.put(key, claimed);
+        return { state: "claimed", draft: claimed };
+      });
+      return json(result);
+    }
+
+    if (url.pathname === "/draft/release") {
+      const draftId = typeof payload.draftId === "string" ? payload.draftId : "";
+      await this.state.storage.transaction(async (transaction) => {
+        const key = `draft:${draftId}`;
+        const draft = await transaction.get<IssueDraftRecord>(key);
+        if (draft?.status === "submitting") await transaction.put(key, { ...draft, status: "ready", claimExpiresAt: undefined });
+      });
+      return json({ released: true });
+    }
+
+    if (url.pathname === "/draft/complete") {
+      const draftId = typeof payload.draftId === "string" ? payload.draftId : "";
+      const issueNumber = typeof payload.issueNumber === "number" ? payload.issueNumber : 0;
+      const issueUrl = typeof payload.issueUrl === "string" ? payload.issueUrl : "";
+      const now = typeof payload.now === "number" ? payload.now : Date.now();
+      if (!issueNumber || !issueUrl) return json({ error: "ISSUE_RESULT_INVALID" }, 400);
+      await this.state.storage.transaction(async (transaction) => {
+        const key = `draft:${draftId}`;
+        const draft = await transaction.get<IssueDraftRecord>(key);
+        if (draft) {
+          await transaction.put(key, {
+            ...draft,
+            status: "submitted",
+            claimExpiresAt: undefined,
+            issueNumber,
+            issueUrl,
+            expiresAt: now + ISSUE_RATE_WINDOW_MS,
+          });
+        }
+      });
+      return json({ completed: true });
+    }
+
+    return json({ error: "NOT_FOUND" }, 404);
+  }
+
+  async alarm(): Promise<void> {
+    await this.state.storage.deleteAll();
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const issueRedirect = issueRedirectPath(url.pathname, preferredIssueLanguage(request));
+    if (issueRedirect && request.method === "GET") return Response.redirect(`${url.origin}${issueRedirect}`, 308);
+    if (url.pathname === "/api/issues/draft" && request.method === "POST") return handleIssueDraft(request, env);
+    if (url.pathname === "/api/issues/submit" && request.method === "POST") return handleIssueSubmit(request, env);
     if (url.pathname === "/api/auth/github/start" && request.method === "GET") return startOAuth(request, env);
     if (url.pathname === "/api/auth/github/callback" && request.method === "GET") return finishOAuth(request, env);
     if (url.pathname === "/api/auth/me" && request.method === "GET") return currentUser(request, env);
     if (url.pathname === "/api/auth/logout" && request.method === "POST") return logout();
     if (url.pathname === "/api/contributor-avatar" && request.method === "GET") return contributorAvatar(request);
-    return env.ASSETS.fetch(request);
+    const response = await env.ASSETS.fetch(request);
+    const cacheControl = staticAssetCacheControl(url.pathname);
+    if (!cacheControl || response.status < 200 || response.status >= 400) return response;
+
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", cacheControl);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   },
 };

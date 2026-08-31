@@ -233,13 +233,4 @@ const { t } = useI18n();
   flex-direction: column;
   gap: 16px;
 }
-
-.btn-close {
-  border: none;
-  background: none;
-  font-size: 22px;
-  line-height: 1;
-  cursor: pointer;
-  color: var(--color-text-secondary);
-}
 </style>

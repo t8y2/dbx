@@ -3,9 +3,9 @@ services:
     image: docker.cnb.cool/znb/images/rnacos:v0.8.5
     container_name: dbx-rnacos-0.8
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-8849}:8848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_GRPC_PORT:-9849}:9848"
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_CONSOLE_PORT:-10849}:10848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-11100}:8848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_GRPC_PORT:-11101}:9848"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${RNACOS_CONSOLE_PORT:-11102}:10848"
     volumes:
       - data:/io
     environment:

@@ -11,16 +11,21 @@ const apiMock = vi.hoisted(() => ({
   installDownloadedUpdate: vi.fn<() => Promise<void>>(),
 }));
 const listenMock = vi.hoisted(() => vi.fn());
+const toastMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/backend/api", () => apiMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({
   isTauriRuntime: () => true,
 }));
 vi.mock("@/composables/useToast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: toastMock }),
+}));
+const settingsStoreMock = vi.hoisted(() => ({
+  editorSettings: { updateDownloadSource: "official", ignoredUpdateVersion: "" },
+  updateEditorSettingsAndPersist: vi.fn<() => Promise<void>>(),
 }));
 vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => ({ editorSettings: { updateDownloadSource: "official" } }),
+  useSettingsStore: () => settingsStoreMock,
 }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,
@@ -47,6 +52,8 @@ let container: HTMLDivElement | undefined;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  settingsStoreMock.editorSettings.ignoredUpdateVersion = "";
+  settingsStoreMock.updateEditorSettingsAndPersist.mockResolvedValue();
   listenMock.mockResolvedValue(vi.fn());
   apiMock.installDownloadedUpdate.mockResolvedValue();
 });
@@ -114,5 +121,75 @@ describe("useAppUpdater download attempts", () => {
     expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce();
     expect(updater.isDownloadingUpdate.value).toBe(false);
     expect(updater.updateReady.value).toBe(true);
+  });
+});
+
+describe("useAppUpdater ignore version", () => {
+  it("persists the ignored latest version and closes the update dialog", async () => {
+    let updater!: ReturnType<typeof useAppUpdater>;
+    container = document.createElement("div");
+    document.body.append(container);
+    app = createApp(
+      defineComponent({
+        setup() {
+          updater = useAppUpdater();
+          return () => h("div");
+        },
+      }),
+    );
+    app.use(i18n);
+    app.mount(container);
+    updater.updateInfo.value = {
+      current_version: "0.5.69",
+      latest_version: "0.5.70",
+      update_available: true,
+      release_name: "DBX v0.5.70",
+      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
+      release_notes: "",
+    };
+    updater.showUpdateDialog.value = true;
+
+    await updater.ignoreCurrentVersion();
+
+    expect(settingsStoreMock.updateEditorSettingsAndPersist).toHaveBeenCalledWith({ ignoredUpdateVersion: "0.5.70" });
+    expect(updater.showUpdateDialog.value).toBe(false);
+    expect(toastMock).toHaveBeenCalledWith("Version v0.5.70 ignored. You'll be reminded when the next version releases.", 5000);
+  });
+
+  it("keeps the dialog open and allows retry when persistence fails", async () => {
+    settingsStoreMock.updateEditorSettingsAndPersist.mockRejectedValueOnce(new Error("storage unavailable")).mockResolvedValueOnce();
+    let updater!: ReturnType<typeof useAppUpdater>;
+    container = document.createElement("div");
+    document.body.append(container);
+    app = createApp(
+      defineComponent({
+        setup() {
+          updater = useAppUpdater();
+          return () => h("div");
+        },
+      }),
+    );
+    app.use(i18n);
+    app.mount(container);
+    updater.updateInfo.value = {
+      current_version: "0.5.69",
+      latest_version: "0.5.70",
+      update_available: true,
+      release_name: "DBX v0.5.70",
+      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
+      release_notes: "",
+    };
+    updater.showUpdateDialog.value = true;
+
+    await updater.ignoreCurrentVersion();
+
+    expect(updater.showUpdateDialog.value).toBe(true);
+    expect(updater.isIgnoringUpdate.value).toBe(false);
+    expect(toastMock).toHaveBeenLastCalledWith("Failed to save the ignored version: storage unavailable", 5000);
+
+    await updater.ignoreCurrentVersion();
+
+    expect(settingsStoreMock.updateEditorSettingsAndPersist).toHaveBeenCalledTimes(2);
+    expect(updater.showUpdateDialog.value).toBe(false);
   });
 });

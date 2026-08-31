@@ -2,6 +2,7 @@ import { Map as MapIcon } from "@lucide/vue";
 import { registerPreviewAction, type PreviewActionContext } from "@/lib/dataGrid/resultPreviewRegistry";
 import { wktToGeoJson, type GeoJsonGeometry } from "@/lib/dataGrid/geometryPreview";
 import LayerPreviewDialog from "@/components/grid/LayerPreviewDialog.vue";
+import type { QueryResult } from "@/types/database";
 
 export interface GeometryMapFeature {
   type: "Feature";
@@ -21,13 +22,7 @@ registerPreviewAction({
   label: "grid.layerPreview",
   icon: MapIcon,
   isAvailable(result) {
-    return (result.column_types ?? []).some((t) => {
-      const base = (t ?? "")
-        .trim()
-        .toLowerCase()
-        .split(/[(:\s]/)[0];
-      return base === "geometry" || base === "geography";
-    });
+    return hasGeometryMapPreviewColumns(result);
   },
   execute(ctx) {
     const featureCollection = buildGeometryMapFeatureCollection(ctx);
@@ -41,6 +36,10 @@ registerPreviewAction({
     };
   },
 });
+
+export function hasGeometryMapPreviewColumns(result: Pick<QueryResult, "column_types">): boolean {
+  return geometryColumnIndices(result.column_types).length > 0;
+}
 
 export function buildGeometryMapFeatureCollection(ctx: PreviewActionContext): GeometryMapFeatureCollection | null {
   const geomIndices = geometryColumnIndices(ctx.result.column_types);

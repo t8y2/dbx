@@ -100,6 +100,15 @@ fn push_tsv_value(out: &mut String, value: &Value) {
     }
 }
 
+pub(crate) fn push_tsv_row(out: &mut String, row: &[Value]) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push('\t');
+        }
+        push_tsv_value(out, cell);
+    }
+}
+
 /// 预分配粗估：按全部行的实际单元格数求和（不假设等宽），饱和运算防溢出，
 /// 并设上限——估算只是性能提示，绝不能因病态输入放大成巨额分配
 const ROWS_CAPACITY_ESTIMATE_MAX: usize = 16 * 1024 * 1024;
@@ -133,15 +142,11 @@ fn push_tsv_rows(out: &mut String, rows: &[Vec<Value>]) {
         if row_index > 0 {
             out.push('\n');
         }
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
-                out.push('\t');
-            }
-            push_tsv_value(out, cell);
-        }
+        push_tsv_row(out, row);
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_tsv_rows(rows: &[Vec<Value>]) -> String {
     let mut out = String::with_capacity(estimated_rows_capacity(rows));
     push_tsv_rows(&mut out, rows);
@@ -166,17 +171,30 @@ pub(crate) fn format_tsv(columns: &[String], rows: &[Vec<Value>]) -> String {
 /// Format query-result rows as CSV text without a header row. Database NULLs
 /// use the same empty-cell representation as table-data exports. Used by the
 /// streaming query-result export for batches after the first.
+pub(crate) fn push_query_result_csv_row(out: &mut String, row: &[Value]) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push(',');
+        }
+        push_csv_value(out, cell);
+    }
+}
+
+pub(crate) fn push_table_csv_row(out: &mut String, row: &[Value]) {
+    for (cell_index, cell) in row.iter().enumerate() {
+        if cell_index > 0 {
+            out.push(',');
+        }
+        push_csv_text_value(out, cell);
+    }
+}
+
 fn push_query_result_csv_rows(out: &mut String, rows: &[Vec<Value>]) {
     for (row_index, row) in rows.iter().enumerate() {
         if row_index > 0 {
             out.push('\n');
         }
-        for (cell_index, cell) in row.iter().enumerate() {
-            if cell_index > 0 {
-                out.push(',');
-            }
-            push_csv_value(out, cell);
-        }
+        push_query_result_csv_row(out, row);
     }
 }
 
@@ -397,6 +415,23 @@ mod tests {
             super::push_csv_text_value(&mut out, &value);
             assert_eq!(out, format!("prefix,{expected}"));
         }
+    }
+
+    #[test]
+    fn reusable_row_buffers_match_batch_formatters() {
+        let row = vec![Value::Null, json!("NULL"), json!("line\n\"two\""), json!(42)];
+
+        let mut csv = String::new();
+        super::push_query_result_csv_row(&mut csv, &row);
+        assert_eq!(csv, super::format_query_result_csv_rows(std::slice::from_ref(&row)));
+
+        let mut table_csv = String::new();
+        super::push_table_csv_row(&mut table_csv, &row);
+        assert_eq!(table_csv, "\"\",\"NULL\",\"line\n\"\"two\"\"\",\"42\"");
+
+        let mut tsv = String::new();
+        super::push_tsv_row(&mut tsv, &row);
+        assert_eq!(tsv, super::format_tsv_rows(&[row]));
     }
 
     use serde_json::Value;

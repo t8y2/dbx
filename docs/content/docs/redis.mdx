@@ -30,13 +30,15 @@ Value search reads matching content and applies type-aware matching for String, 
 
 | Type | Main capabilities |
 | --- | --- |
-| String | Text, JSON, and multiple display formats; binary strings are shown as escaped read-only text |
+| String | Text, JSON, and multiple display formats; gzip and zlib values can be opened in the read-only Decompressed format, while raw DEFLATE requires **Retry as DEFLATE** after the initial attempt fails; decompressed output is limited to 50 MiB; binary strings are shown as escaped read-only text |
 | Hash | Field/value table, search, sorting, add, edit, and delete |
 | List | Paged elements with index, add, edit, and delete |
 | Set | Member browsing, add, and delete |
 | Sorted Set | Member and score browsing, editing, and deletion |
 | Stream | Entries, consumer groups, consumers, pending messages, lag, and delivery details |
 | RedisJSON | JSON tree/source editing, formatting, and compact saves; requires the RedisJSON server module |
+
+List, Set, Hash, Sorted Set, and Stream member details provide the same Decompressed format and Gzip shortcut for compressed member values.
 
 Large collection types load in pages and display total and loaded counts where available.
 
@@ -119,6 +121,7 @@ Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connecti
 - Value search, memory statistics, and Slowlog can increase server load
 - Stream consumer-group details read pending and consumer state; avoid unbounded high-frequency refresh
 - Binary values, module commands, and vendor extensions may require the command line
+- Decompressing a value is read-only and capped at 50 MiB of output; larger results show a non-blocking notice instead of being expanded
 - MCP applies different permission levels to ordinary Redis writes and destructive `FLUSH*` commands
 
 <Cards>

@@ -5,8 +5,17 @@ use super::util::{clean, qualified_table, quote_ident, quote_string};
 use crate::models::connection::DatabaseType;
 
 pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    let capabilities = capabilities_for(options.database_type);
-    let dialect = capabilities.dialect;
+    let capabilities;
+    let dialect;
+    if options.is_gaussdb_m_mode {
+        let caps = super::dialect::gaussdb_m_capabilities();
+        capabilities = caps;
+        dialect = StructureDialect::GaussdbM;
+    } else {
+        let caps = capabilities_for(options.database_type);
+        capabilities = caps;
+        dialect = caps.dialect;
+    }
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
     let mut statements = Vec::new();
@@ -47,13 +56,17 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be edited from this editor.", original.name));
                 continue;
             }
-            statements.push(build_drop_index_sql(
-                options.database_type,
-                dialect,
-                &table,
-                options.schema.as_deref(),
-                &original.name,
-            ));
+            let or_replace =
+                options.database_type == Some(DatabaseType::Dameng) && clean(&index.name) == clean(&original.name);
+            if !or_replace {
+                statements.push(build_drop_index_sql(
+                    options.database_type,
+                    dialect,
+                    &table,
+                    options.schema.as_deref(),
+                    &original.name,
+                ));
+            }
             statements.extend(build_create_index_statements(
                 dialect,
                 &table,
@@ -61,6 +74,8 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings,
                 options.schema.as_deref(),
                 &options.table_name,
+                or_replace,
+                capabilities.index_concurrent,
             ));
             continue;
         }
@@ -76,6 +91,8 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             warnings,
             options.schema.as_deref(),
             &options.table_name,
+            false,
+            capabilities.index_concurrent,
         ));
     }
 
@@ -116,6 +133,29 @@ pub(super) fn mysql_index_parts(index_type: &str) -> (String, String) {
     }
 }
 
+fn gaussdbm_index_parts(index_type: &str) -> (String, String) {
+    match index_type.to_ascii_uppercase().as_str() {
+        "BTREE" | "UBTREE" => (String::new(), " USING UBTREE".to_string()),
+        "HASH" => (String::new(), " USING HASH".to_string()),
+        _ => (String::new(), String::new()),
+    }
+}
+
+fn gaussdbm_index_column_sql(column: &str, is_expression: bool) -> String {
+    let trimmed = column.trim();
+    if is_expression {
+        return trimmed.to_string();
+    }
+    if let Some((name, suffix)) = trimmed.rsplit_once('(') {
+        if let Some(length) = suffix.strip_suffix(')') {
+            if !name.trim().is_empty() && !length.is_empty() && length.chars().all(|ch| ch.is_ascii_digit()) {
+                return format!("{}({length})", quote_ident(StructureDialect::GaussdbM, name.trim()));
+            }
+        }
+    }
+    quote_ident(StructureDialect::GaussdbM, trimmed)
+}
+
 fn mysql_index_column_sql(column: &str) -> String {
     let trimmed = column.trim();
     // Keep the wrapped expression from MySQL metadata instead of quoting it as a column identifier.
@@ -124,6 +164,55 @@ fn mysql_index_column_sql(column: &str) -> String {
     } else {
         quote_ident(StructureDialect::Mysql, column)
     }
+}
+
+fn postgres_index_column_sql(column: &str, is_expression: bool) -> String {
+    // Expression/functional index key parts arrive as raw expression text, not a plain
+    // column name; quoting the whole expression as an identifier turns it into a literal
+    // column reference that doesn't exist (#6295).
+    if is_expression {
+        column.trim().to_string()
+    } else {
+        quote_ident(StructureDialect::Postgres, column)
+    }
+}
+
+/// Per-key expression provenance for `columns` (the edited/current key list), computed once for
+/// the whole index. The editor only lets users toggle real table columns onto an index (see
+/// TableStructureEditor.vue's column checkbox list) — there is no free-text expression input —
+/// so an edited key part is only ever an expression when it corresponds to one from the original
+/// introspected snapshot.
+///
+/// Matches each edited key part against the first *not yet claimed* original key part with the
+/// same text, rather than the first textual match overall: a real column whose name happens to
+/// equal another key's expression text (or two key parts with identical text) can otherwise steal
+/// the wrong original's provenance. Consuming each original slot at most once keeps provenance
+/// tied to its true ordinal position instead of being re-derived by scanning for a text match
+/// (#6312 review). A key without explicit provenance is treated as a real column: the editor can
+/// only add table columns, and guessing from the identifier text breaks valid quoted names.
+fn key_expression_flags(index: &EditableStructureIndex, columns: &[String]) -> Vec<bool> {
+    let original = match &index.original {
+        Some(original) if !original.key_is_expression.is_empty() => original,
+        _ => return vec![false; columns.len()],
+    };
+    let mut consumed = vec![false; original.columns.len()];
+    columns
+        .iter()
+        .map(|column| {
+            let claimed = original
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(i, original_column)| !consumed[*i] && *original_column == column);
+            match claimed {
+                Some((i, _)) => {
+                    consumed[i] = true;
+                    original.key_is_expression.get(i).copied().unwrap_or(false)
+                }
+                None => false,
+            }
+        })
+        .collect()
 }
 
 pub(super) fn build_drop_index_sql(
@@ -144,6 +233,7 @@ pub(super) fn build_drop_index_sql(
         StructureDialect::Postgres
             | StructureDialect::Oracle
             | StructureDialect::Dameng
+            | StructureDialect::Oscar
             | StructureDialect::Informix
             | StructureDialect::Sqlite
     ) && schema.is_some_and(|schema| !schema.trim().is_empty())
@@ -160,6 +250,8 @@ pub(super) fn build_create_index_statements(
     warnings: &mut Vec<String>,
     schema: Option<&str>,
     table_name: &str,
+    or_replace: bool,
+    concurrently_supported: bool,
 ) -> Vec<String> {
     let capabilities = capabilities_for(database_type_for_dialect(dialect));
     let name = clean(&index.name);
@@ -169,12 +261,27 @@ pub(super) fn build_create_index_statements(
         return Vec::new();
     }
 
+    // `CREATE INDEX CONCURRENTLY` is PostgreSQL-only: the flag is honored only when
+    // the caller's real database type advertises the capability, so a stale or
+    // forged `concurrently: true` from another engine is ignored and the original
+    // SQL is generated unchanged. Unsupported concurrent requests (existing index,
+    // partitioned parent) are rejected up front by `validate_concurrent_index_scope`
+    // before any statement is built — this function never downgrades them.
+    let concurrently = index.concurrently && concurrently_supported && dialect == StructureDialect::Postgres;
+
     let unique = if index.is_unique { "UNIQUE " } else { "" };
+    let replace = if or_replace { "OR REPLACE " } else { "" };
+    let key_is_expression = key_expression_flags(index, &columns);
     let cols = columns
         .iter()
-        .map(|column| {
+        .enumerate()
+        .map(|(i, column)| {
             if dialect == StructureDialect::Mysql {
                 mysql_index_column_sql(column)
+            } else if dialect == StructureDialect::GaussdbM {
+                gaussdbm_index_column_sql(column, key_is_expression[i])
+            } else if dialect == StructureDialect::Postgres {
+                postgres_index_column_sql(column, key_is_expression[i])
             } else {
                 quote_ident(dialect, column)
             }
@@ -197,6 +304,11 @@ pub(super) fn build_create_index_statements(
             StructureDialect::Oracle | StructureDialect::Dameng if idx_type == "BITMAP" => {
                 type_prefix = "BITMAP ".to_string()
             }
+            StructureDialect::GaussdbM => {
+                let (prefix, using) = gaussdbm_index_parts(&idx_type);
+                type_prefix = prefix;
+                using_clause = using;
+            }
             _ => {}
         }
     }
@@ -215,7 +327,10 @@ pub(super) fn build_create_index_statements(
         String::new()
     };
     let comment = clean(&index.comment);
-    let comment_clause = if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
+    let comment_clause = if !comment.is_empty()
+        && capabilities.index_comment
+        && matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM)
+    {
         format!(" COMMENT {}", quote_string(&comment))
     } else {
         String::new()
@@ -234,12 +349,13 @@ pub(super) fn build_create_index_statements(
     let create_table =
         if dialect == StructureDialect::Sqlite { quote_ident(dialect, table_name) } else { table.to_string() };
     let create_sql = if dialect == StructureDialect::Postgres {
+        let concurrent_clause = if concurrently { "CONCURRENTLY " } else { "" };
         format!(
-            "CREATE {unique}{type_prefix}INDEX {index_name} ON {create_table}{using_clause} ({cols}){include_clause}{where_clause};"
+            "CREATE {replace}{unique}INDEX {concurrent_clause}{index_name} ON {create_table}{using_clause} ({cols}){include_clause}{where_clause};"
         )
     } else {
         format!(
-            "CREATE {unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
+            "CREATE {replace}{unique}{type_prefix}INDEX {index_name}{using_clause} ON {create_table} ({cols}){include_clause}{where_clause}{comment_clause};"
         )
     };
     let mut statements = vec![create_sql];
@@ -248,8 +364,11 @@ pub(super) fn build_create_index_statements(
         statements.push(format!("COMMENT ON INDEX {} IS {};", quote_ident(dialect, &name), quote_string(&comment)));
     } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::SqlServer {
         statements.extend(build_sqlserver_index_comment_sql(table, schema, table_name, &name, &comment));
-    } else if !comment.is_empty() && capabilities.index_comment && dialect == StructureDialect::Mysql {
-        // MySQL comment is embedded inline in the CREATE INDEX statement above
+    } else if !comment.is_empty()
+        && capabilities.index_comment
+        && matches!(dialect, StructureDialect::Mysql | StructureDialect::GaussdbM)
+    {
+        // Comment is embedded inline in the CREATE INDEX statement above
     } else if !comment.is_empty() && capabilities.index_comment {
         warnings.push(format!("Index comments are not supported for {} from this editor.", dialect_label(dialect)));
     }

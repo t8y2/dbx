@@ -1,9 +1,10 @@
 import * as api from "@/lib/backend/api";
 import { connectionObjectTreeNodeSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { invalidateTableMetadataCache, loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { canApplyDataTabMetadata } from "@/lib/sidebar/dataTabOpenPolicy";
+import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
@@ -25,6 +26,30 @@ export type NavigationTarget = {
   whereInput?: string;
 };
 
+function openMongoCollectionTarget(target: NavigationTarget, reuseMode: DataTabReuseMode) {
+  const connectionStore = useConnectionStore();
+  const queryStore = useQueryStore();
+  connectionStore.activeConnectionId = target.connectionId;
+  const tabTitle = `${target.database}.${target.tableName}`;
+  const sameCollectionTab = reuseMode === "always-new" ? undefined : queryStore.tabs.find((tab) => tab.mode === "mongo" && tab.connectionId === target.connectionId && tab.database === target.database && tab.sql === target.tableName);
+  const activeTab = queryStore.tabs.find((tab) => tab.id === queryStore.activeTabId);
+  const reusableActiveTab = reuseMode === "active-tab" && !sameCollectionTab && canReuseActiveMongoTab(activeTab, target) ? activeTab : undefined;
+  const reusableTab = sameCollectionTab ?? reusableActiveTab;
+  const tabId = reusableTab?.id ?? queryStore.createTab(target.connectionId, target.database, tabTitle, "mongo", undefined, undefined, undefined, { forceNew: true });
+  if (reusableTab) {
+    queryStore.switchTab(tabId);
+    reusableTab.title = tabTitle;
+  }
+  queryStore.updateSql(tabId, target.tableName);
+  queryStore.setTableMeta(tabId, {
+    database: target.database,
+    tableName: target.tableName,
+    tableType: target.tableType || "TABLE",
+    columns: [],
+    primaryKeys: [],
+  });
+}
+
 async function openTableTarget(target: NavigationTarget, options: { tableInfoTab?: TableInfoTab } = {}) {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
@@ -33,6 +58,10 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
 
   connectionStore.activeConnectionId = target.connectionId;
   const config = connectionStore.getConfig(target.connectionId);
+  if (config?.db_type === "mongodb") {
+    openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+    return;
+  }
   const tableSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
   const tabTitle = target.catalog ? `${target.catalog}.${tableSchema || target.database}.${target.tableName}` : tableSchema ? `${tableSchema}.${target.tableName}` : target.tableName;
   if (config?.db_type === "qdrant" || config?.db_type === "milvus" || config?.db_type === "weaviate" || config?.db_type === "chromadb") {
@@ -100,6 +129,8 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     await connectionStore.ensureConnected(target.connectionId);
     if (!isPreparationCurrent()) return;
     if (!config) throw new Error("Connection config not found");
+    const metadataGenerationAtStart = connectionStore.metadataGenerationFor(target.connectionId, target.database);
+    const isCurrentGeneration = () => connectionStore.metadataGenerationFor(target.connectionId, target.database) === metadataGenerationAtStart;
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const identifierQuote = connectionStore.connectionIdentifierQuote?.(target.connectionId);
     const querySchema = metadataSchemaForConnection(config, target.database, tableSchema);
@@ -109,18 +140,20 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       const primaryKeys = editableRowIdentifierColumns(effectiveDbType, columns, undefined, targetTableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config.driver_profile,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
         database: target.database,
         tableName: target.tableName,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         tableType: targetTableType,
         columns: columns.map((column) => column.name),
         primaryKeys,
         whereInput: target.whereInput,
         limit: pageLimit,
       });
-      if (!isPreparationCurrent()) return;
+      if (!isPreparationCurrent() || !isCurrentGeneration()) return;
       queryStore.updateSql(tabId, sql);
       queryStore.setTableMeta(tabId, {
         catalog: target.catalog,
@@ -135,18 +168,38 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       await queryStore.executeTabSql(tabId, sql, { pagination: { limit: pageLimit, offset: 0 } });
       return;
     }
+    const eagerMetadata =
+      effectiveDbType === "mysql" || effectiveDbType === "postgres"
+        ? await loadTableMetadata({
+            connectionId: target.connectionId,
+            database: target.database,
+            schema: querySchema,
+            tableName: target.tableName,
+            tableType: targetTableType,
+            databaseType: effectiveDbType,
+            driverProfile: config.driver_profile || config.db_type,
+            catalog: target.catalog,
+          })
+        : undefined;
+    const eagerColumns = eagerMetadata?.metadata.columns ?? [];
+    const eagerPrimaryKeys = eagerMetadata?.metadata.primaryKeys ?? [];
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
+      driverProfile: config.driver_profile,
       identifierQuote,
       schema: tableSchema,
       catalog: target.catalog,
       database: target.database,
       tableName: target.tableName,
+      includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       tableType: targetTableType,
+      columns: eagerColumns.map((column) => column.name),
+      primaryKeys: eagerPrimaryKeys,
+      ...tableDataLargeValuePreviewOptions(effectiveDbType, eagerColumns, eagerPrimaryKeys, pageLimit),
       whereInput: target.whereInput,
       limit: pageLimit,
     });
-    if (!isPreparationCurrent()) return;
+    if (!isPreparationCurrent() || !isCurrentGeneration()) return;
     queryStore.updateSql(tabId, sql);
     queryStore.setTableMeta(tabId, {
       schema: tableSchema,
@@ -154,8 +207,8 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       database: target.database,
       tableName: target.tableName,
       tableType: targetTableType,
-      columns: [],
-      primaryKeys: [],
+      columns: eagerColumns,
+      primaryKeys: eagerPrimaryKeys,
     });
     firstExecuteStarted = true;
     // 取消计数快照：isCancelling 是瞬态的（取消失败/查询先完成会被清掉），
@@ -180,11 +233,13 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
     if (fellBackToLimitZero) {
       const emptySql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        driverProfile: config.driver_profile,
         identifierQuote,
         schema: tableSchema,
         catalog: target.catalog,
         database: target.database,
         tableName: target.tableName,
+        includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         tableType: targetTableType,
         whereInput: target.whereInput,
         limit: 0,
@@ -210,7 +265,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       const primaryKeys = metadata.primaryKeys;
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
-      if (!isCurrentTarget()) return;
+      if (!isCurrentTarget() || !isCurrentGeneration()) return;
       const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, targetTableType);
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
@@ -224,11 +279,13 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       if (!fellBackToLimitZero && !firstQueryFailed && (useRowId || config.db_type === "tdengine")) {
         const newSql = await buildTableSelectSql({
           databaseType: effectiveDbType,
+          driverProfile: config.driver_profile,
           identifierQuote,
           schema: tableSchema,
           catalog: target.catalog,
           database: target.database,
           tableName: target.tableName,
+          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
           tableType: targetTableType,
           whereInput: target.whereInput,
           primaryKeys,
@@ -258,7 +315,11 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
   const { openData } = useSidebarDataOpenRuntime();
 
   async function openObjectBrowserTableTarget(target: NavigationTarget) {
-    if (!settingsStore.editorSettings.reuseDataTab) {
+    if (connectionStore.getConfig(target.connectionId)?.db_type === "mongodb") {
+      openMongoCollectionTarget(target, settingsStore.editorSettings.dataTabReuseMode);
+      return;
+    }
+    if (settingsStore.editorSettings.dataTabReuseMode === "always-new") {
       await openTableTarget(target);
       return;
     }
@@ -278,7 +339,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
       },
       undefined,
       "default",
-      { reuseScope: "same-table" },
+      { reuseMode: settingsStore.editorSettings.dataTabReuseMode },
     );
   }
 
@@ -326,6 +387,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         const capturedMeta = tab.tableMeta!;
         const capturedSchema = tab.schema || capturedMeta.schema;
         const capturedTarget = { connectionId: tab.connectionId, database: tab.database, schema: capturedSchema, catalog: capturedMeta.catalog, tableName: capturedMeta.tableName };
+        const metadataGenerationAtStart = connectionStore.metadataGenerationFor(tab.connectionId, tab.database);
         const metadataSchema = metadataSchemaForConnection(connection, tab.database, capturedSchema);
         // 分组含 tableType：主键计算依赖它，不同 tableType 不能共享加载结果
         const catalogKey = `${capturedMeta.catalog ?? ""}\u0000${capturedMeta.tableType ?? ""}`;
@@ -347,6 +409,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
           loadedByCatalog.set(catalogKey, metadata);
         }
         const currentTab = queryStore.tabs.find((item) => item.id === tab.id);
+        if (connectionStore.metadataGenerationFor(tab.connectionId, tab.database) !== metadataGenerationAtStart) continue;
         if (!canApplyDataTabMetadata(currentTab, capturedTarget)) continue;
         queryStore.setTableMeta(tab.id, {
           ...capturedMeta,

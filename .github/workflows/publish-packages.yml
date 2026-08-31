@@ -452,6 +452,7 @@ jobs:
           PYEOF
 
       - name: Send to QQ group
+        continue-on-error: true
         env:
           SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}

@@ -2,15 +2,18 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
-import { Upload, Download, FolderPlus, RefreshCw, ChevronsLeft, ChevronsUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
+import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
+import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
+import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import type { QueryTab, TreeNode } from "@/types/database";
 
 defineProps<{
   sidebarWidth: number;
@@ -23,6 +26,7 @@ const emit = defineEmits<{
   startResize: [event: MouseEvent];
   collapse: [];
   "open-settings": [initialTab: string];
+  "add-to-ai": [node: TreeNode];
 }>();
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -41,6 +45,20 @@ const importSourceItems = computed(() => [
   { value: "dbeaver", label: t("sidebar.importDbeaver") },
   { value: "datagrip", label: t("sidebar.importDatagrip") },
 ]);
+const connectionTransferItems = computed(() => [
+  ...importSourceItems.value.map((item) => ({
+    ...item,
+    value: `import:${item.value}`,
+    icon: Download,
+  })),
+  {
+    value: "export",
+    label: t("sidebar.export"),
+    icon: Upload,
+    separatorBefore: true,
+  },
+]);
+const connectionTransferLabel = computed(() => t("sidebar.importExport"));
 const connectionIdSet = computed(() => new Set(connectionStore.connections.map((connection) => connection.id)));
 const allConnectionIds = computed(() => connectionStore.connections.map((connection) => connection.id));
 const selectedConnectionIds = computed(() => (connectionStore.connectionMultiSelectActive ? connectionStore.selectedTreeNodeIds.filter((id) => connectionIdSet.value.has(id)) : []));
@@ -50,9 +68,12 @@ const allConnectionsSelected = computed(() => allConnectionIds.value.length > 0 
 const selectAllIcon = computed(() => (allConnectionsSelected.value ? Check : selectedConnectionCount.value > 0 ? Minus : Square));
 const selectAllLabel = computed(() => (allConnectionsSelected.value ? t("connectionGroup.deselectAllConnections") : t("connectionGroup.selectAllConnections")));
 const moveGroupItems = computed(() => [
-  ...connectionStore.sidebarLayout.groups.map((group) => ({
+  ...connectionGroupDestinationRows(connectionStore.sidebarLayout).map((group) => ({
     value: group.id,
     label: group.name,
+    title: group.path.join(" / "),
+    icon: FolderOpen,
+    indentLevel: group.depth,
   })),
   {
     value: UNGROUPED_GROUP_VALUE,
@@ -65,7 +86,7 @@ async function refreshTree() {
   try {
     await connectionStore.refreshAllTree();
   } catch (e: any) {
-    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
 }
 
@@ -77,6 +98,14 @@ function selectImportSource(source: string) {
   emit("import", source as ImportSource);
 }
 
+function selectConnectionTransferAction(action: string) {
+  if (action === "export") {
+    emit("export");
+    return;
+  }
+  if (action.startsWith("import:")) selectImportSource(action.slice("import:".length));
+}
+
 function collapseAllTreeNodes() {
   connectionTreeRef.value?.collapseAllTreeNodes();
 }
@@ -85,11 +114,24 @@ function focusSearch(): boolean {
   return connectionTreeRef.value?.focusSearch() ?? false;
 }
 
+function locateTabInSidebar(tab: QueryTab) {
+  return connectionTreeRef.value?.locateTabInSidebar(tab);
+}
+
 function clearConnectionMultiSelection() {
-  connectionStore.connectionMultiSelectActive = false;
-  connectionStore.selectedTreeNodeIds = [];
-  connectionStore.selectedTreeNodeId = null;
-  connectionStore.treeSelectionAnchorId = null;
+  applyConnectionMultiSelection(connectionStore, emptyConnectionMultiSelection());
+}
+
+function isEditableSidebarTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || target.isContentEditable || !!target.closest("[contenteditable='true'], [role='textbox']");
+}
+
+function onSidebarKeydown(event: KeyboardEvent) {
+  if (event.defaultPrevented || !connectionStore.connectionMultiSelectActive || !isExitConnectionMultiSelectionShortcut(event) || isEditableSidebarTarget(event.target)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  clearConnectionMultiSelection();
 }
 
 function toggleAllConnectionsSelected() {
@@ -125,9 +167,13 @@ async function confirmDeleteSelectedConnections() {
 
 function moveSelectedConnectionsToGroup(value: string) {
   const groupId = value === UNGROUPED_GROUP_VALUE ? null : value;
-  for (const connectionId of selectedConnectionIds.value) {
+  const ids = selectedConnectionIds.value;
+  for (const connectionId of ids) {
     connectionStore.moveConnectionToGroup(connectionId, groupId);
   }
+  // The moved connections stay selected otherwise, so the next batch would be
+  // moved together with them (issue #5758).
+  clearConnectionMultiSelection();
 }
 
 function openCreateSelectedGroupDialog() {
@@ -137,25 +183,50 @@ function openCreateSelectedGroupDialog() {
 
 function confirmCreateSelectedGroup() {
   const name = selectedGroupName.value.trim();
-  if (!name || selectedConnectionIds.value.length === 0) return;
+  const ids = selectedConnectionIds.value;
+  if (!name || ids.length === 0) return;
   const groupId = connectionStore.createConnectionGroup(name);
-  for (const connectionId of selectedConnectionIds.value) {
+  for (const connectionId of ids) {
     connectionStore.moveConnectionToGroup(connectionId, groupId);
   }
+  clearConnectionMultiSelection();
   showCreateSelectedGroupDialog.value = false;
 }
 
-defineExpose({ focusSearch });
+defineExpose({ focusSearch, locateTabInSidebar });
 </script>
 
 <template>
-  <div class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }">
+  <div class="app-sidebar-panel h-full shrink-0 relative select-none" :class="classicLayout ? '' : 'rounded-md border border-border/80 bg-background'" :style="{ width: sidebarWidth + 'px' }" @keydown="onSidebarKeydown">
     <div class="h-full flex flex-col overflow-hidden">
       <div class="app-sidebar-toolbar flex items-center gap-px px-3 text-xs font-medium text-muted-foreground border-b bg-muted/20" :class="classicLayout ? 'h-9' : 'h-10'">
-        <span class="flex self-stretch items-center truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>
+        <span v-if="showConnectionMultiSelectToolbar" class="flex min-w-0 self-stretch items-center" data-tauri-drag-region>
+          <span class="truncate" data-tauri-drag-region>{{ t("sidebar.connections") }}</span>
+          <span class="ml-1.5 shrink-0 text-[11px] font-normal text-muted-foreground/80" data-connection-selection-count>
+            {{ t("connectionGroup.selectedConnections", { count: selectedConnectionCount }) }}
+          </span>
+        </span>
+        <LightDropdown
+          v-else
+          model-value=""
+          :items="connectionTransferItems"
+          :aria-label="connectionTransferLabel"
+          :trigger-title="connectionTransferLabel"
+          :trigger-icon="ArrowDownUp"
+          :trigger-label="connectionTransferLabel"
+          trigger-class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md px-1 outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
+          trigger-icon-class="h-3.5 w-3.5 shrink-0"
+          item-icon-class="h-3.5 w-3.5"
+          content-class="w-48"
+          :show-trigger-label="true"
+          :show-chevron="true"
+          :highlight-selected="false"
+          check-position="none"
+          align="start"
+          @update:model-value="selectConnectionTransferAction"
+        />
         <span class="flex-1 self-stretch" data-tauri-drag-region />
         <template v-if="showConnectionMultiSelectToolbar">
-          <span class="mr-1 text-[11px] font-medium text-muted-foreground">{{ selectedConnectionCount }}</span>
           <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
             <Button variant="ghost" size="icon" class="h-5 w-5" @click="openCreateSelectedGroupDialog">
               <FolderPlus class="h-3 w-3" />
@@ -197,54 +268,32 @@ defineExpose({ focusSearch });
           </LightTooltip>
         </template>
         <template v-else>
-          <LightTooltip :text="t('sidebar.import')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <span class="inline-flex">
-              <LightDropdown
-                model-value=""
-                :items="importSourceItems"
-                :aria-label="t('sidebar.import')"
-                :trigger-icon="Download"
-                trigger-class="inline-flex h-6 w-5 items-center justify-center rounded-md outline-none hover:bg-muted hover:text-foreground focus-visible:ring-0"
-                trigger-icon-class="h-4 w-4"
-                content-class="w-44"
-                :show-trigger-label="false"
-                :show-chevron="false"
-                :highlight-selected="false"
-                check-position="none"
-                align="end"
-                @update:model-value="selectImportSource"
-              />
-            </span>
-          </LightTooltip>
-          <LightTooltip :text="t('sidebar.export')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="emit('export')">
-              <Upload class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
-              <ChevronsUp class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
-              <FolderPlus class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
-              <RefreshCw class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
-              <ChevronsLeft class="h-3.5 w-3.5" />
-            </Button>
-          </LightTooltip>
+          <span data-sidebar-toolbar-actions class="flex shrink-0 items-center gap-0.5">
+            <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
+                <ChevronsDownUp class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
+                <FolderPlus class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+                <RefreshCw class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
+                <ChevronsLeft class="h-3.5 w-3.5" />
+              </Button>
+            </LightTooltip>
+          </span>
         </template>
       </div>
       <div class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" />
+        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(node) => emit('add-to-ai', node)" />
       </div>
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @mousedown="emit('startResize', $event)" />

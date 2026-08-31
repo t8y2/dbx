@@ -36,6 +36,7 @@ export interface DataGridSaveStatementOptions {
 
 export interface DataGridCopyUpdateStatementOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   tableMeta: DataGridTableMeta;
   columns: string[];
   sourceColumns?: Array<string | undefined>;
@@ -46,6 +47,7 @@ export type DataGridCopyInsertMode = "merged" | "row-by-row";
 
 export interface DataGridCopyInsertStatementOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   tableMeta?: DataGridTableMeta;
   columns: string[];
   columnTypes?: Array<string | null | undefined>;
@@ -56,7 +58,7 @@ export interface DataGridCopyInsertStatementOptions {
   insertMode?: DataGridCopyInsertMode;
 }
 
-export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than" | "in" | "not-in" | "between" | "not-between";
+export type DataGridContextFilterMode = "equals" | "not-equals" | "is-null" | "is-not-null" | "is-blank" | "is-not-blank" | "like" | "not-like" | "begins-with" | "ends-with" | "less-than" | "less-than-or-equal" | "greater-than" | "greater-than-or-equal" | "in" | "not-in" | "between" | "not-between";
 
 export interface DataGridContextFilterConditionOptions {
   databaseType?: DatabaseType;
@@ -108,6 +110,18 @@ export interface DataGridCountSqlOptions {
   schema?: string;
   tableName: string;
   whereInput?: string;
+  /** Optional optimizer hint injected between SELECT and the select list.
+   *  Example: "/*+ set(query_dop 32) *​/" for GaussDB parallel COUNT(*). */
+  countHint?: string;
+}
+
+export interface DataGridConditionalUpdateSqlOptions {
+  databaseType?: DatabaseType;
+  identifierQuote?: string;
+  tableMeta: DataGridTableMeta;
+  columnName: string;
+  value: GridCellValue;
+  whereInput: string;
 }
 
 export interface HiveTablePropertiesSqlOptions {
@@ -142,6 +156,10 @@ export function buildDataGridColumnDistinctValuesSql(options: DataGridColumnDist
 
 export function buildDataGridCountSql(options: DataGridCountSqlOptions): Promise<string> {
   return api.buildDataGridCountSql(options);
+}
+
+export function buildDataGridConditionalUpdateSql(options: DataGridConditionalUpdateSqlOptions): Promise<string | undefined> {
+  return api.buildDataGridConditionalUpdateSql(options);
 }
 
 export function buildHiveTablePropertiesSql(options: HiveTablePropertiesSqlOptions): Promise<string> {

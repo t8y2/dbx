@@ -4,7 +4,7 @@ services:
     container_name: dbx-mysql-5.7
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-3307}:3306"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10100}:3306"
     environment:
       MYSQL_ROOT_PASSWORD: "${DB_PASSWORD:-123456}"
       MYSQL_DATABASE: dbx

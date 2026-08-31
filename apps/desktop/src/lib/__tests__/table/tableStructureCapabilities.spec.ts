@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
+import { getTableStructureCapabilities, hasLocalTableColumnOrderChange, isPhysicalTableColumnOrderChange, sanitizeStructureIndexesForCapabilities, supportsLocalTableColumnReorder } from "@/lib/table/tableStructureCapabilities";
 
 describe("tableStructureCapabilities", () => {
   it("uses table rebuilds only for native SQLite connections", () => {
@@ -28,6 +28,56 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("postgres", "postgres").alterStrategy).toBe("direct");
   });
 
+  it("enables PostgreSQL index INCLUDE only for known supported versions", () => {
+    expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 10.15 (Transwarp) on x86_64-pc-linux-gnu").indexInclude).toBe(false);
+    expect(getTableStructureCapabilities("postgres", "postgres", "9.6.24").indexInclude).toBe(false);
+    expect(getTableStructureCapabilities("postgres", "postgres", "11.0").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "PostgreSQL 16.14").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", undefined).indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "unknown").indexInclude).toBe(true);
+    expect(getTableStructureCapabilities("sqlserver", "sqlserver", "10.0").indexInclude).toBe(true);
+  });
+
+  it("enables concurrent index creation only for PostgreSQL", () => {
+    // PostgreSQL (including pre-11 versions that disable INCLUDE) advertises it.
+    expect(getTableStructureCapabilities("postgres", "postgres").indexConcurrent).toBe(true);
+    expect(getTableStructureCapabilities("postgres", "postgres", "10.15").indexConcurrent).toBe(true);
+
+    // PostgreSQL-family engines sharing the Postgres dialect stay off until verified.
+    for (const databaseType of ["kingbase", "gaussdb", "opengauss", "highgo", "uxdb", "vastbase", "kwdb", "firebird"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType).indexConcurrent).toBe(false);
+    }
+
+    // Unrelated engines never advertise it.
+    for (const databaseType of ["mysql", "sqlite", "sqlserver", "oracle", "dameng", "duckdb", "questdb"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType).indexConcurrent).toBe(false);
+    }
+  });
+
+  it("removes unsupported included columns before SQL generation", () => {
+    const index = {
+      id: "new:index",
+      name: "example_idx",
+      columns: ["key_column"],
+      isUnique: false,
+      isPrimary: false,
+      filter: "",
+      indexType: "BTREE",
+      includedColumns: ["included_column"],
+      comment: "",
+      markedForDrop: false,
+    };
+
+    const indexes = [index];
+    const postgres10Indexes = sanitizeStructureIndexesForCapabilities(indexes, getTableStructureCapabilities("postgres", "postgres", "10.15"));
+    expect(postgres10Indexes).not.toBe(indexes);
+    expect(postgres10Indexes[0].includedColumns).toEqual([]);
+    expect(index.includedColumns).toEqual(["included_column"]);
+
+    const postgres11Indexes = sanitizeStructureIndexesForCapabilities(indexes, getTableStructureCapabilities("postgres", "postgres", "11.0"));
+    expect(postgres11Indexes).toBe(indexes);
+  });
+
   it("disables persisted comment editing for IRIS without disabling other structure changes", () => {
     expect(getTableStructureCapabilities("iris", "iris")).toMatchObject({
       comment: false,
@@ -43,10 +93,21 @@ describe("tableStructureCapabilities", () => {
     expect(getTableStructureCapabilities("dameng", "dameng").comment).toBe(true);
   });
 
-  it("enables alter primary key for Dameng without enabling it for Oracle", () => {
-    expect(getTableStructureCapabilities("dameng", "dameng").alterPrimaryKey).toBe(true);
-    expect(getTableStructureCapabilities("oracle", "oracle").alterPrimaryKey).toBe(false);
-    expect(getTableStructureCapabilities("oceanbase-oracle", "oceanbase-oracle").alterPrimaryKey).toBe(false);
+  it("separates adding a primary key from replacing an existing one", () => {
+    expect(getTableStructureCapabilities("dameng", "dameng")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: true,
+    });
+    expect(getTableStructureCapabilities("oracle", "oracle")).toMatchObject({
+      addPrimaryKey: true,
+      alterPrimaryKey: false,
+    });
+    for (const databaseType of ["oceanbase-oracle", "iris"] as const) {
+      expect(getTableStructureCapabilities(databaseType, databaseType)).toMatchObject({
+        addPrimaryKey: false,
+        alterPrimaryKey: false,
+      });
+    }
   });
 
   it("uses local-only column reordering for editable databases without physical reorder support", () => {

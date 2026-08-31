@@ -525,6 +525,7 @@ pub async fn run_claude_code_agent(
         CliAgentProcessSpec {
             command,
             env,
+            env_remove: Vec::new(),
             current_dir: Some(isolated_cwd.path.clone()),
             stdin: Some(prompt.to_string()),
             dialect: CliAgentJsonlDialect::ClaudeCodePrint,
@@ -567,6 +568,7 @@ mod tests {
             model: model.to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -580,6 +582,16 @@ mod tests {
             claude_code_cli_env: Default::default(),
             pi_agent_cli_path: None,
             pi_agent_cli_env: Default::default(),
+            opencode_cli_path: None,
+            opencode_cli_env: Default::default(),
+            cursor_cli_path: None,
+            cursor_cli_env: Default::default(),
+            grok_cli_path: None,
+            grok_cli_env: Default::default(),
+            codebuddy_cli_path: None,
+            codebuddy_cli_env: Default::default(),
+            qoder_cli_path: None,
+            qoder_cli_env: Default::default(),
         }
     }
 

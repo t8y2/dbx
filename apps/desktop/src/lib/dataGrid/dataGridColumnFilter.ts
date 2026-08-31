@@ -172,7 +172,7 @@ export function combineWhereInputs(manualWhereInput?: string, structuredWhereInp
 }
 
 export function filterModeNeedsValue(mode: DataGridContextFilterMode): boolean {
-  return mode !== "is-null" && mode !== "is-not-null";
+  return mode !== "is-null" && mode !== "is-not-null" && mode !== "is-blank" && mode !== "is-not-blank";
 }
 
 export function filterModeUsesList(mode: DataGridContextFilterMode): boolean {
@@ -184,6 +184,7 @@ export function filterModeUsesRange(mode: DataGridContextFilterMode): boolean {
 }
 
 export function filterModeIsSupportedForDatabase(mode: DataGridContextFilterMode, databaseType?: DatabaseType): boolean {
+  if (databaseType === "victoriametrics") return false;
   if (!filterModeUsesList(mode) && !filterModeUsesRange(mode)) return true;
   // These targets do not support all four new SQL predicates reliably.
   return databaseType !== "cassandra" && databaseType !== "influxdb" && databaseType !== "jdbc";

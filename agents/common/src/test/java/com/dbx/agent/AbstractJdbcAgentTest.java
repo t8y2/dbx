@@ -16,6 +16,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.List;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -25,6 +26,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AbstractJdbcAgentTest {
+    @Test
+    void buildsStandardJdbcCredentialPropertiesByDefault() {
+        TestAgent agent = new TestAgent(new TrackingConnection());
+
+        Properties properties = agent.buildConnectionProperties(
+            new ConnectParams("localhost", 0, "demo", "user", "secret", "", "", false)
+        );
+
+        assertEquals("user", properties.getProperty("user"));
+        assertEquals("secret", properties.getProperty("password"));
+        assertEquals(2, properties.size());
+    }
+
     @Test
     void ownsConnectionLifecycleAndConnectedState() {
         TrackingConnection tracking = new TrackingConnection();
@@ -111,6 +125,19 @@ class AbstractJdbcAgentTest {
         assertEquals(1, tracking.openCount);
         assertEquals(1, tracking.isValidCount);
         assertEquals(1, tracking.closeCount);
+    }
+
+    @Test
+    void validatesLegacyJdbcConnectionsWithConfiguredQueryInsteadOfIsValid() {
+        TrackingConnection tracking = new TrackingConnection();
+        tracking.isValidUnsupported = true;
+        TestAgent agent = new TestAgent(tracking);
+        agent.validationQuery = "SELECT 1";
+
+        assertTrue(agent.testConnection(new ConnectParams()));
+
+        assertEquals(0, tracking.isValidCount);
+        assertEquals(Arrays.asList("setQueryTimeout:5", "execute:SELECT 1"), tracking.calls);
     }
 
     @Test
@@ -325,6 +352,7 @@ class AbstractJdbcAgentTest {
         private int afterConnectCount;
         private int afterDisconnectCount;
         private boolean skipTestConnectionOpen;
+        private String validationQuery;
 
         private TestAgent(TrackingConnection tracking) {
             this.tracking = tracking;
@@ -359,6 +387,11 @@ class AbstractJdbcAgentTest {
         @Override
         protected void afterDisconnect() {
             afterDisconnectCount += 1;
+        }
+
+        @Override
+        protected String connectionValidationQuery() {
+            return validationQuery;
         }
 
         @Override
@@ -422,6 +455,7 @@ class AbstractJdbcAgentTest {
         private String identifierQuote = "\"";
         private boolean compatibilityQueryFails;
         private int compatibilityQueryCount;
+        private boolean isValidUnsupported;
 
         private Connection connection() {
             return proxy(Connection.class, new MethodHandler() {
@@ -436,6 +470,9 @@ class AbstractJdbcAgentTest {
                     }
                     if ("isValid".equals(name)) {
                         isValidCount += 1;
+                        if (isValidUnsupported) {
+                            throw new AbstractMethodError("legacy JDBC driver");
+                        }
                         return true;
                     }
                     if ("close".equals(name)) {

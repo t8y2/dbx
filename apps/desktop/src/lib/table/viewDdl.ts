@@ -6,6 +6,8 @@ export type BuildViewDdlInput = {
   schema?: string | null;
   name: string;
   source: string;
+  /** Driver-reported identifier quote (e.g. `` ` `` for Kingbase MySQL compat). */
+  identifierQuote?: string;
 };
 
 export function buildViewDdl(input: BuildViewDdlInput): Promise<string> {

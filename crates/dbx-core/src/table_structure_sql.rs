@@ -6,6 +6,8 @@ mod create_table;
 mod dialect;
 mod foreign_keys;
 mod indexes;
+mod mysql_engine;
+mod owner;
 mod sqlite_rebuild;
 mod triggers;
 mod types;
@@ -17,22 +19,89 @@ mod tests;
 
 pub use column_alter::build_single_column_alter_sql;
 pub use create_table::build_create_table_sql;
+pub use owner::build_table_owner_change_sql;
 pub use sqlite_rebuild::{apply_sqlite_table_structure_change, preview_sqlite_table_structure_change};
 pub use types::*;
 
-use columns::build_column_sql;
+pub(crate) use column_alter::{
+    build_sqlserver_alter_column_preserving_default_sql, build_sqlserver_drop_default_constraint_sql,
+};
+pub(crate) use comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
+pub(crate) use util::sqlserver_unicode_string_literal;
+
+use crate::models::connection::DatabaseType;
+
+use columns::{build_column_sql, validate_primary_key_change_scope};
 use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
 use indexes::build_index_sql;
+use mysql_engine::{build_mysql_engine_change_sql, validate_mysql_engine};
 use triggers::build_trigger_sql;
-use validation::validate_draft;
+use validation::{validate_concurrent_index_scope, validate_draft};
 
-pub fn build_table_structure_change_sql(options: TableStructureSqlOptions) -> TableStructureSqlResult {
+pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -> TableStructureSqlResult {
+    let mysql_engine_errors = validate_mysql_engine(&options);
+    if !mysql_engine_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: mysql_engine_errors };
+    }
+    // GaussDB M-mode uses MySQL-compatible SQL dialect with backtick quoting.
+    // Map to StructureDialect::Mysql so DDL is generated correctly.
+    if options.is_gaussdb_m_mode {
+        options.database_type = Some(DatabaseType::Mysql);
+    }
+    let primary_key_errors = validate_primary_key_change_scope(&options);
+    if !primary_key_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: primary_key_errors };
+    }
+    // Fail closed: an unsupported concurrent-index request (existing index, or
+    // partitioned parent table) must never degrade into blocking index DDL
+    // behind the caller's back, so the whole plan is refused up front.
+    let concurrent_errors = validate_concurrent_index_scope(&options);
+    if !concurrent_errors.is_empty() {
+        return TableStructureSqlResult { statements: Vec::new(), warnings: concurrent_errors };
+    }
     let mut warnings = validate_draft(&options);
     let mut statements = build_column_sql(&options, &mut warnings);
     statements.extend(build_index_sql(&options, &mut warnings));
     statements.extend(build_foreign_key_sql(&options, &mut warnings));
     statements.extend(build_trigger_sql(&options, &mut warnings));
     statements.extend(build_table_comment_sql(&options, &mut warnings));
+    statements.extend(build_mysql_engine_change_sql(&options));
     TableStructureSqlResult { statements, warnings }
+}
+
+/// Whether this engine's structure editor can generate `COMMENT ON`/inline
+/// comment DDL for tables and columns — a DDL-generation capability, not an
+/// introspection one. The documentation collector uses it as a heuristic for
+/// "can this engine report comments at all", but the two questions can
+/// diverge: IRIS supports `%DESCRIPTION` while *defining* a table or column,
+/// but DBX's editor cannot ALTER an existing one, so this returns `false`
+/// for IRIS even though IRIS still reports descriptions on introspection.
+/// Callers using this as an introspection signal must corroborate it against
+/// what was actually collected rather than trust the flag alone.
+pub(crate) fn supports_comments(database_type: crate::models::connection::DatabaseType) -> bool {
+    dialect::capabilities_for(Some(database_type)).comment
+}
+
+/// Whether this engine's structure editor can generate foreign key DDL — a
+/// DDL-generation capability, not an introspection one, used here as a
+/// heuristic for "does this engine report foreign key metadata at all".
+/// Engines like ClickHouse and Doris genuinely report none, so their ER
+/// diagrams have no edges by necessity rather than by accident, but a
+/// mismatch analogous to the IRIS comment case is possible for any future
+/// engine where DDL support and introspection support diverge — callers
+/// should corroborate against what was actually collected.
+pub(crate) fn supports_foreign_keys(database_type: crate::models::connection::DatabaseType) -> bool {
+    dialect::capabilities_for(Some(database_type)).foreign_key
+}
+
+/// Canonical display label for a database engine (e.g. `postgres`,
+/// `sqlserver`, `mongodb`) — the same identifier already used throughout
+/// this module's own warning prose. The documentation collector uses it for
+/// `database_type` and its engine-capability warnings instead of the Rust
+/// `Debug` spelling (`Postgres`, `SqlServer`, `MongoDb`), which is an
+/// implementation detail, not something a consumer like dbdocs/dbdiagram
+/// should key off.
+pub(crate) fn database_type_label(database_type: crate::models::connection::DatabaseType) -> String {
+    dialect::database_label(Some(database_type))
 }

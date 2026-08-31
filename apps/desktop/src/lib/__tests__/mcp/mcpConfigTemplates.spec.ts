@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
 
 describe("MCP config templates", () => {
   it("builds the standard mcpServers JSON used by Claude, Cursor, TRAE, and Windsurf", () => {
@@ -12,6 +12,29 @@ describe("MCP config templates", () => {
         },
       },
     });
+  });
+
+  it("preserves the standard mcpServers launch config for ZCode full configuration", () => {
+    const launch = {
+      command: "node",
+      args: ["C:\\dbx\\mcp\\dist\\index.js"],
+      env: { DBX_DATA_DIR: "D:\\DBX Data" },
+    };
+    const config = JSON.parse(buildMcpJsonConfig(launch));
+
+    expect(config).toEqual({ mcpServers: { dbx: launch } });
+    expect(config).not.toHaveProperty("mcp");
+  });
+
+  it("builds the standard mcpServers JSON used by the Pi agent", () => {
+    expect(JSON.parse(buildMcpPiConfig())).toEqual({
+      mcpServers: {
+        dbx: {
+          command: "dbx-mcp-server",
+        },
+      },
+    });
+    expect(buildMcpPiConfig({ command: "npx", args: ["-y", "@dbx-app/mcp-server"] })).toContain('"npx"');
   });
 
   it("builds standard JSON configs with a direct node launch command", () => {
@@ -132,6 +155,20 @@ describe("MCP config templates", () => {
 
   it("builds Codex TOML config with a direct node launch command", () => {
     expect(buildMcpCodexConfig({ command: "node", args: ["C:\\dbx\\mcp\\dist\\index.js"] })).toBe(["[mcp_servers.dbx]", 'command = "node"', 'args = ["C:\\\\dbx\\\\mcp\\\\dist\\\\index.js"]'].join("\n"));
+  });
+
+  it("builds the DeepSeek Harness Cordis insert patch", () => {
+    expect(buildMcpDeepSeekHarnessConfig()).toBe(["- insert:", "    - id: mcp-dbx", "      name: '@deepseek-ai/dsh-mcp-client'", "      config:", "        serverName: dbx", "        transport: stdio", '        command: "dbx-mcp-server"'].join("\n"));
+  });
+
+  it("includes launch arguments and explicit environment in the DeepSeek Harness patch", () => {
+    expect(
+      buildMcpDeepSeekHarnessConfig({
+        command: "C:\\Program Files\\nodejs\\node.exe",
+        args: ["C:\\Users\\zhiyo\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-server\\dist\\index.js"],
+        env: { DBX_DATA_DIR: "D:\\DBX Data" },
+      }),
+    ).toContain(['        command: "C:\\\\Program Files\\\\nodejs\\\\node.exe"', '        args: ["C:\\\\Users\\\\zhiyo\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\@dbx-app\\\\mcp-server\\\\dist\\\\index.js"]', "        env:", '          "DBX_DATA_DIR": "D:\\\\DBX Data"'].join("\n"));
   });
 
   it("builds OpenCode config without policy environment", () => {

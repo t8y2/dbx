@@ -3,6 +3,7 @@ import { mysqlUserAccount, quoteMySqlIdentifier, quotePostgresIdentifier, type C
 
 export type AuthorizationAccountType = "standard" | "admin";
 export type AuthorizationPreset = "readWrite" | "readOnly" | "ddl" | "dml" | "custom";
+export type AuthorizationTargetScope = "database" | "table";
 export type AuthorizationStepOperation = "createUser" | "grantAdmin" | "createDatabase" | "grantDatabase" | "grantCurrentObjects" | "grantFutureObjects";
 export type AuthorizationObjectScope = "schemas" | "tables" | "sequences" | "functions";
 
@@ -11,6 +12,7 @@ export interface DatabaseAuthorizationSelection {
   preset: AuthorizationPreset;
   privileges?: string[];
   schemas?: string[];
+  tables?: string[];
 }
 
 export interface AuthorizationPlanStep {
@@ -22,6 +24,7 @@ export interface AuthorizationPlanStep {
   operation: AuthorizationStepOperation;
   subject?: string;
   targetDatabase?: string;
+  targetTable?: string;
   objectScope?: AuthorizationObjectScope;
   schema?: string;
   owner?: string;
@@ -60,6 +63,8 @@ const MYSQL_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = 
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "EXECUTE", "SHOW VIEW", "CREATE VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "TRIGGER", "EVENT", "CREATE TEMPORARY TABLES", "LOCK TABLES"],
 };
 
+const MYSQL_TABLE_PRIVILEGES = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "SHOW VIEW", "CREATE VIEW", "TRIGGER"]);
+
 const POSTGRES_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]> = {
   readOnly: ["SELECT"],
   dml: ["SELECT", "INSERT", "UPDATE", "DELETE"],
@@ -67,15 +72,18 @@ const POSTGRES_PRESETS: Record<Exclude<AuthorizationPreset, "custom">, string[]>
   readWrite: ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "EXECUTE", "CREATE", "TEMPORARY"],
 };
 
-export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = []): string[] {
-  if (preset === "custom") return uniquePrivileges(custom);
-  return [...(provider.dialect === "mysql" ? MYSQL_PRESETS[preset] : POSTGRES_PRESETS[preset])];
+export function authorizationPresetPrivileges(provider: DatabaseUserAdminProvider, preset: AuthorizationPreset, custom: string[] = [], targetScope: AuthorizationTargetScope = "database"): string[] {
+  const privileges = preset === "custom" ? uniquePrivileges(custom) : [...(provider.dialect === "mysql" ? MYSQL_PRESETS[preset] : POSTGRES_PRESETS[preset])];
+  return provider.dialect === "mysql" && targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
 }
 
-export function authorizationPrivileges(provider: DatabaseUserAdminProvider): string[] {
+export function authorizationPrivileges(provider: DatabaseUserAdminProvider, targetScope: AuthorizationTargetScope = "database"): string[] {
   const privilegesForScope = provider.privilegesForScope;
   if (!privilegesForScope) return [];
-  if (provider.dialect === "mysql") return Array.from(privilegesForScope("mysql"));
+  if (provider.dialect === "mysql") {
+    const privileges = Array.from(privilegesForScope("mysql"));
+    return targetScope === "table" ? privileges.filter((privilege) => MYSQL_TABLE_PRIVILEGES.has(privilege)) : privileges;
+  }
   return uniquePrivileges([...privilegesForScope("database"), ...privilegesForScope("schema"), ...privilegesForScope("table"), "EXECUTE", "USAGE", "UPDATE"]);
 }
 
@@ -116,20 +124,26 @@ export function buildCreateUserAuthorizationPlan(input: CreateUserAuthorizationP
   for (const selection of input.databases) {
     const database = selection.database.trim();
     if (!database) continue;
-    const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges);
     if (input.provider.dialect === "mysql") {
-      steps.push({
-        id: `grant-${steps.length}`,
-        label: `grant ${input.provider.label(identity)} access to ${database}`,
-        database: "",
-        sql: input.provider.grantPrivilegesSql({ user: identity, privileges, database, table: "*", scope: "mysql" }),
-        dependsOn: [createStepId],
-        operation: "grantDatabase",
-        subject: input.provider.label(identity),
-        targetDatabase: database,
-      });
+      const targetScope = input.provider.supportsTableGrantsOnCreate && selection.tables !== undefined ? "table" : "database";
+      const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges, targetScope);
+      const tables = targetScope === "database" ? ["*"] : uniqueNames(selection.tables ?? []);
+      for (const table of tables) {
+        steps.push({
+          id: `grant-${steps.length}`,
+          label: `grant ${input.provider.label(identity)} access to ${table === "*" ? database : `${database}.${table}`}`,
+          database: "",
+          sql: input.provider.grantPrivilegesSql({ user: identity, privileges, database, table, scope: "mysql" }),
+          dependsOn: [createStepId],
+          operation: "grantDatabase",
+          subject: input.provider.label(identity),
+          targetDatabase: database,
+          targetTable: table === "*" ? undefined : table,
+        });
+      }
       continue;
     }
+    const privileges = authorizationPresetPrivileges(input.provider, selection.preset, selection.privileges);
     steps.push(...postgresDatabaseAuthorizationSteps(identity, database, privileges, selection.schemas ?? ["public"], createStepId, steps.length));
   }
   return { steps };
@@ -416,6 +430,10 @@ function uniqueSchemas(schemaNames: string[]): string[] {
 
 function uniquePrivileges(privileges: string[]): string[] {
   return Array.from(new Set(privileges.map((privilege) => privilege.trim().toUpperCase()).filter(Boolean)));
+}
+
+function uniqueNames(names: string[]): string[] {
+  return Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
 }
 
 function queryResultMessage(result: QueryResult): string {

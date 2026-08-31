@@ -1,0 +1,35 @@
+schemaVersion: 1
+order: 590
+dbType: spanner
+rustVariant: Spanner
+label: Google Cloud Spanner
+runtimeMode: agent
+mcpMode: bridge
+agentKey: spanner
+driverStoreVisible: true
+driverStoreOrder: 29
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 443
+traits:
+  schemaAware: true
+  treeSchema: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

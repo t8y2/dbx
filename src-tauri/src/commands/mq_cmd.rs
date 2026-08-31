@@ -268,6 +268,23 @@ pub async fn mq_list_subscriptions(
 }
 
 #[tauri::command]
+pub async fn mq_enrich_subscriptions(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    topic: dbx_core::mq::TopicRef,
+) -> Result<Vec<dbx_core::mq::SubscriptionInfo>, String> {
+    dbx_core::mq::service::mq_enrich_subscriptions_core(&state, &connection_id, topic).await
+}
+
+#[tauri::command]
+pub async fn mq_get_kafka_consumer_group_snapshot(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+) -> Result<dbx_core::mq::KafkaConsumerGroupSnapshot, String> {
+    dbx_core::mq::service::mq_get_kafka_consumer_group_snapshot_core(&state, &connection_id).await
+}
+
+#[tauri::command]
 pub async fn mq_create_subscription(
     state: State<'_, Arc<AppState>>,
     connection_id: String,
@@ -354,7 +371,7 @@ pub async fn mq_peek_messages(
     sub: String,
     count: u32,
     options: Option<dbx_core::mq::PeekMessagesOptions>,
-) -> Result<Vec<dbx_core::mq::PeekedMessage>, String> {
+) -> Result<dbx_core::mq::PeekMessagesResult, String> {
     dbx_core::mq::service::mq_peek_messages_core(&state, &connection_id, topic, sub, count, options).await
 }
 

@@ -34,11 +34,18 @@ pub struct CliAgentCommandSpec {
 pub enum CliAgentJsonlDialect {
     CodexExec,
     ClaudeCodePrint,
+    CodeBuddyPrint,
+    QoderPrint,
+    OpenCodeRun,
+    CursorPrint,
+    /// Grok Build headless `--output-format streaming-json` (ACP-derived NDJSON).
+    GrokStreamingJson,
 }
 
 pub struct CliAgentProcessSpec {
     pub command: CliAgentCommandSpec,
     pub env: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
     pub current_dir: Option<PathBuf>,
     pub stdin: Option<String>,
     pub dialect: CliAgentJsonlDialect,
@@ -217,6 +224,7 @@ struct ParsedCliAgentEvent {
     events: Vec<AgentEvent>,
     final_text: Option<String>,
     error: Option<String>,
+    usage_delta: Option<TokenUsage>,
 }
 
 pub fn parse_cli_jsonl_event(line: &str, dialect: CliAgentJsonlDialect) -> Option<Vec<AgentEvent>> {
@@ -231,7 +239,80 @@ pub fn parse_cli_jsonl_event(line: &str, dialect: CliAgentJsonlDialect) -> Optio
 fn parse_cli_jsonl_line(line: &str, dialect: CliAgentJsonlDialect) -> ParsedCliAgentEvent {
     match dialect {
         CliAgentJsonlDialect::CodexExec => parse_codex_jsonl_line(line),
-        CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_code_jsonl_line(line),
+        CliAgentJsonlDialect::ClaudeCodePrint => parse_claude_compatible_jsonl_line(line, "Claude Code CLI failed"),
+        CliAgentJsonlDialect::CodeBuddyPrint => parse_claude_compatible_jsonl_line(line, "CodeBuddy Code CLI failed"),
+        CliAgentJsonlDialect::QoderPrint => parse_qoder_jsonl_line(line),
+        CliAgentJsonlDialect::OpenCodeRun => parse_open_code_jsonl_line(line),
+        CliAgentJsonlDialect::CursorPrint => parse_cursor_jsonl_line(line),
+        CliAgentJsonlDialect::GrokStreamingJson => parse_grok_streaming_json_line(line),
+    }
+}
+
+fn parse_qoder_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let value = serde_json::from_str::<Value>(line).ok();
+    if let Some(value) = value.as_ref().filter(|value| {
+        value.get("type").and_then(Value::as_str) == Some("result")
+            && value.get("subtype").and_then(Value::as_str).unwrap_or("success") != "success"
+    }) {
+        let message = value
+            .get("errors")
+            .and_then(Value::as_array)
+            .map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|error| !error.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| claude_code_error_message(value, "Qoder CLI failed"));
+        return ParsedCliAgentEvent {
+            error: Some(message.clone()),
+            events: vec![AgentEvent::Error { message }],
+            ..Default::default()
+        };
+    }
+
+    let compatible = parse_claude_compatible_jsonl_line(line, "Qoder CLI failed");
+    if !compatible.events.is_empty()
+        || compatible.final_text.is_some()
+        || compatible.error.is_some()
+        || compatible.usage_delta.is_some()
+    {
+        return compatible;
+    }
+
+    let Some(value) = value else {
+        return ParsedCliAgentEvent::default();
+    };
+    if value.get("type").and_then(Value::as_str) != Some("stream_event") {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(delta) = value.get("event").and_then(|event| event.get("delta")) else {
+        return ParsedCliAgentEvent::default();
+    };
+    match delta.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text_delta" => {
+            let Some(text) = delta.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                final_text: Some(text.to_string()),
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "thinking_delta" => {
+            let Some(text) = delta.get("thinking").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
     }
 }
 
@@ -393,7 +474,7 @@ fn codex_error_message(value: &Value) -> String {
         .to_string()
 }
 
-fn parse_claude_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+fn parse_claude_compatible_jsonl_line(line: &str, fallback_error: &str) -> ParsedCliAgentEvent {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return ParsedCliAgentEvent::default();
     };
@@ -401,9 +482,9 @@ fn parse_claude_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
     match value.get("type").and_then(Value::as_str).unwrap_or_default() {
         "assistant" => parse_claude_code_assistant(&value),
         "user" => parse_claude_code_user(&value),
-        "result" => parse_claude_code_result(&value),
+        "result" => parse_claude_code_result(&value, fallback_error),
         "error" => {
-            let message = claude_code_error_message(&value);
+            let message = claude_code_error_message(&value, fallback_error);
             ParsedCliAgentEvent {
                 error: Some(message.clone()),
                 events: vec![AgentEvent::Error { message }],
@@ -480,10 +561,10 @@ fn parse_claude_code_user(value: &Value) -> ParsedCliAgentEvent {
     ParsedCliAgentEvent { events, ..Default::default() }
 }
 
-fn parse_claude_code_result(value: &Value) -> ParsedCliAgentEvent {
+fn parse_claude_code_result(value: &Value, fallback_error: &str) -> ParsedCliAgentEvent {
     let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("success");
     if subtype != "success" {
-        let message = claude_code_error_message(value);
+        let message = claude_code_error_message(value, fallback_error);
         return ParsedCliAgentEvent {
             error: Some(message.clone()),
             events: vec![AgentEvent::Error { message }],
@@ -519,24 +600,434 @@ fn claude_content_blocks(content: &Value) -> Vec<Value> {
     }
 }
 
-fn claude_code_error_message(value: &Value) -> String {
+fn claude_code_error_message(value: &Value, fallback_error: &str) -> String {
     value
         .get("error")
         .and_then(Value::as_str)
         .or_else(|| value.get("message").and_then(Value::as_str))
         .or_else(|| value.get("error").and_then(|error| error.get("message")).and_then(Value::as_str))
         .or_else(|| value.get("result").and_then(Value::as_str))
-        .unwrap_or("Claude Code CLI failed")
+        .unwrap_or(fallback_error)
         .to_string()
 }
 
+fn parse_open_code_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text" => {
+            let Some(text) = value.pointer("/part/text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                final_text: Some(text.to_string()),
+                ..Default::default()
+            }
+        }
+        "reasoning" => {
+            let Some(text) = value.pointer("/part/text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "tool_use" => parse_open_code_tool(&value),
+        "step_finish" => {
+            let input = value.pointer("/part/tokens/input").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let output = value.pointer("/part/tokens/output").and_then(Value::as_u64).unwrap_or(0) as u32;
+            ParsedCliAgentEvent {
+                usage_delta: (input > 0 || output > 0)
+                    .then_some(TokenUsage { input_tokens: input, output_tokens: output }),
+                ..Default::default()
+            }
+        }
+        "error" => {
+            let message = open_code_error_message(&value);
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_open_code_tool(value: &Value) -> ParsedCliAgentEvent {
+    let part = &value["part"];
+    let state = &part["state"];
+    let status = state.get("status").and_then(Value::as_str).unwrap_or_default();
+    if status != "completed" && status != "error" {
+        return ParsedCliAgentEvent::default();
+    }
+
+    let tool_call_id = part
+        .get("callID")
+        .and_then(Value::as_str)
+        .or_else(|| part.get("call_id").and_then(Value::as_str))
+        .or_else(|| part.get("id").and_then(Value::as_str))
+        .unwrap_or("opencode-tool-call")
+        .to_string();
+    let tool_name = part.get("tool").and_then(Value::as_str).unwrap_or("opencode_tool").to_string();
+    let args = state.get("input").cloned().unwrap_or_else(|| Value::Object(Default::default()));
+    let result = state
+        .get("output")
+        .filter(|value| !value.is_null())
+        .or_else(|| state.get("error").filter(|value| !value.is_null()))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    ParsedCliAgentEvent {
+        events: vec![
+            AgentEvent::ToolCallStart { tool_call_id: tool_call_id.clone(), tool_name: tool_name.clone(), args },
+            AgentEvent::ToolCallEnd { tool_call_id, tool_name, result, is_error: status == "error" },
+        ],
+        ..Default::default()
+    }
+}
+
+fn open_code_error_message(value: &Value) -> String {
+    value
+        .pointer("/error/data/message")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .unwrap_or("OpenCode CLI failed")
+        .to_string()
+}
+
+fn parse_cursor_jsonl_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "assistant" => parse_cursor_assistant(&value),
+        "thinking" => parse_cursor_thinking(&value),
+        "tool_call" => parse_cursor_tool_call(&value),
+        "result" => parse_cursor_result(&value),
+        "error" => {
+            let message = cursor_error_message(&value);
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_cursor_assistant(value: &Value) -> ParsedCliAgentEvent {
+    // Cursor emits timestamped partial assistant messages followed by one
+    // un-timestamped buffered message. Only partials are deltas; consuming the
+    // buffered copy would duplicate the entire response.
+    if value.get("timestamp_ms").or_else(|| value.get("timestampMs")).is_none() {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(content) = value.pointer("/message/content").or_else(|| value.get("content")) else {
+        return ParsedCliAgentEvent::default();
+    };
+    let mut text = String::new();
+    for block in claude_content_blocks(content) {
+        if block.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(delta) = block.get("text").and_then(Value::as_str).filter(|delta| !delta.is_empty()) {
+                text.push_str(delta);
+            }
+        }
+    }
+    if text.is_empty() {
+        return ParsedCliAgentEvent::default();
+    }
+    ParsedCliAgentEvent {
+        events: vec![AgentEvent::TextDelta { delta: text.clone() }],
+        final_text: Some(text),
+        ..Default::default()
+    }
+}
+
+fn parse_cursor_thinking(value: &Value) -> ParsedCliAgentEvent {
+    if value.get("subtype").and_then(Value::as_str) != Some("delta") {
+        return ParsedCliAgentEvent::default();
+    }
+    let Some(text) = value.get("text").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+        return ParsedCliAgentEvent::default();
+    };
+    ParsedCliAgentEvent { events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }], ..Default::default() }
+}
+
+fn parse_cursor_tool_call(value: &Value) -> ParsedCliAgentEvent {
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or_default();
+    let call = value.get("tool_call").or_else(|| value.get("toolCall")).unwrap_or(&Value::Null);
+    let payload = call.as_object().and_then(|object| object.values().next()).unwrap_or(call);
+    let call_kind = call.as_object().and_then(|object| object.keys().next()).map(String::as_str);
+    let tool_call_id = value
+        .get("call_id")
+        .or_else(|| value.get("callId"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("call_id").and_then(Value::as_str))
+        .or_else(|| payload.get("callId").and_then(Value::as_str))
+        .unwrap_or("cursor-tool-call")
+        .to_string();
+    let tool_name = payload
+        .get("tool_name")
+        .or_else(|| payload.get("toolName"))
+        .or_else(|| payload.get("name"))
+        .or_else(|| payload.get("tool"))
+        .or_else(|| payload.pointer("/args/toolName"))
+        .or_else(|| payload.pointer("/args/tool_name"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| call_kind.map(cursor_tool_name_from_kind))
+        .unwrap_or_else(|| "cursor_tool".to_string());
+    let args = payload
+        .get("args")
+        .or_else(|| payload.get("arguments"))
+        .or_else(|| payload.get("input"))
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Default::default()));
+
+    match subtype {
+        "started" => ParsedCliAgentEvent {
+            events: vec![AgentEvent::ToolCallStart { tool_call_id, tool_name, args }],
+            ..Default::default()
+        },
+        "completed" => {
+            let result = payload
+                .get("result")
+                .or_else(|| payload.get("output"))
+                .or_else(|| payload.get("error"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let is_error = payload
+                .get("is_error")
+                .or_else(|| payload.get("isError"))
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| payload.get("error").is_some_and(|error| !error.is_null()));
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ToolCallEnd { tool_call_id, tool_name, result, is_error }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn cursor_tool_name_from_kind(kind: &str) -> String {
+    let stem = kind.strip_suffix("ToolCall").unwrap_or(kind);
+    let mut name = String::new();
+    for (index, ch) in stem.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            name.push('_');
+        }
+        name.push(ch.to_ascii_lowercase());
+    }
+    name
+}
+
+fn parse_cursor_result(value: &Value) -> ParsedCliAgentEvent {
+    let subtype = value.get("subtype").and_then(Value::as_str).unwrap_or("success");
+    let is_error = value.get("is_error").or_else(|| value.get("isError")).and_then(Value::as_bool).unwrap_or(false);
+    if subtype != "success" || is_error {
+        let message = cursor_error_message(value);
+        return ParsedCliAgentEvent {
+            error: Some(message.clone()),
+            events: vec![AgentEvent::Error { message }],
+            ..Default::default()
+        };
+    }
+    let usage = value.get("usage");
+    let input_tokens = usage
+        .and_then(|usage| usage.get("inputTokens").or_else(|| usage.get("input_tokens")))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .map(|value| value as u32);
+    let output_tokens = usage
+        .and_then(|usage| usage.get("outputTokens").or_else(|| usage.get("output_tokens")))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .map(|value| value as u32);
+    ParsedCliAgentEvent { events: vec![AgentEvent::AgentEnd { input_tokens, output_tokens }], ..Default::default() }
+}
+
+fn cursor_error_message(value: &Value) -> String {
+    value
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .or_else(|| value.get("result").and_then(Value::as_str))
+        .or_else(|| value.pointer("/error/message").and_then(Value::as_str))
+        .unwrap_or("Cursor CLI failed")
+        .to_string()
+}
+
+/// Parse Grok Build `--output-format streaming-json` NDJSON events.
+///
+/// Documented event types: `text`, `thought`, `tool_call`, `tool_call_update`,
+/// `usage`, `plan`, `available_commands`, `end`, `error` (list is non-exhaustive).
+fn parse_grok_streaming_json_line(line: &str) -> ParsedCliAgentEvent {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return ParsedCliAgentEvent::default();
+    };
+
+    match value.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "text" => {
+            let Some(text) = value.get("data").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                final_text: Some(text.to_string()),
+                events: vec![AgentEvent::TextDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "thought" => {
+            let Some(text) = value.get("data").and_then(Value::as_str).filter(|text| !text.is_empty()) else {
+                return ParsedCliAgentEvent::default();
+            };
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ReasoningDelta { delta: text.to_string() }],
+                ..Default::default()
+            }
+        }
+        "tool_call" => {
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("in_progress");
+            if status == "failed" || status == "error" {
+                return parse_grok_tool_call_end(&value, true);
+            }
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::ToolCallStart {
+                    tool_call_id: grok_tool_call_id(&value),
+                    tool_name: grok_tool_name(&value),
+                    args: value
+                        .get("rawInput")
+                        .or_else(|| value.get("raw_input"))
+                        .or_else(|| value.get("input"))
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(Default::default())),
+                }],
+                ..Default::default()
+            }
+        }
+        "tool_call_update" => {
+            let status = value.get("status").and_then(Value::as_str).unwrap_or("completed");
+            let is_error = matches!(status, "failed" | "error" | "cancelled" | "rejected");
+            if matches!(status, "in_progress" | "pending" | "running") {
+                return ParsedCliAgentEvent::default();
+            }
+            parse_grok_tool_call_end(&value, is_error)
+        }
+        "end" => {
+            let usage = value.get("usage").and_then(grok_usage_tokens);
+            ParsedCliAgentEvent {
+                events: vec![AgentEvent::AgentEnd {
+                    input_tokens: usage.as_ref().and_then(|u| (u.input_tokens > 0).then_some(u.input_tokens)),
+                    output_tokens: usage.as_ref().and_then(|u| (u.output_tokens > 0).then_some(u.output_tokens)),
+                }],
+                ..Default::default()
+            }
+        }
+        "error" => {
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .or_else(|| value.get("error").and_then(Value::as_str))
+                .or_else(|| value.get("data").and_then(Value::as_str))
+                .unwrap_or("Grok CLI failed")
+                .to_string();
+            ParsedCliAgentEvent {
+                error: Some(message.clone()),
+                events: vec![AgentEvent::Error { message }],
+                ..Default::default()
+            }
+        }
+        _ => ParsedCliAgentEvent::default(),
+    }
+}
+
+fn parse_grok_tool_call_end(value: &Value, is_error: bool) -> ParsedCliAgentEvent {
+    let result = value
+        .get("rawOutput")
+        .or_else(|| value.get("raw_output"))
+        .or_else(|| value.get("content"))
+        .or_else(|| value.get("error"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    ParsedCliAgentEvent {
+        events: vec![AgentEvent::ToolCallEnd {
+            tool_call_id: grok_tool_call_id(value),
+            tool_name: grok_tool_name(value),
+            result,
+            is_error,
+        }],
+        ..Default::default()
+    }
+}
+
+fn grok_tool_call_id(value: &Value) -> String {
+    value
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("tool_call_id").and_then(Value::as_str))
+        .or_else(|| value.get("id").and_then(Value::as_str))
+        .unwrap_or("grok-tool-call")
+        .to_string()
+}
+
+fn grok_tool_name(value: &Value) -> String {
+    value
+        .get("toolName")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("tool_name").and_then(Value::as_str))
+        .or_else(|| value.get("title").and_then(Value::as_str))
+        .or_else(|| value.get("name").and_then(Value::as_str))
+        .unwrap_or("mcp_tool")
+        .to_string()
+}
+
+fn grok_usage_tokens(usage: &Value) -> Option<TokenUsage> {
+    let input =
+        usage.get("input_tokens").or_else(|| usage.get("prompt_tokens")).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let output =
+        usage.get("output_tokens").or_else(|| usage.get("completion_tokens")).and_then(Value::as_u64).unwrap_or(0)
+            as u32;
+    (input > 0 || output > 0).then_some(TokenUsage { input_tokens: input, output_tokens: output })
+}
+
+/// Stream a CLI agent's JSONL output to `on_event`, then return the accumulated
+/// final text.
+///
+/// `AgentEnd` is emitted ONLY after the process is confirmed successful: the CLI
+/// is reaped via `child.wait()` and the run must have no terminal error, no
+/// cancellation, and a zero exit status. Both the CLI's own `end` marker and the
+/// synthesized `AgentEnd` (used when the CLI emits none) are gated behind that
+/// confirmed exit — a CLI that closes stdout then hangs or exits non-zero must
+/// never be shown to the frontend as a completed reply.
+///
+/// To still let the frontend stop the reply animation promptly, a NON-terminal
+/// `ResponseComplete` is dispatched as soon as stdout is fully consumed (before
+/// `child.wait()` / the stderr drain, which can take seconds on some CLIs). The
+/// frontend may hide the status line on `ResponseComplete` but must keep
+/// listening for the real `AgentEnd` (success) / `Error` (failure). Cancellation
+/// / read-error paths skip `ResponseComplete` so the frontend cancel flow keeps
+/// its `cancelling` phase until `finally`.
 pub async fn run_cli_jsonl_agent(
     spec: CliAgentProcessSpec,
     cancelled: &Notify,
     on_event: impl Fn(AgentEvent) + Send + Sync + 'static,
 ) -> Result<String, String> {
     let mut command = cli_command(&spec.command.program);
-    command.args(&spec.command.args).envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    command.args(&spec.command.args);
+    for key in &spec.env_remove {
+        command.env_remove(key);
+    }
+    command.envs(spec.env.iter().map(|(key, value)| (key.as_str(), value.as_str())));
     if let Some(current_dir) = &spec.current_dir {
         command.current_dir(current_dir);
     }
@@ -544,6 +1035,7 @@ pub async fn run_cli_jsonl_agent(
         .stdin(if spec.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| (spec.classify_spawn_error)(&e.to_string()))?;
 
@@ -564,7 +1056,8 @@ pub async fn run_cli_jsonl_agent(
     });
 
     let mut final_text = String::new();
-    let mut saw_agent_end = false;
+    let mut pending_agent_end: Option<AgentEvent> = None;
+    let mut total_usage = TokenUsage::default();
     let mut terminal_error: Option<String> = None;
 
     loop {
@@ -583,14 +1076,26 @@ pub async fn run_cli_jsonl_agent(
                 if let Some(text) = parsed.final_text {
                     final_text.push_str(&text);
                 }
+                if let Some(usage) = parsed.usage_delta {
+                    total_usage.add(&usage);
+                }
                 for event in parsed.events {
+                    // A CLI-emitted `end` is a stream marker, not a confirmed
+                    // success: the process may still exit non-zero (or hang)
+                    // after closing stdout. Buffer it and re-emit only after
+                    // child.wait() confirms the exit status (see below).
+                    // Dialects that emit one `end` per tool result (e.g. Cursor)
+                    // collapse into the single confirmed-success AgentEnd here —
+                    // forwarding them inline would show the run as complete at
+                    // the first tool result.
                     if matches!(event, AgentEvent::AgentEnd { .. }) {
-                        saw_agent_end = true;
+                        pending_agent_end = Some(event);
+                        continue;
                     }
                     on_event(event);
                 }
                 if let Some(error) = parsed.error {
-                    terminal_error = Some(error);
+                    terminal_error = Some((spec.classify_run_error)(&error));
                     let _ = child.kill().await;
                     break;
                 }
@@ -603,8 +1108,34 @@ pub async fn run_cli_jsonl_agent(
         }
     }
 
-    let status = child.wait().await.map_err(|e| format!("CLI agent wait failed: {e}"))?;
-    let stderr = stderr_task.await.unwrap_or_default();
+    // stdout is fully consumed. Emit a NON-terminal marker so the frontend can
+    // stop the reply animation (hide the status line) without treating the run
+    // as finished — the process is not confirmed successful until child.wait()
+    // returns a zero exit status below. Skipped on error/cancel paths so the
+    // frontend keeps its `cancelling`/`error` handling until `finally`.
+    if terminal_error.is_none() {
+        on_event(AgentEvent::ResponseComplete);
+    }
+
+    // The read loop above is gone, so this wait is the last chance to observe a
+    // cancel. Race the (potentially slow) post-EOF reap and stderr drain against
+    // `cancelled` so Stop still kills and reaps a CLI that closes stdout and
+    // then hangs. On cancel we kill() then wait() (kill-and-reap) so the child
+    // leaves no zombie behind, then return the cancel error. `stderr_task` is
+    // dropped on that branch — the pipe closes once the child is terminated, so
+    // the reader completes on its own (no leak, no hang).
+    let (status, stderr) = tokio::select! {
+        status = child.wait() => {
+            let status = status.map_err(|e| format!("CLI agent wait failed: {e}"))?;
+            let stderr = stderr_task.await.unwrap_or_default();
+            (status, stderr)
+        }
+        _ = cancelled.notified() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await; // reap; kill() then wait() prevents a zombie
+            return Err("Agent loop cancelled".to_string());
+        }
+    };
 
     if let Some(error) = terminal_error {
         return Err(error);
@@ -614,17 +1145,101 @@ pub async fn run_cli_jsonl_agent(
         return Err((spec.classify_run_error)(&stderr));
     }
 
-    if !saw_agent_end {
-        on_event(AgentEvent::AgentEnd { input_tokens: None, output_tokens: None });
+    // Confirmed success. Forward the CLI's own `end` (backfilling usage from the
+    // accumulated totals when it carried none), else synthesize an `AgentEnd`.
+    if let Some(agent_end) = pending_agent_end {
+        if let AgentEvent::AgentEnd { input_tokens, output_tokens } = agent_end {
+            let agent_end = AgentEvent::AgentEnd {
+                input_tokens: input_tokens
+                    .or_else(|| (total_usage.input_tokens > 0).then_some(total_usage.input_tokens)),
+                output_tokens: output_tokens
+                    .or_else(|| (total_usage.output_tokens > 0).then_some(total_usage.output_tokens)),
+            };
+            on_event(agent_end);
+        }
+    } else {
+        on_event(AgentEvent::AgentEnd {
+            input_tokens: (total_usage.input_tokens > 0).then_some(total_usage.input_tokens),
+            output_tokens: (total_usage.output_tokens > 0).then_some(total_usage.output_tokens),
+        });
     }
 
     Ok(final_text)
+}
+
+#[cfg(test)]
+mod grok_streaming_json_tests {
+    use super::*;
+
+    #[test]
+    fn parses_text_thought_and_end_with_usage() {
+        let text = parse_cli_jsonl_event(r#"{"type":"text","data":"hello"}"#, CliAgentJsonlDialect::GrokStreamingJson)
+            .unwrap();
+        assert!(matches!(&text[0], AgentEvent::TextDelta { delta } if delta == "hello"));
+
+        let thought = parse_cli_jsonl_event(
+            r#"{"type":"thought","data":"thinking..."}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(&thought[0], AgentEvent::ReasoningDelta { delta } if delta == "thinking..."));
+
+        let end = parse_cli_jsonl_event(
+            r#"{"type":"end","stopReason":"end_turn","usage":{"input_tokens":10,"output_tokens":4}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(&end[0], AgentEvent::AgentEnd { input_tokens: Some(10), output_tokens: Some(4) }));
+    }
+
+    #[test]
+    fn parses_tool_call_lifecycle() {
+        let start = parse_cli_jsonl_event(
+            r#"{"type":"tool_call","toolCallId":"call_1","toolName":"dbx__dbx_list_tables","status":"in_progress","rawInput":{"schema":"public"}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(
+            &start[0],
+            AgentEvent::ToolCallStart { tool_call_id, tool_name, args }
+                if tool_call_id == "call_1"
+                    && tool_name == "dbx__dbx_list_tables"
+                    && args.get("schema").and_then(Value::as_str) == Some("public")
+        ));
+
+        let end = parse_cli_jsonl_event(
+            r#"{"type":"tool_call_update","toolCallId":"call_1","toolName":"dbx__dbx_list_tables","status":"completed","rawOutput":{"tables":["users"]}}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .unwrap();
+        assert!(matches!(
+            &end[0],
+            AgentEvent::ToolCallEnd { tool_call_id, is_error: false, .. } if tool_call_id == "call_1"
+        ));
+
+        assert!(parse_cli_jsonl_event(
+            r#"{"type":"tool_call_update","toolCallId":"call_1","status":"in_progress"}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn parses_error_event() {
+        let parsed = parse_cli_jsonl_line(
+            r#"{"type":"error","message":"auth failed"}"#,
+            CliAgentJsonlDialect::GrokStreamingJson,
+        );
+        assert_eq!(parsed.error.as_deref(), Some("auth failed"));
+        assert!(matches!(&parsed.events[0], AgentEvent::Error { message } if message == "auth failed"));
+    }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::process::Command as StdCommand;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::time::{sleep, timeout, Duration};
 
@@ -657,6 +1272,7 @@ mod tests {
                 ],
             },
             env: vec![("DBX_TEST_ENV".to_string(), "from-env".to_string())],
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -680,6 +1296,7 @@ mod tests {
                 ],
             },
             env: Vec::new(),
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: Some("prompt from stdin".to_string()),
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -690,6 +1307,207 @@ mod tests {
         let result = run_cli_jsonl_agent(spec, &Notify::new(), |_| {}).await.unwrap();
 
         assert_eq!(result, "prompt from stdin");
+    }
+
+    #[tokio::test]
+    async fn opencode_agent_aggregates_step_usage_and_emits_one_agent_end() {
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    concat!(
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
+                        "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'",
+                    )
+                    .to_string(),
+                ],
+            },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+
+        let result = run_cli_jsonl_agent(spec, &Notify::new(), move |event| {
+            captured.lock().unwrap().push(event);
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "hello");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(), 1);
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event, AgentEvent::AgentEnd { input_tokens: Some(13), output_tokens: Some(6) }) }));
+    }
+
+    #[tokio::test]
+    async fn jsonl_agent_never_emits_agent_end_when_process_fails_after_stdout_eof() {
+        // The CLI emits its final JSONL line, closes stdout (so the read loop
+        // sees EOF), lingers for a second, then exits with status 1. AgentEnd
+        // must NOT be emitted before the failure is determined — the frontend
+        // must not be shown a completed reply for a failed run. `ResponseComplete`
+        // (non-terminal) is still dispatched early so the reply animation stops.
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    concat!(
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
+                        "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'; ",
+                        "exec 1>&-; sleep 1; exit 1",
+                    )
+                    .to_string(),
+                ],
+            },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+
+        let runner = tokio::spawn(async move {
+            run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    let _ = probe_tx.send(2);
+                }
+                captured.lock().unwrap().push(event);
+            })
+            .await
+        });
+
+        // ResponseComplete must arrive as soon as stdout is consumed — well
+        // before the lingering process finishes its 1s shutdown.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
+            .await
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        // While the process is still alive (sleeping before its exit 1), AgentEnd
+        // must NOT have been emitted yet — the failure is not yet confirmed.
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
+
+        let result = timeout(Duration::from_secs(5), runner)
+            .await
+            .expect("runner should return once the failing process exits")
+            .expect("runner task should not panic");
+        assert!(result.is_err(), "run must fail for a non-zero exit");
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(),
+            0,
+            "AgentEnd must never be emitted for a failed run"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, AgentEvent::ResponseComplete)),
+            "ResponseComplete should still be emitted for the failed run"
+        );
+    }
+
+    #[tokio::test]
+    async fn jsonl_agent_emits_response_complete_early_and_agent_end_only_after_confirmed_exit() {
+        // The CLI emits its final JSONL line, closes stdout (so the read loop
+        // sees EOF), lingers for a second, then exits with status 0. The
+        // non-terminal ResponseComplete must be dispatched as soon as stdout is
+        // consumed (before the process reap), while AgentEnd must wait for the
+        // confirmed-success exit and be the final event.
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec {
+                program: "sh".to_string(),
+                args: vec![
+                    "-c".to_string(),
+                    concat!(
+                        "printf '%s\\n' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":10,\"output\":2}}}' ",
+                        "'{\"type\":\"text\",\"part\":{\"text\":\"hello\"}}' ",
+                        "'{\"type\":\"step_finish\",\"part\":{\"tokens\":{\"input\":3,\"output\":4}}}'; ",
+                        "exec 1>&-; sleep 1",
+                    )
+                    .to_string(),
+                ],
+            },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+
+        let runner = tokio::spawn(async move {
+            run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    let _ = probe_tx.send(2);
+                }
+                captured.lock().unwrap().push(event);
+            })
+            .await
+        });
+
+        // ResponseComplete must arrive as soon as the CLI output is consumed —
+        // well before the lingering process finishes its 1s shutdown.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
+            .await
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        // While the process is still alive, AgentEnd must not have been emitted yet.
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
+
+        let result = timeout(Duration::from_secs(5), runner)
+            .await
+            .expect("runner should return once the lingering process exits")
+            .expect("runner task should not panic");
+        assert_eq!(result.unwrap(), "hello");
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(), 1);
+        assert!(events
+            .iter()
+            .any(|event| { matches!(event, AgentEvent::AgentEnd { input_tokens: Some(13), output_tokens: Some(6) }) }));
+        let response_complete_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ResponseComplete))
+            .expect("ResponseComplete should have been emitted");
+        let agent_end_at = events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::AgentEnd { .. }))
+            .expect("AgentEnd should have been emitted after confirmed success");
+        assert!(response_complete_at < agent_end_at, "ResponseComplete must precede AgentEnd");
+        assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })), "AgentEnd should be the terminal event");
     }
 
     #[tokio::test]
@@ -707,6 +1525,7 @@ mod tests {
         let spec = CliAgentProcessSpec {
             command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
             env: Vec::new(),
+            env_remove: Vec::new(),
             current_dir: None,
             stdin: None,
             dialect: CliAgentJsonlDialect::CodexExec,
@@ -723,5 +1542,125 @@ mod tests {
         let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
         assert!(!process_is_alive(pid.trim()));
         let _ = std::fs::remove_file(pid_file);
+    }
+
+    #[tokio::test]
+    async fn jsonl_cancellation_kills_and_waits_for_child() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "dbx-cli-agent-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::CodexExec,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+        let runner = tokio::spawn(async move { run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), |_| {}).await });
+
+        timeout(Duration::from_secs(3), async {
+            while !pid_file.exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("child should start before cancellation");
+        cancelled.notify_waiters();
+
+        let result = timeout(Duration::from_secs(3), runner)
+            .await
+            .expect("runner should return after cancellation")
+            .expect("runner task should not panic");
+        assert_eq!(result.unwrap_err(), "Agent loop cancelled");
+        sleep(Duration::from_millis(100)).await;
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
+        assert!(!process_is_alive(pid.trim()));
+        let _ = std::fs::remove_file(pid_file);
+    }
+
+    #[tokio::test]
+    async fn jsonl_eof_cancel_kills_and_reaps_hanging_child() {
+        // The CLI emits a valid JSONL line, closes stdout (EOF -> ResponseComplete),
+        // then hangs before exiting. A cancel fired after EOF must race the
+        // post-EOF child.wait(): the child is killed AND reaped (no zombie) and
+        // the run returns promptly with the cancel error. No AgentEnd may be
+        // emitted on the cancel path.
+        let pid_file = std::env::temp_dir().join(format!(
+            "dbx-cli-agent-eof-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let script = format!(
+            "echo $$ > {}; printf '%s\\n' '{{\"type\":\"text\",\"part\":{{\"text\":\"hello\"}}}}'; exec 1>&-; exec sleep 30",
+            pid_file.display()
+        );
+
+        let spec = CliAgentProcessSpec {
+            command: CliAgentCommandSpec { program: "sh".to_string(), args: vec!["-c".to_string(), script] },
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            current_dir: None,
+            stdin: None,
+            dialect: CliAgentJsonlDialect::OpenCodeRun,
+            classify_spawn_error,
+            classify_run_error,
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let (probe_tx, mut probe_rx) = tokio::sync::watch::channel(0u8);
+        let cancelled = Arc::new(Notify::new());
+        let runner_cancelled = Arc::clone(&cancelled);
+
+        let runner = tokio::spawn(async move {
+            run_cli_jsonl_agent(spec, runner_cancelled.as_ref(), move |event| {
+                if matches!(event, AgentEvent::ResponseComplete) {
+                    let _ = probe_tx.send(1);
+                }
+                if matches!(event, AgentEvent::AgentEnd { .. }) {
+                    let _ = probe_tx.send(2);
+                }
+                captured.lock().unwrap().push(event);
+            })
+            .await
+        });
+
+        // ResponseComplete must arrive as soon as stdout is consumed — the child
+        // is still hanging at that point, before the post-EOF wait.
+        timeout(Duration::from_secs(1), probe_rx.wait_for(|seen| *seen >= 1))
+            .await
+            .expect("ResponseComplete should be emitted while the process still runs")
+            .expect("probe watch channel closed before ResponseComplete was emitted");
+
+        assert_eq!(*probe_rx.borrow(), 1, "AgentEnd must not be emitted before the exit status is known");
+        let pid = std::fs::read_to_string(&pid_file).expect("child pid should be captured");
+        assert!(process_is_alive(pid.trim()), "hanging child should still be alive after ResponseComplete");
+
+        cancelled.notify_waiters();
+
+        let result = timeout(Duration::from_secs(3), runner)
+            .await
+            .expect("runner should return promptly after post-EOF cancellation")
+            .expect("runner task should not panic");
+        assert_eq!(result.unwrap_err(), "Agent loop cancelled");
+
+        sleep(Duration::from_millis(100)).await;
+        assert!(!process_is_alive(pid.trim()), "hanging child should be killed and reaped");
+        let _ = std::fs::remove_file(pid_file);
+
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(),
+            0,
+            "AgentEnd must never be emitted on the cancel path"
+        );
     }
 }

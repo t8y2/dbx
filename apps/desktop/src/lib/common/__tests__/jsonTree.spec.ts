@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendJsonPointer, createJsonTreeRoot, getJsonTreeChildren, getVisibleJsonTreeNodes, isJsonTreeContainer, isJsonTreeInitiallyExpanded } from "../jsonTree";
+import { appendJsonPointer, createJsonTreeRoot, getJsonTreeChildren, getVisibleJsonTreeNodes, isJsonTreeClosingNode, isJsonTreeContainer, isJsonTreeInitiallyExpanded } from "../jsonTree";
 import { parseJsonPreservingLargeNumbers } from "../safeJsonFormat";
 
 describe("jsonTree", () => {
@@ -33,6 +33,15 @@ describe("jsonTree", () => {
     const nodes = getVisibleJsonTreeNodes(root, (node) => node.path !== "/first");
 
     expect(nodes.map((node) => node.path)).toEqual(["", "/first", "/second", "/second/0"]);
+  });
+
+  it("adds closing-bracket rows after expanded containers when requested", () => {
+    const root = createJsonTreeRoot({ first: { nested: true }, second: ["kept"] });
+    const nodes = getVisibleJsonTreeNodes(root, () => true, true);
+
+    expect(nodes.map((node) => node.path)).toEqual(["", "/first", "/first/nested", "/first/$close\0", "/second", "/second/0", "/second/$close\0", "/$close\0"]);
+    expect(isJsonTreeClosingNode(nodes[3])).toBe(true);
+    expect(isJsonTreeClosingNode(nodes[0])).toBe(false);
   });
 
   it("handles deeply nested expanded JSON without recursive traversal", () => {

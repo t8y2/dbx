@@ -40,6 +40,12 @@ describe("production SQL safety", () => {
     expect(productionContextForDatabase(connection(), "staging").active).toBe(false);
   });
 
+  it("treats Nacos public and empty namespace IDs as the same protected namespace", () => {
+    const nacos = connection({ db_type: "nacos", production_databases: [""] });
+    expect(productionContextForDatabase(nacos, "public")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+    expect(productionContextForDatabase(nacos, "")).toMatchObject({ active: true, reason: "database", databases: ["public"] });
+  });
+
   it("detects a write after a USE production switch despite comments", () => {
     const assessment = assessProductionSql("-- install\nUSE `prod_app`; /* migration */ DELETE FROM users", connection(), "staging");
     expect(assessment).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
@@ -83,6 +89,18 @@ describe("production SQL safety", () => {
         databases: corpusCase.databases,
       });
     }
+  });
+
+  it("detects VACUUM in a production PostgreSQL database", () => {
+    const pg = connection({ db_type: "postgres", production_databases: ["prod_app"] });
+    for (const sql of ['VACUUM "public"."orders"', 'VACUUM ANALYZE "public"."orders"', 'VACUUM FULL ANALYZE "public"."orders"']) {
+      expect(assessProductionSql(sql, pg, "prod_app")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
+    }
+  });
+
+  it("detects qualified VACUUM targets for database-qualified dialects", () => {
+    const mysql = connection({ db_type: "mysql", production_databases: ["prod_app"] });
+    expect(assessProductionSql("VACUUM FULL prod_app.orders", mysql, "staging")).toMatchObject({ active: true, isMutation: true, databases: ["prod_app"] });
   });
 
   it("detects qualified procedure calls and privilege targets", () => {

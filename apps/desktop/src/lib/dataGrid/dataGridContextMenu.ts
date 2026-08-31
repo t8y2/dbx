@@ -128,6 +128,7 @@ export function createDataGridCellContextMenuItems(options: {
   labels: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", string>;
   icons: Pick<DataGridContextMenuIcons, "cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose">;
   actions: Record<"cellDetails" | "columnDetails" | "rowDetails" | "setNull" | "bulkEdit" | "transpose", () => void>;
+  importItem?: DataGridContextMenuItem | null;
   downloadItem?: DataGridContextMenuItem | null;
   foreignKeyItem?: DataGridContextMenuItem | null;
   copySubmenu: DataGridContextMenuItem;
@@ -138,6 +139,7 @@ export function createDataGridCellContextMenuItems(options: {
   if (options.hasCell) {
     if (options.hasColumn) {
       items.push({ label: options.labels.cellDetails, action: options.actions.cellDetails, icon: options.icons.cellDetails });
+      if (options.importItem) items.push(options.importItem);
       if (options.downloadItem) items.push(options.downloadItem);
       if (options.foreignKeyItem) items.push(options.foreignKeyItem);
       items.push({ label: options.labels.columnDetails, action: options.actions.columnDetails, icon: options.icons.columnDetails });
@@ -221,15 +223,17 @@ export function createDataGridSortMenuItems(options: { column: string; columnInd
 }
 
 export function createDataGridCompactColumnActionItems(options: {
-  labels: { formatter: string; localFilter: string; serverFilter: string };
-  icons: { formatter: Component; filter: Component; database: Component };
+  labels: { formatter: string; clearFormatter: string; localFilter: string; serverFilter: string };
+  icons: { formatter: Component; clearFormatter: Component; filter: Component; database: Component };
   formatterAvailable: boolean;
+  formatterActive: boolean;
   serverFilterAvailable: boolean;
 }): DataGridColumnMenuItem[] {
   const { labels, icons } = options;
   return [
-    { label: labels.formatter, value: "formatter", icon: icons.formatter, disabled: !options.formatterAvailable },
+    { label: labels.formatter, value: "formatter", icon: icons.formatter, disabled: !options.formatterAvailable, checked: options.formatterActive },
     { label: labels.localFilter, value: "localFilter", icon: icons.filter },
     ...(options.serverFilterAvailable ? [{ label: labels.serverFilter, value: "serverFilter", icon: icons.database }] : []),
+    { label: labels.clearFormatter, value: "clearFormatter", icon: icons.clearFormatter, disabled: !options.formatterActive, separatorBefore: true },
   ];
 }

@@ -9,4 +9,9 @@ describe("schemaAfterConnectionSwitch", () => {
   it("does not initialize schemas for non-Oracle connections", () => {
     expect(schemaAfterConnectionSwitch("postgres", ["public", "archive"])).toBeUndefined();
   });
+
+  it("prefers a configured default schema for PostgreSQL and Oracle", () => {
+    expect(schemaAfterConnectionSwitch("postgres", ["public", "archive"], "archive")).toBe("archive");
+    expect(schemaAfterConnectionSwitch("oracle", ["CONNECTED_USER", "APP"], "APP")).toBe("APP");
+  });
 });

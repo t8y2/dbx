@@ -11,6 +11,7 @@ import {
   resolveMqSystemKindFromConnection,
   resolveRabbitMqDefaultVhost,
   resolveRabbitMqSendNamespace,
+  resolveTopicSelectedTab,
 } from "@/lib/mq/mqConsoleDefaults";
 
 describe("mqConsoleDefaults", () => {
@@ -75,6 +76,24 @@ describe("mqConsoleDefaults", () => {
     expect(defaultMqCapabilitiesForSystemKind("kafka").supportsClientConnections).toBe(false);
     expect(defaultMqCapabilitiesForSystemKind("rocketmq").supportsClientConnections).toBe(false);
     expect(defaultMqCapabilitiesForSystemKind("pulsar").supportsClientConnections).toBeFalsy();
+  });
+
+  it("exposes Kafka message browsing through peek capability without query capability", () => {
+    const caps = { ...defaultMqCapabilitiesForSystemKind("kafka"), supportsSendMessage: false };
+    expect(caps.supportsPeekMessages).toBe(true);
+    expect(caps.supportsMessageQuery).toBe(false);
+    expect(resolveAvailableMqTabs({ systemKind: "kafka", capabilities: caps })).toContain("messages");
+  });
+
+  it("keeps Kafka topic subscriptions alongside the cluster-wide consumer groups tab", () => {
+    const tabs = resolveAvailableMqTabs({
+      systemKind: "kafka",
+      capabilities: defaultMqCapabilitiesForSystemKind("kafka"),
+    });
+
+    expect(tabs).toContain("subscriptions");
+    expect(tabs).toContain("consumerGroups");
+    expect(tabs.indexOf("consumerGroups")).toBe(tabs.indexOf("subscriptions") + 1);
   });
 
   it("exposes the namespaces tab for RabbitMQ vhost management", () => {
@@ -185,4 +204,30 @@ describe("mqConsoleDefaults", () => {
     // Nothing to go on in all-vhosts mode: fall back to the connection default vhost.
     expect(resolveRabbitMqSendNamespace(undefined, "*", undefined)).toBeUndefined();
   });
+
+  it("routes RabbitMQ queue selection to Messages, not the cluster-wide Monitoring tab (#5984)", () => {
+    // RabbitMqMonitoringPanel is cluster-wide and ignores the selected topic entirely,
+    // so landing there after clicking a queue drops all context about that queue.
+    expect(resolveTopicSelectedTab({ systemKind: "rabbitmq", capabilities: capabilities("rabbitmq") })).toBe("messages");
+  });
+
+  it("falls back RabbitMQ queue selection to Topics when message sending is unsupported", () => {
+    expect(resolveTopicSelectedTab({ systemKind: "rabbitmq", capabilities: { ...capabilities("rabbitmq"), supportsSendMessage: false } })).toBe("topics");
+  });
+
+  it("still routes Kafka/Pulsar topic selection to the per-topic Monitoring tab", () => {
+    // Unlike RabbitMQ, Kafka/Pulsar's MonitoringPanel is scoped to the selected topic,
+    // so routing there after selection is correct and must stay unchanged.
+    expect(resolveTopicSelectedTab({ systemKind: "kafka", capabilities: capabilities("kafka") })).toBe("monitoring");
+    expect(resolveTopicSelectedTab({ systemKind: undefined, capabilities: capabilities(undefined) })).toBe("subscriptions");
+  });
+
+  it("still routes RocketMQ topic selection to Subscriptions, falling back to Topics", () => {
+    expect(resolveTopicSelectedTab({ systemKind: "rocketmq", capabilities: capabilities("rocketmq") })).toBe("subscriptions");
+    expect(resolveTopicSelectedTab({ systemKind: "rocketmq", capabilities: { ...capabilities("rocketmq"), supportsSubscriptions: false } })).toBe("topics");
+  });
 });
+
+function capabilities(systemKind: Parameters<typeof defaultMqCapabilitiesForSystemKind>[0]) {
+  return defaultMqCapabilitiesForSystemKind(systemKind);
+}

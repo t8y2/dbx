@@ -1,4 +1,5 @@
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import type { DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import dayjs, { Dayjs } from "dayjs";
 import customParseFormat from "dayjs/plugin/customParseFormat";
 import utc from "dayjs/plugin/utc";
@@ -9,6 +10,7 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 export type DateTimeFormatterUnit = "seconds" | "milliseconds" | "auto";
+export type IoTDBTimestampPrecision = "ms" | "us" | "ns";
 const DEFAULT_DATETIME_PATTERN = "YYYY-MM-DD HH:mm:ss";
 export const DateTimePatterns = [
   "YYYY-MM-DD",
@@ -26,6 +28,9 @@ export const DateTimePatterns = [
   "YYYY/MM/DDTHH:mm:ssZ",
   "YYYY/MM/DDTHH:mm:ss.SSSZ",
 ];
+// Keep global date-time formats compatible with the backend; the data grid can
+// additionally render Day.js 12-hour display patterns locally.
+export const DataGridDateTimePatterns = [...DateTimePatterns, "YYYY-MM-DD hh:mm:ss A"];
 const SUPPORTED_DATE_TIME_PATTERN_TOKENS = ["YYYY", "SSS", "ZZ", "MM", "DD", "HH", "mm", "ss", "M", "D", "H", "m", "s", "Z"];
 const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
   "YYYY-MM-DD",
@@ -51,6 +56,7 @@ const STRICT_LOCAL_DATETIME_INPUT_PATTERNS = [
 ];
 const ISO_OFFSET_DATETIME_PATTERN = /^(\d{4})([-/])(\d{2})\2(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 const FRACTIONAL_LOCAL_DATETIME_PATTERN = /^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d{1,9})$/;
+const MONGO_SHELL_DATE_PATTERN = /^(?:ISODate|new Date)\(\s*(["'])(.+)\1\s*\)$/;
 
 export interface CustomColumnFormatterConfig {
   id: string;
@@ -58,8 +64,23 @@ export interface CustomColumnFormatterConfig {
   template: string;
 }
 
+export interface ForeignKeyDisplayFilterConfig {
+  column: string;
+  mode: DataGridContextFilterMode;
+  value?: string;
+  endValue?: string;
+}
+
 interface IntlTimeZoneSupport {
   supportedValuesOf?: (key: "timeZone") => string[];
+}
+
+const TIME_ZONE_DISPLAY_ALIASES: Record<string, string> = {
+  "Asia/Calcutta": "Asia/Kolkata",
+};
+
+export function displayTimeZoneOption(timeZone: string): string {
+  return TIME_ZONE_DISPLAY_ALIASES[timeZone] ?? timeZone;
 }
 
 export function getSupportedTimeZoneOptions(intl: IntlTimeZoneSupport, fallbackTimeZone = "UTC"): string[] {
@@ -100,8 +121,18 @@ export function normalizeSupportedDateTimePattern(value: string): string {
 
 export type ColumnFormatterConfig =
   | { kind: "datetime"; unit: DateTimeFormatterUnit; pattern: string; timezone: string | undefined }
+  | { kind: "iotdb-timestamp"; precision: IoTDBTimestampPrecision; timezone: string }
   | { kind: "json-path"; path: string }
   | { kind: "mask"; prefix: number; suffix: number }
+  | {
+      kind: "foreign-key-display";
+      referenceMode?: "foreign-key" | "manual";
+      refSchema?: string;
+      refTable: string;
+      refColumn: string;
+      displayColumn: string;
+      filter?: ForeignKeyDisplayFilterConfig;
+    }
   | { kind: "custom-template"; template: string }
   | { kind: "custom-ref"; formatterId: string };
 
@@ -142,6 +173,23 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
     return { kind: "mask", prefix: config.prefix as number, suffix: config.suffix as number };
   }
 
+  if (config.kind === "foreign-key-display") {
+    if (typeof config.refTable !== "string" || !config.refTable.trim()) return undefined;
+    if (typeof config.refColumn !== "string" || !config.refColumn.trim()) return undefined;
+    if (typeof config.displayColumn !== "string" || !config.displayColumn.trim()) return undefined;
+    const filter = normalizeForeignKeyDisplayFilter(config.filter);
+    if (config.filter !== undefined && !filter) return undefined;
+    return {
+      kind: "foreign-key-display",
+      ...(config.referenceMode === "manual" || config.referenceMode === "foreign-key" ? { referenceMode: config.referenceMode } : {}),
+      refSchema: typeof config.refSchema === "string" && config.refSchema.trim() ? config.refSchema.trim() : undefined,
+      refTable: config.refTable.trim(),
+      refColumn: config.refColumn.trim(),
+      displayColumn: config.displayColumn.trim(),
+      ...(filter ? { filter } : {}),
+    };
+  }
+
   if (config.kind === "custom-template") {
     return typeof config.template === "string" && config.template.trim() ? { kind: "custom-template", template: config.template.slice(0, 500) } : undefined;
   }
@@ -151,6 +199,45 @@ export function normalizeColumnFormatter(value: unknown): ColumnFormatterConfig 
   }
 
   return undefined;
+}
+
+const FOREIGN_KEY_DISPLAY_FILTER_MODES = new Set<DataGridContextFilterMode>([
+  "equals",
+  "not-equals",
+  "is-null",
+  "is-not-null",
+  "is-blank",
+  "is-not-blank",
+  "like",
+  "not-like",
+  "begins-with",
+  "ends-with",
+  "less-than",
+  "less-than-or-equal",
+  "greater-than",
+  "greater-than-or-equal",
+  "in",
+  "not-in",
+  "between",
+  "not-between",
+]);
+
+function normalizeForeignKeyDisplayFilter(value: unknown): ForeignKeyDisplayFilterConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const filter = value as Record<string, unknown>;
+  if (typeof filter.column !== "string" || !filter.column.trim()) return undefined;
+  if (typeof filter.mode !== "string" || !FOREIGN_KEY_DISPLAY_FILTER_MODES.has(filter.mode as DataGridContextFilterMode)) return undefined;
+  const mode = filter.mode as DataGridContextFilterMode;
+  const rawValue = typeof filter.value === "string" ? filter.value.trim() : "";
+  const rawEndValue = typeof filter.endValue === "string" ? filter.endValue.trim() : "";
+  if (mode !== "is-null" && mode !== "is-not-null" && mode !== "is-blank" && mode !== "is-not-blank" && !rawValue) return undefined;
+  if ((mode === "between" || mode === "not-between") && !rawEndValue) return undefined;
+  return {
+    column: filter.column.trim(),
+    mode,
+    value: rawValue || undefined,
+    endValue: rawEndValue || undefined,
+  };
 }
 
 export function normalizeCustomColumnFormatter(value: unknown): CustomColumnFormatterConfig | undefined {
@@ -197,6 +284,77 @@ export function resolveColumnFormatter(formatter: ColumnFormatterConfig | undefi
   return customFormatter ? { kind: "custom-template", template: customFormatter.template } : undefined;
 }
 
+export function defaultIoTDBTimestampFormatter(databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): ColumnFormatterConfig | undefined {
+  const precision = iotdbTimestampPrecision(databaseType, columnType);
+  if (!precision) return undefined;
+  const timezone = iotdbTimestampTimeZone(urlParams);
+  return { kind: "iotdb-timestamp", precision, timezone };
+}
+
+export function formatIoTDBTimestampEditorValue(value: CellValue, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): string | undefined {
+  const formatter = defaultIoTDBTimestampFormatter(databaseType, columnType, urlParams);
+  if (!formatter || formatter.kind !== "iotdb-timestamp") return undefined;
+  return formatIoTDBTimestamp(value, formatter.precision, formatter.timezone);
+}
+
+export function parseIoTDBTimestampEditorValue(value: string, databaseType: string | undefined, columnType: string | null | undefined, urlParams: string | undefined): string | null | undefined {
+  const precision = iotdbTimestampPrecision(databaseType, columnType);
+  if (!precision) return undefined;
+  const text = value.trim();
+  if (!text || text.toUpperCase() === "NULL") return null;
+  if (isIntegerString(text)) {
+    try {
+      return BigInt(text).toString();
+    } catch {
+      return undefined;
+    }
+  }
+
+  const offsetMatch = text.match(ISO_OFFSET_DATETIME_PATTERN);
+  if (offsetMatch) {
+    const [, year, separator, month, day, hour, minute, second, fraction = "", zone] = offsetMatch;
+    if (!isValidDateTimeParts(year, month, day, hour, minute, second) || !isValidOffset(zone)) return undefined;
+    const baseMilliseconds = Date.parse(`${year}${separator}${month}${separator}${day}T${hour}:${minute}:${second}${zone}`);
+    if (!Number.isFinite(baseMilliseconds)) return undefined;
+    return iotdbRawTimestamp(baseMilliseconds, fraction.slice(1), precision);
+  }
+
+  const match = text.match(FRACTIONAL_LOCAL_DATETIME_PATTERN) ?? text.match(/^(\d{4})([-/])(\d{1,2})\2(\d{1,2})([ T])(\d{1,2}):(\d{1,2}):(\d{1,2})$/);
+  if (!match) return undefined;
+  const [, year, , month, day, , hour, minute, second] = match;
+  if (!isValidDateTimeParts(year, month, day, hour, minute, second)) return undefined;
+  const fraction = match.length > 9 ? String(match[9] ?? "") : "";
+  const normalized = `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T${hour.padStart(2, "0")}:${minute.padStart(2, "0")}:${second.padStart(2, "0")}`;
+  const pattern = "YYYY-MM-DDTHH:mm:ss";
+  try {
+    const parsed = dayjs.tz(normalized, pattern, iotdbTimestampTimeZone(urlParams));
+    return parsed.isValid() && parsed.format(pattern) === normalized ? iotdbRawTimestamp(parsed.valueOf(), fraction, precision) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function iotdbTimestampPrecision(databaseType: string | undefined, columnType: string | null | undefined): IoTDBTimestampPrecision | undefined {
+  if (databaseType !== "iotdb") return undefined;
+  const match = columnType?.trim().match(/^TIMESTAMP\((ms|us|ns)\)$/i);
+  return match?.[1]?.toLowerCase() as IoTDBTimestampPrecision | undefined;
+}
+
+export function iotdbTimestampFractionDigits(precision: IoTDBTimestampPrecision): number {
+  return precision === "ms" ? 3 : precision === "us" ? 6 : 9;
+}
+
+function iotdbTimestampTimeZone(urlParams: string | undefined): string {
+  const params = new URLSearchParams(urlParams ?? "");
+  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "UTC";
+  try {
+    dayjs(0).tz(candidate);
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
 export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[], pattern: string): T[][] {
   const normalizedPattern = normalizeGlobalDateTimePattern(pattern);
   if (!normalizedPattern) return rows.map((row) => [...row]);
@@ -233,6 +391,7 @@ export function applyColumnFormatter(value: CellValue, formatter: ColumnFormatte
   if (!formatter) return displayCellValue(value);
 
   try {
+    if (formatter.kind === "iotdb-timestamp") return formatIoTDBTimestamp(value, formatter.precision, formatter.timezone) ?? displayCellValue(value);
     if (formatter.kind === "datetime") return formatDateTime(value, formatter.unit, formatter.pattern, formatter.timezone);
     if (formatter.kind === "json-path") return formatJsonPath(value, formatter.path);
     if (formatter.kind === "mask") return formatMask(value, formatter);
@@ -262,6 +421,11 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
     if (!trimmed) {
       return undefined;
     }
+    const mongoShellDate = unwrapMongoShellDate(trimmed);
+    if (mongoShellDate !== undefined) {
+      return parseStrictDateTimeString(mongoShellDate);
+    }
+
     const timestamp = parseTimestampMilliseconds(trimmed, unit);
     if (timestamp !== undefined) {
       const parsedTimestamp = dayjs(timestamp);
@@ -277,6 +441,10 @@ function resolveDateTimeValue(value: string | number, unit: DateTimeFormatterUni
 
   const parsedTimestamp = dayjs(timestamp);
   return parsedTimestamp.isValid() ? parsedTimestamp : undefined;
+}
+
+function unwrapMongoShellDate(value: string): string | undefined {
+  return value.match(MONGO_SHELL_DATE_PATTERN)?.[2];
 }
 
 function normalizeDateTimePattern(pattern: unknown): string {
@@ -352,6 +520,43 @@ function parseTimestampMilliseconds(value: string | number, unit: DateTimeFormat
     return convertToMilliseconds(numeric, unit);
   }
   return isAutoTimestampValue(value, numeric) ? convertToMilliseconds(numeric, unit) : undefined;
+}
+
+function formatIoTDBTimestamp(value: CellValue, precision: IoTDBTimestampPrecision, timezone: string): string | undefined {
+  if (typeof value !== "number" && (typeof value !== "string" || !isIntegerString(value))) return undefined;
+  let raw: bigint;
+  try {
+    raw = BigInt(value);
+  } catch {
+    return undefined;
+  }
+  const fractionDigits = iotdbTimestampFractionDigits(precision);
+  const factor = 10n ** BigInt(fractionDigits);
+  let seconds = raw / factor;
+  let fraction = raw % factor;
+  if (fraction < 0) {
+    seconds -= 1n;
+    fraction += factor;
+  }
+  const milliseconds = seconds * 1000n + (fraction * 1000n) / factor;
+  const numericMilliseconds = Number(milliseconds);
+  if (!Number.isSafeInteger(numericMilliseconds)) return undefined;
+  const parsed = dayjs(numericMilliseconds);
+  if (!parsed.isValid()) return undefined;
+  try {
+    const zoned = parsed.tz(timezone);
+    return `${zoned.format("YYYY-MM-DDTHH:mm:ss")}.${fraction.toString().padStart(fractionDigits, "0")}${zoned.format("Z")}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function iotdbRawTimestamp(baseMilliseconds: number, fraction: string, precision: IoTDBTimestampPrecision): string | undefined {
+  if (!Number.isSafeInteger(baseMilliseconds) || baseMilliseconds % 1000 !== 0) return undefined;
+  const digits = iotdbTimestampFractionDigits(precision);
+  if (fraction.length > digits && /[1-9]/.test(fraction.slice(digits))) return undefined;
+  const normalizedFraction = fraction.slice(0, digits).padEnd(digits, "0");
+  return (BigInt(baseMilliseconds / 1000) * 10n ** BigInt(digits) + BigInt(normalizedFraction || "0")).toString();
 }
 
 function convertToMilliseconds(value: number, unit: DateTimeFormatterUnit): number {

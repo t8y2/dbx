@@ -11,6 +11,7 @@ describe("queryStore switchTab", () => {
       setItem: vi.fn(),
       removeItem: vi.fn(),
     });
+    vi.stubGlobal("window", { dispatchEvent: vi.fn() });
     setActivePinia(createPinia());
   });
 
@@ -36,6 +37,16 @@ describe("queryStore switchTab", () => {
     expect(queryStore.activeTabId).toBe(tabId);
   });
 
+  it("notifies the app when switching to an existing tab", async () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "users", "data", "public");
+    const dispatchEvent = window.dispatchEvent as ReturnType<typeof vi.fn>;
+
+    queryStore.switchTab(tabId);
+
+    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({ type: "dbx:activate-query-surface" }));
+  });
+
   it("deactivates settings page when switching to a different tab", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const { useSettingsStore } = await import("@/stores/settingsStore");
@@ -57,6 +68,28 @@ describe("queryStore switchTab", () => {
     expect(settingsStore.settingsPageActive).toBe(false);
     // Active tab should be the new tab
     expect(queryStore.activeTabId).toBe(tab2Id);
+  });
+
+  it("inserts a tab after the active tab only when explicitly requested", async () => {
+    const queryStore = useQueryStore();
+    const firstId = queryStore.createTab("pg-1", "app", "Query 1", "query");
+    const trailingId = queryStore.createTab("pg-1", "app", "Query 2", "query");
+    queryStore.switchTab(firstId);
+
+    const dataId = queryStore.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true, insertAfterActive: true });
+    const appendedId = queryStore.createTab("pg-1", "app", "Query 3", "query", undefined, undefined, undefined, { forceNew: true });
+
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([firstId, dataId, trailingId, appendedId]);
+  });
+
+  it("appends when adjacent insertion has no valid active tab", async () => {
+    const queryStore = useQueryStore();
+    const firstId = queryStore.createTab("pg-1", "app", "Query 1", "query");
+    queryStore.activeTabId = "missing-tab";
+
+    const dataId = queryStore.createTab("pg-1", "app", "users", "data", "public", undefined, undefined, { forceNew: true, insertAfterActive: true });
+
+    expect(queryStore.tabs.map((tab) => tab.id)).toEqual([firstId, dataId]);
   });
 
   it("deactivates settings page when reopening an existing special tab", async () => {
@@ -93,6 +126,20 @@ describe("queryStore switchTab", () => {
 
     expect(queryStore.tabs).toHaveLength(2);
     expect(queryStore.tabs[1].catalog).toBe("paimon_catalog");
+  });
+
+  it("clones result column comments when duplicating a query tab", () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", undefined, "query", undefined, "SELECT 1");
+    const original = queryStore.tabs.find((tab) => tab.id === tabId)!;
+    original.resultColumnComments = ["identifier", "display name"];
+
+    queryStore.duplicateTab(tabId);
+
+    const duplicate = queryStore.tabs[1];
+    expect(Array.isArray(duplicate.resultColumnComments)).toBe(true);
+    expect(duplicate.resultColumnComments).toEqual(original.resultColumnComments);
+    expect(duplicate.resultColumnComments).not.toBe(original.resultColumnComments);
   });
 
   it("switches catalog and database as one query context", () => {

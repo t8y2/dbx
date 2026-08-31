@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, watch, defineAsyncComponent } from "vue";
+import { computed, ref, watch, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,15 +11,20 @@ const SchemaDiffDialog = defineAsyncComponent(() => import("@/components/diff/Sc
 const DataCompareDialog = defineAsyncComponent(() => import("@/components/diff/DataCompareDialog.vue"));
 const SqlFileExecutionDialog = defineAsyncComponent(() => import("@/components/sql-file/SqlFileExecutionDialog.vue"));
 const SchemaDiagramDialog = defineAsyncComponent(() => import("@/components/diagram/SchemaDiagramDialog.vue"));
+const DatabaseDocsDialog = defineAsyncComponent(() => import("@/components/docs/DatabaseDocsDialog.vue"));
 const TableImportDialog = defineAsyncComponent(() => import("@/components/import/TableImportDialog.vue"));
 const FieldLineageDialog = defineAsyncComponent(() => import("@/components/lineage/FieldLineageDialog.vue"));
 const ConfigPassphraseDialog = defineAsyncComponent(() => import("@/components/config/ConfigPassphraseDialog.vue"));
+const ConfigConnectionSelectDialog = defineAsyncComponent(() => import("@/components/config/ConfigConnectionSelectDialog.vue"));
 const DatabaseSearchDialog = defineAsyncComponent(() => import("@/components/search/DatabaseSearchDialog.vue"));
 const SshHostKeyPromptDialog = defineAsyncComponent(() => import("@/components/ssh/SshHostKeyPromptDialog.vue"));
+const ConnectionPasswordPromptDialog = defineAsyncComponent(() => import("@/components/connection/ConnectionPasswordPromptDialog.vue"));
 const DatabaseExportDialog = defineAsyncComponent(() => import("@/components/export/DatabaseExportDialog.vue"));
 const DataGenerateDialog = defineAsyncComponent(() => import("@/components/generate/DataGenerateDialog.vue"));
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSqlExecutionDangerStore } from "@/stores/sqlExecutionDangerStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
+import { useReadOnlyUnlockStore, WRITE_UNLOCK_FIVE_MINUTES_SECS, WRITE_UNLOCK_ONE_MINUTE_SECS, type WriteUnlockDurationSecs } from "@/stores/readOnlyUnlockStore";
 import { useDialogSources } from "@/composables/useDialogSources";
 import type { ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import type { DriverStoreFocus } from "@/lib/connection/agentDriverInstallHint";
@@ -88,6 +93,9 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const productionSafetyStore = useProductionSafetyStore();
+const readOnlyUnlockStore = useReadOnlyUnlockStore();
+const unlockDuration = ref<WriteUnlockDurationSecs>(WRITE_UNLOCK_ONE_MINUTE_SECS);
+const sqlExecutionDangerStore = useSqlExecutionDangerStore();
 const dialogs = useDialogSources();
 const productionConfirmationDetails = computed(() => {
   const request = productionSafetyStore.pending;
@@ -97,6 +105,29 @@ const productionConfirmationDetails = computed(() => {
     database: request.productionDatabases?.join(", ") || request.database || "-",
     source: request.source || "-",
   });
+});
+const readOnlyUnlockDetails = computed(() => {
+  const request = readOnlyUnlockStore.pending;
+  if (!request) return "";
+  return t("readOnlyUnlock.confirmDetails", {
+    connection: request.connectionName || "-",
+    source: request.source || "-",
+  });
+});
+watch(
+  () => readOnlyUnlockStore.pending,
+  (pending) => {
+    if (pending) unlockDuration.value = WRITE_UNLOCK_ONE_MINUTE_SECS;
+  },
+);
+const multiDbDangerDetails = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  if (!request) return "";
+  return [request.targetLabel || request.connectionName, request.database].filter(Boolean).join("\n");
+});
+const multiDbDangerMessage = computed(() => {
+  const request = sqlExecutionDangerStore.pending;
+  return request?.kind === "redis" ? t("dangerDialog.redisCommandMessage") : t("dangerDialog.message");
 });
 
 const editConfig = computed(() => {
@@ -164,6 +195,45 @@ watch(
     @update:open="(open) => !open && productionSafetyStore.cancel()"
     @confirm="productionSafetyStore.confirm()"
   />
+  <DangerConfirmDialog
+    v-if="readOnlyUnlockStore.pending"
+    :open="true"
+    :title="t('readOnlyUnlock.confirmTitle')"
+    :message="t('readOnlyUnlock.confirmMessage')"
+    :details-text="readOnlyUnlockDetails"
+    :sql="readOnlyUnlockStore.pending.sql"
+    :confirm-label="t('readOnlyUnlock.confirmAction')"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && readOnlyUnlockStore.cancel()"
+    @confirm="readOnlyUnlockStore.confirm(unlockDuration)"
+  >
+    <template #options>
+      <fieldset class="mb-3 space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+        <legend class="text-xs font-medium text-foreground">{{ t("readOnlyUnlock.durationLabel") }}</legend>
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="unlockDuration" type="radio" class="accent-primary" :value="WRITE_UNLOCK_ONE_MINUTE_SECS" />
+          {{ t("readOnlyUnlock.durationOneMinute") }}
+        </label>
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="unlockDuration" type="radio" class="accent-primary" :value="WRITE_UNLOCK_FIVE_MINUTES_SECS" />
+          {{ t("readOnlyUnlock.durationFiveMinutes") }}
+        </label>
+      </fieldset>
+    </template>
+  </DangerConfirmDialog>
+  <DangerConfirmDialog
+    v-if="sqlExecutionDangerStore.pending"
+    :open="true"
+    :title="t('multiDbExecute.dangerTitle')"
+    :message="multiDbDangerMessage"
+    :details-text="multiDbDangerDetails"
+    :sql="sqlExecutionDangerStore.pending.sql"
+    :confirm-label="t('multiDbExecute.dangerConfirm')"
+    :show-suppress-toggle="false"
+    :close-on-confirm="false"
+    @update:open="(open) => !open && sqlExecutionDangerStore.cancel()"
+    @confirm="sqlExecutionDangerStore.confirm()"
+  />
   <SqlParameterDialog
     v-if="showSqlParameterDialog"
     :open="showSqlParameterDialog"
@@ -204,6 +274,7 @@ watch(
     :focus-table-name="dialogs.diagramFocusTableName.value"
     @open-target="emit('openDiagramTarget', $event)"
   />
+  <DatabaseDocsDialog v-if="dialogs.showDocsDialog.value" v-model:open="dialogs.showDocsDialog.value" :prefill-connection-id="dialogs.docsPrefillConnectionId.value" :prefill-database="dialogs.docsPrefillDatabase.value" :prefill-schema="dialogs.docsPrefillSchema.value" />
   <TableImportDialog
     v-if="dialogs.showTableImportDialog.value"
     v-model:open="dialogs.showTableImportDialog.value"
@@ -248,13 +319,37 @@ watch(
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
   />
+  <ConfigConnectionSelectDialog
+    v-if="dialogs.showConfigConnectionSelectDialog.value"
+    :open="dialogs.showConfigConnectionSelectDialog.value"
+    :mode="dialogs.configConnectionSelectMode.value"
+    :busy="dialogs.applyingImportSelection.value"
+    :connections="dialogs.configConnectionSelectList.value"
+    @update:open="dialogs.onConfigConnectionSelectOpenChange"
+    @confirm="dialogs.onConfigConnectionSelectConfirm"
+  />
   <ConfigPassphraseDialog
     v-if="dialogs.showConfigPassphraseDialog.value"
-    v-model:open="dialogs.showConfigPassphraseDialog.value"
+    :open="dialogs.showConfigPassphraseDialog.value"
     :mode="dialogs.configPassphraseMode.value"
     :external-error="dialogs.configPassphraseError.value"
+    :busy="dialogs.configExportBusy.value"
+    @update:open="dialogs.onConfigPassphraseOpenChange"
+    @request-unencrypted="dialogs.onRequestUnencryptedExport"
     @confirm="dialogs.configPassphraseMode.value === 'export' ? dialogs.onExportConfirm($event) : dialogs.onImportConfirm($event)"
   />
+  <Dialog v-if="dialogs.showConfigUnencryptedExportConfirm.value" :open="dialogs.showConfigUnencryptedExportConfirm.value" @update:open="dialogs.onConfigUnencryptedExportOpenChange">
+    <DialogContent class="sm:max-w-[440px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("configExport.unencryptedWarningTitle") }}</DialogTitle>
+      </DialogHeader>
+      <p class="text-sm text-muted-foreground">{{ t("configExport.unencryptedWarningDescription") }}</p>
+      <DialogFooter>
+        <Button type="button" variant="outline" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportCancel()">{{ t("dangerDialog.cancel") }}</Button>
+        <Button type="button" variant="destructive" :disabled="dialogs.configExportBusy.value" @click="dialogs.onConfigUnencryptedExportConfirm()">{{ t("configExport.confirmUnencryptedExport") }}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
   <Dialog v-model:open="dialogs.showImportLayoutConfirm.value">
     <DialogContent class="sm:max-w-[400px]">
       <DialogHeader>
@@ -274,4 +369,5 @@ watch(
     </DialogContent>
   </Dialog>
   <SshHostKeyPromptDialog />
+  <ConnectionPasswordPromptDialog />
 </template>

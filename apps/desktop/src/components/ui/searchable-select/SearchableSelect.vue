@@ -32,6 +32,7 @@ const props = withDefaults(
     displayName?: (option: string) => string;
     optionTooltip?: (option: string) => string | undefined;
     normalizeCustom?: (value: string) => string;
+    trimCustom?: boolean;
     clearable?: boolean;
     clearSelectedOption?: boolean;
   }>(),
@@ -41,6 +42,7 @@ const props = withDefaults(
     allowCustom: false,
     clearable: false,
     clearSelectedOption: false,
+    trimCustom: true,
     loadingText: "Loading...",
     triggerVariant: "outline",
     triggerIconClass: "size-4 text-muted-foreground",
@@ -83,7 +85,7 @@ const triggerBaseClass = computed(() =>
 );
 
 const filteredOptions = computed(() => filterDatabaseOptions(props.options, searchText.value, props.displayName));
-const customOptionValue = computed(() => props.normalizeCustom(searchText.value.trim()));
+const customOptionValue = computed(() => props.normalizeCustom(props.trimCustom ? searchText.value.trim() : searchText.value));
 const canSelectCustom = computed(() => props.allowCustom && !!customOptionValue.value && !props.options.includes(customOptionValue.value));
 
 function highlightSelectedOption() {

@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::models::connection::ConnectionConfig;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
+
+pub const NACOS_PRIMARY_SESSION_PASSWORD: &str = "nacos-primary-password";
+pub const NACOS_CONSOLE_SESSION_PASSWORD: &str = "nacos-console-password";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -32,6 +36,14 @@ pub enum NacosVersionMode {
     V3,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum NacosApiPlane {
+    #[default]
+    Admin,
+    Console,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum NacosMetricsMode {
@@ -59,6 +71,8 @@ pub struct NacosAdminConfig {
     pub implementation: Option<NacosImplementation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_mode: Option<NacosVersionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_plane: Option<NacosApiPlane>,
     pub server_addr: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub display_server_addr: String,
@@ -66,6 +80,12 @@ pub struct NacosAdminConfig {
     pub namespace: String,
     #[serde(default)]
     pub context_path: String,
+    /// Namespace IDs supplied for an official Nacos ordinary user that cannot
+    /// call the namespace or authorization management APIs. They define the
+    /// discoverable scope; Nacos still authorizes every configuration and
+    /// naming request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub managed_namespaces: Vec<String>,
     /// Optional r-nacos authenticated-console address. This is separate from
     /// the OpenAPI server address because r-nacos exposes console-only APIs
     /// (including config history plus config type and description metadata) on
@@ -92,6 +112,47 @@ pub struct NacosAdminConfig {
     pub connect_override: Option<NacosConnectOverride>,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct NacosTransientPasswords {
+    pub primary: Option<String>,
+    pub console: Option<String>,
+}
+
+fn take_username_password(value: Option<&mut serde_json::Value>) -> Option<String> {
+    let auth = value?.as_object_mut()?;
+    if auth.get("kind").and_then(serde_json::Value::as_str) != Some("usernamePassword") {
+        return None;
+    }
+    let password = auth.get_mut("password")?;
+    let secret = password.as_str()?.to_string();
+    *password = serde_json::Value::String(String::new());
+    (!secret.is_empty()).then_some(secret)
+}
+
+/// Removes no-save Nacos passwords from a runtime configuration and returns
+/// them for placement in the owner-scoped in-memory credential store.
+pub fn take_transient_passwords(config: &mut ConnectionConfig) -> NacosTransientPasswords {
+    if config.db_type != DatabaseType::Nacos || config.save_password {
+        return NacosTransientPasswords::default();
+    }
+
+    let top_level_password = std::mem::take(&mut config.password);
+    let Some(external) = config.external_config.as_mut().and_then(serde_json::Value::as_object_mut) else {
+        return NacosTransientPasswords {
+            primary: (!top_level_password.is_empty()).then_some(top_level_password),
+            console: None,
+        };
+    };
+
+    NacosTransientPasswords {
+        // NacosAdminConfig::from_connection treats external_config as the
+        // canonical source when present, so a stale top-level password must
+        // never override an explicitly empty external auth password.
+        primary: take_username_password(external.get_mut("auth")),
+        console: take_username_password(external.get_mut("rnacosConsoleAuth")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NacosConnectOverride {
@@ -104,6 +165,13 @@ pub fn default_page_size() -> u32 {
 }
 
 impl NacosAdminConfig {
+    /// Binds short-lived, destructive workflows to the exact Nacos target and
+    /// credentials that created them. The digest is never exposed or persisted.
+    pub fn operation_fingerprint(&self) -> String {
+        let encoded = serde_json::to_vec(self).expect("NacosAdminConfig serialization must succeed");
+        format!("{:x}", Sha256::digest(encoded))
+    }
+
     pub fn from_connection(cfg: &ConnectionConfig) -> Result<Self, String> {
         let parsed = if let Some(raw) = cfg.external_config.as_ref() {
             serde_json::from_value::<NacosAdminConfig>(raw.clone())
@@ -113,10 +181,12 @@ impl NacosAdminConfig {
             NacosAdminConfig {
                 implementation: None,
                 version_mode: None,
+                api_plane: None,
                 server_addr: format!("{scheme}://{}:{}", cfg.host.trim(), cfg.port),
                 display_server_addr: String::new(),
                 namespace: cfg.database.clone().unwrap_or_default(),
                 context_path: String::new(),
+                managed_namespaces: Vec::new(),
                 rnacos_console_addr: String::new(),
                 rnacos_history_enabled: None,
                 rnacos_console_auth: NacosRNacosConsoleAuth::Inherit,
@@ -147,17 +217,25 @@ impl NacosAdminConfig {
         }
         let context_path_is_explicit_root = self.context_path.trim() == "/";
         self.context_path = normalize_context_path(&self.context_path);
-        // Nacos 3 separates the console (normally :8080) from the server-side
-        // Admin API (normally :8848/nacos). Older DBX connection records did
-        // not persist the default server context, so repair only explicit
-        // Nacos 3 profiles here while preserving custom contexts.
+        // Nacos 3 management uses the server-side Admin API, normally
+        // `:8848/nacos`. Keep the documented default context for explicit V3
+        // profiles while preserving custom reverse-proxy prefixes.
         if self.context_path.is_empty()
             && !context_path_is_explicit_root
             && matches!(self.implementation, Some(NacosImplementation::Nacos))
             && matches!(self.version_mode, Some(NacosVersionMode::V3))
+            && self.api_plane() == NacosApiPlane::Admin
         {
             self.context_path = "/nacos".to_string();
         }
+        let mut managed_namespaces = Vec::new();
+        for namespace in std::mem::take(&mut self.managed_namespaces) {
+            let namespace = namespace.trim().to_string();
+            if !namespace.is_empty() && !managed_namespaces.contains(&namespace) {
+                managed_namespaces.push(namespace);
+            }
+        }
+        self.managed_namespaces = managed_namespaces;
         self.rnacos_console_addr = if self.rnacos_console_addr.trim().is_empty() {
             String::new()
         } else {
@@ -185,6 +263,10 @@ impl NacosAdminConfig {
     pub fn with_connect_override(mut self, host: &str, port: u16) -> Self {
         self.connect_override = Some(NacosConnectOverride { host: host.to_string(), port });
         self
+    }
+
+    pub fn api_plane(&self) -> NacosApiPlane {
+        self.api_plane.unwrap_or_default()
     }
 
     pub fn with_server_endpoint(mut self, host: &str, port: u16) -> Result<Self, String> {
@@ -284,6 +366,7 @@ mod tests {
 
     fn connection_with_external(value: serde_json::Value) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "nacos-1".to_string(),
             name: "Nacos".to_string(),
             note: String::new(),
@@ -297,7 +380,9 @@ mod tests {
             username: String::new(),
             password: String::new(),
             database: None,
+            default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -325,6 +410,7 @@ mod tests {
             redis_key_separator: ":".to_string(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -332,6 +418,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -365,6 +452,19 @@ mod tests {
 
         let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
         assert_eq!(parsed.rnacos_console_addr, "http://127.0.0.1:10848");
+    }
+
+    #[test]
+    fn normalizes_managed_namespaces() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "serverAddr": "http://127.0.0.1:8818",
+            "managedNamespaces": [" public ", "team-a", "team-a", ""],
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.managed_namespaces, vec!["public", "team-a"]);
     }
 
     #[test]
@@ -448,6 +548,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_nacos_v3_console_defaults_to_root_context() {
+        let cfg = connection_with_external(serde_json::json!({
+            "implementation": "nacos",
+            "versionMode": "v3",
+            "apiPlane": "console",
+            "serverAddr": "http://127.0.0.1:8080",
+            "auth": { "kind": "none" }
+        }));
+
+        let parsed = NacosAdminConfig::from_connection(&cfg).unwrap();
+        assert_eq!(parsed.api_plane(), NacosApiPlane::Console);
+        assert_eq!(parsed.context_path, "");
+    }
+
+    #[test]
     fn explicit_nacos_v3_root_context_is_preserved() {
         let cfg = connection_with_external(serde_json::json!({
             "implementation": "nacos",
@@ -471,6 +586,43 @@ mod tests {
         assert_eq!(parsed.server_addr, "http://127.0.0.1:8848");
         assert_eq!(parsed.context_path, "");
         assert!(matches!(parsed.auth, NacosAuthConfig::UsernamePassword { .. }));
+    }
+
+    #[test]
+    fn takes_no_save_external_passwords_without_removing_other_fields() {
+        let mut cfg = connection_with_external(serde_json::json!({
+            "implementation": "rnacos",
+            "serverAddr": "http://127.0.0.1:8848",
+            "managedNamespaces": ["team-a"],
+            "auth": { "kind": "usernamePassword", "username": "primary", "password": "primary-secret" },
+            "rnacosConsoleAuth": { "kind": "usernamePassword", "username": "console", "password": "console-secret" }
+        }));
+        cfg.save_password = false;
+        cfg.password = "stale-top-level-secret".to_string();
+
+        let passwords = take_transient_passwords(&mut cfg);
+
+        assert_eq!(passwords.primary.as_deref(), Some("primary-secret"));
+        assert_eq!(passwords.console.as_deref(), Some("console-secret"));
+        assert!(cfg.password.is_empty());
+        let external = cfg.external_config.as_ref().unwrap();
+        assert_eq!(external["auth"]["password"], "");
+        assert_eq!(external["rnacosConsoleAuth"]["password"], "");
+        assert_eq!(external["managedNamespaces"], serde_json::json!(["team-a"]));
+    }
+
+    #[test]
+    fn takes_legacy_top_level_password_only_without_external_config() {
+        let mut cfg = connection_with_external(serde_json::Value::Null);
+        cfg.external_config = None;
+        cfg.save_password = false;
+        cfg.password = "legacy-secret".to_string();
+
+        let passwords = take_transient_passwords(&mut cfg);
+
+        assert_eq!(passwords.primary.as_deref(), Some("legacy-secret"));
+        assert_eq!(passwords.console, None);
+        assert!(cfg.password.is_empty());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import type { DatabaseType } from "@/types/database";
+import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
 
 export enum TransferObjectFamily {
   Mysql = "mysql",
@@ -16,6 +17,7 @@ const SQLSERVER_KINDS: TransferObjectKind[] = ["TABLE", "VIEW", "PROCEDURE", "FU
 
 const FAMILY_BY_DB = new Map<DatabaseType, TransferObjectFamily>([
   ["mysql", TransferObjectFamily.Mysql],
+  ["gbase", TransferObjectFamily.Mysql],
   ["postgres", TransferObjectFamily.Postgres],
   ["kingbase", TransferObjectFamily.Postgres],
   ["gaussdb", TransferObjectFamily.Postgres],
@@ -48,7 +50,7 @@ export function transferObjectKindsForDatabase(dbType?: DatabaseType): TransferO
     case TransferObjectFamily.SqlServer:
       return [...SQLSERVER_KINDS];
     default:
-      return [];
+      return supportsTransfer(dbType) ? ["TABLE"] : [];
   }
 }
 

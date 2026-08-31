@@ -28,6 +28,10 @@ const DUCKDB_WORKER_POISONED_CODE: &str = "duckdb_worker_poisoned";
 const DUCKDB_WORKER_REQUEST_TIMEOUT_CODE: &str = "duckdb_worker_request_timeout";
 const DEFAULT_WORKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_WORKER_KILL_WAIT: Duration = Duration::from_secs(3);
+/// Grace period for a shutdown-acked worker to exit by itself (session drop
+/// plus DuckDB shutdown checkpoint). Kept below the 3s pool close timeout in
+/// `connection.rs` so pool close cancellation cannot cut the checkpoint short.
+const WORKER_SHUTDOWN_EXIT_WAIT: Duration = Duration::from_millis(2500);
 const DEFAULT_WORKER_START_WAIT: Duration = Duration::from_secs(5);
 pub const DUCKDB_DRIVER_PATH_ENV: &str = "DBX_DUCKDB_DRIVER_PATH";
 type PendingRequests = Arc<Mutex<HashMap<String, PendingRequest>>>;
@@ -195,6 +199,17 @@ impl DuckDbWorkerClient {
         cancel_token: Option<CancellationToken>,
         query_timeout: Option<Duration>,
     ) -> Result<db::QueryResult, String> {
+        self.execute_typed(database, sql, max_rows, cancel_token, query_timeout).await.map_err(|error| error.message)
+    }
+
+    pub async fn execute_typed(
+        &self,
+        database: Option<String>,
+        sql: String,
+        max_rows: Option<usize>,
+        cancel_token: Option<CancellationToken>,
+        query_timeout: Option<Duration>,
+    ) -> Result<db::QueryResult, DuckDbWorkerError> {
         let _query_guard = self.inner.query_lock.lock().await;
         let client = self.clone();
         // Cancellation and timeout restart the worker via cancel_or_kill below. An ordinary
@@ -206,7 +221,10 @@ impl DuckDbWorkerClient {
         // than letting the worker self-exit) avoids racing our own next request against a dying
         // worker, and OS-level kill never runs the destructor that would abort the process.
         let future = async move {
-            client.ensure_connected().await?;
+            client
+                .ensure_connected()
+                .await
+                .map_err(|message| DuckDbWorkerError::new("duckdb_worker_connect_failed", message))?;
             match client
                 .send_request_structured::<db::QueryResult>(
                     DuckDbWorkerMethod::Execute,
@@ -220,7 +238,7 @@ impl DuckDbWorkerClient {
                     if error.code == DUCKDB_WORKER_POISONED_CODE {
                         client.kill().await;
                     }
-                    Err(error.message)
+                    Err(error)
                 }
             }
         };
@@ -252,9 +270,9 @@ impl DuckDbWorkerClient {
         }
     }
 
-    async fn cancel_or_kill(&self, final_error: String) -> Result<db::QueryResult, String> {
+    async fn cancel_or_kill(&self, final_error: String) -> Result<db::QueryResult, DuckDbWorkerError> {
         let _ = self.cancel().await;
-        Err(final_error)
+        Err(DuckDbWorkerError::from(final_error))
     }
 
     pub async fn list_databases(&self) -> Result<Vec<db::DatabaseInfo>, String> {
@@ -348,7 +366,61 @@ impl DuckDbWorkerClient {
                 Some(self.inner.request_timeout),
             )
             .await;
-        self.kill().await;
+        self.wait_for_exit_or_kill().await;
+    }
+
+    /// Lets a shutdown-acked worker exit on its own so its session drop runs
+    /// the DuckDB shutdown checkpoint that removes the database WAL; SIGKILL
+    /// stays the fallback for stuck workers. Killing immediately after the
+    /// ack would truncate that checkpoint and leave the WAL file behind.
+    /// The wait must fit inside the caller's pool close timeout so the
+    /// detached close task is not cancelled mid-checkpoint.
+    async fn wait_for_exit_or_kill(&self) {
+        let (child, generation) = {
+            let mut state = self.inner.state.lock().await;
+            let child = state.child.take();
+            let generation = state.generation;
+            state.stdin = None;
+            state.connected = false;
+            (child, generation)
+        };
+
+        let Some(mut child) = child else { return };
+        match tokio::time::timeout(WORKER_SHUTDOWN_EXIT_WAIT, child.wait()).await {
+            Ok(Ok(status)) => {
+                log::info!("[duckdb-worker:shutdown:exit] status={status}");
+                self.fail_pending_for_generation(
+                    generation,
+                    "duckdb_worker_killed",
+                    "DuckDB worker process was killed",
+                )
+                .await;
+                return;
+            }
+            Ok(Err(err)) => {
+                log::warn!("[duckdb-worker:shutdown:wait-failed] error={err}");
+                self.fail_pending_for_generation(
+                    generation,
+                    "duckdb_worker_killed",
+                    "DuckDB worker process was killed",
+                )
+                .await;
+                return;
+            }
+            Err(_) => {
+                log::warn!("[duckdb-worker:shutdown:wait-timeout] wait_ms={}", WORKER_SHUTDOWN_EXIT_WAIT.as_millis());
+            }
+        }
+
+        let _ = child.start_kill();
+        match tokio::time::timeout(DEFAULT_WORKER_KILL_WAIT, child.wait()).await {
+            Ok(Ok(status)) => log::info!("[duckdb-worker:kill:exit] status={status}"),
+            Ok(Err(err)) => log::warn!("[duckdb-worker:kill:wait-failed] error={err}"),
+            Err(_) => {
+                log::warn!("[duckdb-worker:kill:wait-timeout] wait_ms={}", DEFAULT_WORKER_KILL_WAIT.as_millis())
+            }
+        }
+        self.fail_pending_for_generation(generation, "duckdb_worker_killed", "DuckDB worker process was killed").await;
     }
 
     pub async fn kill(&self) {

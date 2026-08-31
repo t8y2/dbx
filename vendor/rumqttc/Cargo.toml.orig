@@ -1,0 +1,77 @@
+[package]
+name = "rumqttc"
+version = "0.24.0"
+publish = true
+description = "An efficient and robust mqtt client for your connected devices"
+keywords = ["mqtt", "iot", "coap", "http"]
+categories = ["network-programming"]
+rust-version = "1.64.0"
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["use-rustls"]
+use-rustls = ["dep:tokio-rustls", "dep:rustls-webpki", "dep:rustls-pemfile", "dep:rustls-native-certs"]
+use-native-tls = ["dep:tokio-native-tls", "dep:native-tls"]
+websocket = ["dep:async-tungstenite", "dep:ws_stream_tungstenite", "dep:http"]
+proxy = ["dep:async-http-proxy"]
+
+[dependencies]
+futures-util = { version = "0.3", default_features = false, features = ["std"] }
+tokio = { version = "1.36", features = ["rt", "macros", "io-util", "net", "time"] }
+bytes = "1.5"
+log = "0.4"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+thiserror = "1"
+
+# Optional
+# rustls
+tokio-rustls = { version = "0.25.0", optional = true }
+rustls-webpki = { version = "0.102.2", optional = true }
+rustls-pemfile = { version = "2.1.0", optional = true }
+rustls-native-certs = { version = "0.7.0", optional = true }
+# websockets
+async-tungstenite = { version = "0.25.0", default-features = false, features = ["tokio-rustls-native-certs"], optional = true }
+ws_stream_tungstenite = { version= "0.13.0", default-features = false, features = ["tokio_io"], optional = true }
+http = { version = "1.0.0", optional = true }
+# native-tls
+tokio-native-tls = { version = "0.3.1", optional = true }
+native-tls = { version = "0.2.11", optional = true }
+# url
+url = { version = "2", default-features = false, optional = true }
+# proxy
+async-http-proxy = { version = "1.2.5", features = ["runtime-tokio", "basic-auth"], optional = true }
+
+[dev-dependencies]
+bincode = "1.3.3"
+color-backtrace = "0.5"
+matches = "0.1"
+pretty_assertions = "1"
+pretty_env_logger = "0.5"
+serde = { version = "1", features = ["derive"] }
+
+[[example]]
+name = "tls"
+path = "examples/tls.rs"
+required-features = ["use-rustls"]
+
+[[example]]
+name = "tls2"
+path = "examples/tls2.rs"
+required-features = ["use-rustls"]
+
+[[example]]
+name = "websocket"
+path = "examples/websocket.rs"
+required-features = ["websocket"]
+
+[[example]]
+name = "websocket_proxy"
+path = "examples/websocket_proxy.rs"
+required-features = ["websocket", "proxy"]

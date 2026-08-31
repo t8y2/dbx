@@ -14,9 +14,21 @@ test("applies the configured result grid font to DOM and canvas renderers", () =
 });
 
 test("invalidates grid measurements and canvas rendering when the result font changes", () => {
-  assert.match(dataGridSource, /columnHeaderMeasurementKey = computed\(\(\) => \[tableFontSize\.value, tableFontFamily\.value\]\)/);
+  assert.match(dataGridSource, /columnHeaderMeasurementKey = computed\(\(\) => \[tableFontSize\.value, tableFontFamily\.value, dataGridFontReadyTick\.value\]\)/);
   assert.match(dataGridSource, /columnHeaderMeasureContext\.font = `600 \$\{tableFontSize\.value\}px \$\{tableFontFamily\.value\}`/);
-  assert.match(dataGridSource, /canvasRenderStyleKey = computed\(\(\) => `[^`]*\$\{tableFontFamily\.value\}:\$\{tableFontSize\.value\}`\)/);
+  assert.match(dataGridSource, /canvasRenderStyleKey = computed\(\(\) => `[^`]*\$\{tableFontFamily\.value\}:\$\{tableFontSize\.value\}:\$\{!!saveError\.value\}/);
+});
+
+test("invalidates canvas rendering when the data type color scheme changes", () => {
+  // The canvas caches its resolved paint theme by this key, so a recolor that is
+  // not represented here would leave the grid painted with the previous palette.
+  assert.match(dataGridSource, /canvasRenderStyleKey = computed\(\(\) => `[^`]*\$\{dataGridTypeColorKey\.value\}`\)/);
+  assert.match(dataGridSource, /resolveActiveDataGridTypeColors\(settings\.dataGridTypeColorSchemes, settings\.activeDataGridTypeColorSchemeId\)/);
+});
+
+test("waits only for the configured result font before remeasuring headers", () => {
+  assert.match(dataGridSource, /document\.fonts\.load\(`600 \$\{fontSize\}px \$\{fontFamily\}`\)/);
+  assert.doesNotMatch(dataGridSource, /document\.fonts\.addEventListener\("loadingdone"/);
 });
 
 test("places the result grid font beside the interface font in appearance settings", () => {

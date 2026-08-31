@@ -1,10 +1,12 @@
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
+import { isLocalFileDatabaseType } from "@/lib/database/databaseDriverManifest";
+import { parseGaussdbHosts, serializeGaussdbHosts } from "@/lib/connection/gaussdbHosts";
+import { spannerDisplayDatabase } from "@/lib/connection/spannerResourcePath";
 
 type ConnectionPresentationConfig = Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "host" | "port" | "database">;
 type ConnectionNamePresentationConfig = ConnectionPresentationConfig & Pick<ConnectionConfig, "name">;
 
-const LOCAL_DATABASE_TYPES = new Set(["sqlite", "duckdb", "access"]);
 const REDACTED_HOST_SEGMENT = "***";
 const REDACTED_PORT = "****";
 
@@ -19,18 +21,52 @@ export function connectionDriverLabel(connection?: Pick<ConnectionConfig, "db_ty
 export function connectionEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
   if (connection.db_type === "cloudflare-d1") return [connection.host, connection.database].filter(Boolean).join("/");
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
+  // Cloud Spanner stores the whole resource path in `database`; only the trailing
+  // database ID is short enough for a subtitle, and the host is empty on Google Cloud.
+  if (connection.db_type === "spanner") return connection.host ? `${connection.host}:${connection.port}` : spannerDisplayDatabase(connection.database);
+  if (isLocalFilePresentationConnection(connection)) {
     return connection.host || connection.database || "local";
   }
-  if (connection.host && connection.port) return `${connection.host}:${connection.port}`;
-  return connection.host || connection.database || "";
+  const endpoint = normalizedPresentationEndpoint(connection);
+  if (endpoint.host && endpoint.port) {
+    // Multi-host format: host1:port1,host2:port2 — already includes ports
+    if (endpoint.host.includes(",")) return endpoint.host;
+    const endpointHost = endpoint.host.includes(":") ? `[${endpoint.host}]` : endpoint.host;
+    return `${endpointHost}:${endpoint.port}`;
+  }
+  return endpoint.host || connection.database || "";
+}
+
+function normalizedPresentationEndpoint(connection: ConnectionPresentationConfig): { host: string; port: number } {
+  if (connection.db_type !== "gaussdb") return { host: connection.host, port: connection.port };
+  return serializeGaussdbHosts(parseGaussdbHosts(connection.host, connection.port));
 }
 
 function redactConnectionHost(host: string): string {
   const normalizedHost = host.trim();
   if (!normalizedHost) return "";
 
-  const unwrappedHost = normalizedHost.startsWith("[") && normalizedHost.endsWith("]") ? normalizedHost.slice(1, -1) : normalizedHost;
+  // Multi-host format: host1:port1,host2:port2 — redact each host separately
+  // and replace each embedded port with the redacted marker.
+  if (normalizedHost.includes(",")) {
+    return normalizedHost
+      .split(",")
+      .map((part) => {
+        const trimmed = part.trim();
+        const colonIdx = trimmed.lastIndexOf(":");
+        if (colonIdx > 0) {
+          return `${redactSingleHost(trimmed.slice(0, colonIdx))}:${REDACTED_PORT}`;
+        }
+        return redactSingleHost(trimmed);
+      })
+      .join(",");
+  }
+
+  return redactSingleHost(normalizedHost);
+}
+
+function redactSingleHost(host: string): string {
+  const unwrappedHost = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   const separator = unwrappedHost.includes(":") ? ":" : ".";
   const segments = unwrappedHost.split(separator).filter(Boolean);
 
@@ -48,12 +84,19 @@ function redactConnectionHost(host: string): string {
 export function connectionRedactedEndpointLabel(connection?: ConnectionPresentationConfig): string {
   if (!connection) return "";
   if (connection.db_type === "cloudflare-d1") return `${REDACTED_HOST_SEGMENT}/${REDACTED_HOST_SEGMENT}`;
-  if (LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) {
+  // The Spanner endpoint label already drops project and instance, so it carries
+  // no more than any other database name; without this branch the fallback below
+  // would print the full `projects/.../databases/...` path.
+  if (connection.db_type === "spanner") return connection.host ? `${redactConnectionHost(connection.host)}:${REDACTED_PORT}` : spannerDisplayDatabase(connection.database);
+  if (isLocalFilePresentationConnection(connection)) {
     return connectionEndpointLabel(connection);
   }
 
-  const redactedHost = connection.host ? redactConnectionHost(connection.host) : "";
-  if (redactedHost && connection.port) {
+  const endpoint = normalizedPresentationEndpoint(connection);
+  const redactedHost = endpoint.host ? redactConnectionHost(endpoint.host) : "";
+  if (redactedHost && endpoint.port) {
+    // Multi-host format already includes ports
+    if (redactedHost.includes(",")) return redactedHost;
     const endpointHost = redactedHost.includes(":") ? `[${redactedHost}]` : redactedHost;
     return `${endpointHost}:${REDACTED_PORT}`;
   }
@@ -63,7 +106,7 @@ export function connectionRedactedEndpointLabel(connection?: ConnectionPresentat
 
 export function connectionRedactedNameLabel(connection?: ConnectionNamePresentationConfig): string {
   const name = connection?.name.trim() || "";
-  if (!connection || !name || LOCAL_DATABASE_TYPES.has(connection.db_type) || (connection.db_type === "h2" && connection.port === 0)) return name;
+  if (!connection || !name || isLocalFilePresentationConnection(connection)) return name;
 
   const host = connection.host.trim();
   if (!host) return name;
@@ -80,6 +123,10 @@ export function connectionRedactedNameLabel(connection?: ConnectionNamePresentat
   return hostNames.has(name) ? connectionRedactedEndpointLabel(connection) : name;
 }
 
+function isLocalFilePresentationConnection(connection: Pick<ConnectionPresentationConfig, "db_type" | "port">): boolean {
+  return isLocalFileDatabaseType(connection.db_type) && (connection.db_type !== "h2" || connection.port === 0);
+}
+
 export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "ssl">>): string {
   switch (connection.db_type) {
     case "postgres":
@@ -94,13 +141,16 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
       return "mssql";
     case "elasticsearch":
     case "easysearch":
+    case "meilisearch":
     case "qdrant":
     case "milvus":
     case "weaviate":
     case "chromadb":
     case "rqlite":
     case "turso":
+    case "dynamodb":
     case "mq":
+    case "consul":
       return connection.ssl ? "https" : "http";
     case "cloudflare-d1":
       return "https";
@@ -136,6 +186,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "zookeeper":
       return "zookeeper://host:2181";
 
+    case "consul":
+      return "http://host:8500";
+
     case "sqlite":
       return "sqlite:///absolute/path/to/database.db";
 
@@ -157,6 +210,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "mongodb":
       return "mongodb://user:password@host:port/database";
 
+    case "dynamodb":
+      return "https://dynamodb.us-east-1.amazonaws.com";
+
     case "clickhouse":
       return "clickhouse://user:password@host:port/database";
 
@@ -173,6 +229,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "weaviate":
     case "chromadb":
       return "http://user:password@host:port";
+
+    case "meilisearch":
+      return "http://host:port/base/path";
 
     case "dameng":
       return "dm://user:password@host:port";
@@ -195,11 +254,17 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
     case "bigquery":
       return "bigquery://https://www.googleapis.com/bigquery/v2:443/project-id";
 
+    case "spanner":
+      return "spanner:///projects/{project}/instances/{instance}/databases/{database}";
+
     case "iris":
       return "iris://user:password@host:port/namespace";
 
     case "influxdb":
       return "influxdb://user:password@host:port/database";
+
+    case "victoriametrics":
+      return "http://user:password@host:port/prometheus";
 
     case "jdbc":
       return "jdbc:mysql://host:3306/database";

@@ -4,7 +4,7 @@ services:
     container_name: dbx-mongodb-5.0
     restart: always
     ports:
-      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-27018}:27017"
+      - "${DB_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-10400}:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: "${DB_PASSWORD:-123456}"

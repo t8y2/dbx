@@ -20,13 +20,28 @@ describe("dataGridContextMenu", () => {
 
   it("omits unavailable server actions and disables unavailable formatter", () => {
     const items = createDataGridCompactColumnActionItems({
-      labels: { formatter: "formatter", localFilter: "local", serverFilter: "server" },
-      icons: { formatter: icon, filter: icon, database: icon },
+      labels: { formatter: "formatter", clearFormatter: "clear formatter", localFilter: "local", serverFilter: "server" },
+      icons: { formatter: icon, clearFormatter: icon, filter: icon, database: icon },
       formatterAvailable: false,
+      formatterActive: false,
       serverFilterAvailable: false,
     });
-    expect(items.map((item) => item.value)).toEqual(["formatter", "localFilter"]);
+    expect(items.map((item) => item.value)).toEqual(["formatter", "localFilter", "clearFormatter"]);
     expect(items[0]?.disabled).toBe(true);
+    expect(items[0]?.checked).toBe(false);
+    expect(items.at(-1)).toMatchObject({ disabled: true, separatorBefore: true });
+  });
+
+  it("marks an active formatter and enables the compact clear action", () => {
+    const items = createDataGridCompactColumnActionItems({
+      labels: { formatter: "formatter", clearFormatter: "clear formatter", localFilter: "local", serverFilter: "server" },
+      icons: { formatter: icon, clearFormatter: icon, filter: icon, database: icon },
+      formatterAvailable: true,
+      formatterActive: true,
+      serverFilterAvailable: true,
+    });
+    expect(items[0]).toMatchObject({ value: "formatter", checked: true, disabled: false });
+    expect(items.at(-1)).toMatchObject({ value: "clearFormatter", disabled: false, separatorBefore: true });
   });
 
   it("builds typed column, cell, and row capability groups", () => {
@@ -63,9 +78,12 @@ describe("dataGridContextMenu", () => {
       labels: { cellDetails: "cell", columnDetails: "column", rowDetails: "row", setNull: "null", bulkEdit: "bulk", transpose: "transpose" },
       icons: { cellDetails: icon, columnDetails: icon, rowDetails: icon, setNull: icon, bulkEdit: icon, transpose: icon },
       actions: { cellDetails: action, columnDetails: action, rowDetails: action, setNull: action, bulkEdit: action, transpose: action },
+      importItem: { label: "import" },
+      downloadItem: { label: "download" },
       copySubmenu: { label: "copy" },
       clearSelectionItem: { label: "clear" },
     });
+    expect(cellItems.slice(0, 4).map((item) => item.label)).toEqual(["cell", "import", "download", "column"]);
     expect(cellItems.find((item) => item.label === "bulk")?.disabled).toBe(true);
 
     const rowItems = createDataGridRowContextMenuItems({

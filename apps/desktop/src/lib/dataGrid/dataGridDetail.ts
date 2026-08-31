@@ -1,5 +1,5 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
-import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
 import type { DatabaseType } from "@/types/database";
 
@@ -215,7 +215,7 @@ export function jsonDetailDisplayValue(value: unknown): unknown {
 }
 
 export function dataGridRowDetailTsv(detail: DataGridRowDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\t");
+  return detail.fields.map((field) => clipboardCellValue(field.value)).join("\t");
 }
 
 export function dataGridColumnDetailJson(detail: DataGridColumnDetail): string {
@@ -230,7 +230,7 @@ export function dataGridColumnDetailJson(detail: DataGridColumnDetail): string {
 }
 
 export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\n");
+  return detail.fields.map((field) => clipboardCellValue(field.value)).join("\n");
 }
 
 export interface BuildDeleteRowConfirmDetailsOptions<TRow> {

@@ -225,6 +225,11 @@ impl SqlDialectProfile {
                 | DatabaseType::Oscar
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Xugu
+                // ArgoDB (Transwarp fork of Hive/Inceptor) ships a PL/SQL-compatible procedure
+                // language: `CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`. Treat it like
+                // Oracle for statement splitting so semicolons inside the procedure body are not
+                // misinterpreted as client-side statement terminators.
+                | DatabaseType::Argo
         )
     }
 }
@@ -3621,6 +3626,58 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn argo_split_keeps_create_procedure_body_together() {
+        // ArgoDB (Transwarp) accepts PL/SQL-style procedure definitions whose body contains
+        // semicolons. The statement splitter must keep those semicolons inside the body rather
+        // than emitting one fragment per statement — otherwise the agent sends only the first
+        // `CREATE ... IS BEGIN INSERT INTO ...` fragment and the server responds with
+        // 42000 + vendorCode 1101 (see screenshots from the 2026-09-01 session).
+        let sql = "\
+CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT,
+  IV_SCHEMA_NAME   IN STRING,
+  IV_PROCEDURE_NAME IN STRING,
+  II_STEP_ID       IN INT,
+  IV_STEP_DESC     IN STRING,
+  II_STEP_FLAG     IN INT,
+  II_START_TIME    IN TIMESTAMP
+)
+/****************************************
+@AUTHOR:xiangxu
+@CREATE-DATE:2015-09-06
+@DESCRIPTION:处理执行信息插入日志表(ETL_LOG)
+@MODIFICATION HISTORY:
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME,
+    PROCEDURE_NAME,
+    STEP_ID,
+    STEP_DESC,
+    STEP_FLAG,
+    START_TIME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME,
+    IV_PROCEDURE_NAME,
+    II_STEP_ID,
+    IV_STEP_DESC,
+    II_STEP_FLAG,
+    II_START_TIME
+  );
+END;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
     }
 
     #[test]

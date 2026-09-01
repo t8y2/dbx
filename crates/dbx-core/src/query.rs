@@ -4236,7 +4236,9 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
         )
         .await
         .map_err(Into::into),
-        Some(TxPath::Sqlite(pool)) => exec_tx_sqlite_inner(pool, statements, start).await.map_err(Into::into),
+        Some(TxPath::Sqlite(pool)) => {
+            exec_tx_sqlite_inner(pool, statements, start, &operation_budget).await.map_err(Into::into)
+        }
         Some(TxPath::CloudflareD1(client)) => {
             let sql = statements.join(";\n");
             wait_for_query_opt(
@@ -4248,7 +4250,16 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             .map_err(Into::into)
         }
         Some(TxPath::Agent(client)) => {
-            let result = exec_tx_agent_inner(client.clone(), db_type, Some(database), statements, schema, start).await;
+            let result = exec_tx_agent_inner(
+                client.clone(),
+                db_type,
+                Some(database),
+                statements,
+                schema,
+                start,
+                &operation_budget,
+            )
+            .await;
             if let Err(error) = result.as_ref() {
                 discard_agent_pool_after_typed_error(state, pool_key, &client, error, RecoveryScope::UserOperation)
                     .await;
@@ -4471,13 +4482,26 @@ async fn exec_tx_sqlite_inner(
     pool: db::sqlite::SqliteHandle,
     statements: &[String],
     start: std::time::Instant,
+    budget: &DbOperationBudget,
 ) -> Result<db::QueryResult, String> {
     let statements = statements.to_vec();
+    let query_timeout = budget.query_timeout;
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
             let mut total_affected: u64 = 0;
             for (i, sql) in statements.iter().enumerate() {
+                // rusqlite's synchronous API cannot interrupt a single statement
+                // mid-flight (no SQLITE_INTERRUPT hook is wired through SqliteHandle),
+                // so the query budget is enforced at statement boundaries: a slow
+                // multi-statement batch is cut at the next statement and the whole
+                // transaction is rolled back. Never an orphaned COMMIT.
+                if let Some(timeout) = query_timeout {
+                    if start.elapsed() >= timeout {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(format!("Query timed out after {} seconds", timeout.as_secs()));
+                    }
+                }
                 match conn.execute_batch(sql) {
                     Ok(_) => total_affected += conn.changes(),
                     Err(e) => {
@@ -4589,6 +4613,7 @@ async fn exec_tx_agent_inner(
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
+    budget: &DbOperationBudget,
 ) -> Result<db::QueryResult, AgentCallError> {
     let execution_schema = schema_for_execution_context(db_type, schema);
     let rewritten_statements;
@@ -4602,7 +4627,8 @@ async fn exec_tx_agent_inner(
         statements
     };
     let mut client = client.lock().await;
-    let result: db::QueryResult = client.execute_transaction_typed(database, statements, execution_schema).await?;
+    let result: db::QueryResult =
+        client.execute_transaction_typed(database, statements, execution_schema, budget.query_timeout).await?;
     Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result })
 }
 
@@ -5832,6 +5858,52 @@ mod tests {
         let mut budget = DbOperationBudget::with_defaults();
         apply_query_timeout_override(&mut budget, Some(0));
         assert_eq!(budget.query_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn sqlite_transaction_timeout_rolls_back_and_commits_nothing() {
+        use std::sync::mpsc;
+
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect in-memory SQLite");
+        db::sqlite::execute_query(&pool, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .await
+            .expect("create table");
+
+        // Deterministic timeout: hold the connection lock from a helper thread so the
+        // transaction's first statement-boundary check is guaranteed to observe
+        // elapsed time >= the 1ms query budget, regardless of machine speed.
+        let mut budget = DbOperationBudget::with_defaults();
+        budget.query_timeout = Some(Duration::from_millis(1));
+        let (lock_held_tx, lock_held_rx) = mpsc::channel();
+        let holder = {
+            let pool = pool.clone();
+            std::thread::spawn(move || {
+                pool.with_connection(|_conn| {
+                    let _ = lock_held_tx.send(());
+                    std::thread::sleep(Duration::from_millis(200));
+                    Ok(())
+                })
+                .expect("helper holds sqlite connection lock");
+            })
+        };
+        lock_held_rx.recv().expect("helper acquired sqlite connection lock");
+
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t (val) VALUES ('one')".to_string(), "INSERT INTO t (val) VALUES ('two')".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("sqlite transaction must time out");
+
+        assert!(error.contains("Query timed out after"), "unexpected error: {error}");
+
+        // The transaction was rolled back (or never got past the first statement):
+        // no partial rows may survive.
+        holder.join().expect("helper thread joined");
+        let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
+        assert_eq!(result.rows[0][0], serde_json::json!(0));
     }
 
     #[test]

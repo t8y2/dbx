@@ -738,11 +738,15 @@ impl Storage {
         // operation, so a transient failure here (e.g. another process
         // racing to open the same brand-new database file) must never stop
         // the app from starting.
-        storage.enable_wal_mode().await;
-        storage.init_schema().await?;
-        // After the schema pass, so the `-wal` and `-shm` sidecars exist and
-        // are covered too.
+        // Restrict as soon as the file exists, so the guarantee does not
+        // depend on the journal-mode switch or the schema pass succeeding.
         restrict_db_file_permissions(&storage.path);
+        storage.enable_wal_mode().await;
+        let schema = storage.init_schema().await;
+        // Second pass: the journal sidecars only appear once something has
+        // written to the database, and this runs on the failure path too.
+        restrict_db_file_permissions(&storage.path);
+        schema?;
         Ok(storage)
     }
 
@@ -920,15 +924,42 @@ fn remove_sqlite_db_files(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Drop group and other permissions from the SQLite database files.
+/// Every file that can hold database contents: the database itself plus the
+/// rollback journal, WAL, and shared-memory sidecars. SQLite derives these by
+/// appending to the database filename, so they are built the same way rather
+/// than through `Path::with_extension`, which would depend on the database
+/// being named `*.db`.
+///
+/// Master journals (`<database>-mjXXXXXXXX`) are only written for a
+/// transaction spanning several attached databases, which the storage handle
+/// never performs.
+#[cfg(unix)]
+fn sqlite_file_set(db_path: &Path) -> [PathBuf; 4] {
+    let sidecar = |suffix: &str| {
+        let mut name = db_path.as_os_str().to_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    [db_path.to_path_buf(), sidecar("-journal"), sidecar("-wal"), sidecar("-shm")]
+}
+
+/// Restrict the SQLite files to the sharing model declared by the data
+/// directory itself.
 ///
 /// `connection_secrets` stores connection passwords in plaintext, so the file
 /// mode is what keeps other local accounts out of the credential store on
 /// platforms whose per-user data directory is world-traversable: most Linux
 /// desktops create `~/.local/share` as 0755, unlike `~/Library` on macOS.
 ///
-/// Runs on every open so existing installations are corrected as well, and is
-/// deliberately best-effort. A portable data directory can live on a
+/// A data directory that several local accounts share — the portable layout
+/// documented on `Storage::open` and `enable_wal_mode` — has to be
+/// group-writable for those accounts to use it at all, so that is taken as
+/// the operator opting into group access: world bits are dropped and group
+/// bits are preserved. Any other directory is treated as single-user and its
+/// files become owner-only. World-readable is never a supported sharing
+/// model, because it cannot be narrowed to a set of accounts.
+///
+/// Deliberately best-effort: a portable data directory can live on a
 /// filesystem without POSIX modes, and a file owned by another user fails
 /// `chmod` with `EPERM` instead of being re-permissioned behind that user's
 /// back. Neither case should stop the app from starting.
@@ -936,15 +967,23 @@ fn remove_sqlite_db_files(db_path: &Path) -> Result<(), String> {
 fn restrict_db_file_permissions(db_path: &Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    for path in [db_path.to_path_buf(), db_path.with_extension("db-wal"), db_path.with_extension("db-shm")] {
+    // S_IWGRP on the directory: the operator made it writable by a group, so
+    // group members are expected to reach the database through it.
+    let group_shared = db_path
+        .parent()
+        .and_then(|dir| std::fs::metadata(dir).ok())
+        .is_some_and(|dir| dir.permissions().mode() & 0o020 != 0);
+    let keep = if group_shared { 0o770 } else { 0o700 };
+
+    for path in sqlite_file_set(db_path) {
         let Ok(metadata) = std::fs::metadata(&path) else { continue };
         let mode = metadata.permissions().mode() & 0o777;
-        // Owner bits are preserved; only group and other are cleared.
-        let owner_only = mode & 0o700;
-        if mode == owner_only {
+        // Owner bits, and group bits in a shared directory, are preserved.
+        let restricted = mode & keep;
+        if mode == restricted {
             continue;
         }
-        if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(owner_only)) {
+        if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(restricted)) {
             log::debug!("Could not restrict permissions on {}: {err}", path.display());
         }
     }
@@ -5004,27 +5043,104 @@ mod tests {
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}.db", std::process::id()))
     }
 
+    /// Data directory with an explicit mode. The process temp directory is
+    /// group-writable on Linux (`/tmp` is 1777), which would otherwise be read
+    /// as the shared-directory sharing model.
     #[cfg(unix)]
-    #[tokio::test]
-    async fn open_clears_group_and_other_permissions_on_db_files() {
+    fn temp_data_dir_with_mode(name: &str, mode: u32) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let path = temp_db_path("permission-hardening");
+        let dir = temp_data_dir(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    fn file_mode(path: &std::path::Path) -> Option<u32> {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::metadata(path).ok().map(|metadata| metadata.permissions().mode() & 0o777)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_restricts_the_database_and_its_journals_to_the_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_data_dir_with_mode("permission-single-user", 0o755);
+        let path = dir.join("dbx.db");
         drop(Storage::open(&path).await.unwrap());
 
-        // Stand in for an installation created before this hardening existed.
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        drop(Storage::open(&path).await.unwrap());
-
-        for file in [path.clone(), path.with_extension("db-wal"), path.with_extension("db-shm")] {
-            let Ok(metadata) = std::fs::metadata(&file) else { continue };
-            let mode = metadata.permissions().mode() & 0o777;
-            assert_eq!(mode & 0o077, 0, "{} kept group/other bits ({mode:o})", file.display());
-            // Owner access is preserved; only the shared bits are dropped.
-            assert_ne!(mode & 0o600, 0, "{} lost owner access ({mode:o})", file.display());
+        // Stand in for an installation created before this hardening existed,
+        // including a rollback journal left behind by an interrupted write.
+        let journal = dir.join("dbx.db-journal");
+        std::fs::write(&journal, b"").unwrap();
+        for file in [&path, &journal] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
 
-        let _ = std::fs::remove_file(&path);
+        drop(Storage::open(&path).await.unwrap());
+
+        for name in ["dbx.db", "dbx.db-journal", "dbx.db-wal", "dbx.db-shm"] {
+            let Some(mode) = file_mode(&dir.join(name)) else { continue };
+            assert_eq!(mode & 0o077, 0, "{name} kept group/other bits ({mode:o})");
+            assert_ne!(mode & 0o600, 0, "{name} lost owner access ({mode:o})");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_preserves_group_access_in_a_shared_data_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Group-writable: the layout the portable notes on `Storage::open` and
+        // `enable_wal_mode` describe, where several local accounts share one
+        // data directory.
+        let dir = temp_data_dir_with_mode("permission-group-shared", 0o770);
+        let path = dir.join("dbx.db");
+        drop(Storage::open(&path).await.unwrap());
+
+        let journal = dir.join("dbx.db-journal");
+        std::fs::write(&journal, b"").unwrap();
+        for file in [&path, &journal] {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o664)).unwrap();
+        }
+
+        drop(Storage::open(&path).await.unwrap());
+
+        for name in ["dbx.db", "dbx.db-journal"] {
+            let Some(mode) = file_mode(&dir.join(name)) else { continue };
+            assert_eq!(mode & 0o007, 0, "{name} stayed world-accessible ({mode:o})");
+            assert_ne!(mode & 0o060, 0, "{name} lost the group access it is shared through ({mode:o})");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_restricts_the_database_even_when_schema_initialization_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_data_dir_with_mode("permission-init-failure", 0o755);
+        let path = dir.join("dbx.db");
+        drop(Storage::open(&path).await.unwrap());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // A read-only directory keeps the database file itself writable while
+        // denying the journal SQLite needs, so the schema pass fails.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = Storage::open(&path).await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "expected schema initialization to fail on a read-only directory");
+        let mode = file_mode(&path).expect("database file still exists");
+        assert_eq!(mode & 0o077, 0, "database kept group/other bits after a failed open ({mode:o})");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn temp_data_dir(name: &str) -> std::path::PathBuf {

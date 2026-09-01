@@ -740,6 +740,9 @@ impl Storage {
         // the app from starting.
         storage.enable_wal_mode().await;
         storage.init_schema().await?;
+        // After the schema pass, so the `-wal` and `-shm` sidecars exist and
+        // are covered too.
+        restrict_db_file_permissions(&storage.path);
         Ok(storage)
     }
 
@@ -916,6 +919,39 @@ fn remove_sqlite_db_files(db_path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Drop group and other permissions from the SQLite database files.
+///
+/// `connection_secrets` stores connection passwords in plaintext, so the file
+/// mode is what keeps other local accounts out of the credential store on
+/// platforms whose per-user data directory is world-traversable: most Linux
+/// desktops create `~/.local/share` as 0755, unlike `~/Library` on macOS.
+///
+/// Runs on every open so existing installations are corrected as well, and is
+/// deliberately best-effort. A portable data directory can live on a
+/// filesystem without POSIX modes, and a file owned by another user fails
+/// `chmod` with `EPERM` instead of being re-permissioned behind that user's
+/// back. Neither case should stop the app from starting.
+#[cfg(unix)]
+fn restrict_db_file_permissions(db_path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    for path in [db_path.to_path_buf(), db_path.with_extension("db-wal"), db_path.with_extension("db-shm")] {
+        let Ok(metadata) = std::fs::metadata(&path) else { continue };
+        let mode = metadata.permissions().mode() & 0o777;
+        // Owner bits are preserved; only group and other are cleared.
+        let owner_only = mode & 0o700;
+        if mode == owner_only {
+            continue;
+        }
+        if let Err(err) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(owner_only)) {
+            log::debug!("Could not restrict permissions on {}: {err}", path.display());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn restrict_db_file_permissions(_db_path: &Path) {}
 
 fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
     const COLUMNS: &[(&str, &str)] = &[
@@ -4966,6 +5002,29 @@ mod tests {
     fn temp_db_path(name: &str) -> std::path::PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         std::env::temp_dir().join(format!("dbx-storage-{name}-{}-{stamp}.db", std::process::id()))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn open_clears_group_and_other_permissions_on_db_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_db_path("permission-hardening");
+        drop(Storage::open(&path).await.unwrap());
+
+        // Stand in for an installation created before this hardening existed.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(Storage::open(&path).await.unwrap());
+
+        for file in [path.clone(), path.with_extension("db-wal"), path.with_extension("db-shm")] {
+            let Ok(metadata) = std::fs::metadata(&file) else { continue };
+            let mode = metadata.permissions().mode() & 0o777;
+            assert_eq!(mode & 0o077, 0, "{} kept group/other bits ({mode:o})", file.display());
+            // Owner access is preserved; only the shared bits are dropped.
+            assert_ne!(mode & 0o600, 0, "{} lost owner access ({mode:o})", file.display());
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 
     fn temp_data_dir(name: &str) -> std::path::PathBuf {

@@ -4759,7 +4759,7 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
             </div>
           </TabsContent>
 
-          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" class="relative m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)]" @scroll.passive="onStructureContentScroll('ddl', $event)">
+          <TabsContent ref="ddlScrollerRef" v-if="tableMetadataCapabilities.ddl" value="ddl" force-mount class="relative m-0 min-h-0 flex-1 overflow-auto p-[var(--structure-cell-px)] data-[state=inactive]:hidden" @scroll.passive="onStructureContentScroll('ddl', $event)">
             <div v-if="ddlLoading" class="flex items-center justify-center gap-2 py-10 text-muted-foreground">
               <Loader2 class="h-4 w-4 animate-spin" />
               {{ t("common.loading") }}

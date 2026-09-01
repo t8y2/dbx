@@ -4,7 +4,7 @@ use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::*;
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
-use sqlparser::ast::Statement;
+use sqlparser::ast::{AlterTableOperation, ObjectNamePart, Statement};
 use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::Parser;
 use std::borrow::Cow;
@@ -5248,12 +5248,40 @@ pub async fn execute_query_on_conn_with_limits(
             }
         }
     } else {
-        let previous_explicit_timestamp_defaults = enable_explicit_timestamp_defaults_for_query(conn, sql).await;
-        let result = match conn.query_iter(sql).await {
-            Ok(result) => result,
-            Err(err) => {
-                restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
-                return Err(err.to_string());
+        let mut query_sql = sql.to_string();
+        let mut previous_explicit_timestamp_defaults =
+            enable_explicit_timestamp_defaults_for_query(conn, &query_sql).await;
+        let result = loop {
+            match conn.query_iter(&query_sql).await {
+                Ok(result) => break result,
+                Err(err) => {
+                    restore_explicit_timestamp_defaults_for_query(conn, previous_explicit_timestamp_defaults).await;
+                    match mysql_add_column_if_not_exists_fallback(conn, &query_sql, &err).await {
+                        Some(MySqlAddColumnFallback::AlreadyExists) => {
+                            return Ok(MySqlQueryResult::exact(QueryResult {
+                                columns: vec![],
+                                column_types: Vec::new(),
+                                column_sortables: vec![],
+                                spatial_columns: vec![],
+                                spatial_values: vec![],
+                                rows: vec![],
+                                affected_rows: 0,
+                                execution_time_ms: start.elapsed().as_millis(),
+                                truncated: false,
+                                session_id: None,
+                                has_more: false,
+                                elasticsearch_raw_body: None,
+                                messages: vec![],
+                            }));
+                        }
+                        Some(MySqlAddColumnFallback::Retry(fallback_sql)) => {
+                            query_sql = fallback_sql;
+                            previous_explicit_timestamp_defaults =
+                                enable_explicit_timestamp_defaults_for_query(conn, &query_sql).await;
+                        }
+                        None => return Err(err.to_string()),
+                    }
+                }
             }
         };
         let affected_rows = result.affected_rows();
@@ -5471,11 +5499,149 @@ pub(crate) fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool
 
 pub(crate) fn is_batchable_non_result_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
     !is_result_set_query(sql, dialect)
+        && !is_mysql_add_column_if_not_exists(sql)
         && starts_with_executable_sql_keyword_for_database(
             sql,
             &["INSERT", "REPLACE", "UPDATE", "DELETE"],
             DatabaseType::Mysql,
         )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MySqlAddColumnIfNotExists {
+    database: Option<String>,
+    table: String,
+    column: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MySqlAddColumnFallback {
+    AlreadyExists,
+    Retry(String),
+}
+
+fn mysql_add_column_if_not_exists(sql: &str) -> Option<MySqlAddColumnIfNotExists> {
+    // sqlparser does not accept MySQL's `ADD COLUMN IF NOT EXISTS` ordering.
+    // Remove only the verified clause first, then use the AST to ensure the
+    // remaining statement is exactly one single-column ALTER TABLE operation.
+    let normalized_sql = mysql_add_column_fallback_sql(sql)?;
+    let statements = Parser::parse_sql(&MySqlDialect {}, &normalized_sql).ok()?;
+    let [Statement::AlterTable(alter_table)] = statements.as_slice() else {
+        return None;
+    };
+    let [AlterTableOperation::AddColumn { if_not_exists: false, column_def, .. }] = alter_table.operations.as_slice()
+    else {
+        return None;
+    };
+
+    let parts = alter_table.name.0.as_slice();
+    let (database, table) = match parts {
+        [ObjectNamePart::Identifier(table)] => (None, table.value.clone()),
+        [ObjectNamePart::Identifier(database), ObjectNamePart::Identifier(table)] => {
+            (Some(database.value.clone()), table.value.clone())
+        }
+        _ => return None,
+    };
+
+    Some(MySqlAddColumnIfNotExists { database, table, column: column_def.name.value.clone() })
+}
+
+pub(crate) fn is_mysql_add_column_if_not_exists(sql: &str) -> bool {
+    mysql_add_column_if_not_exists(sql).is_some()
+}
+
+fn find_if_not_exists_clause(sql: &str) -> Option<(usize, usize)> {
+    // Locate SQL keywords while skipping quoted strings and comments so a user
+    // comment cannot be mistaken for the actual ALTER TABLE clause.
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'/' && bytes[index + 1] == b'*' {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == b'#' || (bytes[index] == b'-' && index + 1 < bytes.len() && bytes[index + 1] == b'-') {
+            index += if bytes[index] == b'#' { 1 } else { 2 };
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            let quote = bytes[index];
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    if index + 1 < bytes.len() && bytes[index + 1] == quote {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else if bytes[index] == b'\\' && quote != b'`' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_') {
+                index += 1;
+            }
+            tokens.push((sql[start..index].to_ascii_lowercase(), start, index));
+        } else {
+            index += 1;
+        }
+    }
+
+    tokens.windows(3).find_map(|window| {
+        (window[0].0 == "if" && window[1].0 == "not" && window[2].0 == "exists").then_some((window[0].1, window[2].2))
+    })
+}
+
+fn mysql_add_column_fallback_sql(sql: &str) -> Option<String> {
+    let (start, end) = find_if_not_exists_clause(sql)?;
+    let mut fallback_sql = String::with_capacity(sql.len());
+    fallback_sql.push_str(&sql[..start]);
+    fallback_sql.push_str(&sql[end..]);
+    Some(fallback_sql)
+}
+
+async fn mysql_add_column_if_not_exists_fallback(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    error: &mysql_async::Error,
+) -> Option<MySqlAddColumnFallback> {
+    let mysql_error = matches!(error, mysql_async::Error::Server(server_error) if server_error.code == 1064);
+    if !mysql_error {
+        return None;
+    }
+    let column = mysql_add_column_if_not_exists(sql)?;
+    let database = column.database.as_deref().map(quote_value).unwrap_or_else(|| "DATABASE()".to_string());
+    let exists_sql = format!(
+        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {database} AND TABLE_NAME = {} AND COLUMN_NAME = {} LIMIT 1",
+        quote_value(&column.table),
+        quote_value(&column.column),
+    );
+    let exists = conn.query_first::<u8, _>(exists_sql).await.ok()?.is_some();
+    if exists {
+        Some(MySqlAddColumnFallback::AlreadyExists)
+    } else {
+        Some(MySqlAddColumnFallback::Retry(mysql_add_column_fallback_sql(sql)?))
+    }
 }
 
 /// MariaDB 10.5+ returns a result set for INSERT/DELETE/REPLACE ... RETURNING.
@@ -6254,6 +6420,42 @@ mod tests {
         assert!(!is_batchable_non_result_query("SELECT * FROM users", dialect));
         assert!(!is_batchable_non_result_query("ANALYZE TABLE users", dialect));
         assert!(!is_batchable_non_result_query("CREATE TABLE users(id INT)", dialect));
+    }
+
+    #[test]
+    fn mysql_add_column_if_not_exists_fallback_only_matches_one_add_column() {
+        assert_eq!(
+            mysql_add_column_if_not_exists(
+                "ALTER TABLE `test_table` ADD COLUMN IF NOT EXISTS `start_date` DATE DEFAULT NULL AFTER `name`"
+            ),
+            Some(MySqlAddColumnIfNotExists {
+                database: None,
+                table: "test_table".to_string(),
+                column: "start_date".to_string(),
+            })
+        );
+        assert!(mysql_add_column_if_not_exists("ALTER TABLE test_table ADD COLUMN start_date DATE").is_none());
+        assert!(mysql_add_column_if_not_exists(
+            "ALTER TABLE test_table ADD COLUMN IF NOT EXISTS a INT, ADD COLUMN b INT"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn mysql_add_column_if_not_exists_fallback_preserves_quoted_text_and_comments() {
+        let sql = "/* IF NOT EXISTS in a comment */ ALTER TABLE app.test_table ADD COLUMN IF NOT EXISTS start_date DATE DEFAULT 'IF NOT EXISTS'";
+        assert_eq!(
+            mysql_add_column_fallback_sql(sql),
+            Some("/* IF NOT EXISTS in a comment */ ALTER TABLE app.test_table ADD COLUMN  start_date DATE DEFAULT 'IF NOT EXISTS'".to_string())
+        );
+    }
+
+    #[test]
+    fn mysql_add_column_if_not_exists_is_not_batched() {
+        assert!(!is_batchable_non_result_query(
+            "ALTER TABLE test_table ADD COLUMN IF NOT EXISTS start_date DATE",
+            MySqlQueryDialect::default()
+        ));
     }
 
     #[test]

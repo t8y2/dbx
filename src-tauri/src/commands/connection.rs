@@ -1112,6 +1112,11 @@ pub async fn test_connection_with_info(
     test_connection_with_info_inner(state.inner(), config).await
 }
 
+#[tauri::command]
+pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+    state.test_connection_ssh_tunnel(&config.canonicalized()).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,

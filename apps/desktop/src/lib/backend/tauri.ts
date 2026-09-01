@@ -1068,6 +1068,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return invokeBackend("test_connection", { config });
 }
 
+export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
+  return invokeBackend("test_ssh_tunnel", { config });
+}
+
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
   try {
     const result = await invoke<unknown>("test_connection_with_info", {

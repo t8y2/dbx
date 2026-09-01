@@ -306,6 +306,13 @@ pub struct AppState {
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
 
+fn transport_layers_through_last_ssh(layers: &[TransportLayerConfig]) -> Result<&[TransportLayerConfig], String> {
+    let Some(last_ssh_index) = layers.iter().rposition(|layer| matches!(layer, TransportLayerConfig::Ssh(_))) else {
+        return Err("Connection has no enabled SSH tunnel layer".to_string());
+    };
+    Ok(&layers[..=last_ssh_index])
+}
+
 /// 活跃时间以进程内单调时钟的相对毫秒存储（AtomicU64）：热路径每条查询都要
 /// 更新它，读锁 + 原子写让并发查询不再在全局写锁上串行化。
 /// 基准偏移让测试能构造"过去"的时间点（否则进程刚启动时相对毫秒接近 0）。
@@ -2827,6 +2834,34 @@ impl AppState {
                 Err("Tunnel test is not supported for HTTP tunnel profiles.".to_string())
             }
         }
+    }
+
+    /// Tests the enabled SSH chain without opening a database connection.
+    /// Layers before the final SSH hop are included because they may be
+    /// required to reach that hop; layers after it are unrelated to SSH auth.
+    pub async fn test_connection_ssh_tunnel(&self, config: &ConnectionConfig) -> Result<String, String> {
+        let resolved_layers = self.resolved_transport_layers(config).await?;
+        let test_layers = transport_layers_through_last_ssh(&resolved_layers)?;
+        let probe_id = format!("__connection_ssh_test__:{}", uuid::Uuid::new_v4());
+        let result = db::transport_layer_tunnel::start_transport_layers(
+            &probe_id,
+            test_layers,
+            "127.0.0.1",
+            1,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        db::transport_layer_tunnel::stop_transport_layers(
+            &probe_id,
+            test_layers.len(),
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        result.map(|_| "SSH tunnel connection successful".to_string())
     }
 
     pub async fn connection_host_port(
@@ -5890,9 +5925,9 @@ mod tests {
         mysql_pool_setup_queries, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
         redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
         sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -6926,6 +6961,59 @@ mod tests {
 
         assert_eq!(state.agent_manager.base_dir(), &agent_dir);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_tunnel_test_includes_prerequisites_through_final_ssh_hop() {
+        let before = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "before".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let ssh = TransportLayerConfig::Ssh(ssh_layer("ssh", ""));
+        let after = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "after".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Http,
+            host: "downstream.internal".to_string(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let layers = vec![before.clone(), ssh.clone(), after];
+
+        assert_eq!(transport_layers_through_last_ssh(&layers).unwrap(), &[before, ssh]);
+    }
+
+    #[test]
+    fn ssh_tunnel_test_rejects_chain_without_ssh() {
+        let layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        })];
+
+        assert_eq!(
+            transport_layers_through_last_ssh(&layers).unwrap_err(),
+            "Connection has no enabled SSH tunnel layer"
+        );
     }
 
     #[tokio::test]

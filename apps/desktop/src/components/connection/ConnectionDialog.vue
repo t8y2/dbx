@@ -230,7 +230,7 @@ type LegacyTransportFields = {
 };
 type LegacyConnectionConfig = ConnectionConfig & LegacyTransportFields;
 type ConnectionForm = Omit<ConnectionConfig, "id">;
-type ConnectionTestState = ConnectionTestResult & { ok: boolean };
+type ConnectionTestState = ConnectionTestResult & { ok: boolean; scope?: "connection" | "ssh" };
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -276,6 +276,7 @@ function initialConnectionGroupId(): string | null {
 }
 const tunnelProfileStore = useTunnelProfileStore();
 const isTesting = ref(false);
+const isTestingSshTunnel = ref(false);
 const isSaving = ref(false);
 const testResult = ref<ConnectionTestState | null>(null);
 const testedConfigFingerprint = ref("");
@@ -2651,6 +2652,7 @@ const databasePlaceholder = computed(() => {
 });
 
 const transportLayers = computed(() => form.value.transport_layers || []);
+const hasEnabledSshLayer = computed(() => transportLayers.value.some((layer) => layer.enabled !== false && layer.type === "ssh"));
 const selectedTransportLayer = computed(() => {
   const layers = transportLayers.value;
   return layers.find((layer) => layer.id === selectedTransportLayerId.value) || layers[0] || null;
@@ -3361,7 +3363,8 @@ const databaseInfoCompactLabel = computed(() =>
 );
 const testResultMessage = computed(() => {
   if (!testResult.value) return "";
-  return testResult.value.ok ? t("connection.testSuccess") : translateBackendError(t, testResult.value.message);
+  if (!testResult.value.ok) return translateBackendError(t, testResult.value.message);
+  return testResult.value.scope === "ssh" ? t("connection.sshTunnelTestSuccess") : t("connection.testSuccess");
 });
 const agentInstallPercent = computed(() => driverInstallProgressPercent(agentInstallProgress.value));
 const agentInstallProgressLabel = computed(() => {
@@ -3483,6 +3486,7 @@ watch(customDriverName, (value) => {
 });
 
 async function testConnection() {
+  if (isTestingSshTunnel.value) return;
   if (!ensureConnectionHostResolvedFromUrl()) return;
 
   const runId = ++testRunId;
@@ -3522,6 +3526,28 @@ async function testConnection() {
     if (runId === testRunId) {
       isTesting.value = false;
     }
+  }
+}
+
+async function testSshTunnel() {
+  if (isTesting.value || isTestingSshTunnel.value) return;
+
+  const runId = ++testRunId;
+  isTestingSshTunnel.value = true;
+  testResult.value = null;
+  testResultCopied.value = false;
+  try {
+    const config = connectionConfigForSshTunnelTest(editingId.value || draftTestConnectionId.value);
+    const message = await api.testSshTunnel(config);
+    if (runId !== testRunId) return;
+    testResult.value = { ok: true, message, scope: "ssh" };
+  } catch (error) {
+    if (runId !== testRunId) return;
+    const message = errorMessage(error);
+    testResult.value = { ok: false, message, scope: "ssh" };
+    showConnectionError(message);
+  } finally {
+    if (runId === testRunId) isTestingSshTunnel.value = false;
   }
 }
 
@@ -3708,6 +3734,24 @@ function generateConnectionName(): string {
   return `${label}_${rand}`;
 }
 
+function normalizeTransportLayersForSubmit(config: LegacyConnectionConfig) {
+  config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
+  config.transport_layers = config.transport_layers.map((layer) => {
+    if (layer.type !== "ssh") return layer;
+    const normalized = normalizeSshTunnel(layer);
+    const timeout = Number(normalized.connect_timeout_secs);
+    normalized.connect_timeout_secs = Number.isFinite(timeout) && timeout > 0 ? timeout : 5;
+    return { type: "ssh", ...normalized };
+  });
+  validateTransportLayers(config);
+}
+
+function connectionConfigForSshTunnelTest(id: string): ConnectionConfig {
+  const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
+  normalizeTransportLayersForSubmit(config);
+  return config;
+}
+
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
@@ -3751,18 +3795,10 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       throw new Error(t("connection.spannerFieldsRequired"));
     }
   }
-  config.transport_layers = (config.transport_layers || []).map(normalizeTransportLayer);
-  config.transport_layers = config.transport_layers.map((layer) => {
-    if (layer.type !== "ssh") return layer;
-    const normalized = normalizeSshTunnel(layer);
-    const timeout = Number(normalized.connect_timeout_secs);
-    normalized.connect_timeout_secs = Number.isFinite(timeout) && timeout > 0 ? timeout : 5;
-    return { type: "ssh", ...normalized };
-  });
-  if (config.db_type === "oracle" && config.oracle_connection_type === "tns" && config.transport_layers.some((layer) => layer.enabled !== false)) {
+  normalizeTransportLayersForSubmit(config);
+  if (config.db_type === "oracle" && config.oracle_connection_type === "tns" && config.transport_layers?.some((layer) => layer.enabled !== false)) {
     throw new Error(t("connection.oracleTnsTransportUnsupported"));
   }
-  validateTransportLayers(config);
   if (config.db_type === "oracle" && config.oracle_connection_type === "tns") {
     const alias = config.database?.trim() || "";
     const tnsAdmin = normalizeOracleTnsAdminPath(oracleTnsAdminPath.value);
@@ -4364,6 +4400,7 @@ function isOracleSysUser(config: Pick<ConnectionConfig, "db_type" | "username">)
 function resetTestState() {
   testRunId += 1;
   isTesting.value = false;
+  isTestingSshTunnel.value = false;
   testResult.value = null;
   clearTestedConnectionInfo();
   showConnectionErrorDialog.value = false;
@@ -8708,6 +8745,16 @@ function openExternalUrl(url: string) {
                     </div>
                   </template>
                 </template>
+                <div v-if="hasEnabledSshLayer" class="grid grid-cols-4 items-center gap-4">
+                  <span />
+                  <div class="col-span-3">
+                    <Button type="button" variant="outline" size="sm" :disabled="isTesting || isTestingSshTunnel || isSaving" @click="testSshTunnel">
+                      <Loader2 v-if="isTestingSshTunnel" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      <ShieldCheck v-else class="mr-1.5 h-3.5 w-3.5" />
+                      {{ isTestingSshTunnel ? t("connection.sshTunnelTesting") : t("connection.sshTunnelTest") }}
+                    </Button>
+                  </div>
+                </div>
               </div>
             </TabsContent>
           </Tabs>
@@ -8715,7 +8762,7 @@ function openExternalUrl(url: string) {
 
         <DialogFooter class="connection-dialog-footer flex min-w-0 shrink-0 items-center gap-2 sm:flex-nowrap">
           <div class="connection-dialog-test-status mr-auto flex min-w-0 flex-1 basis-0 items-center gap-2 overflow-hidden">
-            <Button v-if="!editingId" variant="outline" class="shrink-0" :disabled="isSaving" @click="backToDatabasePicker">
+            <Button v-if="!editingId" variant="outline" class="shrink-0" :disabled="isSaving || isTestingSshTunnel" @click="backToDatabasePicker">
               <ArrowLeft class="h-4 w-4" />
               {{ t("connection.back") }}
             </Button>
@@ -8729,25 +8776,25 @@ function openExternalUrl(url: string) {
               </Button>
             </template>
           </div>
-          <Button v-if="canChooseVisibleNacosNamespaces" variant="outline" class="shrink-0" :disabled="isTesting || isSaving || isLoadingVisibleNacosNamespaces || !hasRequiredConnectionTarget" @click="openVisibleNacosNamespacesPicker">
+          <Button v-if="canChooseVisibleNacosNamespaces" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleNacosNamespaces || !hasRequiredConnectionTarget" @click="openVisibleNacosNamespacesPicker">
             <Loader2 v-if="isLoadingVisibleNacosNamespaces" class="mr-1.5 h-4 w-4 animate-spin" />
             <ListFilter v-else class="mr-1.5 h-4 w-4" />
             {{ t(nacosNamespacePickerTitleKey) }}
           </Button>
-          <Button v-else-if="canChooseVisibleDatabases" variant="outline" class="shrink-0" :disabled="isTesting || isSaving || isLoadingVisibleDatabases || !hasRequiredConnectionTarget" @click="openVisibleDatabasesPicker">
+          <Button v-else-if="canChooseVisibleDatabases" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleDatabases || !hasRequiredConnectionTarget" @click="openVisibleDatabasesPicker">
             <Loader2 v-if="isLoadingVisibleDatabases" class="mr-1.5 h-4 w-4 animate-spin" />
             <ListFilter v-else class="mr-1.5 h-4 w-4" />
             {{ hasVisibleObjectFilter ? visibleObjectSummary : visibleFilterUsesSchemas ? t("contextMenu.configureVisibleObjects") : t("contextMenu.selectVisibleDatabases") }}
           </Button>
-          <Button v-if="canChooseVisibleSchemas && !visibleFilterUsesSchemas && hasVisibleSchemaFilter" variant="outline" class="shrink-0" :disabled="isTesting || isSaving || isLoadingVisibleSchemas || !hasRequiredConnectionTarget" @click="openVisibleSchemasPicker">
+          <Button v-if="canChooseVisibleSchemas && !visibleFilterUsesSchemas && hasVisibleSchemaFilter" variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving || isLoadingVisibleSchemas || !hasRequiredConnectionTarget" @click="openVisibleSchemasPicker">
             <Loader2 v-if="isLoadingVisibleSchemas" class="mr-1.5 h-4 w-4 animate-spin" />
             <ListFilter v-else class="mr-1.5 h-4 w-4" />
             {{ visibleSchemaSummary }}
           </Button>
-          <Button variant="outline" class="shrink-0" :disabled="isTesting || isSaving" @click="testConnection">
+          <Button variant="outline" class="shrink-0" :disabled="isTesting || isTestingSshTunnel || isSaving" @click="testConnection">
             {{ isTesting ? t("connection.testing") : t("connection.test") }}
           </Button>
-          <Button class="shrink-0" @click="save" :disabled="isSaving || !hasRequiredConnectionTarget">
+          <Button class="shrink-0" @click="save" :disabled="isSaving || isTestingSshTunnel || !hasRequiredConnectionTarget">
             {{ isSaving ? t("common.loading") : editingId || isJdbcConnection ? t("connection.save") : t("connection.saveAndConnect") }}
           </Button>
         </DialogFooter>

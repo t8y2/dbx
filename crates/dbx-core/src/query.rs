@@ -2947,6 +2947,33 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key.as_str());
 
+    let execution_plan = db_type.map_or_else(
+        || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
+        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
+    );
+    let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
+    let statements = execution_plan.statements;
+    if statements.is_empty() {
+        return Ok(vec![empty_query_result(0).into()]);
+    }
+
+    // Check the transaction request before database-specific fast paths. Otherwise
+    // a backend such as SQL Server or HTTP SQLite can return successful
+    // auto-commit results while the API has promised a rollbackable batch.
+    if options.use_transaction == Some(true) && statements.len() > 1 {
+        let result = execute_statements_in_transaction_typed(
+            state,
+            connection_id,
+            database,
+            &statements,
+            schema,
+            options.catalog.as_deref(),
+            options.timeout_secs,
+        )
+        .await?;
+        return Ok(vec![result.into()]);
+    }
+
     let is_sqlserver = {
         let connections = state.connections.read().await;
         matches!(connections.get(&pool_key), Some(PoolKind::SqlServer(_)))
@@ -2964,7 +2991,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     };
 
     // HTTP SQLite providers send all statements in one request so the provider
-    // can preserve batch ordering and atomicity.
+    // can preserve batch ordering and atomicity in the default batch mode.
     if is_http_sqlite {
         let table_data_preview = options.table_data_preview;
         return single_statement_multi_result(
@@ -2980,32 +3007,6 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
             .await,
             table_data_preview,
         );
-    }
-
-    let execution_plan = db_type.map_or_else(
-        || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
-        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
-    );
-    let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
-    let statements = execution_plan.statements;
-    if statements.is_empty() {
-        return Ok(vec![empty_query_result(0).into()]);
-    }
-
-    // When use_transaction is explicitly true and we have multiple statements,
-    // route through the transaction wrapper instead of the sequential auto-commit loop.
-    if options.use_transaction == Some(true) && statements.len() > 1 {
-        let result = execute_statements_in_transaction_typed(
-            state,
-            connection_id,
-            database,
-            &statements,
-            schema,
-            options.catalog.as_deref(),
-            options.timeout_secs,
-        )
-        .await?;
-        return Ok(vec![result.into()]);
     }
 
     let mysql_pool = {
@@ -3951,7 +3952,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
 /// - Returns a structured result (never re-executes statements to probe status).
 /// - Comment-only / empty scripts succeed as `committed` with zero statements.
 /// - When the target path cannot guarantee DDL atomicity (MySQL/Oracle DDL
-///   auto-commit, `TxPath::None`, etc.), a failure reports `mixed` and
+///   auto-commit, unsupported batch transaction paths, etc.), a failure reports `mixed` and
 ///   `executed_count` reflects the statements that were issued before the
 ///   error, so the caller can warn the user that partial effects may persist.
 pub async fn execute_schema_diff_deploy(
@@ -4095,11 +4096,10 @@ pub async fn execute_schema_diff_deploy(
 
 /// Execute multiple SQL statements within a single transaction.
 /// For pooled drivers (Postgres/MySQL), uses the driver transaction API.
-/// For SQLite and already-single-connection drivers (ClickHouse/SqlServer/Agent),
-/// uses explicit BEGIN/COMMIT/ROLLBACK on the shared connection.
-/// For databases that don't support explicit transactions (Redis, MongoDB, Oracle),
-/// executes statements sequentially without transaction.
-/// If BEGIN fails, returns an error instead of silently falling back to auto-commit.
+/// For SQLite and SQL Server, uses a transaction on the driver's shared connection.
+/// Agent drivers must provide the same rollbackable transaction contract.
+/// Backends without a verified rollbackable path are rejected instead of being
+/// silently executed one statement at a time in auto-commit mode.
 pub async fn execute_statements_in_transaction(
     state: &AppState,
     connection_id: &str,
@@ -4179,51 +4179,40 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     catalog: Option<&str>,
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
+    let db_type = connection_database_type(state, connection_id).await;
+    if batch_transaction_ddl_is_unrollbackable(db_type, statements) {
+        return Err(
+            "use_transaction cannot be used with a batch whose DDL cannot be rolled back: DDL statements implicitly commit and cannot be undone. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls."
+                .to_string()
+                .into(),
+        );
+    }
+
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
 
     let start = std::time::Instant::now();
-    let db_type = connection_database_type(state, connection_id).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
     let mut operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
     apply_query_timeout_override(&mut operation_budget, timeout_secs);
 
+    // This is the single capability model for explicit batch transactions.
+    // Do not add a backend here unless its execution path keeps every statement
+    // on one transaction-capable connection and can roll back on failure.
+    // Agent drivers are delegated because their transaction RPC has the same
+    // contract and rejects drivers that cannot provide it.
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = {
         let conns = state.connections.read().await;
-        conns.get(pool_key).map(|p| match p {
-            PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
-            PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
-            PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
-            PoolKind::CloudflareD1(client) => TxPath::CloudflareD1(client.clone()),
-            PoolKind::ClickHouse(_) | PoolKind::Rqlite(_) | PoolKind::Turso(_) | PoolKind::SqlServer(_) => {
-                TxPath::Explicit
-            }
-            PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
-            #[cfg(feature = "mq-admin")]
-            PoolKind::Mqtt(_) => TxPath::None,
-            PoolKind::DuckDbWorker(_)
-            | PoolKind::Redis(_)
-            | PoolKind::MongoDb(_)
-            | PoolKind::DynamoDb(_)
-            | PoolKind::Elasticsearch(_)
-            | PoolKind::Easysearch(_)
-            | PoolKind::Meilisearch(_)
-            | PoolKind::VectorDb(_)
-            | PoolKind::InfluxDb(_)
-            | PoolKind::InfluxDb3(_)
-            | PoolKind::VictoriaMetrics(_)
-            | PoolKind::ExternalDriver { .. } => TxPath::None,
-        })
+        conns.get(pool_key).map(batch_transaction_path)
     };
 
     let result = match path {
-        Some(TxPath::Pg(pool)) => {
+        Some(BatchTransactionPath::Pg(pool)) => {
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
-        Some(TxPath::Mysql(pool, _bare)) => exec_tx_mysql_inner(
+        Some(BatchTransactionPath::Mysql(pool)) => exec_tx_mysql_inner(
             state,
             pool_key,
             pool,
@@ -4236,20 +4225,10 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
         )
         .await
         .map_err(Into::into),
-        Some(TxPath::Sqlite(pool)) => {
+        Some(BatchTransactionPath::Sqlite(pool)) => {
             exec_tx_sqlite_inner(pool, statements, start, &operation_budget).await.map_err(Into::into)
         }
-        Some(TxPath::CloudflareD1(client)) => {
-            let sql = statements.join(";\n");
-            wait_for_query_opt(
-                None,
-                operation_budget.query_timeout,
-                db::cloudflare_d1_driver::execute_query_with_max_rows(&client, &sql, None),
-            )
-            .await
-            .map_err(Into::into)
-        }
-        Some(TxPath::Agent(client)) => {
+        Some(BatchTransactionPath::Agent(client)) => {
             let result = exec_tx_agent_inner(
                 client.clone(),
                 db_type,
@@ -4266,18 +4245,17 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
             }
             return result.map_err(QueryExecutionError::Agent);
         }
-        Some(TxPath::Explicit) => {
+        Some(BatchTransactionPath::Explicit) => {
             let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
             exec_tx_explicit_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start)
                 .await
                 .map_err(Into::into)
         }
-        Some(TxPath::None) => {
-            let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
-            exec_tx_none_inner(state, pool_key, mysql_dialect, Some(database), statements, schema, start)
-                .await
-                .map_err(Into::into)
-        }
+        Some(BatchTransactionPath::Unsupported) => Err(
+            "The active backend cannot provide a rollbackable transaction for a batch; run without use_transaction."
+                .to_string()
+                .into(),
+        ),
         None => Err("Connection not found for transaction".to_string().into()),
     };
 
@@ -4288,15 +4266,61 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     result
 }
 
-/// Owned pool variants for safe dispatch across async boundaries.
-enum TxPath {
+/// Whether an explicit batch transaction (`use_transaction`) must be rejected
+/// because the backend's DDL statements implicitly commit and cannot be rolled
+/// back. Uses the same single capability predicate as the schema-diff deploy
+/// path (`database_supports_transactional_ddl`), so it covers every backend
+/// whose DDL is not rollbackable (MySQL-family and Oracle) without re-listing
+/// engines here. Public so the MCP layer can apply the identical check.
+pub fn batch_transaction_ddl_is_unrollbackable(db_type: Option<DatabaseType>, statements: &[String]) -> bool {
+    let Some(db_type) = db_type else {
+        return false;
+    };
+    if database_supports_transactional_ddl(db_type) {
+        return false;
+    }
+    statements.iter().any(|statement| matches!(classify_sql_risk_for_database(statement, db_type), Ok(SqlRisk::Ddl)))
+}
+
+/// Owned transaction-capable pool variants for safe dispatch across async boundaries.
+enum BatchTransactionPath {
     Pg(deadpool_postgres::Pool),
-    Mysql(db::mysql::MySqlPool, bool),
+    Mysql(db::mysql::MySqlPool),
     Sqlite(db::sqlite::SqliteHandle),
-    CloudflareD1(db::cloudflare_d1_driver::CloudflareD1Client),
     Agent(Arc<crate::db::agent_driver::PooledAgentClient>),
     Explicit,
-    None,
+    Unsupported,
+}
+
+fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
+    match pool {
+        PoolKind::Postgres(pg) => BatchTransactionPath::Pg(pg.clone()),
+        PoolKind::Mysql(pool, _mode) => BatchTransactionPath::Mysql(pool.clone()),
+        PoolKind::Sqlite(pool) => BatchTransactionPath::Sqlite(pool.clone()),
+        PoolKind::SqlServer(_) => BatchTransactionPath::Explicit,
+        PoolKind::Agent(client) => BatchTransactionPath::Agent(client.clone()),
+        PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => {
+            BatchTransactionPath::Unsupported
+        }
+        #[cfg(feature = "mq-admin")]
+        PoolKind::Mqtt(_) => BatchTransactionPath::Unsupported,
+        PoolKind::DuckDbWorker(_)
+        | PoolKind::Redis(_)
+        | PoolKind::MongoDb(_)
+        | PoolKind::DynamoDb(_)
+        | PoolKind::ClickHouse(_)
+        | PoolKind::Rqlite(_)
+        | PoolKind::Turso(_)
+        | PoolKind::CloudflareD1(_)
+        | PoolKind::Elasticsearch(_)
+        | PoolKind::Easysearch(_)
+        | PoolKind::Meilisearch(_)
+        | PoolKind::VectorDb(_)
+        | PoolKind::InfluxDb(_)
+        | PoolKind::InfluxDb3(_)
+        | PoolKind::VictoriaMetrics(_)
+        | PoolKind::ExternalDriver { .. } => BatchTransactionPath::Unsupported,
+    }
 }
 
 // Each of these acquires a dedicated connection and runs all statements within
@@ -4750,52 +4774,6 @@ async fn exec_tx_agent_inner(
     let result: db::QueryResult =
         client.execute_transaction_typed(database, statements, execution_schema, budget.query_timeout).await?;
     Ok(db::QueryResult { execution_time_ms: start.elapsed().as_millis(), ..result })
-}
-
-async fn exec_tx_none_inner(
-    state: &AppState,
-    pool_key: &str,
-    mysql_dialect: db::mysql::MySqlQueryDialect,
-    database: Option<&str>,
-    statements: &[String],
-    schema: Option<&str>,
-    start: std::time::Instant,
-) -> Result<db::QueryResult, String> {
-    let mut total_affected: u64 = 0;
-    for (i, sql) in statements.iter().enumerate() {
-        log::info!("[query][tx-none:statement:start] index={}", i + 1);
-        match do_execute(state, pool_key, mysql_dialect, database, sql, schema, None, QueryExecutionOptions::default())
-            .await
-        {
-            Ok(result) => {
-                total_affected += result.affected_rows;
-                log::info!("[query][tx-none:statement:done] index={} affected_rows={}", i + 1, result.affected_rows);
-            }
-            Err(e) => {
-                log::warn!("Statement {} failed (no transaction support): {}", i + 1, e);
-                return Err(query_error_with_omitted_sql_context(
-                    &format!("Statement {} failed: {}. No transaction support for this database type.", i + 1, e),
-                    sql,
-                ));
-            }
-        }
-    }
-
-    Ok(db::QueryResult {
-        columns: vec![],
-        column_types: Vec::new(),
-        column_sortables: vec![],
-        spatial_columns: vec![],
-        spatial_values: vec![],
-        rows: vec![],
-        affected_rows: total_affected,
-        execution_time_ms: start.elapsed().as_millis(),
-        truncated: false,
-        session_id: None,
-        has_more: false,
-        elasticsearch_raw_body: None,
-        messages: Vec::new(),
-    })
 }
 
 /// Start a manual transaction session, holding a connection from the pool.
@@ -6990,6 +6968,71 @@ for line in sys.stdin:
         assert_eq!(!table_check.rows.is_empty(), continue_on_error);
     }
 
+    #[tokio::test]
+    async fn transactional_sqlite_batch_rolls_back_when_a_later_statement_fails() {
+        let dir = std::env::temp_dir().join(format!("dbx-query-transaction-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-transaction";
+        let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
+        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
+
+        let error = execute_multi_core_with_options(
+            &state,
+            connection_id,
+            "",
+            "CREATE TABLE rolled_back_table (id INTEGER); INSERT INTO missing_table VALUES (1);",
+            None,
+            None,
+            QueryExecutionOptions { use_transaction: Some(true), ..Default::default() },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("missing_table"), "unexpected transaction error: {error}");
+
+        let table_check = execute_sql_statement(
+            &state,
+            connection_id,
+            "",
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rolled_back_table'",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(table_check.rows.is_empty(), "the failed batch must roll back its preceding DDL");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn transactional_batch_rejects_an_unsupported_backend_before_execution() {
+        let dir = std::env::temp_dir().join(format!("dbx-query-unsupported-transaction-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "message-queue-transaction";
+        state.connections.write().await.insert(connection_id.to_string(), PoolKind::MessageQueue);
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Redis));
+
+        let error = execute_multi_core_with_options(
+            &state,
+            connection_id,
+            "",
+            "INSERT INTO first_statement VALUES (1); INSERT INTO second_statement VALUES (2);",
+            None,
+            None,
+            QueryExecutionOptions { use_transaction: Some(true), ..Default::default() },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("cannot provide a rollbackable transaction"), "unexpected transaction error: {error}");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn agent_execute_batch_unsupported_detects_case_insensitive_method_errors() {
         assert!(is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_batch"));
@@ -7001,6 +7044,24 @@ for line in sys.stdin:
     fn agent_execute_batch_unsupported_ignores_unrelated_errors() {
         assert!(!is_agent_execute_batch_unsupported("ORA-00955: name is already used by an existing object"));
         assert!(!is_agent_execute_batch_unsupported("Agent RPC error (-1): unknown method: execute_query"));
+    }
+
+    #[test]
+    fn batch_transaction_ddl_is_unrollbackable_covers_oracle_and_mysql_family() {
+        let ddl = vec!["CREATE TABLE test_table (id INT)".to_string()];
+        let dml = vec!["INSERT INTO test_table VALUES (1)".to_string()];
+
+        // MySQL-family and Oracle DDL implicitly commit; explicit transactions
+        // over such DDL cannot be rolled back, so use_transaction is rejected.
+        for db in [DatabaseType::Mysql, DatabaseType::Goldendb, DatabaseType::Oracle] {
+            assert!(batch_transaction_ddl_is_unrollbackable(Some(db), &ddl), "expected {db:?} to reject DDL");
+        }
+        assert!(!batch_transaction_ddl_is_unrollbackable(Some(DatabaseType::Mysql), &dml));
+        // Postgres and SQLite have transactional DDL and must both be allowed.
+        assert!(!batch_transaction_ddl_is_unrollbackable(Some(DatabaseType::Postgres), &ddl));
+        assert!(!batch_transaction_ddl_is_unrollbackable(Some(DatabaseType::Sqlite), &ddl));
+        // An unknown db type cannot be verified — do not risk rejecting valid DDL batches.
+        assert!(!batch_transaction_ddl_is_unrollbackable(None, &ddl));
     }
 
     #[test]
@@ -7837,7 +7898,9 @@ for line in sys.stdin:
         );
         assert_eq!(
             backend_error.detail(),
-            Some("Query timed out after 1 seconds\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.")
+            Some(
+                "Query timed out after 1 seconds\nSQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
+            )
         );
     }
 
@@ -7988,7 +8051,9 @@ for line in sys.stdin:
         );
         assert_eq!(
             external_driver_preview_fallback_sql(sql).as_deref(),
-            Some("SELECT \"id\", \"description\" AS \"description\", \"metadata\"::text AS \"metadata\", 'left(\"literal\", 1)' AS \"note\", 'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100")
+            Some(
+                "SELECT \"id\", \"description\" AS \"description\", \"metadata\"::text AS \"metadata\", 'left(\"literal\", 1)' AS \"note\", 'T:139' AS \"__DBX_LARGE_VALUE_BYTES_T_1\" FROM \"job_details\" WHERE left(note, 1) = 'x' LIMIT 100"
+            )
         );
     }
 
@@ -8001,7 +8066,9 @@ for line in sys.stdin:
         );
         assert_eq!(
             external_driver_preview_fallback_sql(sql).as_deref(),
-            Some("SELECT coalesce(\"description\", concat('a,b', \"fallback\")) AS \"description\", 'FROM left(\"literal\", 1)' AS \"note\", 'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\"")
+            Some(
+                "SELECT coalesce(\"description\", concat('a,b', \"fallback\")) AS \"description\", 'FROM left(\"literal\", 1)' AS \"note\", 'T:140' AS \"__DBX_LARGE_VALUE_BYTES_T_0\" FROM \"job_details\""
+            )
         );
     }
 
@@ -8554,7 +8621,9 @@ for line in sys.stdin:
 
         assert_eq!(
             error.detail(),
-            Some("Server error: `ERROR 1064 (42000): syntax error` SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement.")
+            Some(
+                "Server error: `ERROR 1064 (42000): syntax error` SQL text omitted from user-facing error; enable debug SQL diagnostics to inspect the original statement."
+            )
         );
     }
 

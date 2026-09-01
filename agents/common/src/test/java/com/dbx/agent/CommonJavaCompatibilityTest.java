@@ -626,17 +626,19 @@ class CommonJavaCompatibilityTest {
     }
 
     @Test
-    void executesTransactionsOneByOneWhenJdbcDriverDoesNotSupportTransactions() {
+    void rejectsTransactionsWhenJdbcDriverDoesNotSupportTransactions() {
         List<String> calls = new ArrayList<>();
         DatabaseAgent agent = new TransactionAgent(nonTransactionalConnection(calls));
 
-        QueryResult result = agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP");
-
-        assertEquals(2L, result.getAffected_rows());
-        assertEquals(
-            Arrays.asList("supportsTransactions", "execute:SET SCHEMA \"APP\"", "executeUpdate:UPDATE A SET ID = 1", "executeUpdate:UPDATE B SET ID = 2"),
-            calls
+        UnsupportedOperationException error = assertThrows(
+            UnsupportedOperationException.class,
+            () -> agent.executeTransaction(Arrays.asList("UPDATE A SET ID = 1", "UPDATE B SET ID = 2"), "APP")
         );
+
+        assertEquals("Transactions are not supported by this JDBC driver", error.getMessage());
+        // Capability is checked before schema switching or statements, so a
+        // failed transaction request cannot leave a partially applied batch.
+        assertEquals(Collections.singletonList("supportsTransactions"), calls);
     }
 
     @Test

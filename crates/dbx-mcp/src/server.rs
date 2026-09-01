@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use rmcp::{
+    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, ServerHandler,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::backend::{ConnectionSummary, DbxBackend, format_query_result, new_connection_config, parse_database_type};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
-    agent_tools::{format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow},
+    agent_tools::{QueryCellWindow, format_query_result_as_text, normalize_sql_for_confirmation},
     database_manifest,
-    db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
+    db::redis_driver::{RedisCommandResult, RedisCommandSafety, classify_command, parse_command_argv},
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
@@ -23,7 +24,7 @@ use dbx_core::{
     },
     query_execution_sql::is_write_sql_for_database,
     sql_risk::{
-        classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
+        SqlRisk, classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch,
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
@@ -256,7 +257,7 @@ pub struct ExecuteBatchQueryRequest {
     #[schemars(extend("type" = "boolean"))]
     pub continue_on_error: Option<bool>,
     #[schemars(
-        description = "When true and the script has more than one statement, all statements run inside one transaction (BEGIN … COMMIT) so the whole batch succeeds or rolls back, and the call returns a single merged result. For a single-statement script the option is ignored and the statement runs as normal auto-commit. Not supported by all drivers (SQL Server, Turso, CloudflareD1 ignore it). Cannot be combined with session_id or continue_on_error. Rejected for MySQL-family DDL scripts because DDL implicitly commits and cannot be rolled back. Default is auto-commit for each statement."
+        description = "When true and the script has more than one statement, all statements run inside one transaction (BEGIN … COMMIT) so the whole batch succeeds or rolls back, and the call returns a single merged result. For a single-statement script the option is ignored and the statement runs as normal auto-commit. Backends that cannot provide a rollbackable transaction reject this option. Cannot be combined with session_id or continue_on_error. Rejected for MySQL-family DDL scripts because DDL implicitly commits and cannot be rolled back. Default is auto-commit for each statement."
     )]
     #[schemars(extend("type" = "boolean"))]
     pub use_transaction: Option<bool>,
@@ -506,7 +507,7 @@ impl DbxMcpServer {
                         return tool_error(
                             "SESSION_CONNECTION_MISMATCH",
                             format!("Session \"{session_id}\" is bound to a different connection."),
-                        )
+                        );
                     }
                     None => {
                         return tool_error(
@@ -514,7 +515,7 @@ impl DbxMcpServer {
                             format!(
                                 "Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."
                             ),
-                        )
+                        );
                     }
                 }
             }
@@ -600,7 +601,7 @@ impl DbxMcpServer {
 
     #[tool(
         name = "dbx_execute_batch",
-        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
+        description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
     )]
     async fn execute_batch(&self, Parameters(request): Parameters<ExecuteBatchQueryRequest>) -> CallToolResult {
         let resolved = match self.resolve_connection(&request.selector).await {
@@ -628,7 +629,7 @@ impl DbxMcpServer {
                         return tool_error(
                             "SESSION_CONNECTION_MISMATCH",
                             format!("Session \"{session_id}\" is bound to a different connection."),
-                        )
+                        );
                     }
                     None => {
                         return tool_error(
@@ -636,13 +637,13 @@ impl DbxMcpServer {
                             format!(
                                 "Session \"{session_id}\" not found or expired. Open a new one with dbx_open_session."
                             ),
-                        )
+                        );
                     }
                 }
             }
             None => None,
         };
-        let database = match self.resolve_database(request.database, connection) {
+        let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -660,11 +661,20 @@ impl DbxMcpServer {
         // A pinned session makes USE/SET CATALOG meaningful, so database
         // switching is allowed — unless a hard database scope is configured.
         let allow_database_switch = session.is_some() && self.scope.database.is_none();
+        // Split with the same dialect-aware splitter the core uses, early, so the
+        // option-validity checks below only fire for scripts that actually enter
+        // transaction mode (more than one statement). A single-statement script
+        // ignores use_transaction and runs as normal auto-commit, so combining it
+        // with session_id / continue_on_error must still be allowed.
+        let execution_plan = dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type);
+        let statement_count = execution_plan.statements.len();
+        let transactional = request.use_transaction == Some(true) && statement_count > 1;
         // A transactional batch runs on a pooled connection and returns one
         // merged result, so it cannot preserve session state or yield per-
         // statement results. The core transaction path takes no client session
-        // id, so combining the two would silently drop the session pin.
-        if request.use_transaction == Some(true) && session.is_some() {
+        // id, so combining the two would silently drop the session pin. Only
+        // relevant when the script actually enters transaction mode.
+        if transactional && session.is_some() {
             return tool_error(
                 "TRANSACTION_WITH_SESSION_UNSUPPORTED",
                 "use_transaction cannot be combined with session_id: transactional batches run on a pooled connection, discard session state, and return a single merged result. Run the batch either without use_transaction (auto-commit, one result per statement) or without session_id.",
@@ -673,29 +683,28 @@ impl DbxMcpServer {
         // The core transaction path rolls back and stops on the first failure
         // (query.rs:2970), so continue_on_error is silently ignored there.
         // Accepting both would promise per-statement continuation that never
-        // happens — reject the combination instead.
-        if request.use_transaction == Some(true) && request.continue_on_error == Some(true) {
+        // happens — reject the combination instead. Only relevant when the
+        // script actually enters transaction mode.
+        if transactional && request.continue_on_error == Some(true) {
             return tool_error(
                 "TRANSACTION_WITH_CONTINUE_UNSUPPORTED",
                 "use_transaction cannot be combined with continue_on_error: a transactional batch stops and rolls back at the first failure, so continue_on_error would be ignored. Run the batch either without use_transaction (auto-commit, one result per statement, may continue on error) or without continue_on_error.",
             );
         }
-        // MySQL-family engines implicitly commit before DDL statements, so the
-        // transaction wrapper cannot roll back a DDL that already committed
+        // DDL implicitly commits on MySQL-family and Oracle engines (and any
+        // backend without transactional DDL — the shared capability check), so
+        // the transaction wrapper cannot roll back a DDL that already committed
         // (e.g. "CREATE TABLE a; INSERT INTO missing" leaves the table behind
-        // after the failed INSERT rolls back). A DDL script would therefore
-        // over-promise atomicity — reject use_transaction for it instead.
-        let mysql_family = matches!(
-            connection.db_type,
-            DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch
-        );
-        if request.use_transaction == Some(true)
-            && mysql_family
-            && matches!(classify_sql_risk_for_database(sql, connection.db_type), Ok(SqlRisk::Ddl))
+        // after the failed INSERT rolls back). A transactional batch containing
+        // DDL would over-promise atomicity — reject it instead. Gated on multi-
+        // statement like the other rejects: a single DDL statement is plain
+        // auto-commit and safe.
+        if transactional
+            && dbx_core::query::batch_transaction_ddl_is_unrollbackable(Some(connection.db_type), &execution_plan.statements)
         {
             return tool_error(
                 "TRANSACTION_WITH_DDL_UNSUPPORTED",
-                "use_transaction cannot be used with a MySQL-family DDL script: DDL statements implicitly commit and cannot be rolled back, so the batch would not be atomic. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls.",
+                "use_transaction cannot be used with a batch whose DDL cannot be rolled back: DDL statements implicitly commit and cannot be rolled back, so the batch would not be atomic. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls.",
             );
         }
         // Classify the whole script as a unit so a single write/DDL statement in
@@ -715,18 +724,6 @@ impl DbxMcpServer {
         {
             return tool_error("SQL_BLOCKED", message);
         }
-        // The core only runs the transaction wrapper for scripts with more than
-        // one statement (query.rs:2970), and only for drivers that reach that
-        // gate. SQL Server (query.rs:2928), Turso, and CloudflareD1
-        // (query.rs:2941) return earlier and silently ignore use_transaction,
-        // so their results must not be labelled as transaction outcomes. A
-        // single statement with use_transaction is also plain auto-commit and
-        // must not be marked merged. Count statements with the same splitter
-        // the core uses so the merged marking matches what actually executed.
-        let statement_count = dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type).statements.len();
-        let ignores_transaction =
-            matches!(connection.db_type, DatabaseType::SqlServer | DatabaseType::Turso | DatabaseType::CloudflareD1);
-        let transactional = request.use_transaction == Some(true) && statement_count > 1 && !ignores_transaction;
         // A transactional batch runs on the plain (non-session) pool: the core
         // transaction wrapper ignores client_session_id (query.rs:2970 →
         // execute_statements_in_transaction_typed re-resolves the default pool
@@ -1868,10 +1865,9 @@ fn validate_mongo_command(
                 "SQL_BLOCKED",
                 "MongoDB update/delete commands must include a non-empty filter unless high-risk operations are enabled in DBX MCP settings.",
             ),
-            MongoSafetyError::Dangerous => tool_error(
-                "SQL_BLOCKED",
-                "Dangerous MongoDB command is disabled in DBX MCP settings.",
-            ),
+            MongoSafetyError::Dangerous => {
+                tool_error("SQL_BLOCKED", "Dangerous MongoDB command is disabled in DBX MCP settings.")
+            }
             MongoSafetyError::ProductionWrite => {
                 tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database.")
             }
@@ -2072,7 +2068,6 @@ mod tests {
         closed_sessions: std::sync::Mutex<Vec<String>>,
         pinned_sessions: std::sync::Mutex<HashSet<String>>,
         close_failures_remaining: std::sync::Mutex<usize>,
-        policy: McpGlobalPolicy,
     }
 
     impl Default for FakeBackend {
@@ -2084,7 +2079,6 @@ mod tests {
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
                 pinned_sessions: std::sync::Mutex::new(HashSet::new()),
                 close_failures_remaining: std::sync::Mutex::new(0),
-                policy: McpGlobalPolicy::default(),
             }
         }
     }
@@ -2264,9 +2258,9 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 16);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 15);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_databases"));
         assert!(names.contains(&"dbx_list_tables"));
@@ -2331,11 +2325,13 @@ mod tests {
 
         assert_eq!(tables.get("type"), Some(&serde_json::json!("array")));
         assert_eq!(tables.pointer("/items/type"), Some(&serde_json::json!("string")));
-        assert!(!tool
-            .input_schema
-            .get("required")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|required| required.iter().any(|field| field == "tables")));
+        assert!(
+            !tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|required| required.iter().any(|field| field == "tables"))
+        );
     }
 
     #[test]
@@ -2506,9 +2502,9 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 11);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 10);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -3275,7 +3271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_batch_rejects_mysql_ddl_with_transaction() {
+    async fn execute_batch_rejects_mysql_family_ddl_with_transaction() {
         // MySQL-family engines implicitly commit before DDL, so a DDL batch
         // with use_transaction cannot roll back a DDL that already committed.
         // Reject the combination instead of over-promising atomicity. Plain
@@ -3297,6 +3293,24 @@ mod tests {
             .await;
         assert!(result_text(&ddl).contains("TRANSACTION_WITH_DDL_UNSUPPORTED"));
         assert!(backend.recorded_arguments.lock().unwrap().iter().all(|(name, _)| name != "execute_batch"));
+
+        // GoldenDB is a MySQL-compatible Agent driver, so its DDL has the
+        // same implicit-commit boundary and must not be advertised as atomic.
+        let goldendb = connection("goldendb", "goldendb", "goldendb", "app");
+        let goldendb_backend = Arc::new(FakeBackend { connections: vec![goldendb], ..Default::default() });
+        let goldendb_server = DbxMcpServer::with_runtime_options(goldendb_backend.clone(), McpScope::default(), false);
+        let goldendb_ddl = goldendb_server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("goldendb"),
+                database: None,
+                sql: "CREATE TABLE a (id INT); INSERT INTO missing VALUES (1)".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(result_text(&goldendb_ddl).contains("TRANSACTION_WITH_DDL_UNSUPPORTED"));
+        assert!(goldendb_backend.recorded_arguments.lock().unwrap().iter().all(|(name, _)| name != "execute_batch"));
 
         let dml = server
             .execute_batch(Parameters(ExecuteBatchQueryRequest {
@@ -3329,6 +3343,80 @@ mod tests {
             }))
             .await;
         assert!(result_text(&pg_ddl).contains("Transaction outcome"));
+    }
+
+    #[tokio::test]
+    async fn execute_batch_rejects_oracle_ddl_with_transaction() {
+        // Oracle DDL implicitly commits just like MySQL-family engines, so a DDL
+        // batch with use_transaction over-promises atomicity. The rejection must
+        // come from the shared capability check, not a MySQL-only engine list —
+        // otherwise Oracle would silently run a non-rollbackable "transaction".
+        let oracle = connection("ora", "ora", "oracle", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![oracle], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let ddl = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("ora"),
+                database: None,
+                sql: "CREATE TABLE a (id NUMBER); INSERT INTO missing VALUES (1)".to_string(),
+                session_id: None,
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(result_text(&ddl).contains("TRANSACTION_WITH_DDL_UNSUPPORTED"));
+        assert!(backend.recorded_arguments.lock().unwrap().iter().all(|(name, _)| name != "execute_batch"));
+    }
+
+    #[tokio::test]
+    async fn execute_batch_single_statement_allows_transaction_option_combinations() {
+        // A single-statement script ignores use_transaction and runs as normal
+        // auto-commit, so it never enters transaction mode. Combining it with
+        // session_id or continue_on_error is therefore harmless and must not be
+        // rejected — the option-validity rejects apply only when the script
+        // actually enters transaction mode (statement_count > 1). Contrast with
+        // execute_batch_rejects_transaction_with_session / _continue_on_error,
+        // which use multi-statement scripts and are still rejected.
+        let postgres = connection("pg", "pg", "postgres", "app");
+        let backend = Arc::new(FakeBackend { connections: vec![postgres], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+
+        let with_continue = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "INSERT INTO t VALUES (1)".to_string(),
+                session_id: None,
+                continue_on_error: Some(true),
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(
+            !result_text(&with_continue).contains("TRANSACTION_WITH_CONTINUE_UNSUPPORTED"),
+            "single-statement use_transaction + continue_on_error must not be rejected"
+        );
+        assert!(backend.recorded_arguments.lock().unwrap().iter().any(|(name, _)| name == "execute_batch"));
+
+        // A real session bound to the same connection must likewise reach
+        // execution rather than be rejected as a transaction/session conflict.
+        let opened =
+            server.open_session(Parameters(OpenSessionRequest { selector: selector("pg"), database: None })).await;
+        let session_id = opened_session_id(&opened);
+        let with_session = server
+            .execute_batch(Parameters(ExecuteBatchQueryRequest {
+                selector: selector("pg"),
+                database: None,
+                sql: "INSERT INTO t VALUES (1)".to_string(),
+                session_id: Some(session_id),
+                continue_on_error: None,
+                use_transaction: Some(true),
+            }))
+            .await;
+        assert!(
+            !result_text(&with_session).contains("TRANSACTION_WITH_SESSION_UNSUPPORTED"),
+            "single-statement use_transaction + session_id must not be rejected as a transaction/session conflict"
+        );
     }
 
     #[tokio::test]
@@ -3365,7 +3453,9 @@ mod tests {
         let confirmed = Some("INSERT INTO t VALUES (1)");
 
         // An exact match (modulo surrounding whitespace) passes.
-        assert!(confirmed_batch_sql_block_reason("  INSERT INTO t VALUES (1)  ", postgres_db_type, confirmed).is_none());
+        assert!(
+            confirmed_batch_sql_block_reason("  INSERT INTO t VALUES (1)  ", postgres_db_type, confirmed).is_none()
+        );
         // A differing write script fails closed.
         let blocked = confirmed_batch_sql_block_reason(
             "INSERT INTO t VALUES (1); INSERT INTO u VALUES (2)",
@@ -3494,11 +3584,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_batch_sqlserver_use_transaction_is_never_merged() {
-        // The core routes SQL Server to execute_multi_sqlserver (query.rs:2928)
-        // BEFORE the transaction gate, so use_transaction is silently ignored
-        // and the results are per-statement — never a merged transaction
-        // outcome, even when the script has multiple statements.
+    async fn execute_batch_sqlserver_use_transaction_marks_merged_outcome() {
+        // SQL Server enters the core transaction path before its normal batch
+        // fast path, so a successful multi-statement request is merged.
         let sqlserver = connection("mssql", "mssql", "sqlserver", "app");
         let backend = Arc::new(FakeBackend { connections: vec![sqlserver], ..Default::default() });
         let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
@@ -3513,9 +3601,9 @@ mod tests {
                 use_transaction: Some(true),
             }))
             .await;
-        assert!(result_text(&result).contains("Statement 1"));
-        assert!(!result_text(&result).contains("Transaction outcome"));
+        assert!(result_text(&result).contains("Transaction outcome"));
+        assert!(!result_text(&result).contains("Statement 1"));
         let structured = result.structured_content.as_ref().expect("structured content must be populated");
-        assert!(structured[0]["merged"].is_null());
+        assert_eq!(structured[0]["merged"], true);
     }
 }

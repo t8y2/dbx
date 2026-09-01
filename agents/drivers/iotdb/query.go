@@ -306,6 +306,12 @@ func (s *server) closeAllQuerySessions() error {
 }
 
 func (s *server) executeStatements(params map[string]json.RawMessage, transaction bool) (queryResult, error) {
+	if transaction {
+		// IoTDB executes statements independently and exposes no rollbackable
+		// transaction boundary. Reject the RPC before obtaining a client so a
+		// requested atomic batch can never leave partial writes behind.
+		return queryResult{}, errors.New("IoTDB does not support transactions")
+	}
 	started := time.Now()
 	statements := stringSliceParam(params, "statements")
 	if len(statements) == 0 {

@@ -26,6 +26,16 @@ func TestHandshakeAdvertisesNativeCapabilities(t *testing.T) {
 	}
 }
 
+func TestExecuteTransactionIsRejectedBeforeConnecting(t *testing.T) {
+	server := &server{}
+	_, err := server.executeStatements(map[string]json.RawMessage{
+		"statements": json.RawMessage(`["INSERT INTO metrics(device, time, value) VALUES ('d1', 1, 1)"]`),
+	}, true)
+	if err == nil || err.Error() != "IoTDB does not support transactions" {
+		t.Fatalf("expected unsupported transaction error, got %v", err)
+	}
+}
+
 func TestHandleLineClassifiesMissingSession(t *testing.T) {
 	response, _ := newRuntimeServer().handleLine(
 		`{"jsonrpc":"2.0","id":7,"method":"validate_session","params":{"agentSessionId":"missing"}}`,

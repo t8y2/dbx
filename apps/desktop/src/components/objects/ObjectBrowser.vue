@@ -266,8 +266,11 @@ const effectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(
 const isGaussdbM = computed(() => effectiveDatabaseType.value === "gaussdb" && props.connection.driver_profile?.toLowerCase() === "gaussdb-m");
 const isVictoriaMetrics = computed(() => effectiveDatabaseType.value === "victoriametrics");
 const isMongodb = computed(() => props.connection.db_type === "mongodb");
-const showObjectRowStats = computed(() => !isMongodb.value);
-const showObjectSizeStats = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
+const supportsObjectRowStats = computed(() => !isMongodb.value);
+const supportsObjectSizeStats = computed(() => !isVictoriaMetrics.value && !isMongodb.value);
+const showTableStatistics = computed(() => objectFilter.value === "all" || objectFilter.value === "tables");
+const showObjectRowStats = computed(() => supportsObjectRowStats.value && showTableStatistics.value);
+const showObjectSizeStats = computed(() => supportsObjectSizeStats.value && showTableStatistics.value);
 const objectRowsLabel = computed(() => t(isVictoriaMetrics.value ? "objects.series" : "objects.rows"));
 
 function toggleTableDdlWordWrap() {
@@ -3268,23 +3271,23 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       <div class="min-w-0 flex-1 truncate text-muted-foreground">
         {{ t("objects.selectedTables", { count: selectedTableCount }) }}
       </div>
-      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
+      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="openBatchDatabaseExport">
         <Upload class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.exportSelected") }}
       </Button>
-      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
+      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="copySelectedTablesToClipboard">
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.copyTableSelected") }}
       </Button>
-      <Button v-if="showObjectSizeStats && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
+      <Button v-if="supportsObjectSizeStats && supportsTruncateTable" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchTruncateTables">
         <Scissors class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.truncateSelected") }}
       </Button>
-      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
+      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchEmptyTables">
         <Eraser class="mr-1.5 h-3.5 w-3.5" />
         {{ t("contextMenu.batchEmpty", { count: selectedTableCount }) }}
       </Button>
-      <Button v-if="showObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
+      <Button v-if="supportsObjectSizeStats" variant="ghost" size="sm" class="h-7 px-2 text-xs text-destructive" @click="requestBatchDropTables">
         <Trash2 class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.dropSelected") }}
       </Button>

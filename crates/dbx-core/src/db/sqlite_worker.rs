@@ -315,7 +315,7 @@ pub async fn connect_sqlite_worker(
     if db_path.is_empty() {
         return Err("Remote SQLite path is empty".to_string());
     }
-    if !Path::new(db_path).is_absolute() && !db_path.starts_with("~/") {
+    if !is_remote_linux_path_absolute_or_home_relative(db_path) {
         return Err("Remote SQLite path must be an absolute path on the final SSH hop".to_string());
     }
     validate_remote_path(db_path)?;
@@ -744,6 +744,11 @@ fn validate_remote_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_remote_linux_path_absolute_or_home_relative(path: &str) -> bool {
+    // The remote host is Linux even when the DBX Desktop client runs on Windows.
+    path.starts_with('/') || path.starts_with("~/")
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -812,6 +817,14 @@ mod tests {
         assert!(remote_sqlite_exists_from_output("/remote/data/app.db", "ok\n").is_ok());
         let error = remote_sqlite_exists_from_output("/remote/data/app.db", "").unwrap_err();
         assert!(error.contains("File does not exist"), "{error}");
+    }
+
+    #[test]
+    fn remote_sqlite_path_uses_linux_semantics_on_every_desktop_platform() {
+        assert!(is_remote_linux_path_absolute_or_home_relative("/volume1/music/library.db"));
+        assert!(is_remote_linux_path_absolute_or_home_relative("~/data/library.db"));
+        assert!(!is_remote_linux_path_absolute_or_home_relative("volume1/music/library.db"));
+        assert!(!is_remote_linux_path_absolute_or_home_relative(r"C:\data\library.db"));
     }
 
     #[tokio::test]

@@ -238,8 +238,9 @@ pub fn build_table_data_select_sql_with_database(
     };
     let predicate = normalize_where_input(options.where_input.as_deref());
     let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
-    let default_order_by = if database_type == Some(DatabaseType::InfluxDb) {
-        // InfluxQL only allows sorting of timestamp column
+    let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3)) {
+        // InfluxQL only allows sorting of the timestamp column; SQL-mode
+        // InfluxDB 3 tables also key naturally on `time`.
         Some("time DESC".to_string())
     } else if database_type == Some(DatabaseType::Impala) {
         // Impala requires ORDER BY when OFFSET is present. Keeping the same

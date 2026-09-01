@@ -379,6 +379,7 @@ async fn main() {
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))
+        .route("/connection/test-ssh-tunnel", post(routes::connection::test_ssh_tunnel))
         .route("/connection/connect", post(routes::connection::connect_db))
         .route("/connection/database-info", post(routes::connection::connected_database_info))
         .route("/connection/database-info/save", post(routes::connection::save_connection_database_info))

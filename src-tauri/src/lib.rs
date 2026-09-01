@@ -1794,6 +1794,7 @@ pub fn run() {
             commands::cloud_sync::snippet_sync_download,
             commands::connection::test_connection,
             commands::connection::test_connection_with_info,
+            commands::connection::test_ssh_tunnel,
             commands::connection::connect_db,
             commands::connection::connection_final_proxy_port,
             commands::connection::disconnect_db,

@@ -92,6 +92,7 @@ const DATABASE_TYPE_OBJECTS = new Map<DatabaseType, SidebarObjectKind[]>([
   ["neo4j", TABLE_VIEW_OBJECTS],
   // others
   ["influxdb", ["TABLE"]],
+  ["influxdb3", ["TABLE"]],
   ["victoriametrics", ["TABLE"]],
   ["hbase", ["TABLE"]],
   ["questdb", ["TABLE", "VIEW", "MATERIALIZED_VIEW"]],

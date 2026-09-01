@@ -124,7 +124,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
+import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey } from "@/lib/sql/queryExecutionState";
 import {
   databaseDisplayNameForTab,
   executionSummaryItems,
@@ -491,6 +491,7 @@ const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
+const activeResultIsLoading = computed(() => isActiveResultLoading(props.activeTab));
 const showResultRunTabs = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "tabs");
 const showResultRunSelector = computed(() => resultRuns.value.length > 0 && resultRunDisplayMode.value === "list");
 const canCloseQueryResult = computed(() => props.activeTab.mode === "query" && !props.activeTab.isExecuting && !props.activeTab.activeResultRunId && (!!props.activeTab.result || !!props.activeTab.results?.length || props.activeTab.resultEvicted === true));
@@ -1784,7 +1785,7 @@ defineExpose({
                 :initial-order-by-input="activeTab.orderByInput"
                 :sql="activeResultSql"
                 :export-sql="activeResultExportSql"
-                :loading="activeTab.isExecuting"
+                :loading="activeResultIsLoading"
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
                 :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
@@ -1806,6 +1807,7 @@ defineExpose({
                 :page-offset="activeTab.resultPageOffset"
                 :page-limit="activeTab.resultPageLimit"
                 :count-sql="activeTab.resultCountSql"
+                :count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"
                 :total-row-count="activeTab.resultTotalRowCount"
                 :total-row-count-is-exact="activeTab.resultTotalRowCount !== undefined || activeTab.result.total_is_exact !== false"
                 :total-row-count-loading="activeTab.resultTotalRowCountLoading"

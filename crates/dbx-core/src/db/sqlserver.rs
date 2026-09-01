@@ -49,7 +49,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         DECLARE @dbx_probe_object nvarchar(258) = N'tempdb..' + QUOTENAME(@dbx_probe_table); \
         DECLARE @dbx_probe_sql nvarchar(max); \
         BEGIN TRY \
-            SET @dbx_probe_sql = N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
+            SET @dbx_probe_sql = @P4 + N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
                 N' FROM ' + @P3; \
             EXEC sys.sp_executesql @dbx_probe_sql; \
             SELECT c.name, TYPE_NAME(c.system_type_id) AS system_type_name, \
@@ -716,6 +716,7 @@ impl SqlServerUnsafeTypeQuery {
 
 #[derive(Debug, PartialEq, Eq)]
 struct SqlServerLegacyProbe {
+    prefix: String,
     source_sql: String,
     output_names: Option<Vec<Option<String>>>,
     output_name_overrides: Vec<SqlServerProbeOutputNameOverride>,
@@ -769,9 +770,10 @@ async fn describe_sqlserver_result_set_with_mode(
     // SQL Server 2008 has no first-result-set DMV. Keep one probe round trip by
     // selecting the modern DMV path server-side and using metadata-only execution otherwise.
     let force_legacy = i32::from(force_legacy);
-    let mut stream = sqlserver_driver_result(
-        client.query(SQLSERVER_RESULT_TYPE_PROBE_SQL, &[&sql, &force_legacy, &legacy_probe.source_sql]),
-    )
+    let mut stream = sqlserver_driver_result(client.query(
+        SQLSERVER_RESULT_TYPE_PROBE_SQL,
+        &[&sql, &force_legacy, &legacy_probe.source_sql, &legacy_probe.prefix],
+    ))
     .await?;
     let mut active_result_index = None;
     let mut uses_describe_dmv = None;
@@ -997,7 +999,7 @@ fn sqlserver_legacy_probe_with_nonce(sql: &str, nonce: &str) -> Option<SqlServer
     } else {
         (format!("({}) AS {source_alias}", statement.inner), Vec::new())
     };
-    Some(SqlServerLegacyProbe { source_sql, output_names, output_name_overrides })
+    Some(SqlServerLegacyProbe { prefix: statement.prefix, source_sql, output_names, output_name_overrides })
 }
 
 fn sqlserver_projection_output_names(statement: &str) -> Option<Vec<Option<String>>> {
@@ -5396,6 +5398,7 @@ mod tests {
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("sys.dm_exec_describe_first_result_set"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("##dbx_result_type_probe_"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("SELECT TOP (0) * INTO"));
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("@P4 + N'SELECT TOP (0) * INTO"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("N' FROM ' + @P3"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FROM tempdb.sys.columns"));
         assert!(!SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FMTONLY"));
@@ -5444,6 +5447,27 @@ mod tests {
             probe.output_names,
             Some(vec![Some("HJRQ".to_string()), Some("HJRQ".to_string()), Some("total".to_string()), None])
         );
+        assert_eq!(probe.prefix, "");
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_preserves_cte_prefix() {
+        let probe = sqlserver_legacy_probe(
+            ";WITH source AS (\n    SELECT 1 AS num -- keep the CTE line break\n)\nSELECT num FROM source;",
+        )
+        .unwrap();
+
+        assert_eq!(probe.prefix, ";WITH source AS (\n    SELECT 1 AS num -- keep the CTE line break\n)\n");
+        assert_eq!(probe.source_sql, "(SELECT num FROM source) AS [dbx_probe_source]([dbx_col_1])");
+        assert_eq!(probe.output_names, Some(vec![Some("num".to_string())]));
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_preserves_comments_before_select() {
+        let probe = sqlserver_legacy_probe("-- result query\n/* keep this block */ SELECT 1 AS num").unwrap();
+
+        assert_eq!(probe.prefix, "-- result query\n/* keep this block */ ");
+        assert_eq!(probe.source_sql, "(SELECT 1 AS num) AS [dbx_probe_source]([dbx_col_1])");
     }
 
     #[test]
@@ -5731,8 +5755,24 @@ mod tests {
         let variant = super::execute_query(&mut client, sql).await.unwrap();
         assert_eq!(variant.rows, vec![vec![serde_json::json!(1), serde_json::json!("legacy")]]);
 
+        let simple_cte_sql = "WITH t AS (SELECT 1 AS num) SELECT num FROM t";
+        let simple_cte_probe = super::sqlserver_legacy_probe(simple_cte_sql).unwrap();
+        let simple_cte_legacy_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, simple_cte_sql, &simple_cte_probe, true)
+                .await
+                .unwrap();
+        assert_eq!(simple_cte_legacy_columns.len(), 1);
+        assert_eq!(simple_cte_legacy_columns[0].system_type_name.as_deref(), Some("int"));
+        let simple_cte = super::execute_query(&mut client, simple_cte_sql).await.unwrap();
+        assert_eq!(simple_cte.rows, vec![vec![serde_json::json!(1)]]);
+
         let cte_sql = "WITH source AS (SELECT id, payload FROM #dbx_issue_4002) SELECT id, payload FROM source";
         assert!(super::is_single_sqlserver_select(cte_sql));
+        let cte_probe = super::sqlserver_legacy_probe(cte_sql).unwrap();
+        let cte_legacy_columns =
+            super::describe_sqlserver_result_set_with_mode(&mut client, cte_sql, &cte_probe, true).await.unwrap();
+        assert_eq!(cte_legacy_columns.len(), 2);
+        assert!(is_sqlserver_variant_column(&cte_legacy_columns[1]));
         let cte_variant = super::execute_query(&mut client, cte_sql).await.unwrap();
         assert_eq!(cte_variant.rows, vec![vec![serde_json::json!(1), serde_json::json!("legacy")]]);
 
@@ -5757,6 +5797,7 @@ mod tests {
 
         let wildcard_sql = "SELECT ybbz, cytzrq, jzrq, * FROM #dbx_issue_4002";
         let previous_wildcard_probe = super::SqlServerLegacyProbe {
+            prefix: String::new(),
             source_sql: format!("({wildcard_sql}) AS [dbx_probe_source]"),
             output_names: None,
             output_name_overrides: Vec::new(),

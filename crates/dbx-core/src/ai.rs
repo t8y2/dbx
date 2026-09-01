@@ -68,6 +68,7 @@ pub enum AiProvider {
     Openai,
     Gemini,
     Deepseek,
+    Kimi,
     Qwen,
     MiniMax,
     Ollama,
@@ -100,6 +101,7 @@ impl AiProvider {
             AiProvider::Openai => "openai",
             AiProvider::Gemini => "gemini",
             AiProvider::Deepseek => "deepseek",
+            AiProvider::Kimi => "kimi",
             AiProvider::Qwen => "qwen",
             AiProvider::MiniMax => "minimax",
             AiProvider::Ollama => "ollama",
@@ -794,6 +796,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
     match config.provider {
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -1548,6 +1551,7 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
             | AiProvider::Openai
             | AiProvider::Gemini
             | AiProvider::Deepseek
+            | AiProvider::Kimi
             | AiProvider::Qwen
             | AiProvider::MiniMax
     )
@@ -1555,6 +1559,16 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
 
 fn normalized_api_key(config: &AiConfig) -> &str {
     config.api_key.trim()
+}
+
+fn is_jalapeno_config(config: &AiConfig) -> bool {
+    if !matches!(config.provider, AiProvider::OpenaiCompatible) {
+        return false;
+    }
+    reqwest::Url::parse(config.endpoint.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("api.jalapeno-cloud.ai")))
+        .unwrap_or(false)
 }
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
@@ -1591,6 +1605,9 @@ fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
 pub fn maybe_bearer_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if is_jalapeno_config(config) {
+        headers.insert("HTTP-Referer", HeaderValue::from_static("https://dbxio.com"));
+    }
     let api_key = normalized_api_key(config);
     if !api_key.is_empty() {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| e.to_string())?);
@@ -2009,6 +2026,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
@@ -3044,6 +3062,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::Ollama
@@ -3105,6 +3124,7 @@ pub async fn stream(
         }
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -5942,6 +5962,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_provider_uses_openai_compatible_endpoints_and_requires_an_api_key() {
+        let config = AiConfig {
+            provider: AiProvider::Kimi,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.moonshot.cn/v1".to_string(),
+            model: "kimi-k2.5".to_string(),
+            ..test_config(AiProvider::Kimi)
+        };
+
+        assert_eq!(resolve_endpoint(&config), "https://api.moonshot.cn/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.moonshot.cn/v1/models");
+        assert!(provider_requires_api_key(&config.provider));
+        assert_eq!(
+            validate_config(&AiConfig { api_key: String::new(), ..config.clone() }).unwrap_err(),
+            "API key is required"
+        );
+
+        let provider_json = serde_json::to_string(&AiProvider::Kimi).unwrap();
+        assert_eq!(provider_json, r#""kimi""#);
+        assert!(matches!(serde_json::from_str::<AiProvider>(&provider_json).unwrap(), AiProvider::Kimi));
+    }
+
+    #[test]
     fn auto_adds_v1_to_openai_compatible_endpoints() {
         // Endpoint without /v1 — auto add
         let config = AiConfig {
@@ -6146,6 +6190,22 @@ mod tests {
 
         config.custom_headers = HashMap::from([("X-Test".to_string(), "bad\r\nvalue".to_string())]);
         assert!(maybe_bearer_headers(&config).unwrap_err().contains("Invalid AI custom header value"));
+    }
+
+    #[test]
+    fn jalapeno_requests_include_dbx_referer() {
+        let mut config = test_config(AiProvider::OpenaiCompatible);
+        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
+
+        let headers = maybe_bearer_headers(&config).unwrap();
+        assert_eq!(headers.get("HTTP-Referer").unwrap(), "https://dbxio.com");
+
+        config.endpoint = "https://api.jalapeno-cloud.ai.example.com/v1".to_string();
+        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
+
+        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
+        config.provider = AiProvider::Custom;
+        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
     }
 
     #[test]
@@ -8083,6 +8143,7 @@ mod tests {
             AiProvider::Custom,
             AiProvider::Gemini,
             AiProvider::Deepseek,
+            AiProvider::Kimi,
             AiProvider::Qwen,
             AiProvider::Ollama,
             AiProvider::MiniMax,

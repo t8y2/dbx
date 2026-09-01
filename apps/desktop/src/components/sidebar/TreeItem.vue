@@ -256,7 +256,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       const databaseType = node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
       if (isXuguPublicSynonymTreeNode(databaseType, node.type, node.schema)) return { icon: Link2, colorClass: "text-sky-500" };
       if (isXuguSchedulerJobTreeNode(databaseType, node.type, node.schema)) return { icon: CalendarClock, colorClass: "text-primary" };
-      return { icon: FolderOpen, colorClass: "text-sky-400" };
+      return { icon: FolderOpen, colorClass: "text-amber-500" };
     }
     case "table":
       return { icon: Table, colorClass: "text-green-500" };

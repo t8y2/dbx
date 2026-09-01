@@ -30,6 +30,7 @@ describe("ContentArea query result grid", () => {
     expect(queryGridBlock).toContain("<DataGrid");
     expect(queryGridBlock).toContain(':connection-id="activeResultConnectionId"');
     expect(queryGridBlock).toContain(':count-sql="activeTab.resultCountSql"');
+    expect(queryGridBlock).toContain(':count-total-rows="activeTab.resultCountSql ? () => queryStore.countTabResultRows(activeTab.id) : undefined"');
     expect(queryGridBlock).toContain(':total-row-count="activeTab.resultTotalRowCount"');
     expect(queryGridBlock).toContain(':total-row-count-loading="activeTab.resultTotalRowCountLoading"');
   });

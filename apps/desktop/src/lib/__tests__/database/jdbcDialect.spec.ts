@@ -427,6 +427,41 @@ describe("object tree node schema", () => {
     expect(metadataSchemaForConnection(connection, resourcePath, resourcePath)).toBe("");
   });
 
+  it("never uses the database name as the schema when a schema-tree engine has no schema yet", () => {
+    // Query tabs can reach locate/metadata paths before a schema is picked (a
+    // toolbar "new query" tab, or an external .sql file reopened from disk).
+    // PostgreSQL and its relatives keep tables under a separate schema level, so
+    // `schema || database` sends "dbx_test" as the schema and matches nothing —
+    // locate in the sidebar silently does nothing (issue #7648). The blank schema
+    // lets the backend resolve the session default instead.
+    for (const dbType of ["postgres", "gaussdb", "opengauss", "kingbase", "redshift", "duckdb"] as const) {
+      expect(connectionObjectTreeQuerySchema({ db_type: dbType }, "dbx_test")).toBe("");
+      expect(connectionObjectTreeNodeSchema({ db_type: dbType }, "dbx_test")).toBeUndefined();
+      expect(metadataSchemaForConnection({ db_type: dbType }, "dbx_test")).toBe("");
+      // An explicit schema still wins, and the database name is a legitimate
+      // schema name when the user really did select it.
+      expect(connectionObjectTreeQuerySchema({ db_type: dbType }, "dbx_test", "public")).toBe("public");
+      expect(connectionObjectTreeNodeSchema({ db_type: dbType }, "dbx_test", "public")).toBe("public");
+    }
+    // SQL Server keeps its own dbo default for metadata lookups.
+    expect(connectionObjectTreeQuerySchema({ db_type: "sqlserver" }, "dbx_test")).toBe("");
+    expect(connectionObjectTreeNodeSchema({ db_type: "sqlserver" }, "dbx_test")).toBeUndefined();
+    expect(metadataSchemaForConnection({ db_type: "sqlserver" }, "dbx_test")).toBe("dbo");
+  });
+
+  it("keeps the database-as-schema fallback for engines whose database is the schema", () => {
+    // Oracle, Dameng and the Hive family address objects as schema.table with no
+    // separate schema level in the tree, so the database name is the schema there
+    // and must survive the fix above.
+    expect(connectionObjectTreeNodeSchema({ db_type: "oracle" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeQuerySchema({ db_type: "oracle" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeNodeSchema({ db_type: "dameng" }, "DBX_TEST")).toBe("DBX_TEST");
+    expect(connectionObjectTreeNodeSchema({ db_type: "hive" }, "CS")).toBe("CS");
+    expect(connectionObjectTreeNodeSchema({ db_type: "spark" }, "CS")).toBe("CS");
+    // Flat engines keep returning no tree schema at all.
+    expect(connectionObjectTreeNodeSchema({ db_type: "mysql" }, "shop")).toBeUndefined();
+  });
+
   it("keeps the database-as-schema fallback for flat engines and blanks it for Cloud Spanner", () => {
     // Editor completion paths send the database name as the metadata schema when a
     // connection has no schema level; only Spanner must send a blank schema instead.

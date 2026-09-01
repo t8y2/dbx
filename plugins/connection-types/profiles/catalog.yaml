@@ -700,6 +700,14 @@ profiles:
     port: 8086
     user: ""
     category: timeseries
+  - id: influxdb3
+    dbType: influxdb3
+    label: InfluxDB 3.x
+    icon: InfluxDB
+    pickerIcon: influxdb
+    port: 8181
+    user: ""
+    category: timeseries
   - id: victoriametrics
     dbType: victoriametrics
     label: VictoriaMetrics

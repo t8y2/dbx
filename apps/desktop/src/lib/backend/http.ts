@@ -374,6 +374,10 @@ export async function testConnection(config: ConnectionConfig): Promise<string> 
   return post("/api/connection/test", { config });
 }
 
+export async function testSshTunnel(config: ConnectionConfig): Promise<string> {
+  return post("/api/connection/test-ssh-tunnel", { config });
+}
+
 export async function testConnectionWithInfo(config: ConnectionConfig): Promise<ConnectionTestResult> {
   const response = await fetch(apiUrl("/api/connection/test-info"), {
     method: "POST",

@@ -178,6 +178,27 @@ func TestTreeTimeColumnPresentationDoesNotRewriteOrdinaryInt64(t *testing.T) {
 	}
 }
 
+func TestTreeTimeAggregationColumnsPresentAsTimestamps(t *testing.T) {
+	columns := []string{
+		"max_time(root.db.d1.s1)",
+		"MIN_TIME(root.db.d1.s1)",
+		" max_time(root.db.d1.s1) ",
+		"avg(root.db.d1.s1)",
+		"count(root.db.d1.s1)",
+	}
+	got := normalizedColumnTypes([]string{"INT64", "INT64", "INT64", "DOUBLE", "INT64"}, columns, client.TreeSqlDialect, "ms")
+	want := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "DOUBLE", "INT64"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected tree aggregation types: %#v", got)
+	}
+	if name := normalizedColumnTypes([]string{"INT64"}, []string{"max_timer(root.db.d1.s1)"}, client.TreeSqlDialect, "ms"); !reflect.DeepEqual(name, []string{"INT64"}) {
+		t.Fatalf("unrelated prefix must stay INT64: %#v", name)
+	}
+	if table := normalizedColumnTypes([]string{"INT64"}, []string{"max_time(t1.s1)"}, client.TableSqlDialect, "ms"); !reflect.DeepEqual(table, []string{"INT64"}) {
+		t.Fatalf("table dialect must stay INT64: %#v", table)
+	}
+}
+
 func TestClassifyIoTDBErrors(t *testing.T) {
 	canceled := classifyRPCError("execute_query", "session-1", context.Canceled)
 	if canceled.Data.Category != "canceled" || canceled.Data.SessionDisposition != "quarantine" {

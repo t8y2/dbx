@@ -3,7 +3,6 @@ use deadpool_postgres::{ManagerConfig, Pool, PoolError, RecyclingMethod, Runtime
 use futures::{SinkExt, StreamExt};
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
 use percent_encoding::percent_decode_str;
-use rust_decimal::Decimal;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::client::verify_server_cert_signed_by_trust_anchor;
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
@@ -13,6 +12,7 @@ use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
@@ -165,6 +165,77 @@ impl<'a> FromSql<'a> for PgAnyString {
     fn accepts(_: &Type) -> bool {
         true
     }
+}
+
+struct PgNumeric(String);
+
+impl<'a> FromSql<'a> for PgNumeric {
+    fn from_sql(_: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        decode_pg_numeric_bytes(raw).map(Self).ok_or_else(|| "invalid PostgreSQL numeric binary value".into())
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::NUMERIC
+    }
+}
+
+fn decode_pg_numeric_bytes(raw: &[u8]) -> Option<String> {
+    const POSITIVE: u16 = 0x0000;
+    const NEGATIVE: u16 = 0x4000;
+    const NAN: u16 = 0xC000;
+    const POSITIVE_INFINITY: u16 = 0xD000;
+    const NEGATIVE_INFINITY: u16 = 0xF000;
+
+    let digit_count = usize::from(u16::from_be_bytes(raw.get(0..2)?.try_into().ok()?));
+    let weight = i16::from_be_bytes(raw.get(2..4)?.try_into().ok()?);
+    let sign = u16::from_be_bytes(raw.get(4..6)?.try_into().ok()?);
+    let scale = usize::from(u16::from_be_bytes(raw.get(6..8)?.try_into().ok()?));
+    let expected_len = digit_count.checked_mul(2)?.checked_add(8)?;
+    if raw.len() != expected_len {
+        return None;
+    }
+    match sign {
+        NAN => return Some("NaN".to_string()),
+        POSITIVE_INFINITY => return Some("Infinity".to_string()),
+        NEGATIVE_INFINITY => return Some("-Infinity".to_string()),
+        POSITIVE | NEGATIVE => {}
+        _ => return None,
+    }
+
+    let digits = raw[8..].chunks_exact(2).map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]])).collect::<Vec<_>>();
+    if digits.iter().any(|digit| *digit > 9999) {
+        return None;
+    }
+
+    let integer_groups = if weight >= 0 { usize::try_from(weight).ok()?.checked_add(1)? } else { 0 };
+    let fractional_groups = scale.checked_add(3)? / 4;
+    let mut text = String::with_capacity(integer_groups.saturating_mul(4).max(1).saturating_add(scale + 2));
+    if sign == NEGATIVE && digits.iter().any(|digit| *digit != 0) {
+        text.push('-');
+    }
+    if integer_groups == 0 {
+        text.push('0');
+    } else {
+        for group_index in 0..integer_groups {
+            let digit = digits.get(group_index).copied().unwrap_or(0);
+            if group_index == 0 {
+                write!(&mut text, "{digit}").ok()?;
+            } else {
+                write!(&mut text, "{digit:04}").ok()?;
+            }
+        }
+    }
+    if scale > 0 {
+        text.push('.');
+        let fractional_start = text.len();
+        for group_index in 0..fractional_groups {
+            let digit_index = i32::from(weight) + 1 + i32::try_from(group_index).ok()?;
+            let digit = usize::try_from(digit_index).ok().and_then(|index| digits.get(index)).copied().unwrap_or(0);
+            write!(&mut text, "{digit:04}").ok()?;
+        }
+        text.truncate(fractional_start + scale);
+    }
+    Some(text)
 }
 
 /// PostgreSQL `money` is sent in the binary protocol as a signed 64-bit
@@ -555,8 +626,8 @@ fn pg_array_to_json_value(row: &Row, idx: usize) -> Option<serde_json::Value> {
     if let Ok(values) = row.try_get::<_, Vec<Option<bool>>>(idx) {
         return Some(pg_optional_array_to_json(values, serde_json::Value::Bool));
     }
-    if let Ok(values) = row.try_get::<_, Vec<Option<Decimal>>>(idx) {
-        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
+    if let Ok(values) = row.try_get::<_, Vec<Option<PgNumeric>>>(idx) {
+        return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.0)));
     }
     if let Ok(values) = row.try_get::<_, Vec<Option<uuid::Uuid>>>(idx) {
         return Some(pg_optional_array_to_json(values, |v| serde_json::Value::String(v.to_string())));
@@ -818,10 +889,9 @@ pub(crate) fn pg_value_to_json_classified(row: &Row, idx: usize, col_type: PgCol
                 PgTemporalFallback::Probe => pg_fallback_value_to_json(row, idx),
             }
         }
-        PgColType::Numeric => row
-            .try_get::<_, Decimal>(idx)
-            .map(|v: Decimal| serde_json::Value::String(v.to_string()))
-            .unwrap_or(serde_json::Value::Null),
+        PgColType::Numeric => {
+            row.try_get::<_, PgNumeric>(idx).map(|v| serde_json::Value::String(v.0)).unwrap_or(serde_json::Value::Null)
+        }
         PgColType::Money => row
             .try_get::<_, PgMoney>(idx)
             .map(|v| serde_json::Value::String(format_pg_money(v.0)))
@@ -8151,6 +8221,92 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_postgres::types::FromSql;
+
+    fn postgres_numeric_binary(weight: i16, sign: u16, scale: u16, digits: &[u16]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(8 + digits.len() * 2);
+        raw.extend_from_slice(&u16::try_from(digits.len()).unwrap().to_be_bytes());
+        raw.extend_from_slice(&weight.to_be_bytes());
+        raw.extend_from_slice(&sign.to_be_bytes());
+        raw.extend_from_slice(&scale.to_be_bytes());
+        for digit in digits {
+            raw.extend_from_slice(&digit.to_be_bytes());
+        }
+        raw
+    }
+
+    fn postgres_numeric_array_binary(values: &[Option<Vec<u8>>]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1_i32.to_be_bytes());
+        raw.extend_from_slice(&i32::from(values.iter().any(Option::is_none)).to_be_bytes());
+        raw.extend_from_slice(&Type::NUMERIC.oid().to_be_bytes());
+        raw.extend_from_slice(&i32::try_from(values.len()).unwrap().to_be_bytes());
+        raw.extend_from_slice(&1_i32.to_be_bytes());
+        for value in values {
+            if let Some(value) = value {
+                raw.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+                raw.extend_from_slice(value);
+            } else {
+                raw.extend_from_slice(&(-1_i32).to_be_bytes());
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn postgres_numeric_binary_values_preserve_arbitrary_precision() {
+        assert_eq!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0x0000, 0, &[])).as_deref(), Some("0"));
+        assert_eq!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0x0000, 2, &[])).as_deref(), Some("0.00"));
+        assert_eq!(
+            decode_pg_numeric_bytes(&postgres_numeric_binary(1, 0x0000, 4, &[1, 2345, 6789])).as_deref(),
+            Some("12345.6789")
+        );
+        assert_eq!(
+            decode_pg_numeric_bytes(&postgres_numeric_binary(-1, 0x4000, 7, &[12, 3000])).as_deref(),
+            Some("-0.0012300")
+        );
+
+        let tiny = decode_pg_numeric_bytes(&postgres_numeric_binary(-77, 0x0000, 307, &[10])).unwrap();
+        assert_eq!(tiny, format!("0.{}1", "0".repeat(306)));
+        assert_eq!(tiny.len(), 309);
+
+        let mut huge_digits = vec![9];
+        huge_digits.extend(std::iter::repeat_n(9999, 77));
+        let huge = "9".repeat(309);
+        assert_eq!(
+            decode_pg_numeric_bytes(&postgres_numeric_binary(77, 0x0000, 0, &huge_digits)).as_deref(),
+            Some(huge.as_str())
+        );
+
+        let decoded = PgNumeric::from_sql(&Type::NUMERIC, &postgres_numeric_binary(-77, 0x0000, 307, &[10])).unwrap();
+        assert_eq!(decoded.0, tiny);
+        assert!(PgNumeric::accepts(&Type::NUMERIC));
+        assert!(!PgNumeric::accepts(&Type::INT8));
+
+        let array_raw = postgres_numeric_array_binary(&[
+            Some(postgres_numeric_binary(-77, 0x0000, 307, &[10])),
+            None,
+            Some(postgres_numeric_binary(77, 0x0000, 0, &huge_digits)),
+        ]);
+        let array = Vec::<Option<PgNumeric>>::from_sql(&Type::NUMERIC_ARRAY, &array_raw).unwrap();
+        assert_eq!(
+            array.into_iter().map(|value| value.map(|value| value.0)).collect::<Vec<_>>(),
+            vec![Some(tiny), None, Some(huge)]
+        );
+    }
+
+    #[test]
+    fn postgres_numeric_binary_values_preserve_special_values_and_reject_malformed_payloads() {
+        assert_eq!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0xC000, 0, &[])).as_deref(), Some("NaN"));
+        assert_eq!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0xD000, 0, &[])).as_deref(), Some("Infinity"));
+        assert_eq!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0xF000, 0, &[])).as_deref(), Some("-Infinity"));
+        assert!(decode_pg_numeric_bytes(&[]).is_none());
+        assert!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0x8000, 0, &[])).is_none());
+        assert!(decode_pg_numeric_bytes(&postgres_numeric_binary(0, 0x0000, 0, &[10_000])).is_none());
+
+        let mut trailing_bytes = postgres_numeric_binary(0, 0x0000, 0, &[1]);
+        trailing_bytes.push(0);
+        assert!(decode_pg_numeric_bytes(&trailing_bytes).is_none());
+    }
 
     #[test]
     fn postgres_money_binary_values_are_decoded_with_two_decimal_places() {

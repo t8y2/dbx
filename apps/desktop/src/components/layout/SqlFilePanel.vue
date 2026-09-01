@@ -255,7 +255,7 @@ async function openFile(path: string) {
   try {
     const snapshot = await api.readExternalSqlFileSnapshot(path);
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog);
+    queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
     if (isExternalSqlFileTooLargeError(e)) {
       executeFile(path);

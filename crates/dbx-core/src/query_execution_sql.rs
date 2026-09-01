@@ -161,6 +161,7 @@ pub fn supports_sql_query(database_type: DatabaseType) -> bool {
             | DatabaseType::Weaviate
             | DatabaseType::ChromaDb
             | DatabaseType::InfluxDb
+            | DatabaseType::InfluxDb3
             | DatabaseType::VictoriaMetrics
             | DatabaseType::Neo4j
             | DatabaseType::Etcd

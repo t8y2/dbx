@@ -237,12 +237,28 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
   return type && DATABASE_AS_EXECUTION_SCHEMA_TYPES.has(type) ? database || undefined : undefined;
 }
 
+/**
+ * Whether the database name is a wrong guess for an unknown schema. Engines that keep tables under a
+ * dedicated schema level in the tree (PostgreSQL and relatives, SQL Server, DB2, Trino, generic JDBC)
+ * address objects as database.schema.table, so the database name matches no schema there. Oracle,
+ * Dameng and the Hive family are schema-aware without that level — their database *is* the schema —
+ * and must keep the `schema || database` fallback.
+ */
+function databaseNameIsNotASchema(type: DatabaseType | undefined): boolean {
+  return isSchemaAware(type) && usesTreeSchemaMode(type);
+}
+
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
   const type = effectiveDatabaseTypeForConnection(connection);
   if (type === "informix") return schema || "";
   if (type === "spanner") return spannerObjectTreeSchema(schema);
+  // A query tab that never picked a schema (toolbar "new query", a reopened .sql
+  // file) would otherwise send the database name and match no objects at all, so
+  // sidebar locate silently did nothing (issue #7648). The blank schema is the
+  // established "resolve it on the backend" value used by the completion paths.
+  if (!schema && databaseNameIsNotASchema(type)) return "";
   return schema || database;
 }
 
@@ -272,6 +288,7 @@ export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection
   if (type === "sqlite") return schema || database;
   if (type === "spanner") return spannerObjectTreeSchema(schema);
   if (!type) return schema;
+  if (!schema && databaseNameIsNotASchema(type)) return undefined;
   return isSchemaAware(type) ? schema || database : undefined;
 }
 

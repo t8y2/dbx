@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
+import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -978,8 +979,7 @@ describe("queryStore multi-statement errors", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
-    await store.executeCurrentSql("SELECT 1 AS value");
-    store.toggleResultAutoSave(tabId);
+    await store.executeCurrentSql("SELECT 1 AS value", { openInNewResultTab: true });
     const tab = store.tabs.find((item) => item.id === tabId)!;
     const retainedRunId = tab.activeResultRunId!;
     const retainedRunCacheKey = tab.resultRuns?.find((run) => run.id === retainedRunId)?.resultCacheKey;
@@ -987,11 +987,16 @@ describe("queryStore multi-statement errors", () => {
 
     const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
     await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    expect(tab.executingResultRunId).toBeNull();
+    expect(isActiveResultLoading(tab)).toBe(true);
     expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
     expect(tab.batchSqlExecution?.submittedSql).toBe("SELECT 1 AS value");
+    expect(isActiveResultLoading(tab)).toBe(false);
     pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
     await execution;
 
+    expect(tab.executingResultRunId).toBeUndefined();
+    expect(isActiveResultLoading(tab)).toBe(false);
     expect(tab.resultRuns).toHaveLength(2);
     expect(tab.activeResultRunId).not.toBe(retainedRunId);
     expect(tab.result).toMatchObject({ rows: [[2]] });
@@ -1014,6 +1019,28 @@ describe("queryStore multi-statement errors", () => {
     expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
     expect(tab.result).toMatchObject({ rows: [[1]] });
     expect(tab.batchSqlExecution?.submittedSql).toBe("SELECT 1 AS value");
+  });
+
+  it("keeps loading scoped to the result run being rerun", async () => {
+    const pendingExecution = deferred<Array<{ columns: string[]; rows: number[][]; affected_rows: number; execution_time_ms: number }>>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value", { openInNewResultTab: true });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const executingRunId = tab.activeResultRunId!;
+
+    const execution = store.executeCurrentSql("SELECT 2 AS value");
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+
+    expect(tab.executingResultRunId).toBe(executingRunId);
+    expect(isActiveResultLoading(tab)).toBe(true);
+    pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    await execution;
+
+    expect(tab.executingResultRunId).toBeUndefined();
+    expect(isActiveResultLoading(tab)).toBe(false);
   });
 
   it("restores the retained result when a new-result execution returns no result", async () => {

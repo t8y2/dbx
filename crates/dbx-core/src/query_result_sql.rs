@@ -274,8 +274,8 @@ pub fn build_paginated_query_sql(options: PaginatedQuerySqlOptions) -> QuerySqlB
             if options.database_type == Some(DatabaseType::Kingbase) && has_top_level_top(&statement) {
                 return err("unsupported");
             }
-            let dedup_count = dedup_projection_count_without_order_by(&options.original_sql);
-            ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_count))
+            let dedup_order_by = dedup_projection_count_without_order_by(&options.original_sql);
+            ok(add_standard_limit(&statement, options.database_type, safe_limit, safe_offset, dedup_order_by))
         }
     }
 }
@@ -1695,9 +1695,9 @@ fn add_standard_limit(
     database_type: Option<DatabaseType>,
     limit: usize,
     offset: usize,
-    dedup_projection_count: Option<usize>,
+    dedup_order_by: Option<Vec<usize>>,
 ) -> String {
-    let order_sql = dedup_projection_count.map_or(String::new(), format_positional_order_by);
+    let order_sql = dedup_order_by.as_deref().map_or(String::new(), format_positional_order_by);
 
     if has_top_level_limit(statement) {
         if !order_sql.is_empty() {
@@ -1877,17 +1877,20 @@ fn line_has_open_line_comment(line: &str) -> bool {
 /// returns deterministic results across pages.  This is especially important for
 /// distributed databases (e.g. Doris, StarRocks) where tablet scan order varies
 /// between independent query executions.
-fn format_positional_order_by(column_count: usize) -> String {
-    if column_count == 0 {
+fn format_positional_order_by(positions: &[usize]) -> String {
+    if positions.is_empty() {
         return String::new();
     }
-    let cols: Vec<String> = (1..=column_count).map(|i| i.to_string()).collect();
+    let cols: Vec<String> = positions.iter().map(|position| position.to_string()).collect();
     format!(" ORDER BY {}", cols.join(", "))
 }
 
 /// Detect dedup queries (SELECT DISTINCT, GROUP BY, HAVING) that lack a
-/// top-level ORDER BY clause.  Returns the number of projection items so that
-/// a positional ORDER BY can be injected for deterministic pagination.
+/// top-level ORDER BY clause.  Returns the 1-based projection positions to sort
+/// on so that a positional ORDER BY can be injected for deterministic pagination.
+///
+/// A GROUP BY query sorts on its grouping keys alone: the keys already identify
+/// an output row uniquely, and some engines reject sorting on aggregate outputs.
 ///
 /// Returns `None` for:
 ///   - Non-SELECT queries
@@ -1895,7 +1898,7 @@ fn format_positional_order_by(column_count: usize) -> String {
 ///   - Queries that already specify ORDER BY
 ///   - Wildcard projections (`SELECT *`)
 ///   - Parse failures
-fn dedup_projection_count_without_order_by(sql: &str) -> Option<usize> {
+fn dedup_projection_count_without_order_by(sql: &str) -> Option<Vec<usize>> {
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, sql).ok()?;
     let [Statement::Query(query)] = statements.as_slice() else {
@@ -1918,7 +1921,55 @@ fn dedup_projection_count_without_order_by(sql: &str) -> Option<usize> {
     if select.projection.len() == 1 && matches!(select.projection.first(), Some(SelectItem::Wildcard(_))) {
         return None;
     }
-    Some(select.projection.len())
+    let all_positions: Vec<usize> = (1..=select.projection.len()).collect();
+    if has_distinct {
+        return Some(all_positions);
+    }
+    if let GroupByExpr::Expressions(exprs, _) = &select.group_by {
+        if let Some(positions) = group_by_key_positions(exprs, &select.projection) {
+            return Some(positions);
+        }
+    }
+    Some(all_positions)
+}
+
+/// Map every GROUP BY key onto the 1-based position of the output column that
+/// exposes it.  Returns `None` when a key is not projected (sorting on the keys
+/// alone is then impossible) or when a wildcard hides which position is which,
+/// so callers fall back to sorting on the full projection.
+fn group_by_key_positions(group_by: &[Expr], projection: &[SelectItem]) -> Option<Vec<usize>> {
+    if group_by.is_empty() {
+        return None;
+    }
+    if !projection.iter().all(|item| matches!(item, SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. })) {
+        return None;
+    }
+    let mut positions: Vec<usize> = Vec::with_capacity(group_by.len());
+    for key in group_by {
+        let position = group_by_key_position(key, projection)?;
+        if !positions.contains(&position) {
+            positions.push(position);
+        }
+    }
+    positions.sort_unstable();
+    Some(positions)
+}
+
+fn group_by_key_position(key: &Expr, projection: &[SelectItem]) -> Option<usize> {
+    // `GROUP BY 1` is already a projection position.
+    if let Expr::Value(ValueWithSpan { value: Value::Number(number, _), .. }) = key {
+        let position = number.parse::<usize>().ok()?;
+        return (1..=projection.len()).contains(&position).then_some(position);
+    }
+    let key_sql = key.to_string();
+    projection
+        .iter()
+        .position(|item| match item {
+            SelectItem::UnnamedExpr(expr) => expr.to_string() == key_sql,
+            SelectItem::ExprWithAlias { expr, alias } => alias.value == key_sql || expr.to_string() == key_sql,
+            _ => false,
+        })
+        .map(|index| index + 1)
 }
 
 fn find_top_level_trailing_order_by(sql: &str) -> Option<usize> {
@@ -4689,12 +4740,15 @@ WHERE u.id = picked.id;
 
     #[test]
     fn dedup_count_detects_distinct_query_without_order_by() {
-        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a, b, c FROM t"), Some(3));
+        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a, b, c FROM t"), Some(vec![1, 2, 3]));
     }
 
     #[test]
     fn dedup_count_detects_group_by_query() {
-        assert_eq!(dedup_projection_count_without_order_by("SELECT city, COUNT(*) FROM users GROUP BY city"), Some(2));
+        assert_eq!(
+            dedup_projection_count_without_order_by("SELECT city, COUNT(*) FROM users GROUP BY city"),
+            Some(vec![1])
+        );
     }
 
     #[test]
@@ -4750,10 +4804,7 @@ WHERE u.id = picked.id;
         });
 
         assert!(result.ok);
-        assert_eq!(
-            result.sql.unwrap(),
-            "SELECT dept, SUM(salary) FROM employees GROUP BY dept ORDER BY 1, 2 LIMIT 50;"
-        );
+        assert_eq!(result.sql.unwrap(), "SELECT dept, SUM(salary) FROM employees GROUP BY dept ORDER BY 1 LIMIT 50;");
     }
 
     #[test]
@@ -4833,7 +4884,10 @@ WHERE u.id = picked.id;
 
     #[test]
     fn dedup_count_handles_aliases() {
-        assert_eq!(dedup_projection_count_without_order_by("SELECT DISTINCT a AS x, b AS y, c AS z FROM t"), Some(3));
+        assert_eq!(
+            dedup_projection_count_without_order_by("SELECT DISTINCT a AS x, b AS y, c AS z FROM t"),
+            Some(vec![1, 2, 3])
+        );
     }
 
     #[test]
@@ -4842,7 +4896,7 @@ WHERE u.id = picked.id;
             dedup_projection_count_without_order_by(
                 "SELECT DISTINCT a + b AS sum_col, CASE WHEN c > 0 THEN 'Y' ELSE 'N' END AS flag FROM t"
             ),
-            Some(2)
+            Some(vec![1, 2])
         );
     }
 
@@ -4852,7 +4906,7 @@ WHERE u.id = picked.id;
             dedup_projection_count_without_order_by(
                 "SELECT city, COUNT(*) AS cnt, AVG(salary) AS avg_sal FROM users GROUP BY city"
             ),
-            Some(3)
+            Some(vec![1])
         );
     }
 
@@ -4888,7 +4942,7 @@ WHERE u.id = picked.id;
         assert!(result.ok);
         assert_eq!(
             result.sql.unwrap(),
-            "SELECT dept, SUM(salary) AS total, COUNT(*) AS head_count FROM emp GROUP BY dept ORDER BY 1, 2, 3 LIMIT 50 OFFSET 100;"
+            "SELECT dept, SUM(salary) AS total, COUNT(*) AS head_count FROM emp GROUP BY dept ORDER BY 1 LIMIT 50 OFFSET 100;"
         );
     }
 
@@ -4907,6 +4961,60 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT DISTINCT name, (SELECT MAX(score) FROM scores s WHERE s.uid = u.id) AS max_score FROM users u ORDER BY 1, 2 LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn group_by_order_by_skips_clickhouse_aggregate_states() {
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql:
+                "SELECT city, dept, argMaxState(name, hired_at) AS latest_hire, sumState(salary) AS payroll FROM employees GROUP BY city, dept"
+                    .to_string(),
+            database_type: Some(DatabaseType::ClickHouse),
+            limit: 100,
+            offset: 0,
+        });
+
+        assert!(result.ok);
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT city, dept, argMaxState(name, hired_at) AS latest_hire, sumState(salary) AS payroll FROM employees GROUP BY city, dept ORDER BY 1, 2 LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn group_by_order_by_matches_key_by_output_alias() {
+        assert_eq!(
+            dedup_projection_count_without_order_by(
+                "SELECT SUM(salary) AS total, dept AS team FROM employees GROUP BY team"
+            ),
+            Some(vec![2])
+        );
+    }
+
+    #[test]
+    fn group_by_order_by_accepts_positional_keys() {
+        assert_eq!(
+            dedup_projection_count_without_order_by("SELECT city, dept, COUNT(*) FROM employees GROUP BY 1, 2"),
+            Some(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn group_by_order_by_falls_back_when_key_is_not_projected() {
+        assert_eq!(
+            dedup_projection_count_without_order_by(
+                "SELECT COUNT(*) AS cnt, SUM(salary) AS total FROM employees GROUP BY city"
+            ),
+            Some(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn group_by_order_by_falls_back_for_wildcard_projection() {
+        assert_eq!(
+            dedup_projection_count_without_order_by("SELECT e.*, COUNT(*) FROM employees e GROUP BY city"),
+            Some(vec![1, 2])
         );
     }
 

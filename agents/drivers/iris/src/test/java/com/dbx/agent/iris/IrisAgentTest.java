@@ -11,6 +11,7 @@ import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -44,6 +45,75 @@ class IrisAgentTest {
             Collections.singletonList("SQLUSER"),
             IrisAgent.dedupeCaseInsensitiveSchemas(Arrays.asList("", " ", null, "SQLUSER"))
         );
+    }
+
+    @Test
+    void readsVendorOtherValuesThroughGetObject() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getObject".equals(method.getName())) {
+                calls.add("getObject");
+                return new Object() {
+                    @Override
+                    public String toString() {
+                        return "%List(1,2)";
+                    }
+                };
+            }
+            if ("getString".equals(method.getName())) {
+                calls.add("getString");
+                throw new AssertionError("IRIS %LIST must not use getString");
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.OTHER);
+
+        assertEquals("%List(1,2)", value);
+        assertEquals(Collections.singletonList("getObject"), calls);
+    }
+
+    @Test
+    void preservesStringPathForStandardValues() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getString".equals(method.getName())) {
+                calls.add("getString");
+                return "ordinary";
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.VARCHAR);
+
+        assertEquals("ordinary", value);
+        assertEquals(Collections.singletonList("getString"), calls);
+    }
+
+    @Test
+    void preservesNullForVendorOtherValues() {
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getObject".equals(method.getName())) {
+                calls.add("getObject");
+                return null;
+            }
+            if ("wasNull".equals(method.getName())) {
+                return true;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.OTHER);
+
+        assertNull(value);
+        assertEquals(Collections.singletonList("getObject"), calls);
     }
 
     @Test

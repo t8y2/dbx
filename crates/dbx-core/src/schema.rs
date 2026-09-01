@@ -741,6 +741,10 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
             drop(connections);
             return db::influxdb_driver::list_databases(&client).await;
         }
+        if let Some(client) = extract_pool!(&connections, connection_id, InfluxDb3) {
+            drop(connections);
+            return db::influxdb3_driver::list_databases(&client).await;
+        }
         if let Some(client) = extract_pool!(&connections, connection_id, VictoriaMetrics) {
             drop(connections);
             return db::victoriametrics_driver::list_databases(&client).await;
@@ -2334,6 +2338,12 @@ async fn list_tables_once(
         if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
             drop(connections);
             return db::influxdb_driver::list_tables(&client, database)
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
+        }
+        if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb3) {
+            drop(connections);
+            return db::influxdb3_driver::list_tables(&client, database)
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter));
         }
@@ -6550,6 +6560,10 @@ async fn get_columns_core_for_session_inner(
             if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb) {
                 drop(connections);
                 return db::influxdb_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
+            }
+            if let Some(client) = extract_pool!(&connections, &pool_key, InfluxDb3) {
+                drop(connections);
+                return db::influxdb3_driver::get_columns(&client, database, table).await.map(deduplicate_column_infos);
             }
             if let Some(client) = extract_pool!(&connections, &pool_key, VictoriaMetrics) {
                 drop(connections);

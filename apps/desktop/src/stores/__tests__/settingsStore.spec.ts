@@ -1,7 +1,18 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { isProxy } from "vue";
-import { DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, enforceRightSidebarPanelExclusivity, normalizeAiConfig, normalizeDesktopSettings, normalizeEditorSettings, normalizeMcpGlobalPolicy, type RightSidebarPanelState, transitionRightSidebarPanels } from "@/stores/settingsStore";
+import {
+  AI_PROVIDER_PRESETS,
+  DEFAULT_EDITOR_SETTINGS,
+  EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  enforceRightSidebarPanelExclusivity,
+  normalizeAiConfig,
+  normalizeDesktopSettings,
+  normalizeEditorSettings,
+  normalizeMcpGlobalPolicy,
+  type RightSidebarPanelState,
+  transitionRightSidebarPanels,
+} from "@/stores/settingsStore";
 import type { AiConfigItem } from "@/types/ai";
 
 describe("normalizeEditorSettings", () => {
@@ -606,6 +617,17 @@ describe("settingsStore AI API key normalization", () => {
 
   it("trims API keys when normalizing loaded configurations", () => {
     expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
+  });
+
+  it("provides Kimi defaults and recognizes legacy Kimi configurations", () => {
+    expect(AI_PROVIDER_PRESETS.kimi).toMatchObject({
+      provider: "kimi",
+      endpoint: "https://api.moonshot.cn/v1",
+      apiStyle: "completions",
+      authMethod: "bearer",
+      requiresApiKey: true,
+    });
+    expect(normalizeAiConfig({ endpoint: "https://api.moonshot.cn/v1", model: "kimi-k2.5" }).provider).toBe("kimi");
   });
 
   it("normalizes OpenCode CLI path and environment settings", () => {
@@ -1421,6 +1443,24 @@ describe("settingsStore activeModel lifecycle", () => {
     expect(saveAiConfigItem).toHaveBeenCalledWith(expect.objectContaining({ id: "c1", provider: "gemini" }));
     expect(store.activeModel).toBeNull();
     expect(store.activeEffort).toBeNull();
+  });
+
+  it("deletes the active default config and clears the active selection when it was the last config", async () => {
+    const deleteAiConfig = vi.fn().mockResolvedValue(undefined);
+    const saveAiChatSelection = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ deleteAiConfig, saveAiChatSelection }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    store.aiConfigs = [makeTestConfig({ id: "c1", model: "model-a", isDefault: true })];
+    store.updateActiveModel({ configId: "c1", modelId: "model-a" });
+
+    await store.deleteAiConfig("c1");
+
+    expect(deleteAiConfig).toHaveBeenCalledWith("c1");
+    expect(store.aiConfigs).toEqual([]);
+    expect(store.activeModel).toBeNull();
+    await vi.waitFor(() => expect(saveAiChatSelection).toHaveBeenCalledWith(expect.objectContaining({ active: undefined })));
   });
 
   it("preserves the active model and effort when connection details change within the same provider", async () => {

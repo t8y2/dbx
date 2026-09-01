@@ -1144,7 +1144,9 @@ describe("DataGridQueryControls", () => {
     expect(applyFilters).toHaveBeenCalledOnce();
   });
 
-  it("keeps view selection out of the data grid controls", async () => {
+  it("keeps the filter toggle available when switching filter views", async () => {
+    const updateFilterBuilderOpen = vi.fn();
+    const ensureRule = vi.fn();
     const mounted = mountComponent(DataGridQueryControls, {
       whereInput: "",
       orderByInput: "",
@@ -1168,16 +1170,26 @@ describe("DataGridQueryControls", () => {
       applyWhere: vi.fn(),
       applyOrderBy: vi.fn(),
       clearOrderBy: vi.fn(),
+      "onUpdate:filterBuilderOpen": updateFilterBuilderOpen,
+      onEnsureRule: ensureRule,
     });
 
     expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
     expect(hostText(mounted.root)).not.toContain("grid.filterConditionView");
-    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(1);
+    const quickFilterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    expect(quickFilterButtons).toHaveLength(1);
+    expect(quickFilterButtons[0].props["aria-label"]).toBe("grid.filter");
 
     await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
     await nextTick();
     expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
-    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(0);
+    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    expect(filterButtons).toHaveLength(1);
+    expect(filterButtons[0].props["aria-label"]).toBe("grid.filter");
+    expect(filterButtons[0].props["aria-expanded"]).toBe(false);
+    dispatch(filterButtons[0], "click");
+    expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
+    expect(ensureRule).toHaveBeenCalledOnce();
   });
 });
 

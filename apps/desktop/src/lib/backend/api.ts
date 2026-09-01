@@ -52,6 +52,7 @@ function forward<K extends keyof Backend>(name: K): Backend[K] {
 
 // Connection
 export const testConnection = forward("testConnection");
+export const testSshTunnel = forward("testSshTunnel");
 export const testConnectionWithInfo = forward("testConnectionWithInfo");
 export const connectDb = forward("connectDb");
 export const connectionDatabaseInfo = forward("connectionDatabaseInfo");

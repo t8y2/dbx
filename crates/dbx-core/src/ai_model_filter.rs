@@ -91,6 +91,7 @@ pub(crate) fn model_is_assistant_compatible(provider: &AiProvider, model_id: &st
         AiProvider::Claude
         | AiProvider::AnthropicCompatible
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Ollama
         | AiProvider::OpenaiCompatible
         | AiProvider::CodexCli

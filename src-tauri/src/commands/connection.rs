@@ -1112,6 +1112,11 @@ pub async fn test_connection_with_info(
     test_connection_with_info_inner(state.inner(), config).await
 }
 
+#[tauri::command]
+pub async fn test_ssh_tunnel(state: State<'_, Arc<AppState>>, config: ConnectionConfig) -> Result<String, String> {
+    state.test_connection_ssh_tunnel(&config.canonicalized()).await
+}
+
 async fn test_connection_with_info_inner(
     state: &Arc<AppState>,
     config: ConnectionConfig,
@@ -1485,6 +1490,12 @@ async fn test_connection_with_info_inner(
             DatabaseType::InfluxDb => {
                 let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &config, connect_timeout)?;
                 db::influxdb_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
+            DatabaseType::InfluxDb3 => {
+                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &config, connect_timeout)?;
+                db::influxdb3_driver::test_connection(&client, connect_timeout)
                     .await
                     .map(|_| "Connection successful".to_string())
             }
@@ -1918,6 +1929,11 @@ pub async fn connect_db(
             let client = db::influxdb_driver::InfluxdbClient::new_for_config(&url, &db_config, connect_timeout)?;
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
+        }
+        DatabaseType::InfluxDb3 => {
+            let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
+            db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::InfluxDb3(client)
         }
         DatabaseType::VictoriaMetrics => {
             let client =

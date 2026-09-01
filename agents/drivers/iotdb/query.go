@@ -475,9 +475,25 @@ func normalizedColumnTypes(values, columns []string, dialect, timestampPrecision
 		}
 		if iotdbColumnTypeBase(result[index]) == "TIMESTAMP" {
 			result[index] = timestampColumnType(timestampPrecision)
+			continue
+		}
+		// max_time/min_time aggregates return INT64 epoch values in the tree
+		// dialect; type them as timestamps so the grid renders standard times.
+		if dialect == client.TreeSqlDialect && iotdbColumnTypeBase(result[index]) == "INT64" && isTimeAggregationColumn(columns[index]) {
+			result[index] = timestampColumnType(timestampPrecision)
 		}
 	}
 	return result
+}
+
+func isTimeAggregationColumn(column string) bool {
+	trimmed := strings.TrimSpace(column)
+	for _, prefix := range []string{"max_time(", "min_time("} {
+		if len(trimmed) > len(prefix) && strings.EqualFold(trimmed[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func timestampColumnType(precision string) string {

@@ -2924,7 +2924,7 @@ func (s *server) getObjectSource(schema, name, objectType string) (map[string]an
 		}
 		return map[string]any{"name": name, "object_type": objectType, "schema": schema, "source": source}, nil
 	}
-	if upperType == "SEQUENCE" || upperType == "SYNONYM" {
+	if upperType == "MATERIALIZED_VIEW" || upperType == "SEQUENCE" || upperType == "SYNONYM" {
 		return s.getMetadataObjectSource(schema, name, upperType)
 	}
 

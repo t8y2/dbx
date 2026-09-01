@@ -101,6 +101,7 @@ pub enum PoolKind {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    InfluxDb3(db::influxdb3_driver::Influxdb3Client),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     ExternalDriver {
@@ -143,6 +144,7 @@ impl PoolKind {
             Self::HBase(client) => Some(Self::HBase(client.clone())),
             Self::VectorDb(client) => Some(Self::VectorDb(client.clone())),
             Self::InfluxDb(client) => Some(Self::InfluxDb(client.clone())),
+            Self::InfluxDb3(client) => Some(Self::InfluxDb3(client.clone())),
             Self::VictoriaMetrics(client) => Some(Self::VictoriaMetrics(client.clone())),
             Self::Agent(client) => Some(Self::Agent(client.clone())),
             Self::ExternalDriver { driver_id, config, session } => Some(Self::ExternalDriver {
@@ -304,6 +306,13 @@ pub struct AppState {
     mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
+}
+
+fn transport_layers_through_last_ssh(layers: &[TransportLayerConfig]) -> Result<&[TransportLayerConfig], String> {
+    let Some(last_ssh_index) = layers.iter().rposition(|layer| matches!(layer, TransportLayerConfig::Ssh(_))) else {
+        return Err("Connection has no enabled SSH tunnel layer".to_string());
+    };
+    Ok(&layers[..=last_ssh_index])
 }
 
 /// 活跃时间以进程内单调时钟的相对毫秒存储（AtomicU64）：热路径每条查询都要
@@ -2396,6 +2405,11 @@ impl AppState {
                 db::influxdb_driver::test_connection(&client, connect_timeout).await?;
                 PoolKind::InfluxDb(client)
             }
+            DatabaseType::InfluxDb3 => {
+                let client = db::influxdb3_driver::Influxdb3Client::new_for_config(&url, &db_config, connect_timeout)?;
+                db::influxdb3_driver::test_connection(&client, connect_timeout).await?;
+                PoolKind::InfluxDb3(client)
+            }
             DatabaseType::VictoriaMetrics => {
                 let client = db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(
                     &url,
@@ -2827,6 +2841,34 @@ impl AppState {
                 Err("Tunnel test is not supported for HTTP tunnel profiles.".to_string())
             }
         }
+    }
+
+    /// Tests the enabled SSH chain without opening a database connection.
+    /// Layers before the final SSH hop are included because they may be
+    /// required to reach that hop; layers after it are unrelated to SSH auth.
+    pub async fn test_connection_ssh_tunnel(&self, config: &ConnectionConfig) -> Result<String, String> {
+        let resolved_layers = self.resolved_transport_layers(config).await?;
+        let test_layers = transport_layers_through_last_ssh(&resolved_layers)?;
+        let probe_id = format!("__connection_ssh_test__:{}", uuid::Uuid::new_v4());
+        let result = db::transport_layer_tunnel::start_transport_layers(
+            &probe_id,
+            test_layers,
+            "127.0.0.1",
+            1,
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        db::transport_layer_tunnel::stop_transport_layers(
+            &probe_id,
+            test_layers.len(),
+            &self.tunnels,
+            &self.proxy_tunnels,
+            &self.http_tunnels,
+        )
+        .await;
+        result.map(|_| "SSH tunnel connection successful".to_string())
     }
 
     pub async fn connection_host_port(
@@ -3574,6 +3616,18 @@ impl AppState {
                         Ok(()) => false,
                         Err(err) => {
                             log::warn!("InfluxDB connection pool '{pool_key}' is stale: {err}");
+                            true
+                        }
+                    }
+                }
+                PoolKind::InfluxDb3(client) => {
+                    let client = client.clone();
+                    drop(connections);
+                    let timeout = crate::db::connection_timeout();
+                    match db::influxdb3_driver::test_connection(&client, timeout).await {
+                        Ok(()) => false,
+                        Err(err) => {
+                            log::warn!("InfluxDB 3 connection pool '{pool_key}' is stale: {err}");
                             true
                         }
                     }
@@ -4654,6 +4708,13 @@ impl AppState {
                         false
                     }
                 },
+                PoolKind::InfluxDb3(client) => match db::influxdb3_driver::test_connection(client, timeout).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log::warn!("InfluxDB 3 connection pool '{key}' is unhealthy: {e}");
+                        false
+                    }
+                },
                 PoolKind::VictoriaMetrics(client) => {
                     match db::victoriametrics_driver::test_connection(client, timeout).await {
                         Ok(()) => true,
@@ -4954,6 +5015,7 @@ enum KeepaliveTarget {
     HBase(db::hbase_driver::HBaseClient),
     VectorDb(db::vector_driver::VectorClient),
     InfluxDb(db::influxdb_driver::InfluxdbClient),
+    InfluxDb3(db::influxdb3_driver::Influxdb3Client),
     VictoriaMetrics(db::victoriametrics_driver::VictoriaMetricsClient),
     Agent(Arc<db::agent_driver::PooledAgentClient>),
     #[cfg(feature = "mq-admin")]
@@ -5054,6 +5116,7 @@ fn keepalive_target_from_pool(pool: &PoolKind, config: &ConnectionConfig) -> Opt
         PoolKind::HBase(client) => Some(KeepaliveTarget::HBase(client.clone())),
         PoolKind::VectorDb(client) => Some(KeepaliveTarget::VectorDb(client.clone())),
         PoolKind::InfluxDb(client) => Some(KeepaliveTarget::InfluxDb(client.clone())),
+        PoolKind::InfluxDb3(client) => Some(KeepaliveTarget::InfluxDb3(client.clone())),
         PoolKind::VictoriaMetrics(client) => Some(KeepaliveTarget::VictoriaMetrics(client.clone())),
         PoolKind::Agent(client) => Some(KeepaliveTarget::Agent(client.clone())),
         _ => None,
@@ -5100,6 +5163,9 @@ async fn ping_keepalive_target(target: &mut KeepaliveTarget, timeout: Duration) 
         }
         KeepaliveTarget::InfluxDb(client) => {
             db::influxdb_driver::test_connection(client, timeout).await.map_err(Into::into)
+        }
+        KeepaliveTarget::InfluxDb3(client) => {
+            db::influxdb3_driver::test_connection(client, timeout).await.map_err(Into::into)
         }
         KeepaliveTarget::VictoriaMetrics(client) => {
             db::victoriametrics_driver::test_connection(client, timeout).await.map_err(Into::into)
@@ -5459,6 +5525,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::HBase(client) => PoolKind::HBase(client.clone()),
         PoolKind::VectorDb(client) => PoolKind::VectorDb(client.clone()),
         PoolKind::InfluxDb(client) => PoolKind::InfluxDb(client.clone()),
+        PoolKind::InfluxDb3(client) => PoolKind::InfluxDb3(client.clone()),
         PoolKind::VictoriaMetrics(client) => PoolKind::VictoriaMetrics(client.clone()),
         PoolKind::Agent(client) => PoolKind::Agent(client.clone()),
         PoolKind::ExternalDriver { driver_id, config, session } => {
@@ -5534,6 +5601,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             drop(client);
         }
         PoolKind::InfluxDb(client) => {
+            drop(client);
+        }
+        PoolKind::InfluxDb3(client) => {
             drop(client);
         }
         PoolKind::VictoriaMetrics(client) => {
@@ -5890,9 +5960,9 @@ mod tests {
         mysql_pool_setup_queries, oceanbase_mysql_setup_queries, prestosql_jdbc_config_for_endpoint,
         redacted_connection_url_for_endpoint, redis_sentinel_transport_id, redis_sentinel_transport_prefix,
         sqlserver_legacy_agent_config, sqlserver_legacy_driver_error, sqlserver_uses_legacy_driver,
-        task_client_session_id, upsert_connection_url_param, uses_bare_mysql_pool, uses_tcp_probe,
-        validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind, TxnConnection,
-        GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
+        task_client_session_id, transport_layers_through_last_ssh, upsert_connection_url_param, uses_bare_mysql_pool,
+        uses_tcp_probe, validate_connection_url_params, validate_h2_database_path, AppState, MysqlMode, PoolKind,
+        TxnConnection, GAUSSDB_M_JDBC_DRIVER_CLASS, GAUSSDB_M_JDBC_DRIVER_PROFILE, PRESTOSQL_JDBC_DRIVER_CLASS,
     };
     use crate::agent_connection::{
         agent_connect_params, mongo_legacy_error_with_auth_hint, mongo_uses_legacy_driver,
@@ -6926,6 +6996,59 @@ mod tests {
 
         assert_eq!(state.agent_manager.base_dir(), &agent_dir);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_tunnel_test_includes_prerequisites_through_final_ssh_hop() {
+        let before = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "before".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let ssh = TransportLayerConfig::Ssh(ssh_layer("ssh", ""));
+        let after = TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "after".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Http,
+            host: "downstream.internal".to_string(),
+            port: 8080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        });
+        let layers = vec![before.clone(), ssh.clone(), after];
+
+        assert_eq!(transport_layers_through_last_ssh(&layers).unwrap(), &[before, ssh]);
+    }
+
+    #[test]
+    fn ssh_tunnel_test_rejects_chain_without_ssh() {
+        let layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "proxy.internal".to_string(),
+            port: 1080,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+            profile_id: String::new(),
+        })];
+
+        assert_eq!(
+            transport_layers_through_last_ssh(&layers).unwrap_err(),
+            "Connection has no enabled SSH tunnel layer"
+        );
     }
 
     #[tokio::test]

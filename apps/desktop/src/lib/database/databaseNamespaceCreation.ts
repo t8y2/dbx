@@ -90,6 +90,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { database: "schema" },
   influxdb: { connection: "database" },
+  influxdb3: { deferred: "database creation on InfluxDB 3.x goes through the /api/v3/configure/database admin endpoint, which is not part of the SQL execution path" },
   victoriametrics: { deferred: "metric namespaces are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose a reliable dialect-specific create target" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },

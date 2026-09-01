@@ -55,6 +55,7 @@ interface ColumnarQueryResult {
   execution_error?: true;
   statement_index?: number;
   column_types?: string[];
+  local_column_filters?: QueryResult["local_column_filters"];
   columnValues: CellValue[][];
   rowCount: number;
   mongo_documents?: unknown[];
@@ -327,6 +328,10 @@ function clonePlain<T>(value: T): T {
   }
 }
 
+function cloneLocalColumnFilters(filters: QueryResult["local_column_filters"]): QueryResult["local_column_filters"] {
+  return filters ? Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]])) : undefined;
+}
+
 function stripSessionIds(result: QueryResult | undefined): QueryResult | undefined {
   if (!result) return undefined;
   return {
@@ -334,6 +339,7 @@ function stripSessionIds(result: QueryResult | undefined): QueryResult | undefin
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
@@ -377,6 +383,7 @@ function toColumnarResult(result: QueryResult | undefined): ColumnarQueryResult 
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
@@ -403,6 +410,7 @@ function fromColumnarResult(result: ColumnarQueryResult | undefined): QueryResul
     execution_error: result.execution_error,
     statement_index: result.statement_index,
     column_types: result.column_types ? [...result.column_types] : undefined,
+    local_column_filters: cloneLocalColumnFilters(result.local_column_filters),
     spatial_columns: result.spatial_columns?.map((entry) => ({ column_index: entry.column_index, srid: entry.srid })),
     spatial_values: result.spatial_values?.map((row) => [...row]),
     large_value_cells: result.large_value_cells?.map((cell) => ({ ...cell })),
@@ -712,6 +720,7 @@ export function decodeTabResultSnapshot(bytes: Uint8Array | ArrayBuffer): TabRes
     return undefined;
   }
   if (!isRecord(decoded.payload)) return undefined;
+  // SAFETY: The validated envelope is produced by encodeTabResultSnapshot, so its record payload has the snapshot shape expected here.
   return payloadToSnapshot(decoded.payload as unknown as TabResultSnapshotPayload);
 }
 

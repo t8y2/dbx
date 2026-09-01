@@ -782,7 +782,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		if !session.rows.Next() {
 			return result, session.rows.Err()
 		}
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -794,7 +794,7 @@ func readQuerySessionPage(session *querySession, pageSize int) (queryPageResult,
 		return result, nil
 	}
 	if session.rows.Next() {
-		row, err := scanRow(session.rows, len(session.columns))
+		row, err := scanRow(session.rows, len(session.columns), session.columnTypes)
 		if err != nil {
 			return queryPageResult{}, err
 		}
@@ -810,13 +810,14 @@ func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
 		return queryResult{}, err
 	}
 	columns = nonNilStrings(columns)
-	result := queryResult{Columns: columns, ColumnTypes: columnTypeNames(rows), Rows: make([][]any, 0, min(maxRows, 1024))}
+	columnTypes := columnTypeNames(rows)
+	result := queryResult{Columns: columns, ColumnTypes: columnTypes, Rows: make([][]any, 0, min(maxRows, 1024))}
 	for rows.Next() {
 		if len(result.Rows) >= maxRows {
 			result.Truncated = true
 			break
 		}
-		row, err := scanRow(rows, len(columns))
+		row, err := scanRow(rows, len(columns), columnTypes)
 		if err != nil {
 			return queryResult{}, err
 		}
@@ -825,7 +826,7 @@ func readRows(rows *sql.Rows, maxRows int) (queryResult, error) {
 	return result, rows.Err()
 }
 
-func scanRow(rows *sql.Rows, count int) ([]any, error) {
+func scanRow(rows *sql.Rows, count int, columnTypes []string) ([]any, error) {
 	storage := make([]any, count*2)
 	values := storage[:count]
 	dest := storage[count:]
@@ -836,9 +837,16 @@ func scanRow(rows *sql.Rows, count int) ([]any, error) {
 		return nil, err
 	}
 	for i, value := range values {
-		values[i] = normalizeValue(value)
+		values[i] = normalizeValue(value, columnTypeAt(columnTypes, i))
 	}
 	return values, nil
+}
+
+func columnTypeAt(columnTypes []string, index int) string {
+	if index < 0 || index >= len(columnTypes) {
+		return ""
+	}
+	return columnTypes[index]
 }
 
 func columnTypeNames(rows *sql.Rows) []string {
@@ -1477,7 +1485,7 @@ func isUTF8Encoding(name string) bool {
 	return s == "utf8" || s == "unicode"
 }
 
-func normalizeValue(value any) any {
+func normalizeValue(value any, columnTypeName string) any {
 	switch typed := value.(type) {
 	case nil:
 		return nil
@@ -1487,6 +1495,13 @@ func normalizeValue(value any) any {
 		}
 		return map[string]string{"$binary": base64.StdEncoding.EncodeToString(typed)}
 	case time.Time:
+		// KingBase "timestamp"/"date" columns are wall-clock values with no timezone
+		// meaning; the gokb driver decodes them into a time.Time labeled with the
+		// process-local zone, which is not a real UTC instant. Formatting those with
+		// an offset (RFC3339Nano) makes clients double-apply the timezone shift.
+		if isKingbaseTimezoneLessDateTime(columnTypeName) {
+			return typed.Format("2006-01-02T15:04:05.999999999")
+		}
 		return typed.Format(time.RFC3339Nano)
 	case int8:
 		return int64(typed)
@@ -1498,6 +1513,16 @@ func normalizeValue(value any) any {
 		return float64(typed)
 	default:
 		return typed
+	}
+}
+
+func isKingbaseTimezoneLessDateTime(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(columnTypeName), " ", ""))
+	switch normalized {
+	case "DATE", "TIMESTAMP", "TIME":
+		return true
+	default:
+		return false
 	}
 }
 

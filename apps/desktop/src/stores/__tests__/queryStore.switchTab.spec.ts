@@ -179,6 +179,38 @@ describe("queryStore switchTab", () => {
     expect(tab.result.local_column_filters).toBeUndefined();
   });
 
+  it("keeps local filters isolated across result-run switches and clearing", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "Query", "query");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    const result = (filters?: Record<string, string[]>) => ({
+      columns: ["id", "status"],
+      rows: [[1, "active"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      local_column_filters: filters,
+    });
+    tab.resultRuns = [
+      { id: "run-a", title: "Run A", sequence: 1, sql: "select 1", createdAt: 1, result: result() },
+      { id: "run-b", title: "Run B", sequence: 2, sql: "select 2", createdAt: 2, result: result({ "1": ["str:pending"] }) },
+    ];
+
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    queryStore.updateDataGridLocalColumnFilters(tabId, { "1": ["str:active"] });
+    expect(tab.resultRuns?.[0]?.result?.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    expect(await queryStore.setActiveResultRun(tabId, "run-b")).toBe(true);
+    expect(tab.result?.local_column_filters).toEqual({ "1": ["str:pending"] });
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    expect(tab.result?.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, {});
+    expect(await queryStore.setActiveResultRun(tabId, "run-b")).toBe(true);
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    expect(tab.result?.local_column_filters).toBeUndefined();
+  });
+
   it("stores hidden data-grid column keys on the tab result", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();

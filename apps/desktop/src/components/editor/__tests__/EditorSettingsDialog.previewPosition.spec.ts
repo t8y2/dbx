@@ -169,6 +169,8 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(dataSection).toContain("data-data-grid-filter-preview-quick");
     expect(dataSection).toContain("data-data-grid-filter-preview-conditions");
     expect(dataSection).toContain("data-data-grid-filter-preview-text");
+    expect(dataSection.match(/text-muted-foreground\/70">\{\{ t\("grid.applyFilter"\) \}\}/g)).toHaveLength(2);
+    expect(dataSection).not.toContain('rounded bg-primary px-2 py-1 text-primary-foreground">{{ t("grid.applyFilter") }}');
     expect(dataSection.match(/editDataGridFilterEditorView = '(quick|conditions|text)'/g)).toHaveLength(3);
     expect(dataSection).not.toContain('<SelectTrigger id="data-grid-filter-view"');
 

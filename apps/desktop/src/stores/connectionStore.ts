@@ -5955,44 +5955,61 @@ export const useConnectionStore = defineStore("connection", () => {
       async () => {
         await ensureConnected(target.connectionId);
 
-        const querySchema = connectionObjectTreeQuerySchema(config, target.database, target.schema);
-        const effectiveSchema = connectionObjectTreeNodeSchema(config, target.database, target.schema);
         const pageSize = sidebarObjectGroupPageSize();
         const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
+        // A query tab can reach locate without a schema (a toolbar "new query" tab,
+        // or a reopened .sql file), and on a schema tree the table then lives under
+        // one of the database's schema nodes. Resolve the schema per node instead of
+        // guessing a single one for the whole database: the old `schema || database`
+        // guess matched nothing at all (issue #7648), and a single resolved schema
+        // would merge one schema's tables into every other schema's node.
+        const schemaForNode = (nodeSchema?: string) => target.schema ?? nodeSchema;
         let loaded = false;
 
         if (simpleObjectDisplay) {
-          const parentId = target.schema ? `${target.connectionId}:${target.database}:${target.schema}` : `${target.connectionId}:${target.database}`;
-          const parent = findNode(treeNodes.value, parentId);
-          if (!parent) return false;
-          let load = beginTreeNodeLoad(parent);
-          try {
-            load = reclaimTreeNodeLoad(load, parent);
-            const page = await loadPagedSimpleTableChildren({
-              nodeId: parentId,
-              connectionId: target.connectionId,
-              database: target.database,
-              querySchema,
-              effectiveSchema,
-              nonTableObjectTypes: [],
-              offset: 0,
-              pageSize,
-              searchFilter: target.tableName,
-              force: false,
-            });
-            if (!page.children.length) return false;
-            const targetParent = treeNodeLoadTarget(load);
-            if (!targetParent) return false;
-            const currentChildren = withoutLoadMoreNodes(targetParent.children);
-            const loadMoreNodes = (targetParent.children || []).filter((child) => child.type === "load-more");
-            const mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, target.connectionId, target.database);
-            setChildren(targetParent, [...mergedChildren, ...loadMoreNodes]);
-            targetParent.objectCount = Math.max(targetParent.objectCount ?? currentChildren.length, mergedChildren.length);
-            targetParent.isExpanded = true;
-            return true;
-          } finally {
-            finishTreeNodeLoad(load);
+          const schemaParents = target.schema
+            ? [findNode(treeNodes.value, `${target.connectionId}:${target.database}:${target.schema}`)]
+            : findTreeNodes(treeNodes.value, (node) => node.type === "schema" && node.connectionId === target.connectionId && sameSidebarObjectName(node.database, target.database));
+          const parents = schemaParents.filter((node): node is TreeNode => !!node);
+          if (!parents.length) {
+            const databaseParent = target.schema ? null : findNode(treeNodes.value, `${target.connectionId}:${target.database}`);
+            if (databaseParent) parents.push(databaseParent);
           }
+          if (!parents.length) return false;
+
+          for (const parent of parents) {
+            const parentSchema = schemaForNode(parent.type === "schema" ? (parent.schema ?? parent.label) : undefined);
+            let load = beginTreeNodeLoad(parent);
+            try {
+              load = reclaimTreeNodeLoad(load, parent);
+              const page = await loadPagedSimpleTableChildren({
+                nodeId: parent.id,
+                connectionId: target.connectionId,
+                database: target.database,
+                querySchema: connectionObjectTreeQuerySchema(config, target.database, parentSchema),
+                effectiveSchema: connectionObjectTreeNodeSchema(config, target.database, parentSchema),
+                nonTableObjectTypes: [],
+                offset: 0,
+                pageSize,
+                searchFilter: target.tableName,
+                force: false,
+              });
+              if (!page.children.length) continue;
+              const targetParent = treeNodeLoadTarget(load);
+              if (!targetParent) continue;
+              const currentChildren = withoutLoadMoreNodes(targetParent.children);
+              const loadMoreNodes = (targetParent.children || []).filter((child) => child.type === "load-more");
+              const mergedChildren = mergeLocatedTreeChildren(targetParent, currentChildren, page.children, target.connectionId, target.database);
+              setChildren(targetParent, [...mergedChildren, ...loadMoreNodes]);
+              targetParent.objectCount = Math.max(targetParent.objectCount ?? currentChildren.length, mergedChildren.length);
+              targetParent.isExpanded = true;
+              loaded = true;
+            } finally {
+              finishTreeNodeLoad(load);
+            }
+          }
+
+          return loaded;
         }
 
         const matchingGroups = findTreeNodes(treeNodes.value, (node) => {
@@ -6012,11 +6029,12 @@ export const useConnectionStore = defineStore("connection", () => {
           let load = beginTreeNodeLoad(group);
           try {
             load = reclaimTreeNodeLoad(load, group);
+            const groupSchema = schemaForNode(group.schema);
             const page = await loadPagedTableGroupChildren({
               node: group,
               parentNodeId,
-              querySchema,
-              effectiveSchema,
+              querySchema: connectionObjectTreeQuerySchema(config, group.database || target.database, groupSchema),
+              effectiveSchema: connectionObjectTreeNodeSchema(config, group.database || target.database, groupSchema),
               objectTypes,
               offset: 0,
               pageSize,

@@ -24,6 +24,7 @@ pub mod elasticsearch_sql;
 pub mod file_validator;
 pub mod hbase_driver;
 pub mod http_tunnel;
+pub mod influxdb3_driver;
 pub mod influxdb_driver;
 pub mod manticoresearch;
 pub mod meilisearch_driver;

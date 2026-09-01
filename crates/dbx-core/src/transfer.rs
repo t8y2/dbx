@@ -26,6 +26,13 @@ static OCEANBASE_MYSQL_TABLE_OPTION_RE: std::sync::LazyLock<Regex> = std::sync::
 static MYSQL_COLLATE_CLAUSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(r"(?i)\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b").expect("valid MySQL COLLATE clause regex")
 });
+// An inline FK constraint *definition line*: an optional `CONSTRAINT <name>`
+// prefix followed by `FOREIGN KEY (`. Anchored to the line start so column
+// definitions whose COMMENT/DEFAULT strings mention "foreign key" never match.
+static INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"(?i)^\s*(?:CONSTRAINT\s+(?:`[^`]*`|"[^"]*"|\S+)\s+)?FOREIGN\s+KEY\s*\("#)
+        .expect("valid inline foreign key constraint line regex")
+});
 
 const MAX_TRANSFER_WRITE_SQL_BYTES: usize = 512 * 1024;
 const MAX_SQLSERVER_INSERT_ROWS: usize = 1000;
@@ -1577,6 +1584,42 @@ fn required_unmapped_transfer_target_columns(
         })
         .map(|column| column.name.clone())
         .collect()
+}
+
+/// Fails fast when a preexisting target table's structure can't accept the
+/// source columns. DBX never alters an existing target table's columns, so
+/// skipping this check (structure-only transfers used to silently skip it,
+/// #7660) leaves the transfer reporting success while the target quietly stays
+/// out of sync with the source.
+fn validate_preexisting_target_columns(
+    target_columns: &[db::ColumnInfo],
+    col_names: &[String],
+    target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
+    target_table: &str,
+) -> Result<(), String> {
+    let missing = missing_transfer_target_columns(target_columns, col_names, target_db_type, quote_target_column_names);
+    if !missing.is_empty() {
+        return Err(format!(
+            "Target table '{target_table}' already exists with a different structure and is missing column(s) \
+             {} present in the source table. DBX does not alter an existing target table's columns during \
+             transfer — drop the target table or adjust its structure to match the source first.",
+            missing.join(", ")
+        ));
+    }
+
+    let required =
+        required_unmapped_transfer_target_columns(target_columns, col_names, target_db_type, quote_target_column_names);
+    if !required.is_empty() {
+        return Err(format!(
+            "Target table '{target_table}' already exists with a different structure and has required column(s) \
+             {} that are not present in the source table and have no default or generated value. DBX does not \
+             alter an existing target table's columns during transfer — drop the target table or adjust its \
+             structure to match the source first.",
+            required.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> Vec<String> {
@@ -4866,6 +4909,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 /// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
 /// and on foreign key constraints always being the last items before the closing
 /// paren (true for both dialects' DDL dumps).
+///
+/// Only genuine constraint definition lines match (`CONSTRAINT <name> FOREIGN
+/// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
+/// merely mentions the words must survive (#7660).
 fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     if !statement.trim_start().to_ascii_uppercase().starts_with("CREATE TABLE ") {
         return statement.to_string();
@@ -4873,7 +4920,7 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
 
     let mut lines: Vec<String> = Vec::new();
     for line in statement.lines() {
-        if line.to_ascii_uppercase().contains(" FOREIGN KEY ") {
+        if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
             if let Some(previous) = lines.last_mut() {
                 let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
                 if previous[..trimmed_len].ends_with(',') {
@@ -5155,6 +5202,13 @@ pub async fn get_columns_for_transfer(
         let table = table.to_string();
         drop(connections);
         return db::influxdb_driver::get_columns(&client, &database, &table).await;
+    }
+    if let Some(PoolKind::InfluxDb3(client)) = connections.get(pool_key) {
+        let client = client.clone();
+        let database = database.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return db::influxdb3_driver::get_columns(&client, &database, &table).await;
     }
     if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
         let client = client.clone();
@@ -7533,6 +7587,28 @@ where
     // Structure-only transfer: complete the table's post-create schema DDL,
     // then skip everything data-related.
     if !should_copy_data(&request.content) {
+        if request.create_table && target_table_preexisting {
+            let target_columns = get_columns_for_transfer(
+                state,
+                target_pool_key,
+                &request.target_connection_id,
+                &request.target_database,
+                &request.target_schema,
+                &target_table,
+                request.target_catalog.as_deref(),
+            )
+            .await
+            .map_err(|error| {
+                format!("Failed to inspect target table '{target_table}' columns before transfer: {error}")
+            })?;
+            validate_preexisting_target_columns(
+                &target_columns,
+                &col_names,
+                target_db_type,
+                request.quote_target_column_names,
+                &target_table,
+            )?;
+        }
         if should_restore_postgres_table_schema {
             restore_postgres_table_schema_objects(
                 state,
@@ -7581,36 +7657,13 @@ where
     // can't accept the planned insert, fail fast here instead of truncating
     // the target's existing data and then hitting an opaque driver error.
     if request.create_table && target_table_preexisting {
-        let missing = missing_transfer_target_columns(
+        validate_preexisting_target_columns(
             &target_columns,
             &col_names,
             target_db_type,
             request.quote_target_column_names,
-        );
-        if !missing.is_empty() {
-            return Err(format!(
-                "Target table '{target_table}' already exists with a different structure and is missing column(s) \
-                 {} present in the source table. DBX does not alter an existing target table's columns during \
-                 transfer — drop the target table or adjust its structure to match the source first.",
-                missing.join(", ")
-            ));
-        }
-
-        let required = required_unmapped_transfer_target_columns(
-            &target_columns,
-            &col_names,
-            target_db_type,
-            request.quote_target_column_names,
-        );
-        if !required.is_empty() {
-            return Err(format!(
-                "Target table '{target_table}' already exists with a different structure and has required column(s) \
-                 {} that are not present in the source table and have no default or generated value. DBX does not \
-                 alter an existing target table's columns during transfer — drop the target table or adjust its \
-                 structure to match the source first.",
-                required.join(", ")
-            ));
-        }
+            &target_table,
+        )?;
     }
 
     // Truncate target if overwrite mode
@@ -9089,6 +9142,35 @@ mod tests {
 
             assert!(!stripped.to_ascii_uppercase().contains("FOREIGN KEY"), "{stripped}");
             assert!(stripped.contains("KEY `fk_child_parent` (`parent_id`)"), "{stripped}");
+        }
+
+        #[test]
+        fn keeps_columns_whose_comment_mentions_foreign_key() {
+            // Regression for #7660: the deferred-FK DDL rewrite used to drop any
+            // line containing " FOREIGN KEY ", so column definitions whose
+            // COMMENT text merely mentions the words silently vanished from the
+            // created target table.
+            let ddl = "CREATE TABLE `title_task` (\n  `id` varchar(32) NOT NULL,\n  `review_result` varchar(100) DEFAULT NULL,\n  `review_mode` tinyint NOT NULL DEFAULT '0' COMMENT 'foreign key of review flow',\n  `score_snapshot_json` text COMMENT 'snapshot json, see foreign key docs',\n  `task_status` int DEFAULT '0',\n  PRIMARY KEY (`id`),\n  KEY `idx_task_status` (`task_status`),\n  CONSTRAINT `fk_title_task_org` FOREIGN KEY (`org_id`) REFERENCES `org` (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
+            let stripped = strip_inline_foreign_key_constraint_lines(ddl);
+
+            assert!(stripped.contains("`review_mode` tinyint NOT NULL DEFAULT '0'"), "{stripped}");
+            assert!(stripped.contains("`score_snapshot_json` text"), "{stripped}");
+            assert!(!stripped.contains("FOREIGN KEY"), "{stripped}");
+            assert!(stripped.contains("KEY `idx_task_status` (`task_status`)"), "{stripped}");
+        }
+
+        #[test]
+        fn strips_only_foreign_key_constraint_lines_regardless_of_other_mentions() {
+            // A CHECK constraint whose expression mentions the words stays; a
+            // nameless inline `FOREIGN KEY (` line (defensive: some MySQL
+            // dialects emit it) is still stripped.
+            let ddl = "CREATE TABLE `t` (\n  `id` int NOT NULL,\n  `kind` varchar(10) NOT NULL,\n  CONSTRAINT `chk_kind` CHECK (`kind` <> 'foreign key'),\n  FOREIGN KEY (`id`) REFERENCES `parent` (`id`)\n) ENGINE=InnoDB";
+
+            let stripped = strip_inline_foreign_key_constraint_lines(ddl);
+
+            assert!(stripped.contains("CONSTRAINT `chk_kind` CHECK (`kind` <> 'foreign key')"), "{stripped}");
+            assert!(!stripped.contains("REFERENCES"), "{stripped}");
         }
 
         #[test]

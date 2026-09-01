@@ -3,6 +3,7 @@ package com.dbx.agent.iris;
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.JdbcAgentProfile;
+import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
 
@@ -10,6 +11,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -28,6 +30,14 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
 
     public IrisAgent() {
         super(IRIS_PROFILE);
+    }
+
+    @Override
+    protected Object resultValue(ResultSet rs, int index, int sqlType) {
+        if (sqlType == Types.OTHER) {
+            return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
+        }
+        return super.resultValue(rs, index, sqlType);
     }
 
     @Override

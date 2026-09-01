@@ -1119,7 +1119,7 @@ impl ConnectionConfig {
                 format!("zookeeper://{host}:{port}")
             }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
-            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
+            DatabaseType::InfluxDb | DatabaseType::InfluxDb3 | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -1395,7 +1395,7 @@ impl ConnectionConfig {
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
+            DatabaseType::InfluxDb | DatabaseType::InfluxDb3 | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }

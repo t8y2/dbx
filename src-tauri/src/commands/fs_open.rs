@@ -92,12 +92,11 @@ fn validate_database_backup_file(raw: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!("backup file path is not absolute: {expanded}"));
     }
-    if path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("sql"))
-        != Some(true)
-    {
-        return Err(format!("backup file must use the .sql extension: {expanded}"));
-    }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let lower_file_name = file_name.to_ascii_lowercase();
+    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz")) {
+        return Err(format!("backup file must use the .sql or .sql.gz extension: {expanded}"));
+    }
     if !file_name.starts_with("dbx-backup__") {
         return Err(format!("backup file name is not managed by DBX: {expanded}"));
     }
@@ -164,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn database_backup_file_requires_absolute_sql_path() {
+    fn database_backup_file_requires_absolute_managed_sql_path() {
         assert!(validate_database_backup_file("relative/backup.sql").is_err());
         let invalid_extension = if cfg!(windows) { "C:/tmp/backup.txt" } else { "/tmp/backup.txt" };
         assert!(validate_database_backup_file(invalid_extension).is_err());
@@ -172,6 +171,20 @@ mod tests {
         assert!(validate_database_backup_file(unmanaged).is_err());
         let valid = if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL" } else { "/tmp/dbx-backup__nightly.SQL" };
         assert!(validate_database_backup_file(valid).is_ok());
+        let valid_gzip =
+            if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL.GZ" } else { "/tmp/dbx-backup__nightly.SQL.GZ" };
+        assert!(validate_database_backup_file(valid_gzip).is_ok());
+    }
+
+    #[tokio::test]
+    async fn managed_gzip_backup_file_can_be_deleted() {
+        let path = std::env::temp_dir().join(format!("dbx-backup__delete-test-{}.sql.gz", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"gzip placeholder").unwrap();
+
+        let deleted = delete_database_backup_files(vec![path.to_string_lossy().to_string()]).await.unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(!path.exists());
     }
 
     #[test]

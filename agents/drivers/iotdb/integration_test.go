@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,24 @@ func TestLiveIoTDBAgentTreeAndTable(t *testing.T) {
 	mustExecuteNonQuery(t, treeServer, "CREATE TIMESERIES "+treeDevice+".s1 WITH DATATYPE=INT64, ENCODING=RLE", "")
 	for index := 1; index <= 4; index++ {
 		mustExecuteNonQuery(t, treeServer, fmt.Sprintf("INSERT INTO %s(time,s1) VALUES(%d,%d)", treeDevice, index, index*10), "")
+	}
+
+	// 1.3.x servers order aggregate TsBlock columns by their own aggregate
+	// layout, not the SELECT list; values must still line up with the headers
+	// (https://github.com/t8y2/dbx/issues/7306).
+	aggregate, err := treeServer.executeQuery(queryOptions{
+		SQL:     "SELECT max_time(s1), avg(s1), max_value(s1), min_value(s1) FROM " + treeDevice,
+		MaxRows: 10,
+	})
+	if err != nil || len(aggregate.Rows) != 1 {
+		t.Fatalf("tree aggregate = %#v, %v", aggregate, err)
+	}
+	wantAggregateRow := []any{"4", 25.0, int64(40), int64(10)}
+	if !reflect.DeepEqual(aggregate.Rows[0], wantAggregateRow) {
+		t.Fatalf("tree aggregate row = %#v, want %#v", aggregate.Rows[0], wantAggregateRow)
+	}
+	if aggregate.ColumnTypes[0] != "TIMESTAMP(ms)" {
+		t.Fatalf("tree aggregate max_time type = %#v", aggregate.ColumnTypes)
 	}
 
 	tables, err := treeServer.listTables(treeDatabase, metadataListConstraints{})

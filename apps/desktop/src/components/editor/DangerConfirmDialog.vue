@@ -24,6 +24,7 @@ const copied = ref(false);
 // The CodeMirror editor (if any) that was focused when this dialog opened, so
 // its internal selection can be restored without letting the browser move the caret.
 let editorRootToRestoreFocus: HTMLElement | null = null;
+let focusRestoreGeneration = 0;
 
 const props = withDefaults(
   defineProps<{
@@ -81,6 +82,9 @@ watch(
   () => open.value,
   (isOpen) => {
     if (!isOpen) return;
+    focusRestoreGeneration += 1;
+    // Keep the original editor while a prior close animation is still pending.
+    if (editorRootToRestoreFocus) return;
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
   },
@@ -97,10 +101,18 @@ watch(
  */
 function onDangerDialogCloseAutoFocus(event: Event) {
   const target = editorRootToRestoreFocus;
-  editorRootToRestoreFocus = null;
-  if (!target || !target.isConnected) return;
+  if (!target || !target.isConnected) {
+    editorRootToRestoreFocus = null;
+    return;
+  }
   event.preventDefault();
+  // An interrupted close may emit after the dialog has reopened. Suppress the stale native
+  // restoration, but retain the editor for the next completed close.
+  if (dialogOpen.value) return;
+  const generation = focusRestoreGeneration;
   void import("@codemirror/view").then(({ EditorView }) => {
+    if (dialogOpen.value || generation !== focusRestoreGeneration || editorRootToRestoreFocus !== target) return;
+    editorRootToRestoreFocus = null;
     EditorView.findFromDOM(target)?.focus();
   });
 }

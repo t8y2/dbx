@@ -76,6 +76,7 @@ export const DATABASE_TYPES = [
   "iotdb",
   "iris",
   "influxdb",
+  "influxdb3",
   "victoriametrics",
   "jdbc",
   "spark",

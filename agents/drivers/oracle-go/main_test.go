@@ -2534,6 +2534,53 @@ func TestGetObjectSourceUsesDBMSMetadataForSequence(t *testing.T) {
 	}
 }
 
+func TestGetObjectSourceUsesDBMSMetadataForMaterializedView(t *testing.T) {
+	const ddl = `CREATE MATERIALIZED VIEW "HR"."SALES_MV" AS SELECT * FROM "HR"."SALES"`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"MATERIALIZED_VIEW", "SALES_MV", "HR"},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("HR", "SALES_MV", "MATERIALIZED_VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != ddl || result["object_type"] != "MATERIALIZED_VIEW" {
+		t.Fatalf("unexpected materialized view source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourcePropagatesMaterializedViewMetadataError(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"MATERIALIZED_VIEW", "SALES_MV", "HR"},
+			err:           errors.New("ORA-31603: object not found"),
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("HR", "SALES_MV", "MATERIALIZED_VIEW")
+	if err == nil || !strings.Contains(err.Error(), "ORA-31603") {
+		t.Fatalf("expected DBMS_METADATA error, got result=%#v error=%v", result, err)
+	}
+	if result != nil {
+		t.Fatalf("metadata error must not return a successful source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
 func TestGetObjectSourceAggregatesProcedureSourceInOracle(t *testing.T) {
 	const source = "PROCEDURE DBX_LARGE_SOURCE AS\nBEGIN\n  -- preserve <xml> & special characters\n  NULL;\nEND;"
 	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{

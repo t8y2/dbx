@@ -55,7 +55,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useTheme } from "@/composables/useTheme";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
-import { useSettingsStore, AI_PROVIDER_PRESETS, aiProviderLabel, normalizeAiConfig } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, aiProviderLabel, getAiProviderPreset, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -715,7 +715,7 @@ const activeFullConfig = computed(() => {
 });
 
 function isModelCandidate(config: AiConfigItem): boolean {
-  return isAiConfigModelCandidate(config, AI_PROVIDER_PRESETS[config.provider].requiresApiKey, supportsCliProviders);
+  return isAiConfigModelCandidate(config, getAiProviderPreset(config.provider, config.endpoint).requiresApiKey, supportsCliProviders);
 }
 
 function getModelsForConfig(configId: string) {
@@ -724,8 +724,14 @@ function getModelsForConfig(configId: string) {
   return aiModelOptions(config, modelCatalogs.get(configId)?.models ?? []);
 }
 
+function aiConfigProviderLabel(config: { provider: AiConfigItem["provider"]; endpoint: string } | null | undefined): string {
+  if (!config) return aiProviderLabel("claude", t);
+  const preset = getAiProviderPreset(config.provider, config.endpoint);
+  return preset.provider === "custom" ? aiProviderLabel(config.provider, t) : preset.label;
+}
+
 function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
-  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || aiProviderLabel(config.provider, t).toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
+  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || aiConfigProviderLabel(config).toLowerCase().includes(query);
 }
 
 function getConfigModelOptions(config: AiConfigItem) {
@@ -5001,7 +5007,13 @@ async function openExternalUrl(url: string) {
               <Popover v-model:open="providerSelectorOpen">
                 <PopoverTrigger as-child>
                   <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
-                    <AiProviderLogo :provider="activeFullConfig?.provider ?? 'claude'" :label="aiProviderLabel(activeFullConfig?.provider ?? 'claude', t)" :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug" class="h-3 w-3 shrink-0" />
+                    <AiProviderLogo
+                      :provider="activeFullConfig?.provider ?? 'claude'"
+                      :label="aiConfigProviderLabel(activeFullConfig)"
+                      :icon-slug="activeFullConfig ? getAiProviderPreset(activeFullConfig.provider, activeFullConfig.endpoint).iconSlug : AI_PROVIDER_PRESETS.claude.iconSlug"
+                      :icon-path="activeFullConfig ? getAiProviderPreset(activeFullConfig.provider, activeFullConfig.endpoint).iconPath : undefined"
+                      class="h-3 w-3 shrink-0"
+                    />
                     <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
                     <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>
@@ -5015,7 +5027,13 @@ async function openExternalUrl(url: string) {
                     <div v-for="(config, configIndex) in configuredProviders" :key="config.id" class="relative">
                       <button type="button" class="sticky top-0 z-10 flex w-full items-center gap-2 rounded-sm bg-popover px-2 py-1.5 text-left text-xs text-foreground hover:bg-muted" :aria-expanded="!isModelConfigCollapsed(config.id)" @click="toggleModelConfig(config.id)">
                         <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': !isModelConfigCollapsed(config.id) }" />
-                        <AiProviderLogo :provider="config.provider" :label="AI_PROVIDER_PRESETS[config.provider]?.label ?? config.provider" :icon-slug="AI_PROVIDER_PRESETS[config.provider]?.iconSlug" class="h-3.5 w-3.5 shrink-0" />
+                        <AiProviderLogo
+                          :provider="config.provider"
+                          :label="getAiProviderPreset(config.provider, config.endpoint).label"
+                          :icon-slug="getAiProviderPreset(config.provider, config.endpoint).iconSlug"
+                          :icon-path="getAiProviderPreset(config.provider, config.endpoint).iconPath"
+                          class="h-3.5 w-3.5 shrink-0"
+                        />
                         <span class="min-w-0 flex-1 truncate font-medium">{{ config.name }}</span>
                         <Loader2 v-if="getModelCatalog(config.id).status === 'loading'" class="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
                         <span v-if="config.isDefault" class="ml-auto text-[10px] text-muted-foreground">{{ t("ai.default") }}</span>

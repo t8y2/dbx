@@ -1430,6 +1430,23 @@ jobs:
             esac
           }
 
+          # agents/common rebuilds every packaging driver; report common-only
+          # commits once in a shared section instead of duplicating them under
+          # every driver. Commits that also touch driver code stay attributed
+          # to that driver alone.
+          COMMON_NOTES=""
+          while IFS= read -r line; do
+            sha="${line%% *}"
+            subject="${line#* }"
+            if git diff-tree --no-commit-id --name-only -r "$sha" | grep -qv '^agents/common/'; then
+              continue
+            fi
+            COMMON_NOTES="${COMMON_NOTES}- ${subject}"$'\n'
+          done < <(git log --no-merges --format='%H %s' "$PREV_TAG"..HEAD -- agents/common/build.gradle agents/common/src/main/)
+          if [ -n "$COMMON_NOTES" ]; then
+            NOTES="${NOTES}### 公共组件 (agents/common)"$'\n'"${COMMON_NOTES}"$'\n'
+          fi
+
           for name in "${DRIVER_NAMES[@]}"; do
             old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
             new_ver=$(echo "$MODULE_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
@@ -1443,7 +1460,6 @@ jobs:
               label=$(native_only_label "$name")
             fi
 
-            NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'
             if [ "$name" = "oracle" ]; then
               LOG_PATH="agents/drivers/oracle-go/"
             elif [ "$name" = "kingbase" ]; then
@@ -1478,15 +1494,14 @@ jobs:
                 "agents/go-common/gosasl/"
               )
             fi
+            DRIVER_NOTES=""
             while IFS= read -r line; do
-              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
+              [ -n "$line" ] && DRIVER_NOTES="${DRIVER_NOTES}- ${line}"$'\n'
             done < <(git log --oneline "$PREV_TAG"..HEAD -- "${LOG_PATHS[@]}" | sed 's/^[0-9a-f]* //')
-
-            # include common changes if any
-            while IFS= read -r line; do
-              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
-            done < <(git log --oneline "$PREV_TAG"..HEAD -- agents/common/ | sed 's/^[0-9a-f]* //')
-            NOTES="${NOTES}"$'\n'
+            if [ -z "$DRIVER_NOTES" ]; then
+              DRIVER_NOTES="- 无驱动专属变更"$'\n'
+            fi
+            NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'"${DRIVER_NOTES}"$'\n'
           done
 
           if [ -z "$NOTES" ]; then

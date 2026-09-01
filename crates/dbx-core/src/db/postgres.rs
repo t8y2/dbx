@@ -2021,20 +2021,45 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
+    connect_with_max_connections(url, fallback_timeout, 10).await
+}
+
+/// Creates a PostgreSQL pool with an explicit checkout bound.
+///
+/// Session-scoped DBX pools use a single connection so temporary tables and
+/// other connection-local state cannot migrate between physical clients.
+pub async fn connect_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<Pool, String> {
     #[cfg(all(windows, target_vendor = "win7"))]
     {
-        connect_with_optional_local_timezone(url, fallback_timeout, None).await
+        connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, None, max_connections).await
     }
 
     #[cfg(not(all(windows, target_vendor = "win7")))]
     {
         let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-        connect_with_local_timezone(url, fallback_timeout, &timezone).await
+        connect_with_local_timezone_with_max_connections(url, fallback_timeout, &timezone, max_connections).await
     }
 }
 
+/// Test-only thin wrappers (the library now connects through
+/// `connect_with_max_connections`, which carries the pool bound).
+#[cfg(test)]
 async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
-    connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
+    connect_with_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: &str,
+    max_connections: usize,
+) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, Some(timezone), max_connections)
+        .await
 }
 
 /// Identity of one physical backend connection for notice attribution:
@@ -2225,23 +2250,33 @@ async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<Query
     }
 }
 
+#[cfg(test)]
 async fn connect_with_optional_local_timezone(
     url: &str,
     fallback_timeout: Duration,
     timezone: Option<&str>,
 ) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_optional_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: Option<&str>,
+    max_connections: usize,
+) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout).await;
+    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout, max_connections).await;
     let (pool, client) = match first_attempt {
         Err(error) if postgres_error_should_retry_without_tls(&error) => {
             let Some(fallback_url) = postgres_ssl_fallback_url(&url_with_keepalive) else {
                 return Err(error);
             };
             log::info!("PostgreSQL TLS handshake failed in sslmode=prefer; retrying without TLS");
-            connect_postgres_pool_attempt(&fallback_url, timeout).await?
+            connect_postgres_pool_attempt(&fallback_url, timeout, max_connections).await?
         }
         result => result?,
     };
@@ -2263,6 +2298,7 @@ async fn connect_with_optional_local_timezone(
 async fn connect_postgres_pool_attempt(
     url: &str,
     timeout: Duration,
+    max_connections: usize,
 ) -> Result<(Pool, deadpool_postgres::Client), String> {
     let postgres_url = postgres_connection_url(url)?;
     super::with_connection_timeout("PostgreSQL", timeout, async {
@@ -2298,7 +2334,7 @@ async fn connect_postgres_pool_attempt(
             )
         };
         let pool = Pool::builder(mgr)
-            .max_size(10)
+            .max_size(max_connections.max(1))
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(timeout))
             .create_timeout(Some(timeout))

@@ -171,10 +171,10 @@ fn external_sql_file_version(metadata: &std::fs::Metadata, bytes: &[u8]) -> Exte
 
 #[cfg(test)]
 fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResult, String> {
-    if !is_sql_file_path(path) {
-        return Err("Only .sql files can be opened this way".to_string());
-    }
     let metadata = std::fs::metadata(path).map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
+    if !metadata.is_file() {
+        return Err("Only files can be opened this way".to_string());
+    }
     if exceeds_external_sql_editor_limit(metadata.len()) {
         return Ok(ExternalSqlFileReadResult::TooLarge {
             size_bytes: metadata.len(),
@@ -187,11 +187,11 @@ fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResu
 }
 
 async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalSqlFileReadResult, String> {
-    if !is_sql_file_path(&path) {
-        return Err("Only .sql files can be opened this way".to_string());
-    }
     let file = tokio::fs::File::open(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
     let metadata = file.metadata().await.map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
+    if !metadata.is_file() {
+        return Err("Only files can be opened this way".to_string());
+    }
     if exceeds_external_sql_editor_limit(metadata.len()) {
         return Ok(ExternalSqlFileReadResult::TooLarge {
             size_bytes: metadata.len(),
@@ -214,13 +214,11 @@ async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalS
 }
 
 async fn inspect_external_sql_file_async(path: PathBuf) -> Result<ExternalSqlFileStatus, String> {
-    if !is_sql_file_path(&path) {
-        return Err("Only .sql files can be inspected this way".to_string());
-    }
     match tokio::fs::metadata(&path).await {
-        Ok(metadata) => {
+        Ok(metadata) if metadata.is_file() => {
             Ok(ExternalSqlFileStatus::Present { size_bytes: metadata.len(), modified_ns: modified_ns(&metadata) })
         }
+        Ok(_) => Err("Only files can be inspected this way".to_string()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ExternalSqlFileStatus::Missing),
         Err(error) => Err(format!("Failed to inspect SQL file: {error}")),
     }
@@ -228,9 +226,6 @@ async fn inspect_external_sql_file_async(path: PathBuf) -> Result<ExternalSqlFil
 
 #[cfg(test)]
 fn write_external_sql_file_content(path: &Path, content: &str) -> Result<(), String> {
-    if !is_sql_file_path(path) {
-        return Err("Only .sql files can be saved this way".to_string());
-    }
     std::fs::write(path, content).map_err(|e| format!("Failed to save SQL file: {e}"))
 }
 
@@ -266,10 +261,6 @@ async fn write_external_sql_file_checked_async(
     expected_missing: bool,
     force: bool,
 ) -> Result<ExternalSqlFileWriteResult, String> {
-    if !is_sql_file_path(&path) {
-        return Err("Only .sql files can be saved this way".to_string());
-    }
-
     if !force {
         match external_sql_file_version_async(&path).await? {
             Some(current_version) => {
@@ -397,14 +388,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_non_sql_file_content() {
-        let path = std::env::temp_dir().join(format!("dbx-test-{}.txt", uuid::Uuid::new_v4()));
-        std::fs::write(&path, "select 1;").unwrap();
+    fn reads_external_filtered_text_file_content() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "print('hello')").unwrap();
 
         let result = read_external_sql_file_content(&path);
 
         let _ = std::fs::remove_file(&path);
-        assert!(result.unwrap_err().contains(".sql"));
+        let ExternalSqlFileReadResult::Content { content, .. } = result.unwrap() else {
+            panic!("expected text file content");
+        };
+        assert_eq!(content, "print('hello')");
     }
 
     #[test]
@@ -474,9 +468,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inspects_present_and_missing_external_sql_files() {
-        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
-        std::fs::write(&path, "select 1;").unwrap();
+    async fn inspects_present_and_missing_external_text_files() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sh", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "echo test").unwrap();
 
         let present = inspect_external_sql_file_async(path.clone()).await.unwrap();
         assert!(matches!(present, ExternalSqlFileStatus::Present { size_bytes: 9, .. }));
@@ -583,12 +577,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_non_sql_file_save() {
+    fn writes_external_filtered_text_file_content() {
         let path = std::env::temp_dir().join(format!("dbx-test-{}.txt", uuid::Uuid::new_v4()));
 
-        let result = write_external_sql_file_content(&path, "select 2;");
+        let result = write_external_sql_file_content(&path, "plain text");
 
-        assert!(result.unwrap_err().contains(".sql"));
-        assert!(!path.exists());
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "plain text");
+        let _ = std::fs::remove_file(&path);
     }
 }

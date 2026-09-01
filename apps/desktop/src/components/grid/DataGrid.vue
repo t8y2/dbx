@@ -12713,7 +12713,7 @@ function openGridSnapshot() {
           </DataGridToolbar>
         </div>
         <DataGridFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions'"
+          v-if="canUseWhereSearch && filterBuilderOpen && filterEditorView === 'conditions'"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -12733,7 +12733,7 @@ function openGridSnapshot() {
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text'"
+          v-if="canUseWhereSearch && filterBuilderOpen && filterEditorView === 'text'"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"

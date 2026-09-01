@@ -1144,7 +1144,9 @@ describe("DataGridQueryControls", () => {
     expect(applyFilters).toHaveBeenCalledOnce();
   });
 
-  it("keeps view selection out of the data grid controls", async () => {
+  it("keeps view selection out of the data grid controls and toggles persistent filter panels", async () => {
+    const updateFilterBuilderOpen = vi.fn();
+    const ensureRule = vi.fn();
     const mounted = mountComponent(DataGridQueryControls, {
       whereInput: "",
       orderByInput: "",
@@ -1168,6 +1170,8 @@ describe("DataGridQueryControls", () => {
       applyWhere: vi.fn(),
       applyOrderBy: vi.fn(),
       clearOrderBy: vi.fn(),
+      onEnsureRule: ensureRule,
+      "onUpdate:filterBuilderOpen": updateFilterBuilderOpen,
     });
 
     expect(hostText(mounted.root)).not.toContain("grid.filterQuickView");
@@ -1177,7 +1181,13 @@ describe("DataGridQueryControls", () => {
     await mounted.setProps({ filterEditorView: "conditions", filterBuilderOpen: false });
     await nextTick();
     expect(findOne(mounted.root, (node) => node.type === "textarea" && node.props.placeholder === "WHERE")).toBeTruthy();
-    expect(findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"))).toHaveLength(0);
+    const filterButtons = findAll(mounted.root, (node) => node.type === "button" && String(node.props.class).includes("-translate-x-1"));
+    expect(filterButtons).toHaveLength(1);
+    expect(filterButtons[0].props["aria-expanded"]).toBe(false);
+
+    dispatch(filterButtons[0], "click");
+    expect(ensureRule).toHaveBeenCalledOnce();
+    expect(updateFilterBuilderOpen).toHaveBeenCalledWith(true);
   });
 });
 

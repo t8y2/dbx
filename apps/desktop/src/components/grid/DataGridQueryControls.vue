@@ -142,6 +142,12 @@ async function handleFilterButtonClick() {
   await openPendingFirstEmptyRuleColumnSearch();
 }
 
+function togglePersistentFilterPanel() {
+  const nextOpen = !props.filterBuilderOpen;
+  if (nextOpen) emit("ensureRule");
+  emit("update:filterBuilderOpen", nextOpen);
+}
+
 watch([() => props.filterBuilderOpen, () => props.rules.map((rule) => `${rule.id}:${rule.columnName}:${rule.disabled ? "1" : "0"}`).join("\u0000"), filterBuilderRef], () => void openPendingFirstEmptyRuleColumnSearch(), { flush: "post" });
 
 onUnmounted(onResizeEnd);
@@ -212,6 +218,19 @@ onUnmounted(onResizeEnd);
           </PopoverContent>
         </Popover>
       </template>
+      <button
+        v-else
+        type="button"
+        class="relative flex h-5 w-5 -translate-x-1 shrink-0 items-center justify-center rounded border text-[11px] font-medium transition-colors"
+        :class="filterButtonActive ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground'"
+        :disabled="!canUseWhereSearch"
+        :aria-expanded="filterBuilderOpen"
+        :aria-label="t('grid.filter')"
+        @click="togglePersistentFilterPanel"
+      >
+        <Filter class="h-3 w-3" />
+        <span v-if="filterButtonCount" class="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-primary px-1 text-[9px] leading-none text-primary-foreground">{{ filterButtonCount }}</span>
+      </button>
       <DataGridConditionEditor
         :model-value="whereInput"
         kind="where"

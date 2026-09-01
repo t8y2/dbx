@@ -404,6 +404,13 @@ function hasAnyFolder(): boolean {
 
 function toggleFolder(folderId: string) {
   if (suppressNextRowClick.value) return;
+  // While a search is active, matched branches are force-expanded for
+  // visibility; toggling them would only mutate hidden state that surprises
+  // after the search is cleared, so treat the click as a no-op.
+  if (searchQuery.value) {
+    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
+    if (folder && folderBranchMatchesQuery(folder)) return;
+  }
   const next = new Set(collapsedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
@@ -1157,7 +1164,7 @@ function showDropInside(targetId: string) {
       <span v-if="hasSelection" class="text-[12px] text-muted-foreground ml-1">({{ selectedCount }})</span>
       <span class="flex-1" />
       <LightTooltip :text="t('sqlLibrary.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap :disabled="!hasAnyFolder()">
-        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!hasAnyFolder()" @click="collapseAllFolders">
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!hasAnyFolder() || sortMode === 'date'" @click="collapseAllFolders">
           <ChevronsDownUp class="h-3 w-3" />
         </Button>
       </LightTooltip>

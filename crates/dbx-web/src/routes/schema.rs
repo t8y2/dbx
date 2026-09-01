@@ -64,6 +64,16 @@ pub async fn list_database_storage(
     Ok(Json(result))
 }
 
+pub async fn list_xugu_tablespaces(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::db::XuguTablespaceInfo>>, AppError> {
+    let result = dbx_core::schema::list_xugu_tablespaces_core(&state.app, &q.connection_id, q.database.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
 pub async fn get_sqlserver_completion_context(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -168,6 +178,18 @@ pub async fn get_sqlserver_column_metadata(
             .await
             .map_err(AppError::from)?;
     Ok(Json(serde_json::to_value(result).map_err(|e| AppError::from(e.to_string()))?))
+}
+
+pub async fn get_mysql_table_auto_increment(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Option<String>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let result = dbx_core::schema::get_mysql_table_auto_increment_core(&state.app, &q.connection_id, database, table)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(result))
 }
 
 pub async fn list_schemas(
@@ -590,6 +612,26 @@ pub async fn list_reference_key_columns(
     Ok(Json(dbx_core::schema::reference_key_columns_from_indexes(&indexes)))
 }
 
+pub async fn list_reference_keys(
+    State(state): State<Arc<WebState>>,
+    Query(q): Query<SchemaQuery>,
+) -> Result<Json<Vec<dbx_core::schema::ReferenceKeyInfo>>, AppError> {
+    let database = q.database.as_deref().unwrap_or("");
+    let schema = q.schema.as_deref().unwrap_or("");
+    let table = q.table.as_deref().unwrap_or("");
+    let catalog = external_doris_catalog(&state, &q.connection_id, q.catalog.as_deref()).await;
+    let indexes = if let Some(catalog) = catalog.as_deref() {
+        dbx_core::schema::list_doris_catalog_indexes_core(&state.app, &q.connection_id, catalog, database, table)
+            .await
+            .map_err(AppError::from)?
+    } else {
+        dbx_core::schema::list_indexes_core(&state.app, &q.connection_id, database, schema, table)
+            .await
+            .map_err(AppError::from)?
+    };
+    Ok(Json(dbx_core::schema::reference_keys_from_indexes(&indexes)))
+}
+
 pub async fn list_foreign_keys(
     State(state): State<Arc<WebState>>,
     Query(q): Query<SchemaQuery>,
@@ -654,6 +696,7 @@ pub async fn list_constraints(
     let database = q.database.as_deref().unwrap_or("");
     let schema = q.schema.as_deref().unwrap_or("");
     let table = q.table.as_deref().unwrap_or("");
+    let _ = q.catalog.as_deref();
     let result = dbx_core::schema::list_constraints_core(&state.app, &q.connection_id, database, schema, table)
         .await
         .map_err(AppError::from)?;

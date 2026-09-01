@@ -39,6 +39,7 @@ const props = defineProps<{
   focusedObject?: SchemaDiffObject | null;
   deploySql: string;
   deploySqlAll: string;
+  rollbackForwardSql?: string;
   compatibilityWarnings?: CompatibilityWarning[];
   rollbackSql?: string;
   deploySqlMode?: "forward" | "rollback";
@@ -71,7 +72,7 @@ const rollbackConnectorKey = ref(0);
 
 const rollbackHunks = computed(() => {
   if (!props.rollbackSql) return [];
-  return buildHunks(props.deploySql, props.rollbackSql);
+  return buildHunks(props.rollbackForwardSql ?? props.deploySql, props.rollbackSql);
 });
 
 const hunks = computed(() => {
@@ -463,10 +464,6 @@ function copyDeploySqlAll() {
           <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" @click="copyDeploySql">
             <Copy class="w-3 h-3" />
             {{ t("diff.copy") }}
-          </Button>
-          <Button variant="ghost" size="sm" class="h-6 px-2 text-xs gap-1" :disabled="canExecute === false" @click="$emit('executeScript')">
-            <Play class="w-3 h-3" />
-            {{ t("diff.execute") }}
           </Button>
         </div>
       </div>

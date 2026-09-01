@@ -193,7 +193,9 @@ enum ConnectionDatabaseInfoSource {
 /// Held connection for a manual transaction session
 pub enum TxnConnection {
     Postgres(Box<deadpool_postgres::Object>),
-    Mysql(mysql_async::Conn),
+    /// A dedicated MySQL connection. Cancellation may consume and discard this
+    /// connection instead of trying to reuse it after an interrupted result set.
+    Mysql(Option<mysql_async::Conn>),
     /// Dedicated agent multi_session workload client with an open sticky TX.
     Agent {
         client: Arc<db::agent_driver::PooledAgentClient>,
@@ -247,6 +249,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -295,6 +298,8 @@ pub struct AppState {
     /// Web 端 owner 为已认证会话 token，不同登录会话互不可见。建池/池重建/
     /// AI/元数据从它读取，前端通过状态接口查询。
     pub session_credentials: SessionCredentialStore,
+    /// In-memory, never-persisted 1/5 minute write overrides for read-only connections.
+    pub write_unlock_windows: crate::write_unlock::WriteUnlockWindows,
     metadata_gates: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     mongo_oidc_browser_opener: std::sync::RwLock<Option<MongoOidcBrowserOpener>>,
     #[cfg(feature = "mq-admin")]
@@ -1237,6 +1242,7 @@ impl AppState {
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
             transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_credentials: SessionCredentialStore::new(),
+            write_unlock_windows: crate::write_unlock::WriteUnlockWindows::default(),
             metadata_gates: Arc::new(Mutex::new(HashMap::new())),
             mongo_oidc_browser_opener: std::sync::RwLock::new(None),
             #[cfg(feature = "mq-admin")]
@@ -2125,29 +2131,44 @@ impl AppState {
                 PoolKind::Postgres(pg_pool)
             }
             DatabaseType::Sqlite => {
-                let sqlite_path = expand_tilde(&db_config.host);
-                db::sqlite::validate_persistent_attachments(
-                    &sqlite_path,
-                    &db_config.password,
-                    !db_config.attached_databases.is_empty(),
-                )?;
-                let extensions = db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
-                    .into_iter()
-                    .map(|mut extension| {
-                        extension.path = expand_tilde(&extension.path);
-                        extension
-                    })
-                    .collect();
-                let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
-                    &sqlite_path,
-                    &db_config.password,
-                    extensions,
-                )
-                .await?;
-                for attached in &db_config.attached_databases {
-                    db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                if db::sqlite_worker::sqlite_ssh_worker_requested(&db_config) {
+                    let transport_layers = self.resolved_transport_layers(&db_config).await?;
+                    let worker = db::sqlite_worker::connect_sqlite_worker(
+                        &self.tunnels,
+                        &self.agent_manager,
+                        self.storage.data_dir(),
+                        connection_id,
+                        &db_config,
+                        &transport_layers,
+                    )
+                    .await?;
+                    PoolKind::Sqlite(db::sqlite::SqliteHandle::from_worker(worker))
+                } else {
+                    let sqlite_path = expand_tilde(&db_config.host);
+                    db::sqlite::validate_persistent_attachments(
+                        &sqlite_path,
+                        &db_config.password,
+                        !db_config.attached_databases.is_empty(),
+                    )?;
+                    let extensions =
+                        db::sqlite::sqlite_extension_specs_from_url_params(db_config.url_params.as_deref())
+                            .into_iter()
+                            .map(|mut extension| {
+                                extension.path = expand_tilde(&extension.path);
+                                extension
+                            })
+                            .collect();
+                    let pool = db::sqlite::connect_path_with_cipher_key_and_extensions(
+                        &sqlite_path,
+                        &db_config.password,
+                        extensions,
+                    )
+                    .await?;
+                    for attached in &db_config.attached_databases {
+                        db::sqlite::attach_database(&pool, &attached.name, &expand_tilde(&attached.path))?;
+                    }
+                    PoolKind::Sqlite(pool)
                 }
-                PoolKind::Sqlite(pool)
             }
             DatabaseType::Rqlite => {
                 let client = db::rqlite_driver::RqliteClient::new(
@@ -2452,7 +2473,7 @@ impl AppState {
                             }
                         }
                     }
-                    let client = match initial_result {
+                    let mut client = match initial_result {
                         Ok(client) => client,
                         Err(err) => {
                             let alternate_configs = oracle_alternate_connect_configs(&db_config, &err);
@@ -2526,6 +2547,14 @@ impl AppState {
                             }
                         }
                     };
+                    if db_config.db_type == DatabaseType::Kingbase {
+                        let identifier_quote = client
+                            .connection_info(Some(agent_connect_timeout(&db_config)))
+                            .await
+                            .ok()
+                            .map(|info| info.identifier_quote);
+                        client.set_identifier_quote(identifier_quote);
+                    }
                     PoolKind::agent(client)
                 } else {
                     // ZooKeeper JVM properties are connection-scoped; shared agent daemons must not inherit them.
@@ -2806,7 +2835,7 @@ impl AppState {
         config: &ConnectionConfig,
     ) -> Result<(String, u16), String> {
         let transport_layers = self.resolved_transport_layers(config).await?;
-        if transport_layers.is_empty() {
+        if transport_layers.is_empty() || db::sqlite_worker::sqlite_ssh_worker_requested(config) {
             return Ok((config.host.clone(), config.port));
         }
         if config.uses_oracle_tns() {
@@ -3349,10 +3378,14 @@ impl AppState {
                     checked_mysql_pool = Some(pool.clone());
                     drop(connections);
                     match db::mysql::checkout_mysql_conn(&pool, HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT).await {
-                        // Pool saturation means active work, not a dead connection. Removing this pool would
-                        // start a competing reconnect while foreground queries and metadata are still running.
-                        Err(err) if err.is_pool_saturation() => {
-                            log::debug!("MySQL connection pool '{pool_key}' is busy; skipping health probe: {err}");
+                        // The 500 ms probe budget is intentionally shorter than a foreground checkout. A timeout
+                        // while waiting, creating, or recycling is inconclusive: slow remote handshakes and active
+                        // metadata exports can legitimately exceed it. Removing the pool here would start competing
+                        // reconnects while useful work is still running.
+                        Err(err @ db::PoolCheckoutError::Timeout { .. }) => {
+                            log::debug!(
+                                "MySQL connection pool '{pool_key}' did not finish a health checkout; keeping pool: {err}"
+                            );
                             false
                         }
                         Err(err) => {
@@ -4424,6 +4457,8 @@ impl AppState {
         self.tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.proxy_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
         self.http_tunnels.stop_tunnels_with_prefix(&redis_sentinel_prefix).await;
+        let sqlite_worker_prefix = db::sqlite_worker::sqlite_worker_chain_id(connection_id);
+        self.tunnels.stop_tunnels_with_prefix(&sqlite_worker_prefix).await;
         db::transport_layer_tunnel::stop_transport_layers(
             connection_id,
             layer_count,
@@ -5456,7 +5491,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
             let _ = p.disconnect().await;
         }
         PoolKind::Postgres(p) => p.close(),
-        PoolKind::Sqlite(_) => {}
+        PoolKind::Sqlite(pool) => {
+            pool.shutdown().await;
+        }
         PoolKind::Rqlite(_) => {}
         PoolKind::Turso(_) => {}
         PoolKind::CloudflareD1(_) => {}
@@ -6999,6 +7036,40 @@ mod tests {
         assert!(state.connections.read().await.contains_key("conn"));
         drop(held_connection);
         state.remove_connection_pools_detached("conn").await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn mysql_health_check_keeps_pool_when_connection_creation_exceeds_probe_budget() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let pool_options =
+            mysql_async::PoolOpts::new().with_constraints(mysql_async::PoolConstraints::new(1, 2).unwrap());
+        let options = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(address.ip().to_string())
+            .tcp_port(address.port())
+            .user(Some("fault-injection"))
+            .pass(Some("fault-injection"))
+            .pool_opts(Some(pool_options));
+        let pool = db::mysql::MySqlPool::new(options, 2);
+        let (state, dir) = test_app_state().await;
+        state.connections.write().await.insert("conn".to_string(), PoolKind::Mysql(pool.clone(), MysqlMode::Normal));
+
+        let started = Instant::now();
+        assert!(!state.remove_stale_connection_pool("conn").await);
+
+        assert!(started.elapsed() >= super::HEALTH_CHECK_POOL_ACQUIRE_TIMEOUT);
+        assert!(matches!(
+            state.connections.read().await.get("conn"),
+            Some(PoolKind::Mysql(current, _)) if pool.is_same_pool(current)
+        ));
+        state.connections.write().await.remove("conn");
+        server.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), pool.disconnect()).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

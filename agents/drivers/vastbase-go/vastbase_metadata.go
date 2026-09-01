@@ -28,10 +28,12 @@ var postgresDataTypes = []string{
 }
 
 type vastbaseMode struct {
-	compatibilityMode string
-	postgresCatalog   bool
-	mysqlCompat       bool
-	sqlServerIdentity bool
+	compatibilityMode         string
+	compatibilityModeRaw      string
+	postgresCatalog           bool
+	mysqlCompat               bool
+	sqlServerIdentity         bool
+	supportsDisableConstraint bool
 }
 
 type databaseInfo struct {
@@ -114,64 +116,27 @@ type foreignKeyInfo struct {
 	RefColumn string `json:"ref_column"`
 }
 
+type constraintInfo struct {
+	Name              string   `json:"name"`
+	ConstraintType    string   `json:"constraint_type"`
+	Definition        string   `json:"definition"`
+	Columns           []string `json:"columns"`
+	RefSchema         *string  `json:"ref_schema,omitempty"`
+	RefTable          *string  `json:"ref_table,omitempty"`
+	RefColumns        []string `json:"ref_columns"`
+	MatchType         *string  `json:"match_type,omitempty"`
+	OnUpdate          *string  `json:"on_update,omitempty"`
+	OnDelete          *string  `json:"on_delete,omitempty"`
+	Deferrable        bool     `json:"deferrable"`
+	InitiallyDeferred bool     `json:"initially_deferred"`
+	Enabled           bool     `json:"enabled"`
+	Valid             bool     `json:"valid"`
+}
+
 type triggerInfo struct {
 	Name   string `json:"name"`
 	Event  string `json:"event"`
 	Timing string `json:"timing"`
-}
-
-func detectVastbaseMode(db *sql.DB, configuredMySQL bool) vastbaseMode {
-	if configuredMySQL {
-		return vastbaseMode{compatibilityMode: "mysql", mysqlCompat: true}
-	}
-	mode := vastbaseMode{compatibilityMode: detectDatabaseMode(db)}
-	mode.postgresCatalog = !catalogExists(db, "sys_catalog.sys_namespace") && catalogExists(db, "pg_catalog.pg_namespace")
-	if !mode.postgresCatalog {
-		if mode.compatibilityMode != "" {
-			mode.mysqlCompat = mode.compatibilityMode == "mysql"
-		} else {
-			mode.mysqlCompat = supportsBacktickIdentifiers(db)
-		}
-		mode.sqlServerIdentity = !mode.mysqlCompat && catalogExists(db, "sys.identity_columns")
-	}
-	return mode
-}
-
-func catalogExists(db *sql.DB, catalog string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	rows, err := db.QueryContext(ctx, "SELECT 1 FROM "+catalog+" WHERE 1 = 0")
-	if err != nil {
-		return false
-	}
-	return rows.Close() == nil
-}
-
-func detectMySQLCompatMode(db *sql.DB) bool {
-	if databaseMode := detectDatabaseMode(db); databaseMode != "" {
-		return databaseMode == "mysql"
-	}
-	return supportsBacktickIdentifiers(db)
-}
-
-func detectDatabaseMode(db *sql.DB) string {
-	var databaseMode string
-	switch err := db.QueryRow("SELECT setting FROM sys_catalog.sys_settings WHERE LOWER(name) = 'database_mode'").Scan(&databaseMode); {
-	case err == nil:
-		// Treat database_mode as authoritative when the server exposes it. This
-		// avoids misclassifying Oracle-compatible servers that also publish
-		// sql_mode for MySQL syntax toggles such as ANSI_QUOTES.
-		return strings.ToLower(strings.TrimSpace(databaseMode))
-	case errors.Is(err, sql.ErrNoRows):
-		return ""
-	default:
-		return ""
-	}
-}
-
-func supportsBacktickIdentifiers(db *sql.DB) bool {
-	var value int
-	return db.QueryRow("SELECT 1 AS `dbx_identifier_probe`").Scan(&value) == nil
 }
 
 func (s *server) identifierQuote() string {
@@ -195,8 +160,9 @@ func (s *server) connectionInfo() (map[string]any, error) {
 	}
 	return map[string]any{
 		"database": database, "username": username, "version": version, "schema": schema,
-		"compatibilityMode": s.mode.compatibilityMode, "mysql_compat_mode": s.mode.mysqlCompat,
-		"identifierQuote": s.identifierQuote(),
+		"compatibilityMode": s.mode.compatibilityMode, "compatibilityModeRaw": s.mode.compatibilityModeRaw,
+		"mysql_compat_mode": s.mode.mysqlCompat,
+		"identifierQuote":   s.identifierQuote(),
 		"databaseInfo": map[string]string{
 			"productName":            "Vastbase",
 			"productVersion":         version,
@@ -1350,13 +1316,17 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 	default:
 		fullDataTypeExpression = "NULL AS column_type"
 	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
 	query := fmt.Sprintf(`SELECT c.column_name, c.data_type, %s, c.is_nullable, c.column_default,
 	col_description(a.attrelid, a.attnum), c.numeric_precision, c.numeric_scale, c.character_maximum_length
 	FROM information_schema.columns c
-	LEFT JOIN sys_catalog.sys_namespace n ON n.nspname = c.table_schema
-	LEFT JOIN sys_catalog.sys_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
-	LEFT JOIN sys_catalog.sys_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
-	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, quoteLiteral(schema), quoteLiteral(table))
+	LEFT JOIN %s.%s_namespace n ON n.nspname = c.table_schema
+	LEFT JOIN %s.%s_class rel ON rel.relnamespace = n.oid AND rel.relname = c.table_name
+	LEFT JOIN %s.%s_attribute a ON a.attrelid = rel.oid AND a.attname = c.column_name AND a.attnum > 0 AND NOT a.attisdropped
+	WHERE c.table_schema = %s AND c.table_name = %s ORDER BY c.ordinal_position`, fullDataTypeExpression, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
 	rows, err := s.metadataQuery(query)
 	if err != nil {
 		return nil, err
@@ -1516,6 +1486,314 @@ WHERE tc.table_schema = ` + quoteLiteral(effective) + ` AND tc.table_name = ` + 
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func vastbaseConstraintFunctionName(catalog string) string {
+	if catalog == "pg_catalog" {
+		return "pg_get_constraintdef"
+	}
+	return "sys_get_constraintdef"
+}
+
+func vastbaseConstraintsQuery(catalog, prefix, schema, table string, definitionUnsupported, validatedUnsupported, enabledUnsupported bool) string {
+	definitionExpression := fmt.Sprintf("COALESCE(%s(c.oid, true), '')", vastbaseCatalogFunction(catalog, "sys_get_constraintdef", "pg_get_constraintdef"))
+	validExpression := "COALESCE(CAST(c.convalidated AS text), 'T')"
+	enabledExpression := "COALESCE(CAST(c.conenable AS text), 'T')"
+	if definitionUnsupported {
+		definitionExpression = "''"
+	}
+	if validatedUnsupported {
+		validExpression = "'T'"
+	}
+	if enabledUnsupported {
+		enabledExpression = "'T'"
+	}
+	return fmt.Sprintf(`SELECT COALESCE(c.conname, ''), CAST(c.contype AS text), %s,
+CAST(c.conkey AS text), rn.nspname, rt.relname, CAST(c.confkey AS text),
+CAST(c.confmatchtype AS text), CAST(c.confupdtype AS text), CAST(c.confdeltype AS text),
+c.condeferrable, c.condeferred, %s, %s
+FROM %s.%s_constraint c
+JOIN %s.%s_class t ON t.oid = c.conrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+LEFT JOIN %s.%s_class rt ON rt.oid = c.confrelid
+LEFT JOIN %s.%s_namespace rn ON rn.oid = rt.relnamespace
+WHERE n.nspname = %s AND t.relname = %s AND t.relkind IN ('r', 'p', 'f')
+ORDER BY COALESCE(c.conname, '')`, definitionExpression, validExpression, enabledExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+}
+
+func (s *server) listConstraints(schema, table string) ([]constraintInfo, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	effective, table, err = s.resolveConstraintRelation(catalog, prefix, effective, table)
+	if err != nil {
+		return nil, err
+	}
+	definitionUnsupported := s.constraintDefinitionUnsupported
+	validatedUnsupported := s.constraintValidatedUnsupported
+	enabledUnsupported := s.constraintEnabledUnsupported
+	var rows *sql.Rows
+	for {
+		rows, err = s.metadataQuery(vastbaseConstraintsQuery(catalog, prefix, effective, table, definitionUnsupported, validatedUnsupported, enabledUnsupported))
+		if err == nil {
+			break
+		}
+		changed := false
+		if !definitionUnsupported && isUndefinedFunction(err, vastbaseConstraintFunctionName(catalog)) {
+			definitionUnsupported = true
+			s.constraintDefinitionUnsupported = true
+			changed = true
+		}
+		if !validatedUnsupported && isUndefinedColumn(err, "convalidated") {
+			validatedUnsupported = true
+			s.constraintValidatedUnsupported = true
+			changed = true
+		}
+		if !enabledUnsupported && isUndefinedColumn(err, "conenable") {
+			enabledUnsupported = true
+			s.constraintEnabledUnsupported = true
+			changed = true
+		}
+		if !changed {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	type rawConstraint struct {
+		name, kind, definition                        string
+		columnNumbers, refColumnNumbers               []int
+		refSchema, refTable                           sql.NullString
+		matchType, onUpdate, onDelete                 sql.NullString
+		deferrable, initiallyDeferred, valid, enabled bool
+	}
+	raw := []rawConstraint{}
+	for rows.Next() {
+		var item rawConstraint
+		var columnsRaw, refColumnsRaw sql.NullString
+		var validRaw, enabledRaw any
+		if err := rows.Scan(&item.name, &item.kind, &item.definition, &columnsRaw, &item.refSchema, &item.refTable, &refColumnsRaw, &item.matchType, &item.onUpdate, &item.onDelete, &item.deferrable, &item.initiallyDeferred, &validRaw, &enabledRaw); err != nil {
+			return nil, err
+		}
+		item.columnNumbers, err = parseVastbaseConstraintAttributeNumbers(columnsRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint %s columns: %w", item.name, err)
+		}
+		item.refColumnNumbers, err = parseVastbaseConstraintAttributeNumbers(refColumnsRaw.String)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint %s referenced columns: %w", item.name, err)
+		}
+		item.valid = parseVastbaseConstraintValid(validRaw)
+		item.enabled = parseVastbaseConstraintEnabled(enabledRaw)
+		raw = append(raw, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	attributes, err := s.relationAttributesByNumber(catalog, prefix, effective, table)
+	if err != nil {
+		return nil, err
+	}
+	refAttributes := map[string]map[int]string{}
+	result := make([]constraintInfo, 0, len(raw))
+	for _, item := range raw {
+		constraint := constraintInfo{
+			Name: item.name, ConstraintType: vastbaseConstraintTypeName(item.kind), Definition: item.definition,
+			Columns: []string{}, RefColumns: []string{}, Deferrable: item.deferrable,
+			InitiallyDeferred: item.initiallyDeferred, Enabled: item.enabled, Valid: item.valid,
+		}
+		for _, number := range item.columnNumbers {
+			if name := attributes[number]; name != "" {
+				constraint.Columns = append(constraint.Columns, name)
+			}
+		}
+		if item.refSchema.Valid {
+			constraint.RefSchema = stringPtr(item.refSchema.String)
+		}
+		if item.refTable.Valid {
+			constraint.RefTable = stringPtr(item.refTable.String)
+		}
+		if strings.EqualFold(strings.TrimSpace(item.kind), "f") && item.refSchema.Valid && item.refTable.Valid {
+			key := item.refSchema.String + "\x00" + item.refTable.String
+			ref := refAttributes[key]
+			if ref == nil {
+				ref, err = s.relationAttributesByNumber(catalog, prefix, item.refSchema.String, item.refTable.String)
+				if err != nil {
+					return nil, err
+				}
+				refAttributes[key] = ref
+			}
+			for _, number := range item.refColumnNumbers {
+				if name := ref[number]; name != "" {
+					constraint.RefColumns = append(constraint.RefColumns, name)
+				}
+			}
+			constraint.MatchType = vastbaseConstraintMatchType(item.matchType)
+			constraint.OnUpdate = vastbaseConstraintAction(item.onUpdate)
+			constraint.OnDelete = vastbaseConstraintAction(item.onDelete)
+		}
+		result = append(result, constraint)
+	}
+	return result, nil
+}
+
+func (s *server) resolveConstraintRelation(catalog, prefix, schema, table string) (string, string, error) {
+	query := fmt.Sprintf(`SELECT n.nspname, c.relname
+FROM %s.%s_class c JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE LOWER(n.nspname) = LOWER(%s) AND LOWER(c.relname) = LOWER(%s)
+AND c.relkind IN ('r', 'p', 'f')
+ORDER BY CASE WHEN n.nspname = %s AND c.relname = %s THEN 0 ELSE 1 END`, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table), quoteLiteral(schema), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	type relationName struct{ schema, table string }
+	matches := []relationName{}
+	for rows.Next() {
+		var match relationName
+		if err := rows.Scan(&match.schema, &match.table); err != nil {
+			return "", "", err
+		}
+		matches = append(matches, match)
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", err
+	}
+	if len(matches) == 0 {
+		return "", "", fmt.Errorf("Vastbase relation not found: %s.%s", schema, table)
+	}
+	if matches[0].schema == schema && matches[0].table == table {
+		return schema, table, nil
+	}
+	if len(matches) > 1 {
+		return "", "", fmt.Errorf("ambiguous Vastbase relation name %s.%s under case-insensitive matching", schema, table)
+	}
+	return matches[0].schema, matches[0].table, nil
+}
+
+func (s *server) relationAttributesByNumber(catalog, prefix, schema, table string) (map[int]string, error) {
+	query := fmt.Sprintf(`SELECT a.attnum, a.attname
+FROM %s.%s_attribute a JOIN %s.%s_class c ON c.oid = a.attrelid
+JOIN %s.%s_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped`, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[int]string{}
+	for rows.Next() {
+		var number int
+		var name string
+		if err := rows.Scan(&number, &name); err != nil {
+			return nil, err
+		}
+		result[number] = name
+	}
+	return result, rows.Err()
+}
+
+func parseVastbaseConstraintAttributeNumbers(raw string) ([]int, error) {
+	value := strings.TrimSpace(strings.Trim(raw, "{}[]"))
+	if value == "" {
+		return []int{}, nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' })
+	result := make([]int, 0, len(parts))
+	for _, part := range parts {
+		number, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil {
+			return nil, fmt.Errorf("invalid attribute number %q", part)
+		}
+		result = append(result, number)
+	}
+	return result, nil
+}
+
+func parseVastbaseConstraintValue(raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if bytes, ok := raw.([]byte); ok {
+		return strings.ToLower(strings.TrimSpace(string(bytes)))
+	}
+	return strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+}
+
+func parseVastbaseConstraintValid(raw any) bool {
+	if value, ok := raw.(bool); ok {
+		return value
+	}
+	switch parseVastbaseConstraintValue(raw) {
+	case "0", "f", "false", "n", "no", "not validated", "not_validated", "invalid":
+		return false
+	default:
+		return true
+	}
+}
+
+func parseVastbaseConstraintEnabled(raw any) bool {
+	if value, ok := raw.(bool); ok {
+		return value
+	}
+	switch parseVastbaseConstraintValue(raw) {
+	case "0", "f", "false", "d", "disabled", "disable", "off":
+		return false
+	default:
+		return true
+	}
+}
+
+func vastbaseConstraintTypeName(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "p":
+		return "PRIMARY KEY"
+	case "f":
+		return "FOREIGN KEY"
+	case "u":
+		return "UNIQUE"
+	case "c":
+		return "CHECK"
+	case "t":
+		return "CONSTRAINT TRIGGER"
+	case "x":
+		return "EXCLUDE"
+	case "n":
+		return "NOT NULL"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func vastbaseConstraintMatchType(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	labels := map[string]string{"f": "FULL", "p": "PARTIAL", "s": "SIMPLE"}
+	result, ok := labels[strings.ToLower(strings.TrimSpace(value.String))]
+	if !ok {
+		return nil
+	}
+	return &result
+}
+
+func vastbaseConstraintAction(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	labels := map[string]string{"a": "NO ACTION", "r": "RESTRICT", "c": "CASCADE", "n": "SET NULL", "d": "SET DEFAULT"}
+	result, ok := labels[strings.ToLower(strings.TrimSpace(value.String))]
+	if !ok {
+		return nil
+	}
+	return &result
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
@@ -1791,6 +2069,8 @@ func vastbaseIdentityClause(code string) *string {
 		clause = "GENERATED ALWAYS AS IDENTITY"
 	case "d":
 		clause = "GENERATED BY DEFAULT AS IDENTITY"
+	case "m":
+		clause = "IDENTITY"
 	default:
 		return nil
 	}
@@ -1869,6 +2149,10 @@ WHERE tc.table_schema=` + quoteLiteral(schema) + ` AND tc.table_name=` + quoteLi
 }
 
 func (s *server) applyIdentityMetadata(schema, table string, columns []columnInfo) {
+	if s.mode.postgresCatalog {
+		s.applyPostgresIdentityMetadata(schema, table, columns)
+		return
+	}
 	query := `SELECT a.attname, ic.seed_value, ic.increment_value FROM sys.identity_columns ic
 JOIN sys_catalog.sys_class c ON c.oid=ic.object_id JOIN sys_catalog.sys_namespace n ON n.oid=c.relnamespace
 JOIN sys_catalog.sys_attribute a ON a.attrelid=c.oid AND a.attnum=ic.column_id
@@ -1895,6 +2179,52 @@ WHERE n.nspname=` + quoteLiteral(schema) + ` AND c.relname=` + quoteLiteral(tabl
 				column.Extra = &extra
 			}
 		}
+	}
+}
+
+func (s *server) applyPostgresIdentityMetadata(schema, table string, columns []columnInfo) {
+	query := `SELECT a.attname, pg_get_serial_sequence(quote_ident(n.nspname) || '.' || quote_ident(c.relname), a.attname), a.attidentity
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = ` + quoteLiteral(schema) + ` AND c.relname = ` + quoteLiteral(table) + ` AND a.attidentity <> ''`
+	rows, err := s.metadataQuery(query)
+	if err != nil {
+		return
+	}
+	type identityColumn struct {
+		name, sequence, identity string
+	}
+	identityColumns := []identityColumn{}
+	for rows.Next() {
+		var item identityColumn
+		if rows.Scan(&item.name, &item.sequence, &item.identity) == nil {
+			identityColumns = append(identityColumns, item)
+		}
+	}
+	_ = rows.Close()
+	byName := map[string]*columnInfo{}
+	for i := range columns {
+		byName[strings.ToLower(columns[i].Name)] = &columns[i]
+	}
+	for _, item := range identityColumns {
+		column := byName[strings.ToLower(item.name)]
+		if column == nil {
+			continue
+		}
+		extra := vastbaseIdentityClause(item.identity)
+		if extra == nil {
+			extra = stringPtr("IDENTITY")
+		}
+		if item.sequence != "" {
+			var start, increment sql.NullInt64
+			sequenceQuery := "SELECT start_value, increment_by FROM " + quoteCatalogIdentifier(item.sequence)
+			if err := s.requireDBQueryRow(sequenceQuery, &start, &increment); err == nil && start.Valid && increment.Valid {
+				value := fmt.Sprintf("IDENTITY(%d,%d)", start.Int64, increment.Int64)
+				extra = &value
+			}
+		}
+		column.Extra = extra
 	}
 }
 

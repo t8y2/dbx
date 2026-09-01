@@ -197,6 +197,40 @@ pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Resul
     retry_metadata_connection(state, connection_id, None, || list_databases_once(state, connection_id)).await
 }
 
+/// Lists XuguDB tablespaces and their physical data files for the selected
+/// database. This is deliberately a no-op for every other database type so
+/// the common schema surface and non-Xugu drivers remain untouched.
+pub async fn list_xugu_tablespaces_core(
+    state: &AppState,
+    connection_id: &str,
+    database: Option<&str>,
+) -> Result<Vec<db::XuguTablespaceInfo>, String> {
+    let config = connection_config(state, connection_id).await;
+    if !config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Xugu) {
+        return Ok(Vec::new());
+    }
+    retry_metadata_connection(state, connection_id, database.filter(|database| !database.is_empty()), || async {
+        let pool_key = state
+            .get_or_create_metadata_pool_for_session(
+                connection_id,
+                database.filter(|database| !database.is_empty()),
+                None,
+            )
+            .await?;
+        let config = connection_config(state, connection_id).await;
+        let connections = state.connections.read().await;
+        if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+            drop(connections);
+            let mut client = client.lock().await;
+            return client
+                .list_xugu_tablespaces::<Vec<db::XuguTablespaceInfo>>(database, agent_metadata_timeout(config.as_ref()))
+                .await;
+        }
+        Ok(Vec::new())
+    })
+    .await
+}
+
 /// Loads the more expensive database-level properties needed only by the
 /// connection resource browser. General metadata paths keep using
 /// `list_databases_core`, which only enumerates names.
@@ -290,6 +324,9 @@ pub async fn get_sqlserver_completion_context_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
         let db_config = connection_config(state, connection_id).await;
+        let completion_context_sql = db::sqlserver::completion_context_sql_for_profile(
+            db_config.as_ref().and_then(|config| config.driver_profile.as_deref()),
+        );
         let connections = state.connections.read().await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(&pool_key) {
             let config = config.clone();
@@ -301,7 +338,7 @@ pub async fn get_sqlserver_completion_context_core(
                     serde_json::json!({
                         "connection": config.as_ref(),
                         "database": database,
-                        "sql": db::sqlserver::completion_context_sql(),
+                        "sql": completion_context_sql,
                         "maxRows": 1
                     }),
                     agent_metadata_timeout(Some(config.as_ref())),
@@ -316,7 +353,7 @@ pub async fn get_sqlserver_completion_context_core(
             let result = client
                 .execute_query_with_timeout::<db::QueryResult>(
                     agent_execute_query_params(
-                        db::sqlserver::completion_context_sql(),
+                        completion_context_sql,
                         if database.is_empty() { None } else { Some(database) },
                         None,
                         QueryExecutionOptions { max_rows: Some(1), ..Default::default() },
@@ -3040,6 +3077,7 @@ fn escape_presto_like_pattern(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::agent_postgres_extension_fallback_config;
     use super::db;
     use super::{
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
@@ -3059,12 +3097,12 @@ mod tests {
         oracle_table_comment_from_query_result, oracle_table_comment_sql, oracle_table_comments_sql,
         presto_like_columns_from_query_result, presto_like_information_schema_columns_sql,
         presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
-        reference_key_columns_from_indexes, replace_metadata_runtime, should_query_oracle_columns_via_sql_first,
-        table_comments_from_query_result, table_name_filter_matches, tdengine_table_comment_like_pattern,
-        tdengine_table_comment_sql, tdengine_table_comments_sql, uses_mongodb_agent_collection_listing,
-        visible_schema_filter, MetadataErrorAction, MysqlTableListSource, OracleObjectRef, OracleSynonymResolver,
-        TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL, ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT,
-        TDENGINE_LIKE_PATTERN_MAX_BYTES,
+        reference_key_columns_from_indexes, reference_keys_from_indexes, replace_metadata_runtime,
+        should_query_oracle_columns_via_sql_first, table_comments_from_query_result, table_name_filter_matches,
+        tdengine_table_comment_like_pattern, tdengine_table_comment_sql, tdengine_table_comments_sql,
+        uses_mongodb_agent_collection_listing, visible_schema_filter, MetadataErrorAction, MysqlTableListSource,
+        OracleObjectRef, OracleSynonymResolver, ReferenceKeyInfo, TableNameFilter, ORACLE_CURRENT_SCHEMA_SQL,
+        ORACLE_SYNONYM_MAX_DEPTH, TDENGINE_COMMENT_SEARCH_TIMEOUT, TDENGINE_LIKE_PATTERN_MAX_BYTES,
     };
     use super::{list_databases_core, list_tables_core};
     use super::{
@@ -3079,7 +3117,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn reference_key_columns_require_effective_unfiltered_single_column_uniqueness() {
+    fn reference_keys_require_effective_unfiltered_plain_unique_columns() {
         let index = |name: &str, columns: &[&str], is_unique: bool, is_primary: bool| db::IndexInfo {
             name: name.to_string(),
             columns: columns.iter().map(|column| (*column).to_string()).collect(),
@@ -3095,15 +3133,29 @@ mod tests {
         filtered.filter = Some("active = true".to_string());
         let mut expression = index("uq_lower_email", &["lower(email)"], true, false);
         expression.key_is_expression = vec![true];
+        let mut composite_expression = index("uq_tenant_lower_code", &["tenant_id", "lower(code)"], true, false);
+        composite_expression.key_is_expression = vec![false, true];
         let indexes = vec![
             index("clickhouse_primary", &["event_id"], false, true),
             index("uq_code", &["code"], true, false),
             index("uq_Code", &["Code"], true, false),
             index("uq_tenant_code", &["tenant_id", "code"], true, false),
+            index("uq_tenant_code_duplicate", &["tenant_id", "code"], true, false),
+            index("uq_empty", &[""], true, false),
+            index("uq_repeated", &["tenant_id", "tenant_id"], true, false),
             filtered,
             expression,
+            composite_expression,
         ];
 
+        assert_eq!(
+            reference_keys_from_indexes(&indexes),
+            vec![
+                ReferenceKeyInfo { columns: vec!["code".to_string()] },
+                ReferenceKeyInfo { columns: vec!["Code".to_string()] },
+                ReferenceKeyInfo { columns: vec!["tenant_id".to_string(), "code".to_string()] },
+            ]
+        );
         assert_eq!(reference_key_columns_from_indexes(&indexes), vec!["code", "Code"]);
     }
 
@@ -4043,6 +4095,20 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn detects_opengauss_constraint_profiles_without_gaussdb() {
+        assert!(super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::OpenGauss)));
+        assert!(!super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::Gaussdb)));
+        assert!(!super::is_opengauss_constraint_config(&test_connection_config(DatabaseType::Postgres)));
+
+        let mut profiled_postgres = test_connection_config(DatabaseType::Postgres);
+        profiled_postgres.driver_profile = Some("opengauss".to_string());
+        assert!(super::is_opengauss_constraint_config(&profiled_postgres));
+
+        profiled_postgres.driver_profile = Some("gaussdb".to_string());
+        assert!(!super::is_opengauss_constraint_config(&profiled_postgres));
+    }
+
+    #[test]
     fn detects_opengauss_sequence_compatibility_profiles() {
         assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::OpenGauss)));
         assert!(super::is_opengauss_family_config(&test_connection_config(DatabaseType::Gaussdb)));
@@ -4680,6 +4746,17 @@ for line in sys.stdin:
         assert!(!is_agent_postgres_metadata_fallback_config(&test_connection_config(DatabaseType::Uxdb)));
         assert!(!is_agent_postgres_metadata_fallback_config(&test_connection_config(DatabaseType::Postgres)));
         assert!(!is_agent_postgres_metadata_fallback_config(&test_connection_config(DatabaseType::Mysql)));
+    }
+
+    #[test]
+    fn postgres_extension_metadata_fallback_targets_pg_compatible_agents() {
+        for db_type in [DatabaseType::Highgo, DatabaseType::Vastbase] {
+            assert!(agent_postgres_extension_fallback_config(Some(&test_connection_config(db_type))).is_some());
+        }
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Uxdb, DatabaseType::Postgres, DatabaseType::Mysql] {
+            assert!(agent_postgres_extension_fallback_config(Some(&test_connection_config(db_type))).is_none());
+        }
+        assert!(agent_postgres_extension_fallback_config(None).is_none());
     }
 
     #[test]
@@ -6113,6 +6190,10 @@ fn is_agent_postgres_metadata_fallback_config(config: &ConnectionConfig) -> bool
     matches!(config.db_type, DatabaseType::Highgo | DatabaseType::Vastbase)
 }
 
+fn agent_postgres_extension_fallback_config(config: Option<&ConnectionConfig>) -> Option<&ConnectionConfig> {
+    config.filter(|config| is_agent_postgres_metadata_fallback_config(config))
+}
+
 async fn native_postgres_metadata_pool(
     state: &AppState,
     connection_id: &str,
@@ -6782,22 +6863,51 @@ pub async fn list_indexes_core(
     result
 }
 
-pub fn reference_key_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
-    let mut columns = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferenceKeyInfo {
+    pub columns: Vec<String>,
+}
+
+pub fn reference_keys_from_indexes(indexes: &[db::IndexInfo]) -> Vec<ReferenceKeyInfo> {
+    let mut keys = Vec::new();
     for index in indexes {
         if !index.is_unique
             || index.filter.as_deref().is_some_and(|filter| !filter.trim().is_empty())
-            || index.columns.len() != 1
-            || index.key_is_expression.first().copied().unwrap_or(false)
+            || index.columns.is_empty()
+            || index.key_is_expression.iter().any(|is_expression| *is_expression)
         {
             continue;
         }
-        let column = index.columns[0].trim();
-        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
-            columns.push(column.to_string());
+        let columns = index.columns.iter().map(|column| column.trim().to_string()).collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        if columns.iter().any(|column| column.is_empty() || !seen.insert(column.as_str())) {
+            continue;
+        }
+        let key = ReferenceKeyInfo { columns };
+        if !keys.contains(&key) {
+            keys.push(key);
         }
     }
-    columns
+    keys
+}
+
+pub fn reference_key_columns_from_indexes(indexes: &[db::IndexInfo]) -> Vec<String> {
+    reference_keys_from_indexes(indexes)
+        .into_iter()
+        .filter_map(|key| (key.columns.len() == 1).then(|| key.columns[0].clone()))
+        .collect()
+}
+
+pub async fn list_reference_keys_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<ReferenceKeyInfo>, String> {
+    let indexes = list_indexes_core(state, connection_id, database, schema, table).await?;
+    Ok(reference_keys_from_indexes(&indexes))
 }
 
 pub async fn list_reference_key_columns_core(
@@ -6954,6 +7064,9 @@ async fn list_foreign_keys_core_for_session(
                     db::mysql::list_foreign_keys(p, mysql_table_metadata_catalog(database, schema), table).await
                 }
             }
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_constraint_config) => {
+                db::postgres::list_opengauss_foreign_keys(p, schema, table).await
+            }
             PoolKind::Postgres(p) => db::postgres::list_foreign_keys(p, schema, table).await,
             PoolKind::Sqlite(p) => db::sqlite::list_foreign_keys(p, schema, table).await,
             PoolKind::Rqlite(client) => db::rqlite_driver::list_foreign_keys(client, schema, table).await,
@@ -7010,9 +7123,9 @@ pub async fn list_triggers_core(
     .await
 }
 
-// These object kinds are currently exposed by the Xugu agent only. Keeping
-// the core route generic makes the protocol reusable without altering the
-// metadata behavior of any built-in database driver.
+/// Lists structured constraints for a relation. Exposed generically so the
+/// agent protocol and native drivers share one route; the built-in drivers
+/// that implement it today are PostgreSQL, OpenGauss, and the Xugu agent.
 pub async fn list_constraints_core(
     state: &AppState,
     connection_id: &str,
@@ -7023,13 +7136,36 @@ pub async fn list_constraints_core(
     retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let db_config = connection_config(state, connection_id).await;
-        let connections = state.connections.read().await;
-        if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
-            drop(connections);
-            let mut client = client.lock().await;
-            return client.list_constraints(database, schema, table, agent_metadata_timeout(db_config.as_ref())).await;
+
+        {
+            let connections = state.connections.read().await;
+            if let Some(client) = extract_pool!(&connections, &pool_key, Agent) {
+                drop(connections);
+                let mut client = client.lock().await;
+                return client
+                    .list_constraints(database, schema, table, agent_metadata_timeout(db_config.as_ref()))
+                    .await;
+            }
         }
-        Ok(vec![])
+
+        let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
+
+        match &pool {
+            // QuestDB speaks the PostgreSQL wire protocol but has no
+            // constraint metadata, and Redshift does not enforce or expose
+            // constraint definitions, so neither reports any.
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_questdb_config) => Ok(vec![]),
+            PoolKind::Postgres(_)
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) =>
+            {
+                Ok(vec![])
+            }
+            PoolKind::Postgres(p) if db_config.as_ref().is_some_and(is_opengauss_constraint_config) => {
+                db::postgres::list_opengauss_constraints(p, schema, table).await
+            }
+            PoolKind::Postgres(p) => db::postgres::list_constraints(p, schema, table).await,
+            _ => Ok(vec![]),
+        }
     })
     .await
 }
@@ -7212,6 +7348,15 @@ pub async fn list_extensions_core(
             }
         }
 
+        // HighGo and Vastbase use Agent pools but expose PostgreSQL's extension
+        // catalogs. Reuse the native metadata fallback so their installed
+        // extensions are not silently reported as an empty list.
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_extensions(&pool, schema).await;
+            }
+        }
+
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
@@ -7240,6 +7385,12 @@ pub async fn list_available_extensions_core(
                     agent_metadata_timeout(db_config.as_ref()),
                 )
                 .await;
+            }
+        }
+
+        if let Some(config) = agent_postgres_extension_fallback_config(db_config.as_ref()) {
+            if let Some(pool) = native_postgres_metadata_pool(state, connection_id, database, config).await? {
+                return db::postgres::list_available_extensions(&pool).await;
             }
         }
 
@@ -7329,23 +7480,12 @@ pub async fn get_table_ddl_core(
         table,
         object_type,
         TableDdlOptions::SINGLE_RELATION,
+        None,
     )
     .await
 }
 
 pub async fn get_table_export_ddl_core(
-    state: &AppState,
-    connection_id: &str,
-    database: &str,
-    schema: &str,
-    table: &str,
-    object_type: Option<db::ObjectSourceKind>,
-) -> Result<String, String> {
-    get_table_ddl_core_with_options(state, connection_id, database, schema, table, object_type, TableDdlOptions::EXPORT)
-        .await
-}
-
-pub(crate) async fn get_table_relation_export_ddl_core(
     state: &AppState,
     connection_id: &str,
     database: &str,
@@ -7360,7 +7500,30 @@ pub(crate) async fn get_table_relation_export_ddl_core(
         schema,
         table,
         object_type,
+        TableDdlOptions::EXPORT,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn get_table_relation_export_ddl_core_for_session(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    table: &str,
+    object_type: Option<db::ObjectSourceKind>,
+    client_session_id: Option<&str>,
+) -> Result<String, String> {
+    get_table_ddl_core_with_options(
+        state,
+        connection_id,
+        database,
+        schema,
+        table,
+        object_type,
         TableDdlOptions::RELATION_EXPORT,
+        client_session_id,
     )
     .await
 }
@@ -7381,6 +7544,7 @@ pub async fn get_table_display_ddl_core(
         table,
         object_type,
         TableDdlOptions::DISPLAY,
+        None,
     )
     .await
 }
@@ -7393,6 +7557,7 @@ async fn get_table_ddl_core_with_options(
     table: &str,
     object_type: Option<db::ObjectSourceKind>,
     options: TableDdlOptions,
+    client_session_id: Option<&str>,
 ) -> Result<String, String> {
     if crate::sql_dialect::parse_sqlserver_linked_schema_ref(schema).is_some() {
         return Err("DDL is not supported for SQL Server linked server tables".to_string());
@@ -7437,8 +7602,8 @@ async fn get_table_ddl_core_with_options(
         return Ok(source.source);
     }
 
-    retry_metadata_connection(state, connection_id, Some(database), || {
-        get_table_ddl_once(state, connection_id, database, schema, table, options)
+    retry_metadata_connection_for_session(state, connection_id, Some(database), client_session_id, || {
+        get_table_ddl_once(state, connection_id, database, schema, table, options, client_session_id)
     })
     .await
 }
@@ -7465,8 +7630,10 @@ async fn get_table_ddl_once(
     schema: &str,
     table: &str,
     options: TableDdlOptions,
+    client_session_id: Option<&str>,
 ) -> Result<String, String> {
-    let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
+    let pool_key =
+        state.get_or_create_metadata_pool_for_session(connection_id, Some(database), client_session_id).await?;
     let db_config = connection_config(state, connection_id).await;
 
     {
@@ -7604,6 +7771,10 @@ async fn get_table_ddl_once(
 
 async fn connection_config(state: &AppState, connection_id: &str) -> Option<ConnectionConfig> {
     state.configs.read().await.get(connection_id).cloned()
+}
+
+fn is_opengauss_constraint_config(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::OpenGauss || config.driver_profile.as_deref() == Some("opengauss")
 }
 
 fn is_opengauss_family_config(config: &ConnectionConfig) -> bool {

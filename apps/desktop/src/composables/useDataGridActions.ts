@@ -6,6 +6,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
+import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
@@ -57,6 +58,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return quoteTableDataIdentifier(effectiveDatabaseTypeForConnection(config), name, connectionStore.connectionIdentifierQuote?.(tab.connectionId));
   }
 
+  function tableDataPageLimit(tab: QueryTab): number {
+    return tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+  }
+
+  function resultSortPagination(tab: QueryTab): { limit: number; offset: number } | undefined {
+    const limit = tab.resultPageLimit;
+    return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
+  }
+
   function buildTableSql(tab: QueryTab, options: { orderBy?: string; limit?: number; offset?: number; whereInput?: string } = {}): Promise<string> {
     const config = connectionStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
@@ -67,7 +77,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *
     const realColumns = tab.tableMeta?.columns.length ? tab.tableMeta.columns : undefined;
-    const limit = options.limit ?? tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
+    const limit = options.limit ?? tableDataPageLimit(tab);
     return buildTableSelectSql({
       databaseType: effectiveDbType,
       driverProfile: config?.driver_profile,
@@ -335,35 +345,114 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const continuesResultSession = appendResult ? offset === expectedNextOffset : offset === expectedNextOffset && limit === tab.resultPageLimit;
       const sessionId = tab.result?.has_more && tab.result?.session_id && continuesResultSession ? tab.result.session_id : undefined;
       const resultBaseSql = queryResultBaseSql(tab);
-      await queryStore.executeTabSql(tab.id, baseSql, {
-        ...activeQueryTargetOptions(tab),
-        resultBaseSql,
-        resultSortedSql: tab.resultSortedSql,
-        ...(hasDatabaseSort
-          ? {
-              querySort: {
-                resultColumns: sortColumns.resultColumns,
-                columnIndex: sortColumns.columnIndex,
-                column: tab.resultSortColumn!,
-                direction: tab.resultSortDirection!,
-              },
+      const executePage = (pageOffset: number, pageSessionId?: string, retainDisplayedResult = false) =>
+        queryStore.executeTabSql(tab.id, baseSql, {
+          ...activeQueryTargetOptions(tab),
+          resultBaseSql,
+          resultSortedSql: tab.resultSortedSql,
+          ...(hasDatabaseSort
+            ? {
+                querySort: {
+                  resultColumns: sortColumns.resultColumns,
+                  columnIndex: sortColumns.columnIndex,
+                  column: tab.resultSortColumn!,
+                  direction: tab.resultSortDirection!,
+                },
+              }
+            : {}),
+          pagination: { offset: pageOffset, limit, sessionId: pageSessionId, clientSessionId: pageSessionId ? tab.resultClientSessionId : undefined },
+          ...appendOptions,
+          preserveResultDuringExecution: true,
+          preserveTotalRowCountDuringExecution: true,
+          replaceActiveResultInGroup: true,
+          ...(retainDisplayedResult ? { retainDisplayedResult: true } : {}),
+        });
+      const executionTarget = queryStore.activeResultExecutionTarget(tab.id);
+      const executionConnection = connectionStore.getConfig(executionTarget?.connectionId ?? tab.connectionId);
+      const effectiveDbType = effectiveDatabaseTypeForConnection(executionConnection);
+      const usesElasticsearchCursor = effectiveDbType === "elasticsearch" || effectiveDbType === "easysearch";
+
+      // Elasticsearch search_after has no random page access, so every missing
+      // cursor must be fetched in order. This workaround still sends one ES
+      // request per skipped page (page 1 -> 101 sends 100 requests);
+      // retainDisplayedResult only hides those intermediate pages from the UI.
+      const currentResultSessionId = tab.resultSessionId ?? tab.result?.session_id;
+      if (usesElasticsearchCursor && !appendResult && typeof expectedNextOffset === "number" && limit === tab.resultPageLimit && currentResultSessionId) {
+        let nextOffset = expectedNextOffset;
+        let nextSessionId: string | undefined = currentResultSessionId;
+        const currentPage = Math.floor(nextOffset / limit);
+        const targetPage = Math.floor(offset / limit) + 1;
+        const totalRequests = elasticsearchCursorPageJumpRequestCount(currentPage, targetPage);
+        const jumpProgress =
+          totalRequests > 1
+            ? {
+                completedRequests: 0,
+                totalRequests,
+                targetPage,
+              }
+            : undefined;
+        if (jumpProgress) {
+          tab.resultPageJumpProgress = jumpProgress;
+        }
+        const activeJumpProgress = tab.resultPageJumpProgress;
+        const executeCursorPage = async (pageOffset: number, pageSessionId?: string, retainDisplayedResult = false) => {
+          await executePage(pageOffset, pageSessionId, retainDisplayedResult);
+          if (activeJumpProgress) {
+            activeJumpProgress.completedRequests += 1;
+          }
+        };
+
+        try {
+          if (offset < nextOffset) {
+            await executeCursorPage(0, undefined, offset !== 0);
+            if (offset === 0) {
+              return;
             }
-          : {}),
-        pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
-        ...appendOptions,
-        preserveResultDuringExecution: true,
-        preserveTotalRowCountDuringExecution: true,
-        replaceActiveResultInGroup: true,
-      });
+            const restartedTab = activeTab.value;
+            if (restartedTab?.id !== tab.id) {
+              return;
+            }
+            nextOffset = limit;
+            nextSessionId = restartedTab.resultSessionId;
+          }
+          while (nextOffset < offset) {
+            if (!nextSessionId) {
+              return;
+            }
+            await executeCursorPage(nextOffset, nextSessionId, true);
+            const advancedTab = activeTab.value;
+            if (advancedTab?.id !== tab.id) {
+              return;
+            }
+            nextOffset += limit;
+            nextSessionId = advancedTab.resultSessionId;
+          }
+          if (nextOffset === offset && nextSessionId) {
+            await executeCursorPage(offset, nextSessionId);
+            return;
+          }
+        } finally {
+          if (tab.resultPageJumpProgress === activeJumpProgress) {
+            tab.resultPageJumpProgress = undefined;
+          }
+        }
+      }
+
+      await executePage(offset, sessionId);
       return;
     }
 
     if (!tableMetaForDataTab(tab)) return;
     tab.whereInput = whereInput ?? "";
-    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy });
+    const sql = await buildTableSql(tab, { limit, offset, whereInput, orderBy: orderBy ?? tab.orderByInput });
     queryStore.updateSql(tab.id, sql);
+    const expectedNextOffset = appendResult ? tab.result?.rows.length : (tab.resultPageOffset ?? 0) + (tab.resultPageLimit ?? limit);
+    const continuesResultSession = offset === expectedNextOffset && limit === tab.resultPageLimit;
+    const connection = useConnectionStore().getConfig(tab.connectionId);
+    const isSqlServerLegacy = connection?.db_type === "sqlserver" && connection.driver_profile?.trim().toLowerCase() === "sqlserver-legacy";
+    const sessionId = isSqlServerLegacy && tab.result?.has_more && tab.result.session_id && continuesResultSession ? tab.result.session_id : undefined;
     await queryStore.executeTabSql(tab.id, sql, {
-      pagination: { offset, limit },
+      pagination: { offset, limit, sessionId, clientSessionId: sessionId ? tab.resultClientSessionId : undefined },
       ...appendOptions,
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
@@ -393,20 +482,29 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       const config = connectionStore.getConfig(tab.connectionId);
       const quotedColumn = quoteIdent(tab, column);
       const orderBy = direction ? `${config?.db_type === "neo4j" ? `n.${quotedColumn}` : quotedColumn} ${direction.toUpperCase()}` : undefined;
-      const sql = await buildTableSql(tab, { orderBy, whereInput });
+      const limit = tableDataPageLimit(tab);
+      const pagination = { limit, offset: 0 };
+      tab.orderByInput = orderBy;
+      const sql = await buildTableSql(tab, { orderBy, whereInput, limit, offset: pagination.offset });
       queryStore.updateSql(tab.id, sql);
-      await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
+      await queryStore.executeTabSql(tab.id, sql, {
+        pagination,
+        preserveResultDuringExecution: true,
+        preserveTotalRowCountDuringExecution: true,
+      });
       return;
     }
 
     const baseSql = queryResultBaseSql(tab);
     if (!baseSql.trim()) return;
+    const pagination = resultSortPagination(tab);
 
     if (!direction) {
       await queryStore.executeTabSql(tab.id, baseSql, {
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: undefined,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -427,6 +525,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: sortedSql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -456,6 +555,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         ...activeQueryTargetOptions(tab),
         resultBaseSql: baseSql,
         resultSortedSql: built.sql,
+        ...(pagination ? { pagination } : {}),
         preserveResultDuringExecution: true,
         preserveTotalRowCountDuringExecution: true,
         replaceActiveResultInGroup: true,
@@ -471,6 +571,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
         column,
         direction,
       },
+      ...(pagination ? { pagination } : {}),
       preserveResultDuringExecution: true,
       preserveTotalRowCountDuringExecution: true,
       replaceActiveResultInGroup: true,

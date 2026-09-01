@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { activeTabSidebarTarget, findNodePathForTarget, findSidebarConnectionNode, findSidebarNodeForActiveTab, findSidebarNodeForTarget, scrollTopForSidebarNode, shouldScrollActiveSidebarSelection } from "../../apps/desktop/src/lib/sidebar/sidebarActiveTabTarget.ts";
+import { buildTreeNodesFromLayout, expandGroups } from "../../apps/desktop/src/lib/sidebar/sidebarLayout.ts";
+import { flattenTree } from "../../apps/desktop/src/composables/useFlatTree.ts";
 import type { FlatTreeNode } from "../../apps/desktop/src/composables/useFlatTree.ts";
-import type { QueryTab, TreeNode } from "../../apps/desktop/src/types/database.ts";
+import type { ConnectionConfig, QueryTab, SidebarLayout, TreeNode } from "../../apps/desktop/src/types/database.ts";
 
 function flat(node: TreeNode, depth = 0): FlatTreeNode {
   return { id: node.id, node, depth, type: node.type };
@@ -577,4 +579,60 @@ test("active sidebar selection only scrolls on tab or setting changes", () => {
     }),
     true,
   );
+});
+
+test("locate under collapsed connection groups resolves the path, expands the groups, then finds the flat node", () => {
+  // Mirrors locateTabInSidebar for a target inside collapsed (nested)
+  // connection groups: the node path ignores expansion, the visible flat tree
+  // does not, so locate must reopen the collapsed groups through the layout op
+  // and rebuild before matching, otherwise the locate silently fails (#7387).
+  const conn = (id: string): ConnectionConfig => ({
+    id,
+    name: id,
+    db_type: "postgres",
+    host: "localhost",
+    port: 5432,
+    username: "user",
+    password: "",
+  });
+  const layout: SidebarLayout = {
+    groups: [
+      { id: "group-outer", name: "Outer", collapsed: true },
+      { id: "group-inner", name: "Inner", collapsed: true },
+      { id: "group-open", name: "Open", collapsed: false },
+    ],
+    order: [
+      {
+        type: "group",
+        id: "group-outer",
+        children: [{ type: "group", id: "group-inner", children: [{ type: "connection", id: "conn-grouped" }] }],
+      },
+      { type: "group", id: "group-open", children: [{ type: "connection", id: "conn-open" }] },
+    ],
+  };
+  const connections = [conn("conn-grouped"), conn("conn-open")];
+  const target = { type: "connection", connectionId: "conn-grouped" } as const;
+
+  const collapsedTree = buildTreeNodesFromLayout(layout, connections, new Set());
+  const nodePath = findNodePathForTarget(target, collapsedTree);
+  assert.deepEqual(nodePath?.map((node) => node.id), ["group-outer", "group-inner", "conn-grouped"]);
+  assert.equal(findSidebarNodeForTarget(target, flattenTree(collapsedTree)), null);
+
+  const collapsedGroupIds = nodePath!
+    .filter((node) => node.type === "connection-group" && !node.isExpanded)
+    .map((node) => node.id);
+  assert.deepEqual(collapsedGroupIds, ["group-outer", "group-inner"]);
+
+  const expandedLayout = expandGroups(layout, collapsedGroupIds);
+  assert.deepEqual(
+    expandedLayout.groups.map((group) => [group.id, group.collapsed]),
+    [
+      ["group-outer", false],
+      ["group-inner", false],
+      ["group-open", false],
+    ],
+  );
+
+  const rebuiltTree = buildTreeNodesFromLayout(expandedLayout, connections, new Set());
+  assert.equal(findSidebarNodeForTarget(target, flattenTree(rebuiltTree))?.id, "conn-grouped");
 });

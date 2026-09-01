@@ -59,6 +59,7 @@ pub async fn document_find_documents(
     sort: Option<String>,
     collation: Option<String>,
     cursor: Option<String>,
+    cursor_pagination: Option<bool>,
     execution_id: Option<String>,
 ) -> Result<DocumentQueryResult, String> {
     let app = state.inner().clone();
@@ -77,6 +78,7 @@ pub async fn document_find_documents(
             sort.as_deref(),
             collation.as_deref(),
             cursor.as_deref(),
+            cursor_pagination.unwrap_or(false),
         ),
     )
     .await
@@ -128,6 +130,26 @@ pub async fn elasticsearch_count_documents(
         dbx_core::document_ops::count_elasticsearch_documents_core(&app, &connection_id, &index, filter.as_deref()),
     )
     .await
+}
+
+#[tauri::command]
+pub async fn elasticsearch_get_index_metadata(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+    kind: dbx_core::document_ops::ElasticsearchIndexMetadataKind,
+) -> Result<serde_json::Value, String> {
+    dbx_core::document_ops::elasticsearch_get_index_metadata_core(&state, &connection_id, &index, kind).await
+}
+
+#[tauri::command]
+pub async fn elasticsearch_delete_all_documents(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    index: String,
+) -> Result<dbx_core::db::elasticsearch_driver::ElasticsearchDeleteByQueryResult, String> {
+    ensure_connection_writable(&state, &connection_id, "Delete all documents").await?;
+    dbx_core::document_ops::elasticsearch_delete_all_documents_core(&state, &connection_id, &index).await
 }
 
 #[tauri::command]

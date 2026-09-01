@@ -24,6 +24,7 @@ import {
   GitBranch,
   HelpCircle,
   History,
+  ArrowDownToLine,
   Loader2,
   Maximize2,
   MessageSquarePlus,
@@ -31,7 +32,6 @@ import {
   Pencil,
   Plus,
   RefreshCw,
-  Replace,
   Server,
   ShieldCheck,
   Table2,
@@ -55,7 +55,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useTheme } from "@/composables/useTheme";
 import CodeSnapshotDialog from "@/components/codeSnapshot/CodeSnapshotDialog.vue";
 import type { CodeSnapshotSource } from "@/lib/codeSnapshot/codeSnapshot";
-import { useSettingsStore, AI_PROVIDER_PRESETS, normalizeAiConfig } from "@/stores/settingsStore";
+import { useSettingsStore, AI_PROVIDER_PRESETS, aiProviderLabel, normalizeAiConfig } from "@/stores/settingsStore";
 import AiProviderLogo from "@/components/icons/AiProviderLogo.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -242,7 +242,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  replaceSql: [sql: string];
+  appendSql: [sql: string];
   executeSql: [sql: string];
   tempRunSql: [sql: string];
   requestAutoExecuteSql: [sql: string];
@@ -725,7 +725,7 @@ function getModelsForConfig(configId: string) {
 }
 
 function configMatchesModelQuery(config: AiConfigItem, query: string): boolean {
-  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
+  return config.name.toLowerCase().includes(query) || config.provider.toLowerCase().includes(query) || aiProviderLabel(config.provider, t).toLowerCase().includes(query) || AI_PROVIDER_PRESETS[config.provider].label.toLowerCase().includes(query);
 }
 
 function getConfigModelOptions(config: AiConfigItem) {
@@ -1197,7 +1197,7 @@ function sendProposalReply(positive: boolean) {
   const isWriteConfirmation = isActionableWriteProposalMessage(target);
   if (positive && productionContext.value.active && (target.kind === "writeSqlConfirmation" || looksLikeWriteSqlProposal(target.content))) {
     const sql = extractFirstSqlCodeBlock(target.content);
-    if (sql) emit("replaceSql", sql);
+    if (sql) emit("appendSql", sql);
     toast(t("production.aiReviewRequired"), 5000);
     return;
   }
@@ -3477,7 +3477,7 @@ function applySql(code: string) {
     emit("insertRedisCommand", code);
     return;
   }
-  emit("replaceSql", code);
+  emit("appendSql", code);
 }
 
 function executeSql(code: string) {
@@ -4604,7 +4604,7 @@ async function openExternalUrl(url: string) {
                           <Play class="h-3.5 w-3.5" />
                         </button>
                         <button v-if="!seg.pending && (seg.isSql || isRedisConnection)" class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200" :title="t('ai.apply')" @click="applySql(seg.content)">
-                          <Replace class="h-3.5 w-3.5" />
+                          <ArrowDownToLine class="h-3.5 w-3.5" />
                         </button>
                         <button
                           class="rounded p-0.5 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
@@ -5001,12 +5001,7 @@ async function openExternalUrl(url: string) {
               <Popover v-model:open="providerSelectorOpen">
                 <PopoverTrigger as-child>
                   <button type="button" class="min-w-0 flex shrink items-center gap-1.5 max-w-[220px] rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground">
-                    <AiProviderLogo
-                      :provider="activeFullConfig?.provider ?? 'claude'"
-                      :label="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.label ?? activeFullConfig?.provider ?? 'claude'"
-                      :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug"
-                      class="h-3 w-3 shrink-0"
-                    />
+                    <AiProviderLogo :provider="activeFullConfig?.provider ?? 'claude'" :label="aiProviderLabel(activeFullConfig?.provider ?? 'claude', t)" :icon-slug="AI_PROVIDER_PRESETS[activeFullConfig?.provider ?? 'claude']?.iconSlug" class="h-3 w-3 shrink-0" />
                     <span class="min-w-0 truncate">{{ activeFullConfig?.model || t("ai.selectModel") }}</span>
                     <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                   </button>

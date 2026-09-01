@@ -264,6 +264,42 @@ export interface DependencyGraph {
   nodes: DependencyNode[];
 }
 
+interface RawSchemaDiffDependencyNode {
+  tableName?: unknown;
+  table_name?: unknown;
+  dependsOn?: unknown;
+  depends_on?: unknown;
+  dependedBy?: unknown;
+  depended_by?: unknown;
+}
+
+interface RawSchemaDiffDependencyGraph {
+  nodes?: RawSchemaDiffDependencyNode[] | Record<string, RawSchemaDiffDependencyNode>;
+}
+
+export function normalizeSchemaDiffDependencyGraph(graph: unknown): DependencyGraph | null {
+  if (!graph || typeof graph !== "object") return null;
+
+  const rawNodes = (graph as RawSchemaDiffDependencyGraph).nodes;
+  const entries = Array.isArray(rawNodes) ? rawNodes : rawNodes && typeof rawNodes === "object" ? Object.values(rawNodes) : [];
+  const nodes = entries.flatMap((node) => {
+    const tableName = typeof node.tableName === "string" ? node.tableName : typeof node.table_name === "string" ? node.table_name : "";
+    if (!tableName) return [];
+
+    const dependsOn = Array.isArray(node.dependsOn) ? node.dependsOn : Array.isArray(node.depends_on) ? node.depends_on : [];
+    const dependedBy = Array.isArray(node.dependedBy) ? node.dependedBy : Array.isArray(node.depended_by) ? node.depended_by : [];
+    return [
+      {
+        tableName,
+        dependsOn: dependsOn.filter((name): name is string => typeof name === "string"),
+        dependedBy: dependedBy.filter((name): name is string => typeof name === "string"),
+      },
+    ];
+  });
+
+  return nodes.length > 0 ? { nodes } : null;
+}
+
 export interface MissingRollbackObject {
   kind: string;
   name: string;
@@ -800,6 +836,50 @@ export function selectSchemaDiffInput(result: SchemaDiffPreparation, objects: Sc
     ruleDiffs: (result.ruleDiffs ?? []).filter((diff) => selectedIds.has(`rule-${diff.name}`)),
     ownerDiffs: (result.ownerDiffs ?? []).filter((diff) => selectedIds.has(`owner-${diff.objectName}`)),
   };
+}
+
+function projectSchemaDiffObjectSelection(object: SchemaDiffObject, focusedObjectId: string, selectDescendants: boolean, dependencyNames: ReadonlySet<string>): SchemaDiffObject {
+  const isFocused = object.id === focusedObjectId;
+  const isDependency = !object.parentId && dependencyNames.has(object.name);
+  const selectChildren = selectDescendants || isFocused || isDependency;
+  return {
+    ...object,
+    selected: isFocused || selectDescendants || isDependency,
+    children: object.children?.map((child) => projectSchemaDiffObjectSelection(child, focusedObjectId, selectChildren, dependencyNames)),
+  };
+}
+
+function schemaDiffDependencyClosure(result: SchemaDiffPreparation, objects: SchemaDiffObject[], objectId: string): Set<string> {
+  const focusedObject = findSchemaDiffObject(objects, objectId);
+  if (!focusedObject) return new Set();
+
+  const rootObject = focusedObject.parentId ? findSchemaDiffObject(objects, focusedObject.parentId) : focusedObject;
+  if (!rootObject) return new Set();
+
+  const dependencyNodes = new Map((normalizeSchemaDiffDependencyGraph(result.dependencyGraph)?.nodes ?? []).map((node) => [node.tableName, node]));
+  const dependencies = new Set<string>();
+  const pending = [rootObject.name];
+  while (pending.length > 0) {
+    const name = pending.pop();
+    if (!name) continue;
+    for (const dependency of dependencyNodes.get(name)?.dependsOn ?? []) {
+      if (dependency === rootObject.name || dependencies.has(dependency)) continue;
+      dependencies.add(dependency);
+      pending.push(dependency);
+    }
+  }
+  return dependencies;
+}
+
+/** Project one focused tree object onto a fresh selection without mutating checkbox state. */
+export function selectSchemaDiffInputForObject(result: SchemaDiffPreparation, objects: SchemaDiffObject[], objectId: string): SelectedSchemaDiffInput {
+  if (!findSchemaDiffObject(objects, objectId)) {
+    return { diffs: [], functionDiffs: [], sequenceDiffs: [], ruleDiffs: [], ownerDiffs: [] };
+  }
+
+  const dependencyNames = schemaDiffDependencyClosure(result, objects, objectId);
+  const focusedSelection = objects.map((object) => projectSchemaDiffObjectSelection(object, objectId, false, dependencyNames));
+  return selectSchemaDiffInput(result, focusedSelection);
 }
 
 export function buildDeploySqlForObjects(objects: SchemaDiffObject[]): string {

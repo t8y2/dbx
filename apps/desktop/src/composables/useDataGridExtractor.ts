@@ -19,6 +19,7 @@ import {
   type DataGridExtractWarningCode,
 } from "@/lib/dataGrid/dataGridCopyExtractor";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
+import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { formatError } from "@/lib/backend/errorUtils";
 import type { DatabaseType } from "@/types/database";
 
@@ -26,6 +27,15 @@ interface ExtractorRowItem {
   id: number;
   data: SelectionData["rows"][number];
   isDraft?: boolean;
+}
+
+interface ExtractorRequestSource {
+  rowIds: number[];
+  sourceColumnIndexes: number[];
+  columnTypes: Array<string | undefined>;
+  normalizeValues: boolean;
+  presentBinaryText: boolean;
+  rawRows: unknown[][];
 }
 
 interface UseDataGridExtractorOptions {
@@ -60,7 +70,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   const { t } = useI18n();
   const { toast } = useToast();
   const hasUnsupportedDiscreteSelection = computed(() => options.hasCellSelection.value && options.selectedCellMatrix.value === null);
-  const requestSources = new WeakMap<DataGridExtractRequest, { rowIds: number[]; sourceColumnIndexes: number[]; columnTypes: Array<string | undefined>; normalizeValues: boolean }>();
+  const requestSources = new WeakMap<DataGridExtractRequest, ExtractorRequestSource>();
 
   function normalizeCellValue(value: unknown, columnType: string | undefined): unknown {
     if (typeof value !== "string" || columnType?.trim().toLowerCase() !== "json") return value;
@@ -69,6 +79,16 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     } catch {
       return value;
     }
+  }
+
+  // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串。
+  // SQL 必须继续持有 hex 才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
+  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, presentBinaryText: boolean): unknown {
+    if (presentBinaryText) {
+      const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
+      if (text !== null) return text;
+    }
+    return normalizeValues ? normalizeCellValue(value, columnType) : value;
   }
 
   function selectionData(): SelectionData | null {
@@ -186,7 +206,11 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     }));
     const descriptor = DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor];
     const selectedColumnIndexes = selectedSourceIndexes.map((sourceIndex) => compactIndexBySource.get(sourceIndex)).filter((index): index is number => index !== undefined);
-    const rows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => (descriptor.category === "json" || descriptor.category === "sql" ? normalizeCellValue(row[sourceIndex], columnTypesBySource.get(sourceIndex)) : row[sourceIndex])));
+    const columnTypes = requiredSourceIndexes.map((sourceIndex) => columnTypesBySource.get(sourceIndex));
+    const normalizeValues = descriptor.category === "json" || descriptor.category === "sql";
+    const presentBinaryText = descriptor.category !== "sql";
+    const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, presentBinaryText)));
     const tableMeta =
       descriptor.category === "sql"
         ? compactTableMeta(
@@ -209,28 +233,46 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     requestSources.set(request, {
       rowIds: sourceRowIds,
       sourceColumnIndexes: requiredSourceIndexes,
-      columnTypes: requiredSourceIndexes.map((sourceIndex) => columnTypesBySource.get(sourceIndex)),
-      normalizeValues: descriptor.category === "json" || descriptor.category === "sql",
+      columnTypes,
+      normalizeValues,
+      presentBinaryText,
+      rawRows,
     });
     return request;
   }
 
   async function resolveRequestSourceValues(request: DataGridExtractRequest, rowLimit?: number): Promise<DataGridExtractRequest> {
     const source = requestSources.get(request);
-    if (!source || !options.resolveSourceValues) return rowLimit === undefined ? request : { ...request, rows: request.rows.slice(0, rowLimit) };
-    const rowIds = rowLimit === undefined ? source.rowIds : source.rowIds.slice(0, rowLimit);
-    const overlays = await options.resolveSourceValues(rowIds, source.sourceColumnIndexes);
-    const rows = request.rows.slice(0, rowIds.length).map((row, rowIndex) => {
-      const values = overlays.get(rowIds[rowIndex]!);
+    if (!source) return rowLimit === undefined ? request : { ...request, rows: request.rows.slice(0, rowLimit) };
+
+    const limitedSource: ExtractorRequestSource =
+      rowLimit === undefined
+        ? source
+        : {
+            ...source,
+            rowIds: source.rowIds.slice(0, rowLimit),
+            rawRows: source.rawRows.slice(0, rowLimit),
+          };
+    if (!options.resolveSourceValues) {
+      if (rowLimit === undefined) return request;
+      const limitedRequest = { ...request, rows: request.rows.slice(0, rowLimit) };
+      requestSources.set(limitedRequest, limitedSource);
+      return limitedRequest;
+    }
+
+    const overlays = await options.resolveSourceValues(limitedSource.rowIds, limitedSource.sourceColumnIndexes);
+    const rawRows = limitedSource.rawRows.map((row, rowIndex) => {
+      const values = overlays.get(limitedSource.rowIds[rowIndex]!);
       if (!values) return row;
       return row.map((value, compactIndex) => {
-        const sourceIndex = source.sourceColumnIndexes[compactIndex];
-        if (sourceIndex === undefined || !values.has(sourceIndex)) return value;
-        const resolved = values.get(sourceIndex);
-        return source.normalizeValues ? normalizeCellValue(resolved, source.columnTypes[compactIndex]) : resolved;
+        const sourceIndex = limitedSource.sourceColumnIndexes[compactIndex];
+        return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    return { ...request, rows };
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.presentBinaryText)));
+    const resolvedRequest = { ...request, rows };
+    requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
+    return resolvedRequest;
   }
 
   function canBuildSqlUpdateRequest(): boolean {
@@ -329,7 +371,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const request = await resolveRequestSourceValues(initialRequest);
       const mongoResult = await resolveMongoExtractorResult(extractor, request);
       const result = mongoResult ?? (await api.extractDataGridSelection(request));
-      if (!result.text) return false;
+      if (!result.text && !extractorAllowsEmptyOutput(extractor)) return false;
       // Derive the grid paste-back payload from the effective request schema so
       // hidden support columns, row headers, NULLs, tabs, and newlines keep the
       // same shape and values as the rendered raw text or TSV.
@@ -337,7 +379,8 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
       const gridCopy = isGridTabularCopy
         ? (() => {
             const includeRowHeader = extractor !== "raw" && request.options.dsv.includeRowHeader;
-            const rows = request.rows.map((row, rowIndex) => {
+            const rawRows = requestSources.get(request)?.rawRows ?? request.rows;
+            const rows = rawRows.map((row, rowIndex) => {
               const selectedRow = request.selectedColumnIndexes.map((index) => row[index]);
               return includeRowHeader ? [rowIndex + 1, ...selectedRow] : selectedRow;
             });
@@ -365,7 +408,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const request = await resolveRequestSourceValues(initialRequest, previewRowCount);
     const mongoResult = await resolveMongoExtractorResult(extractor, request, previewRowCount);
     const result = mongoResult ?? (await api.extractDataGridSelection(request));
-    if (!result.text) throw new Error(t("grid.copyExtractorEmptySelection"));
+    if (!result.text && !extractorAllowsEmptyOutput(extractor)) throw new Error(t("grid.copyExtractorEmptySelection"));
     return { ...result, sourceRowCount, truncated: sourceRowCount > result.rowCount };
   }
 
@@ -394,6 +437,10 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
   }
 
   return { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor };
+}
+
+function extractorAllowsEmptyOutput(extractor: DataGridCopyExtractorId): boolean {
+  return DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].category === "raw" || DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS[extractor].category === "delimited";
 }
 
 function compactTableMeta(tableMeta: DataGridTableMeta | undefined, requiredColumns: string[]): DataGridTableMeta | undefined {

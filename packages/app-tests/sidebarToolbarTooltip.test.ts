@@ -5,17 +5,20 @@ import { test } from "vitest";
 const connectionTreeSource = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
 const appSidebarSource = readFileSync("apps/desktop/src/components/layout/AppSidebar.vue", "utf8");
 const activeConnectionFilterSource = readFileSync("apps/desktop/src/components/sidebar/ActiveConnectionFilterButton.vue", "utf8");
+const locateButtonSource = readFileSync("apps/desktop/src/components/sidebar/SidebarLocateButton.vue", "utf8");
+const regexButtonSource = readFileSync("apps/desktop/src/components/sidebar/SidebarRegexToggleButton.vue", "utf8");
 const toolbarStart = connectionTreeSource.indexOf('<div class="connection-tree-search');
 const toolbarEnd = connectionTreeSource.indexOf("<CustomContextMenu", toolbarStart);
 const toolbarSource = connectionTreeSource.slice(toolbarStart, toolbarEnd);
-const toolbarActionSource = `${toolbarSource}\n${activeConnectionFilterSource}`;
+const toolbarActionSource = `${toolbarSource}\n${activeConnectionFilterSource}\n${locateButtonSource}\n${regexButtonSource}`;
 
 test("connection tree toolbar uses app tooltips for icon-only actions", () => {
   for (const tooltip of [`<LightTooltip :text="t('sidebar.locateActiveTab')" side="top" :delay="300" nowrap>`, `<LightTooltip :text="sidebarListOptionsLabel" side="top" :delay="300" nowrap>`]) {
     assert.ok(toolbarSource.includes(tooltip));
   }
   assert.ok(toolbarSource.includes("<ActiveConnectionFilterButton"));
-  assert.ok(toolbarSource.includes('<LocateFixed class="h-3.5 w-3.5" />'));
+  assert.ok(toolbarSource.includes("<SidebarLocateButton"));
+  assert.ok(locateButtonSource.includes("<LocateFixed"));
   assert.ok(activeConnectionFilterSource.includes(`<LightTooltip :text="t('sidebar.showActiveConnectionsOnly')" side="top" :delay="300" nowrap>`));
 
   assert.doesNotMatch(toolbarActionSource, /:title="t\('sidebar\.(?:locateActiveTab|showActiveConnectionsOnly)'\)"/);
@@ -26,13 +29,14 @@ test("connection tree toolbar groups low-frequency controls", () => {
   assert.ok(toolbarSource.includes("pr-[4.75rem]"));
   assert.ok(toolbarSource.includes("sidebar.regexSearchTooltip"));
   assert.ok(toolbarSource.indexOf("sidebar.globalLocalSearchTooltip") < toolbarSource.indexOf("sidebar.locateActiveTab"));
-  assert.ok(toolbarSource.includes('class="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border'));
+  assert.ok(locateButtonSource.includes("h-6 w-6 shrink-0"));
+  assert.ok(toolbarSource.includes("<SidebarRegexToggleButton"));
   assert.ok(toolbarSource.includes(':items="sidebarListOptionItems"'));
   assert.ok(connectionTreeSource.includes('groupLabel: index === 0 ? t("sidebar.sortConnections") : undefined'));
   assert.ok(connectionTreeSource.includes('groupLabel: index === 0 ? t("sidebar.filterByType") : undefined'));
   assert.ok(!toolbarSource.includes(':label="sidebarListOptionsLabel"'));
   assert.equal((toolbarSource.match(/<LightDropdown/g) ?? []).length, 1);
-  assert.equal((toolbarSource.match(/border border-border/g) ?? []).length, 2);
+  assert.equal((toolbarSource.match(/border border-border/g) ?? []).length, 1);
 });
 
 test("connection sidebar exposes import and export actions", () => {

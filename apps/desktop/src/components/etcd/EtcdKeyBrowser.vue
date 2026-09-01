@@ -17,6 +17,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isKeyInKvExportScope, kvExportFilenameStem, kvValueByteIdentity, type KvExportScopeKind, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { detectKvValueFormat } from "@/lib/kv/kvValueFormat";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 
 type WorkbenchMode = "keys" | "search" | "maintenance" | "watch" | "lease";
 type SearchScope = "key" | "value" | "all";
@@ -153,9 +154,9 @@ const transferLoadingDetail = ref("");
 const transferPreviewLoaded = ref(false);
 const syncConfigurationExpanded = ref(true);
 
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const etcdConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "etcd"));
-const targetReadOnly = computed(() => Boolean(connectionStore.getConfig(targetConnectionId.value)?.read_only));
+const targetReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)));
 const selectedTransferRows = computed(() => transferRows.value.filter((row) => row.selected && isTransferRowSelectable(row)));
 const selectableTransferRows = computed(() => transferRows.value.filter(isTransferRowSelectable));
 const filteredTransferRows = computed(() => {

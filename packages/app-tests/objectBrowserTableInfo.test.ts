@@ -51,7 +51,7 @@ test("returns every column for empty searches and preserves match order", () => 
 test("keeps the data-grid table properties search on the shared column filter", () => {
   const source = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
 
-  assert.match(source, /filterObjectBrowserTableColumns\(props\.tableMeta\?\.columns \?\? \[\], searchQuery\.value\)/);
+  assert.match(source, /filterObjectBrowserTableColumns\(tableInfoColumns\.value, searchQuery\.value\)/);
 });
 
 test("both table DDL surfaces use the persisted wrapping preference", () => {

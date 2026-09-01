@@ -137,6 +137,7 @@ async fn run_database_export_of_partition_tree_has_no_duplicates_and_replays() {
         drop_table_if_exists: false,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };

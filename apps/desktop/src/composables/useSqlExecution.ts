@@ -10,6 +10,7 @@ import { supportsConnectionScopedQueryExecution } from "@/lib/database/databaseF
 import { supportsConnectionLevelSqlExecution } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/history/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sql/sqlMetadataRefresh";
+import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
@@ -19,6 +20,7 @@ import { extractSqlParameterDescriptors, type SqlParameterDescriptor, type SqlPa
 import { expandSqlVariables } from "@/lib/sql/sqlVariables";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { assessProductionSql } from "@/lib/database/productionSafety";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import type { SqlExecutionDangerRequest } from "@/stores/sqlExecutionDangerStore";
 import type { ConnectionConfig, DatabaseType, QueryTab } from "@/types/database";
@@ -176,6 +178,7 @@ export function useSqlExecution(deps: {
   }
 
   async function continueExecute(sql: string, sourceOffset?: number, options: SqlExecutionOptions = {}) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     // Redis: block dangerous commands when toggle is on (scan entire batch for highest safety level)
     if (deps.activeConnection.value?.db_type === "redis" && deps.blockDangerousRedisCommands?.value !== false) {
       const commands = sql
@@ -291,7 +294,7 @@ export function useSqlExecution(deps: {
       return;
     }
     const statementCount = splitSqlStatementRanges(sql, executionDatabaseType).length;
-    deps.activeOutputView.value = statementCount > 1 ? "summary" : "result";
+    deps.activeOutputView.value = statementCount > 1 ? settingsStore.editorSettings.multiStatementDefaultView : "result";
     const connName = executionConnection?.name || "";
     const start = Date.now();
     const isRedis = executionDatabaseType === "redis";
@@ -331,8 +334,10 @@ export function useSqlExecution(deps: {
       const refreshTarget = sqlMetadataRefreshTarget(sql, tab.schema);
       if (refreshTarget.scope === "connection") {
         connectionStore.invalidateMetadataCache(tab.connectionId);
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId });
         await connectionStore.loadDatabases(tab.connectionId, { force: true });
       } else if (refreshTarget.scope === "database") {
+        await invalidateObjectMetadataCache({ connectionId: tab.connectionId, database: tab.database, schema: refreshTarget.schema });
         await connectionStore.refreshObjectListTreeNode(tab.connectionId, tab.database, refreshTarget.schema);
       }
     }
@@ -358,6 +363,9 @@ export function useSqlExecution(deps: {
     const tabCancelRequested = (count: number) => (tab.cancelRequestCount ?? 0) !== count;
     if (cancelRequested()) return finish({ status: "cancelled" });
     if (!sql.trim()) return finish({ status: "failed", errorMessage: t("explain.emptySql") });
+    if (!(await ensureReadOnlyWriteAccess({ connection, sql, source: t("production.sourceMultiDbSql") }))) {
+      return finish({ status: "skipped", errorMessage: t("dangerDialog.cancel") });
+    }
     if (requiresDatabaseSelection(executionTab, connection, sql)) {
       return finish({ status: "failed", errorMessage: t("editor.selectDatabaseRequired") });
     }
@@ -473,8 +481,10 @@ export function useSqlExecution(deps: {
         const refreshTarget = sqlMetadataRefreshTarget(sql, executionTab.schema);
         if (refreshTarget.scope === "connection") {
           connectionStore.invalidateMetadataCache(executionTab.connectionId);
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId });
           await connectionStore.loadDatabases(executionTab.connectionId, { force: true });
         } else if (refreshTarget.scope === "database") {
+          await invalidateObjectMetadataCache({ connectionId: executionTab.connectionId, database: executionTab.database, schema: refreshTarget.schema });
           await connectionStore.refreshObjectListTreeNode(executionTab.connectionId, executionTab.database, refreshTarget.schema);
         }
       }
@@ -544,6 +554,7 @@ export function useSqlExecution(deps: {
       settingsStore.updateEditorSettings({ confirmDangerousSqlExecution: false });
     }
     suppressDangerConfirm.value = false;
+    if (!(await ensureReadOnlyWriteAccess({ connection: deps.activeConnection.value, sql, source: t("production.sourceSqlEditor") }))) return;
     await doExecute(sql, sourceOffset, { openInNewResultTab, editorViewportRequestId });
   }
 

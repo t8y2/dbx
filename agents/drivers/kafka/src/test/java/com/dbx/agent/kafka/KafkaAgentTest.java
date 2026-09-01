@@ -256,6 +256,25 @@ class KafkaAgentTest {
     }
 
     @Test
+    void topicListingFallsBackWhenDescriptionsTimeOut() throws Exception {
+        Object result = KafkaAgent.topicListResult(
+            Arrays.asList(
+                new TopicListing("orders", Uuid.randomUuid(), false),
+                new TopicListing("payments", Uuid.randomUuid(), false)
+            ),
+            names -> {
+                throw new java.util.concurrent.TimeoutException("describeTopics timed out");
+            }
+        );
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> topics = (List<Map<String, Object>>) ((Map<String, Object>) result).get("topics");
+        assertEquals(Arrays.asList("orders", "payments"), topics.stream().map(topic -> topic.get("name")).toList());
+        assertFalse(topics.get(0).containsKey("partitions"));
+        assertFalse(topics.get(1).containsKey("replicationFactor"));
+    }
+
+    @Test
     void topicListingPreservesNonVersionDescriptionErrors() {
         IllegalStateException failure = new IllegalStateException("metadata authorization failed");
 

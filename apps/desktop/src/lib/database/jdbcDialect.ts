@@ -15,7 +15,7 @@ const GAUSSDB_COUNT_QUERY_DOP_KEY = "gaussdbCountQueryDop";
 export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
-const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "spark"]);
+const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "kyuubi", "impala", "argo", "spark"]);
 const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
@@ -26,6 +26,8 @@ const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> =
   { type: "jdbc", patterns: [/phoenix/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
+  // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and must stay on jdbc.
+  { type: "gbase", patterns: [/jdbc:gbase:/i, /cn\.gbase\./i, /gbase(?!dbt)(?!8s).*jdbc/i] },
   { type: "mysql", patterns: [/kyuubi/i] },
   { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
   { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },
@@ -50,6 +52,7 @@ const JDBC_ASE_PROFILE_PATTERNS = [/(?:^|[\s_-])ase(?:$|[\s_-])/i, /\bsap[\s_-]+
 
 export function inferJdbcDialect(connection?: JdbcDialectConnection): DatabaseType | undefined {
   if (!connection || connection.db_type !== "jdbc") return undefined;
+  if (isGbase8sProfile(connection.driver_profile)) return undefined;
   const haystack = [connection.driver_profile, connection.driver_label, connection.connection_string, connection.jdbc_driver_class, ...(connection.jdbc_driver_paths ?? []), connection.database_info?.productName, connection.database_info?.serverComment, connection.database_info?.driverName]
     .filter(Boolean)
     .join("\n");
@@ -77,6 +80,22 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   }
   if (connection.db_type !== "jdbc") return connection.db_type;
   return inferJdbcDialect(connection) ?? "jdbc";
+}
+
+/**
+ * Database type the data-transfer pipeline treats a connection as. Doris-family
+ * engines (Doris/SelectDB/StarRocks) are saved as `db_type=mysql` with a
+ * doris/starrocks `driver_profile`, and the transfer backend routes them through
+ * the MySQL object family (catalog routing is driver_profile-aware); the
+ * standalone `doris`/`starrocks` manifest entries are not transfer-capable.
+ * Resolve those connections back to their raw db_type so they stay selectable in
+ * the transfer dialog and keep the MySQL object kinds — the effective type alone
+ * would drop them from the connection list and disable every non-table kind.
+ */
+export function transferDatabaseTypeForConnection(connection?: JdbcDialectConnection): DatabaseType | undefined {
+  const effective = effectiveDatabaseTypeForConnection(connection);
+  if (effective === "doris" || effective === "starrocks") return connection?.db_type;
+  return effective;
 }
 
 export function connectionUsesConnectionRootSchemaMode(connection?: JdbcDialectConnection): boolean {

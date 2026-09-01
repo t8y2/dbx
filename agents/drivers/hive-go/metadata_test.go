@@ -479,3 +479,160 @@ func TestListViewsReturnsFallbackErrorWhenShowViewsIsUnsupported(t *testing.T) {
 func metadataResult(columns []string, rows ...[]driver.Value) gohive.MetadataResult {
 	return gohive.MetadataResult{Columns: columns, Rows: rows}
 }
+
+func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) {
+	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND lower(procedure_name) LIKE '%sp%' ORDER BY procedure_name"
+	functionsQuery := "SELECT function_name FROM system.functions_v WHERE lower(database_name) = lower('ods') AND lower(function_name) LIKE '%sp%' ORDER BY function_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case proceduresQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_daily_etl"}, {"sp_hourly_agg"},
+				}), nil
+			case functionsQuery:
+				return newScriptedRows(context.Background(), []string{"function_name"}, []string{"STRING"}, [][]driver.Value{
+					{"fn_clean"},
+				}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
+		Filter:      "sp", // "sp" overlaps the procedure filter; both lists get "%sp%" applied
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	t.Logf("values: %+v", values)
+	// listObjects applies the same filter pattern to procedures and functions;
+	// we passed "sp" so procedures match and functions don't (because the function
+	// list returns rows regardless of filter — that is, listObjects calls each
+	// listRoutines call with the same Filter). Verify both queries ran and
+	// the procedure name is present.
+	queries, _, _, _ := behavior.snapshot()
+	t.Logf("queries count: %d", len(queries))
+	for i, q := range queries {
+		t.Logf("query[%d]: %q", i, q)
+	}
+	if len(queries) != 2 {
+		t.Fatalf("expected exactly 2 routine queries, got %d: %v", len(queries), queries)
+	}
+	if values == nil {
+		t.Fatal("expected non-nil object list")
+	}
+	names := make([]string, len(values))
+	for i, v := range values {
+		names[i] = v.Name + ":" + v.ObjectType
+	}
+	joined := strings.Join(names, ",")
+	if !strings.Contains(joined, "sp_daily_etl:PROCEDURE") {
+		t.Fatalf("expected procedures in result, got %v", values)
+	}
+	if !strings.Contains(joined, "fn_clean:FUNCTION") {
+		t.Fatalf("expected functions in result, got %v", values)
+	}
+}
+
+func TestGetObjectSourceRoutesProceduresToSystemProceduresView(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND procedure_name = 'sp_daily_etl'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"-- daily ETL pipeline"},
+				{"INSERT OVERWRITE TABLE ods.daily_summary SELECT * FROM staging.events"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"ods"`),
+		"name":        json.RawMessage(`"sp_daily_etl"`),
+		"object_type": json.RawMessage(`"PROCEDURE"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Name != "sp_daily_etl" || source.ObjectType != "PROCEDURE" {
+		t.Fatalf("unexpected object source metadata: %#v", source)
+	}
+	expected := "-- daily ETL pipeline\nINSERT OVERWRITE TABLE ods.daily_summary SELECT * FROM staging.events\n"
+	if source.Source != expected {
+		t.Fatalf("unexpected procedure source: %q", source.Source)
+	}
+}
+
+func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.functions_v WHERE lower(database_name) = lower('ods') AND function_name = 'fn_clean'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"-- cleanup helper"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"schema":      json.RawMessage(`"ods"`),
+		"name":        json.RawMessage(`"fn_clean"`),
+		"object_type": json.RawMessage(`"FUNCTION"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Source != "-- cleanup helper\n" {
+		t.Fatalf("unexpected function source: %q", source.Source)
+	}
+}
+
+func TestListObjectsDoesNotQueryRoutinesForVanillaHive(t *testing.T) {
+	behavior := &scriptedBehavior{
+		query: func(ctx context.Context, query string) (driver.Rows, error) {
+			if strings.Contains(strings.ToUpper(query), "PROCEDURES_V") || strings.Contains(strings.ToUpper(query), "FUNCTIONS_V") {
+				t.Fatalf("vanilla Hive must not query routine views, got: %s", query)
+			}
+			return newScriptedRows(ctx, []string{"tab_name"}, []string{"STRING"}, [][]driver.Value{{"events"}}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "hive"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	for _, v := range values {
+		if v.ObjectType == "PROCEDURE" || v.ObjectType == "FUNCTION" {
+			t.Fatalf("vanilla Hive should not surface routines, got: %+v", v)
+		}
+	}
+}

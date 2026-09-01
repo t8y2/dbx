@@ -8,6 +8,7 @@ import {
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateDatabasePreview,
   mongoCreateIndexFormFromRow,
   mongoCreateIndexRequestFromSpec,
   mongoCreateIndexPreview,
@@ -118,6 +119,10 @@ describe("isProtectedMongoIndex", () => {
 });
 
 describe("mongo shell previews", () => {
+  it("shows the initialization collection used to materialize a database", () => {
+    expect(mongoCreateDatabasePreview('app "primary"')).toBe('db.getSiblingDB("app \\"primary\\"").createCollection("dbx_init");');
+  });
+
   it("preserves identifier whitespace in rename preview", () => {
     expect(mongoRenameCollectionPreview("app", " users ", " renamed ")).toBe('db.getSiblingDB("app").getCollection(" users ").renameCollection(" renamed ")');
   });

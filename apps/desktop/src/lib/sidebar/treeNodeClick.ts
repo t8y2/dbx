@@ -49,16 +49,29 @@ export function isRepeatableNavigationTreeNode(type: TreeNodeType): boolean {
 export function shouldActivateTreeNodeOnSingleClick(type: TreeNodeType, activation: SidebarActivation = "single"): boolean {
   return activation !== "double" || isDirectNavigationTreeNode(type);
 }
-const objectBrowserNodeTypes = new Set<TreeNodeType>(["database", "schema", "object-browser", "mongo-db"]);
+const databaseActivationNodeTypes = new Set<TreeNodeType>(["database", "schema", "mongo-db"]);
 
-/** 开关“单击数据库同时打开数据库项目”命中时，单击数据库类节点直接打开对象浏览器标签页。 */
-export function shouldOpenObjectBrowserOnSingleClick(type: TreeNodeType, enabled: boolean): boolean {
-  return enabled && objectBrowserNodeTypes.has(type);
+export function shouldBrowseObjectsOnDatabaseActivation(type: TreeNodeType, enabled: boolean): boolean {
+  return enabled && databaseActivationNodeTypes.has(type);
 }
-const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "package", "package-body", "type", "type-body"]);
+const sourceNodeTypes = new Set<TreeNodeType>(["materialized_view", "procedure", "function", "trigger", "event", "sequence", "synonym", "job", "package", "package-body", "type", "type-body"]);
 const savedSqlNodeTypes = new Set<TreeNodeType>(["saved-sql-file"]);
 const tableChildGroupNodeTypes = new Set<TreeNodeType>(["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-partitions", "group-table-partitions", "group-table-subpartitions"]);
-const databaseChildGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-packages", "group-types"]);
+const databaseChildGroupNodeTypes = new Set<TreeNodeType>([
+  "group-tables",
+  "group-dolt-system-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-triggers",
+  "group-events",
+  "group-sequences",
+  "group-synonyms",
+  "group-jobs",
+  "group-packages",
+  "group-types",
+]);
 const displayPathObjectNodeTypes = new Set<TreeNodeType>(["table", "view", "materialized_view", "procedure", "function", "trigger", "event"]);
 
 export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKind | null {
@@ -70,6 +83,7 @@ export function objectSourceKindForTreeNode(type: TreeNodeType): ObjectSourceKin
   if (type === "event") return "EVENT";
   if (type === "sequence") return "SEQUENCE";
   if (type === "synonym") return "SYNONYM";
+  if (type === "job") return "JOB";
   if (type === "package") return "PACKAGE";
   if (type === "package-body") return "PACKAGE_BODY";
   if (type === "type") return "TYPE";
@@ -117,12 +131,11 @@ function canOpenTreeNodeSource(type: TreeNodeType, dbType?: DatabaseType): boole
   return true;
 }
 
-export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, openDatabaseOnSingleClick = false, canOpenObjectBrowser = false): TreeNodeRowAction {
-  // “单击数据库同时打开数据库项目”开关优先于激活方式：单击即等效双击的打开行为。
-  if (openDatabaseOnSingleClick && canOpenObjectBrowser && shouldOpenObjectBrowserOnSingleClick(type, true)) {
+export function treeNodeRowAction(type: TreeNodeType, canExpand: boolean, activation: SidebarActivation = "single", dbType?: DatabaseType, browseObjectsOnDatabaseActivation = false, canOpenObjectBrowser = false): TreeNodeRowAction {
+  if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
+  if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
     return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
   }
-  if (!shouldActivateTreeNodeOnSingleClick(type, activation)) return "none";
   if (type === "extension") return "open-extension-details";
   if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
   if (dataNodeTypes.has(type)) return "open-data";
@@ -143,26 +156,26 @@ export function shouldRunTreeNodeRowAction(action: TreeNodeRowAction, clickDetai
   return action !== "none" && clickDetail <= 1;
 }
 
-export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, openDatabaseOnSingleClick = false): TreeNodeRowDoubleClickAction {
+export function treeNodeRowDoubleClickAction(type: TreeNodeType, canOpenObjectBrowser: boolean, activation: SidebarActivation = "single", canExpand = false, dbType?: DatabaseType, canOpenDatabaseBrowser = false, browseObjectsOnDatabaseActivation = false): TreeNodeRowDoubleClickAction {
   // Single-click activation already handles the first click in a dblclick
   // sequence. Only double-click activation needs a second-stage table action.
   if (type === "table") return activation === "double" ? "activate-data" : "none";
-  if (openDatabaseOnSingleClick && canOpenObjectBrowser && shouldOpenObjectBrowserOnSingleClick(type, true)) return "none";
   // 双击激活模式下，双击连接节点应当展开树（与单击模式下单击展开一致），
   // “打开数据库浏览”只保留给单击激活模式下的双击手势。
   if (type === "connection" && canOpenDatabaseBrowser && activation !== "double") return "open-database-browser";
   if (activation === "double") {
+    if (canOpenObjectBrowser && shouldBrowseObjectsOnDatabaseActivation(type, browseObjectsOnDatabaseActivation)) {
+      return canExpand ? "open-object-browser-and-expand" : "open-object-browser";
+    }
+    if (canOpenObjectBrowser && type === "object-browser") return "open-object-browser";
     if (type === "extension") return "open-extension-details";
     if (dataNodeTypes.has(type)) return "open-data";
     if (type === "type" && customTypeCapabilities(dbType).details) return canExpand ? "toggle" : "none";
     if (sourceNodeTypes.has(type) && canOpenTreeNodeSource(type, dbType)) return "open-source";
     if (savedSqlNodeTypes.has(type)) return "open-saved-sql";
     if (toggleLeafNodeTypes.has(type)) return "toggle";
-    if (canOpenObjectBrowser && objectBrowserNodeTypes.has(type) && canExpand) return "open-object-browser-and-expand";
-    if (canOpenObjectBrowser && objectBrowserNodeTypes.has(type)) return "open-object-browser";
     if (canExpand) return "toggle";
   }
-  if (canOpenObjectBrowser && objectBrowserNodeTypes.has(type)) return "open-object-browser";
   return "none";
 }
 

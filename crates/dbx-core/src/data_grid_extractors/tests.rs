@@ -66,6 +66,18 @@ fn extracts_raw_values_without_escaping_quotes() {
 }
 
 #[test]
+fn raw_exports_null_as_an_empty_value() {
+    let mut request = request(DataGridExtractorId::Raw);
+    request.columns = vec![column("name", 0)];
+    request.selected_column_indexes = vec![0];
+    request.rows = vec![vec![Value::Null]];
+
+    let result = extract_data_grid_selection(request).expect("raw extraction");
+
+    assert_eq!(result.text, "");
+}
+
+#[test]
 fn raw_rejects_multiple_selected_cells() {
     let error =
         extract_data_grid_selection(request(DataGridExtractorId::Raw)).expect_err("raw must reject multiple cells");

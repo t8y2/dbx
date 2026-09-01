@@ -26,7 +26,7 @@ const emit = defineEmits<{
   startResize: [event: MouseEvent];
   collapse: [];
   "open-settings": [initialTab: string];
-  "add-to-ai": [node: TreeNode];
+  "add-to-ai": [nodes: TreeNode | TreeNode[]];
 }>();
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
@@ -268,30 +268,32 @@ defineExpose({ focusSearch, locateTabInSidebar });
           </LightTooltip>
         </template>
         <template v-else>
-          <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
-              <ChevronsDownUp class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
-              <FolderPlus class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
-              <RefreshCw class="h-3 w-3" />
-            </Button>
-          </LightTooltip>
-          <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
-            <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
-              <ChevronsLeft class="h-3.5 w-3.5" />
-            </Button>
-          </LightTooltip>
+          <span data-sidebar-toolbar-actions class="flex shrink-0 items-center gap-0.5">
+            <LightTooltip :text="t('sidebar.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="collapseAllTreeNodes">
+                <ChevronsDownUp class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('connectionGroup.createGroup')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="createNewGroup">
+                <FolderPlus class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('contextMenu.refreshChildren')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-5 w-5" @click="refreshTree">
+                <RefreshCw class="h-3 w-3" />
+              </Button>
+            </LightTooltip>
+            <LightTooltip :text="t('sidebar.collapse')" side="bottom" :delay="0" :close-delay="0" nowrap>
+              <Button variant="ghost" size="icon" class="h-6 w-6" @click="emit('collapse')">
+                <ChevronsLeft class="h-3.5 w-3.5" />
+              </Button>
+            </LightTooltip>
+          </span>
         </template>
       </div>
       <div class="flex-1 min-h-0">
-        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(node) => emit('add-to-ai', node)" />
+        <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />
       </div>
     </div>
     <div class="panel-resize-handle panel-resize-handle--right" @mousedown="emit('startResize', $event)" />

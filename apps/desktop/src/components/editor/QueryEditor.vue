@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
 import { AlignLeft, Camera, CaseLower, CaseUpper, ClipboardPaste, Code2, Download, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
-import type { CompletionContext } from "@codemirror/autocomplete";
+import type { Completion, CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
@@ -20,7 +20,7 @@ import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, 
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
-import { canFormatSqlForDatabaseType, formatSqlForEditing, compressSqlText, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -92,29 +92,38 @@ import {
 } from "@/lib/sql/sqlNavigation";
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
+import { createHoverSearch, type HoverSearchController } from "@/lib/editor/sqlHoverSearch";
 import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
+import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
   DBX_TABLE_REFERENCE_DROP_EVENT,
+  DBX_TABLE_REFERENCE_HOVER_EVENT,
+  DBX_TABLE_REFERENCE_DRAG_END_EVENT,
   activeTableReferencePayloadValue,
   clearActiveTableReferencePayload,
   hasTableReferencePayloadType,
   parseTableReferencePayload,
   tableReferenceInsertText,
   type QueryEditorTableReferenceDropDetail,
+  type QueryEditorTableReferenceHoverDetail,
   type QueryEditorTableReferencePayload,
 } from "@/lib/editor/queryEditorTableDrop";
+import { isPointOverElementRoot } from "@/lib/editor/tableReferenceDragFeedback";
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
+import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } from "@/lib/editor/queryEditorSqlShortcut";
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
-import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
+import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
 import { appendSqlCompletionSpace } from "@/lib/editor/sqlCompletionInsertion";
+import { batchColumnSelectionColumnList, batchColumnSelectionInsertReplacement, batchColumnSelectionReplaceTo, isBatchColumnSelectionCompletionActive, shouldResolveSqlColumnCompletion } from "@/lib/editor/batchColumnSelection";
 import { compareSqlCompletions, completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentation";
 import { clampEditorFontSize, createEditorWheelZoomGestureGuard, createEditorZoomCommitScheduler, fontSizeFromGestureScale, fontSizeFromWheelDelta } from "@/lib/editor/editorZoom";
+import { enabledSqlShortcutActions, resolveSqlShortcutTemplate } from "@/lib/sql/sqlShortcutActions";
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
@@ -560,6 +569,8 @@ let codeMirrorSnippetCompletion: typeof import("@codemirror/autocomplete").snipp
 let codeMirrorCompletionStatus: typeof import("@codemirror/autocomplete").completionStatus | null = null;
 let codeMirrorAcceptCompletion: typeof import("@codemirror/autocomplete").acceptCompletion | null = null;
 let codeMirrorSelectedCompletionIndex: typeof import("@codemirror/autocomplete").selectedCompletionIndex | null = null;
+let codeMirrorSelectedCompletion: typeof import("@codemirror/autocomplete").selectedCompletion | null = null;
+let codeMirrorMoveCompletionSelection: typeof import("@codemirror/autocomplete").moveCompletionSelection | null = null;
 let codeMirrorSelectFirstCompletion: import("@codemirror/view").Command | null = null;
 let codeMirrorStartCompletion: typeof import("@codemirror/autocomplete").startCompletion | null = null;
 let codeMirrorCloseCompletion: typeof import("@codemirror/autocomplete").closeCompletion | null = null;
@@ -859,6 +870,18 @@ function emitExecutionRequest(source: SqlExecutionOverride, openInNewResultTab =
   } else {
     emit("execute", source);
   }
+}
+
+/**
+ * Captures a manual selection before a toolbar click can cause a platform
+ * focus transition. The snapshot is immutable, so downstream execution keeps
+ * the exact SQL and source offsets that were visible when the button was
+ * pressed.
+ */
+function captureExecutionSnapshot(): SqlExecutionSnapshot | undefined {
+  const currentView = view.value;
+  if (!currentView || currentView.state.selection.main.empty) return undefined;
+  return sqlExecutionSnapshotFromView(currentView);
 }
 
 function requestExecute(options: RequestExecuteOptions = {}) {
@@ -1923,6 +1946,18 @@ function handleSqlIntentionActions(currentView: EditorViewType): boolean {
   }
 }
 
+function runSqlShortcutAction(action: ReturnType<typeof enabledSqlShortcutActions>[number], currentView: EditorViewType, event?: KeyboardEvent): boolean {
+  if (shouldBlockExecutionShortcut(event, currentView)) return true;
+  if (props.readOnly) return true;
+  const { from, to, empty } = currentView.state.selection.main;
+  if (empty) return false;
+  const selected = currentView.state.sliceDoc(from, to).trim();
+  if (!selected) return false;
+  const sql = resolveSqlShortcutTemplate(action.sql, selected);
+  emitExecutionRequest(sql);
+  return true;
+}
+
 function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view"))["keymap"]) {
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
@@ -1943,19 +1978,43 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
     openReplace,
     isReadOnly: () => !!props.readOnly,
   });
+  const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
+  const sqlShortcutKeymapActions = sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
+  const sqlShortcutBindings = sqlShortcutKeymapActions.flatMap((action) => binding(action.shortcut, (currentView) => runSqlShortcutAction(action, currentView)));
+  const sqlShortcutDomHandler = createQueryEditorSqlShortcutDomHandler(
+    () => settingsStore.editorSettings.sqlShortcuts,
+    (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
+  );
+  const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
+    if (replaceShortcutHandler(event)) return true;
+    return sqlShortcutDomHandler(event, view);
+  };
+  const moveCompletion = (view: EditorViewType, forward: boolean, by?: "page") => codeMirrorMoveCompletionSelection?.(forward, by)?.(view) ?? false;
   return [
     editorViewModule
       ? (Prec?.high(
           editorViewModule.EditorView.domEventHandlers({
-            keydown: replaceShortcutHandler,
+            keydown: combinedDomKeydownHandler,
           }),
         ) ?? [])
       : [],
+    Prec?.highest(
+      codeMirrorKeymap.of([
+        { key: "ArrowDown", run: (view) => moveCompletion(view, true) },
+        { key: "ArrowUp", run: (view) => moveCompletion(view, false) },
+        { key: "PageDown", run: (view) => moveCompletion(view, true, "page") },
+        { key: "PageUp", run: (view) => moveCompletion(view, false, "page") },
+      ]),
+    ) ?? [],
     Prec?.high(
       codeMirrorKeymap.of([
         {
           key: "Enter",
           run: handleEnter,
+        },
+        {
+          key: "Space",
+          run: toggleSelectedBatchColumnSelection,
         },
         ...binding(shortcuts.find, openSearch),
         ...replaceShortcutBindings,
@@ -2014,6 +2073,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
           openReplace,
           isReadOnly: () => !!props.readOnly,
         }),
+        ...sqlShortcutBindings,
       ]),
     ) ?? [],
     codeMirrorKeymap.of(
@@ -2027,6 +2087,10 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 
 function handleEnter(view: EditorViewType): boolean {
   clearPendingCompletionEnter();
+  if (isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;
+  // CodeMirror's default completion keymap is disabled so batch selection can
+  // take precedence. Preserve its normal single-item acceptance here.
+  if (codeMirrorAcceptCompletion?.(view)) return true;
   if (settingsStore.editorSettings.selectFirstCompletionOnOpen && codeMirrorCompletionStatus) {
     let cancelRetry: (() => void) | null = null;
     const result = acceptSelectedCompletionWithRetry(view, {
@@ -2078,6 +2142,7 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   // of the indent edit itself, so it must never hijack this or a following Tab.
   if (view.state.selection.ranges.every((range) => range.empty)) {
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
+    if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;
     if (completionStatus === "active" && acceptSelectedOrFirstCompletion(view, codeMirrorAcceptCompletion, codeMirrorSelectedCompletionIndex, codeMirrorSelectFirstCompletion)) return true;
     if (completionStatus) return waitForCompletionTab(view);
   }
@@ -2591,6 +2656,7 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
 
   let layoutController: ReturnType<typeof constrainSqlHoverLayout> | null = null;
   let handleCopy: ((event: ClipboardEvent) => void) | null = null;
+  let searchController: HoverSearchController | null = null;
 
   if (sqlContent) {
     heading.className = "flex items-center justify-between gap-3 font-medium";
@@ -2635,7 +2701,18 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
       sqlContainer.textContent = sqlContent;
     }
 
+    // 纯前端搜索：在已生成的 DDL 内容上做大小写不敏感匹配并高亮，不重新请求元数据/DDL。
+    // originalHtml 必须在挂到文档前、内容渲染后捕获，作为每次搜索的还原基线。
+    searchController = createHoverSearch({
+      target: sqlContainer,
+      originalHtml: sqlContainer.innerHTML,
+      placeholder: t("grid.hoverSearchPlaceholder"),
+      noResultLabel: t("grid.hoverSearchNoResult"),
+    });
+    dom.appendChild(searchController.element);
+
     dom.appendChild(sqlContainer);
+    dom.appendChild(searchController.status);
     // 返回 mount/destroy 给 CodeMirror TooltipView 生命周期钩子，
     // 避免 MutationObserver 监听 body 全子树来兜底清理。
     layoutController = constrainSqlHoverLayout(dom, sqlContainer);
@@ -2669,16 +2746,17 @@ function createHoverDom(title: string, detail: string, sqlContent?: string, rows
   return {
     dom,
     mount:
-      layoutController || handleCopy
+      layoutController || handleCopy || searchController
         ? () => {
             layoutController?.mount();
             if (handleCopy) document.addEventListener("copy", handleCopy);
           }
         : undefined,
     destroy:
-      layoutController || handleCopy
+      layoutController || handleCopy || searchController
         ? () => {
             layoutController?.destroy();
+            searchController?.destroy();
             if (handleCopy) document.removeEventListener("copy", handleCopy);
           }
         : undefined,
@@ -2741,7 +2819,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
       cachedTables = mergeCompletionTables(cachedTables, remoteHoverTables);
       table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
     }
-    if (table && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
+    if (table && settingsStore.editorSettings.showTableDdlHoverPreview && !semanticQualifierIsRowSource && (!qualifier || table.schema?.toLowerCase() === qualifier.toLowerCase() || table.name === name)) {
       const hoverDatabase = hoverScope.database;
       const hoverSchema = hoverScope.schema ?? table.schema ?? "";
       const hoverQualifiedName = [hoverScope.catalog, hoverDatabase, hoverSchema, table.name].filter(Boolean).join(".");
@@ -2762,7 +2840,13 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
         const { ddl } = await loadObjectDdl(objectMetadataRequest);
         const rawDdl = ddlForHoverPreview(ddl);
         if (rawDdl && rawDdl.trim()) {
-          sqlContent = reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+          // A view's display DDL wraps the raw (often single-line) view source
+          // in `CREATE ... VIEW ... AS`; the table-oriented reformatter cannot
+          // lay out a SELECT body, so views reuse the shared display formatter
+          // (the same one the sidebar/object-source viewers use). Tables keep
+          // the aligned column layout from reformatHoverDdl.
+          const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
+          sqlContent = isViewObject ? await formatSqlForDisplay(rawDdl, props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType), settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
         }
       } catch (error) {
         console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
@@ -3106,6 +3190,13 @@ async function refreshSemanticDiagnostics(options: { preserveOutsideRanges?: boo
   }
 
   const nextDiagnostics: SqlSemanticDiagnostic[] = [];
+  const oracleSyntaxDiagnostics = buildOracleSyntaxDiagnostics(sql, props.databaseType);
+  nextDiagnostics.push(
+    ...oracleSyntaxDiagnostics.filter((diagnostic) => {
+      const diagnosticRange = sqlTextSpanToRange(sql, diagnostic.span);
+      return !!diagnosticRange && diagnosticRanges.some((range) => rangesOverlap(diagnosticRange, range));
+    }),
+  );
   const mysqlRoutineAnalysis = props.databaseType === "mysql" && supportsMysqlRoutineSyntaxDiagnostics(sqlDriverProfile.value) ? analyzeMysqlRoutineSyntax(sql) : null;
   if (mysqlRoutineAnalysis) {
     nextDiagnostics.push(
@@ -3283,7 +3374,11 @@ function hasDroppedTableReference(event: DragEvent) {
 
 function insertTableReferencePayload(currentView: EditorViewType, payload: QueryEditorTableReferencePayload, coords?: { clientX: number; clientY: number }): boolean {
   if (props.readOnly) return false;
-  const insertText = tableReferenceInsertText(payload, props.databaseType);
+  const insertText = tableReferenceInsertText(payload, props.databaseType, {
+    tableNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    columnNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    includeTableSchema: settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema,
+  });
   const dropPos = coords ? currentView.posAtCoords({ x: coords.clientX, y: coords.clientY }) : null;
   const selection = currentView.state.selection.main;
   const from = dropPos ?? selection.from;
@@ -3295,6 +3390,7 @@ function insertTableReferencePayload(currentView: EditorViewType, payload: Query
     userEvent: "input.drop",
   });
   clearActiveTableReferencePayload(payload);
+  hideQueryEditorDropCaret();
   currentView.focus();
   return true;
 }
@@ -3316,21 +3412,77 @@ function onTableReferenceDropEvent(event: Event) {
   if (!currentView || props.readOnly || !(event instanceof CustomEvent)) return;
   const detail = event.detail as QueryEditorTableReferenceDropDetail | undefined;
   if (!detail?.payload) return;
-  const target = document.elementFromPoint(detail.clientX, detail.clientY);
-  if (target instanceof Element && editorRef.value?.contains(target)) {
+  // elementFromPoint 被透明覆盖层拦截时回退为编辑器根节点包围盒判定（见 isPointOverElementRoot）。
+  if (isPointOverElementRoot(detail.clientX, detail.clientY, editorRef.value)) {
     insertTableReferencePayload(currentView, detail.payload, detail);
   }
+}
+
+// --- 表引用拖拽悬停时的插入光标线（指针模拟拖拽经 window 事件驱动） ---
+const queryEditorDropCaret = ref<{ left: number; top: number; height: number } | null>(null);
+const queryEditorDropCaretStyle = computed(() => {
+  const caret = queryEditorDropCaret.value;
+  return caret ? { left: `${caret.left}px`, top: `${caret.top}px`, height: `${caret.height}px` } : {};
+});
+
+function showQueryEditorDropCaretAt(clientX: number, clientY: number) {
+  const currentView = view.value;
+  if (!currentView || props.readOnly || !editorRef.value) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  let dropPos: number | null = null;
+  try {
+    dropPos = currentView.posAtCoords({ x: clientX, y: clientY });
+  } catch {
+    dropPos = null;
+  }
+  if (dropPos == null) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  const coords = currentView.coordsAtPos(dropPos);
+  if (!coords) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  const rect = editorRef.value.getBoundingClientRect();
+  queryEditorDropCaret.value = { left: coords.left - rect.left, top: coords.top - rect.top, height: Math.max(coords.bottom - coords.top, 0) };
+}
+
+function hideQueryEditorDropCaret() {
+  queryEditorDropCaret.value = null;
+}
+
+function onTableReferenceHoverEvent(event: Event) {
+  if (!(event instanceof CustomEvent)) return;
+  const detail = event.detail as QueryEditorTableReferenceHoverDetail | undefined;
+  if (!detail) return;
+  // elementFromPoint 被透明覆盖层拦截时回退为编辑器根节点包围盒判定（见 isPointOverElementRoot）。
+  if (!isPointOverElementRoot(detail.clientX, detail.clientY, editorRef.value)) {
+    hideQueryEditorDropCaret();
+    return;
+  }
+  showQueryEditorDropCaretAt(detail.clientX, detail.clientY);
+}
+
+function onTableReferenceDragEndEvent() {
+  hideQueryEditorDropCaret();
 }
 
 function registerTableReferenceDropListener() {
   if (tableReferenceDropListenerRegistered) return;
   window.addEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  window.addEventListener(DBX_TABLE_REFERENCE_HOVER_EVENT, onTableReferenceHoverEvent);
+  window.addEventListener(DBX_TABLE_REFERENCE_DRAG_END_EVENT, onTableReferenceDragEndEvent);
   tableReferenceDropListenerRegistered = true;
 }
 
 function unregisterTableReferenceDropListener() {
   if (!tableReferenceDropListenerRegistered) return;
   window.removeEventListener(DBX_TABLE_REFERENCE_DROP_EVENT, onTableReferenceDropEvent);
+  window.removeEventListener(DBX_TABLE_REFERENCE_HOVER_EVENT, onTableReferenceHoverEvent);
+  window.removeEventListener(DBX_TABLE_REFERENCE_DRAG_END_EVENT, onTableReferenceDragEndEvent);
   tableReferenceDropListenerRegistered = false;
 }
 
@@ -3359,6 +3511,221 @@ let activeCompletionOrigin: SqlCompletionTriggerOrigin | null = null;
 
 type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
 
+interface BatchColumnSelectionCandidate {
+  key: string;
+  apply: string;
+}
+
+interface BatchColumnSelectionSession {
+  key: string;
+  mode: "select" | "insert";
+  qualifier?: string;
+  document: string;
+  from: number;
+  to: number;
+  replaceClosingQuote?: SqlCompletionItem["replaceClosingQuote"];
+  candidates: BatchColumnSelectionCandidate[];
+  selectedKeys: Set<string>;
+  completionOptions: Map<string, QueryCompletionOption>;
+}
+
+interface BatchColumnSelectionActionItem {
+  label: string;
+  filterText?: string;
+  type: "text";
+  detail: string;
+  boost: number;
+  batchColumnSelectionAction: true;
+  sessionKey: string;
+}
+
+type QueryCompletionOption = Completion & {
+  dbxBatchColumnSelection?: { sessionKey: string; candidateKey: string };
+};
+
+let batchColumnSelectionSession: BatchColumnSelectionSession | null = null;
+
+function clearBatchColumnSelectionSession() {
+  batchColumnSelectionSession = null;
+}
+
+function isBatchColumnSelectionAction(item: QueryCompletionItem | BatchColumnSelectionActionItem): item is BatchColumnSelectionActionItem {
+  return "batchColumnSelectionAction" in item && item.batchColumnSelectionAction === true;
+}
+
+function batchColumnSelectionCandidateKey(item: SqlCompletionItem): string {
+  return `${item.label}\u0000${item.apply ?? item.label}`;
+}
+
+function prepareBatchColumnSelectionSession(items: SqlCompletionItem[], document: string, from: number, to: number): BatchColumnSelectionSession | null {
+  const selectableItems = items.filter((item) => item.type === "column" && item.batchSelectionMode && item.apply);
+  if (selectableItems.length === 0) {
+    batchColumnSelectionSession = null;
+    return null;
+  }
+
+  const mode = selectableItems[0]!.batchSelectionMode!;
+  const candidates = selectableItems.filter((item) => item.batchSelectionMode === mode).map((item) => ({ key: batchColumnSelectionCandidateKey(item), apply: item.apply! }));
+  const key = `${mode}\u0000${from}\u0000${to}\u0000${document}`;
+  if (!batchColumnSelectionSession || batchColumnSelectionSession.key !== key) {
+    batchColumnSelectionSession = {
+      key,
+      mode,
+      qualifier: selectableItems[0]!.batchSelectionQualifier,
+      document,
+      from,
+      to,
+      replaceClosingQuote: selectableItems[0]!.replaceClosingQuote,
+      candidates,
+      selectedKeys: new Set(),
+      completionOptions: new Map(),
+    };
+    return batchColumnSelectionSession;
+  }
+
+  batchColumnSelectionSession.candidates = candidates;
+  batchColumnSelectionSession.qualifier = selectableItems[0]!.batchSelectionQualifier;
+  const candidateKeys = new Set(candidates.map((candidate) => candidate.key));
+  batchColumnSelectionSession.selectedKeys = new Set([...batchColumnSelectionSession.selectedKeys].filter((candidateKey) => candidateKeys.has(candidateKey)));
+  batchColumnSelectionSession.completionOptions = new Map([...batchColumnSelectionSession.completionOptions].filter(([candidateKey]) => candidateKeys.has(candidateKey)));
+  return batchColumnSelectionSession;
+}
+
+function batchColumnSelectionMarkerForItem(item: QueryCompletionItem): QueryCompletionOption["dbxBatchColumnSelection"] | undefined {
+  if (!("batchSelectionMode" in item) || item.type !== "column" || !item.batchSelectionMode || !item.apply) return undefined;
+  const session = batchColumnSelectionSession;
+  if (!session || session.mode !== item.batchSelectionMode) return undefined;
+  const candidateKey = batchColumnSelectionCandidateKey(item);
+  if (!session.candidates.some((candidate) => candidate.key === candidateKey)) return undefined;
+  return { sessionKey: session.key, candidateKey };
+}
+
+function cacheBatchColumnSelectionOption(marker: QueryCompletionOption["dbxBatchColumnSelection"], option: QueryCompletionOption): QueryCompletionOption {
+  if (!marker || !batchColumnSelectionSession || batchColumnSelectionSession.key !== marker.sessionKey) return option;
+  const cached = batchColumnSelectionSession.completionOptions.get(marker.candidateKey);
+  if (cached) return cached;
+  batchColumnSelectionSession.completionOptions.set(marker.candidateKey, option);
+  return option;
+}
+
+function toggleBatchColumnSelection(view: EditorViewType, sessionKey: string, candidateKey: string) {
+  const session = batchColumnSelectionSession;
+  if (!session || session.key !== sessionKey || !session.candidates.some((candidate) => candidate.key === candidateKey)) return;
+  if (session.selectedKeys.has(candidateKey)) {
+    session.selectedKeys.delete(candidateKey);
+  } else {
+    session.selectedKeys.add(candidateKey);
+  }
+  // Reopen the list so the action row and all virtualized checkboxes reflect the new state.
+  window.setTimeout(() => codeMirrorStartCompletion?.(view), 0);
+}
+
+function toggleSelectedBatchColumnSelection(view: EditorViewType): boolean {
+  const completion = codeMirrorSelectedCompletion?.(view.state) as QueryCompletionOption | null | undefined;
+  const marker = completion?.dbxBatchColumnSelection;
+  if (!marker) return false;
+  toggleBatchColumnSelection(view, marker.sessionKey, marker.candidateKey);
+  return true;
+}
+
+function renderBatchColumnSelectionCheckbox(completion: Completion, _state: import("@codemirror/state").EditorState, currentView: EditorViewType): Node | null {
+  const marker = (completion as QueryCompletionOption).dbxBatchColumnSelection;
+  const session = batchColumnSelectionSession;
+  if (!marker || !session || session.key !== marker.sessionKey) return null;
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "cm-batch-column-selection-checkbox";
+  checkbox.checked = session.selectedKeys.has(marker.candidateKey);
+  checkbox.tabIndex = -1;
+  checkbox.setAttribute("aria-label", completion.displayLabel ?? completion.label);
+  checkbox.addEventListener("mousedown", (event) => {
+    // CodeMirror accepts the completion on a list-item mousedown. Keep this
+    // interaction local to the checkbox so a field can be toggled repeatedly.
+    event.preventDefault();
+    event.stopPropagation();
+    toggleBatchColumnSelection(currentView, marker.sessionKey, marker.candidateKey);
+  });
+  checkbox.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  return checkbox;
+}
+
+function applyBatchColumnSelection(view: EditorViewType, item: BatchColumnSelectionActionItem, from: number, to: number) {
+  const session = batchColumnSelectionSession;
+  if (!session || session.key !== item.sessionKey || session.document !== view.state.doc.toString()) return;
+
+  const selected = session.candidates.filter((candidate) => session.selectedKeys.has(candidate.key));
+  if (selected.length === 0) {
+    toast(t("editor.completion.selectColumnsBeforeInsert"), 3000);
+    return;
+  }
+
+  const columns = batchColumnSelectionColumnList(
+    selected.map((candidate) => candidate.apply),
+    session.mode,
+    session.qualifier,
+  );
+  let replaceTo = batchColumnSelectionReplaceTo({
+    to,
+    mode: session.mode,
+    nextCharacter: view.state.sliceDoc(to, to + 1),
+    replaceClosingQuote: session.replaceClosingQuote,
+  });
+  let insert = columns;
+  if (session.mode === "insert") {
+    const replacement = batchColumnSelectionInsertReplacement({
+      document: view.state.doc.toString(),
+      to,
+      columns,
+      valuesKeyword: settingsStore.editorSettings.sqlFormatter.keywordCase === "lower" ? "values" : "VALUES",
+      valueCount: selected.length,
+    });
+    replaceTo = replacement.replaceTo;
+    insert = replacement.insert;
+  }
+
+  if (session.mode === "insert" && !codeMirrorSnippetCompletion) {
+    clearBatchColumnSelectionSession();
+    return;
+  }
+  clearBatchColumnSelectionSession();
+  markCompletionAccepted(item);
+  if (session.mode === "insert") {
+    const snippet = codeMirrorSnippetCompletion(insert, { label: item.label });
+    if (typeof snippet.apply === "function") {
+      snippet.apply(view, snippet, from, replaceTo);
+      return;
+    }
+  }
+  view.dispatch({
+    changes: { from, to: replaceTo, insert },
+    selection: { anchor: from + insert.length },
+    scrollIntoView: true,
+  });
+}
+
+function applySelectedBatchColumnSelection(view: EditorViewType): boolean {
+  const session = batchColumnSelectionSession;
+  if (!session || !isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) || session.document !== view.state.doc.toString() || session.selectedKeys.size === 0) return false;
+  applyBatchColumnSelection(
+    view,
+    {
+      label: t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size }),
+      type: "text",
+      detail: t("editor.completion.insertSelectedColumnsDetail"),
+      boost: -1000,
+      batchColumnSelectionAction: true,
+      sessionKey: session.key,
+    },
+    session.from,
+    session.to,
+  );
+  return true;
+}
+
 function markTypedCompletionActivation() {
   typedCompletionActivationUntil = Date.now() + 500;
 }
@@ -3367,7 +3734,8 @@ function isTypedCompletionActivation(explicit: boolean) {
   return explicit && typedCompletionActivationUntil >= Date.now();
 }
 
-function markCompletionAccepted(item: QueryCompletionItem) {
+function markCompletionAccepted(item: QueryCompletionItem | BatchColumnSelectionActionItem) {
+  batchColumnSelectionSession = null;
   const shouldContinueCompletion = shouldChainSqlCompletionAfterAccept(item) || (props.databaseType === "sqlserver" && item.type === "keyword" && item.label.toUpperCase() === "USE");
   suppressNextSqlCompletionAutoStartUntil = shouldContinueCompletion ? 0 : Date.now() + 750;
   completionEpoch++;
@@ -3382,7 +3750,7 @@ function consumeSqlCompletionAutoStartSuppression() {
   return true;
 }
 
-function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp, prefix?: string) {
+function buildCompletionResult(items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>, from: number, validFor?: RegExp, prefix?: string) {
   if (items.length === 0) return null;
   const bypassFilter = !!prefix && shouldBypassCompletionFilter(prefix, items);
   const resultItems = bypassFilter && prefix ? completionItemsForBypassedFilter(prefix, items) : items;
@@ -3400,23 +3768,39 @@ function buildCompletionResult(items: QueryCompletionItem[], from: number, valid
 
 function buildSqlCompletionResult(items: SqlCompletionItem[], completionContext: SqlCompletionContext, fullDoc: string, position: number) {
   const replacement = prepareSqlCompletionReplacement(fullDoc, position, completionContext, items);
-  return buildCompletionResult(replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
+  const session = prepareBatchColumnSelectionSession(replacement.items, fullDoc, replacement.from, position);
+  const action: BatchColumnSelectionActionItem | undefined = session
+    ? {
+        label: t("editor.completion.insertSelectedColumns", { count: session.selectedKeys.size }),
+        filterText: completionContext.prefix,
+        type: "text",
+        detail: t("editor.completion.insertSelectedColumnsDetail"),
+        // Keep ordinary single-field completion as the default Enter target.
+        boost: -1000,
+        batchColumnSelectionAction: true,
+        sessionKey: session.key,
+      }
+    : undefined;
+  return buildCompletionResult(action ? [...replacement.items, action] : replacement.items, replacement.from, getSqlCompletionResultValidFor(fullDoc, position), completionContext.prefix);
 }
 
 // CodeMirror's built-in matcher only matches single-character queries against
 // the label start, and cannot match pinyin initials against Han labels. Our
 // provider already filters and ranks items itself (substring + pinyin), so
 // skip the second-stage filter exactly in the cases it would break.
-function shouldBypassCompletionFilter(prefix: string, items: QueryCompletionItem[]): boolean {
+function shouldBypassCompletionFilter(prefix: string, items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>): boolean {
   if (!prefix) return false;
   if (/\p{Script=Han}/u.test(prefix)) return true;
   return /^[a-z0-9]+$/i.test(prefix) && items.some((item) => /\p{Script=Han}/u.test(item.label));
 }
 
-function completionItemsForBypassedFilter(prefix: string, items: QueryCompletionItem[]): QueryCompletionItem[] {
+function completionItemsForBypassedFilter(prefix: string, items: Array<QueryCompletionItem | BatchColumnSelectionActionItem>): Array<QueryCompletionItem | BatchColumnSelectionActionItem> {
   if ([...prefix].length !== 1 || !/^[a-z0-9]$/i.test(prefix)) return items;
   const normalized = prefix.toLowerCase();
   return items.filter((item) => {
+    // The confirmation row must remain available while typing a Han/pinyin
+    // prefix, otherwise checked columns cannot be applied from that menu.
+    if (isBatchColumnSelectionAction(item)) return true;
     const renderedLabel = "displayLabel" in item && typeof item.displayLabel === "string" ? item.displayLabel : item.label;
     return /\p{Script=Han}/u.test(item.label) || renderedLabel.toLowerCase().startsWith(normalized);
   });
@@ -3449,13 +3833,32 @@ function shouldInsertSqlCompletionSpace(): boolean {
   return props.databaseType !== "mongodb" && props.databaseType !== "redis" && props.databaseType !== "elasticsearch" && props.databaseType !== "easysearch" && props.databaseType !== "meilisearch" && props.databaseType !== "victoriametrics";
 }
 
-function completionOptionForItem(item: QueryCompletionItem) {
+// Snippet expansion normally follows from the item type; a provider can also
+// opt a differently-typed item in so its `${}` fields still expand on accept.
+function shouldApplyCompletionAsSnippet(item: QueryCompletionItem): boolean {
+  if ("applyAsSnippet" in item && item.applyAsSnippet === true) return true;
+  return item.type === "snippet" || item.type === "function";
+}
+
+function completionOptionForItem(item: QueryCompletionItem | BatchColumnSelectionActionItem) {
   const filterText = "filterText" in item && typeof item.filterText === "string" ? item.filterText : undefined;
   const labelPresentation = completionLabelPresentation(item.label, filterText);
+  if (isBatchColumnSelectionAction(item)) {
+    return {
+      ...labelPresentation,
+      type: item.type,
+      detail: item.detail,
+      boost: item.boost,
+      apply(view: EditorViewType, _completionItem: unknown, from: number, to: number) {
+        applyBatchColumnSelection(view, item, from, to);
+      },
+    };
+  }
   const record = () => {
     recordCompletionSelection(item.label, item.type);
   };
-  if ((item.type === "snippet" || item.type === "function") && item.apply) {
+  const batchColumnSelection = batchColumnSelectionMarkerForItem(item);
+  if (shouldApplyCompletionAsSnippet(item) && item.apply) {
     const completion = codeMirrorSnippetCompletion(item.apply, {
       ...labelPresentation,
       type: item.type,
@@ -3464,8 +3867,9 @@ function completionOptionForItem(item: QueryCompletionItem) {
       boost: item.boost,
     });
     const originalApply = completion.apply;
-    return {
+    return cacheBatchColumnSelectionOption(batchColumnSelection, {
       ...completion,
+      ...(batchColumnSelection ? { dbxBatchColumnSelection: batchColumnSelection } : {}),
       apply(view: EditorViewType, completionItem: unknown, from: number, to: number) {
         record();
         markCompletionAccepted(item);
@@ -3486,10 +3890,11 @@ function completionOptionForItem(item: QueryCompletionItem) {
           }
         }
       },
-    };
+    });
   }
-  return {
+  return cacheBatchColumnSelectionOption(batchColumnSelection, {
     ...labelPresentation,
+    ...(batchColumnSelection ? { dbxBatchColumnSelection: batchColumnSelection } : {}),
     type: item.type,
     detail: item.detail,
     info: item.info,
@@ -3512,7 +3917,7 @@ function completionOptionForItem(item: QueryCompletionItem) {
         });
       }
     },
-  };
+  });
 }
 
 async function provideElasticsearchCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
@@ -3820,7 +4225,13 @@ async function provideSqlCompletions(context: CompletionContext) {
     }
 
     const tableNameCompletion = isTableNameCompletionContext(completionContext);
-    const shouldResolveColumnCompletion = completionContext.suggestColumns && completionContext.referencedTables.length > 0 && (completionContext.prefix.length > 0 || typedActivation);
+    const shouldResolveColumnCompletion = shouldResolveSqlColumnCompletion({
+      suggestColumns: completionContext.suggestColumns,
+      hasReferencedTables: completionContext.referencedTables.length > 0,
+      prefix: completionContext.prefix,
+      typedActivation,
+      selectListColumnContext: completionContext.selectListColumnContext,
+    });
     const shouldResolveAsyncCompletion = tableNameCompletion || shouldResolveColumnCompletion;
     const localResult = buildLocalSqlCompletionResult(completionContext, fullDoc, position, completionScope);
     if (localResult) {
@@ -4731,7 +5142,7 @@ onMounted(async () => {
     },
     { EditorState, EditorSelection, Compartment, Prec, RangeSet, StateEffect, StateField },
     langSql,
-    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion, moveCompletionSelection, selectedCompletionIndex },
+    { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap, insertCompletionText, nextSnippetField, closeCompletion, moveCompletionSelection, selectedCompletion, selectedCompletionIndex },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, toggleLineComment, toggleBlockComment, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, indentUnit, syntaxHighlighting, defaultHighlightStyle, foldKeymap, toggleFold, ensureSyntaxTree, highlightingFor, syntaxTree },
     { searchKeymap },
@@ -4768,7 +5179,9 @@ onMounted(async () => {
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
+  codeMirrorSelectedCompletion = selectedCompletion;
   codeMirrorSelectedCompletionIndex = selectedCompletionIndex;
+  codeMirrorMoveCompletionSelection = moveCompletionSelection;
   codeMirrorSelectFirstCompletion = moveCompletionSelection(true);
   codeMirrorCloseCompletion = closeCompletion;
   codeMirrorStartCompletion = startCompletion;
@@ -5003,8 +5416,10 @@ onMounted(async () => {
   buildSqlCompletionExtension = () =>
     autocompletion({
       activateOnTyping: true,
+      defaultKeymap: false,
       selectOnOpen: settingsStore.editorSettings.selectFirstCompletionOnOpen,
       compareCompletions: (a, b) => compareSqlCompletions(a, b, settingsStore.editorSettings.sortCompletionColumnsAlphabetically),
+      addToOptions: [{ position: 10, render: renderBatchColumnSelectionCheckbox }],
       override: [async (context: CompletionContext) => provideSqlCompletions(context)],
     });
 
@@ -5214,6 +5629,7 @@ onMounted(async () => {
       }),
       runGutterComp.of(runStatementGutterExtension()),
       lineNumbersComp.of(lineNumbersExtension(initialSettings.showLineNumbers)),
+      createQueryEditorLineNumberAlignmentExtension(ViewPlugin),
       currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
@@ -5301,6 +5717,7 @@ onMounted(async () => {
           {
             key: "Escape",
             run: () => {
+              clearBatchColumnSelectionSession();
               return searchPanelRef.value?.closeSearch() ?? false;
             },
           },
@@ -5360,6 +5777,7 @@ onMounted(async () => {
           const status = codeMirrorCompletionStatus(update.state) ?? null;
           if (status === null) {
             activeCompletionOrigin = null;
+            clearBatchColumnSelectionSession();
           }
         }
       }),
@@ -5374,12 +5792,21 @@ onMounted(async () => {
           return recoverLargeTauriPaste(event, currentView);
         },
         dragover(event) {
-          if (props.readOnly || !hasDroppedTableReference(event)) return false;
+          if (props.readOnly || !hasDroppedTableReference(event)) {
+            hideQueryEditorDropCaret();
+            return false;
+          }
           event.preventDefault();
           if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+          showQueryEditorDropCaretAt(event.clientX, event.clientY);
           return true;
         },
+        dragleave() {
+          hideQueryEditorDropCaret();
+          return false;
+        },
         drop(event, currentView) {
+          hideQueryEditorDropCaret();
           return insertDroppedTableReference(currentView, event);
         },
         blur(_event, currentView) {
@@ -5897,10 +6324,19 @@ watch(
 );
 
 watch(
-  () => settingsStore.editorSettings.shortcuts,
+  () => [settingsStore.editorSettings.shortcuts, settingsStore.editorSettings.sqlShortcuts],
   () => {
-    if (!view.value || !defaultKeymapComp) return;
-    view.value.dispatch({ effects: defaultKeymapComp.reconfigure(defaultKeymapExtension()) });
+    if (!view.value || !editorViewModule) return;
+    const effects = [];
+    if (defaultKeymapComp) {
+      effects.push(defaultKeymapComp.reconfigure(defaultKeymapExtension()));
+    }
+    if (runKeymapComp) {
+      effects.push(runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)));
+    }
+    if (effects.length > 0) {
+      view.value.dispatch({ effects });
+    }
   },
   { deep: true },
 );
@@ -6161,6 +6597,7 @@ defineExpose({
   shouldBlockExecutionShortcut,
   requestExecute,
   requestExecuteInNewResultTab,
+  captureExecutionSnapshot,
   pasteClipboardAsSqlInCondition,
   focusStatementRange,
   previewStatementRange,
@@ -6187,6 +6624,7 @@ defineExpose({
         "
       />
     </CustomContextMenu>
+    <div v-show="queryEditorDropCaret" data-query-editor-drop-caret class="pointer-events-none absolute z-20 w-0.5 rounded-full bg-primary/70" :style="queryEditorDropCaretStyle" />
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
     <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
     <DelimitedListDialog v-model:open="delimitedListOpen" :selected-text="delimitedListSelectedText" @confirm="applyDelimitedListResult" />
@@ -6524,5 +6962,14 @@ defineExpose({
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;
+}
+
+.cm-batch-column-selection-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0 2px 0 0;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex: 0 0 auto;
 }
 </style>

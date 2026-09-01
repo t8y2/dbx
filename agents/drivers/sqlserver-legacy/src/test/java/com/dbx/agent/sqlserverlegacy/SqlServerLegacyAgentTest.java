@@ -6,8 +6,74 @@ import org.junit.jupiter.api.Test;
 
 import java.security.Security;
 import java.sql.SQLException;
+import java.sql.Types;
 
 class SqlServerLegacyAgentTest {
+    @Test
+    void onlySqlServer8UnsupportedErrorsTriggerTheOldDriverFallback() {
+        // Real mssql-jdbc prelogin rejection for SQL Server 2000
+        // (R_unsupportedServerVersion, English-only resources).
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("SQL Server version 8 is not supported by this driver.")
+        ));
+        // Older driver wordings name the supported floor instead
+        // (mssql-jdbc R_notSQLServer family).
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("This version of the driver can be used only with SQL Server 2005 or later.")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("该驱动程序不支持 SQL Server 8 版")
+        ));
+        Assertions.assertTrue(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("The driver does not support SQL Server 8")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("TLS handshake failed")
+        ));
+        Assertions.assertFalse(SqlServerLegacyAgent.isSqlServer2000Unsupported(
+            new SQLException("Login failed for user 'sa'")
+        ));
+    }
+
+    @Test
+    void jtdsUrlUsesLegacySqlServerSyntax() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com",
+            1433,
+            "appdb",
+            "sa",
+            "secret",
+            "applicationName=dbx;encrypt=true;sslProtocol=TLSv1",
+            "",
+            false
+        );
+
+        Assertions.assertEquals(
+            "jdbc:jtds:sqlserver://db.example.com:1433/appdb;appName=dbx",
+            SqlServerLegacyAgent.jtdsUrl(params)
+        );
+    }
+
+    @Test
+    void jtdsUrlPreservesExplicitPortForNamedInstance() {
+        ConnectParams params = new ConnectParams(
+            "db.example.com\\MSSQLSERVER",
+            11433,
+            "appdb",
+            "sa",
+            "secret",
+            "",
+            "",
+            false
+        );
+        params.setPort_explicit(true);
+
+        Assertions.assertEquals(
+            "jdbc:jtds:sqlserver://db.example.com:11433/appdb",
+            SqlServerLegacyAgent.jtdsUrl(params)
+        );
+    }
+
     @Test
     void metadataSchemaKeepsExplicitSchemaAndResolvesDefault() {
         Assertions.assertEquals("sales", SqlServerLegacyAgent.normalizeMetadataSchema("sales", "dbo"));
@@ -16,6 +82,22 @@ class SqlServerLegacyAgentTest {
         Assertions.assertEquals(
             "SELECT COALESCE(OBJECT_SCHEMA_NAME(OBJECT_ID(QUOTENAME(?))), NULLIF(SCHEMA_NAME(), N''), N'dbo') AS schema_name",
             SqlServerLegacyAgent.unqualifiedObjectSchemaSql()
+        );
+        Assertions.assertEquals(
+            "SELECT TOP 1 u.name AS schema_name FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "
+                + "WHERE o.name = ? AND o.xtype IN ('U', 'V', 'P', 'FN', 'IF', 'TF') "
+                + "ORDER BY CASE WHEN u.name = 'dbo' THEN 0 ELSE 1 END, u.name",
+            SqlServerLegacyAgent.sqlServer2000ObjectSchemaSql()
+        );
+    }
+
+    @Test
+    void sqlServer2000ObjectSourceReadsOrderedProcedureChunks() {
+        Assertions.assertEquals(
+            "SELECT c.text AS source_text FROM syscomments c JOIN sysobjects o ON c.id = o.id "
+                + "JOIN sysusers u ON o.uid = u.uid WHERE u.name = ? AND o.name = ? AND o.xtype = ? "
+                + "ORDER BY c.colid",
+            SqlServerLegacyAgent.sqlServer2000ObjectSourceSql()
         );
     }
 
@@ -42,6 +124,42 @@ class SqlServerLegacyAgentTest {
         } finally {
             Security.setProperty(key, original == null ? "" : original);
         }
+    }
+
+    @Test
+    void usesSelectOneForLegacyConnectionValidation() {
+        Assertions.assertEquals("SELECT 1", new SqlServerLegacyAgent().connectionValidationQuery());
+    }
+
+    @Test
+    void sqlServer2000AllNulCharacterPaddingBecomesEmptyString() {
+        Assertions.assertEquals(
+            "",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0".repeat(20), Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("", Types.VARCHAR, true)
+        );
+    }
+
+    @Test
+    void sqlServer2000NulNormalizationPreservesNullMixedTextAndOtherModes() {
+        Assertions.assertNull(
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue(null, Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "A\0B",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("A\0B", Types.VARCHAR, true)
+        );
+        Assertions.assertEquals(
+            "\0\0",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0\0", Types.VARBINARY, true)
+        );
+        Assertions.assertEquals(
+            "\0\0",
+            SqlServerLegacyAgent.normalizeSqlServer2000ResultValue("\0\0", Types.VARCHAR, false)
+        );
     }
 
     @Test

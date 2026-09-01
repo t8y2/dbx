@@ -1,7 +1,7 @@
 use super::comments::build_sqlserver_index_comment_sql;
 use super::dialect::{capabilities_for, database_label, database_type_for_dialect, dialect_label, StructureDialect};
 use super::types::{EditableStructureIndex, TableStructureSqlOptions};
-use super::util::{clean, qualified_table, quote_ident, quote_string};
+use super::util::{clean, qualified_table, quote_ident, quote_new_ident, quote_string};
 use crate::models::connection::DatabaseType;
 
 pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
@@ -68,6 +68,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 ));
             }
             statements.extend(build_create_index_statements(
+                options.database_type,
                 dialect,
                 &table,
                 index,
@@ -76,6 +77,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 &options.table_name,
                 or_replace,
                 capabilities.index_concurrent,
+                false,
             ));
             continue;
         }
@@ -85,6 +87,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             continue;
         }
         statements.extend(build_create_index_statements(
+            options.database_type,
             dialect,
             &table,
             index,
@@ -93,6 +96,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             &options.table_name,
             false,
             capabilities.index_concurrent,
+            false,
         ));
     }
 
@@ -244,6 +248,7 @@ pub(super) fn build_drop_index_sql(
 }
 
 pub(super) fn build_create_index_statements(
+    database_type: Option<DatabaseType>,
     dialect: StructureDialect,
     table: &str,
     index: &EditableStructureIndex,
@@ -252,6 +257,7 @@ pub(super) fn build_create_index_statements(
     table_name: &str,
     or_replace: bool,
     concurrently_supported: bool,
+    for_new_table: bool,
 ) -> Vec<String> {
     let capabilities = capabilities_for(database_type_for_dialect(dialect));
     let name = clean(&index.name);
@@ -282,6 +288,8 @@ pub(super) fn build_create_index_statements(
                 gaussdbm_index_column_sql(column, key_is_expression[i])
             } else if dialect == StructureDialect::Postgres {
                 postgres_index_column_sql(column, key_is_expression[i])
+            } else if for_new_table {
+                quote_new_ident(database_type, dialect, column)
             } else {
                 quote_ident(dialect, column)
             }
@@ -321,7 +329,17 @@ pub(super) fn build_create_index_statements(
     {
         format!(
             " INCLUDE ({})",
-            included_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ")
+            included_columns
+                .iter()
+                .map(|column| {
+                    if for_new_table {
+                        quote_new_ident(database_type, dialect, column)
+                    } else {
+                        quote_ident(dialect, column)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         )
     } else {
         String::new()
@@ -339,10 +357,12 @@ pub(super) fn build_create_index_statements(
     let supports_where = capabilities.index_filter
         && matches!(dialect, StructureDialect::Postgres | StructureDialect::SqlServer | StructureDialect::Sqlite);
     let where_clause = if !filter.is_empty() && supports_where { format!(" WHERE {filter}") } else { String::new() };
+    let quoted_index_name =
+        if for_new_table { quote_new_ident(database_type, dialect, &name) } else { quote_ident(dialect, &name) };
     let index_name = if dialect == StructureDialect::Sqlite && schema.is_some_and(|schema| !schema.trim().is_empty()) {
-        format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, &name))
+        format!("{}.{}", quote_ident(dialect, schema.unwrap()), quoted_index_name)
     } else {
-        quote_ident(dialect, &name)
+        quoted_index_name
     };
     // SQLite assigns an index to the database named by the qualified index.
     // Its CREATE INDEX grammar does not allow a qualified table name.

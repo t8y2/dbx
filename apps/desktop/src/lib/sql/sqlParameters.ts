@@ -221,6 +221,13 @@ export function substituteSqlParameters(sql: string, values: Record<string, SqlP
       cursor = occurrence.end;
       continue;
     }
+    // An empty Raw SQL value means that this placeholder is intentionally left
+    // unresolved, rather than replaced with an empty string or NULL.
+    if (input.kind === "raw" && !input.value.trim()) {
+      result += occurrence.token;
+      cursor = occurrence.end;
+      continue;
+    }
     // Embedded placeholders stay inside the surrounding SQL string, so their value
     // must be escaped as text instead of being wrapped in a second SQL literal.
     result += occurrence.replacement === "string-fragment" ? sqlParameterStringFragment(input) : occurrence.replacement === "quoted-string" ? sqlParameterQuotedString(input) : sqlParameterLiteral(input);

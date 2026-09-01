@@ -25,6 +25,37 @@ pub struct DatabaseStorageInfo {
     pub size_bytes: Option<i64>,
 }
 
+/// XuguDB storage metadata exposed by the read-only schema browser.
+///
+/// Xugu stores tablespaces and their data files inside the selected database,
+/// so these types intentionally remain driver-specific instead of widening
+/// the common database model used by other engines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XuguDatafileInfo {
+    pub node_id: String,
+    pub space_id: i64,
+    pub path: String,
+    pub file_no: i64,
+    pub max_size: Option<i64>,
+    pub step_size: Option<i64>,
+    pub curr_size: Option<i64>,
+    pub reserved1: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XuguTablespaceInfo {
+    pub node_id: String,
+    pub space_id: i64,
+    pub space_name: String,
+    pub datafile_num: i64,
+    pub space_type: String,
+    pub media_error: Option<String>,
+    pub total_chunk_num: Option<i64>,
+    pub free_chunk_num: Option<i64>,
+    #[serde(default)]
+    pub datafiles: Vec<XuguDatafileInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaInfo {
     pub name: String,

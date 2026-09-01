@@ -1,4 +1,5 @@
-import type { DatabaseType } from "@/types/database";
+import { classifyElasticsearchRequestRisk, classifyElasticsearchSourceRisk, type ElasticsearchRequestRisk } from "@/lib/elasticsearch/elasticsearchRequestRisk";
+import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
 
 export type SqlRiskLevel = "read" | "write" | "ddl" | "transaction" | "unknown";
 
@@ -44,6 +45,11 @@ export function splitSqlStatementsForSafety(sql: string): string[] {
 }
 
 export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskAssessment {
+  // REST requests carry a JSON body that must not be split on semicolons, and
+  // every request in the text is classified so the highest risk wins.
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchSourceRisk);
+  if (searchEngineRisk) return { ...searchEngineRisk, statements: [searchEngineRisk] };
+
   const statements = splitSqlStatementsForSafety(sql).map((statement) => classifySqlStatementRisk(statement, options));
   if (!statements.length) return { risk: "unknown", statements: [] };
   const highest = statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
@@ -53,7 +59,27 @@ export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlR
 export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskStatementAssessment {
   const dynamodbRisk = classifyDynamoDbStatementRisk(sql, options.dialect);
   if (dynamodbRisk) return dynamodbRisk;
+  const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchRequestRisk);
+  if (searchEngineRisk) return searchEngineRisk;
   return classifyTokens(tokenizeSqlForRisk(sql));
+}
+
+/**
+ * Elasticsearch-compatible connections run REST requests whose method and path
+ * decide the risk; `GET`/`POST _search` reads must not be mistaken for writes.
+ * Text that is not a REST request (Elasticsearch SQL) falls through to the
+ * ordinary SQL classification.
+ *
+ * The HTTP method is deliberately not reported as the first keyword: callers
+ * map that keyword onto SQL semantics (`insert` is a low-risk write, `create`
+ * is a schema change, ...), which a request path does not carry. Reporting
+ * `rest` keeps REST mutations as opaque as they were before this branch existed.
+ */
+function searchEngineAssessment(sql: string, dialect: DatabaseType | string | undefined, classify: (value: string) => ElasticsearchRequestRisk | null): SqlRiskStatementAssessment | null {
+  if (!isElasticsearchCompatibleDatabaseType(dialect as DatabaseType | undefined)) return null;
+  const risk = classify(sql);
+  if (!risk) return null;
+  return { risk: risk === "read" ? "read" : risk === "write" ? "write" : "ddl", firstKeyword: "rest" };
 }
 
 function classifyDynamoDbStatementRisk(sql: string, dialect?: DatabaseType | string): SqlRiskStatementAssessment | null {

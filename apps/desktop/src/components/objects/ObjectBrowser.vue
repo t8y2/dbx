@@ -40,6 +40,7 @@ import {
   Scissors,
   Search,
   ScrollText,
+  ShieldCheck,
   Square,
   Table2,
   TableProperties,
@@ -61,12 +62,13 @@ import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDia
 import CustomTypeInfoPanel from "@/components/objects/CustomTypeInfoPanel.vue";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import * as api from "@/lib/backend/api";
-import type { ColumnInfo, ConnectionConfig, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
 import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
+import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import {
   buildDropObjectSql,
@@ -111,6 +113,7 @@ import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { buildXuguCompileSql } from "@/lib/database/xuguCompileSql";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { batchTableEmptyFeedback, buildBatchTableEmptyPlan, runBatchTableEmpty, type BatchTableEmptyPlanItem } from "@/lib/sidebar/batchTableEmpty";
@@ -152,6 +155,7 @@ import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectMetadataCache } from "@/lib/metadata/objectMetadataCache";
 import { invalidateObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsCache";
+import { eventEditorInstanceKey, resolveInitialEventEditorRequest } from "@/lib/table/eventEditorRequest";
 
 type ObjectFilter = ObjectBrowserFilter;
 type ObjectBrowserColumnKey = "select" | "name" | "type" | "estimatedRows" | "totalBytes" | "created_at" | "updated_at" | "comment";
@@ -164,6 +168,8 @@ const props = defineProps<{
   initialEventName?: string;
   initialEventReadOnly?: boolean;
   initialEventOpenRequestId?: number;
+  /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
+  initialEventCreateRequestId?: number;
   initialObjectFilter?: "tables" | "events";
   viewport?: ObjectBrowserViewport;
 }>();
@@ -208,6 +214,13 @@ const sidePanelRow = ref<ObjectBrowserRow | null>(null);
 const openedInitialEvent = ref("");
 const isEventEditor = computed(() => sidePanelMode.value === "event-editor");
 const sidePanelMode = ref<"table-info" | "source" | "type-info" | "event-editor">("source");
+const eventEditorKey = computed(() =>
+  eventEditorInstanceKey({
+    createRequestId: props.initialEventCreateRequestId,
+    openRequestId: props.initialEventOpenRequestId,
+    rowId: sidePanelRow.value?.id,
+  }),
+);
 // Table info panel state
 const tableInfoTab = ref<TableInfoTab>("ddl");
 const tableColumns = ref<ColumnInfo[]>([]);
@@ -225,8 +238,21 @@ const tableForeignKeysLoaded = ref(false);
 const tableTriggers = ref<TriggerInfo[]>([]);
 const tableTriggersLoading = ref(false);
 const tableTriggersLoaded = ref(false);
+const tableConstraints = ref<ConstraintInfo[]>([]);
+const tableConstraintsLoading = ref(false);
+const tableConstraintsLoaded = ref(false);
+// The Constraints tab hides foreign keys when the dedicated Foreign Keys tab
+// is also shown, mirroring DataGrid/TableStructureEditor.
+const tableConstraintsForTab = computed(() => constraintsForConstraintsTab(tableConstraints.value, tableMetadataCapabilities.value.foreignKeys));
 const tableInfoSearchQuery = ref("");
 const tableInfoDdlPreRef = ref<HTMLPreElement | null>(null);
+const activeTableInfoLoading = computed(() => {
+  if (tableInfoTab.value === "ddl") return tableDdlLoading.value;
+  if (tableInfoTab.value === "columns") return tableColumnsLoading.value;
+  if (tableInfoTab.value === "indexes") return tableIndexesLoading.value;
+  if (tableInfoTab.value === "foreignKeys") return tableForeignKeysLoading.value;
+  return tableInfoTab.value === "triggers" && tableTriggersLoading.value;
+});
 const SIDE_PANEL_MIN_WIDTH = 280;
 const SIDE_PANEL_MAX_WIDTH = 900;
 const sidePanelWidth = ref(settingsStore.editorSettings.tableInfoDrawerWidth || 420);
@@ -335,7 +361,7 @@ const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tabl
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
-const supportsVacuumTable = computed(() => !props.connection.read_only && supportsTableVacuum(effectiveDatabaseType.value));
+const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
 const vacuumRiskMessage = computed(() => (vacuumExecuting.value ? t("contextMenu.vacuumTableRunningHint") : vacuumTableFull.value ? t("contextMenu.vacuumTableFullRisk") : vacuumTableAnalyze.value ? t("contextMenu.vacuumTableAnalyzeRisk") : t("contextMenu.vacuumTableDefaultRisk")));
 const sourceDialect = computed(() => codeMirrorSqlDialect(effectiveDatabaseType.value));
 const sourceFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(effectiveDatabaseType.value));
@@ -976,6 +1002,9 @@ const tableInfoTabs = computed<TableInfoTabItem[]>(() => {
   if (tableMetadataCapabilities.value.foreignKeys) {
     tabs.push({ id: "foreignKeys", label: t("grid.tableInfoForeignKeys"), icon: Link2, count: tableForeignKeys.value.length });
   }
+  if (tableMetadataCapabilities.value.constraints) {
+    tabs.push({ id: "constraints", label: t("grid.tableInfoConstraints"), icon: ShieldCheck, count: tableConstraintsForTab.value.length });
+  }
   if (tableMetadataCapabilities.value.triggers) {
     tabs.push({ id: "triggers", label: t("grid.tableInfoTriggers"), icon: RotateCcw, count: tableTriggers.value.length });
   }
@@ -1006,6 +1035,13 @@ const filteredTableTriggers = computed(() => {
   return tableTriggers.value.filter((tr) => tr.name.toLowerCase().includes(q));
 });
 
+const filteredTableConstraints = computed(() => {
+  const base = tableConstraintsForTab.value;
+  if (!tableInfoSearchQuery.value) return base;
+  const q = tableInfoSearchQuery.value.toLowerCase();
+  return base.filter((c) => c.name.toLowerCase().includes(q) || c.constraint_type.toLowerCase().includes(q) || c.columns.some((col) => col.toLowerCase().includes(q)) || c.definition.toLowerCase().includes(q));
+});
+
 const filteredTableDdlContent = computed(() => {
   if (!tableDdlContent.value) return "";
   const html = highlight(tableDdlContent.value);
@@ -1032,11 +1068,13 @@ async function openTableInfo(row: ObjectBrowserRow, initialTab?: TableInfoTab) {
   tableIndexes.value = [];
   tableForeignKeys.value = [];
   tableTriggers.value = [];
+  tableConstraints.value = [];
   tableColumnsLoaded.value = false;
   tableDdlLoaded.value = false;
   tableIndexesLoaded.value = false;
   tableForeignKeysLoaded.value = false;
   tableTriggersLoaded.value = false;
+  tableConstraintsLoaded.value = false;
   tableInfoSearchQuery.value = "";
   // Determine initial tab: explicit request > previously activated
   const firstTab = initialTab ?? tableInfoTab.value;
@@ -1052,6 +1090,7 @@ async function selectTableInfoTab(tab: TableInfoTab) {
   else if (nextTab === "columns") await fetchTableColumns();
   else if (nextTab === "indexes") await fetchTableIndexes();
   else if (nextTab === "foreignKeys") await fetchTableForeignKeys();
+  else if (nextTab === "constraints") await fetchTableConstraints();
   else if (nextTab === "triggers") await fetchTableTriggers();
 }
 
@@ -1066,7 +1105,7 @@ function tableMetadataRequest(row: ObjectBrowserRow): ObjectDdlRequest {
   };
 }
 
-async function fetchTableDdl(force = false) {
+async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
   const row = sidePanelRow.value;
   if (!row || (tableDdlLoaded.value && !force)) return;
   const epoch = sidePanelGuard.capture();
@@ -1184,6 +1223,30 @@ async function fetchTableTriggers(force = false) {
   }
 }
 
+async function fetchTableConstraints(force = false) {
+  const row = sidePanelRow.value;
+  if (!row || (tableConstraintsLoaded.value && !force)) return;
+  const epoch = sidePanelGuard.capture();
+  tableConstraintsLoading.value = true;
+  let loadedSuccessfully = false;
+  try {
+    const request = tableMetadataRequest(row);
+    const { value: constraints } = await loadObjectMetadataFacet(request, "constraints", () => api.listConstraints(request.connectionId, request.database, request.schema || request.database, request.tableName, request.catalog), { force });
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableConstraints.value = constraints;
+    loadedSuccessfully = true;
+  } catch (error) {
+    if (sidePanelGuard.isStale(epoch)) return;
+    tableConstraints.value = [];
+    toast(translateBackendError(t, error), 5000);
+  } finally {
+    if (sidePanelGuard.isFresh(epoch)) {
+      tableConstraintsLoaded.value = loadedSuccessfully;
+      tableConstraintsLoading.value = false;
+    }
+  }
+}
+
 async function refreshActiveTableInfo() {
   if (sidePanelMode.value !== "table-info" || !sidePanelRow.value) return;
   sidePanelGuard.bump();
@@ -1204,6 +1267,10 @@ async function refreshActiveTableInfo() {
     tableForeignKeys.value = [];
     tableForeignKeysLoaded.value = false;
     await fetchTableForeignKeys(true);
+  } else if (tableInfoTab.value === "constraints") {
+    tableConstraints.value = [];
+    tableConstraintsLoaded.value = false;
+    await fetchTableConstraints(true);
   } else if (tableInfoTab.value === "triggers") {
     tableTriggers.value = [];
     tableTriggersLoaded.value = false;
@@ -2212,7 +2279,7 @@ function canTransferTableClipboard(): boolean {
   if (isVictoriaMetrics.value) return false;
   const entries = normalizedObjectBrowserTableClipboardEntries();
   const target = pasteTableTargetContext();
-  if (entries.length === 0 || props.connection.read_only) return false;
+  if (entries.length === 0 || connectionIsEffectivelyReadOnly(props.connection)) return false;
   const source = tableClipboardSourceContext(entries);
   const sourceConfig = source ? connectionStore.getConfig(source.connectionId) : undefined;
   return !!source && !!sourceConfig && supportsTransfer(sourceConfig.db_type) && supportsTransfer(props.connection.db_type) && !tableClipboardMatchesTarget(entries, target);
@@ -2661,18 +2728,33 @@ function applyObjectBrowserRows(nextRows: ObjectBrowserRow[]) {
 }
 
 function openInitialEventIfNeeded() {
-  const name = props.initialEventName?.trim();
-  const requestKey = `${props.initialEventOpenRequestId ?? 0}:${name}`;
-  if (!name || openedInitialEvent.value === requestKey || loadingObjects.value) return;
+  const name = props.initialEventName?.trim() ?? "";
+  const decision = resolveInitialEventEditorRequest({
+    eventCreateRequestId: props.initialEventCreateRequestId,
+    eventName: props.initialEventName,
+    eventOpenRequestId: props.initialEventOpenRequestId,
+    openedRequestKey: openedInitialEvent.value,
+    hasEventRow: rows.value.some((candidate) => candidate.type === "EVENT" && candidate.name === name),
+    loadingObjects: loadingObjects.value,
+  });
+  if (decision.type === "ignore") return;
+  openedInitialEvent.value = decision.requestKey;
+  if (decision.type === "create") {
+    // 新建事件：不依赖对象列表中的 EVENT row，直接进入 CREATE 编辑器。
+    // MySqlEventEditor 收到空 name 时会以 CREATE 模式渲染。
+    sidePanelGuard.start();
+    sidePanelRow.value = null;
+    sourceRow.value = null;
+    sidePanelMode.value = "event-editor";
+    return;
+  }
   const row = rows.value.find((candidate) => candidate.type === "EVENT" && candidate.name === name);
-  if (!row) return;
-  openedInitialEvent.value = requestKey;
-  openEventEditor(row);
+  if (row) openEventEditor(row);
 }
 
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  const preferredFilter = props.initialObjectFilter ?? (props.initialEventName ? "events" : "tables");
+  const preferredFilter = props.initialObjectFilter ?? (props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : "tables");
   if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
@@ -2683,8 +2765,8 @@ function finishObjectBrowserRowsLoad() {
   restoreObjectBrowserViewport();
 }
 
-watch([() => props.initialEventName, () => props.initialEventOpenRequestId], ([name, requestId], [previousName, previousRequestId]) => {
-  if (name !== previousName || requestId !== previousRequestId) openedInitialEvent.value = "";
+watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () => props.initialEventCreateRequestId], ([name, requestId, createRequestId], [previousName, previousRequestId, previousCreateRequestId]) => {
+  if (name !== previousName || requestId !== previousRequestId || createRequestId !== previousCreateRequestId) openedInitialEvent.value = "";
   openInitialEventIfNeeded();
 });
 
@@ -3424,7 +3506,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </div>
       </div>
       <!-- Right-side panel: table info or source -->
-      <div v-if="sidePanelRow" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
+      <div v-if="sidePanelRow || isEventEditor" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
         <template v-if="sidePanelMode === 'table-info'">
@@ -3461,14 +3543,17 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               <span class="block truncate">{{ tab.label }}</span>
             </button>
           </div>
-          <div class="px-2 py-1.5 border-b shrink-0 bg-background">
-            <div class="relative">
+          <div class="flex items-center gap-1 px-2 py-1.5 border-b shrink-0 bg-background">
+            <div class="relative min-w-0 flex-1">
               <Search class="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
               <input v-model="tableInfoSearchQuery" :placeholder="t('grid.tableInfoSearch')" class="w-full h-7 pl-7 pr-6 text-xs bg-muted/50 rounded border border-border focus:outline-none focus:border-primary/50" @keydown.escape="tableInfoSearchQuery = ''" />
               <button v-if="tableInfoSearchQuery" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" @click="tableInfoSearchQuery = ''">
                 <X class="w-3 h-3" />
               </button>
             </div>
+            <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="activeTableInfoLoading" :title="t('structureEditor.refresh')" :aria-label="t('structureEditor.refresh')" @click="refreshActiveTableInfo">
+              <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': activeTableInfoLoading }" />
+            </Button>
           </div>
           <div v-if="tableInfoTab === 'columns'" class="flex-1 min-h-0 overflow-auto">
             <div v-if="tableColumnsLoading" class="h-full flex items-center justify-center">
@@ -3553,6 +3638,30 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </div>
           </div>
+          <div v-else-if="tableInfoTab === 'constraints'" class="flex-1 min-h-0 overflow-auto">
+            <div v-if="tableConstraintsLoading" class="h-full flex items-center justify-center">
+              <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
+            </div>
+            <div v-else-if="tableInfoSearchQuery && filteredTableConstraints.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoNoResults") }}
+            </div>
+            <div v-else-if="tableConstraintsForTab.length === 0" class="p-6 text-center text-xs text-muted-foreground">
+              {{ t("grid.tableInfoEmpty") }}
+            </div>
+            <div v-else class="divide-y">
+              <div v-for="constraint in filteredTableConstraints" :key="constraint.name" class="p-3 text-xs" :class="constraint.enabled ? '' : 'opacity-60'">
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="font-medium truncate">{{ constraint.name }}</span>
+                  <span class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ constraint.constraint_type }}</span>
+                  <span v-if="!constraint.enabled" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintDisabled") }}</span>
+                  <span v-else-if="!constraint.valid" class="rounded border px-1 py-px text-[10px] text-muted-foreground">{{ t("grid.tableInfoConstraintNotValidated") }}</span>
+                </div>
+                <div v-if="constraint.columns.length" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">{{ constraint.columns.join(", ") }}</div>
+                <div v-if="constraint.ref_table" class="mt-1 font-mono text-[11px] text-muted-foreground break-all">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
+                <div v-if="constraint.definition" class="mt-1 font-mono text-[11px] text-muted-foreground break-all whitespace-pre-wrap">{{ constraint.definition }}</div>
+              </div>
+            </div>
+          </div>
           <div v-else-if="tableInfoTab === 'triggers'" class="flex-1 min-h-0 overflow-auto">
             <div v-if="tableTriggersLoading" class="h-full flex items-center justify-center">
               <Loader2 class="w-4 h-4 animate-spin text-muted-foreground" />
@@ -3589,7 +3698,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <CustomTypeInfoPanel ref="sidePanelRef" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name || ''" :catalog="props.catalog" @close="closeSidePanel" />
         </template>
         <template v-else-if="sidePanelMode === 'event-editor'">
-          <MySqlEventEditor :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name" :read-only="props.initialEventReadOnly" @saved="onEventSaved" @close="closeSidePanel" />
+          <MySqlEventEditor :key="eventEditorKey" :connection="props.connection" :database="props.database" :schema="sidePanelRow?.schema || selectedSchema || props.database" :name="sidePanelRow?.name" :read-only="props.initialEventReadOnly" @saved="onEventSaved" @close="closeSidePanel" />
         </template>
         <!-- Source mode (views, procedures, functions, sequences) -->
         <template v-else>

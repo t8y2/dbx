@@ -28,6 +28,9 @@ vi.mock("vue-i18n", () => ({
 vi.mock("@/lib/backend/api", () => ({
   saveEditorSettings: vi.fn(),
   saveHistory: vi.fn(),
+  unlockConnectionWrites: vi.fn(),
+  lockConnectionWrites: vi.fn(),
+  connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
 }));
 
 function installLocalStorage() {

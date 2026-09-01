@@ -36,6 +36,8 @@ export interface AiConfig {
   model: string;
   models?: AiConfiguredModel[];
   apiStyle: AiApiStyle;
+  /** Additional HTTP headers sent to API-based AI providers. */
+  customHeaders?: Record<string, string>;
   proxyEnabled?: boolean;
   proxyUrl?: string;
   enableThinking?: boolean;

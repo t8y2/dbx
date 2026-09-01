@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { filterDataGridDetailFields, type DataGridCellDetail, type DataGridColumnDetail, type DataGridRowDetail } from "@/lib/dataGrid/dataGridDetail";
+import { detailNavigationDelta, shouldIgnoreDataGridDetailNavigation, type DataGridDetailNavigationDelta } from "@/lib/dataGrid/dataGridDetailNavigation";
 
 const { t } = useI18n();
 const props = defineProps<{
@@ -22,17 +23,50 @@ const props = defineProps<{
   copyColumnDetailColumnName: () => void;
 }>();
 
+const emit = defineEmits<{
+  navigateRow: [delta: DataGridDetailNavigationDelta];
+  navigateColumn: [delta: DataGridDetailNavigationDelta];
+}>();
+
 const rowOpen = defineModel<boolean>("rowOpen", { default: false });
 const columnOpen = defineModel<boolean>("columnOpen", { default: false });
 const rowSearch = ref("");
 const columnSearch = ref("");
 const filteredRowFields = computed(() => (props.rowDetail ? filterDataGridDetailFields(props.rowDetail.fields, rowSearch.value) : []));
 const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGridDetailFields(props.columnDetail.fields, columnSearch.value) : []));
+
+// The dialog must be arrow-navigable the moment it opens. FocusScope's default
+// focuses the first tabbable element — the search input — whose arrows move
+// the caret and are ignored by shouldIgnoreDataGridDetailNavigation. Cancel the
+// default and focus the content root instead (event.target is the FocusScope
+// container, i.e. the rendered dialog content element).
+function focusDetailDialogContentOnOpen(event: Event) {
+  event.preventDefault();
+  (event.target as HTMLElement | null)?.focus();
+}
+
+function onRowDetailKeydown(event: KeyboardEvent) {
+  if (!rowOpen.value || shouldIgnoreDataGridDetailNavigation(event)) return;
+  const delta = detailNavigationDelta(event.key, "row");
+  if (delta === null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit("navigateRow", delta);
+}
+
+function onColumnDetailKeydown(event: KeyboardEvent) {
+  if (!columnOpen.value || shouldIgnoreDataGridDetailNavigation(event)) return;
+  const delta = detailNavigationDelta(event.key, "column");
+  if (delta === null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  emit("navigateColumn", delta);
+}
 </script>
 
 <template>
   <Dialog v-model:open="rowOpen">
-    <DialogContent v-if="rowDetail" class="sm:max-w-[960px] max-h-[85vh] flex flex-col overflow-hidden">
+    <DialogContent v-if="rowDetail" tabindex="-1" class="sm:max-w-[960px] max-h-[85vh] flex flex-col overflow-hidden" @open-auto-focus="focusDetailDialogContentOnOpen" @keydown="onRowDetailKeydown">
       <DialogHeader class="shrink-0 pr-8">
         <DialogTitle class="flex min-w-0 items-center gap-2 text-sm"
           ><ListTree class="h-4 w-4 shrink-0 text-muted-foreground" /><span class="min-w-0 truncate">{{ t("grid.rowDetailsFor", { row: rowDetail.rowNumber }) }}</span></DialogTitle
@@ -90,7 +124,7 @@ const filteredColumnFields = computed(() => (props.columnDetail ? filterDataGrid
   </Dialog>
 
   <Dialog v-model:open="columnOpen">
-    <DialogContent v-if="columnDetail" class="sm:max-w-[900px] max-h-[85vh] flex flex-col overflow-hidden">
+    <DialogContent v-if="columnDetail" tabindex="-1" class="sm:max-w-[900px] max-h-[85vh] flex flex-col overflow-hidden" @open-auto-focus="focusDetailDialogContentOnOpen" @keydown="onColumnDetailKeydown">
       <DialogHeader class="shrink-0 pr-8"
         ><DialogTitle class="flex min-w-0 items-center gap-2 text-sm"
           ><TableProperties class="h-4 w-4 shrink-0 text-muted-foreground" /><span class="min-w-0 truncate">{{ t("grid.columnDetailsFor", { column: columnDetail.column }) }}</span></DialogTitle

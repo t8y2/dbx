@@ -32,7 +32,6 @@ import {
   CalendarClock,
   Gauge,
   ShieldCheck,
-  Lock,
   Archive,
   Square,
   Minus,
@@ -46,6 +45,7 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionErrorIndicator from "@/components/connection/ConnectionErrorIndicator.vue";
+import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -53,8 +53,19 @@ import { Switch } from "@/components/ui/switch";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import type { ColumnInfo, ConnectionConfig, CustomTypeTreeMemberMeta, DatabaseType, TreeNode, TriggerInfo } from "@/types/database";
 import { alignedCommentLeadingWidth, canTreeNodePin, canTreeNodeShowExpander, sidebarTreeNodeComment, trailingCommentAvailableWidth, trailingCommentGapPx, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
-import { clearActiveTableReferencePayload, createTableReferencePayload, createTableReferenceDropEvent, setActiveTableReferencePayload, type QueryEditorTableReferencePayload } from "@/lib/editor/queryEditorTableDrop";
+import {
+  clearActiveTableReferencePayload,
+  createColumnReferencePayload,
+  createMultiTableReferencePayload,
+  createTableReferenceDragEndEvent,
+  createTableReferenceDropEvent,
+  createTableReferenceHoverEvent,
+  createTableReferencePayload,
+  setActiveTableReferencePayload,
+  type QueryEditorTableReferencePayload,
+} from "@/lib/editor/queryEditorTableDrop";
 import { AI_ASSISTANT_TABLE_DROP_ROOT_SELECTOR } from "@/lib/ai/aiTableReferenceDrop";
+import { beginTableReferenceDragFeedback, isOverSqlEditorTarget, type TableReferenceDragFeedback } from "@/lib/editor/tableReferenceDragFeedback";
 import { formatSidebarObjectStorage } from "@/lib/sidebar/sidebarDatabaseStorage";
 import { dataTabOpenModeFromTreeClick } from "@/lib/sidebar/dataTabOpenPolicy";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
@@ -63,10 +74,12 @@ import { encodeSpannerResourcePath } from "@/lib/connection/spannerResourcePath"
 import { hexToRgba } from "@/lib/common/color";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelTooltip";
-import { filterSidebarModifierSelectionIds, supportsSidebarModifierSelection, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { filterSidebarModifierSelectionIds, selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, supportsSidebarModifierSelection, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
+import { resolveSidebarColumnDragNames, resolveSidebarTableCopyTargets, type SidebarTableCopyTarget } from "@/lib/sidebar/sidebarTableNameCopy";
 import { applyConnectionMultiSelection, applyTreeNodeSelection, connectionMultiSelectionAfterToggle } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionBearingGroupIdsUnder, connectionIdsUnderGroup } from "@/lib/sidebar/sidebarLayout";
 import { isSidebarDatabaseOpenForVisual } from "@/lib/sidebar/sidebarDatabaseOpenState";
+import { isLoginUserSchemaNode } from "@/lib/sidebar/loginUserNode";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { connectionCanConfigureSidebarVisibleDatabases } from "@/lib/sidebar/sidebarVisibleFilterMenu";
 import { supportsSidebarObjectNameFilter } from "@/lib/sidebar/sidebarObjectNameFilter";
@@ -77,13 +90,14 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { isXuguPublicSynonymTreeNode, isXuguSchedulerJobTreeNode, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
 import { treeNodePinKey } from "@/lib/app/pinnedItems";
 import { isTreeGroupNodeType } from "@/lib/sidebar/treeNodeGroup";
 import { customTypeCapabilities } from "@/lib/database/databaseObjectCapabilities";
-import { shouldActivateTreeNodeOnSingleClick, shouldOpenObjectBrowserOnSingleClick } from "@/lib/sidebar/treeNodeClick";
+import { shouldActivateTreeNodeOnSingleClick } from "@/lib/sidebar/treeNodeClick";
 
 const { t } = useI18n();
 
@@ -226,6 +240,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-amber-500" };
     case "database":
       return { icon: Database, colorClass: "text-yellow-500" };
+    case "tablespace":
+      return { icon: Database, colorClass: "text-orange-500" };
+    case "datafile":
+      return { icon: FileCode, colorClass: "text-slate-500" };
     case "linked-server-root":
       return { icon: Network, colorClass: "text-blue-500" };
     case "linked-server":
@@ -234,8 +252,12 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: Database, colorClass: "text-yellow-500" };
     case "linked-server-schema":
       return { icon: FolderOpen, colorClass: "text-sky-400" };
-    case "schema":
+    case "schema": {
+      const databaseType = node.connectionId ? effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) : undefined;
+      if (isXuguPublicSynonymTreeNode(databaseType, node.type, node.schema)) return { icon: Link2, colorClass: "text-sky-500" };
+      if (isXuguSchedulerJobTreeNode(databaseType, node.type, node.schema)) return { icon: CalendarClock, colorClass: "text-primary" };
       return { icon: FolderOpen, colorClass: "text-sky-400" };
+    }
     case "table":
       return { icon: Table, colorClass: "text-green-500" };
     case "view":
@@ -339,6 +361,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "synonym":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "job":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "package":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "package-body":
@@ -365,6 +389,8 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ListTree, colorClass: "text-emerald-500" };
     case "group-synonyms":
       return { icon: Link2, colorClass: "text-sky-500" };
+    case "group-jobs":
+      return { icon: Clock, colorClass: "text-orange-400" };
     case "group-packages":
       return { icon: Package, colorClass: "text-cyan-500" };
     case "group-types":
@@ -373,6 +399,10 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-green-400" };
     case "group-extensions":
       return { icon: Package, colorClass: "text-violet-500" };
+    case "group-tablespaces":
+      return { icon: Database, colorClass: "text-orange-500" };
+    case "group-datafiles":
+      return { icon: node.isExpanded ? FolderOpen : FolderClosed, colorClass: "text-slate-500" };
     case "extension":
       return { icon: Package, colorClass: "text-violet-400" };
     case "load-more":
@@ -387,6 +417,13 @@ function isGroupLabel(node: TreeNode): boolean {
 }
 
 function displayLabel(node: TreeNode): string {
+  // Synthetic Xugu scopes are persisted with their reserved protocol value.
+  // Resolve them at render time as well, so an already-cached tree never
+  // exposes that implementation detail after the feature is introduced.
+  if (node.type === "schema" && node.connectionId) {
+    const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId));
+    if (databaseType === "xugu") return xuguSchemaDisplayName(node.schema ?? node.label);
+  }
   if (node.type === "load-more") return t(node.label);
   if (node.type === "object-browser") return t(node.label, { count: node.objectCount ?? 0 });
   // Use the canonical key for persisted trees created before this label was
@@ -403,6 +440,7 @@ function displayLabel(node: TreeNode): string {
 function treeNodeSecondaryValue(node: TreeNode): string | undefined {
   if (node.type === "type" && node.customTypeKind) return t(`customType.kinds.${node.customTypeKind}`);
   if (node.type === "type-member") return (node.meta as CustomTypeTreeMemberMeta | undefined)?.displayValue;
+  if (node.type === "datafile") return node.xuguDatafilePath;
   return undefined;
 }
 
@@ -752,6 +790,14 @@ const isNodeDefaultDatabase = computed(
 );
 function isNodeDefaultSchema(): boolean {
   return activeNode.value.type === "schema" && !!activeNode.value.connectionId && !!activeNode.value.schema && connectionStore.isDefaultSchema(activeNode.value.connectionId, activeNode.value.schema);
+}
+
+// #7490: on Oracle-family connections whose schemas are database users, bold the
+// schema node matching the login user so it stands out among many user schemas.
+// Kept as a plain function call (not a computed) so TreeItem stays within the
+// top-level computed budget asserted by sidebarRuntimeDecomposition.
+function isLoginUserNode(): boolean {
+  return isLoginUserSchemaNode(activeNode.value, activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined);
 }
 
 const trailingComment = computed(() => {
@@ -1126,8 +1172,6 @@ function clearTreeDragTarget() {
 
 const TABLE_REFERENCE_DRAG_THRESHOLD = 5;
 
-const TABLE_REFERENCE_DRAGGING_CLASS = "dbx-table-reference-dragging";
-
 const canDragTableReference = computed(() => {
   if (props.referenceDragDisabled || !activeNode.value.connectionId) return false;
   if (activeNode.value.type === "database") return typeof activeNode.value.database === "string" && activeNode.value.database.trim().length > 0;
@@ -1144,10 +1188,35 @@ let pendingTableReferenceDrag: {
 
 let draggingTableReferencePayload: QueryEditorTableReferencePayload | null = null;
 
+let referenceDragFeedback: TableReferenceDragFeedback | null = null;
+
 let suppressNextTableReferenceClick = false;
+
+function selectedTreeNodesInVisibleOrder(): TreeNode[] {
+  return orderSelectedTreeNodes(visibleTreeNodes(), connectionStore.selectedTreeNodeIds);
+}
+
+function tableReferenceDragLabel(payload: QueryEditorTableReferencePayload): string {
+  if (payload.referenceType === "column") {
+    const names = payload.columnNames?.length ? payload.columnNames : payload.columnName ? [payload.columnName] : [];
+    if (names.length <= 3) return names.join(", ");
+    return t("grid.columnDragChipMany", { names: names.slice(0, 2).join(", "), count: names.length });
+  }
+  const tableNames = payload.tableReferences?.map((entry) => entry.tableName) ?? (payload.tableName ? [payload.tableName] : []);
+  if (tableNames.length <= 3) return tableNames.join(", ");
+  if (tableNames.length > 1) return t("grid.columnDragChipMany", { names: tableNames.slice(0, 2).join(", "), count: tableNames.length });
+  return payload.tableName || payload.database;
+}
 
 function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
   if (!canDragTableReference.value) return null;
+  const selectedNodes = selectedTreeNodesInVisibleOrder();
+  const tableCopyOptions = {
+    tableNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    includeTableSchema: settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema,
+    databaseType: currentDatabaseType(),
+    driverProfile: currentDriverProfile(),
+  };
   if (activeNode.value.type === "database") {
     return createTableReferencePayload({
       connectionId: activeNode.value.connectionId,
@@ -1158,16 +1227,24 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
     });
   }
   if (activeNode.value.type === "column") {
-    const columnName = columnNameForDrag(activeNode.value);
-    if (!activeNode.value.tableName || !columnName) return null;
-    return createTableReferencePayload({
+    const columnNames = resolveSidebarColumnDragNames(activeNode.value, selectedNodes);
+    if (!activeNode.value.connectionId || activeNode.value.database == null || columnNames.length === 0) return null;
+    return createColumnReferencePayload({
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database,
       schema: activeNode.value.schema,
-      tableName: activeNode.value.tableName,
-      columnName,
+      columnNames,
       databaseType: currentDatabaseType(),
-      driverProfile: currentDriverProfile(),
+      columnNameSeparator: settingsStore.editorSettings.sidebarCopyTableNameSeparator,
+    });
+  }
+  const tableTargets = resolveSidebarTableCopyTargets(activeNode.value, selectedNodes);
+  if (tableTargets.length > 1) {
+    return createMultiTableReferencePayload({
+      connectionId: activeNode.value.connectionId,
+      database: activeNode.value.database,
+      tableReferences: tableTargets.map((target: SidebarTableCopyTarget) => ({ schema: target.schema, tableName: target.label })),
+      ...tableCopyOptions,
     });
   }
   const payload = createTableReferencePayload({
@@ -1178,28 +1255,27 @@ function tableReferenceDragPayload(): QueryEditorTableReferencePayload | null {
     databaseType: currentDatabaseType(),
     driverProfile: currentDriverProfile(),
   });
+  if (payload && tableCopyOptions.includeTableSchema) {
+    payload.includeTableSchema = true;
+    payload.tableNameSeparator = tableCopyOptions.tableNameSeparator;
+  }
   return payload;
-}
-
-function columnNameForDrag(node: TreeNode): string {
-  const column = node.meta as Partial<ColumnInfo> | undefined;
-  if (typeof column?.name === "string" && column.name) return column.name;
-  return node.label.replace(/\s+\([^()]*\)$/, "");
 }
 
 function startTableReferenceDrag(payload: QueryEditorTableReferencePayload) {
   draggingTableReferencePayload = payload;
   setActiveTableReferencePayload(payload);
   document.getSelection()?.removeAllRanges();
-  document.body.style.cursor = "copy";
+  referenceDragFeedback = beginTableReferenceDragFeedback(tableReferenceDragLabel(payload));
 }
 
 function finishTableReferenceDrag() {
   clearActiveTableReferencePayload(draggingTableReferencePayload);
   pendingTableReferenceDrag = null;
   draggingTableReferencePayload = null;
-  document.body.classList.remove(TABLE_REFERENCE_DRAGGING_CLASS);
-  document.body.style.cursor = "";
+  referenceDragFeedback?.end();
+  referenceDragFeedback = null;
+  window.dispatchEvent(createTableReferenceDragEndEvent());
   document.removeEventListener("mousemove", onTableReferenceMouseMove, true);
   document.removeEventListener("mouseup", onTableReferenceMouseUp, true);
 }
@@ -1215,6 +1291,11 @@ function onTableReferenceMouseMove(event: MouseEvent) {
   if (draggingTableReferencePayload) {
     event.preventDefault();
     document.getSelection()?.removeAllRanges();
+    referenceDragFeedback?.update(event.clientX, event.clientY);
+    // 仅查询编辑器消费 hover 光标线事件；AI 面板不监听。命中判定含覆盖层拦截时的几何回退。
+    if (isOverSqlEditorTarget(event.clientX, event.clientY)) {
+      window.dispatchEvent(createTableReferenceHoverEvent({ clientX: event.clientX, clientY: event.clientY }));
+    }
   }
 }
 
@@ -1242,7 +1323,6 @@ function startTableReferenceMouseDrag(event: MouseEvent) {
   if (!payload) return;
   event.preventDefault();
   document.getSelection()?.removeAllRanges();
-  document.body.classList.add(TABLE_REFERENCE_DRAGGING_CLASS);
   pendingTableReferenceDrag = { payload, startX: event.clientX, startY: event.clientY };
   document.addEventListener("mousemove", onTableReferenceMouseMove, true);
   document.addEventListener("mouseup", onTableReferenceMouseUp, true);
@@ -1326,10 +1406,6 @@ function onClick(event: MouseEvent) {
   }
   selectSingleTreeNode(props.node);
   rowRef.value?.focus({ preventScroll: true });
-  if (shouldOpenObjectBrowserOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarOpenDatabaseOnSingleClick)) {
-    treeRuntime.handleRowClick(props.node, event.detail);
-    return;
-  }
   if (!shouldActivateTreeNodeOnSingleClick(props.node.type, settingsStore.editorSettings.sidebarActivation) && props.node.type !== "load-more") return;
   treeRuntime.handleRowClick(props.node, event.detail);
 }
@@ -1442,7 +1518,20 @@ function onKeydown(event: KeyboardEvent) {
               @keydown.escape.prevent="cancelRename"
               @click.stop
             />
-            <span v-else ref="labelRef" :class="[labelWidthClass, { 'flex-1': node.type === 'connection' && !trailingComment }]">{{ visibleLabel(node) }}</span>
+            <span
+              v-else
+              ref="labelRef"
+              :class="[
+                labelWidthClass,
+                {
+                  'flex-1': node.type === 'connection' && !trailingComment,
+                  'tree-connection-label': node.type === 'connection' || node.type === 'connection-group',
+                  'tree-object-label': node.type !== 'connection' && node.type !== 'connection-group',
+                  'font-semibold': isLoginUserNode(),
+                },
+              ]"
+              >{{ visibleLabel(node) }}</span
+            >
             <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
             <button
               v-if="canDragPinnedOrder()"
@@ -1470,6 +1559,7 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-events' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
+                  node.type === 'group-jobs' ||
                   node.type === 'group-packages' ||
                   node.type === 'group-types' ||
                   node.type === 'group-partitions' ||
@@ -1499,7 +1589,7 @@ function onKeydown(event: KeyboardEvent) {
         </div>
         <span v-if="node.type === 'connection' && node.connectionId && connectionStore.connectedIds.has(node.connectionId)" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
         <span v-if="databaseOpenVisual.showsIndicator" class="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-        <Badge v-if="isConnectionReadonly" variant="secondary" class="h-4 px-1.5 text-[10px] gap-0.5"> <Lock class="w-2.5 h-2.5" />{{ t("connection.readOnlyBadge") }} </Badge>
+        <ReadOnlySessionControl v-if="isConnectionReadonly && activeNode.connectionId" :connection-id="activeNode.connectionId" show-label />
         <ConnectionErrorIndicator v-if="node.type === 'connection'" :connection-id="node.connectionId" trigger-class="h-4 w-4" />
         <span v-if="formattedObjectStorage()" class="ml-auto shrink-0 text-right text-xs tabular-nums text-muted-foreground">{{ formattedObjectStorage() }}</span>
         <button
@@ -1596,6 +1686,21 @@ function onKeydown(event: KeyboardEvent) {
   font-size: 1em;
   font-weight: 500;
   opacity: 1;
+}
+
+.tree-connection-label {
+  font-weight: 400;
+  font-variation-settings: "wght" 480;
+}
+
+.tree-object-label {
+  font-weight: 400;
+  font-variation-settings: "wght" 430;
+}
+
+.tree-object-label.font-semibold {
+  font-weight: 600;
+  font-variation-settings: "wght" 600;
 }
 
 .tree-item-connection-tint {

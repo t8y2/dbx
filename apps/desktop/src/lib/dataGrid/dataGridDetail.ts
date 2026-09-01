@@ -1,5 +1,6 @@
 import { cellImagePreviewUrl } from "@/lib/dataGrid/cellImageUrl";
-import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
+import { clipboardCellValue, displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { formatJsonText } from "@/lib/dataGrid/cellDetailPresentation";
 import type { DatabaseType } from "@/types/database";
 
@@ -186,11 +187,11 @@ function detailColumnType(typeByColumn: ReadonlyMap<string, string> | undefined,
   return resultColumnTypes?.[columnIndex]?.trim() ?? "";
 }
 
-export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown): string {
+export function dataGridRowDetailJson(detail: DataGridRowDetail, originalDocument?: unknown, databaseType?: DatabaseType): string {
   if (originalDocument !== undefined) return JSON.stringify(jsonDetailDisplayValue(originalDocument), null, 2);
   const row: Record<string, CellValue> = {};
   detail.fields.forEach((field) => {
-    row[field.column] = field.value;
+    row[field.column] = binaryCellClipboardText(field.value, field.type, databaseType) ?? field.value;
   });
   return JSON.stringify(jsonDetailDisplayValue(row), null, 2);
 }
@@ -214,23 +215,23 @@ export function jsonDetailDisplayValue(value: unknown): unknown {
   return value;
 }
 
-export function dataGridRowDetailTsv(detail: DataGridRowDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\t");
+export function dataGridRowDetailTsv(detail: DataGridRowDetail, databaseType?: DatabaseType): string {
+  return detail.fields.map((field) => clipboardCellValue(binaryCellClipboardText(field.value, field.type, databaseType) ?? field.value)).join("\t");
 }
 
-export function dataGridColumnDetailJson(detail: DataGridColumnDetail): string {
+export function dataGridColumnDetailJson(detail: DataGridColumnDetail, databaseType?: DatabaseType): string {
   return JSON.stringify(
     detail.fields.map((field) => ({
       row: field.rowNumber,
-      value: field.value,
+      value: binaryCellClipboardText(field.value, field.type, databaseType) ?? field.value,
     })),
     null,
     2,
   );
 }
 
-export function dataGridColumnDetailTsv(detail: DataGridColumnDetail): string {
-  return detail.fields.map((field) => displayCellValue(field.value)).join("\n");
+export function dataGridColumnDetailTsv(detail: DataGridColumnDetail, databaseType?: DatabaseType): string {
+  return detail.fields.map((field) => clipboardCellValue(binaryCellClipboardText(field.value, field.type, databaseType) ?? field.value)).join("\n");
 }
 
 export interface BuildDeleteRowConfirmDetailsOptions<TRow> {

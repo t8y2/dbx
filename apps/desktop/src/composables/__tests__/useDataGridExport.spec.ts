@@ -730,6 +730,66 @@ describe("useDataGridExport prepared row statements", () => {
     expect(copyToClipboard).toHaveBeenCalledWith(text);
   });
 
+  it("copies a NULL cell as an empty clipboard value", async () => {
+    const state = createExportState(editableTable, ["id", "name"], undefined, [1, null], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("");
+  });
+
+  it("copies all rows with empty fields for NULL cells", async () => {
+    const text = "id\tname\n1\t\n2\tAda";
+    const state = createExportState(editableTable, ["id", "name"], undefined, undefined, undefined, [
+      [1, null],
+      [2, "Ada"],
+    ]);
+
+    await state.copyAll();
+
+    expect(copyToClipboard).toHaveBeenCalledWith(text);
+    expect(parseDataGridClipboard(text)).toEqual([
+      ["id", "name"],
+      ["1", null],
+      ["2", "Ada"],
+    ]);
+  });
+
+  it("copies a NULL smart single-cell selection as an empty value", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [1],
+      columns: ["name"],
+      rows: [[null]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, null]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(copyToClipboard).toHaveBeenCalledWith("");
+  });
+
+  it("uses an empty default NULL text for TSV clipboard output", async () => {
+    const matrix: CellSelectionMatrix = {
+      rowIndexes: [0],
+      columnIndexes: [0, 1],
+      columns: ["id", "name"],
+      rows: [[1, null]],
+    };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "1\t", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 2 });
+    const state = createExportState(editableTable, ["id", "name"], matrix, [1, null]);
+
+    await expect(state.copyWithExtractor("tsv")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        options: expect.objectContaining({ dsv: expect.objectContaining({ nullText: "" }) }),
+      }),
+    );
+    expect(copyToClipboard).toHaveBeenCalledWith("1\t");
+  });
+
   it("preserves JSON-column text in a single-cell smart copy", async () => {
     const tableMeta: DataGridTableMeta = {
       tableName: "events",
@@ -1404,5 +1464,124 @@ describe("useDataGridExport prepared row statements", () => {
     await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(false);
     expect(extractDataGridSelection).not.toHaveBeenCalled();
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+});
+
+// issue #7471：文本型 MySQL VARBINARY 复制单元格/多选/整行时，外部剪贴板应呈现原始字符串；
+// SQL 路径与 DBX 内部网格回粘仍保留 hex 以保证 byte-for-byte round-trip，非文本二进制也始终保持 hex。
+describe("useDataGridExport VARBINARY 文本复制 (#7471)", () => {
+  const varbinTable: DataGridTableMeta = {
+    tableName: "test_varbin",
+    primaryKeys: ["id"],
+    columns: [
+      { name: "id", data_type: "int", is_nullable: false, is_primary_key: true },
+      { name: "name", data_type: "varbinary(128)", is_nullable: false },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearDataGridClipboardCopy();
+  });
+
+  it("复制文本型 VARBINARY 单元格时把 0x<hex> 还原为原始字符串", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(varbinTable, ["id", "name"], matrix, [1, "0x616263"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+    // OS 剪贴板是文本，DBX 内部剪贴板仍保留原 hex，粘回 VARBINARY 时不会重编码或丢字节。
+    expect(parseDataGridClipboard("abc")).toEqual([["0x616263"]]);
+  });
+
+  it("非文本 VARBINARY 保持 0x/hex，避免破坏任意 bytes", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["0xdeadbeef"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "0xdeadbeef", mimeType: "text/plain", fileExtension: "txt", rowCount: 1, columnCount: 1 });
+    const state = createExportState(varbinTable, ["id", "name"], matrix, [1, "0xdeadbeef"]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "raw", rows: [["0xdeadbeef"]] }));
+  });
+
+  it("多选 TSV 复制同样对文本型 VARBINARY 解码", async () => {
+    const rows = [["0x616263"], ["0x31"]];
+    const matrix: CellSelectionMatrix = { rowIndexes: [0, 1], columnIndexes: [1], columns: ["name"], rows };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "abc\n1", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 2, columnCount: 1 });
+    const state = createExportState(varbinTable, ["id", "name"], matrix, undefined, undefined, [
+      [1, "0x616263"],
+      [2, "0x31"],
+    ]);
+
+    await expect(state.copyWithPreference("smart")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "tsv", rows: [["abc"], ["1"]] }));
+    expect(parseDataGridClipboard("abc\n1")).toEqual([["0x616263"], ["0x31"]]);
+  });
+
+  it("JSON 复制格式同样呈现文本型 VARBINARY", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["0x616263"]] };
+    const text = JSON.stringify({ name: "abc" }, null, 2);
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text, mimeType: "application/json", fileExtension: "json", rowCount: 1, columnCount: 1 });
+    const state = createExportState(varbinTable, ["id", "name"], matrix, [1, "0x616263"]);
+
+    await expect(state.copyWithExtractor("json")).resolves.toBe(true);
+
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "json", rows: [["abc"]] }));
+    expect(copyToClipboard).toHaveBeenCalledWith(text);
+  });
+
+  it("SQL 提取器保持 hex 字面量以保证 round-trip", async () => {
+    const matrix: CellSelectionMatrix = { rowIndexes: [0], columnIndexes: [1], columns: ["name"], rows: [["0x616263"]] };
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "INSERT INTO `test_varbin` (`name`) VALUES (0x616263);", mimeType: "application/sql", fileExtension: "sql", rowCount: 1, columnCount: 1 });
+    const state = createExportState(varbinTable, ["id", "name"], matrix, [1, "0x616263"]);
+
+    await expect(state.copyWithExtractor("sql-inserts")).resolves.toBe(true);
+
+    // SQL 路径不解码：请求里仍是 0x<hex>，交由后端 data_grid_sql 生成安全的 hex 字面量。
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ extractor: "sql-inserts", rows: [["0x616263"]] }));
+  });
+
+  it("右键「复制单元格」对文本型 VARBINARY 直接写入原始字符串", async () => {
+    const state = createExportState(varbinTable, ["id", "name"], undefined, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("abc");
+    // 剪贴板走本地 copyCell 路径，不应呼叫后端提取器。
+    expect(extractDataGridSelection).not.toHaveBeenCalled();
+  });
+
+  it("右键「复制单元格」对非文本 VARBINARY 保持 0x/hex", async () => {
+    const state = createExportState(varbinTable, ["id", "name"], undefined, [1, "0xdeadbeef"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("0xdeadbeef");
+  });
+
+  it("复制整行 JSON 时呈现文本型 VARBINARY", async () => {
+    const state = createExportState(varbinTable, ["id", "name"], undefined, [1, "0x616263"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 1);
+
+    await state.copyRow();
+
+    const copied = vi.mocked(copyToClipboard).mock.calls[0]?.[0] ?? "";
+    expect(JSON.parse(copied)).toEqual({ id: 1, name: "abc" });
+  });
+
+  it("复制全部时外部文本呈现 VARBINARY，内部网格副本保留 hex", async () => {
+    const state = createExportState(varbinTable, ["id", "name"], undefined, [1, "0x616263"]);
+
+    await state.copyAll();
+
+    const text = "id\tname\n1\tabc";
+    expect(copyToClipboard).toHaveBeenCalledWith(text);
+    expect(parseDataGridClipboard(text)).toEqual([
+      ["id", "name"],
+      ["1", "0x616263"],
+    ]);
   });
 });

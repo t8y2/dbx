@@ -222,7 +222,33 @@ test("dataGridRowDetailJson and dataGridRowDetailTsv format copy payloads", () =
 
   assert.equal(dataGridRowDetailJson(detail), '{\n  "id": 1,\n  "name": "Ada",\n  "nickname": null\n}');
   assert.equal(dataGridRowDetailJson(detail, { id: 1, profile: { city: "Shanghai" } }), '{\n  "id": 1,\n  "profile": {\n    "city": "Shanghai"\n  }\n}');
-  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\tNULL");
+  assert.equal(dataGridRowDetailTsv(detail), "1\tAda\t");
+});
+
+test("data grid detail copy renders textual MySQL VARBINARY while preserving non-text bytes", () => {
+  const rowDetail = buildDataGridRowDetail({
+    rowIndex: 0,
+    rowId: 1,
+    row: ["0x616263", "0xdeadbeef"],
+    columns: ["name", "payload"],
+    columnIndexes: [0, 1],
+    resultColumnTypes: ["varbinary(128)", "varbinary(4)"],
+    displayValue: (value) => String(value),
+  });
+  const columnDetail = buildDataGridColumnDetail({
+    rows: [{ rowIndex: 0, rowId: 1, row: ["0x616263"] }],
+    columns: ["name"],
+    columnIndex: 0,
+    resultColumnTypes: ["varbinary(128)"],
+    displayValue: (value) => String(value),
+  });
+
+  assert.equal(dataGridRowDetailJson(rowDetail, undefined, "mysql"), '{\n  "name": "abc",\n  "payload": "0xdeadbeef"\n}');
+  assert.equal(dataGridRowDetailTsv(rowDetail, "mysql"), "abc\t0xdeadbeef");
+  assert.equal(dataGridColumnDetailJson(columnDetail!, "mysql"), '[\n  {\n    "row": 1,\n    "value": "abc"\n  }\n]');
+  assert.equal(dataGridColumnDetailTsv(columnDetail!, "mysql"), "abc");
+  // 非 MySQL binary 及非文本 VARBINARY 不应被误转成字符串或 replacement character。
+  assert.equal(dataGridRowDetailJson(rowDetail), '{\n  "name": "0x616263",\n  "payload": "0xdeadbeef"\n}');
 });
 
 test("dataGridRowDetailJson uses the original MongoDB document for nested values", () => {
@@ -305,7 +331,7 @@ test("dataGridColumnDetailJson and dataGridColumnDetailTsv format copy payloads"
 
   assert.ok(detail);
   assert.equal(dataGridColumnDetailJson(detail), '[\n  {\n    "row": 1,\n    "value": "Ada"\n  },\n  {\n    "row": 2,\n    "value": null\n  }\n]');
-  assert.equal(dataGridColumnDetailTsv(detail), "Ada\nNULL");
+  assert.equal(dataGridColumnDetailTsv(detail), "Ada\n");
 });
 
 const detailFields: DataGridCellDetail[] = [

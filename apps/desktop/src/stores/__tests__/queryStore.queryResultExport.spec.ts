@@ -76,4 +76,35 @@ describe("queryStore query result export", () => {
     expect(request?.identifierQuote).toBe("[");
     expect(mocks.connectionIdentifierQuote).toHaveBeenCalledWith("kingbase-1");
   });
+
+  it("uses the Agent cursor for SQL Server legacy result export", async () => {
+    mocks.getConfig.mockReturnValue({
+      id: "sqlserver-2000",
+      name: "SQL Server 2000",
+      db_type: "sqlserver",
+      driver_profile: "sqlserver-legacy",
+      database: "master",
+      query_timeout_secs: 30,
+    });
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("sqlserver-2000", "master", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.sql = "SELECT * FROM dbo.Users";
+    tab.lastExecutedSql = tab.sql;
+    tab.result = {
+      columns: ["id"],
+      rows: [[1]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-legacy",
+      filePath: "users.csv",
+      format: "csv",
+    });
+
+    expect(request?.useAgentCursor).toBe(true);
+  });
 });

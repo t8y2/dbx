@@ -30,3 +30,32 @@ describe("SqlFilePanel folder headers", () => {
     expect(panelSource).not.toContain("bg-muted/10 sticky top-0");
   });
 });
+
+describe("SqlFilePanel file renaming", () => {
+  it("does not re-read a successfully renamed file before refreshing the tree", () => {
+    const renameFunction = panelSource.match(/async function renameSqlFile\(\) \{[\s\S]*?\n\}/)?.[0];
+
+    expect(renameFunction).toBeDefined();
+    expect(renameFunction).toContain("queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath)");
+    expect(renameFunction).not.toContain("readExternalSqlFileSnapshot(nextPath)");
+  });
+});
+
+describe("SqlFilePanel directory actions", () => {
+  it("shows a new SQL file icon for nested directories", () => {
+    expect(panelSource).toContain('@click.stop="openCreateDialog(folder.path, entry.path)"');
+  });
+});
+
+describe("SqlFilePanel file filter", () => {
+  it("restores the previous filter when the backend rejects the saved pattern", () => {
+    expect(panelSource).toContain('message?.startsWith("Invalid file filter")');
+    expect(panelSource).toContain("saveSqlFileFilter(previousFilter)");
+    expect(panelSource).toContain('t("sqlFileTree.filterInvalid"');
+  });
+
+  it("renders the translated filter placeholder", () => {
+    expect(panelSource).toContain("t('sqlFileTree.fileFilterPlaceholder')");
+    expect(panelSource).not.toContain("const fileFilterPlaceholder =");
+  });
+});

@@ -7,13 +7,15 @@ use crate::connection::{config_for_pool_key, AppState, PoolKind};
 use crate::db;
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::db::mongo_driver::MongoDocumentResult;
-use crate::models::connection::DatabaseType;
+use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
     agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
-use crate::sql_dialect::{normalize_len_params, qualified_transfer_table, quote_transfer_identifier};
+use crate::sql_dialect::{
+    normalize_len_params, qualified_transfer_table, quote_transfer_identifier, transfer_column_identifier,
+};
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
     std::sync::LazyLock::new(|| RwLock::new(HashSet::new()));
@@ -125,7 +127,7 @@ pub enum TransferObjectFamily {
 
 pub fn transfer_object_family(db_type: &DatabaseType) -> Option<TransferObjectFamily> {
     match db_type {
-        DatabaseType::Mysql => Some(TransferObjectFamily::Mysql),
+        DatabaseType::Mysql | DatabaseType::Gbase => Some(TransferObjectFamily::Mysql),
         DatabaseType::Postgres
         | DatabaseType::Kingbase
         | DatabaseType::Gaussdb
@@ -185,9 +187,15 @@ pub struct TransferRequest {
     pub mode: TransferMode,
     #[serde(default)]
     pub target_table_name_case: TransferTableNameCase,
+    #[serde(default = "default_quote_target_column_names")]
+    pub quote_target_column_names: bool,
     #[serde(default)]
     pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+}
+
+fn default_quote_target_column_names() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1491,7 +1499,12 @@ fn writable_transfer_columns(
         .collect()
 }
 
-fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right: &str) -> bool {
+fn transfer_column_names_match(
+    target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
+    left: &str,
+    right: &str,
+) -> bool {
     if matches!(
         target_db_type,
         DatabaseType::Mysql
@@ -1508,7 +1521,11 @@ fn transfer_column_names_match(target_db_type: &DatabaseType, left: &str, right:
             | DatabaseType::Impala
             | DatabaseType::Spark
             | DatabaseType::Access
-    ) {
+    ) || (matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) && !quote_target_column_names)
+    {
+        // Unquoted GaussDB/openGauss identifiers fold to lowercase server-side,
+        // so with quoting disabled a table created from mixed-case source
+        // columns reports folded names back from the catalog.
         left.eq_ignore_ascii_case(right)
     } else {
         left == right
@@ -1519,11 +1536,14 @@ fn missing_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     col_names
         .iter()
         .filter(|name| {
-            !target_columns.iter().any(|column| transfer_column_names_match(target_db_type, name, &column.name))
+            !target_columns.iter().any(|column| {
+                transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+            })
         })
         .cloned()
         .collect()
@@ -1545,12 +1565,15 @@ fn required_unmapped_transfer_target_columns(
     target_columns: &[db::ColumnInfo],
     col_names: &[String],
     target_db_type: &DatabaseType,
+    quote_target_column_names: bool,
 ) -> Vec<String> {
     target_columns
         .iter()
         .filter(|column| {
             !target_column_can_be_omitted(column, target_db_type)
-                && !col_names.iter().any(|name| transfer_column_names_match(target_db_type, name, &column.name))
+                && !col_names.iter().any(|name| {
+                    transfer_column_names_match(target_db_type, quote_target_column_names, name, &column.name)
+                })
         })
         .map(|column| column.name.clone())
         .collect()
@@ -1565,8 +1588,8 @@ fn transfer_key_columns(columns: &[db::ColumnInfo], db_type: &DatabaseType) -> V
         .collect()
 }
 
-fn dameng_identity_insert_statement(table: &str, schema: &str, enabled: bool) -> String {
-    let full_table = qualified_table(table, schema, &DatabaseType::Dameng, None);
+fn identity_insert_statement(table: &str, schema: &str, db_type: &DatabaseType, enabled: bool) -> String {
+    let full_table = qualified_table(table, schema, db_type, None);
     format!("SET IDENTITY_INSERT {full_table} {}", if enabled { "ON" } else { "OFF" })
 }
 
@@ -1590,27 +1613,25 @@ async fn execute_transfer_write_statement(
     schema: &str,
     needs_identity_insert: bool,
 ) -> Result<(), String> {
-    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng) {
+    if !needs_identity_insert || !matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer) {
         execute_on_pool(state, target_pool_key, sql).await?;
         return Ok(());
     }
 
-    let enable_sql = dameng_identity_insert_statement(table, schema, true);
-    let disable_sql = dameng_identity_insert_statement(table, schema, false);
+    let enable_sql = identity_insert_statement(table, schema, target_db_type, true);
+    let disable_sql = identity_insert_statement(table, schema, target_db_type, false);
     execute_on_pool(state, target_pool_key, &enable_sql)
         .await
-        .map_err(|e| format!("Failed to enable Dameng IDENTITY_INSERT for {table}: {e}"))?;
+        .map_err(|e| format!("Failed to enable IDENTITY_INSERT for {table}: {e}"))?;
     let write_result = execute_on_pool(state, target_pool_key, sql).await;
     let disable_result = execute_on_pool(state, target_pool_key, &disable_sql).await;
 
     match (write_result, disable_result) {
         (Ok(_), Ok(_)) => Ok(()),
         (Err(write_error), Ok(_)) => Err(write_error),
-        (Ok(_), Err(disable_error)) => {
-            Err(format!("Failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
-        }
+        (Ok(_), Err(disable_error)) => Err(format!("Failed to disable IDENTITY_INSERT for {table}: {disable_error}")),
         (Err(write_error), Err(disable_error)) => {
-            Err(format!("{write_error}; also failed to disable Dameng IDENTITY_INSERT for {table}: {disable_error}"))
+            Err(format!("{write_error}; also failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
         }
     }
 }
@@ -1892,6 +1913,22 @@ fn oracle_rownum_page_sql(col_list: &str, base_sql: String, offset: u64, limit: 
     let end = offset + limit as u64;
     format!(
         "SELECT {col_list} FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM ({base_sql}) dbx_inner WHERE ROWNUM <= {end}) WHERE \"__dbx_row_num\" > {offset}"
+    )
+}
+
+// SQL Server 2008 R2 and older reject `OFFSET ... FETCH` (added in SQL Server
+// 2012), so paged reads must use a ROW_NUMBER() subquery that every supported
+// SQL Server version accepts (issue #7356).
+fn sqlserver_row_number_page_sql(
+    col_list: &str,
+    from_clause: &str,
+    order_by: &str,
+    offset: u64,
+    limit: usize,
+) -> String {
+    let end = offset + limit as u64;
+    format!(
+        "SELECT {col_list} FROM (SELECT {col_list}, ROW_NUMBER() OVER (ORDER BY {order_by}) AS __dbx_row_num FROM {from_clause}) AS __dbx_page WHERE __dbx_row_num > {offset} AND __dbx_row_num <= {end}"
     )
 }
 
@@ -2922,7 +2959,7 @@ pub fn map_column_type(source_type: &str, _source_db: &DatabaseType, target_db: 
     // Extract basic type, `bigint unsigned` -> `bigint`
     base = base.split(' ').next().unwrap_or(base).trim();
 
-    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
         return match base {
             "tinyint" => "TINYINT".into(),
             "smallint" | "int2" => "SMALLINT".into(),
@@ -3106,6 +3143,31 @@ pub fn generate_create_table_ddl(
     table_comment: Option<&str>,
     catalog: Option<&str>,
 ) -> String {
+    generate_create_table_ddl_with_column_quoting(
+        columns,
+        table,
+        source_schema,
+        schema,
+        target_db,
+        source_db,
+        table_comment,
+        catalog,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_create_table_ddl_with_column_quoting(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    source_schema: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    source_db: &DatabaseType,
+    table_comment: Option<&str>,
+    catalog: Option<&str>,
+    quote_target_column_names: bool,
+) -> String {
     let full_table = qualified_table(table, schema, target_db, catalog);
 
     let is_mysql_family = matches!(
@@ -3121,12 +3183,20 @@ pub fn generate_create_table_ddl(
     for c in columns {
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
-            let mut line = format!("  {} {}", quote_identifier(&c.name, target_db), mapped_type);
+            let mut line = format!(
+                "  {} {}",
+                transfer_column_identifier(&c.name, target_db, quote_target_column_names),
+                mapped_type
+            );
             if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
                 line.push(' ');
                 line.push_str(&default_clause);
             }
-            if !c.is_nullable && !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala)
+            if !c.is_nullable
+                && !matches!(
+                    target_db,
+                    DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo
+                )
             {
                 line.push_str(" NOT NULL");
             }
@@ -3150,10 +3220,10 @@ pub fn generate_create_table_ddl(
     }
 
     let mut pks = Vec::with_capacity(columns.iter().filter(|c| c.is_primary_key).count());
-    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
         for c in columns {
             if c.is_primary_key {
-                let qname = quote_identifier(&c.name, target_db);
+                let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
                 if is_mysql_family {
                     let mapped = map_column_type(&c.data_type, source_db, target_db);
                     if mysql_type_needs_key_prefix(&mapped) {
@@ -3219,6 +3289,17 @@ pub fn generate_comment_ddl(
     target_db: &DatabaseType,
     table_comment: Option<&str>,
 ) -> Vec<String> {
+    generate_comment_ddl_with_column_quoting(columns, table, schema, target_db, table_comment, true)
+}
+
+fn generate_comment_ddl_with_column_quoting(
+    columns: &[db::ColumnInfo],
+    table: &str,
+    schema: &str,
+    target_db: &DatabaseType,
+    table_comment: Option<&str>,
+    quote_target_column_names: bool,
+) -> Vec<String> {
     if !(is_postgres_transfer_dialect(target_db)
         || matches!(target_db, DatabaseType::Oracle | DatabaseType::ClickHouse))
     {
@@ -3246,7 +3327,7 @@ pub fn generate_comment_ddl(
                 continue;
             }
             let escaped = trimmed.replace('\'', "''");
-            let qcol = quote_identifier(&c.name, target_db);
+            let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
 
             match target_db {
                 target_db if is_postgres_transfer_dialect(target_db) || matches!(target_db, DatabaseType::Oracle) => {
@@ -3316,8 +3397,25 @@ impl InsertSqlTemplate {
         catalog: Option<&str>,
         overrides_postgres_system_values: bool,
     ) -> Self {
+        Self::new_with_column_quoting(columns, table, schema, db_type, catalog, overrides_postgres_system_values, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_column_quoting(
+        columns: &[String],
+        table: &str,
+        schema: &str,
+        db_type: &DatabaseType,
+        catalog: Option<&str>,
+        overrides_postgres_system_values: bool,
+        quote_target_column_names: bool,
+    ) -> Self {
         let full_table = qualified_table(table, schema, db_type, catalog);
-        let col_list = columns.iter().map(|column| quote_identifier(column, db_type)).collect::<Vec<_>>().join(", ");
+        let col_list = columns
+            .iter()
+            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .collect::<Vec<_>>()
+            .join(", ");
         let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
             " OVERRIDING SYSTEM VALUE"
         } else {
@@ -3451,6 +3549,7 @@ pub fn generate_upsert_typed(
         catalog,
         false,
         false,
+        true,
     )
 }
 
@@ -3466,13 +3565,18 @@ fn generate_upsert_typed_for_transfer(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> String {
     if rows.is_empty() || pk_columns.is_empty() {
         return String::new();
     }
 
     let full_table = qualified_table(table, schema, db_type, catalog);
-    let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+    let col_list = columns
+        .iter()
+        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let value_rows = value_rows_sql(rows, column_types, db_type, mysql_spatial_markers);
 
@@ -3488,7 +3592,11 @@ fn generate_upsert_typed_for_transfer(
             if is_postgres_transfer_dialect(db_type)
                 || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
         {
-            let pk_list = pk_columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+            let pk_list = pk_columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
             let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
                 " OVERRIDING SYSTEM VALUE"
             } else {
@@ -3502,7 +3610,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("{qc} = EXCLUDED.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3515,13 +3623,13 @@ fn generate_upsert_typed_for_transfer(
             let mut sql = format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"));
             if non_pk_columns.is_empty() {
                 sql.push_str("\nON DUPLICATE KEY UPDATE ");
-                let first_pk = quote_identifier(&pk_columns[0], db_type);
+                let first_pk = transfer_column_identifier(&pk_columns[0], db_type, quote_target_column_names);
                 sql.push_str(&format!("{first_pk} = {first_pk}"));
             } else {
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("{qc} = VALUES({qc})")
                     })
                     .collect::<Vec<_>>()
@@ -3531,11 +3639,15 @@ fn generate_upsert_typed_for_transfer(
             sql
         }
         DatabaseType::SqlServer => {
-            let src_col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
+            let src_col_list = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = quote_identifier(c, db_type);
+                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                     format!("target.{qc} = src.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3550,7 +3662,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("target.{qc} = src.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3558,9 +3670,16 @@ fn generate_upsert_typed_for_transfer(
                 sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
             }
 
-            let insert_cols = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-            let insert_vals =
-                columns.iter().map(|c| format!("src.{}", quote_identifier(c, db_type))).collect::<Vec<_>>().join(", ");
+            let insert_cols = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_vals = columns
+                .iter()
+                .map(|column| format!("src.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .collect::<Vec<_>>()
+                .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
             sql
         }
@@ -3572,7 +3691,7 @@ fn generate_upsert_typed_for_transfer(
                     vals.push(format!(
                         "{} AS {}",
                         escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())),
-                        quote_identifier(c, db_type)
+                        transfer_column_identifier(c, db_type, quote_target_column_names)
                     ));
                 }
                 using_rows.push(format!("SELECT {} FROM dual", vals.join(", ")));
@@ -3581,7 +3700,7 @@ fn generate_upsert_typed_for_transfer(
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = quote_identifier(c, db_type);
+                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                     format!("t.{qc} = s.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3594,7 +3713,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = quote_identifier(c, db_type);
+                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
                         format!("t.{qc} = s.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3602,14 +3721,29 @@ fn generate_upsert_typed_for_transfer(
                 sql.push_str(&format!("\nWHEN MATCHED THEN UPDATE SET {update_set}"));
             }
 
-            let insert_cols = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
-            let insert_vals =
-                columns.iter().map(|c| format!("s.{}", quote_identifier(c, db_type))).collect::<Vec<_>>().join(", ");
+            let insert_cols = columns
+                .iter()
+                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let insert_vals = columns
+                .iter()
+                .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .collect::<Vec<_>>()
+                .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
             sql
         }
         _ => {
-            let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, false);
+            let template = InsertSqlTemplate::new_with_column_quoting(
+                columns,
+                table,
+                schema,
+                db_type,
+                catalog,
+                false,
+                quote_target_column_names,
+            );
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
     }
@@ -3618,7 +3752,7 @@ fn generate_upsert_typed_for_transfer(
 fn max_transfer_write_rows(db_type: &DatabaseType, mode: &TransferMode) -> usize {
     match (db_type, mode) {
         (DatabaseType::SqlServer, TransferMode::Append | TransferMode::Overwrite) => MAX_SQLSERVER_INSERT_ROWS,
-        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala, _) => 500,
+        (DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo, _) => 500,
         (DatabaseType::Oracle, TransferMode::Append | TransferMode::Overwrite) => MAX_ORACLE_INSERT_ALL_ROWS,
         (DatabaseType::Oracle, TransferMode::Upsert) => MAX_ORACLE_MERGE_ROWS,
         _ => usize::MAX,
@@ -3799,6 +3933,7 @@ fn generate_transfer_write_sql(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> String {
     match mode {
         TransferMode::Upsert => generate_upsert_typed_for_transfer(
@@ -3812,13 +3947,21 @@ fn generate_transfer_write_sql(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         ),
         _ => {
             if rows.is_empty() {
                 return String::new();
             }
-            let template =
-                InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+            let template = InsertSqlTemplate::new_with_column_quoting(
+                columns,
+                table,
+                schema,
+                db_type,
+                catalog,
+                overrides_postgres_system_values,
+                quote_target_column_names,
+            );
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
     }
@@ -3850,7 +3993,9 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
-    generate_insert_sql_batches_from_value_rows(columns, value_rows, table, schema, db_type, catalog, limits, false)
+    generate_insert_sql_batches_from_value_rows(
+        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3865,6 +4010,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -3880,6 +4026,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
         catalog,
         limits,
         overrides_postgres_system_values,
+        quote_target_column_names,
     )
 }
 
@@ -3893,6 +4040,7 @@ fn generate_insert_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<(String, usize)>, String> {
     if value_rows.is_empty() {
         return Ok(Vec::new());
@@ -3905,7 +4053,15 @@ fn generate_insert_sql_batches_from_value_rows(
     });
     let target_sql_bytes = limits.target_sql_bytes.max(1);
     let batch_sql_bytes = limits.hard_sql_bytes.map_or(target_sql_bytes, |hard| target_sql_bytes.min(hard));
-    let template = InsertSqlTemplate::new(columns, table, schema, db_type, catalog, overrides_postgres_system_values);
+    let template = InsertSqlTemplate::new_with_column_quoting(
+        columns,
+        table,
+        schema,
+        db_type,
+        catalog,
+        overrides_postgres_system_values,
+        quote_target_column_names,
+    );
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -3943,6 +4099,7 @@ fn generate_insert_sql_batches_from_value_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn generate_transfer_write_sql_batches(
     mode: &TransferMode,
     columns: &[String],
@@ -3955,6 +4112,37 @@ fn generate_transfer_write_sql_batches(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
+) -> Result<Vec<String>, String> {
+    generate_transfer_write_sql_batches_with_column_quoting(
+        mode,
+        columns,
+        column_types,
+        rows,
+        table,
+        schema,
+        db_type,
+        pk_columns,
+        catalog,
+        overrides_postgres_system_values,
+        mysql_spatial_markers,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_transfer_write_sql_batches_with_column_quoting(
+    mode: &TransferMode,
+    columns: &[String],
+    column_types: &[Option<String>],
+    rows: &[Vec<serde_json::Value>],
+    table: &str,
+    schema: &str,
+    db_type: &DatabaseType,
+    pk_columns: &[String],
+    catalog: Option<&str>,
+    overrides_postgres_system_values: bool,
+    mysql_spatial_markers: bool,
+    quote_target_column_names: bool,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -3972,6 +4160,7 @@ fn generate_transfer_write_sql_batches(
             SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         )?
         .into_iter()
         .map(|(sql, _)| sql)
@@ -4000,6 +4189,7 @@ fn generate_transfer_write_sql_batches(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
+            quote_target_column_names,
         );
 
         while end < rows.len() && end - start < max_rows {
@@ -4015,6 +4205,7 @@ fn generate_transfer_write_sql_batches(
                 catalog,
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
+                quote_target_column_names,
             );
             if candidate.len() > max_sql_bytes && !accepted.is_empty() {
                 break;
@@ -4044,7 +4235,7 @@ pub fn pagination_sql(
     let col_list = columns.iter().map(|c| quote_identifier(c, db_type)).collect::<Vec<_>>().join(", ");
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
         }
@@ -4055,7 +4246,10 @@ pub fn pagination_sql(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            sqlserver_row_number_page_sql(&col_list, &full_table, "(SELECT NULL)", offset, limit)
+        }
+        DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
             )
@@ -4085,7 +4279,7 @@ pub fn pagination_sql_with_order(
     let order_expression = postgres_order_by_expression(order_by_columns, db_type);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4098,7 +4292,11 @@ pub fn pagination_sql_with_order(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{order_by}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
+            sqlserver_row_number_page_sql(&col_list, &full_table, &order_by, offset, limit)
+        }
+        DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -4169,7 +4367,7 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
         });
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let order_by = order_expression.map(|value| format!(" ORDER BY {value}")).unwrap_or_default();
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause}{order_by}");
             oracle_rownum_page_sql(&col_list, base_sql, offset, limit)
@@ -4182,7 +4380,12 @@ pub fn pagination_sql_with_filter_order_and_identifier_quote(
                 format!("SELECT SKIP {offset} FIRST {limit} {col_list} FROM {full_table}{where_clause}{order_by}")
             }
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
+            let from_clause = format!("{full_table}{where_clause}");
+            sqlserver_row_number_page_sql(&col_list, &from_clause, &order_by, offset, limit)
+        }
+        DatabaseType::Dameng => {
             let order_by = order_expression.unwrap_or_else(|| "(SELECT NULL)".to_string());
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
@@ -4275,14 +4478,17 @@ pub fn keyset_pagination_sql_with_identifier_quote(
     let where_clause = keyset_where_clause(primary_keys, last_pk_values, db_type, identifier_quote);
 
     match db_type {
-        DatabaseType::Oracle => {
+        DatabaseType::Oracle | DatabaseType::OceanbaseOracle => {
             let base_sql = format!("SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order}");
             oracle_rownum_page_sql(&col_list, base_sql, 0, limit)
         }
         DatabaseType::Informix => {
             format!("SELECT FIRST {limit} {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
         }
-        DatabaseType::SqlServer | DatabaseType::Dameng => {
+        DatabaseType::SqlServer => {
+            format!("SELECT TOP ({limit}) {col_list} FROM {full_table}{where_clause} ORDER BY {order}")
+        }
+        DatabaseType::Dameng => {
             format!(
                 "SELECT {col_list} FROM {full_table}{where_clause} ORDER BY {order} OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
             )
@@ -4835,6 +5041,19 @@ async fn execute_on_pool_once(
             );
             client.execute_query(params).await
         }
+        PoolKind::ExternalDriver { config, session, .. } => {
+            let database = database_from_pool_key(pool_key)
+                .map(str::to_string)
+                .unwrap_or_else(|| config.effective_database().unwrap_or("").to_string());
+            let params = crate::query::external_driver_query_params(
+                config.as_ref(),
+                sql,
+                &database,
+                None,
+                &QueryExecutionOptions { max_rows, fetch_size: max_rows, ..QueryExecutionOptions::default() },
+            );
+            session.invoke_with_timeout("executeQuery", params, None).await
+        }
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
@@ -4859,7 +5078,39 @@ fn catalog_from_pool_key(pool_key: &str) -> Option<&str> {
 
 pub async fn get_db_type(state: &AppState, connection_id: &str) -> Result<DatabaseType, String> {
     let configs = state.configs.read().await;
-    configs.get(connection_id).map(|c| c.db_type).ok_or_else(|| format!("Connection config not found: {connection_id}"))
+    configs
+        .get(connection_id)
+        .map(effective_transfer_database_type)
+        .ok_or_else(|| format!("Connection config not found: {connection_id}"))
+}
+
+fn effective_transfer_database_type(config: &ConnectionConfig) -> DatabaseType {
+    if config.db_type != DatabaseType::Jdbc {
+        return config.db_type;
+    }
+    if config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("gbase8s")) {
+        return DatabaseType::Jdbc;
+    }
+
+    let jdbc_identity = [
+        config.driver_profile.as_deref().unwrap_or(""),
+        config.connection_string.as_deref().unwrap_or(""),
+        config.jdbc_driver_class.as_deref().unwrap_or(""),
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    // GBase 8a only: 8s (`gbasedbt`/`jdbc:gbasedbt-sqli`) is Informix-based and
+    // must not be mapped into the MySQL transfer family.
+    let is_gbase_8a = jdbc_identity.contains("jdbc:gbase:")
+        || jdbc_identity.contains("cn.gbase.")
+        || (jdbc_identity.contains("gbase")
+            && !jdbc_identity.contains("gbasedbt")
+            && !jdbc_identity.contains("gbase8s"));
+    if is_gbase_8a {
+        DatabaseType::Gbase
+    } else {
+        DatabaseType::Jdbc
+    }
 }
 
 pub async fn get_columns_for_transfer(
@@ -4913,6 +5164,26 @@ pub async fn get_columns_for_transfer(
         drop(connections);
         let mut client = client.lock().await;
         return client.get_columns(&database, &schema, &table, None).await;
+    }
+    if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(pool_key) {
+        let config = config.clone();
+        let session = session.clone();
+        let database = database.to_string();
+        let schema = schema.to_string();
+        let table = table.to_string();
+        drop(connections);
+        return session
+            .invoke_with_timeout(
+                "getColumns",
+                serde_json::json!({
+                    "connection": config.as_ref(),
+                    "database": database,
+                    "schema": schema,
+                    "table": table,
+                }),
+                None,
+            )
+            .await;
     }
     let pool = connections.get(pool_key).ok_or("Pool not found")?;
     let schema = schema.to_string();
@@ -6658,7 +6929,7 @@ where
 
                 if request.create_table {
                     if !target_table_preexisting {
-                        let ddl = generate_create_table_ddl(
+                        let ddl = generate_create_table_ddl_with_column_quoting(
                             &sql_target_columns,
                             &target_table,
                             &request.source_schema,
@@ -6667,18 +6938,20 @@ where
                             source_db_type,
                             None,
                             request.target_catalog.as_deref(),
+                            request.quote_target_column_names,
                         );
                         let target_table_created = transfer_create_table_created(
                             execute_on_pool(state, target_pool_key, &ddl).await.map(|_| ()),
                             &format!("Failed to create table from MongoDB collection '{table}'"),
                         )?;
                         if target_table_created {
-                            for stmt in generate_comment_ddl(
+                            for stmt in generate_comment_ddl_with_column_quoting(
                                 &sql_target_columns,
                                 &target_table,
                                 &request.target_schema,
                                 target_db_type,
                                 None,
+                                request.quote_target_column_names,
                             ) {
                                 if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
                                     log::warn!(
@@ -6723,7 +6996,7 @@ where
             } else {
                 mongo_documents_to_rows(&documents, &sql_target_column_names)
             };
-            let write_statements = generate_transfer_write_sql_batches(
+            let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &TransferMode::Append,
                 &sql_target_column_names,
                 &sql_target_column_types,
@@ -6735,6 +7008,7 @@ where
                 request.target_catalog.as_deref(),
                 false,
                 false,
+                request.quote_target_column_names,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -7062,7 +7336,8 @@ where
                 source_driver_profile.as_deref(),
                 target_driver_profile.as_deref(),
                 preserves_target_table_name,
-            );
+            ) && (request.quote_target_column_names
+                || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss));
             let mut reused_source_ddl = false;
             let ddl = if can_reuse_source_ddl {
                 let (source_ddl, source_ddl_was_read) = if let Some(catalog) =
@@ -7085,7 +7360,7 @@ where
                         Err(err) => {
                             log::warn!("[transfer] catalog DDL read failed for {table} in catalog '{catalog}': {err}; falling back to generated DDL");
                             (
-                                generate_create_table_ddl(
+                                generate_create_table_ddl_with_column_quoting(
                                     &columns,
                                     &target_table,
                                     &request.source_schema,
@@ -7094,6 +7369,7 @@ where
                                     source_db_type,
                                     table_comment.as_deref(),
                                     request.target_catalog.as_deref(),
+                                    request.quote_target_column_names,
                                 ),
                                 false,
                             )
@@ -7112,7 +7388,7 @@ where
                     {
                         Ok(ddl) => (ddl, true),
                         Err(_) => (
-                            generate_create_table_ddl(
+                            generate_create_table_ddl_with_column_quoting(
                                 &columns,
                                 &target_table,
                                 &request.source_schema,
@@ -7121,6 +7397,7 @@ where
                                 source_db_type,
                                 table_comment.as_deref(),
                                 request.target_catalog.as_deref(),
+                                request.quote_target_column_names,
                             ),
                             false,
                         ),
@@ -7129,7 +7406,7 @@ where
                 if contains_oceanbase_mysql_table_options(&source_ddl)
                     && !db::oceanbase_mysql::is_profile(target_db_type, target_driver_profile.as_deref())
                 {
-                    generate_create_table_ddl(
+                    generate_create_table_ddl_with_column_quoting(
                         &columns,
                         &target_table,
                         &request.source_schema,
@@ -7138,6 +7415,7 @@ where
                         source_db_type,
                         table_comment.as_deref(),
                         request.target_catalog.as_deref(),
+                        request.quote_target_column_names,
                     )
                 } else {
                     reused_source_ddl = source_ddl_was_read;
@@ -7150,7 +7428,7 @@ where
                     )
                 }
             } else {
-                generate_create_table_ddl(
+                generate_create_table_ddl_with_column_quoting(
                     &columns,
                     &target_table,
                     &request.source_schema,
@@ -7159,6 +7437,7 @@ where
                     source_db_type,
                     table_comment.as_deref(),
                     request.target_catalog.as_deref(),
+                    request.quote_target_column_names,
                 )
             };
             // MySQL-family targets: create the bare table first and add any foreign
@@ -7219,12 +7498,13 @@ where
             if target_table_created {
                 pending_fk_alters
                     .extend(deferred_fk_alters.into_iter().map(|statement| (target_table.clone(), statement)));
-                let comment_stmts = generate_comment_ddl(
+                let comment_stmts = generate_comment_ddl_with_column_quoting(
                     &columns,
                     &target_table,
                     &request.target_schema,
                     target_db_type,
                     table_comment.as_deref(),
+                    request.quote_target_column_names,
                 );
                 for stmt in &comment_stmts {
                     if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
@@ -7272,7 +7552,11 @@ where
         || (request.mode == TransferMode::Upsert
             && !matches!(
                 target_db_type,
-                DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+                DatabaseType::ClickHouse
+                    | DatabaseType::Hive
+                    | DatabaseType::Kyuubi
+                    | DatabaseType::Impala
+                    | DatabaseType::Argo
             ))
         || matches!(target_db_type, DatabaseType::Postgres | DatabaseType::Dameng);
     let target_columns = if needs_target_columns {
@@ -7297,7 +7581,12 @@ where
     // can't accept the planned insert, fail fast here instead of truncating
     // the target's existing data and then hitting an opaque driver error.
     if request.create_table && target_table_preexisting {
-        let missing = missing_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        let missing = missing_transfer_target_columns(
+            &target_columns,
+            &col_names,
+            target_db_type,
+            request.quote_target_column_names,
+        );
         if !missing.is_empty() {
             return Err(format!(
                 "Target table '{target_table}' already exists with a different structure and is missing column(s) \
@@ -7307,7 +7596,12 @@ where
             ));
         }
 
-        let required = required_unmapped_transfer_target_columns(&target_columns, &col_names, target_db_type);
+        let required = required_unmapped_transfer_target_columns(
+            &target_columns,
+            &col_names,
+            target_db_type,
+            request.quote_target_column_names,
+        );
         if !required.is_empty() {
             return Err(format!(
                 "Target table '{target_table}' already exists with a different structure and has required column(s) \
@@ -7336,7 +7630,11 @@ where
     let (effective_mode, pk_columns) = if request.mode == TransferMode::Upsert {
         if matches!(
             target_db_type,
-            DatabaseType::ClickHouse | DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala
+            DatabaseType::ClickHouse
+                | DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Impala
+                | DatabaseType::Argo
         ) {
             log::warn!("[transfer] upsert not supported for {:?}, falling back to append", target_db_type);
             (TransferMode::Append, vec![])
@@ -7356,7 +7654,7 @@ where
         (request.mode.clone(), vec![])
     };
 
-    let writes_dameng_identity_columns = matches!(target_db_type, DatabaseType::Dameng)
+    let writes_identity_insert_columns = matches!(target_db_type, DatabaseType::Dameng | DatabaseType::SqlServer)
         && selected_columns_include_identity_columns(&col_names, &target_columns);
     let overrides_postgres_system_values = matches!(target_db_type, DatabaseType::Postgres)
         && selected_columns_include_postgres_generated_always_identity_columns(&col_names, &target_columns);
@@ -7419,7 +7717,7 @@ where
                 break;
             }
 
-            let write_statements = generate_transfer_write_sql_batches(
+            let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
                 &effective_mode,
                 &col_names,
                 &col_types,
@@ -7431,6 +7729,7 @@ where
                 request.target_catalog.as_deref(),
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
+                request.quote_target_column_names,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_transfer_write_statement(
@@ -7440,7 +7739,7 @@ where
                     target_db_type,
                     &target_table,
                     &request.target_schema,
-                    writes_dameng_identity_columns,
+                    writes_identity_insert_columns,
                 )
                 .await
                 .map_err(|e| {
@@ -7999,6 +8298,97 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
+        ConnectionConfig {
+            id: "test-jdbc".to_string(),
+            name: "Test JDBC".to_string(),
+            note: String::new(),
+            db_type: DatabaseType::Jdbc,
+            driver_profile: if profile.is_empty() { None } else { Some(profile.to_string()) },
+            driver_label: None,
+            url_params: None,
+            agent_java_options: Vec::new(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            database: None,
+            default_schema: None,
+            visible_databases: None,
+            visible_database_patterns: None,
+            visible_schemas: None,
+            show_system_schemas: false,
+            attached_databases: Vec::new(),
+            init_script: None,
+            color: None,
+            transport_layers: Vec::new(),
+            connect_timeout_secs: 5,
+            query_timeout_secs: 30,
+            idle_timeout_secs: 60,
+            keepalive_interval_secs: 0,
+            ssl: false,
+            ca_cert_path: String::new(),
+            client_cert_path: String::new(),
+            client_key_path: String::new(),
+            sysdba: false,
+            oracle_connection_type: None,
+            connection_string: if connection_string.is_empty() { None } else { Some(connection_string.to_string()) },
+            redis_connection_mode: None,
+            redis_sentinel_master: String::new(),
+            redis_sentinel_nodes: String::new(),
+            redis_sentinel_username: String::new(),
+            redis_sentinel_password: String::new(),
+            redis_sentinel_tls: false,
+            redis_cluster_nodes: String::new(),
+            redis_key_separator: crate::models::connection::default_redis_key_separator(),
+            redis_scan_page_size: None,
+            redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
+            etcd_endpoints: String::new(),
+            gbase_server: String::new(),
+            informix_server: String::new(),
+            external_config: None,
+            jdbc_driver_class: if driver_class.is_empty() { None } else { Some(driver_class.to_string()) },
+            jdbc_driver_paths: Vec::new(),
+            one_time: false,
+            save_password: true,
+            read_only: false,
+            is_production: false,
+            production_databases: vec![],
+            database_info: None,
+            docs_notes_path: None,
+        }
+    }
+
+    #[test]
+    fn gbase_8s_jdbc_stays_generic_for_transfer() {
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbasedbt-sqli://localhost:9088/dbx_test:INFORMIXSERVER=ol_gbasedbt",
+                "com.gbasedbt.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "cn.gbase.Driver",
+                "gbase8s"
+            )),
+            DatabaseType::Jdbc
+        );
+        assert_eq!(
+            effective_transfer_database_type(&jdbc_transfer_config(
+                "jdbc:gbase://localhost:5258/dbx_test",
+                "com.gbase.jdbc.Driver",
+                ""
+            )),
+            DatabaseType::Gbase
+        );
+    }
+
     use serde_json::json;
 
     fn test_column(name: &str, data_type: &str) -> db::ColumnInfo {
@@ -8138,6 +8528,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.content, TransferContent::StructureAndData);
         assert!(request.objects.is_empty());
+        assert!(request.quote_target_column_names);
     }
 
     #[test]
@@ -8161,6 +8552,7 @@ mod tests {
             }],
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         };
@@ -8168,6 +8560,7 @@ mod tests {
         assert_eq!(json["content"], "structureOnly");
         assert_eq!(json["objects"][0]["objectType"], "VIEW");
         assert_eq!(json["objects"][0]["names"][0], "v1");
+        assert_eq!(json["quoteTargetColumnNames"], true);
     }
 
     mod transfer_family_tests {
@@ -8232,6 +8625,7 @@ mod tests {
                 create_table: true,
                 mode: TransferMode::Append,
                 target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
                 ownership_policy: TransferOwnershipPolicy::Preserve,
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
@@ -8316,6 +8710,7 @@ mod tests {
             assert!(same.contains(&Event));
             // unsupported databases
             assert!(cross_family_transferable_object_kinds(&DatabaseType::Sqlite, &DatabaseType::Mysql).is_empty());
+            assert_eq!(transfer_object_family(&DatabaseType::Gbase), Some(TransferObjectFamily::Mysql));
             // postgres is not a validated cross-family source or target:
             // the executor rejects postgres sources and no dialect-aware
             // conversion exists for it (postgres <-> postgres stays same-family)
@@ -9229,6 +9624,7 @@ mod tests {
             objects: Vec::new(),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
         }
@@ -9451,7 +9847,7 @@ mod tests {
         let col_names = vec!["id".to_string(), "name".to_string(), "extra_col".to_string()];
 
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["extra_col".to_string()]
         );
     }
@@ -9461,11 +9857,26 @@ mod tests {
         let target_columns = vec![test_column("ID", "int"), test_column("Name", "varchar(32)")];
         let col_names = vec!["id".to_string(), "name".to_string()];
 
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql).is_empty());
-        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true).is_empty());
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Kyuubi, true).is_empty());
         assert_eq!(
-            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres),
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Postgres, true),
             vec!["id".to_string(), "name".to_string()]
+        );
+    }
+
+    #[test]
+    fn gauss_target_column_validation_ignores_case_when_quoting_disabled() {
+        let target_columns = vec![test_column("id", "int"), test_column("user_id", "bigint")];
+        let col_names = vec!["id".to_string(), "USER_ID".to_string()];
+
+        assert!(missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, false).is_empty());
+        assert!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::OpenGauss, false).is_empty()
+        );
+        assert_eq!(
+            missing_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Gaussdb, true),
+            vec!["USER_ID".to_string()]
         );
     }
 
@@ -9498,11 +9909,15 @@ mod tests {
         ];
         let col_names = vec!["id".to_string()];
 
-        assert!(required_unmapped_transfer_target_columns(&target_columns[..6], &col_names, &DatabaseType::Mysql)
+        assert!(required_unmapped_transfer_target_columns(
+            &target_columns[..6],
+            &col_names,
+            &DatabaseType::Mysql,
+            true
+        )
+        .is_empty());
+        assert!(required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer, true)
             .is_empty());
-        assert!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::SqlServer).is_empty()
-        );
     }
 
     #[test]
@@ -9514,7 +9929,7 @@ mod tests {
         let col_names = vec!["id".to_string()];
 
         assert_eq!(
-            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql),
+            required_unmapped_transfer_target_columns(&target_columns, &col_names, &DatabaseType::Mysql, true),
             vec!["required_code".to_string()]
         );
     }
@@ -9530,6 +9945,18 @@ mod tests {
         assert_eq!(
             sql,
             "SET IDENTITY_INSERT \"SYSDBA\".\"USERS\" ON;\nINSERT INTO \"SYSDBA\".\"USERS\" (\"ID\") VALUES\n(1);\nSET IDENTITY_INSERT \"SYSDBA\".\"USERS\" OFF;"
+        );
+    }
+
+    #[test]
+    fn sqlserver_identity_insert_statement_quotes_schema_and_table() {
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, true),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] ON"
+        );
+        assert_eq!(
+            identity_insert_statement("inter_putaway", "dbo", &DatabaseType::SqlServer, false),
+            "SET IDENTITY_INSERT [dbo].[inter_putaway] OFF"
         );
     }
 
@@ -9553,6 +9980,78 @@ mod tests {
         assert!(!ddl.contains("`age` INT COMMENT")); // no comment for age
         assert!(ddl.contains("`name` VARCHAR(100) NOT NULL COMMENT '用户姓名'"));
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
+    }
+
+    #[test]
+    fn gaussdb_transfer_can_leave_safe_target_columns_unquoted() {
+        let columns = vec![
+            db::ColumnInfo { is_primary_key: true, ..test_column("USER_ID", "int") },
+            test_column("CamelName", "varchar(32)"),
+            test_column("select", "varchar(32)"),
+            test_column("has space", "varchar(32)"),
+        ];
+
+        let ddl = generate_create_table_ddl_with_column_quoting(
+            &columns,
+            "case_target",
+            "dbx_test",
+            "public",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Mysql,
+            None,
+            None,
+            false,
+        );
+
+        assert!(ddl.contains("USER_ID INTEGER"), "ddl: {ddl}");
+        assert!(ddl.contains("CamelName VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"select\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"has space\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (USER_ID)"), "ddl: {ddl}");
+
+        let quoted = generate_create_table_ddl_with_column_quoting(
+            &columns,
+            "case_target",
+            "dbx_test",
+            "public",
+            &DatabaseType::Gaussdb,
+            &DatabaseType::Mysql,
+            None,
+            None,
+            true,
+        );
+        assert!(quoted.contains("\"USER_ID\" INTEGER"), "ddl: {quoted}");
+        assert!(quoted.contains("\"CamelName\" VARCHAR(32)"), "ddl: {quoted}");
+    }
+
+    #[test]
+    fn gaussdb_transfer_writes_use_the_same_target_column_quoting_policy() {
+        let columns = vec!["USER_ID".to_string(), "CamelName".to_string(), "select".to_string()];
+        let column_types = vec![Some("int".to_string()), Some("varchar".to_string()), Some("varchar".to_string())];
+        let rows = vec![vec![serde_json::json!(1), serde_json::json!("Alice"), serde_json::json!("ok")]];
+
+        let statements = generate_transfer_write_sql_batches_with_column_quoting(
+            &TransferMode::Append,
+            &columns,
+            &column_types,
+            &rows,
+            "case_target",
+            "public",
+            &DatabaseType::Gaussdb,
+            &[],
+            None,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(statements.len(), 1);
+        assert!(
+            statements[0].starts_with("INSERT INTO \"public\".\"case_target\" (USER_ID, CamelName, \"select\") VALUES"),
+            "sql: {}",
+            statements[0]
+        );
     }
 
     #[test]
@@ -10501,6 +11000,65 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_export_pagination_uses_row_number_subquery() {
+        let sql = pagination_sql(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            500,
+            100,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT [id], [name] FROM (SELECT [id], [name], ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS __dbx_row_num FROM [dbo].[users]) AS __dbx_page WHERE __dbx_row_num > 500 AND __dbx_row_num <= 600"
+        );
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
+    fn sqlserver_ordered_pagination_uses_row_number_subquery() {
+        let sql = pagination_sql_with_order(
+            &[String::from("id"), String::from("name")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            200,
+            100,
+            &[String::from("id")],
+            None,
+        );
+
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY [id]) AS __dbx_row_num"));
+        assert!(sql.contains("WHERE __dbx_row_num > 200 AND __dbx_row_num <= 300"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
+    fn sqlserver_filtered_pagination_preserves_filter_in_subquery() {
+        let sql = pagination_sql_with_filter_order(
+            &[String::from("id"), String::from("status")],
+            "users",
+            "dbo",
+            &DatabaseType::SqlServer,
+            10_000,
+            2_000,
+            Some("WHERE status = 'active'"),
+            Some("[id] DESC"),
+            &[String::from("id")],
+        );
+
+        assert!(sql.contains("ROW_NUMBER() OVER (ORDER BY [id] DESC) AS __dbx_row_num"));
+        assert!(sql.contains("FROM [dbo].[users] WHERE (status = 'active')"));
+        assert!(sql.contains("WHERE __dbx_row_num > 10000 AND __dbx_row_num <= 12000"));
+        assert!(!sql.contains("OFFSET"));
+        assert!(!sql.contains(" FETCH "));
+    }
+
+    #[test]
     fn filtered_pagination_preserves_where_and_order() {
         let sql = pagination_sql_with_filter_order(
             &[String::from("id"), String::from("status")],
@@ -10572,7 +11130,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlserver_keyset_pagination_includes_offset_fetch() {
+    fn sqlserver_keyset_pagination_uses_top() {
         let sql = keyset_pagination_sql(
             &[String::from("id"), String::from("name")],
             "users",
@@ -10583,10 +11141,7 @@ mod tests {
             100,
         );
 
-        assert_eq!(
-            sql,
-            "SELECT [id], [name] FROM [dbo].[users] ORDER BY [id] ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
-        );
+        assert_eq!(sql, "SELECT TOP (100) [id], [name] FROM [dbo].[users] ORDER BY [id] ASC");
     }
 
     #[test]
@@ -10629,6 +11184,51 @@ mod tests {
     }
 
     #[test]
+    fn oceanbase_oracle_pagination_uses_rownum_for_all_transfer_paths() {
+        let columns = [String::from("id"), String::from("name")];
+        let order = [String::from("id")];
+
+        for database_type in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            let sql = pagination_sql(&columns, "users", "APP", &database_type, 100, 50);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_order(&columns, "users", "APP", &database_type, 100, 50, &order, None);
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("ORDER BY \"id\""), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = pagination_sql_with_filter_order(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                100,
+                50,
+                Some("WHERE status = 'active'"),
+                Some("id DESC"),
+                &order,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE (status = 'active')"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+
+            let sql = keyset_pagination_sql(
+                &columns,
+                "users",
+                "APP",
+                &database_type,
+                &[String::from("id")],
+                &[json!(25)],
+                50,
+            );
+            assert!(sql.contains("ROWNUM"), "database_type={database_type:?}, sql={sql}");
+            assert!(sql.contains("WHERE \"id\" > 25"), "database_type={database_type:?}, sql={sql}");
+            assert!(!sql.contains(" LIMIT "), "database_type={database_type:?}, sql={sql}");
+        }
+    }
+
+    #[test]
     fn composite_keyset_pagination_uses_portable_lexicographic_predicate() {
         let sql = keyset_pagination_sql(
             &[String::from("tenant_id"), String::from("id"), String::from("name")],
@@ -10642,7 +11242,7 @@ mod tests {
 
         assert_eq!(
             sql,
-            "SELECT [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY"
+            "SELECT TOP (100) [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC"
         );
     }
 
@@ -11927,6 +12527,19 @@ SELECT 1 FROM dual"#
             production_databases: vec![],
             database_info: None,
         };
+        let mut gbase_jdbc = config.clone();
+        gbase_jdbc.db_type = DatabaseType::Jdbc;
+        gbase_jdbc.connection_string = Some("jdbc:gbase://127.0.0.1:5258/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("cn.gbase.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Gbase);
+        assert_eq!(
+            transfer_object_family(&effective_transfer_database_type(&gbase_jdbc)),
+            Some(TransferObjectFamily::Mysql)
+        );
+
+        gbase_jdbc.connection_string = Some("jdbc:unknown://127.0.0.1:1234/dbx_test".to_string());
+        gbase_jdbc.jdbc_driver_class = Some("com.example.Driver".to_string());
+        assert_eq!(effective_transfer_database_type(&gbase_jdbc), DatabaseType::Jdbc);
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("paimon"), &config), Some("paimon"));
         assert_eq!(resolve_external_transfer_catalog_for_config(Some("default_catalog"), &config), None);
     }

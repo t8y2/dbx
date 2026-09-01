@@ -1634,6 +1634,7 @@ mod tests {
                 model: "gpt-4o-mini".to_string(),
                 models: vec![],
                 api_style: AiApiStyle::Completions,
+                custom_headers: Default::default(),
                 proxy_enabled: false,
                 proxy_url: String::new(),
                 enable_thinking: true,

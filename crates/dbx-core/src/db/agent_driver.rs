@@ -887,6 +887,9 @@ pub struct AgentDriverClient {
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
     cached_query: Option<CachedAgentQuery>,
+    /// Driver-reported identifier quoting, captured once after connect.
+    /// Keeping this on the client avoids a connection-info RPC on every query.
+    identifier_quote: Option<String>,
 }
 
 /// Keeps serialized session RPC access separate from the process-level fail-stop handle.
@@ -896,13 +899,19 @@ pub struct PooledAgentClient {
     client: tokio::sync::Mutex<AgentDriverClient>,
     shared_runtime: Option<Arc<AgentRuntimeClient>>,
     agent_session_id: Option<String>,
+    identifier_quote: Option<String>,
 }
 
 impl PooledAgentClient {
     pub fn new(client: AgentDriverClient) -> Self {
         let shared_runtime = client.shared_runtime.clone();
         let agent_session_id = client.agent_session_id.clone();
-        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id }
+        let identifier_quote = client.identifier_quote.clone();
+        Self { client: tokio::sync::Mutex::new(client), shared_runtime, agent_session_id, identifier_quote }
+    }
+
+    pub fn identifier_quote(&self) -> Option<&str> {
+        self.identifier_quote.as_deref()
     }
 
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, AgentDriverClient> {
@@ -1187,6 +1196,7 @@ pub enum AgentMethod {
     ListTables,
     ListObjects,
     ListDataTypes,
+    ListXuguTablespaces,
     CompletionAssistantSearchV1,
     GetObjectSource,
     GetColumns,
@@ -1274,6 +1284,7 @@ impl AgentMethod {
             Self::ListTables => "list_tables",
             Self::ListObjects => "list_objects",
             Self::ListDataTypes => "list_data_types",
+            Self::ListXuguTablespaces => "list_xugu_tablespaces",
             Self::CompletionAssistantSearchV1 => "completion_assistant_search_v1",
             Self::GetObjectSource => "get_object_source",
             Self::GetTableDdl => "get_table_ddl",
@@ -1632,6 +1643,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         })
     }
 
@@ -1646,6 +1658,7 @@ impl AgentDriverClient {
             shared_runtime: Some(runtime),
             agent_session_id: Some(agent_session_id),
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -1947,6 +1960,10 @@ impl AgentDriverClient {
         self.call_method_with_timeout(AgentMethod::ConnectionInfo, serde_json::json!({}), timeout_duration).await
     }
 
+    pub(crate) fn set_identifier_quote(&mut self, identifier_quote: Option<String>) {
+        self.identifier_quote = identifier_quote.filter(|quote| !quote.trim().is_empty());
+    }
+
     pub async fn disconnect(&mut self) -> Result<Value, String> {
         self.invalidate_cached_query();
         if self.shared_runtime.is_some() {
@@ -2037,6 +2054,10 @@ impl AgentDriverClient {
         }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
+            // Agent drivers (hive-go, oracle-go, etc.) read the object-type
+            // filter from a camelCase field; keep both spellings so existing
+            // agents don't need a coordinated rollout.
+            params["objectTypes"] = serde_json::json!(object_types);
         }
         self.call_method_with_timeout(AgentMethod::ListTables, params, timeout_duration).await
     }
@@ -2072,6 +2093,7 @@ impl AgentDriverClient {
         }
         if let Some(object_types) = object_types {
             params["object_types"] = serde_json::json!(object_types);
+            params["objectTypes"] = serde_json::json!(object_types);
         }
         self.call_method_with_timeout(AgentMethod::ListObjects, params, timeout_duration).await
     }
@@ -2087,6 +2109,18 @@ impl AgentDriverClient {
             timeout_duration,
         )
         .await
+    }
+
+    pub async fn list_xugu_tablespaces<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: Option<&str>,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        let params = database
+            .filter(|database| !database.trim().is_empty())
+            .map(|database| serde_json::json!({ "database": database }))
+            .unwrap_or_else(|| serde_json::json!({}));
+        self.call_method_with_timeout(AgentMethod::ListXuguTablespaces, params, timeout_duration).await
     }
 
     pub async fn completion_assistant_search<T: DeserializeOwned + Send + 'static>(
@@ -3026,6 +3060,13 @@ fn agent_java_args_with_extra_opts(
         );
     }
 
+    // DM's driver reflects into NetworkInterface.index when the host contains '%'
+    // (multi-NIC addresses or IPv6 zone suffixes); without this open such connects
+    // fail with InaccessibleObjectException on the managed JRE 21.
+    if agent_jar_path_matches_key(jar_path, "dameng") {
+        args.push("--add-opens=java.base/java.net=ALL-UNNAMED".to_string());
+    }
+
     // Hive/Kerberos JDBC drivers read JAAS and krb5 settings during JVM startup,
     // so users need a process-level escape hatch before the agent jar is loaded.
     if let Some(extra) = extra_opts {
@@ -3338,6 +3379,7 @@ impl AgentDriverClient {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         }
     }
 
@@ -3809,6 +3851,20 @@ mod tests {
     }
 
     #[test]
+    fn agent_java_args_open_java_net_for_dameng() {
+        let args = agent_java_args("/tmp/dbx/drivers/dameng/agent.jar");
+
+        assert!(args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
+    fn agent_java_args_do_not_open_java_net_for_other_agents() {
+        let args = agent_java_args("/tmp/dbx/drivers/highgo/agent.jar");
+
+        assert!(!args.iter().any(|arg| arg == "--add-opens=java.base/java.net=ALL-UNNAMED"));
+    }
+
+    #[test]
     fn agent_java_args_open_jdk_internals_for_ignite() {
         let args = agent_java_args("/tmp/dbx/drivers/ignite/agent.jar");
 
@@ -4049,6 +4105,7 @@ mod tests {
             shared_runtime: None,
             agent_session_id: None,
             cached_query: None,
+            identifier_quote: None,
         };
 
         let started_at = std::time::Instant::now();
@@ -4830,6 +4887,7 @@ for line in sys.stdin:
         assert_eq!(AgentMethod::ListTables.as_str(), "list_tables");
         assert_eq!(AgentMethod::ListObjects.as_str(), "list_objects");
         assert_eq!(AgentMethod::ListDataTypes.as_str(), "list_data_types");
+        assert_eq!(AgentMethod::ListXuguTablespaces.as_str(), "list_xugu_tablespaces");
         assert_eq!(AgentMethod::CompletionAssistantSearchV1.as_str(), "completion_assistant_search_v1");
         assert_eq!(AgentMethod::GetObjectSource.as_str(), "get_object_source");
         assert_eq!(AgentMethod::GetColumns.as_str(), "get_columns");

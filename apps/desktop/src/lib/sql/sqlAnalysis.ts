@@ -23,6 +23,7 @@ export interface EditableQueryInfo {
   editableSourceKey?: string;
   multiSource?: boolean;
   allowInsert?: boolean;
+  allowDelete?: boolean;
   allowInsertDelete?: boolean;
   distinct?: boolean;
   groupByColumns?: EditableQueryColumn[];

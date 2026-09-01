@@ -27,7 +27,7 @@ pub(crate) use column_alter::{
     build_sqlserver_alter_column_preserving_default_sql, build_sqlserver_drop_default_constraint_sql,
 };
 pub(crate) use comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
-pub(crate) use util::sqlserver_unicode_string_literal;
+pub(crate) use util::{oracle_new_object_reference, sqlserver_unicode_string_literal};
 
 use crate::models::connection::DatabaseType;
 

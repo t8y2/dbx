@@ -78,6 +78,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         drop_table_if_exists: true,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };
@@ -211,6 +212,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 drop_table_if_exists: false,
                 omit_auto_increment: false,
                 fail_on_error: false,
+                output_compression: Default::default(),
                 snapshot_session_id: None,
                 batch_size: 1000,
             };
@@ -303,6 +305,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         drop_table_if_exists: true,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };
@@ -367,6 +370,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         drop_table_if_exists: true,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };
@@ -452,6 +456,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         drop_table_if_exists: true,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };

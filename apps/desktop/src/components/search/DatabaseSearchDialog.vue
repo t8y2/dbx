@@ -198,6 +198,7 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
     const columns = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, schema, task.table.name);
     const query = await buildDatabaseSearchSql({
       databaseType,
+      driverProfile: connection.value?.driver_profile,
       schema: task.schema,
       tableName: task.table.name,
       columns,

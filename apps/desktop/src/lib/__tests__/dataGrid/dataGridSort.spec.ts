@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
 
 describe("simpleDataGridOrderByColumn", () => {
   it.each([
@@ -44,5 +44,38 @@ describe("simpleDataGridOrderByMatchesSort", () => {
   it("does not treat a manual order as owned by a stale structured sort", () => {
     expect(simpleDataGridOrderByMatchesSort("LOWER(name) ASC", "old_name", "asc")).toBe(false);
     expect(simpleDataGridOrderByMatchesSort('"name" ASC', "old_name", "asc")).toBe(false);
+  });
+});
+
+describe("compareDataGridValues datetime ordering", () => {
+  it("orders space-separated timestamps with microsecond precision", () => {
+    expect(compareDataGridValues("2024-01-01 12:00:00.123456", "2024-01-01 12:00:00.500000")).toBeLessThan(0);
+    expect(compareDataGridValues("2024-01-01 12:00:00.500000", "2024-01-01 12:00:00.123456")).toBeGreaterThan(0);
+  });
+
+  it("orders dates before earlier-day late times across midnight", () => {
+    expect(compareDataGridValues("2024-01-02 00:00:00", "2024-01-01 23:59:59")).toBeGreaterThan(0);
+  });
+
+  it("normalizes numeric UTC offsets so equal instants compare equal", () => {
+    expect(compareDataGridValues("2024-01-01 12:00:00+08", "2024-01-01 13:00:00+09")).toBe(0);
+    expect(compareDataGridValues("2024-01-01 11:00:00+09", "2024-01-01 12:00:00+08")).toBeLessThan(0);
+  });
+
+  it("sorts PostgreSQL infinity sentinels beyond finite timestamps", () => {
+    expect(compareDataGridValues("infinity", "9999-12-31 23:59:59")).toBeGreaterThan(0);
+    expect(compareDataGridValues("-infinity", "0001-01-01 00:00:00")).toBeLessThan(0);
+  });
+
+  it("still parses ISO-T timestamps with Zulu suffix", () => {
+    expect(compareDataGridValues("2024-01-01T12:00:00Z", "2024-01-01T12:00:01Z")).toBeLessThan(0);
+  });
+
+  it("falls back to collation for non-datetime strings", () => {
+    expect(compareDataGridValues("zebra", "apple")).toBeGreaterThan(0);
+  });
+
+  it("keeps null values after populated datetime cells", () => {
+    expect(compareDataGridValues(null, "2024-01-01 00:00:00")).toBeGreaterThan(0);
   });
 });

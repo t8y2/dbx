@@ -16,6 +16,7 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
+import { connectionIsEffectivelyReadOnly, ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
@@ -307,7 +308,7 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: true,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
+      filters: [{ name: "SQL", extensions: ["sql", "gz"] }],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length > 0) {
@@ -357,6 +358,12 @@ async function refreshTargetAfterImport() {
 
 async function startExecution() {
   if (!canStart.value || previews.value.length === 0) return;
+  // Await the unlock guard only when it can actually prompt/block (effectively
+  // read-only); writable or already-unlocked connections stay synchronous so
+  // the running state flips in the same tick as the click.
+  if (connectionIsEffectivelyReadOnly(selectedConnection.value)) {
+    if (!(await ensureReadOnlyWriteAccess({ connection: selectedConnection.value, source: t("readOnlyUnlock.sourceSqlFile"), treatAsMutation: true }))) return;
+  }
   const productionContext = productionContextForDatabase(selectedConnection.value, database.value);
   if (productionContext.active) {
     // File previews are truncated, so production file execution is always reviewed instead of inferring safety from a partial preview.
@@ -563,7 +570,7 @@ watch(
           </div>
 
           <div class="flex items-center gap-2">
-            <input ref="fileInput" type="file" accept=".sql,text/sql" multiple class="hidden" @change="handleFileInputChange" />
+            <input ref="fileInput" type="file" accept=".sql,.sql.gz,text/sql,application/gzip" multiple class="hidden" @change="handleFileInputChange" />
             <Input :model-value="filePathDisplay" readonly class="h-8 text-xs font-mono" :placeholder="t('sqlFile.selectSqlFile')" />
             <Button variant="outline" size="sm" class="h-8 shrink-0" :disabled="running || selectingFile" @click="selectFile">
               <Loader2 v-if="selectingFile || loadingPreview" class="w-3.5 h-3.5 mr-1.5 animate-spin" />

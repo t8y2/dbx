@@ -68,6 +68,8 @@ pub struct DocumentFindRequest {
     pub sort: Option<String>,
     pub collation: Option<String>,
     pub cursor: Option<String>,
+    #[serde(default)]
+    pub cursor_pagination: bool,
     pub execution_id: Option<String>,
 }
 
@@ -94,6 +96,21 @@ pub struct ElasticsearchCountDocumentsRequest {
     pub index: String,
     pub filter: Option<String>,
     pub execution_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElasticsearchIndexRequest {
+    pub connection_id: String,
+    pub index: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElasticsearchIndexMetadataRequest {
+    pub connection_id: String,
+    pub index: String,
+    pub kind: dbx_core::document_ops::ElasticsearchIndexMetadataKind,
 }
 
 #[derive(Deserialize)]
@@ -330,6 +347,7 @@ pub async fn find_documents(
             req.sort.as_deref(),
             req.collation.as_deref(),
             req.cursor.as_deref(),
+            req.cursor_pagination,
         ),
     )
     .await?;
@@ -379,6 +397,33 @@ pub async fn elasticsearch_count_documents(
         ),
     )
     .await?;
+    Ok(Json(result))
+}
+
+pub async fn elasticsearch_get_index_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ElasticsearchIndexMetadataRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let result = dbx_core::document_ops::elasticsearch_get_index_metadata_core(
+        &state.app,
+        &req.connection_id,
+        &req.index,
+        req.kind,
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn elasticsearch_delete_all_documents(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ElasticsearchIndexRequest>,
+) -> Result<Json<dbx_core::db::elasticsearch_driver::ElasticsearchDeleteByQueryResult>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Delete all documents").await?;
+    let result =
+        dbx_core::document_ops::elasticsearch_delete_all_documents_core(&state.app, &req.connection_id, &req.index)
+            .await
+            .map_err(AppError::from)?;
     Ok(Json(result))
 }
 

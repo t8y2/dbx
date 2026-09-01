@@ -16,6 +16,7 @@ import * as api from "@/lib/backend/api";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { loadMeilisearchKeyColumns, saveMeilisearchKeyColumns, type MeilisearchKeyColumnKey } from "@/lib/meilisearch/meilisearchKeyColumns";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useToast } from "@/composables/useToast";
 import type { KeyCreateInput, KeyListItem } from "@/types/meilisearchManagement";
 
@@ -53,7 +54,7 @@ const props = defineProps<{ connectionId: string }>();
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 
 const rows = ref<KeyListItem[]>([]);
 const offset = ref(0);

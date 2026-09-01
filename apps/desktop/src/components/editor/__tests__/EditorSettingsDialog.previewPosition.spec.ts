@@ -2,21 +2,25 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dialogSource = readFileSync(new URL("../EditorSettingsDialog.vue", import.meta.url), "utf8");
-const editorSectionStart = dialogSource.indexOf(`activeSettingsTab === 'editor'`);
+const editorSectionStart = dialogSource.indexOf(`<section v-if="activeSettingsTab === 'editor'"`);
 const formatterSectionStart = dialogSource.indexOf(`activeSettingsTab === 'formatter'`, editorSectionStart);
 const editorSection = dialogSource.slice(editorSectionStart, formatterSectionStart);
+const editorPreviewStart = dialogSource.indexOf("data-editor-live-preview");
+const settingsSearchResultsStart = dialogSource.indexOf('v-if="settingsSearchVisible"', editorPreviewStart);
+const editorPreview = dialogSource.slice(editorPreviewStart, settingsSearchResultsStart);
 const dataSectionStart = dialogSource.indexOf(`activeSettingsTab === 'data'`);
 const shortcutsSectionStart = dialogSource.indexOf(`activeSettingsTab === 'shortcuts'`, dataSectionStart);
 const dataSection = dialogSource.slice(dataSectionStart, shortcutsSectionStart);
 
 describe("EditorSettingsDialog live preview placement", () => {
-  it("renders preview-linked controls after appearance settings and before the live preview", () => {
+  it("keeps the live preview below search and outside the editor settings scroller", () => {
     const fontFamily = editorSection.indexOf('t("settings.fontFamily")');
     const theme = editorSection.indexOf('t("settings.theme")');
     const fontSize = editorSection.indexOf('t("settings.fontSize")');
     const previewControls = editorSection.indexOf("data-editor-preview-controls");
-    const preview = editorSection.indexOf('ref="previewRef"');
     const executeMode = editorSection.indexOf("executeModeLabel");
+    const searchInput = dialogSource.indexOf("settingsSearchInputContainerRef");
+    const scroller = dialogSource.indexOf('ref="settingsContentScrollRef"');
 
     expect(editorSectionStart).toBeGreaterThanOrEqual(0);
     expect(formatterSectionStart).toBeGreaterThan(editorSectionStart);
@@ -24,31 +28,44 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(theme).toBeGreaterThan(fontFamily);
     expect(fontSize).toBeGreaterThan(theme);
     expect(previewControls).toBeGreaterThan(fontSize);
-    expect(preview).toBeGreaterThan(previewControls);
-    expect(preview).toBeLessThan(executeMode);
-    expect(editorSection.match(/ref="previewRef"/g)).toHaveLength(1);
+    expect(executeMode).toBeGreaterThan(previewControls);
+    expect(editorPreviewStart).toBeGreaterThan(searchInput);
+    expect(editorPreviewStart).toBeLessThan(scroller);
+    expect(dialogSource.indexOf("activeSettingsTab === 'editor' && !settingsSearchVisible", searchInput)).toBeLessThan(editorPreviewStart);
+    expect(editorPreview).toContain('ref="previewRef"');
+    expect(editorPreview).toContain("settings-editor-live-preview-surface");
+    expect(dialogSource.match(/ref="previewRef"/g)).toHaveLength(1);
+    expect(editorSection).not.toContain('ref="previewRef"');
 
-    for (const id of ["editor-show-statement-run-buttons", "editor-show-line-numbers", "editor-show-current-statement-frame", "editor-sql-semantic-diagnostics"]) {
+    for (const id of ["editor-show-statement-run-buttons", "editor-show-line-numbers", "editor-show-current-statement-frame", "editor-sql-semantic-diagnostics", "editor-show-table-ddl-hover-preview"]) {
       expect(editorSection.indexOf(`id="${id}"`)).toBeGreaterThan(previewControls);
-      expect(editorSection.indexOf(`id="${id}"`)).toBeLessThan(preview);
+      expect(editorSection.indexOf(`id="${id}"`)).toBeLessThan(executeMode);
       expect(editorSection.match(new RegExp(`id="${id}"`, "g"))).toHaveLength(1);
     }
   });
 
-  it("keeps the preview lifecycle tied to the same template ref", () => {
+  it("unmounts the preview for search results and safely cancels pending initialization or updates", () => {
     expect(dialogSource).toContain("watch(previewRef, async (el) => {");
+    expect(dialogSource).toContain("if (!el) {");
     expect(dialogSource).toContain("cleanupPreviewEditor();");
+    expect(dialogSource).toContain("const previewHost = el;");
+    expect(dialogSource).toContain("previewRef.value !== previewHost");
+    expect(dialogSource).toContain("parent: previewHost");
+    expect(dialogSource).toContain("const currentPreviewView = previewView.value;");
+    expect(dialogSource).toContain("previewView.value !== currentPreviewView");
+    expect(dialogSource).toContain("currentPreviewView.dispatch({");
+    expect(dialogSource).toContain(".settings-editor-live-preview-surface {");
+    expect(dialogSource).toContain("max-height: min(16rem, 34vh);");
   });
 
   it("places execution behavior before SQL completion with high-priority controls first", () => {
-    const preview = editorSection.indexOf('ref="previewRef"');
     const completionSection = editorSection.indexOf("data-editor-sql-completion-settings");
     const completionTriggerMode = editorSection.indexOf('t("settings.completionTriggerMode")');
     const selectFirstCompletion = editorSection.indexOf('t("settings.selectFirstCompletionOnOpen")');
     const executionSection = editorSection.indexOf("data-editor-execution-settings");
     const executeMode = editorSection.indexOf("executeModeLabel", executionSection);
 
-    expect(executionSection).toBeGreaterThan(preview);
+    expect(executionSection).toBeGreaterThan(editorSection.indexOf("data-editor-preview-controls"));
     expect(executeMode).toBeGreaterThan(executionSection);
     expect(completionSection).toBeGreaterThan(executeMode);
     expect(completionTriggerMode).toBeGreaterThan(completionSection);
@@ -85,7 +102,7 @@ describe("EditorSettingsDialog live preview placement", () => {
   });
 
   it("describes the execute shortcut below the mode selector in every supported locale", () => {
-    expect(editorSection.indexOf("executeModeDescription")).toBeGreaterThan(editorSection.indexOf('ref="previewRef"'));
+    expect(editorSection.indexOf("executeModeDescription")).toBeGreaterThan(editorSection.indexOf("executeModeLabel"));
 
     for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
@@ -121,16 +138,16 @@ describe("EditorSettingsDialog live preview placement", () => {
     const objectDisplay = navigationSection.indexOf('t("settings.sidebarObjectDisplay")');
     const routineOpenMode = navigationSection.indexOf('t("settings.routineSourceOpenMode")');
     const tableNavigation = navigationSection.indexOf('id="editor-click-table-navigation-ddl"');
-    const openDatabaseOnClick = navigationSection.indexOf('id="sidebar-open-database-on-single-click"');
+    const browseObjectsOnDatabaseActivation = navigationSection.indexOf('id="sidebar-browse-objects-on-database-activation"');
     const tableSearch = navigationSection.indexOf('id="sidebar-table-search-enabled"');
     const activeNodeSelection = navigationSection.indexOf('id="auto-select-active-sidebar-node"');
 
-    expect(adjacentDataTabs).toBeGreaterThanOrEqual(0);
+    expect(browseObjectsOnDatabaseActivation).toBeGreaterThanOrEqual(0);
+    expect(adjacentDataTabs).toBeGreaterThan(browseObjectsOnDatabaseActivation);
     expect(objectDisplay).toBeGreaterThan(adjacentDataTabs);
     expect(routineOpenMode).toBeGreaterThan(objectDisplay);
     expect(tableNavigation).toBeGreaterThan(routineOpenMode);
-    expect(openDatabaseOnClick).toBeGreaterThan(tableNavigation);
-    expect(tableSearch).toBeGreaterThan(openDatabaseOnClick);
+    expect(tableSearch).toBeGreaterThan(tableNavigation);
     expect(activeNodeSelection).toBeGreaterThan(tableSearch);
   });
 
@@ -169,8 +186,19 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(dialogSource).toContain('let previewLineNumbersComp: import("@codemirror/state").Compartment | null = null;');
     expect(dialogSource).toContain('const previewBasicSetup = (basicSetup as readonly import("@codemirror/state").Extension[]).slice(2);');
     expect(dialogSource).toContain("previewLineNumbersComp.of(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
-    expect(dialogSource).toContain("previewLineNumbersComp.reconfigure(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
+    expect(dialogSource).toContain("currentPreviewLineNumbersComp.reconfigure(buildPreviewLineNumbersExtension(ss.showLineNumbers))");
     expect(dialogSource).toContain("return buildQueryEditorLineNumbersExtension(previewLineNumbersFactory, enabled");
+  });
+
+  it("uses the unsaved font draft for the preview CSS variables", () => {
+    expect(dialogSource).toContain("EDITOR_FONT_FAMILY_CSS_VAR");
+    expect(dialogSource).toContain("EDITOR_FONT_SIZE_CSS_VAR");
+    expect(dialogSource).toContain("const previewFontStyle = computed<Record<string, string>>");
+    expect(dialogSource).toContain("[EDITOR_FONT_FAMILY_CSS_VAR]: editFontFamily.value");
+    expect(dialogSource).toContain("[EDITOR_FONT_SIZE_CSS_VAR]: `${editFontSize.value}px`");
+    expect(dialogSource).toContain(":style=\"{ minWidth: '100%', ...previewFontStyle }\"");
+    expect(dialogSource).toContain("watch([editFontFamily, editFontSize], () => {");
+    expect(dialogSource).toContain("previewView.value?.requestMeasure();");
   });
 
   it("creates the preview editor as read-only so demo edits cannot desync the Apply buttons", () => {
@@ -180,9 +208,9 @@ describe("EditorSettingsDialog live preview placement", () => {
   });
 
   it("explains the intentional syntax-error demo below the preview when diagnostics are enabled", () => {
-    const preview = editorSection.indexOf('ref="previewRef"');
-    expect(editorSection).toContain('v-if="editSqlSemanticDiagnosticsEnabled"');
-    expect(editorSection.indexOf('t("settings.previewSyntaxErrorHint")')).toBeGreaterThan(preview);
+    const preview = editorPreview.indexOf('ref="previewRef"');
+    expect(editorPreview).toContain('v-if="editSqlSemanticDiagnosticsEnabled"');
+    expect(editorPreview.indexOf('t("settings.previewSyntaxErrorHint")')).toBeGreaterThan(preview);
   });
 
   it.each(["en", "zh-CN", "zh-TW", "es", "pt-BR", "it", "ja", "ko"])("locale %s translates settings.previewSyntaxErrorHint", (locale) => {

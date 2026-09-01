@@ -772,8 +772,8 @@ fn dameng_integer_column_omits_mysql_display_width() {
     assert_eq!(
         result.statements,
         vec![
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" INTEGER);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" NUMBER(10,0));",
         ]
     );
 }
@@ -998,8 +998,226 @@ fn oracle_create_table_preserves_character_length_units() {
         is_gaussdb_m_mode: false,
     });
 
-    assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
-    assert!(result.statements[0].contains("\"CHAR_COL\" VARCHAR2(12 CHAR)"));
+    assert!(result.statements[0].contains("BYTE_COL VARCHAR2(12 BYTE)"));
+    assert!(result.statements[0].contains("CHAR_COL VARCHAR2(12 CHAR)"));
+}
+
+#[test]
+fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
+    let mut user_id = column("user_id");
+    user_id.data_type = "NUMBER".to_string();
+    user_id.is_primary_key = true;
+    user_id.comment = "identifier".to_string();
+    let mut user_name = column("userName");
+    user_name.data_type = "VARCHAR2(100)".to_string();
+    let mut upper_id = column("USER_CODE");
+    upper_id.data_type = "NUMBER".to_string();
+    let mut dollar_id = column("ABC$01");
+    dollar_id.data_type = "NUMBER".to_string();
+    let mut hash_id = column("ABC#01");
+    hash_id.data_type = "NUMBER".to_string();
+    let idx = index("idx_user_id", &["user_id"]);
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![user_id, user_name, upper_id, dollar_id, hash_id],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("user table".to_string()),
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements[0],
+        "CREATE TABLE \"APP\".orders (\n  user_id NUMBER,\n  userName VARCHAR2(100),\n  USER_CODE NUMBER,\n  ABC$01 NUMBER,\n  ABC#01 NUMBER,\n  PRIMARY KEY (user_id)\n);"
+    );
+    assert!(result.statements.iter().any(|statement| statement == "COMMENT ON TABLE \"APP\".orders IS 'user table';"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "COMMENT ON COLUMN \"APP\".orders.user_id IS 'identifier';"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "CREATE INDEX idx_user_id ON \"APP\".orders (user_id);"));
+}
+
+#[test]
+fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
+    let mut user_id = column("USER_ID");
+    user_id.data_type = "NUMBER".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns: vec![user_id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE TABLE USERS (\n  USER_ID NUMBER\n);".to_string()]);
+}
+
+#[test]
+fn oracle_create_table_quotes_special_and_reserved_identifiers() {
+    let mut special = column("user name");
+    special.data_type = "VARCHAR2(100)".to_string();
+    special.comment = "special".to_string();
+    let mut escaped = column(r#"a"b"#);
+    escaped.data_type = "VARCHAR2(100)".to_string();
+    let mut select = column("SELECT");
+    select.data_type = "VARCHAR2(100)".to_string();
+    let mut from = column("FROM");
+    from.data_type = "VARCHAR2(100)".to_string();
+    let mut table = column("TABLE");
+    table.data_type = "VARCHAR2(100)".to_string();
+    let mut leading_digit = column("123column");
+    leading_digit.data_type = "VARCHAR2(100)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "order detail".to_string(),
+        columns: vec![special, escaped, select, from, table, leading_digit],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let ddl = &result.statements[0];
+    assert!(ddl.starts_with("CREATE TABLE \"APP\".\"order detail\" ("));
+    assert!(ddl.contains("\"user name\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"a\"\"b\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"SELECT\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"FROM\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"TABLE\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"123column\" VARCHAR2(100)"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "COMMENT ON COLUMN \"APP\".\"order detail\".\"user name\" IS 'special';"));
+}
+
+#[test]
+fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers() {
+    let mut user_id = column("user_id");
+    user_id.data_type = "NUMBER".to_string();
+    let mut customer_fk = foreign_key("fk_orders_user", "user_id", "CamelCase", "UserName");
+    customer_fk.ref_schema = "CaseSchema".to_string();
+    let audit_trigger = trigger("auditTrigger", "BEFORE", "INSERT", "BEGIN\n  NULL;\nEND");
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![user_id],
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: vec![audit_trigger],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE \"APP\".orders (\n  user_id NUMBER\n);",
+            "ALTER TABLE \"APP\".orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES \"CaseSchema\".\"CamelCase\" (\"UserName\");",
+            "CREATE OR REPLACE TRIGGER \"APP\".auditTrigger BEFORE INSERT ON \"APP\".orders\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;",
+        ]
+    );
+}
+
+#[test]
+fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
+    let mut column = column("CamelCase");
+    column.data_type = "NUMBER".to_string();
+    column.original = Some(ColumnInfo {
+        name: "CamelCase".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("CaseSchema".to_string()),
+        table_name: "CaseTable".to_string(),
+        columns: vec![column],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"CaseSchema\".\"CaseTable\" MODIFY (\"CamelCase\" NUMBER);".to_string()]
+    );
+}
+
+#[test]
+fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
+    for (database_type, expected) in [
+        (DatabaseType::Postgres, "CREATE TABLE \"users\" (\n  \"user_id\" INTEGER\n);"),
+        (DatabaseType::Mysql, "CREATE TABLE `users` (\n  `user_id` INTEGER\n);"),
+        (DatabaseType::SqlServer, "CREATE TABLE [users] (\n  [user_id] INTEGER\n);"),
+        (DatabaseType::Dameng, "CREATE TABLE \"users\" (\n  \"user_id\" INTEGER\n);"),
+    ] {
+        let mut user_id = column("user_id");
+        user_id.data_type = "INTEGER".to_string();
+        let result = build_create_table_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: None,
+            table_name: "users".to_string(),
+            columns: vec![user_id],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: None,
+            original_table_comment: None,
+            mysql_engine: None,
+            partitioned: false,
+            is_gaussdb_m_mode: false,
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
+        assert_eq!(result.statements, vec![expected.to_string()], "{database_type:?}");
+    }
 }
 
 #[test]
@@ -1746,7 +1964,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAMP;"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP;"]
     );
 }
 
@@ -1774,7 +1992,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) DEFAULT CURRENT_TIMESTAMP(3);"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) NULL DEFAULT CURRENT_TIMESTAMP(3);"]
     );
 }
 
@@ -2776,6 +2994,32 @@ fn dameng_add_column_with_identity() {
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"ID\" INT IDENTITY(10, 2));"]);
+}
+
+#[test]
+fn dameng_uppercases_lowercase_column_type() {
+    let mut status = column("STATUS");
+    status.data_type = "varchar(50)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "TEST".to_string(),
+        columns: vec![status],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // A lower-case type keyword must not reach the DDL: Dameng would store it
+    // as a USER-DEFINED type instead of the built-in VARCHAR (issue #7343).
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"STATUS\" VARCHAR(50));"]);
 }
 
 #[test]
@@ -4844,7 +5088,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements[1],
-        "ALTER TABLE \"HR\".\"ORDERS_COPY\" ADD CONSTRAINT \"ORDERS_COPY_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
+        "ALTER TABLE \"HR\".ORDERS_COPY ADD CONSTRAINT ORDERS_COPY_FK1 FOREIGN KEY (CUSTOMER_ID) REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
     );
 }
 
@@ -4896,6 +5140,7 @@ fn builds_mysql_trigger_changes() {
         event: "UPDATE".to_string(),
         timing: "BEFORE".to_string(),
         statement: Some("SET NEW.updated_at = CURRENT_TIMESTAMP".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4924,6 +5169,109 @@ fn builds_mysql_trigger_changes() {
 }
 
 #[test]
+fn builds_sqlserver_trigger_with_multiple_events() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![trigger("orders_audit", "AFTER", "INSERT, UPDATE", "BEGIN\n  SET NOCOUNT ON;\nEND")],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN\n  SET NOCOUNT ON;\nEND;"
+        ]
+    );
+}
+
+#[test]
+fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
+    let mut existing = trigger(
+        "orders_audit",
+        "AFTER",
+        "INSERT, UPDATE",
+        "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END",
+    );
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT, UPDATE".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some(
+            "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (0); END"
+                .to_string(),
+        ),
+        enabled: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP TRIGGER [dbo].[orders_audit];",
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END;"
+        ]
+    );
+}
+
+#[test]
+fn sqlserver_trigger_edit_restores_disabled_state() {
+    let mut existing =
+        trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END");
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some("CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT AS PRINT 'old'".to_string()),
+        enabled: Some(false),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        mysql_engine: None,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(
+        result.statements.last().map(String::as_str),
+        Some("DISABLE TRIGGER [dbo].[orders_audit] ON [dbo].[orders];")
+    );
+}
+
+#[test]
 fn unchanged_postgres_trigger_does_not_block_column_rename() {
     let mut renamed = column("display_name");
     renamed.original = Some(ColumnInfo {
@@ -4942,6 +5290,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4971,6 +5320,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5005,6 +5355,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         event: "INSERT OR UPDATE OR DELETE".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -5063,6 +5414,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
     existing.marked_for_drop = true;
 
@@ -6524,4 +6876,121 @@ fn gaussdb_m_create_table_with_primary_key() {
     assert!(result.warnings.is_empty());
     let sql = result.statements.join("\n");
     assert!(sql.contains("PRIMARY KEY (`id`)"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
+    // A second (or later) MySQL TIMESTAMP column that is nullable but has no
+    // DEFAULT must carry an explicit NULL keyword — otherwise MySQL either
+    // silently rewrites it to NOT NULL or, with the still-common
+    // explicit_defaults_for_timestamp=OFF server default, rejects it outright
+    // with ERROR 1067 (42000): Invalid default value. See issue #7416.
+    let mut created_at = column("created_at");
+    created_at.data_type = "timestamp".to_string();
+    created_at.is_nullable = false;
+
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![created_at, updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL"));
+    assert!(!result.statements[0].contains("`updated_at` timestamp NULL DEFAULT"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null() {
+    // Even with an explicit DEFAULT, MySQL still needs the NULL keyword to
+    // keep the column nullable — omitting it silently produces NOT NULL.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+    updated_at.default_value = "CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP"));
+}
+
+#[test]
+fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
+    // DATETIME is not subject to MySQL's TIMESTAMP-specific implicit-default
+    // quirk; the fix must not touch it.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "datetime".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(!result.statements[0].contains("NULL"));
+}
+
+#[test]
+fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
+    // The ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN path shares
+    // column_definition() with CREATE TABLE and must carry the same fix.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `u7_game_order_step` ADD COLUMN `updated_at` timestamp NULL;"]);
 }

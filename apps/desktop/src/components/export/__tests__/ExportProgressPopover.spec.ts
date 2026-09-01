@@ -145,6 +145,29 @@ describe("ExportProgressPopover task duration", () => {
     expect(document.body.textContent).toContain("Preparing: t_0001");
   });
 
+  it("keeps a cancelling backup visible as cancelling until its terminal event arrives", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("cancelling-backup", "Nightly", "/tmp/backups", "scheduled");
+    tracker.markDatabaseExportTaskCancelling(task.exportId);
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "app.users",
+      objectIndex: 8,
+      totalObjects: 27,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: false,
+    });
+
+    await mountPopover();
+
+    expect(tracker.tasks.value.find((item) => item.exportId === task.exportId)?.status).toBe("Cancelling");
+    expect(document.body.textContent).toContain("Cancelling…");
+    expect(document.body.querySelector<HTMLButtonElement>("button[disabled]")).not.toBeNull();
+  });
+
   it.each(["Done", "Error", "Cancelled"] as const)("hides stale database object text after the task reaches %s", async (status) => {
     const tracker = useExportTracker();
     const task = tracker.addDatabaseExportTask(`terminal-${status}`, "Nightly", "/tmp/backups", "scheduled");

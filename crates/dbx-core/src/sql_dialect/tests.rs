@@ -35,6 +35,11 @@ fn quotes_identifiers_by_database_type() {
     assert_eq!(quote_table_identifier(Some(DatabaseType::Jdbc), "user name"), "user name");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Iotdb), "root.test.device2"), "root.test.device2");
     assert_eq!(quote_table_identifier(Some(DatabaseType::Spanner), "user`name"), "`user``name`");
+    // ArgoDB shares the Hive-family dialect: backticks quote identifiers and
+    // double quotes are string literals, and schemas qualify table names.
+    assert_eq!(quote_table_identifier(Some(DatabaseType::Argo), "user`name"), "`user``name`");
+    assert_eq!(quote_transfer_identifier("user`name", &DatabaseType::Argo), "`user``name`");
+    assert!(is_schema_aware(DatabaseType::Argo));
 }
 
 /// Spanner databases are created in one of two immutable dialects. The connected
@@ -148,7 +153,7 @@ fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Oscar)), TablePaginationStrategy::Rownum);
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oracle), PaginationContext::BoundedRead),
-        TablePaginationStrategy::FetchFirst
+        TablePaginationStrategy::Rownum
     );
     assert_eq!(
         pagination_strategy(Some(DatabaseType::Oscar), PaginationContext::BoundedRead),
@@ -492,7 +497,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT `id` AS `id`, `name` AS `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
+        "SELECT `id`, `name` FROM `dbx_demo`.`connection_test` ORDER BY 1 LIMIT 2 OFFSET 1;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

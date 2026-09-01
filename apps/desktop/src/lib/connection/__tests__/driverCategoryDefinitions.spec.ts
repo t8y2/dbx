@@ -118,6 +118,7 @@ describe("AGENT_DRIVER_CATEGORY_MAP integrity", () => {
       "access",
       "duckdb",
       "h2",
+      "sqlite-worker",
       // document
       "cassandra",
       "mongodb",

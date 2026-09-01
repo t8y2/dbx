@@ -87,12 +87,14 @@ Run `dsh web --dump-config` to verify the composed configuration, then restart D
 
 ## Tools
 
-DBX MCP currently provides 12 tools:
+DBX MCP currently provides 15 tools:
 
 | Tool | Description |
 | --- | --- |
 | `dbx_list_connections` | List connections visible to the MCP session |
+| `dbx_list_databases` | List databases available through a connection, respecting its MCP database scope |
 | `dbx_add_connection` | Add a connection to DBX storage |
+| `dbx_duplicate_connection` | Duplicate a DBX connection with its complete settings |
 | `dbx_remove_connection` | Remove a connection from DBX storage |
 | `dbx_list_tables` | List tables, views, or collections |
 | `dbx_describe_table` | Return columns and table metadata |
@@ -101,6 +103,7 @@ DBX MCP currently provides 12 tools:
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
@@ -120,6 +123,30 @@ Sessions support SQL connections only and are bound to one connection and databa
 <Callout type="warn">A stateful session does not widen SQL policy. `USE` is meaningful only inside a session, while writes, DDL, production protection, connection read-only state, and database privileges are rechecked for every request.</Callout>
 
 ## Database Access
+
+### Native Streamable HTTP for DBX Desktop
+
+Desktop can optionally host its own Streamable HTTP MCP endpoint. It is **off by default** and, when enabled in **Settings → MCP → HTTP Service**, listens only on `127.0.0.1:5225/mcp` by default. The Desktop process manages the listener, creates a local bearer token, shows a copyable client configuration, and restarts the managed HTTP service if it exits unexpectedly.
+
+To connect a local MCP client:
+
+1. Open **Settings → MCP → HTTP Service**, turn on **Streamable HTTP Service**, and keep the default loopback address unless another device genuinely needs access.
+2. Click **Save and start service**. Saving a changed address, port, or path applies the configuration by restarting the service.
+3. Copy the displayed service address and bearer token into the MCP client.
+
+Use the generated values in an HTTP-capable MCP client. The transport-specific field names differ between clients, but the essential configuration is:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:5225/mcp",
+  "headers": {
+    "Authorization": "Bearer <token shown by DBX Desktop>"
+  }
+}
+```
+
+Keep the default loopback binding for local clients. Binding to a LAN address requires turning on **Allow remote access** and setting the exact allowed `Host` authorities; browser clients also need their exact `Origin` values. Use `host:port` in an allowed Host when the client sends a non-default port. Rotating the token immediately invalidates the previous credential.
 
 ### Local connections
 
@@ -151,6 +178,22 @@ DBX Web requests honor the standard system proxy environment variables: `HTTPS_P
 
 DBX Web and Docker require the same standalone DuckDB driver. Install it from Driver Manager after the first launch. Docker stores installed drivers under `/app/data/agents`, so they persist when `/app/data` is mounted as a volume.
 
+### Native Streamable HTTP for DBX Web
+
+DBX Web can also host MCP itself. This mode is disabled unless `DBX_WEB_MCP_TOKEN` (or `DBX_WEB_MCP_TOKEN_FILE`) is configured. It uses the existing Web listener and the `/mcp` path, so Docker and reverse-proxy deployments do not need a second exposed port. Configure `DBX_WEB_MCP_ALLOWED_HOSTS` with the public authorities that clients send in the `Host` header, including a mapped port when applicable. Use `DBX_WEB_MCP_TOKEN_FILE` or your deployment secret manager instead of committing a real token to a Compose file.
+
+For example, a container published as `4225:4224` uses `http://localhost:4225/mcp`:
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+Clients must supply `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`. Browser-based clients additionally require `DBX_WEB_MCP_ALLOWED_ORIGINS` with their exact origin, such as `https://mcp.example.com`; native clients normally do not send an `Origin` header. When a reverse proxy adds a public path prefix, set `DBX_PUBLIC_BASE_PATH=/dbx`; the native endpoint then becomes `/dbx/mcp`. Native HTTP and the existing `DBX_WEB_URL` stdio adapter can coexist: they share DBX connections and MCP policy, while the adapter remains useful for clients that support only stdio.
+
 ### Desktop UI tools
 
 `dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app and are unavailable in Web mode or when scoped policy hides UI tools. Whether other tools need Desktop depends on whether the connection uses native execution or a bridge/Agent path.
@@ -167,6 +210,21 @@ DBX stores one authoritative MCP policy under **Settings → MCP** and reloads i
 
 An ineffective condition such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, or an opaque MongoDB filter remains high risk. Connection-level read-only protection, production protection, database credentials, and the MCP connection allowlist remain upper bounds in every mode.
 
+For connections that are exposed to MCP, **Settings → MCP** can apply an additional per-connection ceiling: inherit the global mode, read only, safe write, or high-risk write. A connection rule only narrows access. For example, a global high-risk policy cannot make a connection writable when its connection rule is read only, and no connection rule can override DBX production or connection-level protection.
+
+The same page can also expose only selected MCP tools. This is enforced at every call, rather than being only a client-side display preference; a client that retained an old tool list is denied once the server-side allowlist changes.
+
+### Configure access in order
+
+Use **Settings → MCP** to define the effective scope in this order:
+
+1. Choose whether MCP can see **all connections** (including future connections) or only **specified connections**.
+2. For every exposed connection, choose **all databases**, **specified databases**, or **no access**. Specified database names are exact matches; use `dbx_list_databases` to discover the names that are currently allowed.
+3. Optionally set a per-connection execution ceiling to narrow the global permission mode for a sensitive connection.
+4. Select only the MCP tools that the client needs, then choose the global permission mode.
+
+Every layer is an upper bound: an allowed tool still cannot bypass a hidden connection, a database scope, connection read-only status, production protection, or the database account's own privileges. Requests for a database outside the selected scope are rejected with `DATABASE_OUT_OF_SCOPE`.
+
 Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
 
 | Variable | Purpose |
@@ -179,6 +237,10 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
 | `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` disables TLS certificate verification for self-signed DBX Web backends (default: verify) |
 | `DBX_WEB_CA_CERT` | PEM/DER CA file to trust for DBX Web TLS verification |
+| `DBX_WEB_MCP_TOKEN` | Enable native Web Streamable HTTP MCP with this bearer token |
+| `DBX_WEB_MCP_TOKEN_FILE` | Read the native Web MCP token from a file; cannot be combined with `DBX_WEB_MCP_TOKEN` |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | Required comma-separated public Host authorities for native Web MCP |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | Comma-separated browser Origins allowed for native Web MCP |
 | `DBX_MCP_ALLOW_WRITES` | Upgrade compatibility only: `0`/`false` keeps an unconfigured policy read-only |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | Compatibility scope for one connection ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
@@ -192,6 +254,11 @@ Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQ
   <Accordion title="The optional platform package was not installed">Reinstall without `--no-optional`, then verify the platform with `node -p 'process.platform + "-" + process.arch'`. The current platform must appear in the supported platform table.</Accordion>
   <Accordion title="dbx.db cannot be found">Set `DBX_DATA_DIR` to the folder containing `dbx.db`. For Windows portable builds, this is normally the `data` folder beside `DBX.exe`.</Accordion>
   <Accordion title="DBX is not running">Only `dbx_open_table` and `dbx_execute_and_show` require the desktop app. Local query tools can run without DBX open.</Accordion>
+  <Accordion title="A Desktop HTTP client gets ERR_CONNECTION_REFUSED">In **Settings → MCP → HTTP Service**, turn on the service and click **Save and start service**. Confirm that the client uses the displayed address, path, and current bearer token. The default `127.0.0.1` address accepts connections only from the same computer.</Accordion>
+  <Accordion title="Desktop says the HTTP address is already in use">Another process is listening on the selected address and port. Choose an unused port in **Settings → MCP → HTTP Service**, then save the configuration to restart the service. Do not run two DBX Desktop instances with the same HTTP endpoint.</Accordion>
+  <Accordion title="A request returns DATABASE_OUT_OF_SCOPE">The connection is exposed, but the requested database is not in its MCP database scope. Add the exact database name in **Settings → MCP**, or change that connection's scope to all databases if appropriate. For a specified scope, call `dbx_list_databases` first and then use one of the returned names.</Accordion>
+  <Accordion title="A previously visible tool is rejected">The tool is no longer selected in **Settings → MCP** or the current policy does not permit it. Refresh the MCP client's tool list after changing the allowlist; the server rejects stale tool calls as well.</Accordion>
+  <Accordion title="A Docker or reverse-proxy MCP request fails">Use the public endpoint, including the mapped port and any `DBX_PUBLIC_BASE_PATH` prefix. Set `DBX_WEB_MCP_ALLOWED_HOSTS` to the exact public `Host` authority. Browser clients also require an exact `DBX_WEB_MCP_ALLOWED_ORIGINS` entry.</Accordion>
   <Accordion title="An Agent/JDBC database cannot start">Install or update the matching DBX agent, JDBC driver, and JRE through DBX Driver Manager. Proprietary drivers are not included in the native MCP package.</Accordion>
   <Accordion title="A DuckDB connection cannot start">Install or update the DuckDB driver through DBX Driver Manager. Local MCP, DBX Web, and Docker use the standalone driver rather than embedding the DuckDB engine.</Accordion>
   <Accordion title="I see a better-sqlite3 or Node ABI error">MCP does not require `better-sqlite3`. Upgrade `@dbx-app/mcp-server`; if the error comes from `@dbx-app/cli`, follow the CLI installation requirements because it is a separate package.</Accordion>

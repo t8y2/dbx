@@ -127,7 +127,7 @@ function connectionIconType(id: string) {
 
     <div class="relative min-w-40 flex-1">
       <Search class="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      <Input :value="tableSearch" @input="(e: Event) => emit('update:table-search', (e.target as HTMLInputElement).value)" class="h-8 pl-7 pr-9 text-xs" :placeholder="t('diagram.searchTables')" />
+      <Input :model-value="tableSearch" @update:model-value="(value) => emit('update:table-search', String(value))" class="h-8 pl-7 pr-9 text-xs" :placeholder="t('diagram.searchTables')" />
       <button v-if="tableSearch" type="button" class="absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 rounded-full bg-muted-foreground/20 hover:bg-muted-foreground/40 flex items-center justify-center transition-colors" @click="emit('update:table-search', '')">
         <X class="h-3 w-3 text-muted-foreground" />
       </button>

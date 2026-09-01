@@ -51,6 +51,7 @@ export const DATABASE_TYPES = [
   "trino",
   "prestosql",
   "hive",
+  "argo",
   "kyuubi",
   "impala",
   "db2",

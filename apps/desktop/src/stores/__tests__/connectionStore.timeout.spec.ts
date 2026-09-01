@@ -382,6 +382,32 @@ describe("connectionStore timeout recovery", () => {
     expect(writeTextFile).not.toHaveBeenCalled();
   });
 
+  it("fails the export when writing the file fails instead of reporting success", async () => {
+    const save = vi.fn().mockResolvedValue("/home/user/dbx-connections.json");
+    const writeTextFile = vi.fn().mockRejectedValue(new Error("disk full"));
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-dialog", () => ({ save }));
+    vi.doMock("@tauri-apps/plugin-fs", () => ({ writeTextFile }));
+    vi.doMock("@/lib/backend/api", () => ({
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
+      loadConnections: vi.fn().mockResolvedValue([postgresConnection()]),
+      loadPinnedTreeNodeIds: vi.fn().mockResolvedValue([]),
+      loadSidebarLayout: vi.fn().mockResolvedValue(null),
+      loadTunnelProfiles: vi.fn().mockResolvedValue([]),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    await store.initFromDisk();
+
+    await expect(store.exportConnectionsToFile({ mode: "plaintext" })).rejects.toThrow("disk full");
+    expect(writeTextFile).toHaveBeenCalledOnce();
+  });
+
   it("clears connection node loading when health check timeout forces reconnect failure", async () => {
     const checkConnectionHealth = vi.fn(() => new Promise(() => undefined));
     const connectDb = vi.fn().mockRejectedValue(new Error("reconnect failed"));

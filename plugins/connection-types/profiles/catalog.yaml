@@ -470,6 +470,14 @@ profiles:
     user: ""
     urlParams: auth=NONE
     category: analytics
+  - id: argo
+    dbType: argo
+    label: ArgoDB (Transwarp)
+    icon: hive
+    port: 10000
+    user: ""
+    category: domestic
+    pickerLabel: ArgoDB
   - id: impala
     dbType: impala
     label: Apache Impala

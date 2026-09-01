@@ -1,6 +1,6 @@
 ---
 title: Table Import
-description: Use a guided workflow to import CSV, TSV, text, JSON, or Excel data into an existing table or create new tables in batches.
+description: Use a guided workflow to import CSV, TSV, text, JSON, Excel, or SQL data into an existing table or create new tables in batches.
 ---
 
 Table Import writes file data into database tables. DBX parses and previews the source first, then asks you to review parsing options, the target, column mappings, and execution settings before any rows are written.
@@ -25,6 +25,11 @@ Create-table mode accepts multiple files at once. Excel workbooks are expanded i
 | Delimited text | Files such as `.txt` with a custom delimiter |
 | JSON | A single object, object rows, or array rows; the shape can be selected explicitly |
 | Excel | `.xlsx`, `.xlsm`, and `.xls`, with worksheet selection |
+| SQL | `.sql` scripts containing literal `INSERT INTO ... VALUES` statements for one table |
+
+SQL import accepts only literal `INSERT INTO ... VALUES` rows. Expressions, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT`, and other constructs that cannot be rewritten losslessly are rejected so data and statement semantics are preserved.
+
+SQL import reads the whole script through the non-streaming path, so each `.sql` file is limited to 100 MB; larger files are rejected with an explicit error. Values written with date functions such as `TO_DATE` and `TO_TIMESTAMP` are imported as the text of their first argument, and the target column must be able to parse that format.
 
 Desktop reads selected local files directly. Docker/Web uploads browser-selected files to temporary server storage, then releases the prepared source after preview and import finish.
 
@@ -67,7 +72,7 @@ Desktop reads selected local files directly. Docker/Web uploads browser-selected
 
 ### Text Encoding
 
-CSV, TSV, and delimited text support auto detection, UTF-8, GBK, UTF-16 LE, and UTF-16 BE. If detection is wrong, select an encoding manually and recheck the preview.
+CSV, TSV, delimited text, and SQL scripts support auto detection, UTF-8, GBK, UTF-16 LE, and UTF-16 BE. If detection is wrong, select an encoding manually and recheck the preview.
 
 ### Row Range
 

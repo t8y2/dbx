@@ -101,6 +101,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         drop_table_if_exists: false,
         omit_auto_increment: false,
         fail_on_error: true,
+        output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
     };

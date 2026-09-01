@@ -872,17 +872,21 @@ pub fn resolve_kafka_launch_spec(mqc: &MqAdminConfig, state: &AppState) -> Optio
 }
 
 async fn ensure_connection_writable(state: &AppState, conn_id: &str, operation: &str) -> Result<(), String> {
-    let configs = state.configs.read().await;
-    if let Some(config) = configs.get(conn_id) {
-        if config.read_only {
-            return Err(format!(
-                "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
-                config.name, operation
-            ));
+    let (name, read_only) = {
+        let configs = state.configs.read().await;
+        match configs.get(conn_id) {
+            Some(config) => (config.name.clone(), config.read_only),
+            None => return Ok(()),
         }
-        // Production protection for desktop MQ uses UI confirmation; MCP enforces
-        // is_production separately. Do not hard-block confirmed desktop writes here.
+    };
+    if read_only && !state.write_unlock_windows.is_active(conn_id).await {
+        return Err(format!(
+            "Read-only mode: connection '{}' has read-only protection enabled. {} blocked.",
+            name, operation
+        ));
     }
+    // Production protection for desktop MQ uses UI confirmation; MCP enforces
+    // is_production separately. Do not hard-block confirmed desktop writes here.
     Ok(())
 }
 

@@ -79,21 +79,30 @@ func TestKingbaseIntegration(t *testing.T) {
 	if err != nil || len(parentColumns) != 3 || parentColumns[0].Comment == nil || *parentColumns[0].Comment != "主键编号" || parentColumns[1].Comment == nil || *parentColumns[1].Comment != "客户'名称" {
 		t.Fatalf("get commented columns failed: columns=%v err=%v", parentColumns, err)
 	}
-	if parentColumns[1].DataType != "character varying(64)" || parentColumns[1].CharacterMaximumLength == nil || *parentColumns[1].CharacterMaximumLength != 64 {
-		t.Fatalf("varchar length metadata mismatch: column=%+v", parentColumns[1])
+	parentVarcharType := strings.ToLower(strings.TrimSpace(parentColumns[1].DataType))
+	if !strings.Contains(parentVarcharType, "varchar") && !strings.Contains(parentVarcharType, "character varying") {
+		t.Fatalf("varchar type metadata mismatch: column=%+v", parentColumns[1])
 	}
-	if parentColumns[2].DataType != "character(32)" || parentColumns[2].CharacterMaximumLength == nil || *parentColumns[2].CharacterMaximumLength != 32 {
+	if parentColumns[1].CharacterMaximumLength == nil || *parentColumns[1].CharacterMaximumLength != 64 {
+		actualLength := -1
+		if parentColumns[1].CharacterMaximumLength != nil {
+			actualLength = *parentColumns[1].CharacterMaximumLength
+		}
+		t.Fatalf("varchar length metadata mismatch: length=%d column=%+v", actualLength, parentColumns[1])
+	}
+	parentCharacterType := strings.ToLower(strings.TrimSpace(parentColumns[2].DataType))
+	if ((!strings.HasPrefix(parentCharacterType, "char") && !strings.HasPrefix(parentCharacterType, "character") && parentCharacterType != "bpchar") || strings.Contains(parentCharacterType, "varying")) || parentColumns[2].CharacterMaximumLength == nil || *parentColumns[2].CharacterMaximumLength != 32 {
 		t.Fatalf("character length metadata mismatch: column=%+v", parentColumns[2])
 	}
 	ddl, err := server.getTableDDL(schema, parent)
 	if err != nil {
 		t.Fatalf("get table DDL failed: %v", err)
 	}
-	qualifiedParent := qualifiedSchema + "." + quoteIdentifier(parent)
+	qualifiedParent := server.quoteDDLIdentifier(schema) + "." + server.quoteDDLIdentifier(parent)
 	for _, expected := range []string{
 		"COMMENT ON TABLE " + qualifiedParent + " IS '订单父表';",
-		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier(parentColumns[0].Name) + " IS '主键编号';",
-		"COMMENT ON COLUMN " + qualifiedParent + "." + quoteIdentifier(parentColumns[1].Name) + " IS '客户''名称';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + server.quoteDDLIdentifier(parentColumns[0].Name) + " IS '主键编号';",
+		"COMMENT ON COLUMN " + qualifiedParent + "." + server.quoteDDLIdentifier(parentColumns[1].Name) + " IS '客户''名称';",
 	} {
 		if !strings.Contains(ddl, expected) {
 			t.Fatalf("table DDL missing %q:\n%s", expected, ddl)
@@ -153,6 +162,134 @@ func TestKingbaseIntegration(t *testing.T) {
 	if err := server.validateConnection(); err != nil {
 		t.Fatalf("connection was not reusable after cancellation: %v", err)
 	}
+}
+
+func TestKingbaseConstraintsIntegration(t *testing.T) {
+	host := os.Getenv("KINGBASE_TEST_HOST")
+	portText := os.Getenv("KINGBASE_TEST_PORT")
+	username := os.Getenv("KINGBASE_TEST_USERNAME")
+	password := os.Getenv("KINGBASE_TEST_PASSWORD")
+	if host == "" || portText == "" || username == "" || password == "" {
+		t.Skip("Kingbase integration environment is not configured")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := os.Getenv("KINGBASE_TEST_DATABASE")
+	if database == "" {
+		database = "test"
+	}
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	schema := "dbx_constraints_" + suffix
+	schemaIdent := quoteIdentifier(schema)
+	parent := "parent"
+	child := "child"
+	parentTable := schemaIdent + "." + quoteIdentifier(parent)
+	childTable := schemaIdent + "." + quoteIdentifier(child)
+
+	server := newServer()
+	cp := connectParams{
+		Host: host, Port: port, Database: database, Username: username, Password: password,
+		ConnectionString: fmt.Sprintf("jdbc:kingbase8://%s:%d/%s", host, port, database),
+	}
+	if err := server.connect(cp); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.disconnect() })
+	t.Cleanup(func() {
+		_, _ = server.executeQuery(queryOptions{SQL: "DROP SCHEMA IF EXISTS " + schemaIdent + " CASCADE"})
+	})
+
+	mustExecute(t, server, "CREATE SCHEMA "+schemaIdent)
+	mustExecute(t, server, "CREATE TABLE "+parentTable+" (a bigint NOT NULL, b bigint NOT NULL, CONSTRAINT parent_pk PRIMARY KEY (a, b))")
+	mustExecute(t, server, "CREATE TABLE "+childTable+" (id bigint PRIMARY KEY, parent_a bigint, parent_b bigint, code text NOT NULL, amount int, CONSTRAINT child_parent_fk FOREIGN KEY (parent_a, parent_b) REFERENCES "+parentTable+" (a, b) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED, CONSTRAINT child_code_unique UNIQUE (code), CONSTRAINT child_code_check CHECK (length(code) > 0))")
+
+	constraints, err := server.listConstraints(schema, child)
+	if err != nil {
+		t.Fatalf("list constraints failed in %s mode: %v", server.mode.compatibilityMode, err)
+	}
+	byName := map[string]constraintInfo{}
+	for _, constraint := range constraints {
+		byName[constraint.Name] = constraint
+	}
+	pk := byName["child_pkey"]
+	if pk.ConstraintType != "PRIMARY KEY" || len(pk.Columns) != 1 || pk.Columns[0] != "id" {
+		t.Fatalf("primary key metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, pk)
+	}
+	fk := byName["child_parent_fk"]
+	if fk.ConstraintType != "FOREIGN KEY" || !equalStringSlices(fk.Columns, []string{"parent_a", "parent_b"}) || !equalStringSlices(fk.RefColumns, []string{"a", "b"}) || fk.RefSchema == nil || *fk.RefSchema != schema || fk.RefTable == nil || *fk.RefTable != parent || fk.OnDelete == nil || *fk.OnDelete != "CASCADE" || !fk.Deferrable || !fk.InitiallyDeferred {
+		t.Fatalf("foreign key metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, fk)
+	}
+	unique := byName["child_code_unique"]
+	if unique.ConstraintType != "UNIQUE" || !equalStringSlices(unique.Columns, []string{"code"}) {
+		t.Fatalf("unique metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, unique)
+	}
+	check := byName["child_code_check"]
+	if check.ConstraintType != "CHECK" || !equalStringSlices(check.Columns, []string{"code"}) || !strings.Contains(check.Definition, "length(code) > 0") || !check.Enabled {
+		t.Fatalf("check metadata mismatch in %s mode: %+v", server.mode.compatibilityMode, check)
+	}
+	foreignKeys, err := server.listForeignKeys(schema, child)
+	if err != nil {
+		t.Fatalf("list foreign keys failed in %s mode: %v", server.mode.compatibilityMode, err)
+	}
+	foreignKeyNames := map[string]struct{}{}
+	for _, foreignKey := range foreignKeys {
+		foreignKeyNames[foreignKey.Name] = struct{}{}
+	}
+	constraintForeignKeyNames := map[string]struct{}{}
+	for _, constraint := range constraints {
+		if constraint.ConstraintType == "FOREIGN KEY" {
+			constraintForeignKeyNames[constraint.Name] = struct{}{}
+		}
+	}
+	if len(foreignKeyNames) != len(constraintForeignKeyNames) {
+		t.Fatalf("foreign-key metadata sources disagree in %s mode: constraints=%v foreign_keys=%v", server.mode.compatibilityMode, constraintForeignKeyNames, foreignKeyNames)
+	}
+	for name := range foreignKeyNames {
+		if _, ok := constraintForeignKeyNames[name]; !ok {
+			t.Fatalf("foreign-key %q missing from list_constraints in %s mode", name, server.mode.compatibilityMode)
+		}
+	}
+	if server.mode.compatibilityMode == "oracle" {
+		mustExecute(t, server, "ALTER TABLE "+childTable+" DISABLE CONSTRAINT child_code_check")
+		disabled, err := server.listConstraints(schema, child)
+		if err != nil {
+			t.Fatalf("list disabled constraints failed in %s mode: %v", server.mode.compatibilityMode, err)
+		}
+		var disabledCheck constraintInfo
+		found := false
+		for _, constraint := range disabled {
+			if constraint.Name == "child_code_check" {
+				disabledCheck = constraint
+				found = true
+				break
+			}
+		}
+		if !found || disabledCheck.Enabled {
+			t.Fatalf("disabled constraint state mismatch in %s mode: %+v", server.mode.compatibilityMode, disabledCheck)
+		}
+		mustExecute(t, server, "ALTER TABLE "+childTable+" ENABLE CONSTRAINT child_code_check")
+	}
+	parentConstraints, err := server.listConstraints(schema, parent)
+	if err != nil {
+		t.Fatalf("list parent constraints failed in %s mode: %v", server.mode.compatibilityMode, err)
+	}
+	if len(parentConstraints) != 1 || parentConstraints[0].Name != "parent_pk" || !equalStringSlices(parentConstraints[0].Columns, []string{"a", "b"}) {
+		t.Fatalf("composite primary key order mismatch in %s mode: %+v", server.mode.compatibilityMode, parentConstraints)
+	}
+}
+
+func equalStringSlices(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestKingbaseCustomTypesIntegration(t *testing.T) {

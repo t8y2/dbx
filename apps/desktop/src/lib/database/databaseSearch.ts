@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api.ts";
 
 export interface DatabaseSearchSqlOptions {
   databaseType?: DatabaseType;
+  driverProfile?: string;
   schema?: string;
   tableName: string;
   columns: ColumnInfo[];

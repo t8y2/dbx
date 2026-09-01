@@ -1,8 +1,23 @@
 use super::dialect::{database_label, StructureDialect};
 use super::types::{EditableStructureForeignKey, ForeignKeyInfo, TableStructureSqlOptions};
-use super::util::{clean, qualified_table, quote_ident};
+use super::util::{clean, qualified_new_table, qualified_table, quote_ident, quote_new_ident};
 
 pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
+    build_foreign_key_sql_with_mode(options, warnings, false)
+}
+
+pub(super) fn build_foreign_key_sql_for_new_table(
+    options: &TableStructureSqlOptions,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    build_foreign_key_sql_with_mode(options, warnings, true)
+}
+
+fn build_foreign_key_sql_with_mode(
+    options: &TableStructureSqlOptions,
+    warnings: &mut Vec<String>,
+    for_new_table: bool,
+) -> Vec<String> {
     if options.foreign_keys.is_empty() {
         return Vec::new();
     }
@@ -17,7 +32,11 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
         return Vec::new();
     }
 
-    let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
+    let table = if for_new_table {
+        qualified_new_table(options.database_type, dialect, options.schema.as_deref(), &options.table_name)
+    } else {
+        qualified_table(dialect, options.schema.as_deref(), &options.table_name)
+    };
     let mut statements = Vec::new();
 
     for foreign_key in &options.foreign_keys {
@@ -35,7 +54,9 @@ pub(super) fn build_foreign_key_sql(options: &TableStructureSqlOptions, warnings
             statements.push(drop_foreign_key_sql(dialect, &table, &original.name));
         }
 
-        if let Some(sql) = create_foreign_key_sql(dialect, &table, foreign_key, warnings) {
+        if let Some(sql) =
+            create_foreign_key_sql(options.database_type, dialect, &table, foreign_key, warnings, for_new_table)
+        {
             statements.push(sql);
         }
     }
@@ -87,10 +108,12 @@ fn drop_foreign_key_sql(dialect: StructureDialect, table: &str, name: &str) -> S
 }
 
 fn create_foreign_key_sql(
+    database_type: Option<crate::models::connection::DatabaseType>,
     dialect: StructureDialect,
     table: &str,
     foreign_key: &EditableStructureForeignKey,
     warnings: &mut Vec<String>,
+    for_new_table: bool,
 ) -> Option<String> {
     let name = clean(&foreign_key.name);
     let columns = identifier_list(&foreign_key.column);
@@ -111,13 +134,25 @@ fn create_foreign_key_sql(
         format!("{}.{}", quote_ident(dialect, &foreign_key.ref_schema), quote_ident(dialect, &ref_table))
     };
 
+    let constraint_name =
+        if for_new_table { quote_new_ident(database_type, dialect, &name) } else { quote_ident(dialect, &name) };
+    let local_columns =
+        columns
+            .iter()
+            .map(|column| {
+                if for_new_table {
+                    quote_new_ident(database_type, dialect, column)
+                } else {
+                    quote_ident(dialect, column)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+    let referenced_columns =
+        ref_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ");
     let mut sql = format!(
-        "ALTER TABLE {table} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {ref_target} ({}",
-        quote_ident(dialect, &name),
-        columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", "),
-        ref_columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ")
+        "ALTER TABLE {table} ADD CONSTRAINT {constraint_name} FOREIGN KEY ({local_columns}) REFERENCES {ref_target} ({referenced_columns})"
     );
-    sql.push(')');
 
     if let Some(action) = action_clause(dialect, "ON DELETE", &foreign_key.on_delete, warnings) {
         sql.push(' ');

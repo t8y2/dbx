@@ -578,13 +578,14 @@ function blurValueRule(id: string) {
                 {{ column }}
               </SelectItem>
               <div v-if="!props.filteredColumns.length" class="px-2 py-2 text-xs text-muted-foreground">{{ t("grid.filterBuilderNoMatchingColumns") }}</div>
-              <template #footer>
-                <div class="flex items-center gap-1.5 border-t bg-popover px-2 py-1">
+              <template #header>
+                <div data-filter-column-search class="flex items-center gap-1.5 border-b bg-popover px-2 py-1.5">
                   <Search class="h-3.5 w-3.5 text-muted-foreground" />
                   <input
                     :ref="(element) => setColumnSearchInput(rule.id, element)"
                     :value="props.columnSearch"
-                    class="h-6 min-w-0 flex-1 bg-transparent text-xs outline-none"
+                    :aria-label="t('grid.filterBuilderSearchColumns')"
+                    class="h-7 min-w-0 flex-1 rounded-sm border border-input bg-background/60 px-2 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary"
                     :placeholder="t('grid.filterBuilderSearchColumns')"
                     @input="updateColumnSearch(rule.id, $event)"
                     @click.stop

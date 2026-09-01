@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyLegacyWebViewClass, isLegacyWebView, LEGACY_WEBVIEW_CLASS, missingLegacyWebViewCapabilities } from "@/lib/ui/legacyWebView";
+import { applyLegacyWebViewClass, isLegacyWebView, LEGACY_WEBVIEW_CLASS, missingLegacyWebViewCapabilities, supportsRegExpLookbehind } from "@/lib/ui/legacyWebView";
 
 const supportedFeatures = new Set(["oklch", "color-mix-oklab", "color-mix-oklch", "has-selector", "dynamic-viewport", "min-function", "media-query-range"]);
 
@@ -82,5 +82,28 @@ describe("legacy WebView detection", () => {
     mockCssSupports(supportedFeatures);
     expect(applyLegacyWebViewClass(root)).toBe(false);
     expect(root.classList.contains(LEGACY_WEBVIEW_CLASS)).toBe(false);
+  });
+});
+
+describe("supportsRegExpLookbehind", () => {
+  it("reports support when the engine compiles lookbehind patterns", () => {
+    expect(supportsRegExpLookbehind()).toBe(true);
+  });
+
+  it("reports no support when lookbehind patterns throw like old WebKit", () => {
+    const OriginalRegExp = RegExp;
+    vi.stubGlobal(
+      "RegExp",
+      class extends OriginalRegExp {
+        constructor(pattern: string | RegExp, flags?: string) {
+          if (typeof pattern === "string" && pattern.includes("(?<")) {
+            throw new SyntaxError("Invalid regular expression: invalid group specifier name");
+          }
+          super(pattern, flags);
+        }
+      },
+    );
+
+    expect(supportsRegExpLookbehind()).toBe(false);
   });
 });

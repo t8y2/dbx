@@ -12,7 +12,7 @@
     <a href="https://discord.gg/W7NyVDRt6a"><img src="https://dcbadge.limes.pink/api/server/W7NyVDRt6a" alt="加入 Discord" /></a>
   </p>
   <p>
-		<a href="https://trendshift.io/repositories/26775?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/26775/daily?language=Rust" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
+		<a href="https://trendshift.io/repositories/26775?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26775" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
     <a href="https://hellogithub.com/repository/t8y2/dbx" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=7f74ffda697241bf996e17e1b0900a21&claim_uid=p0UjnC1TLtyvWSx" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 	<a href="https://www.producthunt.com/products/dbx/launches/dbx?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-dbx" target="_blank" rel="noopener noreferrer"><img alt="DBX - Lightweight open-source database manager built with Rust | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136811&amp;theme=light&amp;t=1780979717555"></a>
 	  </p>
@@ -514,7 +514,7 @@ MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHo
 ## 贡献者
 
 <a href="https://github.com/t8y2/dbx/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
+  <img src="https://contrib.rocks/image?repo=t8y2/dbx&max=300&columns=15" />
 </a>
 
 ## Star History

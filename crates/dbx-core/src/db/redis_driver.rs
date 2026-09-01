@@ -3074,7 +3074,12 @@ where
                 return false
             end
             local detail = string.lower(reply.err)
+            -- Redis < 7.4 reports an HTTL/HEXPIRE pcall as "Unknown Redis
+            -- command called from [Lua] script", not the top-level "unknown
+            -- command" wording. Permission and WRONGTYPE errors use different
+            -- wording and must still fail.
             return string.find(detail, 'unknown command', 1, true) ~= nil
+                or string.find(detail, 'unknown redis command', 1, true) ~= nil
                 or string.find(detail, 'syntax error', 1, true) ~= nil
                 or string.find(detail, 'unsupported', 1, true) ~= nil
         end
@@ -5511,6 +5516,63 @@ mod tests {
         assert!(con.commands[0].contains("redis.pcall('HDEL'"));
         assert!(con.commands[0].contains("local delete_probe"));
         assert!(con.commands[0].contains("if source_ttl == 0 then"));
+        // Regression guard for #7584: Redis < 7.4 answers the HTTL/HEXPIRE
+        // probe with "Unknown Redis command called from [Lua] script", which
+        // has to be recognised as an unsupported-command reply so the update
+        // degrades instead of returning -3.
+        assert!(con.commands[0].contains("'unknown redis command'"));
+    }
+
+    /// End-to-end regression for #7584 against a real Redis < 7.4.
+    ///
+    /// Set `DBX_TEST_REDIS_URL` to a Redis that predates hash-field expiry
+    /// (for example `redis://127.0.0.1:6379` backed by Redis 7.2 or 6.2).
+    /// The HTTL probe inside the Lua script fails there, and before the fix
+    /// the mismatched error wording made both value-only edits and renames
+    /// return "failed before completion". This exercises the actual
+    /// `hash_field_update` path so the Lua matcher runs on the server.
+    #[tokio::test]
+    #[ignore = "requires a Redis without hash-field expiry via DBX_TEST_REDIS_URL"]
+    async fn hash_field_update_degrades_on_redis_without_hash_field_ttl() {
+        let url = std::env::var("DBX_TEST_REDIS_URL").expect("DBX_TEST_REDIS_URL");
+        let mut con = super::connect(&url, std::time::Duration::from_secs(5)).await.unwrap();
+
+        let key = b"dbx-7584-regression";
+        redis::cmd("DEL").arg(&key[..]).query_async::<()>(&mut con).await.unwrap();
+        redis::cmd("HSET").arg(&key[..]).arg("old_field").arg("value1").query_async::<()>(&mut con).await.unwrap();
+
+        // Confirm this server takes the exact unsupported-command path that
+        // triggered the regression rather than merely accepting HTTL.
+        let unsupported_detail: String = redis::cmd("EVAL")
+            .arg(
+                "local reply = redis.pcall('HTTL', KEYS[1], 'FIELDS', 1, ARGV[1]); \
+                 if type(reply) == 'table' and reply.err ~= nil then return reply.err end; \
+                 return 'supported'",
+            )
+            .arg(1)
+            .arg(&key[..])
+            .arg("old_field")
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        assert!(
+            unsupported_detail.to_ascii_lowercase().contains("unknown redis command called from"),
+            "expected Redis without hash-field expiry, got: {unsupported_detail}"
+        );
+
+        // Value-only edit must still succeed even though HTTL is unsupported.
+        super::hash_field_update(&mut con, key, "old_field", "old_field", "value2").await.unwrap();
+        let current: String = redis::cmd("HGET").arg(&key[..]).arg("old_field").query_async(&mut con).await.unwrap();
+        assert_eq!(current, "value2");
+
+        // Field rename must also succeed and leave only the new field behind.
+        super::hash_field_update(&mut con, key, "old_field", "new_field", "value3").await.unwrap();
+        let renamed: String = redis::cmd("HGET").arg(&key[..]).arg("new_field").query_async(&mut con).await.unwrap();
+        assert_eq!(renamed, "value3");
+        let old_exists: i64 = redis::cmd("HEXISTS").arg(&key[..]).arg("old_field").query_async(&mut con).await.unwrap();
+        assert_eq!(old_exists, 0);
+
+        redis::cmd("DEL").arg(&key[..]).query_async::<()>(&mut con).await.unwrap();
     }
 
     #[tokio::test]

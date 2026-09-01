@@ -246,6 +246,10 @@ export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Pa
   return matchesShortcut(event, actionShortcut("toggleSidebar", shortcuts));
 }
 
+export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
+}
+
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("copySidebarSelection", shortcuts));
 }

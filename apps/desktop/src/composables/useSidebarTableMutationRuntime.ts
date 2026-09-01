@@ -4,6 +4,7 @@ import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { DatabaseType, TreeNode } from "@/types/database";
 import { supportsTableTruncate, supportsTableVacuum } from "@/lib/database/databaseCapabilities";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import {
   buildDropTableSql,
   buildEmptyTableSql,
@@ -66,7 +67,7 @@ export function useSidebarTableMutationRuntime(options: SidebarTableMutationRunt
   const supportsTruncate = computed(() => supportsTableTruncate(currentDatabaseType()));
   const supportsVacuum = computed(() => {
     const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-    return activeNode.value.type === "table" && !config?.read_only && supportsTableVacuum(currentDatabaseType());
+    return activeNode.value.type === "table" && !connectionIsEffectivelyReadOnly(config) && supportsTableVacuum(currentDatabaseType());
   });
   const canDropTableCascade = computed(() => activeNode.value.type === "table" && supportsDropTableCascade(currentDatabaseType()));
   const canTruncateTableCascade = computed(() => activeNode.value.type === "table" && supportsTruncateTableCascade(currentDatabaseType()));

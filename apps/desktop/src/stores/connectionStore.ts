@@ -58,6 +58,8 @@ import {
   reorderEntry as reorderEntryOp,
   reorderEntries as reorderEntriesOp,
   buildConnectionGroupPathMap,
+  connectionGroupDestinationRows,
+  connectionGroupIdForSelection,
   connectionSidebarSearchAliases,
   type DropPosition,
   type ReorderEntriesOptions,
@@ -141,12 +143,12 @@ import { kvRootNodeLabel } from "@/lib/kv/kvRootPresentation";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisDatabaseAliases, redisDatabaseAlias, redisDatabaseLabel } from "@/lib/redis/redisDatabaseAlias";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
-import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
+import { appendAgentDriverUpdateHint, connectionUsesSsh, hasAgentDriverUpdate, hasInstalledAgentVersion, type AgentDriverInstallState } from "@/lib/connection/agentDriverInstallHint";
 import { appendConnectionErrorHints, isMysqlMissingPasswordFailure, isSqliteMissingEncryptionPasswordFailure } from "@/lib/connection/connectionErrorHints";
 import { connectionNeedsPasswordPrompt } from "@/lib/connection/connectionPassword";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
-import { isXuguPublicSynonymScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
+import { isXuguPublicSynonymScope, isXuguSchedulerJobScope, isXuguSyntheticScope, sortXuguSchemaInfos, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE, XUGU_SCHEDULER_JOB_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable, packageMemberGroupOwnerId } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -162,6 +164,7 @@ import { invalidateObjectBrowserRowsCache } from "@/lib/table/objectBrowserRowsC
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
 import { buildCustomTypeTreeChildren } from "@/lib/sidebar/customTypeTree";
 import { TreeNodeLoadRegistry, type TreeNodeLoadHandle } from "@/lib/metadata/treeNodeLoadHandle";
+import { buildXuguTablespaceChildren } from "@/lib/sidebar/xuguTablespaces";
 import i18n from "@/i18n";
 import type { MqAdminConfig } from "@/types/mq";
 import { RABBITMQ_MQ_TENANT, resolveMqSystemKindFromConnection } from "@/lib/mq/mqConsoleDefaults";
@@ -516,6 +519,7 @@ export const useConnectionStore = defineStore("connection", () => {
     database: string;
     schema?: string;
     tableName?: string;
+    tableNames?: string[];
   } | null>(null);
   const docsSource = ref<{
     connectionId: string;
@@ -557,6 +561,12 @@ export const useConnectionStore = defineStore("connection", () => {
   } | null>(null);
   const sidebarLayout = ref<SidebarLayout>(emptyLayout());
   const connectionGroupPaths = computed(() => buildConnectionGroupPathMap(sidebarLayout.value));
+  const connectionGroupOptions = computed(() => connectionGroupDestinationRows(sidebarLayout.value));
+  const selectedConnectionGroupId = computed(() => {
+    const selectedNodeId = selectedTreeNodeId.value;
+    const selectedNode = selectedNodeId ? findNode(treeNodes.value, selectedNodeId) : null;
+    return connectionGroupIdForSelection(sidebarLayout.value, selectedNodeId, selectedNode?.connectionId);
+  });
   let layoutPersistTimer: ReturnType<typeof setTimeout> | null = null;
   const staleTreeRefreshIds = new Set<string>();
   const activeTreeRefreshGenerations = new Map<string, number>();
@@ -930,7 +940,7 @@ export const useConnectionStore = defineStore("connection", () => {
   function connectionErrorWithDriverUpdateHint(config: ConnectionConfig | undefined, message: string): string {
     if (!config) return message;
     message = appendConnectionErrorHints(config, message, i18n.global.t);
-    if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile)) return message;
+    if (!hasAgentDriverUpdate(config.db_type, agentDrivers.value, config.driver_profile, { ssh: connectionUsesSsh(config) })) return message;
     return appendAgentDriverUpdateHint(message, agentDriverUpdateHint());
   }
 
@@ -1355,7 +1365,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // as metadata children, withConnectionUtilityNodes would keep the old copies
     // AND append fresh ones on every useCachedChildren pass, duplicating the
     // 用户/角色 menus once per refresh cycle.
-    return node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "saved-sql-root";
+    return node.type === "user-admin" || node.type === "dameng-users" || node.type === "dameng-roles" || node.type === "dameng-job-admin" || node.type === "group-tablespaces" || node.type === "saved-sql-root";
   }
 
   function connectionMetadataChildren(children: TreeNode[] | undefined): TreeNode[] {
@@ -1644,13 +1654,33 @@ export const useConnectionStore = defineStore("connection", () => {
     };
   }
 
+  function buildXuguTablespacesNode(connectionId: string, existingConnectionNode?: TreeNode): TreeNode | undefined {
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "xugu") return undefined;
+    const existing = existingConnectionNode?.children?.find((child) => child.type === "group-tablespaces");
+    return {
+      id: `${connectionId}:__xugu_tablespaces`,
+      label: "tree.xuguTablespaces",
+      type: "group-tablespaces",
+      connectionId,
+      // SYS_TABLESPACES/SYS_DATAFILES are scoped to the current database. The
+      // optional value lets the agent switch to the configured database while
+      // retaining compatibility with connections that have no default DB.
+      database: config?.database || "",
+      objectCount: existing?.objectCount,
+      isExpanded: existing?.isExpanded ?? false,
+      children: existing?.children ?? [],
+    };
+  }
+
   function withConnectionUtilityNodes(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
     const nonUtilityChildren = connectionMetadataChildren(children);
     const userAdminNode = buildUserAdminNode(connectionId, existingConnectionNode);
     const damengUserNode = buildDamengUserNode(connectionId, existingConnectionNode);
     const damengRoleNode = buildDamengRoleNode(connectionId, existingConnectionNode);
     const damengJobAdminNode = buildDamengJobAdminNode(connectionId, existingConnectionNode);
-    return [...nonUtilityChildren, userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode].filter(Boolean) as TreeNode[];
+    const xuguTablespacesNode = buildXuguTablespacesNode(connectionId, existingConnectionNode);
+    return [...nonUtilityChildren, userAdminNode, damengUserNode, damengRoleNode, damengJobAdminNode, xuguTablespacesNode].filter(Boolean) as TreeNode[];
   }
 
   function withSavedSqlRoot(connectionId: string, children: TreeNode[], existingConnectionNode?: TreeNode): TreeNode[] {
@@ -1692,11 +1722,14 @@ export const useConnectionStore = defineStore("connection", () => {
     if (config?.db_type === "xugu" && isXuguPublicSynonymScope(schema)) {
       return ["SYNONYM"];
     }
+    if (config?.db_type === "xugu" && isXuguSchedulerJobScope(schema)) {
+      return ["JOB"];
+    }
     return supportedSidebarObjectTypes(config);
   }
 
   function objectTreeCacheVersion(config: ConnectionConfig | undefined, schema: string | undefined, baseVersion: string): string {
-    const scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : baseVersion;
+    const scopedVersion = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema) ? `${baseVersion}-public-synonyms` : config?.db_type === "xugu" && isXuguSchedulerJobScope(schema) ? `${baseVersion}-scheduler-jobs` : baseVersion;
     return ownerAwareMetadataCacheVersion(config, scopedVersion);
   }
 
@@ -3384,7 +3417,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function setDefaultSchema(connectionId: string, schema: string) {
     const config = getConfig(connectionId);
     const defaultSchema = schema.trim();
-    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguPublicSynonymScope(defaultSchema))) return;
+    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguSyntheticScope(defaultSchema))) return;
     await updateConnection({
       ...config,
       default_schema: defaultSchema,
@@ -3833,6 +3866,10 @@ export const useConnectionStore = defineStore("connection", () => {
         queryStore.rollbackConnectionTransactions(connectionId);
         break;
     }
+    // Tab handling is synchronous in memory, but persistence is debounced. Flush
+    // the scoped tab state before disconnect returns so a quick reconnect/restart
+    // cannot restore tabs that the selected policy already removed.
+    await queryStore.flushPendingPersist().catch(() => undefined);
     await disconnectRequest;
     if (isCurrentConnectionStateRevision(connectionId, stateRevision)) {
       clearConnectionError(connectionId);
@@ -3871,6 +3908,10 @@ export const useConnectionStore = defineStore("connection", () => {
         queryStore.rollbackDatabaseTransactions(connectionId, database);
         break;
     }
+    // Keep database-level disconnect consistent with connection-level cleanup:
+    // the next restore must observe the post-policy tab set, not the debounced
+    // snapshot from before this database was closed.
+    await queryStore.flushPendingPersist().catch(() => undefined);
     const node = findDatabaseTreeNode(treeNodes.value, connectionId, database);
     if (node) {
       node.isExpanded = false;
@@ -4116,6 +4157,50 @@ export const useConnectionStore = defineStore("connection", () => {
     },
     { flush: "post" },
   );
+
+  async function loadXuguTablespaces(node: TreeNode, options?: LoadTreeOptions) {
+    if (node.type !== "group-tablespaces" || !node.connectionId) return;
+    const connectionId = node.connectionId;
+    const config = getConfig(connectionId);
+    if (effectiveDatabaseTypeForConnection(config) !== "xugu") return;
+    return runTreeMetadataLoad(
+      {
+        kind: "xugu-tablespaces",
+        connectionId,
+        database: node.database || undefined,
+        driverProfile: metadataDriverProfile(config),
+      },
+      async () => {
+        let load = beginTreeNodeLoad(node);
+        try {
+          await ensureConnected(connectionId);
+          load = reclaimTreeNodeLoad(load, node);
+          if (useCachedChildren(node, options, load)) return;
+          const tablespaces = await withMetadataLoadTimeout(connectionId, api.listXuguTablespaces(connectionId, node.database || undefined), "Xugu tablespaces");
+          const targetNode = treeNodeLoadTarget(load);
+          if (!targetNode) return;
+          const children = buildXuguTablespaceChildren(targetNode, tablespaces);
+          setChildren(targetNode, children);
+          targetNode.objectCount = children.length;
+          targetNode.isExpanded = true;
+        } catch (error) {
+          // Storage metadata is an optional, read-only enhancement. A user
+          // without SYS_* view access should see an empty group rather than a
+          // connection-level RPC error that blocks the rest of the tree.
+          console.debug("[DBX][xugu-tablespaces:unavailable]", { connectionId, error });
+          const targetNode = treeNodeLoadTarget(load);
+          if (targetNode) {
+            setChildren(targetNode, []);
+            targetNode.objectCount = 0;
+            targetNode.isExpanded = true;
+          }
+        } finally {
+          finishTreeNodeLoad(load);
+        }
+      },
+      options,
+    );
+  }
 
   async function loadDatabases(connectionId: string, options?: LoadTreeOptions) {
     const configForScope = getConfig(connectionId);
@@ -5027,6 +5112,9 @@ export const useConnectionStore = defineStore("connection", () => {
           if (config?.db_type === "xugu" && schemas.some((schema) => isXuguPublicSynonymScope(schema.name))) {
             visibleSchemaNames.add(XUGU_PUBLIC_SYNONYM_SCOPE);
           }
+          if (config?.db_type === "xugu" && schemas.some((schema) => isXuguSchedulerJobScope(schema.name))) {
+            visibleSchemaNames.add(XUGU_SCHEDULER_JOB_SCOPE);
+          }
           const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
@@ -5429,6 +5517,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const config = getConfig(connectionId);
           const objectTreeProfile = driverProfileObjectTreeProfileForConnection(config);
           const isPublicSynonymScope = config?.db_type === "xugu" && isXuguPublicSynonymScope(schema);
+          const isSchedulerJobScope = config?.db_type === "xugu" && isXuguSchedulerJobScope(schema);
           const baseCacheVersion = objectTreeCacheVersion(config, schema, simpleObjectDisplay ? "objects-simple-v8" : "objects-grouped-v8");
           const cacheVersion = !simpleObjectDisplay && objectTreeProfile?.cacheKey ? `${baseCacheVersion}:${objectTreeProfile.cacheKey}` : baseCacheVersion;
           const cacheKey = schemaCacheKey(connectionId, database, schema || "", cacheVersion);
@@ -5452,7 +5541,7 @@ export const useConnectionStore = defineStore("connection", () => {
           const nonTableObjectTypes = simpleObjectDisplay ? sidebarObjectTypesForScope(config, schema).filter((objectType) => objectType !== "TABLE") : [];
           let children: TreeNode[];
           let nextObjectCount: number | undefined;
-          if (simpleObjectDisplay && !isPublicSynonymScope) {
+          if (simpleObjectDisplay && !isPublicSynonymScope && !isSchedulerJobScope) {
             const pageSize = sidebarObjectGroupPageSize();
             const page = await loadPagedSimpleTableChildren({
               nodeId,
@@ -6525,6 +6614,8 @@ export const useConnectionStore = defineStore("connection", () => {
       node.isExpanded = true;
     } else if (node.type === "doris-catalog" && node.connectionId) {
       await loadDorisCatalogDatabases(node, options);
+    } else if (node.type === "group-tablespaces" && node.connectionId) {
+      await loadXuguTablespaces(node, options);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       if (node.catalog && node.catalog !== "internal") {
         await loadDorisCatalogTables(node, options);
@@ -8749,6 +8840,8 @@ export const useConnectionStore = defineStore("connection", () => {
     recordConnectionLostError,
     sidebarLayout,
     connectionGroupPaths,
+    connectionGroupOptions,
+    selectedConnectionGroupId,
     getConfig,
     connectionIdentifierQuote,
     isTreeNodePinned,
@@ -8837,6 +8930,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadObjectGroupChildren,
     loadCustomTypeChildren,
     loadPackageMembers,
+    loadXuguTablespaces,
     loadXuguTypeMembers,
     loadMoreObjectGroupChildren,
     loadAllObjectGroupChildren,

@@ -6,7 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
-import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import i18n from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
@@ -258,7 +258,7 @@ export function useQuickOpen() {
         const allEntries: Array<{ entry: SqlFileEntry; rootFolder: string }> = [];
         for (const folderPath of folderPaths) {
           try {
-            const entries = await api.listSqlFilesInFolder(folderPath);
+            const entries = await api.listSqlFilesInFolder(folderPath, getSqlFileFilter());
             const collected: SqlFileEntry[] = [];
             collectSqlFileEntries(entries, collected);
             const rootName = folderNameFromPath(folderPath);

@@ -1217,3 +1217,61 @@ INSERT INTO install_check (id) VALUES (1), (2);
     assert_eq!(verify.columns, vec!["count"]);
     assert_eq!(verify.rows, vec![vec![serde_json::json!("2")]]);
 }
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection without a required default database"]
+async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let config = live_mysql_sql_file_config(&format!("sql-file-binary-{suffix}"));
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let database_name = std::env::var("DBX_LIVE_SQL_FILE_MYSQL_DATABASE").unwrap_or_else(|_| "dbx_test".to_string());
+    let table_name = format!("binary_dump_{suffix}");
+    let mut script = format!(
+        "USE `{database_name}`;\nCREATE TABLE `{table_name}` (id INT PRIMARY KEY, value LONGBLOB);\nINSERT INTO `{table_name}` VALUES (1, _binary '"
+    )
+    .into_bytes();
+    script.extend_from_slice(&[0xAC, b'\\', 0xED, b'\\', b'0', 0x05]);
+    script.extend_from_slice(b"');\n");
+    let request = SqlFileRequest {
+        execution_id: format!("exec-{suffix}"),
+        connection_id: config.id.clone(),
+        database: String::new(),
+        file_path: std::env::temp_dir().join(format!("mysql-binary-dump-{suffix}.sql")).to_string_lossy().into_owned(),
+        continue_on_error: false,
+    };
+
+    tokio::fs::write(&request.file_path, script).await.unwrap();
+    let result = execute_sql_file_path(
+        &state,
+        &request,
+        std::path::Path::new(&request.file_path),
+        CancellationToken::new(),
+        Instant::now(),
+        |_| {},
+    )
+    .await;
+    let verify = execute_sql_statement(
+        &state,
+        &config.id,
+        &database_name,
+        &format!("SELECT HEX(value) AS value_hex FROM `{table_name}` WHERE id = 1"),
+        None,
+        None,
+    )
+    .await;
+    let _ = execute_sql_statement(
+        &state,
+        &config.id,
+        &database_name,
+        &format!("DROP TABLE IF EXISTS `{table_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(&request.file_path);
+
+    result.expect("binary SQL file import should succeed");
+    let verify = verify.expect("verify imported binary bytes");
+    assert_eq!(verify.rows, vec![vec![serde_json::json!("ACED0005")]]);
+}

@@ -109,10 +109,10 @@ pub async fn ai_stream(
     );
     let cancelled = dbx_core::ai::register_stream(&session_id).await;
 
-    let result = dbx_core::ai::stream(&session_id, &request, &cancelled, |chunk| {
-        let _ = app.emit("ai-stream-chunk", &chunk);
-    })
-    .await;
+    let batcher = AiStreamChunkBatcher::new(app.clone(), session_id.clone());
+    let result = dbx_core::ai::stream(&session_id, &request, &cancelled, |chunk| batcher.handle(chunk)).await;
+    // Emit tail deltas the interval gate was still holding when the stream ended.
+    batcher.flush();
 
     dbx_core::ai::unregister_stream(&session_id).await;
     result
@@ -128,6 +128,187 @@ struct AiAgentEventPayload {
     session_id: String,
     #[serde(flatten)]
     event: AgentEvent,
+}
+
+/// Minimum interval between emitted AI delta batches. Providers surface one
+/// TextDelta/ReasoningDelta per SSE chunk (30-100+/second) and each emission
+/// costs a serde serialization plus a webview IPC dispatch; batching keeps that
+/// load off the render path while staying above the ~10Hz rate below which
+/// streamed text stops reading as smooth typing.
+const AI_DELTA_EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Delta batches are emitted on the first observation after a quiet period and
+/// at most once per interval afterwards.
+fn ai_delta_emit_due(last_emit: Option<std::time::Instant>) -> bool {
+    match last_emit {
+        None => true,
+        Some(at) => at.elapsed() >= AI_DELTA_EMIT_INTERVAL,
+    }
+}
+
+#[derive(Default)]
+struct AiAgentDeltaBatch {
+    text: String,
+    reasoning: String,
+    last_emit: Option<std::time::Instant>,
+}
+
+impl AiAgentDeltaBatch {
+    fn due(&self) -> bool {
+        ai_delta_emit_due(self.last_emit)
+    }
+}
+
+/// Coalesces consecutive TextDelta/ReasoningDelta events before they reach the
+/// webview. Cloning shares the batch, so provider implementations that clone
+/// the `on_event` callback emit through the same buffer. Any non-delta event
+/// flushes the pending batch first, preserving event ordering and the
+/// exact-replace semantics of WriteSqlConfirmationRequired/ProductionWriteBlocked
+/// on the frontend.
+struct AiAgentEventBatcher<R: tauri::Runtime> {
+    app: AppHandle<R>,
+    session_id: String,
+    batch: Arc<std::sync::Mutex<AiAgentDeltaBatch>>,
+}
+
+// Manual impl: deriving would add an unnecessary `R: Clone` bound.
+impl<R: tauri::Runtime> Clone for AiAgentEventBatcher<R> {
+    fn clone(&self) -> Self {
+        Self { app: self.app.clone(), session_id: self.session_id.clone(), batch: self.batch.clone() }
+    }
+}
+
+impl<R: tauri::Runtime> AiAgentEventBatcher<R> {
+    fn new(app: AppHandle<R>, session_id: String) -> Self {
+        Self { app, session_id, batch: Arc::new(std::sync::Mutex::new(AiAgentDeltaBatch::default())) }
+    }
+
+    fn handle(&self, event: AgentEvent) {
+        let mut batch = self.lock_batch();
+        match event {
+            AgentEvent::TextDelta { delta } => {
+                batch.text.push_str(&delta);
+                if batch.due() {
+                    self.flush_locked(&mut batch);
+                }
+            }
+            AgentEvent::ReasoningDelta { delta } => {
+                batch.reasoning.push_str(&delta);
+                if batch.due() {
+                    self.flush_locked(&mut batch);
+                }
+            }
+            event => {
+                self.flush_locked(&mut batch);
+                self.emit_event(event);
+            }
+        }
+    }
+
+    /// Emits whatever deltas the interval gate is still holding.
+    fn flush(&self) {
+        let mut batch = self.lock_batch();
+        self.flush_locked(&mut batch);
+    }
+
+    fn lock_batch(&self) -> std::sync::MutexGuard<'_, AiAgentDeltaBatch> {
+        self.batch.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn flush_locked(&self, batch: &mut AiAgentDeltaBatch) {
+        if !batch.text.is_empty() {
+            self.emit_event(AgentEvent::TextDelta { delta: std::mem::take(&mut batch.text) });
+        }
+        if !batch.reasoning.is_empty() {
+            self.emit_event(AgentEvent::ReasoningDelta { delta: std::mem::take(&mut batch.reasoning) });
+        }
+        batch.last_emit = Some(std::time::Instant::now());
+    }
+
+    fn emit_event(&self, event: AgentEvent) {
+        let payload = AiAgentEventPayload { session_id: self.session_id.clone(), event };
+        let _ = self.app.emit("ai-agent-event", &payload);
+    }
+}
+
+#[derive(Default)]
+struct AiStreamChunkBatch {
+    delta: String,
+    reasoning: Option<String>,
+    last_emit: Option<std::time::Instant>,
+}
+
+impl AiStreamChunkBatch {
+    fn due(&self) -> bool {
+        ai_delta_emit_due(self.last_emit)
+    }
+}
+
+/// Same delta coalescing as [`AiAgentEventBatcher`] for the legacy
+/// `ai-stream-chunk` completion stream: concatenate deltas between emissions,
+/// forward the terminal `done` chunk immediately after flushing.
+struct AiStreamChunkBatcher<R: tauri::Runtime> {
+    app: AppHandle<R>,
+    session_id: String,
+    batch: Arc<std::sync::Mutex<AiStreamChunkBatch>>,
+}
+
+impl<R: tauri::Runtime> Clone for AiStreamChunkBatcher<R> {
+    fn clone(&self) -> Self {
+        Self { app: self.app.clone(), session_id: self.session_id.clone(), batch: self.batch.clone() }
+    }
+}
+
+impl<R: tauri::Runtime> AiStreamChunkBatcher<R> {
+    fn new(app: AppHandle<R>, session_id: String) -> Self {
+        Self { app, session_id, batch: Arc::new(std::sync::Mutex::new(AiStreamChunkBatch::default())) }
+    }
+
+    fn handle(&self, mut chunk: AiStreamChunk) {
+        let mut batch = self.lock_batch();
+        if chunk.done {
+            self.flush_locked(&mut batch);
+            self.emit_chunk(chunk);
+            return;
+        }
+        if !chunk.delta.is_empty() {
+            batch.delta.push_str(&chunk.delta);
+        }
+        if let Some(reasoning) = chunk.reasoning_delta.take() {
+            if !reasoning.is_empty() {
+                batch.reasoning.get_or_insert_with(String::new).push_str(&reasoning);
+            }
+        }
+        if batch.due() {
+            self.flush_locked(&mut batch);
+        }
+    }
+
+    /// Emits whatever deltas the interval gate is still holding.
+    fn flush(&self) {
+        let mut batch = self.lock_batch();
+        self.flush_locked(&mut batch);
+    }
+
+    fn lock_batch(&self) -> std::sync::MutexGuard<'_, AiStreamChunkBatch> {
+        self.batch.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn flush_locked(&self, batch: &mut AiStreamChunkBatch) {
+        if !batch.delta.is_empty() || batch.reasoning.is_some() {
+            self.emit_chunk(AiStreamChunk {
+                session_id: self.session_id.clone(),
+                delta: std::mem::take(&mut batch.delta),
+                reasoning_delta: batch.reasoning.take(),
+                done: false,
+            });
+        }
+        batch.last_emit = Some(std::time::Instant::now());
+    }
+
+    fn emit_chunk(&self, chunk: AiStreamChunk) {
+        let _ = self.app.emit("ai-stream-chunk", &chunk);
+    }
 }
 
 #[tauri::command]
@@ -214,18 +395,15 @@ pub async fn ai_agent_stream(
     };
     let is_agent_mode = mode.as_deref() == Some("agent");
 
+    let emitter = AiAgentEventBatcher::new(app.clone(), session_id.clone());
     let result = run_agent_loop(
         &request.config,
         &request.system_prompt,
         &request.messages,
         &agent_ctx,
         {
-            let app = app.clone();
-            let event_session_id = session_id.clone();
-            move |event: AgentEvent| {
-                let payload = AiAgentEventPayload { session_id: event_session_id.clone(), event };
-                let _ = app.emit("ai-agent-event", &payload);
-            }
+            let emitter = emitter.clone();
+            move |event: AgentEvent| emitter.handle(event)
         },
         &cancelled,
         request.max_tokens,
@@ -233,6 +411,9 @@ pub async fn ai_agent_stream(
         is_agent_mode,
     )
     .await;
+    // Emit tail deltas the interval gate was still holding when the loop ended
+    // (e.g. an error return that produced no terminal AgentEvent).
+    emitter.flush();
 
     dbx_core::ai::unregister_stream(&session_id).await;
     result
@@ -310,11 +491,151 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
-    use tauri::Manager;
+    use tauri::{Listener, Manager};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::super::connection::AppState;
     use dbx_core::ai::{AiApiStyle, AiAuthMethod, AiConfig, AiProvider, AiReasoningLevel};
+
+    /// Captures the JSON payload of every `event_name` emission on a mock app.
+    fn captured_events(
+        event_name: &'static str,
+    ) -> (tauri::AppHandle<tauri::test::MockRuntime>, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let received: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let sink = received.clone();
+        handle.listen(event_name, move |event| {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                sink.lock().unwrap().push(value);
+            }
+        });
+        (handle, received)
+    }
+
+    #[test]
+    fn ai_agent_event_batcher_coalesces_deltas_between_intervals() {
+        use super::AiAgentEventBatcher;
+        use dbx_core::agent_events::AgentEvent;
+
+        let (handle, received) = captured_events("ai-agent-event");
+        let batcher = AiAgentEventBatcher::new(handle, "session-1".to_string());
+        // Leading delta flushes immediately.
+        batcher.handle(AgentEvent::TextDelta { delta: "a".to_string() });
+        // Follow-up deltas within the interval are held …
+        batcher.handle(AgentEvent::TextDelta { delta: "b".to_string() });
+        batcher.handle(AgentEvent::ReasoningDelta { delta: "r1".to_string() });
+        // … and released as one batch each before a non-delta event, so event
+        // ordering (and the exact-replace semantics of confirmation events on
+        // the frontend) is preserved.
+        batcher.handle(AgentEvent::TurnStart { turn: 1 });
+
+        let observed: Vec<(String, String)> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let delta = value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                (kind, delta)
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![
+                ("text_delta".to_string(), "a".to_string()),
+                ("text_delta".to_string(), "b".to_string()),
+                ("reasoning_delta".to_string(), "r1".to_string()),
+                ("turn_start".to_string(), String::new()),
+            ]
+        );
+
+        // Tail deltas the interval gate is still holding flush at stream end.
+        received.lock().unwrap().clear();
+        batcher.handle(AgentEvent::TextDelta { delta: "c".to_string() });
+        batcher.flush();
+        let observed: Vec<(String, String)> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let kind = value.get("type").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let delta = value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                (kind, delta)
+            })
+            .collect();
+        assert_eq!(observed, vec![("text_delta".to_string(), "c".to_string())]);
+    }
+
+    #[test]
+    fn ai_agent_event_batcher_merges_held_deltas_after_interval() {
+        use super::AiAgentEventBatcher;
+        use dbx_core::agent_events::AgentEvent;
+
+        let (handle, received) = captured_events("ai-agent-event");
+        let batcher = AiAgentEventBatcher::new(handle, "session-1".to_string());
+        batcher.handle(AgentEvent::TextDelta { delta: "a".to_string() });
+        batcher.handle(AgentEvent::TextDelta { delta: "b".to_string() });
+        std::thread::sleep(super::AI_DELTA_EMIT_INTERVAL + std::time::Duration::from_millis(20));
+        batcher.handle(AgentEvent::TextDelta { delta: "c".to_string() });
+
+        let deltas: Vec<String> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|value| value.get("type").and_then(|v| v.as_str()) == Some("text_delta"))
+            .filter_map(|value| value.get("delta").and_then(|v| v.as_str()).map(ToString::to_string))
+            .collect();
+        assert_eq!(deltas, vec!["a".to_string(), "bc".to_string()]);
+    }
+
+    #[test]
+    fn ai_stream_chunk_batcher_merges_deltas_and_forwards_done() {
+        use super::AiStreamChunkBatcher;
+
+        let (handle, received) = captured_events("ai-stream-chunk");
+        let batcher = AiStreamChunkBatcher::new(handle, "session-2".to_string());
+        batcher.handle(super::AiStreamChunk {
+            session_id: "session-2".to_string(),
+            delta: "a".to_string(),
+            reasoning_delta: None,
+            done: false,
+        });
+        // Held within the interval …
+        batcher.handle(super::AiStreamChunk {
+            session_id: "session-2".to_string(),
+            delta: "b".to_string(),
+            reasoning_delta: Some("r".to_string()),
+            done: false,
+        });
+        // … and flushed in order before the terminal chunk is forwarded.
+        batcher.handle(super::AiStreamChunk {
+            session_id: "session-2".to_string(),
+            delta: String::new(),
+            reasoning_delta: None,
+            done: true,
+        });
+
+        let observed: Vec<(String, Option<String>, bool)> = received
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                let delta = value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let reasoning = value.get("reasoning_delta").and_then(|v| v.as_str()).map(ToString::to_string);
+                let done = value.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+                (delta, reasoning, done)
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![
+                ("a".to_string(), None, false),
+                ("b".to_string(), Some("r".to_string()), false),
+                (String::new(), None, true),
+            ]
+        );
+    }
 
     /// Spawn a TCP server that returns 429 and counts connections.
     async fn counting_429_server() -> (String, Arc<AtomicU32>, tokio::task::JoinHandle<()>) {
@@ -344,6 +665,7 @@ mod tests {
             model: model.to_string(),
             models: vec![],
             api_style: AiApiStyle::AnthropicMessages,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,

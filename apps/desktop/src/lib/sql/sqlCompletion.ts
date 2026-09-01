@@ -1291,6 +1291,10 @@ export interface SqlCompletionItem {
   boost: number;
   exactMatch?: boolean;
   dedupeKey?: string;
+  /** Enables the query editor's checkbox-based batch insertion for this column. */
+  batchSelectionMode?: "select" | "insert";
+  /** Qualifier to prepend to every batch-selected column after the first one. */
+  batchSelectionQualifier?: string;
 }
 
 export function shouldChainSqlCompletionAfterAccept(item: { type?: string; apply?: string }): boolean {
@@ -1304,7 +1308,7 @@ type SqlCompletionApplyDialect = "mysql" | "postgres" | "sqlserver" | "oracle" |
 // QueryEditor may use another dialect as a CodeMirror syntax fallback.
 // Completion apply text must still follow the connected database's identifier
 // folding and quoting rules.
-const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
+const MYSQL_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["mysql", "clickhouse", "hive", "argo", "kyuubi", "impala", "spark", "databend", "tdengine", "access", "doris", "starrocks"]);
 const POSTGRES_LIKE_IDENTIFIER_DATABASES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kingbase", "highgo", "uxdb", "vastbase", "kwdb", "opengauss"]);
 const ORACLE_COMPAT_IDENTIFIER_DATABASES = new Set<DatabaseType>(["oracle", "oceanbase-oracle", "yashandb", "oscar", "xugu"]);
 const UPPER_FOLDING_IDENTIFIER_DATABASES = new Set<DatabaseType>(["dameng", "db2"]);
@@ -2210,7 +2214,9 @@ function skipSqlWhitespaceAndComments(sql: string, pos: number): number {
 export function getSqlCompletionContext(sql: string, cursor: number, options: SqlSemanticBuildOptions = {}): SqlCompletionContext {
   const statementSpan = sqlCompletionStatementSpan(sql, cursor, options);
   // Extract the full statement at cursor position for referenced tables
-  const fullStatement = sql.slice(statementSpan.start, statementSpan.end).trim();
+  const rawStatement = sql.slice(statementSpan.start, statementSpan.end);
+  const fullStatement = rawStatement.trim();
+  const cursorInStatement = cursor - statementSpan.start - (rawStatement.length - rawStatement.trimStart().length);
 
   // Content before cursor within the current statement
   const beforeCursor = sql.slice(statementSpan.start, cursor);
@@ -2223,10 +2229,10 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
 
-  let referencedTables = extractReferencedTables(fullStatement, options.databaseType);
-
-  // Merge CTE definitions into referenced tables
-  const cteDefs = extractCteDefinitions(fullStatement);
+  // CTE bodies are their own scope: resolve them first so the outer query's
+  // referenced tables are read from a statement with those bodies blanked out.
+  const cteDefs = scanCteDefinitions(fullStatement);
+  let referencedTables = extractReferencedTables(maskResolvedCteBodies(fullStatement, cursorInStatement, cteDefs), options.databaseType);
   for (const cte of cteDefs) {
     if (!referencedTables.some((rt) => rt.name.toLowerCase() === cte.name.toLowerCase())) {
       referencedTables.push({ name: cte.name, columns: cte.columns });
@@ -2861,7 +2867,7 @@ function lastTopLevelKeywordIndex(sql: string, keyword: string): number {
 // unquoted token as a table reference there is a false-positive risk. Everything else defaults
 // to Unicode support (MySQL/Postgres/SQL Server/SQLite/DuckDB and the many Chinese-vendor
 // engines this product supports legitimately use non-ASCII unquoted identifiers).
-const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
+const ASCII_ONLY_UNQUOTED_IDENTIFIER_DATABASES = new Set<DatabaseType>(["clickhouse", "snowflake", "bigquery", "hive", "argo", "spark", "trino", "prestosql", "impala", "db2", "teradata"]);
 
 // Dialects where a bare "--" needs trailing whitespace/EOL to start a comment, since MySQL
 // reserves unspaced "--" for double-negation (e.g. `SELECT 1--1`). Scoped to mysql itself plus
@@ -2881,7 +2887,7 @@ const MYSQL_DASH_COMMENT_DIALECTS = new Set<DatabaseType>(["mysql", "doris", "st
 // why that's unsafe (a trailing backslash before a closing quote in a dialect that doesn't escape
 // it, e.g. a Postgres Windows-path string literal, would misread the real closing quote as
 // escaped and swallow the rest of the query).
-const BACKSLASH_ESCAPE_STRING_DIALECTS = new Set<DatabaseType>(["mysql", "doris", "starrocks", "hive", "impala", "spark"]);
+const BACKSLASH_ESCAPE_STRING_DIALECTS = new Set<DatabaseType>(["mysql", "doris", "starrocks", "hive", "argo", "impala", "spark"]);
 
 // Table/schema/db unquoted-identifier continue class needs @ and # in addition to what
 // SQL_IDENTIFIER_CONTINUE_CHAR covers, so splice its inner class body into a locally-built class
@@ -3287,8 +3293,21 @@ function extractSelectColumnNames(sql: string): string[] {
   return names;
 }
 
-export function extractCteDefinitions(sql: string): Array<{ name: string; columns: string[] }> {
-  const ctes: Array<{ name: string; columns: string[] }> = [];
+interface ScannedCteDefinition {
+  name: string;
+  columns: string[];
+  /** Index of the `(` opening the CTE body. */
+  bodyStart: number;
+  /** Index of the `)` closing the CTE body. */
+  bodyEnd: number;
+}
+
+/**
+ * Scans `WITH` definitions, keeping each body's span so callers can tell which
+ * part of the statement belongs to a CTE rather than to the outer query.
+ */
+function scanCteDefinitions(sql: string): ScannedCteDefinition[] {
+  const ctes: ScannedCteDefinition[] = [];
   let lower = sql.toLowerCase();
   const withMatch = /\bwith\b/.exec(lower);
   if (!withMatch) return ctes;
@@ -3347,11 +3366,39 @@ export function extractCteDefinitions(sql: string): Array<{ name: string; column
       columns = extractSelectColumnNames(body);
     }
 
-    ctes.push({ name: cteName, columns });
+    ctes.push({ name: cteName, columns, bodyStart: pos, bodyEnd });
     pos = bodyEnd + 1;
   }
 
   return ctes;
+}
+
+export function extractCteDefinitions(sql: string): Array<{ name: string; columns: string[] }> {
+  return scanCteDefinitions(sql).map(({ name, columns }) => ({ name, columns }));
+}
+
+/**
+ * Blanks out CTE bodies whose projected columns are already known, so the outer
+ * query's referenced tables stay scoped to its own row sources. Without this the
+ * tables read inside a CTE (`WITH cte AS (SELECT id, name FROM t) SELECT na|`)
+ * would count as extra outer row sources and force every column suggestion to be
+ * qualified, hiding the bare `name` candidate the CTE actually provides.
+ *
+ * The body holding the cursor is never blanked -- completion inside a CTE body
+ * still needs that body's own tables -- and neither is a body whose columns could
+ * not be resolved (e.g. `SELECT *`), where the underlying table remains the only
+ * source of column names.
+ */
+function maskResolvedCteBodies(statement: string, cursorOffset: number, ctes: readonly ScannedCteDefinition[]): string {
+  let masked = statement;
+  for (const cte of ctes) {
+    if (cte.columns.length === 0) continue;
+    if (cursorOffset > cte.bodyStart && cursorOffset <= cte.bodyEnd) continue;
+    const bodyLength = cte.bodyEnd - cte.bodyStart - 1;
+    if (bodyLength <= 0) continue;
+    masked = `${masked.slice(0, cte.bodyStart + 1)}${" ".repeat(bodyLength)}${masked.slice(cte.bodyEnd)}`;
+  }
+  return masked;
 }
 
 function extractSubqueryReferences(sql: string): SqlCompletionReferencedTable[] {
@@ -4462,6 +4509,8 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
     .sort((left, right) => right.boost - left.boost || left.index - right.index)
     .slice(0, context.insertTable || !context.prefix ? 50 : context.qualifier ? 30 : 20);
 
+  const batchSelectionMode = context.insertTable ? "insert" : context.statementKind === "select" && context.selectListColumnContext ? "select" : undefined;
+
   return rankedColumns.map(({ column, boost }) => {
     return {
       label: column.displayLabel,
@@ -4471,6 +4520,11 @@ function buildColumnItems(context: SqlCompletionContext, columnsByTable: Map<str
       info: buildColumnInfo(column),
       apply: buildColumnApply(column, context, dialect),
       boost,
+      batchSelectionMode,
+      // The first selected column keeps the qualifier already present in the
+      // document. Subsequent columns must use that same user-typed qualifier,
+      // not a referenced-table alias which may be different from it.
+      batchSelectionQualifier: batchSelectionMode === "select" && context.qualifier ? (context.qualifierParts ?? context.qualifier.split(".").filter(Boolean)).map((part) => quoteCompletionApplyIdentifier(part, dialect)).join(".") : undefined,
     };
   });
 }

@@ -129,13 +129,32 @@ describe("supportsTransaction", () => {
 });
 
 describe("defaultAutoCommitForDbType", () => {
-  it("defaults query tabs to auto-commit", () => {
+  it("defaults query tabs to auto-commit unless the user configured manual", () => {
     expect(defaultAutoCommitForDbType("oceanbase-oracle")).toBe(true);
     expect(defaultAutoCommitForDbType("oracle")).toBe(true);
     expect(defaultAutoCommitForDbType("mysql")).toBe(true);
     expect(defaultAutoCommitForDbType("postgres")).toBe(true);
     expect(defaultAutoCommitForDbType("dameng")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined)).toBe(true);
+  });
+
+  it("honors the configured default transaction mode", () => {
+    expect(defaultAutoCommitForDbType("mysql", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
+    expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
+  });
+
+  it("keeps non-transaction databases auto-commit even when manual is configured", () => {
+    expect(defaultAutoCommitForDbType("redis", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType("mongodb", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(true);
+    expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
   });
 });
 

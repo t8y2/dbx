@@ -2,7 +2,7 @@
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, GutterMarker, gutter, lineNumbers } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
+import { buildQueryEditorLineNumbersExtension, isWrappedLineNumberGutter } from "@/lib/editor/queryEditorLineNumbers";
 
 class StatementRunMarker extends GutterMarker {}
 
@@ -41,6 +41,12 @@ afterEach(() => {
 });
 
 describe("query editor line numbers", () => {
+  it("only treats gutters taller than one visual row as wrapped", () => {
+    expect(isWrappedLineNumberGutter(20.8, 20.8)).toBe(false);
+    expect(isWrappedLineNumberGutter(21.6, 20.8)).toBe(false);
+    expect(isWrappedLineNumberGutter(42, 20.8)).toBe(true);
+  });
+
   it("keeps line selection behavior when enabled", () => {
     const { selectLine, view } = createEditor(true);
     const lineNumber = view.dom.querySelector<HTMLElement>(".cm-lineNumbers .cm-gutterElement");

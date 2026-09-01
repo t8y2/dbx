@@ -25,7 +25,10 @@ import {
   setGaussdbIdentifierQuoteStyle,
   setGaussdbTargetServerType,
   supportsGaussdbIdentifierQuoteStyle,
+  transferDatabaseTypeForConnection,
 } from "@/lib/database/jdbcDialect";
+import { supportsTransfer } from "@/lib/database/databaseFeatureSupport";
+import { transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 
 describe("jdbc dialect inference", () => {
   it("detects InterSystems IRIS and Caché JDBC connections", () => {
@@ -187,6 +190,68 @@ describe("jdbc dialect inference", () => {
     };
 
     expect(inferJdbcDialect(damengConnection)).toBe("dameng");
+  });
+
+  it("detects GBase JDBC connections for transfer dialect selection", () => {
+    const gbaseConnection = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
+
+    expect(inferJdbcDialect(gbaseConnection)).toBe("gbase");
+    expect(effectiveDatabaseTypeForConnection(gbaseConnection)).toBe("gbase");
+
+    // GBase 8s is Informix-based and must stay on generic jdbc (no MySQL-family transfer dialect).
+    const gbase8sByUrl = {
+      db_type: "jdbc" as const,
+      connection_string: "jdbc:gbasedbt-sqli://localhost:9088/dbx_test:INFORMIXSERVER=ol_gbasedbt",
+      jdbc_driver_class: "com.gbasedbt.jdbc.Driver",
+    };
+    const gbase8sByProfile = {
+      db_type: "jdbc" as const,
+      driver_profile: "gbase8s",
+    };
+    const gbase8sProfileWithLegacyGbaseUrl = {
+      db_type: "jdbc" as const,
+      driver_profile: "gbase8s",
+      connection_string: "jdbc:gbase://localhost:5258/dbx_test",
+      jdbc_driver_class: "cn.gbase.Driver",
+    };
+    expect(inferJdbcDialect(gbase8sByUrl)).toBe("informix");
+    expect(effectiveDatabaseTypeForConnection(gbase8sByUrl)).toBe("informix");
+    expect(inferJdbcDialect(gbase8sByProfile)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(gbase8sByProfile)).toBe("jdbc");
+    expect(inferJdbcDialect(gbase8sProfileWithLegacyGbaseUrl)).toBeUndefined();
+    expect(effectiveDatabaseTypeForConnection(gbase8sProfileWithLegacyGbaseUrl)).toBe("jdbc");
+  });
+
+  it("keeps doris-family mysql connections on the mysql transfer path", () => {
+    // Doris/SelectDB/StarRocks connections are saved as db_type=mysql with a
+    // doris-family driver_profile. The SQL dialect stays doris/starrocks
+    // (3-part catalog names), but transfer admission and object kinds must ride
+    // the raw mysql db_type: the standalone doris/starrocks manifest entries are
+    // not transfer-capable, so the effective type would hide these connections
+    // from the transfer dialog and drop their non-table object kinds.
+    for (const driver_profile of ["starrocks", "doris", "selectdb"]) {
+      const connection = { db_type: "mysql" as const, driver_profile };
+      const transferType = transferDatabaseTypeForConnection(connection);
+
+      expect(transferType).toBe("mysql");
+      expect(supportsTransfer(transferType)).toBe(true);
+      expect(transferObjectKindsForDatabase(transferType)).toContain("VIEW");
+    }
+  });
+
+  it("resolves transfer types for non-doris-family connections through the effective type", () => {
+    expect(transferDatabaseTypeForConnection(undefined)).toBeUndefined();
+    expect(transferDatabaseTypeForConnection({ db_type: "mysql" })).toBe("mysql");
+    expect(transferDatabaseTypeForConnection({ db_type: "postgres" })).toBe("postgres");
+    expect(transferDatabaseTypeForConnection({ db_type: "gbase" })).toBe("mysql");
+    expect(transferDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:gbase://localhost:5258/dbx_test" })).toBe("gbase");
+    // A generic-JDBC Doris URL keeps its raw db_type (never admitted), matching
+    // the pre-effective-type behavior for unknown jdbc connections.
+    expect(transferDatabaseTypeForConnection({ db_type: "jdbc", connection_string: "jdbc:doris://localhost:9030/dbx_test" })).toBe("jdbc");
   });
 
   it("uses Hive tree and execution semantics for Inceptor JDBC metadata", () => {

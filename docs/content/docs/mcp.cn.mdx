@@ -87,12 +87,14 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 12 个工具：
+DBX MCP 当前提供 15 个工具：
 
 | 工具 | 说明 |
 | --- | --- |
 | `dbx_list_connections` | 列出当前 MCP 会话可见的连接 |
+| `dbx_list_databases` | 列出连接中可通过 MCP 访问的数据库，并遵守该连接的数据库范围 |
 | `dbx_add_connection` | 添加连接到 DBX 存储 |
+| `dbx_duplicate_connection` | 复制一个连接及其完整配置 |
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
 | `dbx_list_tables` | 列出表、视图或集合 |
 | `dbx_describe_table` | 返回列定义和表元数据 |
@@ -101,6 +103,7 @@ DBX MCP 当前提供 12 个工具：
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
@@ -120,6 +123,30 @@ DBX MCP 当前提供 12 个工具：
 <Callout type="warn">有状态会话不会放宽 SQL 策略。`USE` 只有在会话中才有意义，但写入、DDL、生产保护、连接只读和数据库权限仍按每次请求重新检查。</Callout>
 
 ## 数据库访问
+
+### DBX Desktop 原生 Streamable HTTP
+
+Desktop 可以选择直接托管 Streamable HTTP MCP 服务。该服务**默认关闭**；在 **设置 → MCP → HTTP 服务**启用后，默认仅监听 `127.0.0.1:5225/mcp`。监听服务由 Desktop 进程管理，会生成本地 Bearer Token，页面提供可复制的客户端配置；服务异常退出时会由 Desktop 自动重新拉起。
+
+本机 MCP 客户端的接入步骤：
+
+1. 打开 **设置 → MCP → HTTP 服务**，开启 **Streamable HTTP 服务**。除非确实需要让其他设备访问，否则保持默认本机回环地址。
+2. 点击 **保存并启动服务**。修改地址、端口或路径后保存，会通过重启服务来应用新配置。
+3. 将页面展示的服务地址和 Bearer Token 复制到 MCP 客户端。
+
+不同客户端的字段名称可能不同，但核心配置如下：
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:5225/mcp",
+  "headers": {
+    "Authorization": "Bearer <DBX Desktop 页面展示的 Token>"
+  }
+}
+```
+
+本机客户端建议保留默认回环监听。绑定到局域网地址时，必须开启 **允许远程访问**，并填写精确的允许 `Host`；浏览器客户端还必须填写精确的 `Origin`。客户端通过非默认端口访问时，允许的 Host 应写成 `host:port`。轮换 Token 会立即使旧凭证失效。
 
 ### 本地连接
 
@@ -151,6 +178,22 @@ DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_P
 
 DBX Web 和 Docker 同样需要独立 DuckDB 驱动。首次启动后可通过 Driver Manager 安装；Docker 会把驱动保存到 `/app/data/agents`，挂载 `/app/data` 数据卷后升级容器不会丢失。
 
+### DBX Web 原生 Streamable HTTP
+
+DBX Web 也可以直接托管 MCP。只有配置 `DBX_WEB_MCP_TOKEN` 或 `DBX_WEB_MCP_TOKEN_FILE` 后才会启用。它复用现有 Web 监听器和 `/mcp` 路径，因此 Docker 和反向代理部署不需要额外暴露第二个端口。将 `DBX_WEB_MCP_ALLOWED_HOSTS` 配置为客户端在 `Host` 请求头中发送的公网访问地址；如有端口映射，必须包含映射后的端口。生产环境请使用 `DBX_WEB_MCP_TOKEN_FILE` 或部署平台的 Secret 管理能力，不要把真实 Token 提交到 Compose 文件中。
+
+例如容器映射为 `4225:4224` 时，MCP 地址为 `http://localhost:4225/mcp`：
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+客户端必须携带 `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`。浏览器客户端还需要在 `DBX_WEB_MCP_ALLOWED_ORIGINS` 中填写精确 Origin，例如 `https://mcp.example.com`；原生客户端通常不会发送 `Origin` 请求头。若反向代理添加了公网路径前缀，请设置 `DBX_PUBLIC_BASE_PATH=/dbx`，此时原生端点为 `/dbx/mcp`。原生 HTTP 与现有的 `DBX_WEB_URL` stdio 适配方式可以同时使用：两者共享 DBX 连接和 MCP 策略，后者仍适合只支持 stdio 的客户端。
+
 ### 桌面 UI 工具
 
 `dbx_open_table` 和 `dbx_execute_and_show` 要求 DBX 桌面端正在运行，并且在 Web 模式或连接作用域隐藏 UI 工具时不可用。其他工具是否需要 Desktop 取决于该连接是原生执行还是 bridge/Agent 路径。
@@ -167,6 +210,21 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 
 `WHERE TRUE`、`WHERE 1 = 1`、`_id: {$exists: true}` 或不透明 MongoDB 过滤器仍按高风险处理。连接自身只读、生产库保护、数据库账号权限和 MCP 连接 allowlist 在任何模式下都是权限上限。
 
+对于已暴露给 MCP 的连接，**设置 → MCP** 还可以设置额外的连接级执行上限：继承全局、只读、安全写入或高风险写入。连接规则只能收窄权限。例如全局策略为高风险访问时，连接规则设为只读仍不能写入；任何连接规则也不能绕过 DBX 的生产库保护或连接自身保护。
+
+同一页面还可只暴露选定的 MCP 工具。这项限制在服务端的每一次调用中都会强制执行，不只是客户端的展示偏好；即使客户端缓存了旧工具列表，也会在服务端 allowlist 更新后被拒绝。
+
+### 按顺序配置授权范围
+
+在 **设置 → MCP** 中建议按以下顺序定义最终权限范围：
+
+1. 选择 MCP 可见的是**所有连接**（包括以后新增的连接），还是仅**指定连接**。
+2. 为每个已暴露连接选择**全部数据库**、**仅指定数据库**或**不允许访问**。指定数据库名按精确名称匹配；可先调用 `dbx_list_databases` 获取当前允许使用的名称。
+3. 对敏感连接按需设置连接级执行上限，使其低于全局权限模式。
+4. 仅选择客户端实际需要的 MCP 工具，再设置全局执行权限模式。
+
+每一层都是权限上限：已允许的工具也不能绕过隐藏连接、数据库范围、连接只读、生产库保护或数据库账号本身的权限。请求未被选中数据库时，服务会返回 `DATABASE_OUT_OF_SCOPE`。
+
 新版 Server 不允许 `DBX_MCP_ALLOW_WRITES` 或 `DBX_MCP_ALLOW_DANGEROUS_SQL` 放宽 DBX 中央策略。为兼容升级，在中央策略首次保存前，旧配置中的 `DBX_MCP_ALLOW_WRITES=0`（或 `false`）仍会保持 MCP 只读；策略保存后仅以中央策略为准，并忽略旧权限变量。旧连接 scope 变量只能进一步收窄 DBX allowlist。
 
 | 变量 | 用途 |
@@ -179,6 +237,10 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |
 | `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true` 时跳过 TLS 证书验证（用于自签名 DBX Web 后端；默认验证） |
 | `DBX_WEB_CA_CERT` | DBX Web TLS 验证时信任的 PEM/DER CA 文件 |
+| `DBX_WEB_MCP_TOKEN` | 使用该 Bearer Token 启用原生 Web Streamable HTTP MCP |
+| `DBX_WEB_MCP_TOKEN_FILE` | 从文件读取原生 Web MCP Token；不能与 `DBX_WEB_MCP_TOKEN` 同时设置 |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | 原生 Web MCP 必填：允许的公网 Host authority，逗号分隔 |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | 原生 Web MCP 的浏览器 Origin allowlist，逗号分隔 |
 | `DBX_MCP_ALLOW_WRITES` | 仅用于升级兼容：`0`/`false` 使尚未配置的策略保持只读 |
 | `DBX_MCP_SCOPE_CONNECTION_ID` | 兼容旧配置：限制为一个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制为多个连接 ID |
@@ -192,6 +254,11 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
   <Accordion title="npm 没有安装当前平台包">不要使用 `--no-optional`，重新安装 `@dbx-app/mcp-server`，并用 `node -p 'process.platform + "-" + process.arch'` 检查平台。Alpine Linux 默认使用 musl，目前不在 Linux 发布包支持范围内。</Accordion>
   <Accordion title="找不到 dbx.db">将 `DBX_DATA_DIR` 设置为包含 `dbx.db` 的目录。Windows 便携版通常是 `DBX.exe` 旁边的 `data` 目录。</Accordion>
   <Accordion title="提示 DBX 未运行">只有 `dbx_open_table` 和 `dbx_execute_and_show` 需要桌面端运行；本地查询工具可以在 DBX 关闭时执行。</Accordion>
+  <Accordion title="Desktop HTTP 客户端提示 ERR_CONNECTION_REFUSED">进入 **设置 → MCP → HTTP 服务**，确认服务已开启并点击 **保存并启动服务**。客户端应使用页面展示的地址、路径和当前 Bearer Token。默认的 `127.0.0.1` 只接受同一台电脑上的连接。</Accordion>
+  <Accordion title="Desktop 提示 HTTP 地址已被占用">已有其他进程监听了所选地址和端口。请在 **设置 → MCP → HTTP 服务** 中改用未被占用的端口，再保存配置以重启服务。不要让两个 DBX Desktop 实例使用相同 HTTP 端点。</Accordion>
+  <Accordion title="请求返回 DATABASE_OUT_OF_SCOPE">该连接虽然已暴露给 MCP，但请求的数据库不在它的 MCP 数据库范围内。请在 **设置 → MCP** 中添加精确的数据库名称，或在合适时将该连接设为全部数据库。指定范围时，应先调用 `dbx_list_databases`，再使用返回的名称。</Accordion>
+  <Accordion title="之前可见的工具现在被拒绝">该工具已不在 **设置 → MCP** 的选中范围内，或当前权限策略不允许它。修改工具 allowlist 后请刷新 MCP 客户端的工具列表；服务端同样会拒绝缓存的旧工具调用。</Accordion>
+  <Accordion title="Docker 或反向代理下 MCP 请求失败">请使用公网访问地址，包括映射后的端口和 `DBX_PUBLIC_BASE_PATH` 前缀。`DBX_WEB_MCP_ALLOWED_HOSTS` 必须与实际 `Host` authority 精确一致；浏览器客户端还必须在 `DBX_WEB_MCP_ALLOWED_ORIGINS` 中配置精确 Origin。</Accordion>
   <Accordion title="Agent/JDBC 数据库无法启动">在 DBX Driver Manager 中安装或更新匹配的 Agent、JDBC 驱动和 JRE。厂商专有驱动不会随 MCP 原生包发布。</Accordion>
   <Accordion title="DuckDB 连接无法启动">在 DBX Driver Manager 中安装或更新 DuckDB 驱动。本地 MCP、DBX Web 和 Docker 都通过独立驱动运行 DuckDB，不会内置 DuckDB 引擎。</Accordion>
   <Accordion title="出现 better-sqlite3 或 Node ABI 错误">MCP 不需要 `better-sqlite3`。请先升级 `@dbx-app/mcp-server`；如果错误来自 `@dbx-app/cli`，请按照 CLI 的安装要求处理，因为它们是两个独立的包。</Accordion>

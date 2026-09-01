@@ -65,6 +65,43 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebMcpHttpStatus {
+    pub enabled: bool,
+    pub endpoint_path: String,
+    pub token_source: Option<&'static str>,
+    pub allowed_hosts: Vec<String>,
+    pub allowed_origins: Vec<String>,
+}
+
+pub async fn load_web_mcp_http_status(State(state): State<Arc<WebState>>) -> Json<WebMcpHttpStatus> {
+    let token_source = match (std::env::var_os("DBX_WEB_MCP_TOKEN"), std::env::var_os("DBX_WEB_MCP_TOKEN_FILE")) {
+        (Some(_), None) => Some("environment"),
+        (None, Some(_)) => Some("file"),
+        _ => None,
+    };
+    let endpoint_path =
+        if state.public_base_path == "/" { "/mcp".to_string() } else { format!("{}/mcp", state.public_base_path) };
+    Json(WebMcpHttpStatus {
+        enabled: token_source.is_some(),
+        endpoint_path,
+        token_source,
+        allowed_hosts: comma_separated_env("DBX_WEB_MCP_ALLOWED_HOSTS"),
+        allowed_origins: comma_separated_env("DBX_WEB_MCP_ALLOWED_ORIGINS"),
+    })
+}
+
+fn comma_separated_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .ok()
+        .into_iter()
+        .flat_map(|value| {
+            value.split(',').map(str::trim).filter(|value| !value.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveMaxAgentTurnsRequest {

@@ -23,7 +23,7 @@ use crate::query_result_sql::{
     QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
-use crate::transfer::keyset_pagination_sql;
+use crate::transfer::keyset_pagination_sql_with_identifier_quote;
 use crate::types::SpatialColumn;
 use crate::xlsx_export::{
     finish_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_options, StreamingXlsxWriter, XlsxWorksheetData,
@@ -39,6 +39,8 @@ use tokio_util::sync::CancellationToken;
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
+const HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
+    "HighGo cannot safely paginate this query for export. Run and export a single SELECT statement that supports LIMIT/OFFSET.";
 const AGENT_SESSION_MISSING_ERROR: &str =
     "Streaming export needs a result-set session, but this driver returned no session_id.";
 const STREAM_PROGRESS_TIME_INTERVAL: Duration = Duration::from_secs(1);
@@ -506,6 +508,21 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+fn streaming_pagination_preflight_error(
+    request: &QueryResultExportRequest,
+    page_size: usize,
+    has_keyset_plan: bool,
+    has_single_execution_bound: bool,
+) -> Option<&'static str> {
+    if has_keyset_plan || supports_streaming_offset_pagination(request, page_size) || has_single_execution_bound {
+        return None;
+    }
+    if request.database_type == DatabaseType::Highgo {
+        return Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR);
+    }
+    (!request.use_agent_cursor).then_some(STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+}
+
 /// Enforceable in-memory row bound for a single-execution export, or `None`
 /// when the query cannot be safely streamed in one shot without an Agent
 /// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
@@ -551,6 +568,19 @@ struct KeysetPlan {
     schema: String,
     table: String,
     last_pk_values: Vec<Value>,
+}
+
+fn build_keyset_export_sql(plan: &KeysetPlan, request: &QueryResultExportRequest, limit: usize) -> String {
+    keyset_pagination_sql_with_identifier_quote(
+        &plan.columns,
+        &plan.table,
+        &plan.schema,
+        &request.database_type,
+        &plan.primary_keys,
+        &plan.last_pk_values,
+        limit,
+        request.identifier_quote.as_deref(),
+    )
 }
 
 fn object_name_parts(name: &sqlparser::ast::ObjectName) -> Option<Vec<String>> {
@@ -734,12 +764,13 @@ async fn export_query_result_core_inner(
     // bound (concrete TOP count and/or the configured export row limit), then it
     // stops after the first response.
     let single_execution_bound = single_execution_page_limit(request, page_size);
-    if keyset_plan.is_none()
-        && !request.use_agent_cursor
-        && !supports_streaming_offset_pagination(request, page_size)
-        && single_execution_bound.is_none()
-    {
-        return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
+    if let Some(error) = streaming_pagination_preflight_error(
+        request,
+        page_size,
+        keyset_plan.is_some(),
+        single_execution_bound.is_some(),
+    ) {
+        return Err(error.to_string());
     }
 
     let mut sql_writer: Option<SqlInsertWriter> =
@@ -772,20 +803,7 @@ async fn export_query_result_core_inner(
 
         let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) =
             if let Some(plan) = keyset_plan.as_ref() {
-                (
-                    keyset_pagination_sql(
-                        &plan.columns,
-                        &plan.table,
-                        &plan.schema,
-                        &request.database_type,
-                        &plan.primary_keys,
-                        &plan.last_pk_values,
-                        this_page,
-                    ),
-                    this_page,
-                    false,
-                    false,
-                )
+                (build_keyset_export_sql(plan, request, this_page), this_page, false, false)
             } else {
                 let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
                     sql: request.sql.clone(),
@@ -1209,24 +1227,16 @@ async fn try_export_mysql_query_result_stream(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(&pool_key);
 
-    let (mysql_dialect, read_only_connection) = {
+    let mysql_dialect = {
         let configs = state.configs.read().await;
-        let config = configs.get(&request.connection_id);
-        (
-            config
-                .map(|config| {
-                    crate::db::mysql::MySqlQueryDialect::for_connection(
-                        config.db_type,
-                        config.driver_profile.as_deref(),
-                    )
-                })
-                .unwrap_or_default(),
-            config.filter(|config| config.read_only).map(|config| (config.name.clone(), config.db_type)),
-        )
+        configs
+            .get(&request.connection_id)
+            .map(|config| {
+                crate::db::mysql::MySqlQueryDialect::for_connection(config.db_type, config.driver_profile.as_deref())
+            })
+            .unwrap_or_default()
     };
-    if let Some((name, database_type)) = read_only_connection {
-        crate::query_execution_sql::check_read_only(&request.sql, &name, database_type)?;
-    }
+    crate::query::check_read_only_for_connection(state, &request.connection_id, &request.sql).await?;
 
     let row_limit = effective_row_limit(request);
     let stream_row_limit = row_limit;
@@ -1926,6 +1936,32 @@ mod tests {
     }
 
     #[test]
+    fn highgo_unrewritable_query_export_reports_actionable_pagination_error() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::Highgo;
+        req.use_agent_cursor = true;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(
+            streaming_pagination_preflight_error(&req, 100, false, false),
+            Some(HIGHGO_STREAMING_PAGINATION_UNSUPPORTED_ERROR)
+        );
+    }
+
+    #[test]
+    fn agent_cursor_export_keeps_unrewritable_fallback_for_other_databases() {
+        let mut req = request("csv", None, None);
+        req.database_type = DatabaseType::Oracle;
+        req.use_agent_cursor = true;
+        req.sql = "SELECT * FROM users; SELECT 1".to_string();
+        req.query_base_sql = req.sql.clone();
+
+        assert_eq!(streaming_pagination_preflight_error(&req, 100, false, false), None);
+    }
+
+    #[test]
     fn csv_unlimited_export_has_no_effective_row_limit() {
         assert_eq!(effective_row_limit(&request("csv", None, None)), None);
     }
@@ -2267,6 +2303,26 @@ mod tests {
     fn keyset_candidate_rejects_filters_and_projection_changes() {
         assert!(safe_keyset_candidate("SELECT * FROM users WHERE active = true").is_none());
         assert!(safe_keyset_candidate("SELECT id, name FROM users").is_none());
+    }
+
+    #[test]
+    fn kingbase_keyset_export_uses_connection_identifier_quote() {
+        let mut export_request = request("sql", None, None);
+        export_request.database_type = DatabaseType::Kingbase;
+        export_request.identifier_quote = Some("`".to_string());
+        let plan = KeysetPlan {
+            columns: vec!["id".to_string(), "name".to_string()],
+            primary_keys: vec!["id".to_string()],
+            pk_indices: vec![0],
+            schema: "app".to_string(),
+            table: "events".to_string(),
+            last_pk_values: vec![serde_json::json!(7)],
+        };
+
+        assert_eq!(
+            build_keyset_export_sql(&plan, &export_request, 100),
+            "SELECT `id`, `name` FROM `app`.`events` WHERE `id` > 7 ORDER BY `id` ASC LIMIT 100"
+        );
     }
 
     #[tokio::test]

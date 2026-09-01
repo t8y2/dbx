@@ -5,6 +5,7 @@ import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoS
 import { ExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
+import type { XuguTablespaceInfo } from "@/types/database";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 
 /** Normalize Tauri rejections once at the public backend boundary. */
@@ -37,6 +38,7 @@ import type {
   ColumnInfo,
   SqlServerColumnMetadata,
   IndexInfo,
+  ReferenceKeyInfo,
   ForeignKeyInfo,
   TriggerInfo,
   ConstraintInfo,
@@ -244,7 +246,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedToolNames: string[] | null;
+  connectionPolicies: McpConnectionPolicy[];
   configured: boolean;
+  queryTimeoutSecs: number | null;
+}
+
+export interface McpConnectionPolicy {
+  connectionId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
+  executionModeConfigured: boolean;
+  databaseScope: "all" | "selected" | "none";
+  allowedDatabases: string[];
 }
 
 export interface SavedSqlSyncEntry {
@@ -632,6 +646,53 @@ export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configu
   return invoke("save_mcp_global_policy", { policy });
 }
 
+export interface McpHttpServerSettings {
+  enabled: boolean;
+  host: string;
+  port: number;
+  path: string;
+  allowRemote: boolean;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export interface McpHttpServerStatus {
+  enabled: boolean;
+  running: boolean;
+  endpoint: string | null;
+  accessToken: string | null;
+  lastError: string | null;
+  recentLogs: string[];
+}
+
+export interface WebMcpHttpStatus {
+  enabled: boolean;
+  endpointPath: string;
+  tokenSource: "environment" | "file" | null;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+}
+
+export async function loadMcpHttpServerSettings(): Promise<McpHttpServerSettings> {
+  return invoke("load_mcp_http_server_settings");
+}
+
+export async function saveMcpHttpServerSettings(settings: McpHttpServerSettings): Promise<McpHttpServerStatus> {
+  return invoke("save_mcp_http_server_settings", { settings });
+}
+
+export async function mcpHttpServerStatus(): Promise<McpHttpServerStatus> {
+  return invoke("mcp_http_server_status");
+}
+
+export async function rotateMcpHttpServerToken(): Promise<McpHttpServerStatus> {
+  return invoke("rotate_mcp_http_server_token");
+}
+
+export async function loadWebMcpHttpStatus(): Promise<WebMcpHttpStatus> {
+  return { enabled: false, endpointPath: "/mcp", tokenSource: null, allowedHosts: [], allowedOrigins: [] };
+}
+
 export async function loadMaxAgentTurns(): Promise<number> {
   return invoke("load_max_agent_turns");
 }
@@ -886,8 +947,20 @@ export interface SqlFileEntry {
   children: SqlFileEntry[];
 }
 
-export async function listSqlFilesInFolder(folderPath: string): Promise<SqlFileEntry[]> {
-  return invoke("list_sql_files_in_folder", { folderPath });
+export async function listSqlFilesInFolder(folderPath: string, fileFilter?: string): Promise<SqlFileEntry[]> {
+  return invoke("list_sql_files_in_folder", { folderPath, fileFilter });
+}
+
+export async function createSqlFileInFolder(rootPath: string, directoryPath: string, fileName: string): Promise<string> {
+  return invoke("create_sql_file_in_folder", { rootPath, directoryPath, fileName });
+}
+
+export async function renameSqlFileInFolder(rootPath: string, filePath: string, fileName: string): Promise<string> {
+  return invoke("rename_sql_file_in_folder", { rootPath, filePath, fileName });
+}
+
+export async function deleteSqlFileInFolder(rootPath: string, filePath: string): Promise<void> {
+  return invoke("delete_sql_file_in_folder", { rootPath, filePath });
 }
 
 // --- AI Conversations ---
@@ -1022,6 +1095,24 @@ export async function saveConnectionDatabaseInfo(connectionId: string, databaseI
   });
 }
 
+export interface WriteUnlockState {
+  remainingMs: number;
+}
+
+export async function unlockConnectionWrites(connectionId: string, durationSecs: number): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("unlock_connection_writes", { connectionId, durationSecs });
+  return state.remainingMs;
+}
+
+export async function lockConnectionWrites(connectionId: string): Promise<void> {
+  return invokeBackend("lock_connection_writes", { connectionId });
+}
+
+export async function connectionWriteUnlockState(connectionId: string): Promise<number> {
+  const state = await invokeBackend<WriteUnlockState>("connection_write_unlock_state", { connectionId });
+  return state.remainingMs;
+}
+
 export async function connectionFinalProxyPort(config: ConnectionConfig): Promise<number> {
   return invokeBackend("connection_final_proxy_port", { config });
 }
@@ -1068,6 +1159,10 @@ export async function listDatabaseMetadata(connectionId: string): Promise<Databa
 
 export async function listDatabaseStorage(connectionId: string, databases: string[]): Promise<DatabaseStorageInfo[]> {
   return invoke("list_database_storage", { connectionId, databases });
+}
+
+export async function listXuguTablespaces(connectionId: string, database?: string): Promise<XuguTablespaceInfo[]> {
+  return invoke("list_xugu_tablespaces", { connectionId, database });
 }
 
 export async function getSqlServerCompletionContext(connectionId: string, database: string): Promise<SqlServerCompletionContext> {
@@ -1807,6 +1902,16 @@ export async function listReferenceKeyColumns(connectionId: string, database: st
   });
 }
 
+export async function listReferenceKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ReferenceKeyInfo[]> {
+  return invoke("list_reference_keys", {
+    connectionId,
+    database,
+    schema,
+    table,
+    catalog,
+  });
+}
+
 export async function listForeignKeys(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ForeignKeyInfo[]> {
   return invoke("list_foreign_keys", {
     connectionId,
@@ -2243,6 +2348,10 @@ export async function isSqliteDatabaseFile(path: string): Promise<boolean> {
 
 export async function backupSqliteDatabase(connectionId: string, destinationPath: string): Promise<void> {
   return invoke("backup_sqlite_database", { connectionId, destinationPath });
+}
+
+export async function restoreSqliteDatabase(connectionId: string, sourcePath: string): Promise<void> {
+  return invoke("restore_sqlite_database", { connectionId, sourcePath });
 }
 
 export async function syncSavedSqlDirectory(request: SavedSqlSyncRequest): Promise<void> {
@@ -3761,7 +3870,20 @@ export async function mongoParseShellCommand(source: string): Promise<MongoComma
   return normalizeRustMongoCommand(raw);
 }
 
-export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, collation?: string, executionId?: string, cursor?: string): Promise<DocumentQueryResult> {
+export async function documentFindDocuments(
+  connectionId: string,
+  database: string,
+  collection: string,
+  skip: number,
+  limit: number,
+  filter?: string,
+  projection?: string,
+  sort?: string,
+  collation?: string,
+  executionId?: string,
+  cursor?: string,
+  cursorPagination?: boolean,
+): Promise<DocumentQueryResult> {
   return invoke("document_find_documents", {
     connectionId,
     database,
@@ -3773,6 +3895,7 @@ export async function documentFindDocuments(connectionId: string, database: stri
     sort,
     collation,
     cursor,
+    cursorPagination,
     executionId,
   });
 }
@@ -3796,6 +3919,33 @@ export async function elasticsearchCountDocuments(connectionId: string, index: s
     index,
     filter,
     executionId,
+  });
+}
+
+/** Read-only index metadata endpoints exposed on the Elasticsearch index context menu. */
+export type ElasticsearchIndexMetadataKind = "mapping" | "settings" | "stats";
+
+/** Outcome of clearing an index: mapping and settings are kept, documents are not. */
+export interface ElasticsearchDeleteByQueryResult {
+  total: number;
+  deleted: number;
+  versionConflicts: number;
+  timedOut: boolean;
+  failures: string[];
+}
+
+export async function elasticsearchGetIndexMetadata(connectionId: string, index: string, kind: ElasticsearchIndexMetadataKind): Promise<Record<string, any>> {
+  return invoke("elasticsearch_get_index_metadata", {
+    connectionId,
+    index,
+    kind,
+  });
+}
+
+export async function elasticsearchDeleteAllDocuments(connectionId: string, index: string): Promise<ElasticsearchDeleteByQueryResult> {
+  return invoke("elasticsearch_delete_all_documents", {
+    connectionId,
+    index,
   });
 }
 
@@ -4391,6 +4541,7 @@ export interface TransferRequest {
   objects: TransferObjectSelection[];
   mode: TransferMode;
   targetTableNameCase: TransferTableNameCase;
+  quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
 }
@@ -4466,7 +4617,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 export type TableImportMode = "append" | "truncate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
-export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel";
+export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql";
 export type TableImportJsonShape = "auto" | "objects" | "arrays";
 export type TableImportTextEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
 
@@ -4488,6 +4639,7 @@ export interface TableImportParseOptions {
   sheetName?: string | null;
   sheetIndex?: number | null;
   jsonShape?: TableImportJsonShape | null;
+  sqlDialect?: DatabaseType | null;
 }
 
 export interface TableImportPreviewRequest {
@@ -4614,6 +4766,7 @@ export interface DatabaseExportRequest {
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;
+  outputCompression?: "none" | "gzip";
   snapshotSessionId?: string;
   batchSize: number;
 }
@@ -4805,8 +4958,8 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
-export async function beginDatabaseBackupSnapshot(connectionId: string, database: string): Promise<DatabaseBackupSnapshot> {
-  return invoke("begin_database_backup_snapshot", { connectionId, database });
+export async function beginDatabaseBackupSnapshot(connectionId: string, database: string, exportId?: string): Promise<DatabaseBackupSnapshot> {
+  return invoke("begin_database_backup_snapshot", { connectionId, database, exportId: exportId || null });
 }
 
 export async function exportDatabaseSql(request: DatabaseExportRequest, onProgress: (progress: ExportProgress) => void): Promise<void> {
@@ -4828,6 +4981,10 @@ export async function exportDatabaseSql(request: DatabaseExportRequest, onProgre
 
 export async function cancelDatabaseExport(exportId: string): Promise<void> {
   await invoke("cancel_database_export", { exportId });
+}
+
+export async function clearDatabaseExportCancellation(exportId: string): Promise<void> {
+  await invoke("clear_database_export_cancellation", { exportId });
 }
 
 export async function recordDatabaseExportDestination(directory: string): Promise<void> {

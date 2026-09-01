@@ -4,11 +4,13 @@
 //! 思路：不手工重建 sqlparser AST，而是复用 sqlparser 对表达式 / 表 / WHERE 的
 //! 方言正确渲染（`Display` round-trip），只在外层做字符串装配：
 //!   UPDATE t SET a = 123 WHERE id = 1
-//!     → SELECT *, 123 AS "a（新值）" FROM t WHERE id = 1
-//! `SELECT *` 展开受影响行全部当前值，「新值」列追加在末尾；SET 表达式直接搬运
-//! （在行上下文中按旧值求值即得新值，`SET a = a + 1` 也能算对）。
+//!     → SELECT *, 123 AS "a (new)" FROM t WHERE id = 1
+//! `SELECT *` 展开受影响行全部当前值，新值列（别名后缀 ` (new)`）追加在末尾；
+//! SET 表达式直接搬运（在行上下文中按旧值求值即得新值，`SET a = a + 1` 也能算对）。
+//! 注意：SET / VALUES 表达式会在预览 SELECT 中重新求值，带副作用的表达式
+//! （推进序列、volatile 函数）在预览中同样生效，非确定性函数的预览值可能与实际执行不同。
 //!
-//! 无法安全改写的语句返回 Err（前端据此提示"暂不支持预览"，仍可正常执行原语句）。
+//! 无法安全改写的语句返回 Err（错误信息为英文，前端直接以 toast 展示，仍可正常执行原语句）。
 
 use sqlparser::ast::{AssignmentTarget, Expr, Ident, ObjectNamePart, SetExpr, Statement, TableWithJoins};
 use sqlparser::dialect::{
@@ -77,7 +79,7 @@ fn parse_statements(sql: &str, dialect_key: &str) -> Result<Vec<Statement>, Stri
         "spark" => Parser::parse_sql(&SparkSqlDialect {}, sql),
         _ => Parser::parse_sql(&GenericDialect {}, sql),
     }
-    .map_err(|error| format!("无法解析该语句：{error}"))
+    .map_err(|error| format!("Failed to parse the statement: {error}"))
 }
 
 fn quote_identifier(name: &str, quote: Option<&str>, dialect_key: &str) -> String {
@@ -104,13 +106,13 @@ fn assignment_target_column(target: &AssignmentTarget) -> Option<&Ident> {
 }
 
 fn unsupported(reason: &str) -> String {
-    format!("暂不支持预览：{reason}")
+    format!("Preview is not supported: {reason}")
 }
 
 /// UPDATE → SELECT <列交错展开> FROM … WHERE …
 ///
-/// 提供目标表列清单且为单表时，按「原列, 原列（新值）」逐列交错展开，使新值列紧跟
-/// 其原值列；否则退化为 `SELECT *, <SET 表达式> AS "列（新值）", …`（追加在末尾）。
+/// 提供目标表列清单且为单表时，按「原列, 原列 (new)」逐列交错展开，使新值列紧跟
+/// 其原值列；否则退化为 `SELECT *, <SET 表达式> AS "列 (new)", …`（追加在末尾）。
 fn build_update_preview(
     update: &sqlparser::ast::Update,
     dialect_key: &str,
@@ -127,7 +129,7 @@ fn build_update_preview(
     let mut set_order: Vec<String> = Vec::new(); // 小写列名 → 顺序
     for assignment in &update.assignments {
         let Some(column) = assignment_target_column(&assignment.target) else {
-            return Err(unsupported("UPDATE 的赋值目标不是单列（含元组赋值）"));
+            return Err(unsupported("UPDATE assignment target is not a single column"));
         };
         let column_name = column.value.clone();
         let key = column_name.to_lowercase();
@@ -139,22 +141,21 @@ fn build_update_preview(
         set_items.push(SetItem { column: column_name, expr: assignment.value.to_string() });
     }
 
-    // FROM 部分：主表 + JOIN；Postgres `UPDATE … FROM …` 追加为跨连接。
-    let mut from_sql = update.table.to_string();
+    // Postgres `UPDATE … FROM …`：同一目标行可能匹配多行来源，真实 UPDATE 只更新一次，
+    // 而改写出的 SELECT 会把该行显示多次（跨连接重复计数），直接拒绝预览。
     if let Some(from_kind) = &update.from {
-        let extra = match from_kind {
+        let extra_count = match from_kind {
             sqlparser::ast::UpdateTableFromKind::BeforeSet(list)
-            | sqlparser::ast::UpdateTableFromKind::AfterSet(list) => {
-                list.iter().map(|table| table.to_string()).collect::<Vec<_>>()
-            }
+            | sqlparser::ast::UpdateTableFromKind::AfterSet(list) => list.len(),
         };
-        if !extra.is_empty() {
-            from_sql = format!("{from_sql}, {}", extra.join(", "));
+        if extra_count > 0 {
+            return Err(unsupported("UPDATE ... FROM"));
         }
     }
+    let from_sql = update.table.to_string();
 
     let render_new_value = |item: &SetItem| -> String {
-        format!("{} AS {}", item.expr, quote_identifier(&format!("{}（新值）", item.column), quote, dialect_key))
+        format!("{} AS {}", item.expr, quote_identifier(&format!("{} (new)", item.column), quote, dialect_key))
     };
     let append_items: Vec<String> = set_items.iter().map(render_new_value).collect();
 
@@ -222,18 +223,18 @@ fn build_insert_preview(
             .iter()
             .map(|assignment| {
                 let col = assignment_target_column(&assignment.target)
-                    .ok_or_else(|| unsupported("INSERT … SET 的赋值目标不是单列"))?;
+                    .ok_or_else(|| unsupported("INSERT ... SET assignment target is not a single column"))?;
                 Ok(format!("{} AS {}", assignment.value, quote_identifier(&col.value, quote, dialect_key)))
             })
             .collect::<Result<Vec<_>, String>>()?;
         if items.is_empty() {
-            return Err(unsupported("INSERT … SET 没有赋值"));
+            return Err(unsupported("INSERT ... SET has no assignments"));
         }
         return Ok(format!("SELECT {}", items.join(", ")));
     }
 
     let Some(source) = &insert.source else {
-        return Err(unsupported("INSERT 缺少数据来源（source）"));
+        return Err(unsupported("INSERT has no source"));
     };
 
     match source.body.as_ref() {
@@ -246,7 +247,7 @@ fn build_insert_preview(
                 })
                 .collect();
             if !column_names.is_empty() && values.rows.iter().any(|row| row.content.len() != column_names.len()) {
-                return Err(unsupported("INSERT 的 VALUES 行与列数不一致"));
+                return Err(unsupported("INSERT VALUES row length does not match the column list"));
             }
             let render_row = |row_exprs: &[Expr]| -> String {
                 let cells: Vec<String> = row_exprs
@@ -265,7 +266,7 @@ fn build_insert_preview(
             };
             let rows = values.rows.iter().collect::<Vec<_>>();
             let Some(first) = rows.first() else {
-                return Err(unsupported("INSERT 的 VALUES 为空"));
+                return Err(unsupported("INSERT VALUES is empty"));
             };
             let mut sql = render_row(&first.content);
             for row in rows.iter().skip(1) {
@@ -293,7 +294,7 @@ fn build_delete_preview(
         }
     };
     if from_sql.is_empty() {
-        return Err(unsupported("DELETE 缺少 FROM"));
+        return Err(unsupported("DELETE has no FROM"));
     }
     let mut sql = format!("SELECT * FROM {from_sql}");
     if let Some(using) = &delete.using {
@@ -319,9 +320,9 @@ pub fn build_dml_change_preview_sql(options: DmlChangePreviewSqlOptions) -> Resu
     let dialect_key = normalize_dialect(options.database_type.as_deref());
     let statements = parse_statements(&options.sql, dialect_key)?;
     let statement = match statements.len() {
-        0 => return Err(unsupported("没有可预览的语句")),
+        0 => return Err(unsupported("no statement to preview")),
         1 => &statements[0],
-        _ => return Err(unsupported("一次只能预览一条语句（请选中单独一条）")),
+        _ => return Err(unsupported("only one statement can be previewed at a time")),
     };
     let quote = options.identifier_quote.as_deref();
     let columns = options.columns.as_deref();
@@ -344,7 +345,7 @@ pub fn build_dml_change_preview_sql(options: DmlChangePreviewSqlOptions) -> Resu
             has_new_value_columns: false,
             tables: vec![delete_table_ref(delete)],
         }),
-        _ => Err(unsupported("只有 UPDATE / INSERT / DELETE 语句可以预览变更")),
+        _ => Err(unsupported("only UPDATE / INSERT / DELETE statements can be previewed")),
     }
 }
 
@@ -437,37 +438,38 @@ mod tests {
     fn update_simple_single_table() {
         let result = preview("UPDATE admin_sessions SET public_id = 123 WHERE id = 1", "mysql").unwrap();
         assert_eq!(result.operation, "update");
-        assert_eq!(result.sql, "SELECT *, 123 AS `public_id（新值）` FROM admin_sessions WHERE id = 1");
+        assert_eq!(result.sql, "SELECT *, 123 AS `public_id (new)` FROM admin_sessions WHERE id = 1");
     }
 
     #[test]
     fn update_multiple_assignments_and_expression() {
         let result = preview("UPDATE t SET a = 1, b = a + 1", "postgres").unwrap();
-        assert_eq!(result.sql, "SELECT *, 1 AS \"a（新值）\", a + 1 AS \"b（新值）\" FROM t");
+        assert_eq!(result.sql, "SELECT *, 1 AS \"a (new)\", a + 1 AS \"b (new)\" FROM t");
     }
 
     #[test]
     fn update_deduplicates_same_column_last_wins() {
         let result = preview("UPDATE t SET x = 1, x = 2", "postgres").unwrap();
-        assert_eq!(result.sql, "SELECT *, 2 AS \"x（新值）\" FROM t");
+        assert_eq!(result.sql, "SELECT *, 2 AS \"x (new)\" FROM t");
     }
 
     #[test]
     fn update_with_alias_and_join() {
         let result = preview("UPDATE a JOIN b ON a.id = b.id SET a.x = b.x WHERE a.id = 1", "mysql").unwrap();
-        assert_eq!(result.sql, "SELECT *, b.x AS `x（新值）` FROM a JOIN b ON a.id = b.id WHERE a.id = 1");
+        assert_eq!(result.sql, "SELECT *, b.x AS `x (new)` FROM a JOIN b ON a.id = b.id WHERE a.id = 1");
     }
 
     #[test]
-    fn update_postgres_from_clause() {
-        let result = preview("UPDATE t SET x = s.y FROM s WHERE t.id = s.id", "postgres").unwrap();
-        assert_eq!(result.sql, "SELECT *, s.y AS \"x（新值）\" FROM t, s WHERE t.id = s.id");
+    fn update_postgres_from_clause_rejected() {
+        // `UPDATE … FROM …` 的目标行可能匹配多行来源，跨连接改写会重复计数，应拒绝预览。
+        let error = preview("UPDATE t SET x = s.y FROM s WHERE t.id = s.id", "postgres").unwrap_err();
+        assert_eq!(error, "Preview is not supported: UPDATE ... FROM");
     }
 
     #[test]
     fn update_where_missing() {
         let result = preview("UPDATE t SET x = 1", "sqlite").unwrap();
-        assert_eq!(result.sql, "SELECT *, 1 AS \"x（新值）\" FROM t");
+        assert_eq!(result.sql, "SELECT *, 1 AS \"x (new)\" FROM t");
     }
 
     #[test]
@@ -520,7 +522,7 @@ mod tests {
             columns: None,
         })
         .unwrap();
-        assert_eq!(result.sql, "SELECT *, 1 AS \"a（新值）\" FROM t WHERE id = 1");
+        assert_eq!(result.sql, "SELECT *, 1 AS \"a (new)\" FROM t WHERE id = 1");
     }
 
     #[test]
@@ -532,7 +534,7 @@ mod tests {
             columns: None,
         })
         .unwrap();
-        assert_eq!(result.sql, "SELECT *, 1 AS [a（新值）] FROM dbo.t WHERE id = 1");
+        assert_eq!(result.sql, "SELECT *, 1 AS [a (new)] FROM dbo.t WHERE id = 1");
     }
 
     #[test]
@@ -545,7 +547,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             result.sql,
-            "SELECT `id`, `public_id`, 123 AS `public_id（新值）`, `session` FROM admin_sessions WHERE id = 1"
+            "SELECT `id`, `public_id`, 123 AS `public_id (new)`, `session` FROM admin_sessions WHERE id = 1"
         );
         assert_eq!(result.tables.len(), 1);
         assert_eq!(result.tables[0].table.as_deref(), Some("admin_sessions"));
@@ -559,14 +561,14 @@ mod tests {
             vec!["a".to_string(), "b".to_string(), "c".to_string()],
         )
         .unwrap();
-        assert_eq!(result.sql, "SELECT \"a\", 1 AS \"a（新值）\", \"b\", 2 AS \"b（新值）\", \"c\" FROM t");
+        assert_eq!(result.sql, "SELECT \"a\", 1 AS \"a (new)\", \"b\", 2 AS \"b (new)\", \"c\" FROM t");
     }
 
     #[test]
     fn update_interleave_missing_set_column_appends_at_end() {
         let result =
             preview_with_columns("UPDATE t SET z = 9", "postgres", vec!["a".to_string(), "b".to_string()]).unwrap();
-        assert_eq!(result.sql, "SELECT \"a\", \"b\", 9 AS \"z（新值）\" FROM t");
+        assert_eq!(result.sql, "SELECT \"a\", \"b\", 9 AS \"z (new)\" FROM t");
     }
 
     #[test]
@@ -577,7 +579,7 @@ mod tests {
             vec!["a_x".to_string()],
         )
         .unwrap();
-        assert_eq!(result.sql, "SELECT *, b.x AS `x（新值）` FROM a JOIN b ON a.id = b.id WHERE a.id = 1");
+        assert_eq!(result.sql, "SELECT *, b.x AS `x (new)` FROM a JOIN b ON a.id = b.id WHERE a.id = 1");
     }
 
     #[test]

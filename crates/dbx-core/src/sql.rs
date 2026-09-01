@@ -1651,6 +1651,8 @@ pub fn optimize_sql_file_import_statements(
 ) -> Vec<SqlFileImportStatement> {
     let mut optimized = Vec::new();
     let mut pending_insert: Option<PendingInsertBatch> = None;
+    let merge_adjacent_inserts =
+        db_type.as_ref().is_none_or(|db_type| !is_mysql_compatible_import_target(db_type, driver_profile));
 
     for statement in statements {
         let action = db_type
@@ -1670,7 +1672,11 @@ pub fn optimize_sql_file_import_statements(
             }
             SqlFileStatementAction::Execute(sql) => {
                 let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
-                if let Some(insert) = parse_mergeable_insert(&sql, options) {
+                // Combining separate MySQL INSERT statements changes session
+                // semantics such as LAST_INSERT_ID(), so execute them with the
+                // same statement boundaries as the source file.
+                let mergeable_insert = merge_adjacent_inserts.then(|| parse_mergeable_insert(&sql, options)).flatten();
+                if let Some(insert) = mergeable_insert {
                     match pending_insert.as_mut() {
                         Some(batch) if batch.can_accept(&insert) => batch.push(insert),
                         Some(_) => {
@@ -3191,19 +3197,56 @@ mod tests {
     }
 
     #[test]
-    fn optimizes_adjacent_single_row_inserts_into_multi_row_insert() {
+    fn optimizes_adjacent_postgres_single_row_inserts_into_multi_row_insert() {
         let statements = vec![
             "INSERT INTO users (id, name) VALUES (1, 'Ada')".to_string(),
             "insert into users (id, name) values (2, 'Linus')".to_string(),
             "SELECT 1".to_string(),
         ];
 
-        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
+        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Postgres), None);
 
         assert_eq!(optimized.len(), 2);
         assert_eq!(optimized[0].source_statement_count, 2);
         assert_eq!(optimized[0].sql, "INSERT INTO users (id, name) VALUES\n(1, 'Ada'),\n(2, 'Linus')");
         assert_eq!(optimized[1].sql, "SELECT 1");
+    }
+
+    #[test]
+    fn keeps_mysql_insert_statements_separate_to_preserve_session_semantics() {
+        let statements = vec![
+            "INSERT INTO parents (name) VALUES ('first')".to_string(),
+            "INSERT INTO parents (name) VALUES ('second')".to_string(),
+            "INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID())".to_string(),
+        ];
+
+        for (db_type, driver_profile) in
+            [(DatabaseType::Mysql, None), (DatabaseType::Jdbc, Some("mariadb")), (DatabaseType::Doris, None)]
+        {
+            let optimized = optimize_sql_file_import_statements(&statements, Some(db_type), driver_profile);
+
+            assert_eq!(optimized.len(), 3, "{db_type:?}/{driver_profile:?}");
+            assert!(
+                optimized.iter().all(|statement| statement.source_statement_count == 1),
+                "{db_type:?}/{driver_profile:?}"
+            );
+            assert_eq!(
+                optimized.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>(),
+                statements,
+                "{db_type:?}/{driver_profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_existing_mysql_multi_row_insert_unchanged() {
+        let statements = vec!["INSERT INTO users (id) VALUES (1), (2)".to_string()];
+
+        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
+
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].source_statement_count, 1);
+        assert_eq!(optimized[0].sql, statements[0]);
     }
 
     #[test]
@@ -3221,7 +3264,7 @@ mod tests {
     }
 
     #[test]
-    fn optimized_sql_file_import_keeps_skipped_mysql_dump_statements() {
+    fn mysql_dump_import_keeps_skips_and_insert_statement_boundaries() {
         let statements = vec![
             "LOCK TABLES `users` WRITE".to_string(),
             "INSERT INTO `users` VALUES (1)".to_string(),
@@ -3231,10 +3274,11 @@ mod tests {
 
         let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
 
-        assert_eq!(optimized.len(), 3);
+        assert_eq!(optimized.len(), 4);
         assert_eq!(optimized[0].kind, super::SqlFileImportStatementKind::Skip);
-        assert_eq!(optimized[1].source_statement_count, 2);
-        assert_eq!(optimized[2].kind, super::SqlFileImportStatementKind::Skip);
+        assert_eq!(optimized[1].source_statement_count, 1);
+        assert_eq!(optimized[2].source_statement_count, 1);
+        assert_eq!(optimized[3].kind, super::SqlFileImportStatementKind::Skip);
     }
 
     #[test]

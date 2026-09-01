@@ -1220,6 +1220,91 @@ INSERT INTO install_check (id) VALUES (1), (2);
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection without a required default database"]
+async fn live_sql_file_import_preserves_last_insert_id_across_adjacent_inserts() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("sql-file-order-{suffix}");
+    let config = live_mysql_sql_file_config(&connection_id);
+    let (state, db_path) = app_state_with_config(config.clone()).await;
+    let database_name = format!("dbx_issue_7738_{suffix}");
+    let script = format!(
+        r#"
+CREATE DATABASE `{database_name}`;
+USE `{database_name}`;
+CREATE TABLE parents (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(32) NOT NULL
+);
+CREATE TABLE children (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    parent_id INT NOT NULL,
+    CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES parents(id)
+);
+INSERT INTO parents (name) VALUES ('first');
+INSERT INTO parents (name) VALUES ('second');
+DELETE FROM parents WHERE name = 'first';
+INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID());
+"#
+    );
+    let request = SqlFileRequest {
+        execution_id: format!("exec-{suffix}"),
+        connection_id: config.id.clone(),
+        database: String::new(),
+        file_path: std::env::temp_dir()
+            .join(format!("issue-7738-mysql-order-{suffix}.sql"))
+            .to_string_lossy()
+            .into_owned(),
+        continue_on_error: false,
+    };
+
+    let _ = execute_sql_statement(
+        &state,
+        &config.id,
+        "",
+        &format!("DROP DATABASE IF EXISTS `{database_name}`"),
+        None,
+        None,
+    )
+    .await;
+
+    tokio::fs::write(&request.file_path, &script).await.unwrap();
+    let result = execute_sql_file_path(
+        &state,
+        &request,
+        std::path::Path::new(&request.file_path),
+        CancellationToken::new(),
+        std::time::Instant::now(),
+        |_| {},
+    )
+    .await;
+    let verify = execute_sql_statement(
+        &state,
+        &config.id,
+        &database_name,
+        "SELECT p.name FROM children c JOIN parents p ON p.id = c.parent_id",
+        None,
+        None,
+    )
+    .await;
+    let _ = execute_sql_statement(
+        &state,
+        &config.id,
+        "",
+        &format!("DROP DATABASE IF EXISTS `{database_name}`"),
+        None,
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(&request.file_path);
+
+    result.expect("SQL file import should preserve LAST_INSERT_ID() semantics between statements");
+    let verify = verify.expect("verify the child references the second inserted parent");
+    assert_eq!(verify.columns, vec!["name"]);
+    assert_eq!(verify.rows, vec![vec![serde_json::json!("second")]]);
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQL_FILE_MYSQL_* env vars pointing at a writable MySQL connection without a required default database"]
 async fn live_sql_file_import_preserves_raw_mysql_binary_literal_bytes() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let config = live_mysql_sql_file_config(&format!("sql-file-binary-{suffix}"));

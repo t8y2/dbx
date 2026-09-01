@@ -4432,7 +4432,11 @@ export const useQueryStore = defineStore("query", () => {
       const queryAnalysis = {
         ...target.analysis,
         ...(target.analysis.distinct && canInsertIntoEditableQuerySource(tab, dbType as DatabaseType, target, target.sourceColumns) ? { allowInsert: true } : {}),
-        allowDelete: !target.analysis.distinct,
+        // A DISTINCT result is still one-to-one with the selected source row
+        // when that source's complete primary key is present in the projection.
+        // The candidate filter above guarantees that identity before enabling
+        // the primary-key based delete SQL.
+        allowDelete: true,
         allowInsertDelete: false,
         multiSource: true,
       };

@@ -3438,7 +3438,7 @@ test("binds DISTINCT qualified-star edits to the single safe joined source", asy
     assert.equal(tab?.queryAnalysis?.multiSource, true);
     assert.equal(tab?.queryAnalysis?.distinct, true);
     assert.equal(tab?.queryAnalysis?.allowInsert, true);
-    assert.equal(tab?.queryAnalysis?.allowDelete, false);
+    assert.equal(tab?.queryAnalysis?.allowDelete, true);
     assert.equal(tab?.queryAnalysis?.allowInsertDelete, false);
     assert.equal(tab?.tableMeta?.tableName, "users");
     assert.deepEqual(tab?.querySourceColumns, ["id", "name"]);

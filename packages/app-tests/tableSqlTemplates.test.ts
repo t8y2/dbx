@@ -77,6 +77,19 @@ test("builds DELETE template with TODO WHERE clause when no primary key exists",
   );
 });
 
+test("builds GoldenDB templates with MySQL-style identifier quotes", () => {
+  const options = {
+    databaseType: "goldendb" as const,
+    tableName: "order",
+    columns,
+  };
+
+  assert.equal(buildTableSelectTemplate(options), "SELECT `id`, `name`, `created_at`\nFROM `order`;");
+  assert.equal(buildTableInsertTemplate(options), "INSERT INTO `order` (`name`, `created_at`)\nVALUES ('name_value', CURRENT_TIMESTAMP);");
+  assert.equal(buildTableUpdateTemplate(options), "UPDATE `order`\nSET `name` = 'name_value',\n    `created_at` = CURRENT_TIMESTAMP\nWHERE `id` = 0;");
+  assert.equal(buildTableDeleteTemplate(options), "DELETE FROM `order`\nWHERE `id` = 0;");
+});
+
 test("builds GaussDB M templates with the detected backtick identifier mode", () => {
   const options = {
     databaseType: "gaussdb" as const,

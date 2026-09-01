@@ -2542,7 +2542,7 @@ export interface RedisStreamPendingPage {
 }
 
 export type RedisValueData =
-  | { kind: "string"; content: RedisBlob }
+  | { kind: "string"; content: RedisBlob; total_bytes?: number; truncated?: boolean }
   | { kind: "json"; value: string }
   | {
       kind: "list";

@@ -73,6 +73,17 @@ fn full_access_policy() -> McpGlobalPolicy {
     }
 }
 
+/// Like `full_access_policy()` but with a 1s global MCP query timeout, used to
+/// prove that `use_transaction` batches honor the MCP query-timeout policy.
+fn short_timeout_policy() -> McpGlobalPolicy {
+    McpGlobalPolicy {
+        read_only: false,
+        allow_dangerous_sql: true,
+        allowed_connection_ids: None,
+        query_timeout_secs: Some(1),
+    }
+}
+
 /// Boot a real `DbxMcpServer` over a live LocalBackend seeded from a temp
 /// storage db. Returns `(client, server_task, temp_dir)`; `temp_dir` must stay
 /// alive for the test so the sqlite file is not deleted mid-run.
@@ -216,6 +227,52 @@ async fn mysql_batch_rejects_ddl_transaction_and_rolls_back_failed_dml() {
         count_text.contains("c") && count_text.contains("0"),
         "expected the whole batch to roll back (0 rows), got: {count_text}"
     );
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
+async fn postgres_transaction_batch_respects_mcp_query_timeout() {
+    let (postgres, postgres_database) = postgres_env();
+    let (client, server_task, _dir) = boot_live_server!(vec![postgres], short_timeout_policy());
+    let db = postgres_database.as_str();
+
+    // A use_transaction batch must honor the MCP global query-timeout policy:
+    // pg_sleep(3) exceeds the 1s policy, so the whole transactional batch errors
+    // instead of returning a successful merged outcome. Regression for the P1
+    // where the transaction path ignored options.timeout_secs and ran unbounded.
+    let (is_error, text) = batch!(&client, "live-postgres", db, "SELECT pg_sleep(3); SELECT 1", true);
+    assert!(is_error, "expected the PostgreSQL transaction batch to time out, got: {text}");
+    assert!(
+        text.contains("DBX_BATCH_EXECUTION_ERROR") || text.contains("Query timed out"),
+        "expected a timeout surfaced as an execution error, got: {text}"
+    );
+    assert!(!text.contains("Transaction outcome"), "the batch must NOT be a successful merged outcome, got: {text}");
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
+async fn mysql_transaction_batch_respects_mcp_query_timeout() {
+    let (mysql, mysql_database) = mysql_env();
+    let (client, server_task, _dir) = boot_live_server!(vec![mysql], short_timeout_policy());
+    let db = mysql_database.as_str();
+
+    // Same shape as the PostgreSQL timeout test: SLEEP(3) exceeds the 1s MCP
+    // policy, so the transactional batch errors instead of a merged outcome.
+    // (Whether the driver also aborts the server-side SLEEP is an observation;
+    // the requirement here is that the error surfaces to the caller.)
+    let (is_error, text) = batch!(&client, "live-mysql", db, "SELECT SLEEP(3); SELECT 1", true);
+    assert!(is_error, "expected the MySQL transaction batch to time out, got: {text}");
+    assert!(
+        text.contains("DBX_BATCH_EXECUTION_ERROR") || text.contains("Query timed out"),
+        "expected a timeout surfaced as an execution error, got: {text}"
+    );
+    assert!(!text.contains("Transaction outcome"), "the batch must NOT be a successful merged outcome, got: {text}");
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

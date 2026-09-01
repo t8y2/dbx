@@ -1703,6 +1703,15 @@ async fn configured_operation_budget_for_pool_key(state: &AppState, pool_key: &s
         .unwrap_or_else(DbOperationBudget::with_defaults)
 }
 
+/// Override a transaction budget's query timeout from a per-call override (e.g. the MCP
+/// global query-timeout policy). `None` leaves the budget unchanged; `Some(secs)` follows
+/// `resolve_query_timeout` semantics (`Some(0)` clears the limit, meaning unlimited).
+fn apply_query_timeout_override(budget: &mut DbOperationBudget, timeout_secs: Option<u64>) {
+    if let Some(secs) = timeout_secs {
+        budget.query_timeout = resolve_query_timeout(Some(secs));
+    }
+}
+
 fn oceanbase_mysql_session_timeout_sql(config: Option<&ConnectionConfig>, timeout_secs: Option<u64>) -> Option<String> {
     let config = config?;
     let timeout_secs = timeout_secs.unwrap_or(config.query_timeout_secs);
@@ -2993,6 +3002,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
             &statements,
             schema,
             options.catalog.as_deref(),
+            options.timeout_secs,
         )
         .await?;
         return Ok(vec![result.into()]);
@@ -4098,7 +4108,7 @@ pub async fn execute_statements_in_transaction(
     schema: Option<&str>,
     catalog: Option<&str>,
 ) -> Result<db::QueryResult, String> {
-    execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog)
+    execute_statements_in_transaction_typed(state, connection_id, database, statements, schema, catalog, None)
         .await
         .map_err(QueryExecutionError::into_legacy_string)
 }
@@ -4111,6 +4121,7 @@ pub async fn execute_statements_in_transaction_typed(
     statements: &[String],
     schema: Option<&str>,
     catalog: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     let sql_ctx = statements.first().map(|s| s.as_str()).unwrap_or("");
     let pool_database = query_pool_database(database, catalog);
@@ -4127,6 +4138,7 @@ pub async fn execute_statements_in_transaction_typed(
         statements,
         schema,
         catalog,
+        timeout_secs,
     )
     .await
 }
@@ -4150,6 +4162,7 @@ pub async fn execute_statements_in_transaction_on_pool(
         statements,
         schema,
         catalog,
+        None,
     )
     .await
     .map_err(QueryExecutionError::into_legacy_string)
@@ -4164,6 +4177,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     statements: &[String],
     schema: Option<&str>,
     catalog: Option<&str>,
+    timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
@@ -4171,7 +4185,8 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     let start = std::time::Instant::now();
     let db_type = connection_database_type(state, connection_id).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect(state, connection_id).await;
-    let operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
+    let mut operation_budget = configured_operation_budget_for_pool_key(state, pool_key).await;
+    apply_query_timeout_override(&mut operation_budget, timeout_secs);
 
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = {
@@ -5798,6 +5813,25 @@ mod tests {
         assert!(postgres_prefers_text_protocol(Some(DatabaseType::Redshift)));
         assert!(!postgres_prefers_text_protocol(Some(DatabaseType::Postgres)));
         assert!(!postgres_prefers_text_protocol(None));
+    }
+
+    #[test]
+    fn apply_query_timeout_override_respects_resolve_semantics() {
+        // None leaves the budget unchanged.
+        let mut budget = DbOperationBudget::with_defaults();
+        let original = budget.query_timeout;
+        apply_query_timeout_override(&mut budget, None);
+        assert_eq!(budget.query_timeout, original);
+
+        // Some(5) sets query_timeout to 5s.
+        let mut budget = DbOperationBudget::with_defaults();
+        apply_query_timeout_override(&mut budget, Some(5));
+        assert_eq!(budget.query_timeout, Some(Duration::from_secs(5)));
+
+        // Some(0) clears the limit (unlimited), matching resolve_query_timeout.
+        let mut budget = DbOperationBudget::with_defaults();
+        apply_query_timeout_override(&mut budget, Some(0));
+        assert_eq!(budget.query_timeout, None);
     }
 
     #[test]

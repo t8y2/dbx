@@ -41,7 +41,7 @@ const props = defineProps<{
   checkingUpdates: boolean;
   hasUpdateAvailable: boolean;
   isDownloadingUpdate: boolean;
-  downloadProgress: number;
+  downloadProgress: number | null;
   updateReadyToInstall: boolean;
   updateReady: boolean;
   agentDriverUpdateCount: number;
@@ -75,11 +75,13 @@ const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const checkingUpdates = computed(() => props.checkingUpdates);
 const updateTooltip = computed(() => {
-  if (props.isDownloadingUpdate) return t("updates.downloading", { progress: props.downloadProgress });
+  if (props.isDownloadingUpdate) return t("updates.downloading", { progress: props.downloadProgress ?? 0 });
   if (props.updateReady) return t("updates.restartRequiredTooltip");
   if (props.updateReadyToInstall) return t("updates.updateReadyTooltip");
   return t("updates.check");
 });
+// ToolbarUpdateIcon takes a 0..1 fraction, with null meaning the download size is unknown.
+const updateDownloadProgress = computed(() => (props.downloadProgress == null ? null : Math.min(1, Math.max(0, props.downloadProgress / 100))));
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
 const SQL_LIBRARY_CHECK_PATH = "M9 9.5 L9 9.5 L11 11.5 L15 7.5 L15 7.5";
@@ -596,7 +598,7 @@ const toolbarStyle = computed(() => {
         <Tooltip>
           <TooltipTrigger as-child>
             <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <ToolbarUpdateIcon :loading="checkingUpdates" />
+              <ToolbarUpdateIcon :loading="checkingUpdates" :downloading="isDownloadingUpdate" :progress="updateDownloadProgress" />
               <span v-if="updateReady || updateReadyToInstall" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-background" />
               <span v-else-if="hasUpdateAvailable && !isDownloadingUpdate" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
             </Button>

@@ -16,7 +16,7 @@ interface DialogState {
   portableMode: boolean;
   manualUpdateOnly: boolean;
   isDownloadingUpdate: boolean;
-  downloadProgress: number;
+  downloadProgress: number | null;
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
@@ -196,6 +196,12 @@ describe("UpdateDialog download progress", () => {
     await flushDialog();
 
     expect(buttonWithText("Downloading 100%")?.classList.contains("w-52")).toBe(true);
+  });
+
+  it("falls back to 0% while the download size is unknown", async () => {
+    await mountDialog(0, { isDownloadingUpdate: true, downloadProgress: null });
+
+    expect(buttonWithText("Downloading 0%")).toBeDefined();
   });
 });
 

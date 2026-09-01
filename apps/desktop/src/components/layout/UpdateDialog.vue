@@ -14,7 +14,7 @@ const props = defineProps<{
   updateInfo: UpdateInfo | null;
   updateCheckMessage: string;
   isDownloadingUpdate: boolean;
-  downloadProgress: number;
+  downloadProgress: number | null;
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
   updateReady: boolean;
@@ -156,7 +156,7 @@ watch(
               <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
               <Button class="w-52 shrink-0 tabular-nums" disabled>
                 <Loader2 class="h-4 w-4 animate-spin" />
-                {{ t("updates.downloading", { progress: downloadProgress }) }}
+                {{ t("updates.downloading", { progress: downloadProgress ?? 0 }) }}
               </Button>
             </template>
             <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('install-downloaded')">{{ t("updates.exitAndUpdate") }}</Button>

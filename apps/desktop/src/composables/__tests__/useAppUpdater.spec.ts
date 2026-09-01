@@ -119,7 +119,8 @@ describe("useAppUpdater download attempts", () => {
     firstDownload.reject(new Error("Download canceled by user."));
     await firstAttempt;
     expect(updater.isDownloadingUpdate.value).toBe(true);
-    expect(updater.downloadProgress.value).toBe(0);
+    // The retry is in flight with no progress event yet, so progress is indeterminate.
+    expect(updater.downloadProgress.value).toBeNull();
 
     secondDownload.resolve();
     await retryAttempt;
@@ -169,6 +170,29 @@ describe("useAppUpdater download attempts", () => {
     await vi.waitFor(() => expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(toastMock).toHaveBeenLastCalledWith("DBX has been updated. Restart to finish.", 10000, expect.objectContaining({ label: "Exit & Restart", onClick: expect.any(Function) })));
     expect(updater.updateReady.value).toBe(true);
+  });
+
+  it("tracks download progress and stays indeterminate when the backend reports no total", async () => {
+    const download = deferred<void>();
+    apiMock.downloadUpdate.mockReturnValueOnce(download.promise);
+    const updater = mountUpdater();
+
+    const downloadAttempt = updater.downloadUpdateInBackground();
+    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledOnce());
+    // No progress event yet — the size is unknown, so progress stays indeterminate.
+    expect(updater.downloadProgress.value).toBeNull();
+
+    const onProgress = listenMock.mock.calls[0][1] as (event: { payload: { downloaded: number; total: number | null } }) => void;
+    onProgress({ payload: { downloaded: 25, total: 100 } });
+    expect(updater.downloadProgress.value).toBe(25);
+
+    // Mirrors may stream chunks without a total; progress must not freeze at a stale percentage.
+    onProgress({ payload: { downloaded: 64, total: null } });
+    expect(updater.downloadProgress.value).toBeNull();
+
+    download.resolve();
+    await downloadAttempt;
+    expect(updater.downloadProgress.value).toBe(100);
   });
 });
 

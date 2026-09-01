@@ -117,7 +117,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const updateCheckMessage = ref("");
   const showUpdateDialog = ref(false);
   const isDownloadingUpdate = ref(false);
-  const downloadProgress = ref(0);
+  // null while the download size is unknown (backend reported no total) — the UI shows an indeterminate state.
+  const downloadProgress = ref<number | null>(0);
   const updateDownloaded = ref(false);
   const isInstallingUpdate = ref(false);
   const updateReady = ref(false);
@@ -218,7 +219,8 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     showUpdateDialog.value = false;
     const attempt = ++activeDownloadAttempt;
     isDownloadingUpdate.value = true;
-    downloadProgress.value = 0;
+    // The total is unknown until the first progress event arrives.
+    downloadProgress.value = null;
     let unlisten: (() => void) | undefined;
     const latestVersion = updateInfo.value?.latest_version;
     toast(t("updates.downloadStarted", { version: latestVersion ? tagVersion(latestVersion) : "" }), 3000);
@@ -229,7 +231,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       unlisten = await listen<UpdateDownloadProgress>("update-download-progress", (event) => {
         if (attempt !== activeDownloadAttempt) return;
         const total = event.payload.total ?? 0;
-        downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : 0;
+        downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : null;
       });
       await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
       if (attempt !== activeDownloadAttempt) return;

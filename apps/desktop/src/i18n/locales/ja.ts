@@ -1404,6 +1404,10 @@ export default withEnglishFallback({
       selectFirst: "リストテキストを選択してください",
     },
     connectionOnlyTarget: "接続レベル目標",
+    previewChanges: "変更をプレビュー",
+    previewChangesComment: "変更プレビュー（ドライラン）：{operation} ステートメント",
+    previewChangesFailed: "変更プレビューに失敗しました。",
+    previewChangesNoStatement: "変更をプレビューするには、UPDATE / INSERT / DELETE ステートメントを選択するか、その上にカーソルを置いてください。",
   },
   tabs: {
     sql: "SQL",

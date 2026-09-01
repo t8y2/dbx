@@ -1383,6 +1383,10 @@ export default withEnglishFallback({
       selectFirst: "請選擇清單文字",
     },
     connectionOnlyTarget: "連線級目標",
+    previewChanges: "預覽變更",
+    previewChangesComment: "變更預覽（乾跑）：{operation} 語句",
+    previewChangesFailed: "變更預覽失敗。",
+    previewChangesNoStatement: "請選取或將游標放在一條 UPDATE / INSERT / DELETE 語句上以預覽變更。",
   },
   tabs: {
     sql: "SQL",

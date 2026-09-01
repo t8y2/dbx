@@ -1385,6 +1385,10 @@ export default withEnglishFallback({
       selectFirst: "Seleccione el texto de la lista",
     },
     connectionOnlyTarget: "Objetivo a nivel de conexión",
+    previewChanges: "Previsualizar cambios",
+    previewChangesComment: "Previsualización de cambios (simulación): sentencia {operation}",
+    previewChangesFailed: "Error al previsualizar los cambios.",
+    previewChangesNoStatement: "Seleccione o coloque el cursor sobre una sentencia UPDATE / INSERT / DELETE para previsualizar los cambios.",
   },
   tabs: {
     sql: "SQL",

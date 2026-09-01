@@ -1286,6 +1286,10 @@ export default withEnglishFallback({
       currentCommand: "현재 명령",
       allCommands: "전체 명령",
     },
+    previewChanges: "변경 사항 미리 보기",
+    previewChangesComment: "변경 미리 보기(드라이 런): {operation} 문",
+    previewChangesFailed: "변경 미리 보기 실패.",
+    previewChangesNoStatement: "변경 사항을 미리 보려면 UPDATE / INSERT / DELETE 문을 선택하거나 커서를 해당 문에 놓으십시오.",
   },
   tabs: {
     sql: "SQL",

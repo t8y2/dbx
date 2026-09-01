@@ -1383,6 +1383,10 @@ export default withEnglishFallback({
       selectFirst: "Seleziona il testo della lista",
     },
     connectionOnlyTarget: "Target a livello di connessione",
+    previewChanges: "Anteprima modifiche",
+    previewChangesComment: "Anteprima modifiche (prova a secco): istruzione {operation}",
+    previewChangesFailed: "Anteprima modifiche non riuscita.",
+    previewChangesNoStatement: "Seleziona o posiziona il cursore su un'istruzione UPDATE / INSERT / DELETE per visualizzare l'anteprima delle modifiche.",
   },
   tabs: {
     sql: "SQL",

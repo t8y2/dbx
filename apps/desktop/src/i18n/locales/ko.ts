@@ -187,6 +187,7 @@ export default withEnglishFallback({
     updatableDriverCount: "업데이트 가능한 드라이버 수",
     mcpUpdateAvailable: "MCP 서버 업데이트 가능",
     blockDangerousRedisCommands: "위험한 명령 차단",
+    saveSqlFile: "원본 파일에 저장",
   },
   multiDbExecute: {
     title: "다중 데이터베이스 실행",

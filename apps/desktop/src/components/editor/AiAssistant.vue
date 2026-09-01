@@ -25,6 +25,7 @@ import {
   HelpCircle,
   History,
   ArrowDownToLine,
+  Layers,
   Loader2,
   Maximize2,
   MessageSquarePlus,
@@ -63,6 +64,7 @@ import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { connectionIconType } from "@/lib/connection/connectionPresentation";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
+import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
 import { useNavigationTargets } from "@/composables/useNavigationTargets";
@@ -147,10 +149,11 @@ import type { AiMessage } from "@/lib/backend/api";
 import type { AiConfigItem, AiEffortCapability, AiEffortOption, AiEffortSelection } from "@/types/ai";
 import type { ConnectionConfig, QueryTab, SavedSqlFile, TableInfo } from "@/types/database";
 import { fetchNamespaceOptionsForConnection, useDatabaseOptions } from "@/composables/useDatabaseOptions";
+import { useSchemaOptions } from "@/composables/useSchemaOptions";
 import { decodeSelectableDatabaseValue, encodeSelectableDatabaseValue, formatDatabaseLabel, resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 import { normalizeSqliteNamespace } from "@/lib/database/sqliteNamespace";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
-import { isSchemaAware } from "@/lib/database/databaseCapabilities";
+import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseCapabilities";
 import ExplainPlanViewer from "@/components/explain/ExplainPlanViewer.vue";
 import { parseExplainResult, parseOracleExplainText, type ParsedExplainPlan } from "@/lib/diagram/explainPlan";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -437,14 +440,14 @@ watch(showTemplateSelector, (open) => {
   if (open) void promptTemplateStore.ensureLoaded();
 });
 
-// Reset template selection when the user switches to a different connection or database —
-// a new database context warrants a fresh selection of scenario templates.
+// Reset template selection when the user switches to a different connection,
+// database, or schema — a new namespace context warrants a fresh selection.
 watch(
   // Return a stable primitive key: a fresh array literal is never Object.is-equal to the
   // previous one, so a getter returning `[id, database]` fires on every dependency
   // invalidation (e.g. the 30s backup scheduler replacing connection objects) even when the
   // id/database values are unchanged — spuriously clearing the selection mid agent-run.
-  () => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}`,
+  () => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`,
   () => {
     activeTemplateIds.value = [];
   },
@@ -1277,6 +1280,7 @@ function selectModeActionItem(action: AiAction) {
 }
 
 const { databaseOptions, loadDatabaseOptions } = useDatabaseOptions();
+const { loadSchemaOptions, getSchemaOptionsForDb, isLoadingSchemas } = useSchemaOptions();
 
 // Dameng presents schemas as its top-level namespace, unlike the other
 // connection types that rely on the shared database-options loader.
@@ -1314,6 +1318,30 @@ const selectedDatabaseLabel = computed(() => {
     noDatabase: t("editor.noDatabase"),
   });
 });
+
+const showAiSchemaSelector = computed(() => {
+  const connection = props.connection;
+  return !!connection && connection.db_type !== "dameng" && isSchemaAware(connection.db_type);
+});
+
+const aiSchemaDatabaseKey = computed(() => {
+  const connection = props.connection;
+  const tab = props.tab;
+  if (!connection || !tab) return "";
+  return tab.database || (isSingleDatabase(connection.db_type) ? "_" : "");
+});
+
+const aiSchemaOptions = computed(() => {
+  const connection = props.connection;
+  if (!connection) return [];
+  return getSchemaOptionsForDb(connection.id, aiSchemaDatabaseKey.value);
+});
+
+async function loadAiSchemas() {
+  const connection = props.connection;
+  if (!connection || !showAiSchemaSelector.value) return;
+  await loadSchemaOptions(connection.id, aiSchemaDatabaseKey.value);
+}
 
 async function loadDatabases(connection = props.connection): Promise<string[]> {
   if (!connection) return [];
@@ -1363,6 +1391,13 @@ function changeNamespace(value: string) {
   } else {
     queryStore.updateDatabase(tab.id, namespace);
   }
+}
+
+function changeSchema(schema: string) {
+  const tab = props.tab;
+  if (!tab || tab.schema === schema) return;
+  clearContextReferences();
+  queryStore.updateSchema(tab.id, schema || undefined);
 }
 
 function flushAssistantDeltas() {
@@ -4711,13 +4746,13 @@ async function openExternalUrl(url: string) {
     </div>
 
     <div class="p-2">
-      <div ref="promptPanelRef" class="relative rounded-[6px] border bg-background">
+      <div ref="promptPanelRef" class="ai-prompt-context-container relative rounded-[6px] border bg-background">
         <div v-if="isAttachmentDragging" class="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-[6px] border-2 border-dashed border-primary bg-background/90 text-sm font-medium text-foreground shadow-sm backdrop-blur-sm">
           {{ t("ai.attachmentDropHint") }}
         </div>
         <div class="resize-handle" @mousedown="startResize"></div>
         <div class="px-2 pb-2 pt-1">
-          <div class="flex items-center gap-1 mb-1 text-xs text-foreground/80">
+          <div data-ai-composer-context-row :class="['ai-prompt-context-row mb-1 flex items-center gap-x-1 text-xs text-foreground/80', showAiSchemaSelector && 'ai-prompt-context-row--schema']">
             <template v-if="connectionStore.connections.length">
               <DatabaseIcon v-if="connection" :db-type="connectionIconType(connection)" class="h-3 w-3 shrink-0" />
               <Server v-else class="h-3 w-3 shrink-0" />
@@ -4728,7 +4763,7 @@ async function openExternalUrl(url: string) {
                 :placeholder="t('editor.selectConnection')"
                 :search-placeholder="t('editor.searchConnection')"
                 :empty-text="t('grid.noSearchResults')"
-                trigger-class="h-5 px-1 text-foreground/80"
+                :trigger-class="['h-5 px-1 text-foreground/80', showAiSchemaSelector && 'min-w-0 max-w-56 flex-1']"
                 trigger-icon-class="h-3 w-3"
                 list-class="w-72 max-w-[calc(100vw-2rem)]"
                 @update:model-value="(v) => changeConnection(v)"
@@ -4748,7 +4783,7 @@ async function openExternalUrl(url: string) {
                     }
                   "
                 >
-                  <SelectTrigger class="h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3">
+                  <SelectTrigger :class="['h-5 w-auto border-0 rounded-md bg-transparent dark:bg-transparent p-0 px-1 text-xs text-foreground/80 shadow-none focus:ring-0 focus-visible:ring-0 [&_svg]:size-3', showAiSchemaSelector && 'min-w-0 max-w-56 flex-1']">
                     <SelectValue :placeholder="t('editor.selectDatabase')">{{ selectedDatabaseLabel }}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
@@ -4756,16 +4791,43 @@ async function openExternalUrl(url: string) {
                     <SelectItem v-if="!dbSelectOptions.length && connection && tab" :value="selectedDatabaseSelectValue">{{ selectedDatabaseLabel }}</SelectItem>
                   </SelectContent>
                 </Select>
+                <template v-if="showAiSchemaSelector">
+                  <Layers class="h-3 w-3 shrink-0 text-foreground/40" />
+                  <SearchableSelect
+                    :model-value="tab?.schema || ''"
+                    :options="aiSchemaOptions.length ? aiSchemaOptions : tab?.schema ? [tab.schema] : []"
+                    :placeholder="t('editor.selectSchema')"
+                    :search-placeholder="t('editor.searchSchema')"
+                    :empty-text="t('grid.noSearchResults')"
+                    :loading-text="t('common.loading')"
+                    :loading="isLoadingSchemas(connection.id, aiSchemaDatabaseKey)"
+                    trigger-variant="ghost"
+                    trigger-class="h-5 min-w-0 max-w-36 flex-1 p-0 px-1 text-foreground/80"
+                    trigger-icon-class="h-3 w-3"
+                    list-class="w-56"
+                    @update:model-value="changeSchema"
+                    @update:open="
+                      (open: boolean) => {
+                        if (open) loadAiSchemas().catch(() => {});
+                      }
+                    "
+                  />
+                </template>
               </template>
             </template>
-            <span class="min-w-0 flex-1" />
+            <span class="ai-prompt-context-spacer min-w-0 flex-1" />
             <!-- Template selector -->
             <Popover v-model:open="showTemplateSelector">
               <PopoverTrigger as-child>
-                <button type="button" class="flex min-w-0 max-w-[40%] items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="templateSelectorTriggerLabel" :title="templateSelectorTriggerLabel">
+                <button
+                  type="button"
+                  class="ai-template-selector-trigger flex min-w-0 max-w-[40%] items-center gap-1 rounded-[6px] border px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                  :aria-label="templateSelectorTriggerLabel"
+                  :title="templateSelectorTriggerLabel"
+                >
                   <FileCode class="h-3 w-3" />
-                  <span class="truncate">{{ templateSelectorTriggerLabel }}</span>
-                  <svg class="h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
+                  <span class="ai-template-selector-label truncate">{{ templateSelectorTriggerLabel }}</span>
+                  <svg class="ai-template-selector-chevron h-3 w-3 shrink-0 opacity-60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6" /></svg>
                 </button>
               </PopoverTrigger>
               <PopoverContent align="end" class="w-64 gap-0 p-1.5">
@@ -5260,6 +5322,30 @@ async function openExternalUrl(url: string) {
 </template>
 
 <style scoped>
+.ai-prompt-context-container {
+  container-type: inline-size;
+}
+
+@container (max-width: 28rem) {
+  .ai-prompt-context-row--schema .ai-prompt-context-spacer {
+    flex: 0 0 0;
+  }
+
+  .ai-prompt-context-row--schema .ai-template-selector-trigger {
+    flex: 0 0 1.5rem;
+    width: 1.5rem;
+    max-width: 1.5rem;
+    height: 1.5rem;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .ai-prompt-context-row--schema .ai-template-selector-label,
+  .ai-prompt-context-row--schema .ai-template-selector-chevron {
+    display: none;
+  }
+}
+
 .ai-markdown :deep(h1) {
   font-size: 1em;
   font-weight: 700;

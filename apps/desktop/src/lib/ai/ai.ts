@@ -100,7 +100,7 @@ export interface AiContext {
   connectionName: string;
   databaseType: DatabaseType;
   database: string;
-  /** Selected schema when it is distinct from the connection database (for example Dameng). */
+  /** Schema selected for metadata loading and agent tool execution. */
   schema?: string;
   currentSql: string;
   lastError?: string;
@@ -751,7 +751,9 @@ export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionCon
       schema: resolveAiNamespaceSelection(tab, connection).value || undefined,
     };
   }
-  return { database: connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database };
+  const normalizedDatabase = connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
+  const schema = isSchemaAware(aiDatabaseTypeForConnection(connection)) ? tab.schema?.trim() || undefined : undefined;
+  return schema ? { database: normalizedDatabase, schema } : { database: normalizedDatabase };
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {

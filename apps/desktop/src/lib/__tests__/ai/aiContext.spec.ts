@@ -54,6 +54,19 @@ function damengConnection(database = "APPDB"): ConnectionConfig {
   };
 }
 
+function postgresConnection(database = "app"): ConnectionConfig {
+  return {
+    id: "postgres-1",
+    name: "PostgreSQL",
+    db_type: "postgres",
+    host: "127.0.0.1",
+    port: 5432,
+    username: "app_user",
+    password: "",
+    database,
+  };
+}
+
 function aiConfig(): AiConfig {
   return {
     provider: "openai",
@@ -134,5 +147,40 @@ describe("Dameng AI context routing", () => {
 
   it("does not change non-Dameng namespace behavior", () => {
     expect(resolveAiDatabaseTarget(queryTab("analytics"), sqliteConnection())).toEqual({ database: "analytics" });
+  });
+});
+
+describe("PostgreSQL AI schema routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listTables.mockResolvedValue([]);
+    apiMock.getColumns.mockResolvedValue([]);
+    apiMock.listIndexes.mockResolvedValue([]);
+    apiMock.listForeignKeys.mockResolvedValue([]);
+    apiMock.aiAgentStream.mockResolvedValue("done");
+  });
+
+  it("scopes metadata and agent tools to the selected schema", async () => {
+    const tab = { ...queryTab("app", "main_chatdr"), connectionId: "postgres-1" };
+    const connection = postgresConnection();
+    const context = await buildAiContext(tab, connection);
+
+    expect(resolveAiDatabaseTarget(tab, connection)).toEqual({ database: "app", schema: "main_chatdr" });
+    expect(context.schema).toBe("main_chatdr");
+    expect(apiMock.listTables).toHaveBeenCalledWith("postgres-1", "app", "main_chatdr");
+
+    await runAgentStream(
+      {
+        config: aiConfig(),
+        action: "general",
+        mode: "agent",
+        instruction: "inspect chat_dial_in",
+        context,
+      },
+      [],
+      vi.fn(),
+      "session-postgres",
+    );
+    expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
   });
 });

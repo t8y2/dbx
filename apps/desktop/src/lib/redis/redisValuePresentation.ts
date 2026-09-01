@@ -446,7 +446,7 @@ export function redisValueCollectionScanCursor(value: RedisValue): number | unde
 export function redisValueSize(value: RedisValue): number {
   switch (value.data.kind) {
     case "string":
-      return decodeRedisBlob(value.data.content).byteLength;
+      return value.data.total_bytes ?? decodeRedisBlob(value.data.content).byteLength;
     case "json":
       return new TextEncoder().encode(redisJsonValueText(value.data)).byteLength;
     case "list":

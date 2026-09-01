@@ -4256,3 +4256,35 @@ func containsString(values []string, target string) bool {
 	}
 	return false
 }
+
+// Regression test for https://github.com/t8y2/dbx/issues/7681: a timezone-less
+// "timestamp"/"date"/"time" column must not be labeled as an absolute UTC
+// instant (RFC3339Nano with a "Z"/offset suffix), or clients that convert it
+// to a display timezone will double-apply the shift.
+func TestNormalizeValueKingbaseTimezoneLessDateTime(t *testing.T) {
+	// gokb decodes "timestamp"/"date" wall-clock values into a time.Time in
+	// the process-local zone, which is not a real UTC instant.
+	wallClock := time.Date(2026, time.January, 30, 10, 0, 3, 0, time.UTC)
+
+	for _, columnType := range []string{"TIMESTAMP", "timestamp", "DATE", "TIME"} {
+		got := normalizeValue(wallClock, columnType)
+		want := "2026-01-30T10:00:03"
+		gotStr, ok := got.(string)
+		if !ok {
+			t.Fatalf("columnType=%s: expected a string, got %#v", columnType, got)
+		}
+		if gotStr != want {
+			t.Fatalf("columnType=%s: got %q, want %q", columnType, gotStr, want)
+		}
+		if strings.ContainsAny(gotStr, "Z+") {
+			t.Fatalf("columnType=%s: timezone-less value must not carry a Z/offset suffix, got %q", columnType, gotStr)
+		}
+	}
+
+	// A real timezone-aware column must keep its absolute-instant encoding.
+	tzAware := normalizeValue(wallClock, "TIMESTAMPTZ")
+	tzAwareStr, ok := tzAware.(string)
+	if !ok || tzAwareStr != "2026-01-30T10:00:03Z" {
+		t.Fatalf("TIMESTAMPTZ column: got %#v, want RFC3339Nano-encoded UTC instant", tzAware)
+	}
+}

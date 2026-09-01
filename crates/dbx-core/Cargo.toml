@@ -37,7 +37,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 chrono = { version = "0.4", features = ["serde"] }
 httpdate = "1"
-rust_decimal = { version = "1", features = ["serde", "db-postgres"] }
+rust_decimal = { version = "1", features = ["serde"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }

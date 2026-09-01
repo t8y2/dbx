@@ -64,6 +64,7 @@ import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/l
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { redisKeyRawToText, redisKeyTextToDisplay, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
+import { formatBytes } from "@/lib/database/serverMetrics";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -439,6 +440,7 @@ const stringBlob = computed<RedisBlob | null>(() => {
   if (!value) return null;
   return value.data.kind === "string" ? value.data.content : null;
 });
+const isStringValueTruncated = computed(() => data.value?.data.kind === "string" && Boolean(data.value.data.truncated));
 const stringValueDetail = computed(() => (stringBlob.value ? formatRedisMemberDetail(stringBlob.value, { allowJsonText: true }) : null));
 const selectedMemberDetail = computed(() => formatRedisMemberDetail(selectedMemberRaw.value, { allowJsonText: true }));
 
@@ -569,7 +571,7 @@ const memberCopyText = computed(() => memberDecodedText.value ?? detailTextForFo
 const redisJsonAppearance = computed(() => (isDark.value ? "dark" : "light"));
 const isBinaryStringValue = computed(() => Boolean(stringValueDetail.value?.binary));
 const selectedMemberCanEdit = computed(() => selectedMemberContext.value?.canEdit ?? false);
-const canEditCurrentStringFormat = computed(() => Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
+const canEditCurrentStringFormat = computed(() => !isStringValueTruncated.value && Boolean(stringValueDetail.value?.editable) && (stringValueView.value === "utf8" || stringValueView.value === "json"));
 const showStringEditActions = computed(() => canEditCurrentStringFormat.value);
 const originalStringEditValue = computed(() => (stringBlob.value ? rawRedisValueText(stringBlob.value) : ""));
 const stringJsonRawBaseline = ref("");
@@ -632,14 +634,25 @@ const zsetGridStyle = computed(() => ({
   gridTemplateColumns: `60px ${zsetScoreWidth.value}px minmax(0, 1fr) 104px`,
 }));
 const metadataSizeLabel = computed(() => {
+  if (data.value?.data.kind === "string" && data.value.data.total_bytes != null) {
+    return formatBytes(data.value.data.total_bytes);
+  }
   const metadata = props.metadata;
   const size = metadata?.size ?? 0;
   if (!metadata || size <= 0) return "";
   if (metadata.key_type === "string") {
-    if (size >= 1024) return `${(size / 1024).toFixed(1)} KB`;
-    return `${size} B`;
+    return formatBytes(size);
   }
   return String(size);
+});
+const largeStringPreviewHint = computed(() => {
+  const value = data.value;
+  const loaded = stringValueDetail.value?.byteCount ?? 0;
+  if (!value || value.data.kind !== "string" || !value.data.truncated) return "";
+  if (value.data.total_bytes != null) {
+    return t("redis.largeStringPreviewHint", { loaded: formatBytes(loaded), total: formatBytes(value.data.total_bytes) });
+  }
+  return t("redis.largeStringPreviewHintUnknown", { loaded: formatBytes(loaded) });
 });
 const streamRows = computed<RedisStreamRow[]>(() => {
   if (redisKind.value !== "stream") return [];
@@ -1305,6 +1318,7 @@ function setStringValueFormat(format: RedisValueFormat) {
 }
 
 function setStringValueCodec(codec: RedisValueCodec) {
+  if (isStringValueTruncated.value && codec !== "none") return;
   stringValueCodec.value = codec;
   rememberRedisValueCodec(codec);
 }
@@ -1538,6 +1552,7 @@ async function load(options: { background?: boolean; notifyParent?: boolean; pre
     }
 
     if (loadedValue.data.kind === "string") {
+      if (loadedValue.data.truncated) stringValueCodec.value = "none";
       const detail = formatRedisMemberDetail(loadedValue.data.content, { allowJsonText: true });
       stringValueView.value = preferredRedisValueFormat(loadedValue.data.content, readPreferredRedisValueFormat(), { allowJsonText: true });
       stringJsonRawBaseline.value = detail.json?.formattedText ?? "";
@@ -1591,7 +1606,7 @@ async function loadMore() {
 }
 
 async function saveString() {
-  if (!data.value || !stringBlob.value || isBinaryStringValue.value || !stringValueChanged.value || savingString.value) return;
+  if (!data.value || !stringBlob.value || isStringValueTruncated.value || isBinaryStringValue.value || !stringValueChanged.value || savingString.value) return;
 
   let value = editValue.value;
   // Compact whenever this draft is/was JSON-edited, even if the user switched tabs before Save.
@@ -1695,6 +1710,10 @@ async function renameKey() {
 
 async function copyValue() {
   if (!data.value) return;
+  if (isStringValueTruncated.value) {
+    toast(t("redis.largeStringPreviewActionUnavailable"), 3000);
+    return;
+  }
   // Copy the decoded text while a codec is decoding the string value.
   if (stringValueCodec.value !== "none" && stringDecodedText.value != null) {
     await copyText(stringDecodedText.value);
@@ -1805,6 +1824,10 @@ function generateInsertStatements(): string | null {
 }
 
 async function copyInsertStatement() {
+  if (isStringValueTruncated.value) {
+    toast(t("redis.largeStringPreviewActionUnavailable"), 3000);
+    return;
+  }
   const stmt = generateInsertStatements();
   if (!stmt) {
     toast(t("redis.copyInsertStatementBinary"), 3000);
@@ -2734,8 +2757,10 @@ defineExpose({ focusSearch });
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
-          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"><ClipboardCopy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyValue"><Copy class="h-3.5 w-3.5" /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
+            ><ClipboardCopy class="h-3.5 w-3.5"
+          /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.renameKey')" :aria-label="t('redis.renameKey')" @click="openRenameKeyDialog"><Pencil class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
@@ -2774,11 +2799,21 @@ defineExpose({ focusSearch });
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
           <div class="flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5">
-            <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': stringValueCodec === codec }" @click="setStringValueCodec(codec)">
+            <Button
+              v-for="codec in REDIS_VALUE_CODEC_ORDER"
+              :key="codec"
+              variant="ghost"
+              size="sm"
+              class="h-6 shrink-0 rounded-[5px] px-2 text-xs"
+              :class="{ 'bg-background shadow-sm': stringValueCodec === codec }"
+              :disabled="isStringValueTruncated && codec !== 'none'"
+              :title="isStringValueTruncated && codec !== 'none' ? t('redis.largeStringPreviewActionUnavailable') : undefined"
+              @click="setStringValueCodec(codec)"
+            >
               {{ redisCodecLabel(codec) }}
             </Button>
           </div>
-          <FileArchive v-if="stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
+          <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
             <WrapText class="h-3.5 w-3.5" />
@@ -2882,7 +2917,11 @@ defineExpose({ focusSearch });
         />
         <pre v-else-if="canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)" v-html="contentSearchHighlightedHtml" />
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
-        <div v-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
+        <div v-if="isStringValueTruncated" data-redis-large-string-preview class="flex shrink-0 items-center gap-2 border-t bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+          <Eye class="h-3.5 w-3.5 shrink-0" />
+          <span>{{ largeStringPreviewHint }}</span>
+        </div>
+        <div v-else-if="isBinaryStringValue" class="px-4 py-2 border-t text-xs text-muted-foreground shrink-0">
           {{ t("redis.binaryStringReadonlyHint") }}
         </div>
         <div v-if="showStringEditActions" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">

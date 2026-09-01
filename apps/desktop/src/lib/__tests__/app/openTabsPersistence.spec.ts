@@ -51,6 +51,19 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.originalSql).toBe("");
   });
 
+  it("does not persist the transient result execution target", () => {
+    const tab = queryTab({ activeResultRunId: "run-1", executingResultRunId: "run-1", isExecuting: true });
+    const [saved] = serializeOpenTabs([tab]);
+    const [restored] = restoreOpenTabsPayload({
+      tabs: [{ ...saved, executingResultRunId: "run-1" }],
+      activeTabId: tab.id,
+    }).tabs;
+
+    expect(saved).not.toHaveProperty("executingResultRunId");
+    expect(restored.executingResultRunId).toBeUndefined();
+    expect(restored.isExecuting).toBe(false);
+  });
+
   it("preserves an external Doris catalog across tab restore", () => {
     const [restored] = roundTrip([queryTab({ database: "dbx_catalog_completion", catalog: "dbx_mysql_catalog" })]);
 

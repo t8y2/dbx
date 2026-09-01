@@ -861,6 +861,7 @@ export const useQueryStore = defineStore("query", () => {
       isExecuting: false,
       isCancelling: false,
       executionId: undefined,
+      executingResultRunId: undefined,
       queryExecutionStartedAt: undefined,
       batchSqlExecution: undefined,
       cancelRequestCount: 0,
@@ -1903,6 +1904,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isExecuting = false;
     tab.isCancelling = false;
     tab.executionId = undefined;
+    tab.executingResultRunId = undefined;
     tab.queryExecutionStartedAt = undefined;
     if (tab.result) touchResult(tab);
     return id;
@@ -3003,6 +3005,7 @@ export const useQueryStore = defineStore("query", () => {
       editorViewport: undefined,
       editorSelection: undefined,
       executionId: undefined,
+      executingResultRunId: undefined,
       isExplaining: false,
       explainExecutionId: undefined,
       mode: original.mode,
@@ -3687,6 +3690,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.isExecuting = isExecuting;
+    tab.executingResultRunId = isExecuting ? null : undefined;
     tab.queryExecutionStartedAt = isExecuting ? Date.now() : undefined;
     if (!isExecuting) {
       tab.isCancelling = false;
@@ -3698,6 +3702,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.isExecuting = true;
+    tab.executingResultRunId = null;
     tab.executionId = executionId;
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = Date.now();
@@ -3743,6 +3748,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.isCancelling = false;
     tab.queryExecutionStartedAt = undefined;
     tab.executionId = undefined;
+    tab.executingResultRunId = undefined;
     touchResult(tab);
   }
 
@@ -3757,6 +3763,7 @@ export const useQueryStore = defineStore("query", () => {
       current.isExecuting = false;
       current.isCancelling = false;
       current.executionId = undefined;
+      current.executingResultRunId = undefined;
       current.queryExecutionStartedAt = undefined;
       if (!restorePendingResultRun(current, executionId)) {
         current.result = toErrorResult(new Error("Query canceled"));
@@ -4617,7 +4624,12 @@ export const useQueryStore = defineStore("query", () => {
     const traceId = executionId.slice(0, 8);
     const startedAt = performance.now();
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
+    const batchResume = options?.batchResume;
+    const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     tab.isExecuting = true;
+    tab.executingResultRunId = !captureResultRun && updateActiveResultRun ? tab.activeResultRunId : null;
     options?.onExecutionStarted?.();
     tab.isCancelling = false;
     if (!tab.queryExecutionStartedAt) {
@@ -4638,8 +4650,6 @@ export const useQueryStore = defineStore("query", () => {
     if (captureResultRun && tab.activeResultRunId) {
       pendingResultRunRestores.set(executionId, tab.activeResultRunId);
     }
-    const batchResume = options?.batchResume;
-    const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
     if (batchResume) {
       tab.batchSqlExecution = prepareBatchSqlRecovery(batchResume.batch, executionId, batchResume.startStatementIndex);
       liveBatchSqlExecutions.set(tab, tab.batchSqlExecution);
@@ -4647,8 +4657,6 @@ export const useQueryStore = defineStore("query", () => {
       tab.batchSqlExecution = undefined;
       liveBatchSqlExecutions.delete(tab);
     }
-    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
-    const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     if (!updateActiveResultRun) {
       tab.activeResultRunId = undefined;
     }
@@ -5754,6 +5762,7 @@ export const useQueryStore = defineStore("query", () => {
         current.isCancelling = false;
         current.queryExecutionStartedAt = undefined;
         current.executionId = undefined;
+        current.executingResultRunId = undefined;
         clearLiveBatchSqlExecution(current, executionId);
         queryExecutionLog("info", "finish", { traceId, elapsed: elapsed() });
       } else {
@@ -6165,6 +6174,7 @@ export const useQueryStore = defineStore("query", () => {
           current.isExecuting = false;
           current.isCancelling = false;
           current.executionId = undefined;
+          current.executingResultRunId = undefined;
           current.queryExecutionStartedAt = undefined;
           clearLiveBatchSqlExecution(current, executionId);
         }
@@ -6182,6 +6192,7 @@ export const useQueryStore = defineStore("query", () => {
           current.isCancelling = false;
           current.queryExecutionStartedAt = undefined;
           current.executionId = undefined;
+          current.executingResultRunId = undefined;
         } else {
           // 复用 setErrorResult 的完整清理：分组结果不清空的话，错误结果不会展示，
           // 估算值也会继续按旧的 results 计算

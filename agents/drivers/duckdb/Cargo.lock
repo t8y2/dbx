@@ -4537,7 +4537,6 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
- "postgres-types",
  "rand 0.8.7",
  "rkyv",
  "serde",

@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, nextTick, type App } from "vue";
-import type { PeekedMessage } from "@/types/mq";
+import type { PeekedMessage, SubscriptionInfo } from "@/types/mq";
 
 const backend = vi.hoisted(() => ({
   mqListSubscriptions: vi.fn(),
@@ -90,7 +90,7 @@ async function mountPanel(overrides: Record<string, unknown> = {}) {
   return root;
 }
 
-function subscription(name: string, consumerGroupType: string) {
+function subscription(name: string, consumerGroupType: string): SubscriptionInfo {
   return {
     name,
     subType: consumerGroupType,
@@ -328,5 +328,32 @@ describe("SubscriptionsPanel RocketMQ filter count", () => {
     search!.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUi();
     expect(count()).toBe("2 / 4");
+  });
+});
+
+describe("SubscriptionsPanel RocketMQ pagination", () => {
+  it("keeps groups after the first page when enrichment is partial", async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) => subscription(`group-${String(index + 1).padStart(4, "0")}`, "NORMAL"));
+    rows.push(subscription("z-target-group", "NORMAL"));
+    backend.mqListSubscriptions.mockResolvedValue(rows);
+    backend.mqEnrichSubscriptions.mockResolvedValue(rows.slice(0, 500).map((row) => ({ ...row, onlineMembers: 2, topics: ["events"] })));
+
+    const panel = await mountPanel({
+      topic: undefined,
+      tenant: "_rocketmq",
+      namespace: "default",
+      mqSystemKind: "rocketmq",
+      supportsPeekMessages: false,
+    });
+
+    await vi.waitFor(() => expect(panel.querySelectorAll("tbody tr")).toHaveLength(1001));
+    expect(panel.querySelector('[data-testid="subscription-count"]')?.textContent?.replace(/\s+/g, " ").trim()).toBe("1001 / 1001");
+
+    const search = panel.querySelector<HTMLInputElement>("input.topic-search");
+    expect(search).toBeTruthy();
+    search!.value = "z-target-group";
+    search!.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() => expect(panel.querySelectorAll("tbody tr")).toHaveLength(1));
+    expect(panel.textContent).toContain("z-target-group");
   });
 });

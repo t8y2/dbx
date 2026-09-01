@@ -17,6 +17,7 @@ use super::json_value_for_js;
 const STREAM_ENTRY_PAGE_SIZE: usize = 50;
 const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
+const STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const HASH_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -204,6 +205,10 @@ where
 pub enum RedisValueData {
     String {
         content: RedisBlob,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     Json {
         /// Original JSON.GET payload used throughout the RedisJSON UI.
@@ -2431,12 +2436,27 @@ where
 
     let data = match redis_type.as_str() {
         "string" => {
-            let v: RedisRawValue = redis::cmd("GET").arg(key).query_async(con).await.map_err(|e| e.to_string())?;
-            RedisValueData::String {
-                content: redis_value_to_bytes(v)
-                    .map(|bytes| redis_blob_from_bytes(&bytes))
-                    .ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?,
+            // Ask for one extra byte so large values are detected without ever
+            // materializing the complete payload in the backend or IPC layer.
+            let v: RedisRawValue = redis::cmd("GETRANGE")
+                .arg(key)
+                .arg(0)
+                .arg(STRING_PREVIEW_MAX_BYTES as i64)
+                .query_async(con)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut bytes =
+                redis_value_to_bytes(v).ok_or_else(|| "Redis string payload is not byte-addressable".to_string())?;
+            let truncated = bytes.len() > STRING_PREVIEW_MAX_BYTES;
+            if truncated {
+                bytes.truncate(STRING_PREVIEW_MAX_BYTES);
             }
+            let total_bytes = if truncated {
+                redis::cmd("STRLEN").arg(key).query_async(con).await.ok()
+            } else {
+                Some(bytes.len() as u64)
+            };
+            RedisValueData::String { content: redis_blob_from_bytes(&bytes), total_bytes, truncated }
         }
         "list" => {
             let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
@@ -2516,7 +2536,7 @@ fn redis_key_matches_query(key_display: &str, key_raw: &str, query: &str) -> boo
 
 fn redis_search_value_text(value: &RedisValueData) -> String {
     match value {
-        RedisValueData::String { content } => redis_blob_display_text(content),
+        RedisValueData::String { content, .. } => redis_blob_display_text(content),
         RedisValueData::Json { value } => value.clone(),
         RedisValueData::List { items, .. } => {
             items.iter().map(|item| redis_blob_display_text(&item.value)).collect::<Vec<_>>().join(" ")
@@ -2558,10 +2578,12 @@ fn redis_search_value_preview(value: &RedisValueData) -> String {
 
 fn redis_search_value_size(value: &RedisValue) -> u64 {
     match &value.data {
-        RedisValueData::String { content } => base64::engine::general_purpose::STANDARD
-            .decode(&content.raw_base64)
-            .map(|bytes| bytes.len() as u64)
-            .unwrap_or(0),
+        RedisValueData::String { content, total_bytes, .. } => total_bytes.unwrap_or_else(|| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&content.raw_base64)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(0)
+        }),
         RedisValueData::Json { value } => value.len() as u64,
         RedisValueData::List { total, .. }
         | RedisValueData::Set { total, .. }
@@ -3789,6 +3811,7 @@ fn parse_scan_members(raw: RedisRawValue) -> Result<(u64, Vec<RedisSetItem>), St
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use std::{
         collections::{HashMap, VecDeque},
         future::ready,
@@ -3802,13 +3825,13 @@ mod tests {
         classify_command, connection_info, decode_cluster_cursor, encode_cluster_cursor, is_redis_json_type,
         parse_cluster_slots, parse_command_argv, parse_database_count, parse_redis_endpoint, parse_scan_keys,
         parse_stream_consumers, parse_stream_entries, parse_stream_groups, parse_stream_pending_entries,
-        redis_auth_candidates, redis_blob_from_bytes, redis_cluster_slot, redis_command_raw_to_json,
-        redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw, redis_key_matches_query,
-        redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint, redis_value_matches_query,
-        redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob, RedisBlobEncoding,
-        RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem, RedisNodeEndpoint,
-        RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry, RedisStreamField,
-        RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
+        redis_auth_candidates, redis_blob_display_text, redis_blob_from_bytes, redis_cluster_slot,
+        redis_command_raw_to_json, redis_database_index, redis_key_bytes_to_display, redis_key_bytes_to_raw,
+        redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
+        redis_value_matches_query, redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob,
+        RedisBlobEncoding, RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem,
+        RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry,
+        RedisStreamField, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -3943,7 +3966,14 @@ mod tests {
     }
 
     fn string_value(value: &str) -> RedisValue {
-        redis_value("string", RedisValueData::String { content: text_blob(value) })
+        redis_value(
+            "string",
+            RedisValueData::String {
+                content: text_blob(value),
+                total_bytes: Some(value.len() as u64),
+                truncated: false,
+            },
+        )
     }
 
     fn hash_value(entries: &[(&str, &str)]) -> RedisValue {
@@ -4240,6 +4270,49 @@ mod tests {
         assert_eq!(consumer_json["idle_ms"], unsafe_value.to_string());
         assert_eq!(consumer_json["inactive_ms"], unsafe_value.to_string());
         assert_eq!(entry_json["deliveries"], unsafe_value.to_string());
+    }
+
+    #[tokio::test]
+    async fn string_value_uses_a_bounded_range_for_small_values() {
+        let mut con = FakeRedisConnection::new(vec![bulk("string"), RedisRawValue::Int(-1), bulk("hello")]);
+
+        let value = super::get_value(&mut con, b"message").await.unwrap();
+
+        let RedisValueData::String { content, total_bytes, truncated } = &value.data else {
+            panic!("expected a String value");
+        };
+        assert_eq!(redis_blob_display_text(content), "hello");
+        assert_eq!(*total_bytes, Some(5));
+        assert!(!truncated);
+        assert_eq!(con.command_count("GETRANGE"), 1);
+        assert_eq!(con.command_count("GET"), 0);
+        assert_eq!(con.command_count("STRLEN"), 0);
+    }
+
+    #[tokio::test]
+    async fn string_value_truncates_large_payloads_before_ipc_serialization() {
+        let preview_with_sentinel = vec![0xFF; super::STRING_PREVIEW_MAX_BYTES + 1];
+        let total_bytes = 45 * 1024 * 1024;
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("string"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::BulkString(preview_with_sentinel),
+            RedisRawValue::Int(total_bytes as i64),
+        ]);
+
+        let value = super::get_value(&mut con, b"bf:ali_health_monitor").await.unwrap();
+
+        let RedisValueData::String { content, total_bytes: reported_bytes, truncated } = &value.data else {
+            panic!("expected a String value");
+        };
+        let preview = base64::engine::general_purpose::STANDARD.decode(&content.raw_base64).unwrap();
+        assert_eq!(preview.len(), super::STRING_PREVIEW_MAX_BYTES);
+        assert_eq!(*reported_bytes, Some(total_bytes));
+        assert!(*truncated);
+        assert_eq!(super::redis_search_value_size(&value), total_bytes);
+        assert_eq!(con.command_count("GETRANGE"), 1);
+        assert_eq!(con.command_count("GET"), 0);
+        assert_eq!(con.command_count("STRLEN"), 1);
     }
 
     #[tokio::test]

@@ -1199,6 +1199,8 @@ export interface QueryTab {
     head: number;
   };
   executionId?: string;
+  /** Ephemeral result run targeted by the current execution; null means a new run is being produced. */
+  executingResultRunId?: string | null;
   isExplaining?: boolean;
   explainExecutionId?: string;
   /** Per-run connection session for explain flows that require session state. */

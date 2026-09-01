@@ -190,6 +190,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         isExecuting: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
+        executingResultRunId: undefined,
         editorViewport: undefined,
         editorSelection: undefined,
         isExplaining: false,

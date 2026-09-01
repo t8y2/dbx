@@ -11,7 +11,7 @@ use std::future::Future;
 use std::ops::ControlFlow;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Condvar, Mutex,
 };
 use std::time::Duration;
 use tokio::time::timeout;
@@ -4489,46 +4489,166 @@ async fn exec_tx_sqlite_inner(
     tokio::task::spawn_blocking(move || {
         pool.with_connection(|conn| {
             conn.execute_batch("BEGIN").map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+            // rusqlite's synchronous API blocks for the full duration of a single
+            // statement, so a per-statement-boundary elapsed check alone cannot
+            // interrupt a statement that itself runs past the query budget. Use a
+            // cross-thread watchdog: it sleeps on a condvar for the budget, then
+            // fires `InterruptHandle::interrupt()` (SQLITE_INTERRUPT) which aborts
+            // the currently executing statement mid-flight. The watchdog is disarmed
+            // and joined before COMMIT so a stale interrupt can never land on a
+            // future, unrelated query of this pooled connection.
+            let interrupt = conn.get_interrupt_handle();
+            let armed = Arc::new((Mutex::new(true), Condvar::new()));
+            let watchdog = match query_timeout {
+                Some(timeout) => {
+                    let armed = armed.clone();
+                    Some(std::thread::spawn(move || {
+                        let (lock, cvar) = &*armed;
+                        let mut guard = lock.lock().unwrap();
+                        let mut should_interrupt = false;
+                        if *guard {
+                            // Armed at wait start: wait for the budget or until the
+                            // main thread disarms (notifies) after finishing. A
+                            // spurious wakeup re-waits for the remaining budget, so
+                            // interrupt() only fires when the budget genuinely
+                            // elapsed while still armed.
+                            let wait_start = std::time::Instant::now();
+                            let mut remaining = timeout;
+                            loop {
+                                let (guard2, wait_result) = cvar
+                                    .wait_timeout(guard, remaining)
+                                    .expect("sqlite tx watchdog condvar wait poisoned");
+                                guard = guard2;
+                                if !*guard {
+                                    // Disarmed: the main thread finished first.
+                                    break;
+                                }
+                                if wait_result.timed_out() || wait_start.elapsed() >= timeout {
+                                    // Budget elapsed while still armed: interrupt.
+                                    should_interrupt = true;
+                                    break;
+                                }
+                                remaining = timeout.saturating_sub(wait_start.elapsed());
+                            }
+                        }
+                        if should_interrupt {
+                            interrupt.interrupt();
+                        }
+                    }))
+                }
+                None => None,
+            };
+
+            let mut timeout_error: Option<String> = None;
+            let mut statement_error: Option<String> = None;
             let mut total_affected: u64 = 0;
-            for (i, sql) in statements.iter().enumerate() {
-                // rusqlite's synchronous API cannot interrupt a single statement
-                // mid-flight (no SQLITE_INTERRUPT hook is wired through SqliteHandle),
-                // so the query budget is enforced at statement boundaries: a slow
-                // multi-statement batch is cut at the next statement and the whole
-                // transaction is rolled back. Never an orphaned COMMIT.
-                if let Some(timeout) = query_timeout {
-                    if start.elapsed() >= timeout {
-                        let _ = conn.execute_batch("ROLLBACK");
-                        return Err(format!("Query timed out after {} seconds", timeout.as_secs()));
+            let result = (|| {
+                for (i, sql) in statements.iter().enumerate() {
+                    // Defense in depth: the boundary check still runs (it also
+                    // guarantees we never COMMIT past the budget even if the
+                    // watchdog was not armed because the timeout is None).
+                    if let Some(timeout) = query_timeout {
+                        if start.elapsed() >= timeout {
+                            timeout_error = Some(format!("Query timed out after {} seconds", timeout.as_secs()));
+                            return Err(());
+                        }
+                    }
+                    match conn.execute_batch(sql) {
+                        Ok(_) => total_affected += conn.changes(),
+                        Err(e) => {
+                            // The watchdog interrupt aborts the statement with
+                            // SQLITE_INTERRUPT; surface it as a query timeout
+                            // (matching `mysql_query_iter_with_timeout` wording so
+                            // `is_dbx_query_timeout_error` recognizes it). The
+                            // interrupt is detected by the SQLITE_INTERRUPT error
+                            // code, never by matching "interrupt" in the message
+                            // text (user/trigger/constraint text could otherwise
+                            // be misclassified as a timeout).
+                            //
+                            // The SQLITE_INTERRUPT error-code match is only
+                            // consulted when a query budget is set: the watchdog
+                            // (this function's only in-process source of
+                            // SQLITE_INTERRUPT intended to be a timeout) is only
+                            // armed when query_timeout is Some. An EXTERNAL
+                            // interrupt (e.g. the query_cancel mechanism) with no
+                            // budget must surface as a normal statement error, not
+                            // a timeout — misclassifying it panics on
+                            // `query_timeout.unwrap()` below (None) and skips the
+                            // ROLLBACK/disarm below, leaking the open transaction.
+                            let timed_out = query_timeout.is_some_and(|timeout| {
+                                start.elapsed() >= timeout
+                                    || matches!(
+                                        e.sqlite_error_code(),
+                                        Some(rusqlite::ffi::ErrorCode::OperationInterrupted)
+                                    )
+                            });
+                            if timed_out {
+                                timeout_error = Some(format!(
+                                    "Query timed out after {} seconds",
+                                    query_timeout.unwrap_or_default().as_secs()
+                                ));
+                                return Err(());
+                            }
+                            statement_error = Some(query_error_with_omitted_sql_context(
+                                &format!("Statement {} failed: {}", i + 1, e),
+                                sql,
+                            ));
+                            return Err(());
+                        }
                     }
                 }
-                match conn.execute_batch(sql) {
-                    Ok(_) => total_affected += conn.changes(),
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK");
-                        return Err(query_error_with_omitted_sql_context(
-                            &format!("Statement {} failed: {}", i + 1, e),
-                            sql,
-                        ));
+                Ok(())
+            })();
+
+            // Disarm and join the watchdog before issuing COMMIT (or ROLLBACK) so
+            // no interrupt can be delivered after the transaction ends.
+            {
+                let (lock, cvar) = &*armed;
+                *lock.lock().unwrap() = false;
+                cvar.notify_all();
+            }
+            if let Some(watchdog) = watchdog {
+                watchdog.join().expect("sqlite tx watchdog thread joined");
+            }
+
+            match result {
+                Ok(()) => {
+                    // The boundary check above runs at the top of each loop
+                    // iteration only. After the last statement the loop returns
+                    // Ok and COMMIT would run without any elapsed re-check, so a
+                    // statement that started under budget and finished after the
+                    // budget elapsed could still COMMIT. Guard once more here,
+                    // before COMMIT, so we never COMMIT past the budget.
+                    if let Some(timeout) = query_timeout {
+                        if start.elapsed() >= timeout {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(format!("Query timed out after {} seconds", timeout.as_secs()));
+                        }
                     }
+                    conn.execute_batch("COMMIT").map_err(|e| format!("COMMIT failed: {}", e)).map(|_| db::QueryResult {
+                        columns: vec![],
+                        column_types: Vec::new(),
+                        column_sortables: vec![],
+                        spatial_columns: vec![],
+                        spatial_values: vec![],
+                        rows: vec![],
+                        affected_rows: total_affected,
+                        execution_time_ms: start.elapsed().as_millis(),
+                        truncated: false,
+                        session_id: None,
+                        has_more: false,
+                        elasticsearch_raw_body: None,
+                        messages: Vec::new(),
+                    })
+                }
+                Err(()) => {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    Err(timeout_error
+                        .or(statement_error)
+                        .unwrap_or_else(|| "Statement execution failed inside the transaction".to_string()))
                 }
             }
-            conn.execute_batch("COMMIT").map_err(|e| format!("COMMIT failed: {}", e))?;
-            Ok(db::QueryResult {
-                columns: vec![],
-                column_types: Vec::new(),
-                column_sortables: vec![],
-                spatial_columns: vec![],
-                spatial_values: vec![],
-                rows: vec![],
-                affected_rows: total_affected,
-                execution_time_ms: start.elapsed().as_millis(),
-                truncated: false,
-                session_id: None,
-                has_more: false,
-                elasticsearch_raw_body: None,
-                messages: Vec::new(),
-            })
         })
     })
     .await
@@ -5904,6 +6024,220 @@ mod tests {
         holder.join().expect("helper thread joined");
         let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
         assert_eq!(result.rows[0][0], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn sqlite_slow_statement_is_interrupted_and_rolled_back() {
+        // A statement that genuinely BLOCKS past the query budget must be aborted
+        // mid-flight by the watchdog (SQLITE_INTERRUPT) rather than running to
+        // completion and then committing. This is the gap the lock-holder test
+        // above does not cover: that one only makes the first statement-boundary
+        // check observe an already-elapsed budget.
+        //
+        // Lock-holder approach verified empirically and REJECTED: holding a write
+        // lock from a second connection and letting the main handle busy-wait is
+        // NOT interrupted by sqlite3_interrupt on the bundled SQLite 3.45.3
+        // (rusqlite 0.32). `pager_wait_on_lock` loops on the busy handler without
+        // re-checking `db->u1.isInterrupted`, so the wait runs out the full busy
+        // timeout (a 60s wait with a 50ms budget confirmed it) instead of failing
+        // fast. So the deterministic proof uses a slow-but-bounded statement whose
+        // VDBE loop re-checks the interrupt flag every iteration (WITH RECURSIVE
+        // row generator) — the watchdog interrupts it mid-flight.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("slow.db");
+        let db_path = db_path.to_str().expect("utf8 temp path");
+
+        let pool = db::sqlite::connect_path_create_if_missing(db_path).await.expect("connect sqlite");
+        db::sqlite::execute_query(&pool, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .await
+            .expect("create table");
+
+        let mut budget = DbOperationBudget::with_defaults();
+        budget.query_timeout = Some(Duration::from_millis(50));
+
+        // Generating 50M rows takes seconds, so this single statement is provably
+        // still running when the 50ms watchdog fires. A busy-wait would not prove
+        // the point (see above); this statement is interrupted mid-flight. It is
+        // the LAST statement of a 2-statement batch so it also exercises the
+        // loop-exit-then-final-guard path: a fast first statement, then a slow
+        // second one that is still running when the budget elapses.
+        let slow_sql = "INSERT INTO t (val) SELECT 'slow' FROM (WITH RECURSIVE cnt(x) AS \
+                        (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 50000000) SELECT x FROM cnt)";
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t (val) VALUES ('fast')".to_string(), slow_sql.to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("sqlite transaction with a slow statement must time out");
+
+        assert!(error.contains("Query timed out after"), "unexpected error: {error}");
+        let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
+        assert_eq!(result.rows[0][0], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn sqlite_legitimate_interrupt_text_error_is_not_reported_as_timeout() {
+        // A genuine statement error whose MESSAGE contains "interrupt" (here a
+        // missing column named `interrupted_at`) must NOT be misclassified as a
+        // watchdog timeout. The interrupt is detected by the SQLITE_INTERRUPT
+        // error code only, never by matching the message text. A large 60s budget
+        // guarantees elapsed can never trigger the timeout path, so only the
+        // error-code match could classify it.
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect in-memory SQLite");
+        db::sqlite::execute_query(&pool, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .await
+            .expect("create table");
+
+        let mut budget = DbOperationBudget::with_defaults();
+        budget.query_timeout = Some(Duration::from_secs(60));
+
+        let error = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t (interrupted_at) VALUES (1)".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect_err("sqlite transaction must fail with the statement error");
+
+        assert!(
+            !error.contains("Query timed out after"),
+            "legitimate 'interrupt'-text error must not be masked as a timeout: {error}"
+        );
+        assert!(error.contains("Statement 1 failed") && error.contains("interrupted_at"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn sqlite_external_interrupt_without_budget_does_not_panic() {
+        // Regression: with query_timeout = None (MCP policy can set it to 0 =
+        // unlimited; resolve_query_timeout(Some(0)) -> None), an SQLITE_INTERRUPT
+        // arriving from an EXTERNAL source (e.g. the query_cancel mechanism, not
+        // this function's watchdog, which is only armed when query_timeout is
+        // Some) used to be misclassified as a timeout, then `query_timeout.unwrap()`
+        // panicked on None. The panic fired before the watchdog disarm/join and
+        // before ROLLBACK, leaking the watchdog thread and leaving the BEGIN
+        // transaction open on the pooled connection.
+        //
+        // Determinism: the bundled SQLite 3.45.3 clears the interrupt flag at
+        // VDBE step start whenever `nVdbeActive == 0` (sqlite3Step), so a
+        // pre-set interrupt fires only if it lands mid-statement. This was
+        // verified empirically below. So the interrupt is issued from a timer
+        // thread DURING a slow-but-bounded statement whose VDBE loop re-checks
+        // the interrupt flag every iteration (WITH RECURSIVE row generator —
+        // same technique the watchdog test uses; a lock busy-wait would not be
+        // aborted because pager_wait_on_lock does not recheck isInterrupted).
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect in-memory SQLite");
+        db::sqlite::execute_query(&pool, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .await
+            .expect("create table");
+
+        let interrupt =
+            pool.with_connection(|conn| Ok(conn.get_interrupt_handle())).expect("get sqlite interrupt handle");
+        let mut budget = DbOperationBudget::with_defaults();
+        budget.query_timeout = None; // external interrupt: no in-process watchdog is armed
+
+        // Arm the timer BEFORE the statement starts and send the go signal first,
+        // so the interrupt can land mid-statement. A single pre-set interrupt
+        // would be cleared (nVdbeActive==0 at step start), so the timer fires in
+        // a short retry loop: as soon as the slow statement is running, the flag
+        // sticks and the VDBE aborts on its next interrupt check. The `done` flag
+        // stops the loop as soon as exec returns so no stray interrupt can hit a
+        // later query, and we join the timer before any further query anyway.
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (timer_tx, timer_rx) = std::sync::mpsc::channel();
+        let timer = {
+            let done = done.clone();
+            std::thread::spawn(move || {
+                timer_rx.recv().expect("go signal");
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while !done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                    interrupt.interrupt(); // external interrupt mid-statement
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        timer_tx.send(()).expect("send go signal");
+
+        // Single slow statement that takes seconds to run, so an interrupt that
+        // lands within milliseconds of its start always hits mid-execution.
+        let slow_sql = "INSERT INTO t (val) SELECT 'slow' FROM (WITH RECURSIVE cnt(x) AS \
+                        (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 10000000) SELECT x FROM cnt)";
+        let error = exec_tx_sqlite_inner(pool.clone(), &[slow_sql.to_string()], std::time::Instant::now(), &budget)
+            .await
+            .expect_err("sqlite transaction must fail with the external interrupt");
+
+        done.store(true, Ordering::Relaxed);
+        timer.join().expect("timer thread joined");
+
+        // Must NOT panic, must NOT be masked as a timeout (no budget), and must
+        // surface as a plain statement error like any other failure.
+        assert!(
+            !error.contains("Query timed out after"),
+            "external interrupt with no budget must not be reported as a timeout: {error}"
+        );
+        assert!(
+            error.contains("Statement 1 failed") && error.contains("interrupted"),
+            "expected a plain interrupted-statement error, got: {error}"
+        );
+
+        // The external interrupt must still roll back the transaction (0 rows),
+        // just like any other statement failure.
+        let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
+        assert_eq!(result.rows[0][0], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn sqlite_pre_set_interrupt_is_cleared_before_next_statement() {
+        // Empirical probe for the pre-set-interrupt question: `sqlite3_interrupt`
+        // unconditionally sets the interrupt flag, but bundled SQLite 3.45.3
+        // clears it at VDBE step start whenever `nVdbeActive == 0` (sqlite3Step,
+        // "prevents a call to sqlite3_interrupt from interrupting a statement
+        // that has not yet started"). Verified here: a pre-set interrupt (with
+        // nothing running) is cleared before the NEXT statement begins, so that
+        // statement runs to completion. A regression test therefore cannot rely
+        // on a pre-set interrupt — it must interrupt DURING a running statement
+        // (see sqlite_external_interrupt_without_budget_does_not_panic).
+        let pool = db::sqlite::connect_path(":memory:").await.expect("connect in-memory SQLite");
+        db::sqlite::execute_query(&pool, "CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .await
+            .expect("create table");
+
+        let interrupt =
+            pool.with_connection(|conn| Ok(conn.get_interrupt_handle())).expect("get sqlite interrupt handle");
+
+        // Pre-set the interrupt, then run a fast statement on the SAME
+        // connection: the flag is cleared at step start, so the statement
+        // succeeds (it does NOT fail with SQLITE_INTERRUPT).
+        pool.with_connection(|conn| {
+            interrupt.interrupt(); // pre-set, nothing running yet
+            conn.execute_batch("INSERT INTO t (val) VALUES ('one')").map_err(|e| e.to_string())
+        })
+        .expect("pre-set interrupt must be cleared before the statement runs");
+
+        // Same for a transaction: pre-set the interrupt, then the transaction's
+        // first statement must still run and commit.
+        pool.with_connection(|_conn| {
+            interrupt.interrupt(); // pre-set, nothing running yet
+            Ok(())
+        })
+        .expect("pre-set interrupt on idle connection");
+
+        let mut budget = DbOperationBudget::with_defaults();
+        budget.query_timeout = None;
+        let result = exec_tx_sqlite_inner(
+            pool.clone(),
+            &["INSERT INTO t (val) VALUES ('two')".to_string()],
+            std::time::Instant::now(),
+            &budget,
+        )
+        .await
+        .expect("transaction with a pre-set interrupt must still succeed (flag cleared at step start)");
+        assert_eq!(result.affected_rows, 1);
+
+        let count = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
+        assert_eq!(count.rows[0][0], serde_json::json!(2));
     }
 
     #[test]

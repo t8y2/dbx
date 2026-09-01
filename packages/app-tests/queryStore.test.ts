@@ -8113,6 +8113,7 @@ test("query execution keeps automatically counting total rows in the background"
     assert.equal(tab.resultTotalRowCountLoading, true);
     assert.equal(countBody.sql, "select count(*) from users");
     assert.equal(countBody.schema, "public");
+    assert.equal(countBody.clientSessionId, `${tabId}:count`);
 
     resolveCount?.(
       new Response(
@@ -8127,6 +8128,74 @@ test("query execution keeps automatically counting total rows in the background"
     );
     await waitFor(() => tab.resultTotalRowCount === 250);
     assert.equal(tab.resultTotalRowCountLoading, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("SQL Server temporary-table counts reuse the query tab session", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const settingsStore = useSettingsStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+
+  settingsStore.updateEditorSettings({ autoCalculateTotalRows: true });
+  connectionStore.addEphemeralConnection(sqlServerConn("sqlserver-1"));
+  const tabId = store.createTab("sqlserver-1", "db", "Query", "query", "dbo");
+  const tab = store.tabs.find((item) => item.id === tabId);
+  assert.ok(tab);
+
+  let countBody: any;
+  const closedClientSessions: string[] = [];
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/query/prepare-pagination-plan") {
+      return Response.json({
+        sqlToExecute: "SELECT * FROM #orders",
+        pageLimit: 100,
+        pageOffset: 0,
+        countSql: "SELECT COUNT(*) FROM (SELECT * FROM #orders) AS dbx_count",
+        useAgentResultSession: false,
+      });
+    }
+    if (url === "/api/query/execute-multi") {
+      return Response.json([
+        {
+          columns: ["id"],
+          rows: Array.from({ length: 100 }, (_, index) => [index + 1]),
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ]);
+    }
+    if (url === "/api/query/execute") {
+      countBody = JSON.parse(String(init?.body ?? "{}"));
+      return Response.json({ columns: ["count"], rows: [[250]], affected_rows: 0, execution_time_ms: 1 });
+    }
+    if (url === "/api/query/close-client-session") {
+      closedClientSessions.push(JSON.parse(String(init?.body ?? "{}")).clientSessionId);
+      return Response.json(true);
+    }
+    if (url === "/api/query/analyze-editability") {
+      return Response.json({ editable: false, reason: "complex-source" });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    await store.executeTabSql(tabId, "SELECT * FROM #orders");
+    await waitFor(() => tab.resultTotalRowCount === 250);
+
+    assert.equal(countBody.clientSessionId, tabId);
+    assert.equal(closedClientSessions.includes(tabId), false, "the query tab session must remain open");
+
+    tab.resultCountSql = "SELECT COUNT(*) FROM (SELECT * FROM #orders) AS dbx_count";
+    assert.equal(await store.countTabResultRows(tabId), 250);
+    assert.equal(countBody.clientSessionId, tabId);
+    assert.equal(closedClientSessions.includes(tabId), false, "manual count must also preserve the query tab session");
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

@@ -1,6 +1,7 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::connection::{config_for_pool_key, AppState, PoolKind};
@@ -798,8 +799,66 @@ fn existing_transfer_target_table_name(
     tables.iter().find(|table| table.name.eq_ignore_ascii_case(requested_name)).map(|table| table.name.clone())
 }
 
+const TRANSFER_PROGRESS_CHANNEL_CAPACITY: usize = 16;
+
+fn try_send_transfer_progress(sender: &tokio::sync::mpsc::Sender<TransferProgress>, progress: TransferProgress) {
+    let _ = sender.try_send(progress);
+}
+
+struct AbortTransferTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTransferTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_transfer_tables_isolated(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    catalog: Option<String>,
+    db_type: DatabaseType,
+    table: String,
+    limit: usize,
+) -> Result<Vec<db::TableInfo>, String> {
+    let task = tokio::spawn(async move {
+        if let Some(catalog) = resolve_external_transfer_catalog(catalog.as_deref(), &db_type) {
+            crate::schema::list_doris_catalog_tables_core(
+                &state,
+                &connection_id,
+                catalog,
+                &database,
+                Some(&table),
+                Some(limit),
+                None,
+                None,
+                None,
+            )
+            .await
+        } else {
+            crate::schema::list_tables_core(
+                &state,
+                &connection_id,
+                &database,
+                &schema,
+                Some(&table),
+                Some(limit),
+                None,
+                None,
+                None,
+            )
+            .await
+        }
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Transfer table metadata task failed: {error}"))?
+}
+
 async fn resolve_transfer_target_table_name(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: &TransferRequest,
     source_table: &str,
     target_pool_key: &str,
@@ -818,41 +877,21 @@ async fn resolve_transfer_target_table_name(
     // Route through the catalog-aware path when targeting an external
     // Doris/StarRocks catalog — otherwise the lookup runs against the
     // default / internal catalog and can miss or misidentify the table.
-    let tables = if let Some(catalog) = resolve_external_transfer_catalog(target_catalog, target_db_type) {
-        crate::schema::list_doris_catalog_tables_core(
-            state,
-            &request.target_connection_id,
-            catalog,
-            &request.target_database,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name} in catalog '{catalog}': {error}");
-            Vec::new()
-        })
-    } else {
-        crate::schema::list_tables_core(
-            state,
-            &request.target_connection_id,
-            &request.target_database,
-            &request.target_schema,
-            Some(&requested_name),
-            Some(TRANSFER_TARGET_TABLE_LOOKUP_LIMIT),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_or_else(|error| {
-            log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
-            Vec::new()
-        })
-    };
+    let tables = list_transfer_tables_isolated(
+        state.clone(),
+        request.target_connection_id.clone(),
+        request.target_database.clone(),
+        request.target_schema.clone(),
+        target_catalog.map(str::to_string),
+        *target_db_type,
+        requested_name.clone(),
+        TRANSFER_TARGET_TABLE_LOOKUP_LIMIT,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        log::debug!("[transfer] failed to resolve target table metadata for {requested_name}: {error}");
+        Vec::new()
+    });
 
     if let Some(existing_name) =
         existing_transfer_target_table_name(&requested_name, &tables, allow_case_insensitive_match)
@@ -6827,7 +6866,7 @@ pub(crate) fn sort_table_names_by_dependencies(
 
 #[allow(clippy::too_many_arguments)]
 async fn transfer_mongodb_table<F>(
-    state: &AppState,
+    state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
     table_index: usize,
@@ -7187,8 +7226,8 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
 #[allow(clippy::too_many_arguments)]
-pub async fn transfer_table<F>(
-    state: &AppState,
+async fn transfer_table_inner<F>(
+    state: &Arc<AppState>,
     request: &TransferRequest,
     table: &str,
     table_index: usize,
@@ -7265,45 +7304,23 @@ where
         log::info!("[transfer] {} has {} columns, counting rows...", table, columns.len());
     }
 
-    // Fetch source table comment
-    // Route through the catalog-aware path for Doris/StarRocks external catalogs
-    // so the comment comes from the selected catalog, not the default one.
-    let table_comment: Option<String> =
-        if let Some(catalog) = resolve_external_transfer_catalog(request.source_catalog.as_deref(), source_db_type) {
-            crate::schema::list_doris_catalog_tables_core(
-                state,
-                &request.source_connection_id,
-                catalog,
-                &request.source_database,
-                Some(table),
-                Some(1),
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|t| t.comment)
-        } else {
-            crate::schema::list_tables_core(
-                state,
-                &request.source_connection_id,
-                &request.source_database,
-                &request.source_schema,
-                Some(table),
-                Some(1),
-                None,
-                None,
-                None,
-            )
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|t| t.comment)
-        };
+    // Fetch source table comment. Keep this list-tables metadata chain on its
+    // own task stack, just like the target-table lookup above.
+    let table_comment = list_transfer_tables_isolated(
+        state.clone(),
+        request.source_connection_id.clone(),
+        request.source_database.clone(),
+        request.source_schema.clone(),
+        request.source_catalog.clone(),
+        *source_db_type,
+        table.to_string(),
+        1,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .next()
+    .and_then(|table| table.comment);
 
     let source_indexes =
         if request.create_table && pg_compat_transfer && preserves_target_table_name && !target_table_preexisting {
@@ -7860,6 +7877,74 @@ where
     }
 
     Ok(total_transferred)
+}
+
+/// Transfer one table on its own Tokio task so the large transfer future and
+/// nested driver metadata futures do not share a single worker stack.
+#[allow(clippy::too_many_arguments)]
+pub async fn transfer_table<F>(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    table: &str,
+    table_index: usize,
+    source_db_type: &DatabaseType,
+    target_db_type: &DatabaseType,
+    source_pool_key: &str,
+    target_pool_key: &str,
+    known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
+    pending_fk_alters: &mut Vec<(String, String)>,
+    mut progress_callback: F,
+) -> Result<u64, String>
+where
+    F: FnMut(TransferProgress),
+{
+    let state = state.clone();
+    let request = request.clone();
+    let table = table.to_string();
+    let source_db_type = *source_db_type;
+    let target_db_type = *target_db_type;
+    let source_pool_key = source_pool_key.to_string();
+    let target_pool_key = target_pool_key.to_string();
+    let known_foreign_keys = known_foreign_keys
+        .get(&table)
+        .map(|foreign_keys| HashMap::from([(table.clone(), foreign_keys.clone())]))
+        .unwrap_or_default();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+
+    let mut task = tokio::spawn(async move {
+        let mut task_pending_fk_alters = Vec::new();
+        let result = transfer_table_inner(
+            &state,
+            &request,
+            &table,
+            table_index,
+            &source_db_type,
+            &target_db_type,
+            &source_pool_key,
+            &target_pool_key,
+            &known_foreign_keys,
+            &mut task_pending_fk_alters,
+            move |progress| {
+                try_send_transfer_progress(&progress_tx, progress);
+            },
+        )
+        .await;
+        (result, task_pending_fk_alters)
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+
+    loop {
+        tokio::select! {
+            biased;
+            Some(progress) = progress_rx.recv() => progress_callback(progress),
+            result = &mut task => {
+                let (result, task_pending_fk_alters) =
+                    result.map_err(|error| format!("Transfer table task failed: {error}"))?;
+                pending_fk_alters.extend(task_pending_fk_alters);
+                return result;
+            }
+        }
+    }
 }
 
 pub async fn transfer_postgres_schema_dependencies<F>(
@@ -12991,5 +13076,28 @@ CREATE INDEX items_name_idx ON public.items (id);"#;
 
         assert_eq!(statements.len(), 1);
         assert!(statements[0].starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn transfer_progress_queue_has_bounded_capacity() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
+        for rows_transferred in 0..=TRANSFER_PROGRESS_CHANNEL_CAPACITY {
+            try_send_transfer_progress(
+                &sender,
+                TransferProgress {
+                    transfer_id: "transfer".to_string(),
+                    table: "table".to_string(),
+                    table_index: 0,
+                    total_tables: 1,
+                    rows_transferred: rows_transferred as u64,
+                    total_rows: None,
+                    status: TransferStatus::Running,
+                    error: None,
+                    terminal: false,
+                },
+            );
+        }
+
+        assert_eq!(receiver.len(), TRANSFER_PROGRESS_CHANNEL_CAPACITY);
     }
 }

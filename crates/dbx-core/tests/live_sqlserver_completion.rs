@@ -1351,7 +1351,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
     let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-rowversion-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     let config = live_sqlserver_config("live-sqlserver-rowversion", &database);
     state.configs.write().await.insert(config.id.clone(), config);
     let source_pool_key =

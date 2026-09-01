@@ -175,6 +175,7 @@ export default withEnglishFallback({
     previewQuery: "クエリをプレビュー",
     hidePreviewSql: "SQLプレビューを非表示",
     saveSql: "SQLライブラリに保存",
+    saveSqlFile: "元のファイルに保存",
     openSql: "SQLファイルを開く",
     exPasteSqlInCondition: "ExPaste: IN条件として貼り付け",
     theme: "テーマ",

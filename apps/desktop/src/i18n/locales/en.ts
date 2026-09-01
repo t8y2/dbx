@@ -173,6 +173,7 @@ export default {
     previewQuery: "Preview query",
     hidePreviewSql: "Hide SQL Preview",
     saveSql: "Save to SQL Library",
+    saveSqlFile: "Save to Original File",
     openSql: "Open SQL file",
     exPasteSqlInCondition: "ExPaste: paste as IN condition",
     theme: "Theme",

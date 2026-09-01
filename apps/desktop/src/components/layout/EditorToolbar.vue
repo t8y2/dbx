@@ -133,7 +133,11 @@ const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnec
 const supportsTransaction = computed(() => supportsTransactionFeature(props.activeConnection?.db_type));
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
-const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+const saveTooltip = computed(() => {
+  if (props.activeTab.objectSource) return t("objects.saveSource");
+  if (props.activeTab.externalSqlPath) return t("toolbar.saveSqlFile");
+  return t("toolbar.saveSql");
+});
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
 // executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，

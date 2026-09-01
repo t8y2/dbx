@@ -175,6 +175,7 @@ export default withEnglishFallback({
     previewQuery: "預覽查詢",
     hidePreviewSql: "隱藏 SQL 預覽",
     saveSql: "儲存到 SQL 庫",
+    saveSqlFile: "儲存到原始檔案",
     openSql: "開啟 SQL 檔案",
     exPasteSqlInCondition: "ExPaste：貼上為 IN 條件",
     theme: "主題",

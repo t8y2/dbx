@@ -175,6 +175,7 @@ export default withEnglishFallback({
     previewQuery: "Vista previa de la consulta",
     hidePreviewSql: "Ocultar vista previa de SQL",
     saveSql: "Guardar en biblioteca SQL",
+    saveSqlFile: "Guardar en el archivo original",
     openSql: "Abrir archivo SQL",
     exPasteSqlInCondition: "ExPaste: pegar como condición IN",
     theme: "Tema",

@@ -98,6 +98,7 @@ export default withEnglishFallback({
     previewQuery: "预览查询",
     hidePreviewSql: "隐藏 SQL 预览",
     saveSql: "保存到 SQL 库",
+    saveSqlFile: "保存到原文件",
     openSql: "打开 SQL 文件",
     exPasteSqlInCondition: "ExPaste：粘贴为 IN 条件",
     theme: "主题",

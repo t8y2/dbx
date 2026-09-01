@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { useConnectionStore } from "@/stores/connectionStore";
 import * as api from "@/lib/backend/api";
 import { buildDatabaseSearchSql, buildSearchResultWhere, findMatchedSearchColumns } from "@/lib/database/databaseSearch";
+import { databaseSearchBatchRange, databaseSearchNextBatchSize } from "@/lib/database/databaseSearchBatch";
 import type { DatabaseType, TableInfo } from "@/types/database";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 
@@ -58,7 +59,6 @@ type SearchTableTask = {
 };
 
 const SYSTEM_SCHEMAS = new Set(["information_schema", "pg_catalog", "sys", "system", "mysql", "performance_schema", "xdb", "outln", "dbsnmp"]);
-const MAX_TABLES = 200;
 
 const keyword = ref("");
 const perTableLimit = ref(20);
@@ -70,14 +70,20 @@ const progressTotal = ref(0);
 const results = ref<SearchResultItem[]>([]);
 const tableErrors = ref<Array<{ tableName: string; message: string }>>([]);
 const generalError = ref("");
-const limitedTables = ref(false);
 const currentExecutionId = ref("");
+const tableTasks = ref<SearchTableTask[]>([]);
+const nextTableIndex = ref(0);
+const activeKeyword = ref("");
+const activePerTableLimit = ref(20);
 let runId = 0;
 
 const connection = computed(() => (props.prefillConnectionId ? connectionStore.getConfig(props.prefillConnectionId) : undefined));
 const scopeLabel = computed(() => [connection.value?.name, props.prefillDatabase, props.prefillSchema].filter(Boolean).join(" / "));
 const canSearch = computed(() => Boolean(props.prefillConnectionId && props.prefillDatabase && keyword.value.trim() && !running.value));
 const progressLabel = computed(() => t("databaseSearch.progress", { done: progressDone.value, total: progressTotal.value }));
+const remainingTableCount = computed(() => Math.max(0, tableTasks.value.length - nextTableIndex.value));
+const nextBatchSize = computed(() => databaseSearchNextBatchSize(nextTableIndex.value, tableTasks.value.length));
+const canContinueSearch = computed(() => !running.value && !loadingTables.value && remainingTableCount.value > 0);
 
 watch(
   dialogOpen,
@@ -100,8 +106,11 @@ function resetSearchState() {
   results.value = [];
   tableErrors.value = [];
   generalError.value = "";
-  limitedTables.value = false;
   currentExecutionId.value = "";
+  tableTasks.value = [];
+  nextTableIndex.value = 0;
+  activeKeyword.value = "";
+  activePerTableLimit.value = 20;
 }
 
 function isSearchableTable(table: TableInfo): boolean {
@@ -154,10 +163,6 @@ async function listSearchTables(): Promise<SearchTableTask[]> {
     }
   }
 
-  if (tasks.length > MAX_TABLES) {
-    limitedTables.value = true;
-    return tasks.slice(0, MAX_TABLES);
-  }
   return tasks;
 }
 
@@ -167,27 +172,57 @@ async function startSearch() {
   resetSearchState();
   running.value = true;
   loadingTables.value = true;
+  activeKeyword.value = keyword.value.trim();
+  activePerTableLimit.value = Math.min(100, Math.max(1, Math.trunc(Number(perTableLimit.value) || 20)));
 
   try {
     await connectionStore.ensureConnected(props.prefillConnectionId);
-    const tasks = await listSearchTables();
+    tableTasks.value = await listSearchTables();
     if (currentRun !== runId || cancelled.value) return;
-    progressTotal.value = tasks.length;
+    progressTotal.value = tableTasks.value.length;
     loadingTables.value = false;
-
-    for (const task of tasks) {
-      if (currentRun !== runId || cancelled.value) break;
-      await searchTable(task, connection.value.db_type, currentRun);
-      progressDone.value += 1;
-    }
+    await scanTableRange(currentRun, false);
   } catch (error: any) {
-    if (!cancelled.value) generalError.value = error?.message || String(error);
+    if (currentRun === runId && !cancelled.value) generalError.value = error?.message || String(error);
   } finally {
     if (currentRun === runId) {
       running.value = false;
       loadingTables.value = false;
       currentExecutionId.value = "";
     }
+  }
+}
+
+async function continueSearch(scanAllRemaining: boolean) {
+  if (!canContinueSearch.value || !connection.value) return;
+  const currentRun = ++runId;
+  cancelled.value = false;
+  running.value = true;
+  generalError.value = "";
+
+  try {
+    await connectionStore.ensureConnected(props.prefillConnectionId);
+    await scanTableRange(currentRun, scanAllRemaining);
+  } catch (error: any) {
+    if (currentRun === runId && !cancelled.value) generalError.value = error?.message || String(error);
+  } finally {
+    if (currentRun === runId) {
+      running.value = false;
+      currentExecutionId.value = "";
+    }
+  }
+}
+
+async function scanTableRange(currentRun: number, scanAllRemaining: boolean) {
+  const range = databaseSearchBatchRange(nextTableIndex.value, tableTasks.value.length, scanAllRemaining);
+  while (nextTableIndex.value < range.end) {
+    if (currentRun !== runId || cancelled.value) break;
+    const task = tableTasks.value[nextTableIndex.value];
+    if (!task) break;
+    await searchTable(task, connection.value!.db_type, currentRun);
+    if (currentRun !== runId || cancelled.value) break;
+    nextTableIndex.value += 1;
+    progressDone.value = nextTableIndex.value;
   }
 }
 
@@ -202,8 +237,8 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
       schema: task.schema,
       tableName: task.table.name,
       columns,
-      term: keyword.value,
-      limit: perTableLimit.value,
+      term: activeKeyword.value,
+      limit: activePerTableLimit.value,
     });
     if (!query || currentRun !== runId || cancelled.value) return;
 
@@ -213,8 +248,9 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
     if (currentExecutionId.value === executionId) currentExecutionId.value = "";
     if (currentRun !== runId || cancelled.value) return;
 
+    const tableResults: SearchResultItem[] = [];
     for (const [rowIndex, row] of result.rows.entries()) {
-      const matchedColumns = findMatchedSearchColumns(result.columns, row, columns, keyword.value);
+      const matchedColumns = findMatchedSearchColumns(result.columns, row, columns, activeKeyword.value);
       const whereInput = await buildSearchResultWhere({
         databaseType,
         columns,
@@ -222,8 +258,9 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
         row,
         matchedColumns,
       });
-      results.value.push({
-        id: `${tableLabel}:${rowIndex}:${results.value.length}`,
+      if (currentRun !== runId || cancelled.value) return;
+      tableResults.push({
+        id: `${tableLabel}:${rowIndex}`,
         schema: task.schema,
         tableName: task.table.name,
         tableType: task.table.table_type,
@@ -232,8 +269,9 @@ async function searchTable(task: SearchTableTask, databaseType: DatabaseType, cu
         whereInput,
       });
     }
+    if (currentRun === runId && !cancelled.value) results.value.push(...tableResults);
   } catch (error: any) {
-    if (!cancelled.value) {
+    if (currentRun === runId && !cancelled.value) {
       tableErrors.value.push({ tableName: tableLabel, message: error?.message || String(error) });
     }
   }
@@ -312,7 +350,14 @@ function openResult(item: SearchResultItem) {
         <div v-if="running || progressTotal" class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
           <span class="tabular-nums">{{ loadingTables ? t("databaseSearch.loadingTables") : progressLabel }}</span>
           <span class="tabular-nums">{{ t("databaseSearch.resultCount", { count: results.length }) }}</span>
-          <span v-if="limitedTables" class="text-amber-600">{{ t("databaseSearch.limitedTables", { count: 200 }) }}</span>
+          <div v-if="canContinueSearch" class="ml-auto flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" class="h-7 text-xs" @click="continueSearch(false)">
+              {{ t("databaseSearch.continueNextBatch", { count: nextBatchSize }) }}
+            </Button>
+            <Button variant="secondary" size="sm" class="h-7 text-xs" @click="continueSearch(true)">
+              {{ t("databaseSearch.scanAllRemaining", { count: remainingTableCount }) }}
+            </Button>
+          </div>
         </div>
 
         <div v-if="generalError" class="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">

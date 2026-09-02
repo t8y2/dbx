@@ -318,6 +318,9 @@ export default withEnglishFallback({
     exitAndUpdate: "Sair e Atualizar",
     dockerUsersRun: "Usuários do Docker devem executar",
     toUpdate: "para atualizar",
+    source: "Fonte de atualização",
+    sourceOfficial: "Fonte oficial",
+    sourceCnb: "CNB",
   },
   sidebar: {
     connections: "CONEXÕES",

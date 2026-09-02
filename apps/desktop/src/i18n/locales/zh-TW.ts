@@ -318,6 +318,9 @@ export default withEnglishFallback({
     exitAndUpdate: "結束並更新",
     dockerUsersRun: "Docker 使用者請執行",
     toUpdate: "更新",
+    source: "更新來源",
+    sourceOfficial: "官方來源",
+    sourceCnb: "CNB",
   },
   sidebar: {
     connections: "連線",

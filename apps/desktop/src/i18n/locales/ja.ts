@@ -318,6 +318,9 @@ export default withEnglishFallback({
     exitAndUpdate: "終了してアップデート",
     dockerUsersRun: "Dockerユーザーは以下を実行してください",
     toUpdate: "更新するには",
+    source: "更新ソース",
+    sourceOfficial: "公式ソース",
+    sourceCnb: "CNB",
   },
   sidebar: {
     connections: "接続",

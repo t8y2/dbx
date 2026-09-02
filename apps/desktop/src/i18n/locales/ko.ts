@@ -316,6 +316,9 @@ export default withEnglishFallback({
     exitAndUpdate: "종료 후 업데이트",
     dockerUsersRun: "Docker 사용자는 다음 명령을 실행하세요",
     toUpdate: "업데이트하려면",
+    source: "업데이트 소스",
+    sourceOfficial: "공식 소스",
+    sourceCnb: "CNB",
   },
   sidebar: {
     connections: "연결",

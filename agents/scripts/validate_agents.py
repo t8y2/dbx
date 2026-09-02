@@ -16,6 +16,7 @@ NATIVE_ONLY_AGENT_MODULES = {
     "cassandra": "drivers/cassandra-go",
     "duckdb": "drivers/duckdb",
     "hive": "drivers/hive-go",
+    "argo": "drivers/argo-go",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
     "iotdb": "drivers/iotdb",

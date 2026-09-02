@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
+import { AlertTriangle, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Database, Info, KeyRound, ListChevronsUpDown, Loader2, Maximize2, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Settings, SlidersHorizontal, Trash2, UserRound, X } from "@lucide/vue";
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -27,6 +27,7 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
+import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -175,9 +176,33 @@ let ddlEditorScrollCleanup: (() => void) | null = null;
 const loadedMetadataFacets = new Set<ObjectMetadataFacet>();
 let structureEditorReady = false;
 const ddlFetched = ref(false);
+/** User-edited DDL script; `null` means untouched (the loaded DDL is shown verbatim). */
+const ddlDraft = ref<string | null>(null);
+
+/**
+ * DDL is only editable for an existing table whose DDL actually loaded — the
+ * create-table flow has no DDL tab, and an empty baseline only renders the
+ * "no records" placeholder, which must never become executable text.
+ */
+const ddlEditingEnabled = computed(() => !isCreateMode.value && !!ddlContent.value.trim());
+const ddlDirty = computed(() => ddlDraft.value !== null && ddlDraft.value.trim() !== ddlContent.value.trim());
 
 function ddlEditorDocument(): string {
-  return ddlContent.value || t("structureEditor.emptyReadonly");
+  return ddlDraft.value ?? (ddlContent.value || t("structureEditor.emptyReadonly"));
+}
+
+function resetDdlDraft() {
+  ddlDraft.value = null;
+  updateDdlEditorContent(ddlEditorDocument());
+}
+
+/** Statements the edited DDL script will execute, split like the SQL editor does. */
+function ddlDraftStatements(): string[] {
+  const script = ddlDraft.value;
+  if (!script) return [];
+  return splitSqlStatementRanges(script, databaseType.value)
+    .map((statement) => statement.sql.trim())
+    .filter((statement) => statement.length > 0);
 }
 
 function destroyDdlEditor() {
@@ -188,13 +213,21 @@ function destroyDdlEditor() {
   ddlEditorView.value = null;
 }
 
+/** Set while we replace the document ourselves, so the listener below only records real user edits. */
+let applyingDdlDocument = false;
+
 function updateDdlEditorContent(content: string): boolean {
   const view = ddlEditorView.value;
   if (!view) return false;
   if (view.state.doc.toString() !== content) {
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: content },
-    });
+    applyingDdlDocument = true;
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: content },
+      });
+    } finally {
+      applyingDdlDocument = false;
+    }
   }
   return true;
 }
@@ -212,7 +245,11 @@ async function initDdlEditor(content: string) {
   if (!container) return;
 
   const existingView = ddlEditorView.value;
-  if (existingView?.dom.parentElement === container) {
+  // Read-only is baked into the state, so a view built while the DDL was still
+  // empty (placeholder text) can only be reused while its editability still
+  // matches — otherwise the tab would stay stuck uneditable after real DDL
+  // arrived, and rebuilding is the only way to swap the extension.
+  if (existingView?.dom.parentElement === container && existingView.state.readOnly === !ddlEditingEnabled.value) {
     updateDdlEditorContent(content);
     existingView.focus();
     return;
@@ -260,7 +297,11 @@ async function initDdlEditor(content: string) {
           WebkitUserSelect: "text",
         },
       }),
-      EditorState.readOnly.of(true),
+      EditorView.updateListener.of((update) => {
+        if (!update.docChanged || applyingDdlDocument || !ddlEditingEnabled.value) return;
+        ddlDraft.value = update.state.doc.toString();
+      }),
+      EditorState.readOnly.of(!ddlEditingEnabled.value),
     ],
   });
   const editorView = new EditorView({ state, parent: container });
@@ -1280,8 +1321,12 @@ function onStructureContentScroll(tab: TableInfoTab, event: Event) {
 
 function createCurrentDraft(initialized = true): TableStructureEditorDraft {
   return {
-    dirty: hasPendingStructureChanges(),
+    dirty: hasPendingStructureChanges() || ddlDirty.value,
     activeTab: activeTab.value as TableStructureEditorDraft["activeTab"],
+    ddlDraft: ddlDraft.value,
+    // Only carried alongside an actual edit: without a draft the baseline is
+    // refetched, and copying every table's DDL into every draft is pure weight.
+    ddlContent: ddlDraft.value === null ? undefined : ddlContent.value,
     newTableName: newTableName.value,
     tableComment: tableComment.value,
     originalTableComment: originalTableComment.value,
@@ -1316,6 +1361,13 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   restoringDraft = true;
   draftHydrated = false;
   activeTab.value = draft.activeTab || "columns";
+  // Restore the DDL baseline alongside the edit, otherwise the restored script
+  // would read as dirty (or clean) against the wrong reference text.
+  if (draft.ddlContent) {
+    ddlContent.value = draft.ddlContent;
+    ddlFetched.value = true;
+  }
+  ddlDraft.value = draft.ddlDraft ?? null;
   newTableName.value = draft.newTableName || "";
   tableComment.value = draft.tableComment || "";
   originalTableComment.value = draft.originalTableComment || "";
@@ -1529,7 +1581,7 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (!hasPendingStructureChanges()) {
+  if (!hasPendingStructureChanges() && !ddlDirty.value) {
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
@@ -1538,10 +1590,15 @@ function scheduleSqlPreviewRefresh() {
     return;
   }
   sqlPreviewPending.value = true;
-  if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) return;
-  if (!isCreateMode.value && secondaryMetadataLoading.value) {
-    deferredSqlPreviewRefresh = true;
-    return;
+  // An edited DDL script is previewed by splitting the text the user typed, so
+  // none of the column-draft/metadata gates below apply to it — waiting on them
+  // would leave the preview pending with nothing left to trigger it.
+  if (!ddlDirty.value) {
+    if (hydratingRestoredDraft || needsColumnDraftMetadataHydration()) return;
+    if (!isCreateMode.value && secondaryMetadataLoading.value) {
+      deferredSqlPreviewRefresh = true;
+      return;
+    }
   }
   sqlPreviewDebounceTimer = setTimeout(() => {
     sqlPreviewDebounceTimer = undefined;
@@ -1574,6 +1631,18 @@ async function refreshSqlPreview() {
     // the explicit error visible until a later probe re-verifies the table.
     pendingStatements.value = [];
     warnings.value = [t("structureEditor.concurrentUnavailableBlocksSave")];
+    sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  if (ddlDirty.value) {
+    // An edited DDL script runs verbatim — it is never diffed against the
+    // current structure — so it cannot be merged with the generated ALTERs.
+    // Refuse to guess which one the user meant instead of executing both.
+    const conflictsWithStructureDraft = hasPendingStructureChanges();
+    pendingStatements.value = conflictsWithStructureDraft ? [] : ddlDraftStatements();
+    warnings.value = conflictsWithStructureDraft ? [t("structureEditor.ddlEditConflictsWithStructure")] : [];
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
@@ -1690,6 +1759,7 @@ function resetState() {
   triggersLoaded.value = false;
   clearColumnSelection();
   ddlContent.value = "";
+  ddlDraft.value = null;
   ddlFetched.value = false;
   loadedMetadataFacets.clear();
   newTableName.value = "";
@@ -1740,6 +1810,9 @@ async function reloadStructureFromDatabase() {
   invalidateTableMetadataCache(metadataMatch);
   await invalidateObjectDdl(ddlRequest());
   loadedMetadataFacets.clear();
+  // Reloading from the database discards drafts (triggers/constraints above do
+  // the same), so an edited DDL script must not survive as a stale overlay.
+  ddlDraft.value = null;
   if (refreshDdl) {
     ddlFetched.value = false;
     await Promise.all([fetchDdl(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
@@ -3384,9 +3457,12 @@ async function copyPreviewSql() {
 }
 
 async function copyDdlContent() {
-  if (!ddlContent.value.trim()) return;
+  // Copy what the editor actually shows, so an edited script is not silently
+  // replaced by the database's original DDL.
+  const ddl = ddlDraft.value ?? ddlContent.value;
+  if (!ddl.trim()) return;
   try {
-    await copyToClipboard(ddlContent.value);
+    await copyToClipboard(ddl);
     toast(t("contextMenu.ddlCopied"), 2000);
   } catch (e: any) {
     toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
@@ -3423,7 +3499,10 @@ async function applyChanges() {
   }
   saving.value = true;
   errorMessage.value = "";
-  const refreshScope = captureStructureRefreshScope();
+  // A hand-written DDL script can change anything about the table, and the
+  // structure draft it was applied from is clean, so the change-derived scope
+  // would be empty: reload every facet instead of leaving the tabs stale.
+  const refreshScope = ddlDirty.value ? { columns: true, indexes: true, foreignKeys: true, constraints: true, triggers: true, tableComment: true } : captureStructureRefreshScope();
   // Plan A guard: concurrent builds only run with a long-enough query timeout
   // (a cancelled build leaves an INVALID index behind), and are blocked
   // up-front when a same-name INVALID index already exists.
@@ -3460,9 +3539,12 @@ async function applyChanges() {
   const configuredTimeoutSecs = queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs);
   const executionTimeoutSecs = queryTimeoutSecsForConcurrentIndex(configuredTimeoutSecs, hasConcurrentIndexBuild);
   try {
-    const result = hasSqliteTypeChange.value
-      ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
-      : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs);
+    // An edited DDL script is always executed as the batch it previews as; the
+    // SQLite rebuild path would rebuild from the structure draft instead.
+    const result =
+      hasSqliteTypeChange.value && !ddlDirty.value
+        ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
+        : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs);
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
@@ -3479,6 +3561,7 @@ async function applyChanges() {
     sqliteSchemaRevision.value = undefined;
     ddlFetched.value = false;
     ddlContent.value = "";
+    ddlDraft.value = null;
     if (isCreateMode.value) {
       clearDraft();
       emit("saved", tableComment.value !== originalTableComment.value);
@@ -3784,6 +3867,7 @@ watch(
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     tableOwner,
+    ddlDraft,
     columns,
     indexes,
     foreignKeys,
@@ -3872,6 +3956,30 @@ watch([activeTab, loading, secondaryMetadataLoading], () => void loadActiveTable
 watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, ddlIsLoading]) => {
   if (tab === "ddl" && !structureIsLoading && !ddlIsLoading) scheduleDdlEditorInit();
 });
+
+// The DDL pane lives in a reka-ui TabsContent that stays mounted across tab
+// switches via force-mount (see the TabsContent in the template), so the
+// historical "revisit renders blank" race is closed at the mount level. Two
+// windows remain for this watch: the pane still mounts one tick *after* the
+// tab becomes active (Presence flips asynchronously), so a single `nextTick`
+// guess (scheduleDdlEditorInit) can run before the container exists; and the
+// loading branch swaps the container node. Drive creation off the container
+// ref itself, like useDataGridCellDetail/DataGrid do for their editors.
+watch(
+  ddlEditorContainer,
+  (container) => {
+    if (!container) {
+      // The container only goes away on real unmount or when the loading
+      // branch swaps it out: drop the view rather than leaving it attached
+      // to a detached node.
+      destroyDdlEditor();
+      return;
+    }
+    if (activeTab.value !== "ddl" || loading.value || ddlLoading.value) return;
+    void initDdlEditor(ddlEditorDocument());
+  },
+  { flush: "post" },
+);
 </script>
 
 <template>
@@ -3969,7 +4077,10 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
         <Tabs v-model="activeTab" class="flex h-full min-h-0 flex-col">
           <div class="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-[var(--structure-header-py)]">
             <TabsList>
-              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">DDL</TabsTrigger>
+              <TabsTrigger v-if="tableMetadataCapabilities.ddl && !isCreateMode" value="ddl">
+                DDL
+                <span v-if="ddlDirty" class="ml-1 h-1.5 w-1.5 rounded-full bg-primary" :title="t('structureEditor.ddlEditNotice')" data-ddl-dirty-indicator></span>
+              </TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.columns" value="columns">{{ t("structureEditor.columns") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.indexes" value="indexes">{{ t("structureEditor.indexes") }}</TabsTrigger>
               <TabsTrigger v-if="tableMetadataCapabilities.foreignKeys" value="foreignKeys">{{ t("structureEditor.foreignKeys") }}</TabsTrigger>
@@ -4765,10 +4876,16 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
               {{ t("common.loading") }}
             </div>
             <template v-else>
-              <Button v-if="ddlContent && !ddlSearchOpen" variant="outline" size="sm" class="absolute right-3 top-3 z-10 h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
-                <Copy class="h-3.5 w-3.5" />
-                {{ t("grid.copyDdl") }}
-              </Button>
+              <div v-if="ddlContent && !ddlSearchOpen" class="absolute right-3 top-3 z-10 flex items-center gap-1.5">
+                <Button v-if="ddlDirty" variant="outline" size="sm" class="h-7 gap-1 px-2" :title="t('structureEditor.resetDdl')" @click="resetDdlDraft">
+                  <RotateCcw class="h-3.5 w-3.5" />
+                  {{ t("structureEditor.resetDdl") }}
+                </Button>
+                <Button variant="outline" size="sm" class="h-7 gap-1 px-2" :title="t('grid.copyDdl')" @click="copyDdlContent">
+                  <Copy class="h-3.5 w-3.5" />
+                  {{ t("grid.copyDdl") }}
+                </Button>
+              </div>
               <div ref="ddlEditorContainer" class="structure-ddl-editor h-full min-h-full min-w-0 w-full"></div>
               <EditorSearchPanel v-if="ddlEditorView" ref="ddlSearchPanelRef" :view="ddlEditorView" @open="ddlSearchOpen = true" @close="ddlSearchOpen = false" />
             </template>
@@ -4807,6 +4924,10 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
           </div>
         </div>
         <div v-if="!sqlPreviewCollapsed" class="min-h-0 flex-1 overflow-auto p-2.5" :aria-busy="sqlPreviewPending || sqlPreviewLoading">
+          <div v-if="ddlDirty" class="mb-2 flex gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-primary">
+            <Info :class="[structureIconClass, 'mt-0.5 shrink-0']" />
+            <span>{{ t("structureEditor.ddlEditNotice") }}</span>
+          </div>
           <div v-if="hasSqliteTypeChange" class="mb-2 flex gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-[var(--structure-cell-px)] py-[var(--structure-cell-py)] text-[length:var(--structure-font-size)] text-primary">
             <Info :class="[structureIconClass, 'mt-0.5 shrink-0']" />
             <span>{{ t("structureEditor.sqliteRebuildNotice") }}</span>

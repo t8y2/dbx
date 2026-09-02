@@ -94,6 +94,7 @@ export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unk
   if (normalizedSource === "cnb" && info?.latest_version) {
     return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${tagVersion(info.latest_version)}`;
   }
+  if (normalizedSource === "cnb") return "https://cnb.cool/dbxio.com/dbx/-/releases";
   return info?.release_url || fallbackUrl;
 }
 
@@ -115,6 +116,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const checkingUpdates = ref(false);
   const updateInfo = ref<api.UpdateInfo | null>(null);
   const updateCheckMessage = ref("");
+  const updateCheckFailed = ref(false);
   const showUpdateDialog = ref(false);
   const isDownloadingUpdate = ref(false);
   // null while the download size is unknown (backend reported no total) — the UI shows an indeterminate state.
@@ -146,10 +148,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       return;
     }
     checkingUpdates.value = true;
-    updateCheckMessage.value = "";
+    // Keep the previous message/failed state visible while the check is in
+    // flight: pre-clearing would flip the dialog to "up to date" with an empty
+    // version and unmount the source switcher until the request settles.
     try {
       const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
       updateInfo.value = info;
+      updateCheckMessage.value = "";
+      updateCheckFailed.value = false;
       if (info.update_available) {
         if (shouldOpenUpdateDialog({ silent: options.silent })) {
           showUpdateDialog.value = true;
@@ -160,7 +166,13 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       }
     } catch (e: any) {
       if (!options.silent) {
+        // Drop the stale update info only on a surfaced failure; silent
+        // background checks keep the last known state so the toolbar
+        // indicator and an in-flight download's portable-mode flag survive
+        // a single failed poll.
+        updateInfo.value = null;
         updateCheckMessage.value = formatUpdateError(String(e));
+        updateCheckFailed.value = true;
         showUpdateDialog.value = true;
       }
     } finally {
@@ -185,6 +197,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   function openLatestRelease() {
     const url = resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl);
     openUrl(url);
+  }
+
+  async function changeUpdateDownloadSource(source: SettingsUpdateDownloadSource) {
+    await settingsStore.updateEditorSettingsAndPersist({ updateDownloadSource: source });
+    await checkUpdates();
   }
 
   async function ignoreCurrentVersion() {
@@ -342,6 +359,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkingUpdates,
     updateInfo,
     updateCheckMessage,
+    updateCheckFailed,
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
@@ -356,6 +374,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkUpdates,
     formatUpdateError,
     openLatestRelease,
+    changeUpdateDownloadSource,
     ignoreCurrentVersion,
     downloadUpdateInBackground,
     cancelDownload,

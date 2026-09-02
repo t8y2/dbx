@@ -2786,6 +2786,11 @@ function switchH2ConnectionMode(mode: H2ConnectionMode) {
   resetTestState();
 }
 
+function switchEtcdApiVersion(profile: "etcd" | "etcd-v2") {
+  form.value.driver_profile = profile;
+  resetTestState();
+}
+
 function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2-custom") {
   form.value.driver_profile = profile;
   if (profile === "h2-custom") {
@@ -6872,6 +6877,18 @@ function openExternalUrl(url: string) {
 
                 <!-- etcd: endpoints, user, password, TLS -->
                 <template v-else-if="form.db_type === 'etcd'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">API</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <div class="flex flex-wrap gap-2">
+                        <Button size="sm" :variant="!form.driver_profile || form.driver_profile === 'etcd' ? 'default' : 'outline'" @click="switchEtcdApiVersion('etcd')">v3 (etcd 3.x)</Button>
+                        <Button size="sm" :variant="form.driver_profile === 'etcd-v2' ? 'default' : 'outline'" @click="switchEtcdApiVersion('etcd-v2')">v2 (etcd 2.x)</Button>
+                      </div>
+                      <p v-if="form.driver_profile === 'etcd-v2'" class="text-xs text-muted-foreground">
+                        {{ t("connection.etcdV2ApiHint") }}
+                      </p>
+                    </div>
+                  </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />

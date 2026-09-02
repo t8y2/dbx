@@ -155,6 +155,8 @@ const transferPreviewLoaded = ref(false);
 const syncConfigurationExpanded = ref(true);
 
 const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
+// etcd 2.x connections speak the v2 API: no key history, no leases, no maintenance.
+const isV2Api = computed(() => connectionStore.getConfig(props.connectionId)?.driver_profile === "etcd-v2");
 const etcdConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "etcd"));
 const targetReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)));
 const selectedTransferRows = computed(() => transferRows.value.filter((row) => row.selected && isTransferRowSelectable(row)));
@@ -259,7 +261,7 @@ function keyOptions(key: string): api.KvGetOptions {
   return { keyBytes: candidates?.size === 1 ? [...candidates.values()][0] : undefined };
 }
 
-const etcdApi = {
+const etcdApi = computed(() => ({
   async listPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: api.KvListPrefixOptions | null) {
     const response = await api.etcdListPrefix(connectionId, prefix, limit, continuation, options);
     return { ...response, keys: response.keys.map(rememberSummary) };
@@ -279,9 +281,11 @@ const etcdApi = {
     }),
   deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => api.etcdDelete(connectionId, key, { ...options, keyBytes: options?.keyBytes ?? keyOptions(key).keyBytes }),
   rename: api.etcdRename,
-  history: api.etcdHistory,
+  // The v2 API has no event history; hiding the entry keeps KvKeyBrowser from
+  // offering restore/compare actions it cannot fulfill.
+  history: isV2Api.value ? undefined : api.etcdHistory,
   exportScope: exportEtcdNodeScope,
-};
+}));
 
 const labels = computed(() => ({
   prefixPlaceholder: t("etcd.prefixPlaceholder"),
@@ -1030,7 +1034,7 @@ defineExpose({ focusSearch, refresh });
         <Button size="sm" :variant="mode === 'keys' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'keys'"><KeyRound class="h-4 w-4" /> {{ t("etcd.key") }}</Button>
         <Button size="sm" :variant="mode === 'search' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'search'"><Search class="h-4 w-4" /> {{ t("etcd.globalSearch") }}</Button>
       </div>
-      <Button size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
+      <Button v-if="!isV2Api" size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
       <Button
         size="sm"
         :variant="mode === 'watch' ? 'secondary' : 'ghost'"
@@ -1041,7 +1045,7 @@ defineExpose({ focusSearch, refresh });
         "
         ><Activity class="h-4 w-4" />{{ t("etcd.admin.watch") }}</Button
       >
-      <Button size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
+      <Button v-if="!isV2Api" size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
       <div class="flex-1" />
       <Badge v-if="readOnly" variant="outline">{{ t("connection.readOnly") }}</Badge>
       <DropdownMenu>
@@ -1074,7 +1078,7 @@ defineExpose({ focusSearch, refresh });
       :api="etcdApi"
       :labels="labels"
       :supports-ttl="supportsTtl"
-      :supports-lease-binding="true"
+      :supports-lease-binding="!isV2Api"
       :ttl-capability-known="ttlCapabilityKnown"
       :enable-node-actions="true"
       :safe-write="true"

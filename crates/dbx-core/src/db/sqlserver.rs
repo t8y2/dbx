@@ -49,7 +49,7 @@ const SQLSERVER_RESULT_TYPE_PROBE_SQL: &str = "\
         DECLARE @dbx_probe_object nvarchar(258) = N'tempdb..' + QUOTENAME(@dbx_probe_table); \
         DECLARE @dbx_probe_sql nvarchar(max); \
         BEGIN TRY \
-            SET @dbx_probe_sql = @P4 + N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
+            SET @dbx_probe_sql = CAST(@P4 AS nvarchar(max)) + N'SELECT TOP (0) * INTO ' + QUOTENAME(@dbx_probe_table) + \
                 N' FROM ' + @P3; \
             EXEC sys.sp_executesql @dbx_probe_sql; \
             SELECT c.name, TYPE_NAME(c.system_type_id) AS system_type_name, \
@@ -5409,11 +5409,26 @@ mod tests {
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("sys.dm_exec_describe_first_result_set"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("##dbx_result_type_probe_"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("SELECT TOP (0) * INTO"));
-        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("@P4 + N'SELECT TOP (0) * INTO"));
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("CAST(@P4 AS nvarchar(max)) + N'SELECT TOP (0) * INTO"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("N' FROM ' + @P3"));
         assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FROM tempdb.sys.columns"));
         assert!(!SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("FMTONLY"));
         assert_eq!(SQLSERVER_RESULT_TYPE_PROBE_SQL.matches("SELECT @dbx_use_describe_dmv").count(), 1);
+    }
+
+    #[test]
+    fn sqlserver_legacy_probe_keeps_long_projection_text_untruncated() {
+        let aliases = (1..=136).map(|index| format!("[dbx_col_{index}]")).collect::<Vec<_>>().join(", ");
+        let source_sql = format!(
+            "(SELECT TOP (100) {} FROM [dbo].[ProjectInfo] WHERE ([PrjId] = N'123')) AS [dbx_probe_source]({aliases})",
+            (1..=136).map(|index| format!("[column_{index:03}]")).collect::<Vec<_>>().join(", "),
+        );
+
+        // SQL Server evaluates non-MAX concatenations left-to-right and caps
+        // nvarchar results at 4,000 characters. This is the shape reported in
+        // #7827; the explicit MAX cast must precede the dynamic source text.
+        assert!(source_sql.len() > 3_900);
+        assert!(SQLSERVER_RESULT_TYPE_PROBE_SQL.contains("CAST(@P4 AS nvarchar(max)) +"));
     }
 
     #[test]

@@ -238,9 +238,8 @@ pub struct McpGlobalPolicy {
     /// allowlist and is enforced independently of connection permissions.
     #[serde(default)]
     pub allowed_tool_names: Option<Vec<String>>,
-    /// Per-connection rules may only reduce the global execution ceiling.
-    /// Keeping this in the global document preserves compatibility with the
-    /// existing policy API while allowing each exposed connection to be safer.
+    /// Per-connection execution defaults and database overrides. Rules without
+    /// the current execution policy version remain legacy ceilings.
     #[serde(default)]
     pub connection_policies: Vec<McpConnectionPolicy>,
     #[serde(default)]
@@ -259,17 +258,21 @@ pub struct McpConnectionPolicy {
     /// permits writes.
     #[serde(default)]
     pub read_only: bool,
-    /// Enables high-risk SQL only when the MCP-wide policy also enables it.
-    /// The default is deliberately false, so adding a connection rule narrows
-    /// a full-access global policy to safe writes unless chosen otherwise.
+    /// Enables high-risk SQL for this connection. Legacy rules require this
+    /// to remain within the global ceiling; versioned rules use it as the
+    /// connection default and still honor independent connection protections.
     #[serde(default)]
     pub allow_dangerous_sql: bool,
     /// Whether the operation ceiling is explicitly overridden for this
-    /// connection. Missing on older saved policies defaults to true so their
-    /// existing safe-write/read-only behavior is preserved; database-only
-    /// rules leave it false and inherit the global ceiling.
+    /// connection. Missing on older saved policies defaults to true for
+    /// deserialization compatibility; the version marker determines whether
+    /// those fields use legacy ceiling or current override semantics.
     #[serde(default = "default_mcp_connection_execution_mode_configured")]
     pub execution_mode_configured: bool,
+    /// Rules without this marker retain the legacy ceiling behavior. New UI
+    /// writes use version 1 for scoped override semantics.
+    #[serde(default)]
+    pub execution_mode_policy_version: Option<u8>,
     /// Limits which databases below this connection can be reached by MCP.
     /// The default preserves existing installations: all databases remain
     /// available until a user explicitly narrows the scope.
@@ -279,6 +282,25 @@ pub struct McpConnectionPolicy {
     /// An empty selected list intentionally denies every database.
     #[serde(default)]
     pub allowed_databases: Vec<String>,
+    /// Optional per-database execution settings. A missing entry inherits the
+    /// connection default, while a present entry takes priority over it.
+    #[serde(default)]
+    pub database_policies: Vec<McpDatabasePolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpDatabasePolicy {
+    /// Exact database name matched after the connection scope has admitted it.
+    pub database_name: String,
+    /// When true, this database rejects writes regardless of the connection
+    /// and global defaults.
+    #[serde(default)]
+    pub read_only: bool,
+    /// Enables high-risk SQL for this database. Connection read-only,
+    /// production protection, scope, and database credentials remain hard limits.
+    #[serde(default)]
+    pub allow_dangerous_sql: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -412,6 +434,15 @@ impl McpGlobalPolicy {
                         }
                         current.execution_mode_configured = true;
                     }
+                    current.execution_mode_policy_version =
+                        match (current.execution_mode_policy_version, rule.execution_mode_policy_version) {
+                            (Some(left), Some(right))
+                                if left == crate::mcp_policy::MCP_EXECUTION_POLICY_VERSION && right == left =>
+                            {
+                                Some(left)
+                            }
+                            _ => None,
+                        };
                     let (scope, databases) = intersect_mcp_database_scopes(
                         current.database_scope,
                         &current.allowed_databases,
@@ -420,14 +451,18 @@ impl McpGlobalPolicy {
                     );
                     current.database_scope = scope;
                     current.allowed_databases = databases;
+                    current.database_policies =
+                        merge_mcp_database_policies(&current.database_policies, &rule.database_policies);
                 })
                 .or_insert_with(|| McpConnectionPolicy {
                     connection_id: connection_id.to_string(),
                     read_only: rule.read_only,
                     allow_dangerous_sql: rule.allow_dangerous_sql,
                     execution_mode_configured: rule.execution_mode_configured,
+                    execution_mode_policy_version: rule.execution_mode_policy_version,
                     database_scope: rule.database_scope,
                     allowed_databases: normalize_mcp_database_names(&rule.allowed_databases),
+                    database_policies: normalize_mcp_database_policies(&rule.database_policies),
                 });
         }
         let mut connection_policies = policies.into_values().collect::<Vec<_>>();
@@ -439,6 +474,10 @@ impl McpGlobalPolicy {
             rule.allowed_databases = normalize_mcp_database_names(&rule.allowed_databases);
             if rule.database_scope != McpDatabaseScope::Selected {
                 rule.allowed_databases.clear();
+                rule.database_policies.clear();
+            } else {
+                rule.database_policies
+                    .retain(|policy| rule.allowed_databases.binary_search(&policy.database_name).is_ok());
             }
         }
 
@@ -463,6 +502,44 @@ fn normalize_mcp_database_names(databases: &[String]) -> Vec<String> {
     databases.sort();
     databases.dedup();
     databases
+}
+
+fn normalize_mcp_database_policies(policies: &[McpDatabasePolicy]) -> Vec<McpDatabasePolicy> {
+    let mut normalized = HashMap::<String, McpDatabasePolicy>::new();
+    for policy in policies {
+        let database_name = policy.database_name.trim();
+        if database_name.is_empty() {
+            continue;
+        }
+        normalized
+            .entry(database_name.to_string())
+            .and_modify(|current| {
+                // Duplicate entries represent independently supplied limits,
+                // so combine them as the strictest possible policy.
+                current.read_only |= policy.read_only;
+                current.allow_dangerous_sql &= policy.allow_dangerous_sql;
+            })
+            .or_insert_with(|| McpDatabasePolicy {
+                database_name: database_name.to_string(),
+                read_only: policy.read_only,
+                allow_dangerous_sql: !policy.read_only && policy.allow_dangerous_sql,
+            });
+    }
+    let mut normalized = normalized.into_values().collect::<Vec<_>>();
+    normalized.sort_by(|left, right| left.database_name.cmp(&right.database_name));
+    for policy in &mut normalized {
+        if policy.read_only {
+            policy.allow_dangerous_sql = false;
+        }
+    }
+    normalized
+}
+
+fn merge_mcp_database_policies(left: &[McpDatabasePolicy], right: &[McpDatabasePolicy]) -> Vec<McpDatabasePolicy> {
+    let mut policies = Vec::with_capacity(left.len() + right.len());
+    policies.extend_from_slice(left);
+    policies.extend_from_slice(right);
+    normalize_mcp_database_policies(&policies)
 }
 
 fn intersect_mcp_database_scopes(

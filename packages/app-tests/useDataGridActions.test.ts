@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { computed, toRaw } from "vue";
 import { createPinia, setActivePinia } from "pinia";
-import { test, vi } from "vitest";
+import { describe, test, vi } from "vitest";
 import { useConnectionStore } from "../../apps/desktop/src/stores/connectionStore.ts";
 import { useQueryStore } from "../../apps/desktop/src/stores/queryStore.ts";
 import { useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
@@ -283,4 +283,227 @@ test("query toolbar refresh reruns the complete multi-result SQL and keeps the a
   } finally {
     restoreStorage();
   }
+});
+
+describe("multi-result preservation after submit", () => {
+  function withConnectionHealthMock(
+    handler: typeof fetch,
+  ): typeof fetch {
+    return async (input, init) => {
+      const url = String(input);
+      if (url === "/api/connection/check-health") {
+        return Response.json(null);
+      }
+      return handler(input, init);
+    };
+  }
+
+  test("submit edit on first result preserves the second result", async () => {
+    const restoreStorage = installMemoryStorage();
+    const originalFetch = globalThis.fetch;
+    const { useDataGridActions } = await import(
+      "../../apps/desktop/src/composables/useDataGridActions.ts",
+    );
+
+    globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/query/prepare-pagination-plan") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify({
+            sqlToExecute: body.options.sql,
+            useAgentResultSession: false,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url === "/api/query/execute-multi") {
+        return new Response(
+          JSON.stringify([
+            {
+              columns: ["id"],
+              rows: [[11]],
+              affected_rows: 0,
+              execution_time_ms: 1,
+              sourceStatement: "select * from users",
+            },
+          ]),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url === "/api/query/analyze-editability") {
+        return new Response(
+          JSON.stringify({ editable: false, reason: "complex-source" }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      return new Response("unexpected request: " + url, {
+        status: 500,
+      });
+    });
+
+    try {
+      setActivePinia(createPinia());
+      const connectionStore = useConnectionStore();
+      const queryStore = useQueryStore();
+      connectionStore.addEphemeralConnection(conn("mysql-1"));
+
+      const tabId = queryStore.createTab("mysql-1", "app", "query", "query");
+      const tab = queryStore.tabs.find((item) => item.id === tabId);
+      assert.ok(tab);
+
+      // Simulate prior multi-statement execution with two results
+      const batchSql = "select * from users; select * from orders";
+      const resultA = {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "select * from users",
+      };
+      const resultB = {
+        columns: ["id"],
+        rows: [[2]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "select * from orders",
+      };
+
+      tab.sql = batchSql;
+      tab.lastExecutedSql = batchSql;
+      tab.resultBaseSql = batchSql;
+      tab.results = [resultA, resultB];
+      tab.activeResultIndex = 0;
+      tab.result = resultA;
+
+      const actions = useDataGridActions(computed(() => tab));
+
+      // Simulate DataGrid submit reload: onReloadData with the current
+      // result's sourceStatement (single statement, not the full batch SQL)
+      await actions.onReloadData("select * from users");
+
+      // The second result must be preserved
+      assert.equal(tab.results?.length, 2, "both results must survive after submit");
+      assert.equal(tab.activeResultIndex, 0, "activeResultIndex must stay on the first result");
+      assert.equal(tab.results![0].rows[0][0], 11, "first result must be refreshed");
+      assert.equal(tab.results![1].rows[0][0], 2, "second result must be the original resultB");
+      assert.equal(tab.result, tab.results![0], "tab.result must point to the refreshed first result");
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
+
+  test("submit edit on second result preserves the first result", async () => {
+    const restoreStorage = installMemoryStorage();
+    const originalFetch = globalThis.fetch;
+    const { useDataGridActions } = await import(
+      "../../apps/desktop/src/composables/useDataGridActions.ts",
+    );
+
+    globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+      const url = String(input);
+      if (url === "/api/query/prepare-pagination-plan") {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify({
+            sqlToExecute: body.options.sql,
+            useAgentResultSession: false,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url === "/api/query/execute-multi") {
+        return new Response(
+          JSON.stringify([
+            {
+              columns: ["id"],
+              rows: [[22]],
+              affected_rows: 0,
+              execution_time_ms: 1,
+              sourceStatement: "select * from orders",
+            },
+          ]),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      if (url === "/api/query/analyze-editability") {
+        return new Response(
+          JSON.stringify({ editable: false, reason: "complex-source" }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      return new Response("unexpected request: " + url, {
+        status: 500,
+      });
+    });
+
+    try {
+      setActivePinia(createPinia());
+      const connectionStore = useConnectionStore();
+      const queryStore = useQueryStore();
+      connectionStore.addEphemeralConnection(conn("mysql-1"));
+
+      const tabId = queryStore.createTab("mysql-1", "app", "query", "query");
+      const tab = queryStore.tabs.find((item) => item.id === tabId);
+      assert.ok(tab);
+
+      // Simulate prior multi-statement execution with two results
+      const batchSql = "select * from users; select * from orders";
+      const resultA = {
+        columns: ["id"],
+        rows: [[1]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "select * from users",
+      };
+      const resultB = {
+        columns: ["id"],
+        rows: [[2]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+        sourceStatement: "select * from orders",
+      };
+
+      tab.sql = batchSql;
+      tab.lastExecutedSql = batchSql;
+      tab.resultBaseSql = batchSql;
+      tab.results = [resultA, resultB];
+      tab.activeResultIndex = 1;
+      tab.result = resultB;
+
+      const actions = useDataGridActions(computed(() => tab));
+
+      // Simulate DataGrid submit reload on the SECOND result
+      await actions.onReloadData("select * from orders");
+
+      // The first result must be preserved
+      assert.equal(tab.results?.length, 2, "both results must survive after submit on second result");
+      assert.equal(tab.activeResultIndex, 1, "activeResultIndex must stay on the second result");
+      assert.equal(tab.results![0].rows[0][0], 1, "first result must be the original resultA");
+      assert.equal(tab.results![1].rows[0][0], 22, "second result must be refreshed");
+      assert.equal(tab.result, tab.results![1], "tab.result must point to the refreshed second result");
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreStorage();
+    }
+  });
 });

@@ -92,6 +92,7 @@ import {
   type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
+  type McpConnectionPolicy,
   type ClickTableNavigationTarget,
   type SqlCompletionTriggerMode,
   SIDEBAR_INDENT_MIN,
@@ -543,6 +544,7 @@ const editSidebarCopyTableNameIncludeSchema = ref(settingsStore.editorSettings.s
 const editRedisKeyTemplates = ref(normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n"));
 const editSidebarObjectInfoMode = ref<SidebarObjectInfoMode>(settingsStore.editorSettings.sidebarObjectInfoMode);
 const editSidebarAllowHorizontalScroll = ref(settingsStore.editorSettings.sidebarAllowHorizontalScroll);
+const editSidebarShowTooltips = ref(settingsStore.editorSettings.sidebarShowTooltips);
 const editSidebarIndent = ref(settingsStore.editorSettings.sidebarIndent);
 const editSidebarFontSize = ref(settingsStore.editorSettings.sidebarFontSize);
 const editExportBatchSize = ref(settingsStore.editorSettings.exportBatchSize);
@@ -688,6 +690,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
+    sidebarShowTooltips: editSidebarShowTooltips.value,
     sidebarIndent: editSidebarIndent.value,
     sidebarFontSize: editSidebarFontSize.value,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(editSidebarHiddenTablePrefixes.value),
@@ -1095,6 +1098,7 @@ function syncEditorSettingsDraftFromStore() {
   editRedisKeyTemplates.value = normalizeRedisKeyTemplates(settingsStore.editorSettings.redisKeyTemplates).join("\n");
   editSidebarObjectInfoMode.value = settingsStore.editorSettings.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = settingsStore.editorSettings.sidebarAllowHorizontalScroll;
+  editSidebarShowTooltips.value = settingsStore.editorSettings.sidebarShowTooltips;
   editSidebarIndent.value = settingsStore.editorSettings.sidebarIndent;
   editSidebarFontSize.value = settingsStore.editorSettings.sidebarFontSize;
   editExportBatchSize.value = settingsStore.editorSettings.exportBatchSize;
@@ -1358,6 +1362,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
     editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
     editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+    editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
     editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
     editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
     editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
@@ -1494,6 +1499,7 @@ function resetAllDefaults() {
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
+  editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
   editSidebarIndent.value = DEFAULT_EDITOR_SETTINGS.sidebarIndent;
   editSidebarFontSize.value = DEFAULT_EDITOR_SETTINGS.sidebarFontSize;
   editSidebarHiddenTablePrefixes.value = DEFAULT_EDITOR_SETTINGS.sidebarHiddenTablePrefixes.join("\n");
@@ -1924,6 +1930,7 @@ function resetSettingsSearchState() {
   settingsSearchActiveIndex.value = 0;
   pendingSettingsSearchResult = null;
   shortcutSearchQuery.value = "";
+  mcpPermissionPreviewSearchQuery.value = "";
   clearSettingsSearchHighlight();
 }
 
@@ -2217,7 +2224,16 @@ async function saveMcpPolicy(partial: {
   allowDangerousSql?: boolean;
   allowedConnectionIds?: string[] | null;
   allowedToolNames?: string[] | null;
-  connectionPolicies?: { connectionId: string; readOnly: boolean; allowDangerousSql: boolean; executionModeConfigured: boolean; databaseScope: "all" | "selected" | "none"; allowedDatabases: string[] }[];
+  connectionPolicies?: {
+    connectionId: string;
+    readOnly: boolean;
+    allowDangerousSql: boolean;
+    executionModeConfigured: boolean;
+    executionModePolicyVersion: number | null;
+    databaseScope: "all" | "selected" | "none";
+    allowedDatabases: string[];
+    databasePolicies: { databaseName: string; readOnly: boolean; allowDangerousSql: boolean }[];
+  }[];
   queryTimeoutSecs?: number | null;
 }) {
   if (mcpPolicyControlsDisabled.value) return;
@@ -2325,16 +2341,87 @@ function mcpConnectionExecutionMode(connectionId: string): McpConnectionExecutio
   return rule.allowDangerousSql ? "high_risk_write" : "safe_write";
 }
 
+function mcpExecutionModeRank(mode: McpConnectionExecutionMode): number {
+  return mode === "read_only" ? 0 : mode === "safe_write" ? 1 : 2;
+}
+
+function migrateLegacyMcpConnectionPolicy(policy: McpConnectionPolicy) {
+  const connectionMode = mcpConnectionExecutionMode(policy.connectionId);
+  const legacyMode = connectionMode === "inherit" ? mcpExecutionMode.value : connectionMode;
+  const effectiveMode = mcpExecutionModeRank(legacyMode) < mcpExecutionModeRank(mcpExecutionMode.value) ? legacyMode : mcpExecutionMode.value;
+  const databasePolicies = policy.databasePolicies.map((databasePolicy) => {
+    const databaseMode: McpConnectionExecutionMode = databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
+    const effectiveDatabaseMode = mcpExecutionModeRank(databaseMode) < mcpExecutionModeRank(effectiveMode) ? databaseMode : effectiveMode;
+    return {
+      ...databasePolicy,
+      readOnly: effectiveDatabaseMode === "read_only",
+      allowDangerousSql: effectiveDatabaseMode === "high_risk_write",
+    };
+  });
+  return {
+    readOnly: effectiveMode === "read_only",
+    allowDangerousSql: effectiveMode === "high_risk_write",
+    executionModeConfigured: true,
+    databasePolicies,
+  };
+}
+
+function mcpExecutionModeLabel(mode: McpConnectionExecutionMode): string {
+  return t(mode === "read_only" ? "settings.mcpExecutionModeReadOnly" : mode === "safe_write" ? "settings.mcpExecutionModeSafeWrite" : "settings.mcpExecutionModeHighRiskWrite");
+}
+
+function mcpEffectiveExecutionMode(connectionMode: McpConnectionExecutionMode | "inherit", databaseMode: McpConnectionExecutionMode | "inherit"): McpConnectionExecutionMode {
+  return databaseMode !== "inherit" ? databaseMode : connectionMode !== "inherit" ? connectionMode : mcpExecutionMode.value;
+}
+
+const mcpPermissionPreviewSearchQuery = ref("");
+const mcpPermissionPreviewRows = computed(() =>
+  mcpConnectionPolicyConnections.value.flatMap((connection) => {
+    const rule = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connection.id);
+    const connectionMode = mcpConnectionExecutionMode(connection.id);
+    if (rule?.databaseScope === "none") return [];
+    const databases = rule?.databaseScope === "selected" ? rule.allowedDatabases : [t("settings.mcpDatabaseScopeSummaryAll")];
+    return databases.map((database) => {
+      const databasePolicy = rule?.databasePolicies.find((item) => item.databaseName === database);
+      const databaseMode: McpConnectionExecutionMode | "inherit" = !databasePolicy ? "inherit" : databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
+      return {
+        connection: connection.name,
+        database,
+        connectionMode,
+        databaseMode,
+        effectiveMode: mcpEffectiveExecutionMode(connectionMode, databaseMode),
+      };
+    });
+  }),
+);
+const filteredMcpPermissionPreviewRows = computed(() => {
+  const query = mcpPermissionPreviewSearchQuery.value.trim().toLocaleLowerCase();
+  if (!query) return mcpPermissionPreviewRows.value;
+  return mcpPermissionPreviewRows.value.filter((row) => [row.connection, row.database].some((value) => value.toLocaleLowerCase().includes(query)));
+});
+
 function onMcpConnectionExecutionModeChange(connectionId: string, mode: McpConnectionExecutionMode | "inherit") {
   const existing = settingsStore.mcpGlobalPolicy.connectionPolicies.find((item) => item.connectionId === connectionId);
   const rules = settingsStore.mcpGlobalPolicy.connectionPolicies.filter((item) => item.connectionId !== connectionId);
+  const migrated = existing && existing.executionModePolicyVersion !== 1 ? migrateLegacyMcpConnectionPolicy(existing) : null;
+  const selectedMode =
+    migrated && mode === "inherit"
+      ? migrated
+      : {
+          readOnly: mode === "read_only",
+          allowDangerousSql: mode === "high_risk_write",
+          executionModeConfigured: mode !== "inherit",
+          databasePolicies: migrated?.databasePolicies ?? existing?.databasePolicies ?? [],
+        };
   const next = {
     connectionId,
-    readOnly: mode === "read_only",
-    allowDangerousSql: mode === "high_risk_write",
-    executionModeConfigured: mode !== "inherit",
+    readOnly: selectedMode.readOnly,
+    allowDangerousSql: selectedMode.allowDangerousSql,
+    executionModeConfigured: selectedMode.executionModeConfigured,
+    executionModePolicyVersion: 1,
     databaseScope: existing?.databaseScope ?? ("all" as const),
     allowedDatabases: existing?.allowedDatabases ?? [],
+    databasePolicies: selectedMode.databasePolicies,
   };
   if (next.executionModeConfigured || next.databaseScope !== "all") rules.push(next);
   void saveMcpPolicy({ connectionPolicies: rules });
@@ -5791,6 +5878,17 @@ onUnmounted(() => {
                 <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
               </div>
               <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
+                  <Label for="sidebar-show-tooltips">
+                    {{ t("settings.sidebarShowTooltips") }}
+                  </Label>
+                  <HelpTooltip :label="t('settings.sidebarShowTooltips')">
+                    {{ t("settings.sidebarShowTooltipsDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Switch id="sidebar-show-tooltips" v-model="editSidebarShowTooltips" />
+              </div>
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-indent">{{ t("settings.sidebarIndent") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -7931,6 +8029,7 @@ onUnmounted(() => {
                       :connections="mcpSelectableConnections"
                       :allowed-connection-ids="mcpAllowedConnectionIds"
                       :connection-policies="settingsStore.mcpGlobalPolicy.connectionPolicies"
+                      :global-execution-mode="mcpExecutionMode"
                       :disabled="mcpPolicyControlsDisabled"
                       :busy="mcpPolicyLoading || mcpPolicySaving"
                       @update:connection-policies="onMcpConnectionPoliciesChange"
@@ -7981,6 +8080,44 @@ onUnmounted(() => {
                   </template>
                   <template #capabilities>
                     <div class="space-y-4">
+                      <section class="space-y-2 rounded-md border bg-background p-3">
+                        <div>
+                          <p class="text-sm font-medium">{{ t("settings.mcpPermissionPreviewTitle") }}</p>
+                          <p class="text-xs text-muted-foreground">{{ t("settings.mcpPermissionPreviewDescription") }}</p>
+                        </div>
+                        <template v-if="mcpPermissionPreviewRows.length">
+                          <div class="relative">
+                            <Search class="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+                            <Input v-model="mcpPermissionPreviewSearchQuery" autocomplete="off" :placeholder="t('settings.mcpPermissionPreviewSearchPlaceholder')" class="h-8 pl-9 text-xs" />
+                          </div>
+                          <div class="max-h-72 overflow-auto overscroll-contain rounded border">
+                            <table class="w-full min-w-[42rem] border-separate border-spacing-0 text-xs">
+                              <thead class="text-muted-foreground">
+                                <tr>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewConnection") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewDatabase") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewConnectionDefault") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewDatabaseOverride") }}</th>
+                                  <th scope="col" class="sticky top-0 z-10 bg-muted px-3 py-2 text-left font-medium shadow-[0_1px_0_hsl(var(--border))]">{{ t("settings.mcpPermissionPreviewEffective") }}</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <tr v-for="row in filteredMcpPermissionPreviewRows" :key="`${row.connection}:${row.database}`" class="border-t">
+                                  <td class="px-3 py-2 font-medium">{{ row.connection }}</td>
+                                  <td class="px-3 py-2 font-mono">{{ row.database }}</td>
+                                  <td class="px-3 py-2">{{ row.connectionMode === "inherit" ? t("settings.mcpConnectionPolicyInherit") : mcpExecutionModeLabel(row.connectionMode) }}</td>
+                                  <td class="px-3 py-2">{{ row.databaseMode === "inherit" ? t("settings.mcpDatabasePolicyInherit") : mcpExecutionModeLabel(row.databaseMode) }}</td>
+                                  <td class="px-3 py-2 font-medium">{{ mcpExecutionModeLabel(row.effectiveMode) }}</td>
+                                </tr>
+                                <tr v-if="filteredMcpPermissionPreviewRows.length === 0">
+                                  <td colspan="5" class="px-3 py-8 text-center text-muted-foreground">{{ t("settings.mcpPermissionPreviewSearchNoResults") }}</td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </template>
+                        <p v-else class="text-xs text-muted-foreground">{{ t("settings.mcpPermissionPreviewEmpty") }}</p>
+                      </section>
                       <section class="space-y-2">
                         <div>
                           <p class="text-sm font-medium">{{ t("settings.mcpToolPermissionsTitle") }}</p>

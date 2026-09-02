@@ -64,8 +64,16 @@ export interface McpConnectionPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   executionModeConfigured: boolean;
+  executionModePolicyVersion: number | null;
   databaseScope: "all" | "selected" | "none";
   allowedDatabases: string[];
+  databasePolicies: McpDatabasePolicy[];
+}
+
+export interface McpDatabasePolicy {
+  databaseName: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export type DesktopIconTheme = "default" | "black";
@@ -116,13 +124,33 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
   const connectionPolicies = Object.values(
     (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
       if (!rule || typeof rule.connectionId !== "string" || !rule.connectionId.trim()) return rules;
+      const databaseScope = rule.databaseScope === "selected" || rule.databaseScope === "none" ? rule.databaseScope : "all";
+      const allowedDatabases = databaseScope === "selected" ? [...new Set((rule.allowedDatabases ?? []).filter((database): database is string => typeof database === "string" && database.trim().length > 0).map((database) => database.trim()))] : [];
+      const allowedDatabaseNames = new Set(allowedDatabases);
+      const databasePolicies = Object.values(
+        (databaseScope === "selected" ? (rule.databasePolicies ?? []) : []).reduce<Record<string, McpDatabasePolicy>>((policies, databasePolicy) => {
+          if (!databasePolicy || typeof databasePolicy.databaseName !== "string") return policies;
+          const databaseName = databasePolicy.databaseName.trim();
+          if (!databaseName || !allowedDatabaseNames.has(databaseName)) return policies;
+          const current = policies[databaseName];
+          const readOnly = current?.readOnly === true || databasePolicy.readOnly === true;
+          policies[databaseName] = {
+            databaseName,
+            readOnly,
+            allowDangerousSql: !readOnly && (current ? current.allowDangerousSql && databasePolicy.allowDangerousSql === true : databasePolicy.allowDangerousSql === true),
+          };
+          return policies;
+        }, {}),
+      );
       rules[rule.connectionId.trim()] = {
         connectionId: rule.connectionId.trim(),
         readOnly: rule.readOnly === true,
         allowDangerousSql: rule.readOnly !== true && rule.allowDangerousSql === true,
         executionModeConfigured: rule.executionModeConfigured !== false,
-        databaseScope: rule.databaseScope === "selected" || rule.databaseScope === "none" ? rule.databaseScope : "all",
-        allowedDatabases: rule.databaseScope === "selected" ? [...new Set((rule.allowedDatabases ?? []).filter((database): database is string => typeof database === "string" && database.trim().length > 0).map((database) => database.trim()))] : [],
+        executionModePolicyVersion: rule.executionModePolicyVersion === 1 ? 1 : null,
+        databaseScope,
+        allowedDatabases,
+        databasePolicies,
       };
       return rules;
     }, {}),
@@ -748,6 +776,7 @@ export interface EditorSettings {
   sidebarCopyTableNameIncludeSchema: boolean;
   sidebarObjectInfoMode: SidebarObjectInfoMode;
   sidebarShowConnectionNotes: boolean;
+  sidebarShowTooltips: boolean;
   sidebarAllowHorizontalScroll: boolean;
   sidebarIndent: number;
   sidebarFontSize: number;
@@ -972,6 +1001,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarCopyTableNameIncludeSchema: false,
   sidebarObjectInfoMode: "comment-inline",
   sidebarShowConnectionNotes: false,
+  sidebarShowTooltips: true,
   sidebarAllowHorizontalScroll: false,
   sidebarIndent: SIDEBAR_INDENT_DEFAULT,
   sidebarFontSize: SIDEBAR_FONT_SIZE_DEFAULT,
@@ -1441,6 +1471,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
       ).sidebarShowDatabaseSizes,
     ),
     sidebarShowConnectionNotes: settings.sidebarShowConnectionNotes === true,
+    sidebarShowTooltips: settings.sidebarShowTooltips ?? DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips,
     sidebarAllowHorizontalScroll: settings.sidebarAllowHorizontalScroll ?? DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll,
     sidebarIndent: normalizeSidebarIndent(settings.sidebarIndent),
     sidebarFontSize: normalizeSidebarFontSize(settings.sidebarFontSize),
@@ -2107,6 +2138,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sidebarCopyTableNameIncludeSchema !== undefined) editorSettings.value.sidebarCopyTableNameIncludeSchema = partial.sidebarCopyTableNameIncludeSchema === true;
     if (partial.sidebarObjectInfoMode !== undefined) editorSettings.value.sidebarObjectInfoMode = normalizeSidebarObjectInfoMode(partial.sidebarObjectInfoMode);
     if (partial.sidebarShowConnectionNotes !== undefined) editorSettings.value.sidebarShowConnectionNotes = partial.sidebarShowConnectionNotes === true;
+    if (partial.sidebarShowTooltips !== undefined) editorSettings.value.sidebarShowTooltips = partial.sidebarShowTooltips;
     if (partial.sidebarAllowHorizontalScroll !== undefined) editorSettings.value.sidebarAllowHorizontalScroll = partial.sidebarAllowHorizontalScroll;
     if (partial.sidebarIndent !== undefined) editorSettings.value.sidebarIndent = normalizeSidebarIndent(partial.sidebarIndent);
     if (partial.sidebarFontSize !== undefined) editorSettings.value.sidebarFontSize = normalizeSidebarFontSize(partial.sidebarFontSize);

@@ -755,6 +755,24 @@ a {
   color: var(--color-landing-ink);
 }
 
+.landing-install-download-link:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid rgba(255, 255, 255, 0.72);
+  outline-offset: -3px;
+}
+
+.landing-install-driver-link {
+  color: #69c9ff;
+  text-decoration-color: rgba(105, 201, 255, 0.78);
+  transition: color 0.16s ease;
+}
+
+.landing-install-driver-link:hover,
+.landing-install-driver-link:focus-visible {
+  color: #a7e3ff;
+  text-decoration-color: currentColor;
+}
+
 .landing-install-option svg {
   fill: currentColor;
   stroke-width: 1.8;

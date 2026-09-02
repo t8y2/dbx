@@ -161,8 +161,8 @@ impl MySqlSqlFileExecutor {
         let database = (!database.is_empty()).then_some(database);
         let pool_key = state.get_or_create_pool_for_session(&request.connection_id, database, None).await?;
         let (db_type, driver_profile, bare) = {
-            let connections = state.connections.read().await;
-            let Some(PoolKind::Mysql(_, mode)) = connections.get(&pool_key) else {
+            let pool_handle = state.pool_handle(&pool_key).await;
+            let Some(PoolKind::Mysql(_, mode)) = pool_handle.as_ref() else {
                 return Ok(None);
             };
             (Some(target.db_type), target.driver_profile.as_deref(), *mode == crate::connection::MysqlMode::Bare)
@@ -303,8 +303,8 @@ impl MySqlSqlFileExecutor {
         let database = (!database.is_empty()).then_some(database);
         self.pool_key = state.get_or_create_pool_for_session(&self.connection_id, database, None).await?;
         let pool = {
-            let connections = state.connections.read().await;
-            match connections.get(&self.pool_key) {
+            let pool_handle = state.pool_handle(&self.pool_key).await;
+            match pool_handle.as_ref() {
                 Some(PoolKind::Mysql(pool, _)) => pool.clone(),
                 Some(_) => return Err("SQL file import expected a MySQL-compatible pooled connection".to_string()),
                 None => return Err("Connection not found".to_string()),
@@ -2276,10 +2276,10 @@ mod tests {
 
         let pool = crate::db::sqlite::connect_path(":memory:").await.unwrap();
         state
-            .connections
-            .write()
-            .await
-            .insert("gauss-stream".to_string(), crate::connection::PoolKind::Sqlite(pool.clone()));
+            .update_connection_pools(|connections| {
+                connections.insert("gauss-stream".to_string(), crate::connection::PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
 
         let path = temporary_sql_file(
             b"CREATE TABLE side_effects(value INTEGER);\nINSERT INTO missing_before_control VALUES (1);\nINSERT INTO side_effects VALUES (1);\n\\set ON_ERROR_STOP on\nINSERT INTO missing_after_control VALUES (1);\nINSERT INTO side_effects VALUES (2);",

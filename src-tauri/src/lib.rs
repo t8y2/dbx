@@ -1697,7 +1697,24 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
+                    let _ = window.emit("dbx:detached-tab-lost", serde_json::json!({ "tabId": tab_id }));
+                }
+                return;
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if let Some(tab_id) = window.label().strip_prefix("detached-tab-") {
+                    if commands::app_settings::take_approved_detached_window_close(window.label()) {
+                        return;
+                    }
+                    api.prevent_close();
+                    // Broadcast with the tabId payload: JS listeners registered
+                    // with the default `listen()` target receive events emitted
+                    // to any window, so the frontend must filter by tabId.
+                    let _ = window.emit("dbx:detached-tab-close-requested", serde_json::json!({ "tabId": tab_id }));
+                    return;
+                }
                 if !should_hide_window_on_close(std::env::consts::OS) {
                     return;
                 }
@@ -1768,6 +1785,11 @@ pub fn run() {
             commands::app_settings::save_editor_settings,
             commands::app_settings::load_open_tabs_state,
             commands::app_settings::save_open_tabs_state,
+            commands::app_settings::save_detached_tab_handoff,
+            commands::app_settings::load_detached_tab_handoff,
+            commands::app_settings::list_detached_tab_handoffs,
+            commands::app_settings::delete_detached_tab_handoff,
+            commands::app_settings::approve_detached_window_close,
             commands::app_settings::load_saved_sql_editor_positions,
             commands::app_settings::save_saved_sql_editor_positions,
             commands::app_settings::load_transfer_task_library,

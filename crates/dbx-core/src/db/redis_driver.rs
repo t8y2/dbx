@@ -305,6 +305,22 @@ pub enum RedisConnection {
     Cluster(RedisClusterPool),
 }
 
+#[cfg(test)]
+pub(crate) fn redis_connection_test_stub() -> RedisConnection {
+    RedisConnection::Cluster(RedisClusterPool {
+        connection: None,
+        seed_nodes: Vec::new(),
+        seed_routes: Vec::new(),
+        slot_ranges: Vec::new(),
+        node_routes: Vec::new(),
+        tls: false,
+        tls_insecure: false,
+        username: String::new(),
+        password: String::new(),
+        scan_sessions: Box::new(Mutex::new(RedisClusterScanSessions::default())),
+    })
+}
+
 pub struct RedisClusterPool {
     pub connection: Option<Mutex<ClusterConnection>>,
     pub seed_nodes: Vec<RedisNodeEndpoint>,

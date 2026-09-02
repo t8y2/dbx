@@ -74,6 +74,42 @@ pub struct DescribeTableRequest {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListRoutinesRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(description = "Schema name")]
+    #[schemars(extend("type" = "string"))]
+    pub schema: Option<String>,
+    #[schemars(
+        description = "Optional routine type filter: PROCEDURE or FUNCTION. Omit to list both. Unsupported databases return an empty list."
+    )]
+    #[schemars(extend("type" = "string"))]
+    pub routine_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetRoutineSourceRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Routine name (as returned by dbx_list_routines)")]
+    pub name: String,
+    #[schemars(description = "Routine type: PROCEDURE or FUNCTION")]
+    pub object_type: String,
+    #[schemars(description = "Optional routine signature for databases that overload routine names (e.g. Oracle)")]
+    #[schemars(extend("type" = "string"))]
+    pub signature: Option<String>,
+    #[schemars(description = "Database name")]
+    #[schemars(extend("type" = "string"))]
+    pub database: Option<String>,
+    #[schemars(description = "Schema name")]
+    #[schemars(extend("type" = "string"))]
+    pub schema: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ExecuteQueryRequest {
     #[serde(flatten)]
     pub selector: ConnectionSelector,
@@ -435,6 +471,76 @@ impl DbxMcpServer {
             Ok(columns) if columns.is_empty() => text("No columns found."),
             Ok(columns) => text(format_columns(&columns)),
             Err(error) => tool_error("TABLE_DESCRIPTION_ERROR", error),
+        }
+    }
+
+    #[tool(name = "dbx_list_routines", description = "List stored procedures and functions for a database schema")]
+    async fn list_routines(&self, Parameters(request): Parameters<ListRoutinesRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_list_routines").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let database = match self.resolve_database(request.database, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
+        let routine_types = match request.routine_type.as_deref() {
+            None => None,
+            Some(kind) => match normalize_routine_type(kind) {
+                Ok(kind) => Some(vec![kind]),
+                Err(error) => return tool_error("ROUTINE_LIST_ERROR", error),
+            },
+        };
+        match self.backend.list_routines(&resolved.connection, &database, &schema, routine_types.as_deref()).await {
+            Ok(routines) if routines.is_empty() => text("No routines found."),
+            Ok(routines) => text(format_routines(&routines)),
+            Err(error) => tool_error("ROUTINE_LIST_ERROR", error),
+        }
+    }
+
+    #[tool(name = "dbx_get_routine_source", description = "Get the full source text of a stored procedure or function")]
+    async fn get_routine_source(&self, Parameters(request): Parameters<GetRoutineSourceRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_get_routine_source").await {
+            return error;
+        }
+        let resolved = match self.resolve_connection(&request.selector).await {
+            Ok(resolved) => resolved,
+            Err(error) => return error,
+        };
+        let database = match self.resolve_database(request.database, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
+        let schema = match self.resolve_schema(request.schema) {
+            Ok(schema) => schema,
+            Err(error) => return error,
+        };
+        let object_type = match normalize_routine_type(&request.object_type) {
+            Ok(kind) => kind,
+            Err(error) => return tool_error("ROUTINE_SOURCE_ERROR", error),
+        };
+        match self
+            .backend
+            .get_routine_source(
+                &resolved.connection,
+                &database,
+                &schema,
+                &request.name,
+                &object_type,
+                request.signature.as_deref(),
+            )
+            .await
+        {
+            Ok(source) if source.source.trim().is_empty() => text("Routine source is empty."),
+            Ok(source) => text(source.source),
+            Err(error) => tool_error("ROUTINE_SOURCE_ERROR", error),
         }
     }
 
@@ -1703,6 +1809,32 @@ fn format_connections(connections: &[ConnectionSummary]) -> String {
     output
 }
 
+/// Normalize a user-supplied routine type ("procedure", "PROCEDURE", ...) to
+/// the canonical SCREAMING form used by the object listing protocol.
+fn normalize_routine_type(value: &str) -> Result<String, String> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "PROCEDURE" => Ok("PROCEDURE".to_string()),
+        "FUNCTION" => Ok("FUNCTION".to_string()),
+        other => Err(format!("Unsupported routine type \"{other}\"; use PROCEDURE or FUNCTION.")),
+    }
+}
+
+fn format_routines(routines: &[dbx_core::db::ObjectInfo]) -> String {
+    let rows = routines
+        .iter()
+        .map(|routine| {
+            vec![
+                routine.name.clone(),
+                routine.object_type.clone(),
+                routine.schema.clone().unwrap_or_default(),
+                routine.signature.clone().unwrap_or_default(),
+                routine.comment.clone().unwrap_or_default(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    markdown_table(&["Routine", "Type", "Schema", "Signature", "Comment"], &rows)
+}
+
 fn format_columns(columns: &[dbx_core::db::ColumnInfo]) -> String {
     let rows = columns
         .iter()
@@ -1943,13 +2075,15 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 15);
+        assert_eq!(tools.len(), 17);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_databases"));
         assert!(names.contains(&"dbx_list_tables"));
         assert!(names.contains(&"dbx_describe_table"));
+        assert!(names.contains(&"dbx_list_routines"));
+        assert!(names.contains(&"dbx_get_routine_source"));
         assert!(names.contains(&"dbx_execute_query"));
         assert!(names.contains(&"dbx_add_connection"));
         assert!(names.contains(&"dbx_duplicate_connection"));
@@ -2060,6 +2194,8 @@ mod tests {
         let mut checks: Vec<(&str, &[&str])> = vec![
             ("dbx_list_tables", &["database", "schema"]),
             ("dbx_describe_table", &["database", "schema"]),
+            ("dbx_list_routines", &["database", "schema", "routine_type"]),
+            ("dbx_get_routine_source", &["database", "schema", "signature"]),
             ("dbx_execute_query", &["database", "session_id", "cell_char_offset", "cell_char_limit"]),
             ("dbx_open_session", &["database"]),
             ("dbx_open_table", &["database", "schema"]),
@@ -2183,14 +2319,16 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 10);
+        assert_eq!(names.len(), 12);
         #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 9);
+        assert_eq!(names.len(), 11);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
         assert!(!names.iter().any(|name| name == "dbx_open_table"));
         assert!(!names.iter().any(|name| name == "dbx_execute_and_show"));
+        assert!(names.iter().any(|name| name == "dbx_list_routines"));
+        assert!(names.iter().any(|name| name == "dbx_get_routine_source"));
         assert!(names.iter().any(|name| name == "dbx_open_session"));
         assert!(names.iter().any(|name| name == "dbx_close_session"));
         #[cfg(feature = "mq-admin")]

@@ -224,8 +224,8 @@ impl ConsulClient {
 
 pub(super) async fn client_for_state(state: &AppState, connection_id: &str) -> Result<ConsulClient, String> {
     state.get_or_create_pool(connection_id, None).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id) {
+    let pool_handle = state.pool_handle(connection_id).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::Consul(client)) => Ok(client.clone()),
         Some(_) => Err("Connection is not a Consul connection".to_string()),
         None => Err("Connection not found".to_string()),

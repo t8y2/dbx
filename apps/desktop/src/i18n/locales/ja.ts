@@ -6834,6 +6834,8 @@ export default withEnglishFallback({
     mcpToolListDatabases: "データベースを一覧",
     mcpToolListTables: "テーブルを一覧",
     mcpToolDescribeTable: "テーブル構造",
+    mcpToolListRoutines: "ルーチン一覧",
+    mcpToolGetRoutineSource: "ルーチンソース",
     mcpToolGetSchemaContext: "Schema コンテキスト",
     mcpToolExecuteQuery: "SQL / Mongo コマンドを実行",
     mcpToolOpenSession: "クエリセッションを開く",

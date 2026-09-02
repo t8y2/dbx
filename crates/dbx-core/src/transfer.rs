@@ -5094,35 +5094,30 @@ async fn execute_on_pool_once(
 ) -> Result<db::QueryResult, String> {
     // Read-only check: block transfer operations in readonly mode
     crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
-    let connections = state.connections.read().await;
-    let pool = connections.get(pool_key).ok_or("Connection not found")?;
+    let pool_handle = state.pool_handle(pool_key).await;
+    let pool = pool_handle.as_ref().ok_or("Connection not found")?;
 
     match pool {
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
-            drop(connections);
             db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, Default::default()).await
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            drop(connections);
             db::postgres::execute_query_with_max_rows(&p, sql, max_rows).await
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
-            drop(connections);
             db::sqlite::execute_query_with_max_rows(&p, sql, max_rows).await
         }
         PoolKind::ClickHouse(client) => {
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
-            drop(connections);
             db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows).await
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
-            drop(connections);
             let mut client = client.lock().await;
             let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
             drop(client);
@@ -5132,7 +5127,6 @@ async fn execute_on_pool_once(
             let client = client.clone();
             let database = database_from_pool_key(pool_key).map(str::to_string);
             let sql = sql.to_string();
-            drop(connections);
             let mut client = client.lock().await;
             let params = agent_execute_query_params(
                 &sql,
@@ -5159,7 +5153,6 @@ async fn execute_on_pool_once(
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
             let sql = sql.to_string();
-            drop(connections);
             client.execute(None, sql, max_rows, None, None).await
         }
         _ => Err("Unsupported database type for transfer".to_string()),
@@ -5223,63 +5216,56 @@ pub async fn get_columns_for_transfer(
     table: &str,
     catalog: Option<&str>,
 ) -> Result<Vec<db::ColumnInfo>, String> {
-    let connections = state.connections.read().await;
+    let pool_handle = state.pool_handle(pool_key).await;
 
     #[cfg(feature = "duckdb-sidecar")]
-    if let Some(PoolKind::DuckDbWorker(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::DuckDbWorker(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         return client.list_columns(database, schema, table).await;
     }
 
-    if let Some(PoolKind::ClickHouse(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::ClickHouse(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let table = table.to_string();
-        drop(connections);
         return db::clickhouse_driver::get_columns(&client, &database, &table).await;
     }
-    if let Some(PoolKind::SqlServer(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::SqlServer(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         let mut client = client.lock().await;
         return db::sqlserver::get_columns(&mut client, &schema, &table).await;
     }
-    if let Some(PoolKind::InfluxDb(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::InfluxDb(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let table = table.to_string();
-        drop(connections);
         return db::influxdb_driver::get_columns(&client, &database, &table).await;
     }
-    if let Some(PoolKind::InfluxDb3(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::InfluxDb3(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let table = table.to_string();
-        drop(connections);
         return db::influxdb3_driver::get_columns(&client, &database, &table).await;
     }
-    if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
+    if let Some(PoolKind::Agent(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         let mut client = client.lock().await;
         return client.get_columns(&database, &schema, &table, None).await;
     }
-    if let Some(PoolKind::ExternalDriver { config, session, .. }) = connections.get(pool_key) {
+    if let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() {
         let config = config.clone();
         let session = session.clone();
         let database = database.to_string();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         return session
             .invoke_with_timeout(
                 "getColumns",
@@ -5293,14 +5279,13 @@ pub async fn get_columns_for_transfer(
             )
             .await;
     }
-    let pool = connections.get(pool_key).ok_or("Pool not found")?;
+    let pool = pool_handle.as_ref().ok_or("Pool not found")?;
     let schema = schema.to_string();
     let table = table.to_string();
     match pool {
         PoolKind::Mysql(p, _) => {
             let p = p.clone();
             let catalog = normalize_external_catalog_name(catalog).map(str::to_string);
-            drop(connections);
             if let Some(catalog) = catalog {
                 // Use 3-part qualified column lookup for Doris/StarRocks external catalogs
                 db::doris::get_catalog_columns(&p, &catalog, &schema, &table).await
@@ -5310,12 +5295,10 @@ pub async fn get_columns_for_transfer(
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            drop(connections);
             db::postgres::get_columns(&p, &schema, &table).await
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
-            drop(connections);
             db::sqlite::get_columns(&p, &schema, &table).await
         }
         _ => Err("Unsupported database type".to_string()),
@@ -5329,21 +5312,19 @@ async fn get_postgres_indexes_for_transfer(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::IndexInfo>, String> {
-    let connections = state.connections.read().await;
-    if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
+    let pool_handle = state.pool_handle(pool_key).await;
+    if let Some(PoolKind::Agent(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         let mut client = client.lock().await;
         return client.list_indexes(&database, &schema, &table, None).await;
     }
-    let Some(PoolKind::Postgres(pool)) = connections.get(pool_key) else {
+    let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() else {
         return Err("PostgreSQL pool not found".to_string());
     };
     let pool = pool.clone();
-    drop(connections);
     db::postgres::list_indexes(&pool, schema, table).await
 }
 
@@ -5354,21 +5335,19 @@ async fn get_postgres_foreign_keys_for_transfer(
     schema: &str,
     table: &str,
 ) -> Result<Vec<db::ForeignKeyInfo>, String> {
-    let connections = state.connections.read().await;
-    if let Some(PoolKind::Agent(client)) = connections.get(pool_key) {
+    let pool_handle = state.pool_handle(pool_key).await;
+    if let Some(PoolKind::Agent(client)) = pool_handle.as_ref() {
         let client = client.clone();
         let database = database.to_string();
         let schema = schema.to_string();
         let table = table.to_string();
-        drop(connections);
         let mut client = client.lock().await;
         return client.list_foreign_keys(&database, &schema, &table, None).await;
     }
-    let Some(PoolKind::Postgres(pool)) = connections.get(pool_key) else {
+    let Some(PoolKind::Postgres(pool)) = pool_handle.as_ref() else {
         return Err("PostgreSQL pool not found".to_string());
     };
     let pool = pool.clone();
-    drop(connections);
     db::postgres::list_foreign_keys(&pool, schema, table).await
 }
 
@@ -5383,8 +5362,8 @@ async fn get_postgres_owned_sequences_for_transfer(
     }
 
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(Vec::new()),
         }
@@ -5430,8 +5409,8 @@ async fn get_postgres_sequence_snapshots_for_transfer(
     schema: &str,
 ) -> Result<Vec<PostgresSequenceSnapshot>, String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(Vec::new()),
         }
@@ -6763,8 +6742,8 @@ pub async fn sort_tables_by_fk_dependency_with_foreign_keys(
     let postgres_pool = if db_type == DatabaseType::Postgres {
         let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
         {
-            let connections = state.connections.read().await;
-            native_postgres_dependency_pool(connections.get(&pool_key))
+            let pool_handle = state.pool_handle(&pool_key).await;
+            native_postgres_dependency_pool(pool_handle.as_ref())
         }
     } else {
         None
@@ -7184,12 +7163,11 @@ async fn fetch_hive_server_transfer_batch(
         let configs = state.configs.read().await;
         configs.get(&request.source_connection_id).map(|config| config.query_timeout_secs).unwrap_or(0)
     };
-    let connections = state.connections.read().await;
-    let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+    let pool_handle = state.pool_handle(pool_key).await;
+    let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
         return Err("Impala transfer requires an Agent connection".to_string());
     };
     let client = client.clone();
-    drop(connections);
 
     let mut client = client.lock().await;
     let result = if cursor.started {
@@ -7226,12 +7204,11 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
     let Some(session_id) = cursor.session_id.take() else {
         return;
     };
-    let connections = state.connections.read().await;
-    let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+    let pool_handle = state.pool_handle(pool_key).await;
+    let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
         return;
     };
     let client = client.clone();
-    drop(connections);
     let mut client = client.lock().await;
     if let Err(error) = client.close_table_read_session::<bool>(&session_id).await {
         log::warn!("[transfer] failed to close Impala transfer cursor: {error}");
@@ -7433,10 +7410,11 @@ where
                     // SHOW CREATE TABLE catalog.database.table using the
                     // existing source pool (bare MySQL — addresses any catalog).
                     let pool = {
-                        let connections = state.connections.read().await;
-                        let pool =
-                            connections.get(source_pool_key).ok_or_else(|| "Source pool not found".to_string())?;
-                        let PoolKind::Mysql(p, _) = pool else {
+                        let pool = state
+                            .pool_handle(source_pool_key)
+                            .await
+                            .ok_or_else(|| "Source pool not found".to_string())?;
+                        let PoolKind::Mysql(p, _) = &pool else {
                             return Err("Source pool must be MySQL-family for catalog DDL".to_string());
                         };
                         p.clone()
@@ -8256,6 +8234,7 @@ where
             }
             db::ObjectSourceKind::Sequence
             | db::ObjectSourceKind::Synonym
+            | db::ObjectSourceKind::Job
             | db::ObjectSourceKind::Package
             | db::ObjectSourceKind::PackageBody => object.source.clone(),
             db::ObjectSourceKind::Trigger
@@ -8637,10 +8616,14 @@ mod tests {
     #[tokio::test]
     async fn postgres_transfer_metadata_routes_agent_pools() {
         let (state, dir) = test_app_state().await;
-        state.connections.write().await.insert(
-            "source:source_db".to_string(),
-            PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
-        );
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "source:source_db".to_string(),
+                    PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
+                );
+            })
+            .await;
 
         let index_error =
             get_postgres_indexes_for_transfer(&state, "source:source_db", "source_db", "source_schema", "items")

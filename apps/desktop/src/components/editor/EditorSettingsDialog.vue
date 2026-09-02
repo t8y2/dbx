@@ -2286,6 +2286,8 @@ const mcpToolOptions = [
   { name: "dbx_list_databases", labelKey: "settings.mcpToolListDatabases" },
   { name: "dbx_list_tables", labelKey: "settings.mcpToolListTables" },
   { name: "dbx_describe_table", labelKey: "settings.mcpToolDescribeTable" },
+  { name: "dbx_list_routines", labelKey: "settings.mcpToolListRoutines" },
+  { name: "dbx_get_routine_source", labelKey: "settings.mcpToolGetRoutineSource" },
   { name: "dbx_get_schema_context", labelKey: "settings.mcpToolGetSchemaContext" },
   { name: "dbx_execute_query", labelKey: "settings.mcpToolExecuteQuery" },
   { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },

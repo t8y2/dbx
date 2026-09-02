@@ -6169,6 +6169,8 @@ export default withEnglishFallback({
     mcpToolListDatabases: "列出資料庫",
     mcpToolListTables: "列出資料表",
     mcpToolDescribeTable: "資料表結構",
+    mcpToolListRoutines: "預存程序列表",
+    mcpToolGetRoutineSource: "預存程序原始碼",
     mcpToolGetSchemaContext: "Schema 上下文",
     mcpToolExecuteQuery: "執行 SQL / Mongo 命令",
     mcpToolOpenSession: "開啟查詢工作階段",

@@ -20,8 +20,12 @@ function movePointer(x: number, y = 20, pointerType = "mouse") {
   document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y, pointerType }));
 }
 
-function releasePointer() {
-  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+function releasePointer(x = 0, y = 0) {
+  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: x, clientY: y, screenX: x, screenY: y }));
+}
+
+function cancelPointer() {
+  document.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true }));
 }
 
 function enterDropTarget(drag: ReturnType<typeof useTabDrag>, tabId = "target", x = 10) {
@@ -111,5 +115,59 @@ describe("useTabDrag", () => {
     expect(drag.state.active).toBe(false);
     expect(drag.state.suppressClick).toBe(false);
     expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("detaches only when an armed drag is released outside the tab strip", () => {
+    const onDetach = vi.fn(() => true);
+    const drag = useTabDrag(
+      vi.fn(() => true),
+      onDetach,
+    );
+    drag.setDetachBoundsProvider(() => ({ left: 0, top: 0, right: 300, bottom: 40 }) as DOMRect);
+    const source = document.createElement("div");
+    source.innerHTML = '<span class="truncate">Source</span>';
+    source.addEventListener("pointerdown", (event) => drag.startDrag(event as PointerEvent, "source"));
+    document.body.appendChild(source);
+
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD);
+    releasePointer(500, 500);
+
+    expect(onDetach).toHaveBeenCalledWith("source", { x: 500, y: 500 });
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.suppressClick).toBe(true);
+    drag.setDetachBoundsProvider(null);
+  });
+
+  it("clears an armed drag when the pointer is cancelled", () => {
+    const { drag, source } = createDragHarness();
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD);
+    expect(drag.state.active).toBe(true);
+
+    cancelPointer();
+
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.draggedId).toBe(null);
+    expect(drag.state.suppressClick).toBe(false);
+  });
+
+  it("does not detach when the pointer is released inside the tab strip", () => {
+    const onDetach = vi.fn(() => true);
+    const onDrop = vi.fn(() => false);
+    const drag = useTabDrag(onDrop, onDetach);
+    drag.setDetachBoundsProvider(() => ({ left: 0, top: 0, right: 300, bottom: 40 }) as DOMRect);
+    const source = document.createElement("div");
+    source.innerHTML = '<span class="truncate">Source</span>';
+    source.addEventListener("pointerdown", (event) => drag.startDrag(event as PointerEvent, "source"));
+    document.body.appendChild(source);
+
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD);
+    releasePointer();
+
+    expect(onDetach).not.toHaveBeenCalled();
+    expect(onDrop).not.toHaveBeenCalled();
+    drag.setDetachBoundsProvider(null);
   });
 });

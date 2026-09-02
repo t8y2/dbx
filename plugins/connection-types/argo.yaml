@@ -2,12 +2,12 @@ schemaVersion: 1
 order: 515
 dbType: argo
 rustVariant: Argo
-label: ArgoDB (Transwarp)
+label: 星环Argo
 runtimeMode: agent
 mcpMode: bridge
-agentKey: hive
-driverStoreVisible: false
-driverStoreOrder: 23
+agentKey: argo
+driverStoreVisible: true
+driverStoreOrder: 50
 singleConnectionPool: false
 metadataConnectionScoped: false
 skipTcpProbe: true

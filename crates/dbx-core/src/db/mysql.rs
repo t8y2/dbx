@@ -60,6 +60,7 @@ impl MySqlPool {
     /// generation. Pool options are not an identity: a reconnect creates a new
     /// pool with identical options, and a late health probe for the old pool
     /// must not be allowed to remove that replacement from routing.
+    #[cfg(test)]
     pub(crate) fn is_same_pool(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.inner.metrics(), &other.inner.metrics())
     }

@@ -35,6 +35,8 @@ let pending: {
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
+let onDetachCallback: ((draggedId: string, position: { x: number; y: number }) => boolean) | null = null;
+let detachBoundsProvider: (() => DOMRect | undefined) | null = null;
 let dragAxis: () => "horizontal" | "vertical" = () => "horizontal";
 let ghostEl: HTMLElement | null = null;
 
@@ -102,12 +104,25 @@ function onPointerMove(event: PointerEvent) {
   }
 }
 
-function onMouseUp() {
+function onMouseUp(event: PointerEvent) {
   state.suppressClick = false;
-  if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
+  if (state.active && state.draggedId && onDetachCallback && isOutsideDetachBounds(event.clientX, event.clientY)) {
+    const scale = typeof window !== "undefined" && Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+    state.suppressClick = onDetachCallback(state.draggedId, { x: event.screenX * scale, y: event.screenY * scale });
+  } else if (state.active && state.draggedId && state.targetId && state.dropPosition && onDropCallback) {
     state.suppressClick = onDropCallback(state.draggedId, state.targetId, state.dropPosition);
   }
   reset();
+}
+
+function onPointerCancel() {
+  state.suppressClick = false;
+  reset();
+}
+
+function isOutsideDetachBounds(x: number, y: number): boolean {
+  const bounds = detachBoundsProvider?.();
+  return !!bounds && (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom);
 }
 
 function reset() {
@@ -129,13 +144,20 @@ function ensureListeners() {
   if (listenersAttached) return;
   document.addEventListener("pointermove", onPointerMove, true);
   document.addEventListener("pointerup", onMouseUp, true);
+  document.addEventListener("pointercancel", onPointerCancel, true);
+  window.addEventListener("blur", onPointerCancel, true);
   listenersAttached = true;
 }
 
-export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean, axis: () => "horizontal" | "vertical" = () => "horizontal") {
+export function useTabDrag(onDrop: (draggedId: string, targetId: string, position: TabDropPosition) => boolean, onDetach?: (draggedId: string, position: { x: number; y: number }) => boolean, axis: () => "horizontal" | "vertical" = () => "horizontal") {
   ensureListeners();
   onDropCallback = onDrop;
+  onDetachCallback = onDetach ?? null;
   dragAxis = axis;
+
+  function setDetachBoundsProvider(provider: (() => DOMRect | undefined) | null) {
+    detachBoundsProvider = provider;
+  }
 
   function startDrag(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
@@ -183,5 +205,6 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     startDrag,
     updateTarget,
     clearTarget,
+    setDetachBoundsProvider,
   };
 }

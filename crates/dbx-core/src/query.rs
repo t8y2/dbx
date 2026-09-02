@@ -1674,8 +1674,7 @@ async fn sqlserver_pool_is_current(
     pool_key: &str,
     client: &Arc<tokio::sync::Mutex<db::sqlserver::SqlServerClient>>,
 ) -> bool {
-    let connections = state.connections.read().await;
-    matches!(connections.get(pool_key), Some(PoolKind::SqlServer(current)) if Arc::ptr_eq(current, client))
+    matches!(state.pool_handle(pool_key).await, Some(PoolKind::SqlServer(current)) if Arc::ptr_eq(&current, client))
 }
 
 pub fn query_timeout_duration(timeout_secs: Option<u64>) -> Option<Duration> {
@@ -1769,13 +1768,12 @@ async fn do_execute_typed(
     let operation_budget = operation_budget_for_pool_key(state, pool_key, query_timeout).await;
     let pool_db_type = connection_database_type_for_pool_key(state, pool_key).await;
     let mysql_catalog_dialect = connection_mysql_catalog_dialect_for_pool_key(state, pool_key).await;
-    let connections = state.connections.read().await;
-    let pool = connections.get(pool_key).ok_or("Connection not found")?;
+    let pool = state.pool_handle(pool_key).await.ok_or("Connection not found")?;
 
     let mut typed_agent_error = None;
     #[cfg(feature = "duckdb-sidecar")]
     let mut typed_duckdb_error = None;
-    let result: Result<db::QueryResult, String> = match pool {
+    let result: Result<db::QueryResult, String> = match &pool {
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
@@ -1793,7 +1791,6 @@ async fn do_execute_typed(
             let sql = sql.to_string();
             let database = database.map(str::to_string);
             let max_rows = options.max_rows;
-            drop(connections);
             match client.execute_typed(database, sql, max_rows, cancel_token, query_timeout).await {
                 Ok(result) => Ok(result),
                 Err(error) => {
@@ -1815,7 +1812,6 @@ async fn do_execute_typed(
             let bare = *mode == crate::connection::MysqlMode::Bare;
             let max_rows = options.max_rows;
             let max_result_bytes = options.max_result_bytes.filter(|value| *value > 0);
-            drop(connections);
             let mut conn = match db::mysql::get_conn_with_health_check_with_cancel(
                 &p,
                 operation_budget.checkout_timeout,
@@ -1880,7 +1876,6 @@ async fn do_execute_typed(
             let prefer_text_protocol = postgres_prefers_text_protocol(pool_db_type);
             let execution_mode = options.execution_mode;
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
-            drop(connections);
             if execution_mode == QueryExecutionMode::PostgresReadOnlyTransaction {
                 db::postgres::execute_query_in_read_only_transaction_with_rollback(
                     &p,
@@ -1920,14 +1915,12 @@ async fn do_execute_typed(
         PoolKind::Sqlite(p) => {
             let p = p.clone();
             let max_rows = options.max_rows;
-            drop(connections);
             wait_for_query_opt(cancel_token, query_timeout, db::sqlite::execute_query_with_max_rows(&p, sql, max_rows))
                 .await
         }
         PoolKind::Rqlite(client) => {
             let client = client.clone();
             let max_rows = options.max_rows;
-            drop(connections);
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1938,7 +1931,6 @@ async fn do_execute_typed(
         PoolKind::Turso(client) => {
             let client = client.clone();
             let max_rows = options.max_rows;
-            drop(connections);
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1949,7 +1941,6 @@ async fn do_execute_typed(
         PoolKind::CloudflareD1(client) => {
             let client = client.clone();
             let max_rows = options.max_rows;
-            drop(connections);
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1961,7 +1952,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -1978,7 +1968,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let max_rows = options.max_rows;
             let execution_mode = options.execution_mode;
-            drop(connections);
             let (mut client, lock_wait_ms) =
                 match lock_shared_client_with_wait(&client, cancel_token.clone(), None).await {
                     Ok(value) => value,
@@ -2010,7 +1999,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let sql = sql.to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2031,7 +2019,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let sql = sql.to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2052,7 +2039,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let sql = sql.to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2069,7 +2055,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let sql = sql.to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result =
                 wait_for_query_opt(cancel_token, query_timeout, db::vector_driver::execute_rest_query(&client, &sql))
                     .await
@@ -2089,7 +2074,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2106,7 +2090,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2122,7 +2105,6 @@ async fn do_execute_typed(
         PoolKind::VictoriaMetrics(client) => {
             let client = client.clone();
             let max_rows = options.max_rows;
-            drop(connections);
             let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
@@ -2144,7 +2126,6 @@ async fn do_execute_typed(
             let schema = schema_for_execution_context(pool_db_type, schema).map(|s| s.to_string());
             let max_rows = options.max_rows;
             let rpc_timeout = query_timeout;
-            drop(connections);
             if is_canceled(&cancel_token) {
                 return Err(canceled_error().into());
             }
@@ -2203,7 +2184,6 @@ async fn do_execute_typed(
             let database = database.unwrap_or_else(|| config.effective_database().unwrap_or("")).to_string();
             let max_rows = options.max_rows;
             let plugin_timeout = query_timeout;
-            drop(connections);
             wait_for_query_opt(cancel_token, query_timeout, async move {
                 if let Some(session_id) = options.result_session_id.as_deref() {
                     let params = external_driver_fetch_query_page_params(
@@ -2233,7 +2213,6 @@ async fn do_execute_typed(
             let client = client.clone();
             let sql = sql.to_string();
             let max_rows = options.max_rows.unwrap_or(MAX_ROWS);
-            drop(connections);
             // Keep the AWS SDK cold-path future off this already-large query dispatcher stack.
             let execution = Box::pin(db::dynamodb_driver::execute_statement(&client, &sql, max_rows));
             wait_for_query_opt(cancel_token, query_timeout, execution).await
@@ -2726,8 +2705,8 @@ async fn execute_postgres_drop_database(
 
     check_read_only_for_connection(state, &pool_key, sql).await?;
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(&pool_key) {
+        let pool_handle = state.pool_handle(&pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => pool.clone(),
             Some(_) => return Err("DROP DATABASE reconnect did not create a PostgreSQL connection".to_string()),
             None => return Err("Connection not found".to_string()),
@@ -2786,19 +2765,17 @@ pub async fn close_query_session(
     let pool_database = query_pool_database(database, catalog);
     let pool_key = state.get_or_create_pool_for_session(connection_id, pool_database, client_session_id).await?;
 
-    let connections = state.connections.read().await;
-    let pool = connections.get(&pool_key).ok_or("Connection not found")?;
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let pool = pool_handle.as_ref().ok_or("Connection not found")?;
     match pool {
         PoolKind::Agent(client) => {
             let client = client.clone();
-            drop(connections);
             let mut client = client.lock().await;
             client.close_query_session(session_id).await
         }
         PoolKind::ExternalDriver { config, session, .. } => {
             let config = config.clone();
             let session = session.clone();
-            drop(connections);
             let params = external_driver_fetch_query_page_params(config.as_ref(), session_id, 1);
             session
                 .invoke::<serde_json::Value>("closeQuerySession", params)
@@ -2807,13 +2784,11 @@ pub async fn close_query_session(
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             db::elasticsearch_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             db::easysearch_driver::close_cursor(&client, session_id).await?;
             Ok(true)
         }
@@ -2954,10 +2929,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key.as_str());
 
-    let is_sqlserver = {
-        let connections = state.connections.read().await;
-        matches!(connections.get(&pool_key), Some(PoolKind::SqlServer(_)))
-    };
+    let is_sqlserver = { matches!(state.pool_handle(&pool_key).await, Some(PoolKind::SqlServer(_))) };
 
     if is_sqlserver {
         return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await.map_err(Into::into);
@@ -3015,8 +2987,8 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     }
 
     let mysql_pool = {
-        let connections = state.connections.read().await;
-        match connections.get(&pool_key) {
+        let pool_handle = state.pool_handle(&pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Mysql(pool, mode)) => Some((pool.clone(), *mode)),
             _ => None,
         }
@@ -3595,13 +3567,12 @@ async fn execute_multi_sqlserver(
             break;
         }
 
-        let connections = state.connections.read().await;
-        let pool = connections.get(pool_key).ok_or("Connection not found")?;
+        let pool_handle = state.pool_handle(pool_key).await;
+        let pool = pool_handle.as_ref().ok_or("Connection not found")?;
         let client = match pool {
             PoolKind::SqlServer(c) => c.clone(),
             _ => return Err("Expected SQL Server connection".to_string()),
         };
-        drop(connections);
 
         let (mut client_guard, lock_wait_ms) =
             match lock_shared_client_with_wait(&client, cancel_token.clone(), query_timeout).await {
@@ -3698,8 +3669,8 @@ pub async fn execute_statements(
     let mysql_dialect = connection_mysql_query_dialect(state, connection_id).await;
 
     let agent_client = {
-        let conns = state.connections.read().await;
-        match conns.get(&pool_key) {
+        let pool_handle = state.pool_handle(&pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Agent(client)) => Some(client.clone()),
             _ => None,
         }
@@ -4047,10 +4018,8 @@ pub async fn execute_schema_diff_deploy(
             }
         }
     };
-    let has_transactional_path = {
-        let conns = state.connections.read().await;
-        conns.get(&pool_key).is_some_and(pool_kind_has_transactional_path)
-    };
+    let has_transactional_path =
+        { state.pool_handle(&pool_key).await.as_ref().is_some_and(pool_kind_has_transactional_path) };
     let atomicity = classify_schema_diff_atomicity(db_type, &parsed, has_transactional_path);
 
     match execute_statements_in_transaction_on_pool(state, &pool_key, connection_id, database, &parsed, schema, None)
@@ -4190,8 +4159,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
 
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = {
-        let conns = state.connections.read().await;
-        conns.get(pool_key).map(|p| match p {
+        state.pool_handle(pool_key).await.as_ref().map(|p| match p {
             PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
             PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
             PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
@@ -4736,8 +4704,8 @@ async fn begin_transaction_session(
         ExternalDriver,
     }
     let pool_handle = {
-        let connections = state.connections.read().await;
-        match connections.get(&probe_pool_key).ok_or("Connection not found")? {
+        let pool = state.pool_handle(&probe_pool_key).await.ok_or("Connection not found")?;
+        match &pool {
             PoolKind::Postgres(pg) => TxnPoolHandle::Postgres(pg.clone()),
             PoolKind::Mysql(mp, _) => TxnPoolHandle::Mysql(mp.clone()),
             PoolKind::Agent(_) if !consistent_snapshot => TxnPoolHandle::Agent,
@@ -4792,8 +4760,8 @@ async fn begin_transaction_session(
             let agent_pool_key =
                 state.get_or_create_pool_for_session(connection_id, pool_database, Some(&client_session_id)).await?;
             let client = {
-                let connections = state.connections.read().await;
-                match connections.get(&agent_pool_key) {
+                let pool_handle = state.pool_handle(&agent_pool_key).await;
+                match pool_handle.as_ref() {
                     Some(PoolKind::Agent(client)) => client.clone(),
                     _ => {
                         let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
@@ -4830,8 +4798,8 @@ async fn begin_transaction_session(
             let external_pool_key =
                 state.get_or_create_pool_for_session(connection_id, pool_database, Some(&client_session_id)).await?;
             let (config, session) = {
-                let connections = state.connections.read().await;
-                match connections.get(&external_pool_key) {
+                let pool_handle = state.pool_handle(&external_pool_key).await;
+                match pool_handle.as_ref() {
                     Some(PoolKind::ExternalDriver { config, session, .. }) => (config.clone(), session.clone()),
                     _ => {
                         let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
@@ -6215,7 +6183,11 @@ for line in sys.stdin:
         let client = db::dynamodb_driver::connect(&config, host, config.port).unwrap();
         db::dynamodb_driver::test_connection(&client, Duration::from_secs(5)).await.unwrap();
         state.configs.write().await.insert(config.id.clone(), config.clone());
-        state.connections.write().await.insert(config.id.clone(), PoolKind::DynamoDb(client));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(config.id.clone(), PoolKind::DynamoDb(client));
+            })
+            .await;
 
         let results = execute_multi_core_with_options_for_client_and_progress_typed(
             &state,
@@ -6294,13 +6266,17 @@ for line in sys.stdin:
         let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::Dameng));
-        state.connections.write().await.insert(
-            "conn-1".to_string(),
-            PoolKind::agent(crate::db::agent_driver::AgentDriverClient::shared_session(
-                runtime.clone(),
-                "session-1".to_string(),
-            )),
-        );
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "conn-1".to_string(),
+                    PoolKind::agent(crate::db::agent_driver::AgentDriverClient::shared_session(
+                        runtime.clone(),
+                        "session-1".to_string(),
+                    )),
+                );
+            })
+            .await;
 
         (state, dir, runtime)
     }
@@ -6312,7 +6288,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(!state.pool_handle("conn-1").await.is_some());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6350,7 +6326,11 @@ for line in sys.stdin:
         let state = AppState::new(storage);
         let connection_id = "sqlite-cancel";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
-        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
         state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
@@ -6434,7 +6414,7 @@ for line in sys.stdin:
         .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(!state.pool_handle("conn-1").await.is_some());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6451,7 +6431,7 @@ for line in sys.stdin:
                 .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(!state.pool_handle("conn-1").await.is_some());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6465,7 +6445,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.connections.read().await.contains_key("conn-1"));
+        assert!(!state.pool_handle("conn-1").await.is_some());
         assert!(!runtime.is_failed());
 
         runtime.kill();
@@ -6526,7 +6506,11 @@ for line in sys.stdin:
         let state = AppState::new(storage);
         let connection_id = "sqlite-batch";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
-        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
         state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Sqlite));
 
         let sql = if failure_first {
@@ -6622,7 +6606,11 @@ for line in sys.stdin:
         let state = AppState::new(storage);
         let connection_id = "gaussdb-on-error-stop";
         let sqlite = db::sqlite::connect_path_create_if_missing(dir.join("query.db").to_str().unwrap()).await.unwrap();
-        state.connections.write().await.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(connection_id.to_string(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
         state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Gaussdb));
 
         let results = execute_multi_core_with_options(
@@ -7766,14 +7754,18 @@ for line in sys.stdin:
         let client_session_id = "manual-txn-test";
         let pool_key = "jdbc-conn:session:manual-txn-test";
         let config = Arc::new(config);
-        state.connections.write().await.insert(
-            pool_key.to_string(),
-            PoolKind::ExternalDriver {
-                driver_id: "jdbc".to_string(),
-                config: config.clone(),
-                session: session.clone(),
-            },
-        );
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    pool_key.to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: config.clone(),
+                        session: session.clone(),
+                    },
+                );
+            })
+            .await;
         let cleanup_guard =
             state.workload_session_pool_cleanup_guard("jdbc-conn", Some("dbx_test"), client_session_id).await.unwrap();
         state.transaction_sessions.write().await.insert(
@@ -7799,7 +7791,7 @@ for line in sys.stdin:
             execute_in_manual_transaction(&state, "txn-test", "SELECT 42", "dbx_test", None, Some(10)).await.unwrap();
         assert_eq!(results[0].rows, vec![vec![serde_json::json!(42)]]);
         commit_manual_transaction(&state, "txn-test").await.unwrap();
-        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_handle(pool_key).await.is_some());
         assert_eq!(
             std::fs::read_to_string(&calls).unwrap(),
             "beginManualTransaction\nexecuteInManualTransaction\ncommitManualTransaction\n"

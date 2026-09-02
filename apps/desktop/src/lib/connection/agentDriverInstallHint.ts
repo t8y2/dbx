@@ -33,7 +33,8 @@ export function hasInstalledAgentVersion(drivers: readonly AgentDriverInstallSta
 
 export function agentDriverInstallKey(dbType: DatabaseType | undefined, driverProfile?: string, context?: AgentDriverInstallContext): string | undefined {
   if (dbType === "sqlite") return context?.ssh ? "sqlite-worker" : undefined;
-  if (dbType === "kyuubi" || dbType === "impala" || dbType === "argo") return "hive";
+  // argo owns its dedicated argo-go agent — only kyuubi/impala still share hive-go.
+  if (dbType === "kyuubi" || dbType === "impala") return "hive";
   if (dbType === "oracle") return "oracle";
   if (dbType === "h2") return "h2";
   if (dbType === "mongodb") return "mongodb";

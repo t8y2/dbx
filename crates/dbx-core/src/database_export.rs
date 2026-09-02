@@ -1484,8 +1484,8 @@ async fn list_postgres_extension_members(
     schema: &str,
 ) -> Result<PostgresExtensionMembers, String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(PostgresExtensionMembers::default()),
         }
@@ -1515,8 +1515,8 @@ async fn list_postgres_export_sequences(
     fail_on_error: bool,
 ) -> Result<Vec<PostgresExportSequence>, String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(Vec::new()),
         }
@@ -2718,7 +2718,8 @@ async fn export_database_sql_core_inner(
     let concurrent_prefetch_is_safe =
         match state.get_or_create_pool(&request.connection_id, Some(&request.database)).await {
             Ok(metadata_pool_key) => {
-                concurrent_metadata_prefetch_allowed(state.connections.read().await.get(&metadata_pool_key))
+                let pool = state.pool_handle(&metadata_pool_key).await;
+                concurrent_metadata_prefetch_allowed(pool.as_ref())
             }
             // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
             Err(_) => false,

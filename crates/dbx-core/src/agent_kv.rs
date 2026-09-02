@@ -1013,8 +1013,8 @@ async fn ensure_etcd_dangerous_action_capability(
             .get(connection_id)
             .and_then(|config| crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()))
     };
-    let connections = state.connections.read().await;
-    let PoolKind::Agent(client) = connections.get(connection_id).ok_or("Connection not found")? else {
+    let pool = state.pool_handle(connection_id).await.ok_or("Connection not found")?;
+    let PoolKind::Agent(client) = &pool else {
         return Err("Not an agent key-value connection".to_string());
     };
     if !client.lock().await.supports_capability(capability) {
@@ -1706,8 +1706,8 @@ fn kv_put_required_capabilities(options: &KvPutOptions) -> Vec<AgentCapability> 
 
 pub async fn kv_supports_ttl_core(state: &AppState, connection_id: &str) -> Result<bool, String> {
     ensure_agent_kv_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    let pool = connections.get(connection_id).ok_or("Connection not found")?;
+    let pool_handle = state.pool_handle(connection_id).await;
+    let pool = pool_handle.as_ref().ok_or("Connection not found")?;
     match pool {
         PoolKind::Agent(client) => Ok(client.lock().await.supports_capability(AgentCapability::KvTtl)),
         _ => Err("Not an agent key-value connection".to_string()),
@@ -1738,8 +1738,8 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             .and_then(|config| crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()))
     };
     let client = {
-        let connections = state.connections.read().await;
-        match connections.get(connection_id) {
+        let pool_handle = state.pool_handle(connection_id).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Agent(client)) => client.clone(),
             Some(_) => return Err("Not an agent key-value connection".to_string()),
             None => return Err("Connection not found".to_string()),

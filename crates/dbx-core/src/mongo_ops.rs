@@ -29,8 +29,8 @@ pub async fn mongo_list_collections_core(
 
 pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::create_database(client, database).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support create database".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -40,8 +40,8 @@ pub async fn mongo_create_database_core(state: &AppState, connection_id: &str, d
 pub async fn mongo_drop_database_core(state: &AppState, connection_id: &str, database: &str) -> Result<(), String> {
     mongo_driver::validate_mongo_namespace_name(database, "Database")?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::drop_database(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -67,8 +67,8 @@ pub async fn mongo_drop_collection_core(
     mongo_driver::validate_mongo_namespace_name(database, "Database")?;
     mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::drop_collection(client, database, collection).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -92,8 +92,8 @@ pub async fn mongo_rename_collection_core(
     new_name: &str,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::rename_collection(client, database, collection, new_name).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support rename collection".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -109,8 +109,8 @@ pub async fn mongo_clone_collection_core(
 ) -> Result<MongoCloneCollectionResult, String> {
     mongo_driver::validate_clone_collection_names(database, source_collection, target_collection)?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::clone_collection(client, database, source_collection, target_collection).await
         }
@@ -140,8 +140,8 @@ pub async fn mongo_server_version_core(
     database: &str,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::server_version(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -158,8 +158,8 @@ pub async fn mongo_run_command_core(
     command_json: &str,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::run_command(client, database, command_json).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
@@ -192,8 +192,8 @@ pub async fn mongo_collection_stats_core(
     scale: Option<serde_json::Number>,
 ) -> Result<MongoCollectionStatsResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::collection_stats(client, database, collection, scale).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support collection stats helpers".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -244,8 +244,8 @@ async fn mongo_find_documents_without_total_core(
     collation: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_without_total(
                 client, database, collection, skip, limit, filter, projection, sort, collation,
@@ -284,8 +284,8 @@ pub async fn mongo_find_one_core(
     options: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one(client, database, collection, filter, projection, options).await
         }
@@ -320,8 +320,8 @@ pub async fn mongo_explain_find_core(
     verbosity: &str,
 ) -> Result<serde_json::Value, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::explain_find(
                 client, database, collection, skip, limit, filter, projection, sort, collation, verbosity,
@@ -358,8 +358,8 @@ pub async fn mongo_count_documents_core(
 ) -> Result<u64, String> {
     let accurate = mode != Some("legacy");
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::count_documents(client, database, collection, filter, accurate).await
         }
@@ -406,8 +406,8 @@ pub async fn mongo_find_documents_extended_json_core(
     sort: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_documents_extended_json(
                 client, database, collection, skip, limit, filter, projection, sort, None,
@@ -454,8 +454,8 @@ pub async fn mongo_aggregate_documents_core(
     options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::aggregate_documents(client, database, collection, pipeline_json, max_rows, options_json).await
         }
@@ -490,8 +490,8 @@ pub async fn mongo_distinct_core(
     filter: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::distinct(client, database, collection, field, filter).await,
         // The legacy agent protocol has no distinct method and no read that could stand in for it.
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support distinct".to_string()),
@@ -515,8 +515,8 @@ pub async fn mongo_list_index_specs_core(
     mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
     ensure_document_pool(state, connection_id).await?;
     let is_native = {
-        let connections = state.connections.read().await;
-        match connections.get(connection_id).ok_or("Not found")? {
+        let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+        match &pool {
             PoolKind::MongoDb(_) => true,
             PoolKind::Agent(_) => false,
             _ => return Err("Not a MongoDB connection".to_string()),
@@ -529,8 +529,8 @@ pub async fn mongo_list_index_specs_core(
         return Ok(indexes.iter().map(mongo_driver::index_spec_from_index_info).collect());
     }
 
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::list_index_specs(client, database, collection).await,
         _ => Err("Not a MongoDB connection".to_string()),
     }
@@ -550,8 +550,8 @@ pub async fn mongo_create_index_core(
     mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
     mongo_driver::validate_create_index_request(keys_json, options_json)?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::create_index(client, database, collection, keys_json, options_json).await
         }
@@ -586,8 +586,8 @@ pub async fn mongo_create_user_core(
     mongo_driver::validate_mongo_namespace_name(database, "Database")?;
     mongo_driver::validate_create_user_request(user_json, write_concern_json)?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::create_user(client, database, user_json, write_concern_json).await?;
             Ok(1)
@@ -662,8 +662,8 @@ async fn mongo_drop_indexes_once_core(
     // to Native MongoDB or the Legacy Agent.
     mongo_driver::validate_drop_indexes_request(indexes_json, single)?;
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::drop_indexes(client, database, collection, indexes_json, single).await
         }
@@ -700,8 +700,8 @@ pub async fn mongo_insert_documents_core(
     docs_json: &str,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
         PoolKind::Agent(client) => {
             let documents: serde_json::Value =
@@ -747,8 +747,8 @@ pub async fn mongo_insert_documents_extended_json_core(
     docs_json: &str,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::insert_documents_extended_json(client, database, collection, docs_json).await
         }
@@ -780,8 +780,8 @@ pub async fn mongo_update_documents_core(
     options_json: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::update_documents(client, database, collection, filter_json, update_json, many, options_json)
                 .await
@@ -824,8 +824,8 @@ pub async fn mongo_delete_documents_core(
     many: bool,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::delete_documents(client, database, collection, filter_json, many).await
         }
@@ -855,8 +855,8 @@ pub async fn mongo_find_one_and_update_core(
     options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one_and_update(client, database, collection, filter_json, update_json, options_json)
                 .await
@@ -876,8 +876,8 @@ pub async fn mongo_find_one_and_replace_core(
     options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one_and_replace(
                 client,
@@ -903,8 +903,8 @@ pub async fn mongo_find_one_and_delete_core(
     options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::find_one_and_delete(client, database, collection, filter_json, options_json).await
         }
@@ -1409,6 +1409,7 @@ mod tests {
             &[AgentCapability::MongoDropDatabase.as_str()],
             None,
             None,
+            None,
         )
         .await
     }
@@ -1420,8 +1421,16 @@ mod tests {
         expected_result: serde_json::Value,
         capabilities: &[&str],
     ) -> (AppState, tempfile::TempDir) {
-        legacy_mongo_state_with_options(expected_method, expected_params, expected_result, capabilities, None, None)
-            .await
+        legacy_mongo_state_with_options(
+            expected_method,
+            expected_params,
+            expected_result,
+            capabilities,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     #[cfg(unix)]
@@ -1437,6 +1446,7 @@ mod tests {
             expected_result,
             &[AgentCapability::MongoDropDatabase.as_str()],
             Some(server_version),
+            None,
             None,
         )
         .await
@@ -1456,6 +1466,7 @@ mod tests {
             &[AgentCapability::MongoDropDatabase.as_str()],
             Some(server_version),
             Some(expected_error),
+            None,
         )
         .await
     }
@@ -1468,6 +1479,7 @@ mod tests {
         capabilities: &[&str],
         server_version: Option<&str>,
         expected_error: Option<&str>,
+        response_delay_ms: Option<u64>,
     ) -> (AppState, tempfile::TempDir) {
         use std::io::Write;
 
@@ -1482,10 +1494,13 @@ mod tests {
         };
         let server_version = python_optional_string(server_version);
         let expected_error = python_optional_string(expected_error);
+        let response_delay_ms = response_delay_ms.unwrap_or_default();
+        let request_entered_path = serde_json::to_string(&directory.path().join("request-entered")).unwrap();
         write!(
             script,
             r#"import json
 import sys
+import time
 
 EXPECTED_METHOD = {expected_method}
 EXPECTED_PARAMS = json.loads({expected_params})
@@ -1493,6 +1508,8 @@ EXPECTED_RESULT = json.loads({expected_result})
 CAPABILITIES = {capabilities}
 SERVER_VERSION = {server_version}
 EXPECTED_ERROR = {expected_error}
+RESPONSE_DELAY_SECONDS = {response_delay_ms} / 1000
+REQUEST_ENTERED_PATH = {request_entered_path}
 expected_calls = 0
 
 print(json.dumps({{"ready": True}}), flush=True)
@@ -1515,6 +1532,9 @@ for line in sys.stdin:
     if expected_calls > 1:
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": "duplicate MongoDB RPC"}}}}), flush=True)
         continue
+    if RESPONSE_DELAY_SECONDS:
+        open(REQUEST_ENTERED_PATH, "w").close()
+        time.sleep(RESPONSE_DELAY_SECONDS)
     if EXPECTED_ERROR is not None:
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": EXPECTED_ERROR}}}}), flush=True)
     else:
@@ -1547,7 +1567,11 @@ for line in sys.stdin:
         }))
         .unwrap();
         state.configs.write().await.insert("legacy".to_string(), config);
-        state.connections.write().await.insert("legacy".to_string(), PoolKind::agent(client));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("legacy".to_string(), PoolKind::agent(client));
+            })
+            .await;
         (state, directory)
     }
 
@@ -1856,6 +1880,54 @@ for line in sys.stdin:
             mongo_create_index_core(&state, "legacy", "app", "users", keys_json, Some(options_json)).await.unwrap();
 
         assert_eq!(name, "email_1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_legacy_create_index_does_not_block_registry_writes() {
+        let keys_json = r#"{"email":1}"#;
+        let options_json = r#"{"name":"email_1"}"#;
+        let (state, directory) = legacy_mongo_state_with_options(
+            "create_index",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "keys_json": keys_json,
+                "options_json": options_json,
+            }),
+            serde_json::json!({ "name": "email_1" }),
+            &[AgentCapability::MongoDropDatabase.as_str()],
+            None,
+            None,
+            Some(500),
+        )
+        .await;
+        let state = std::sync::Arc::new(state);
+        let index_state = std::sync::Arc::clone(&state);
+        let index_task = tokio::spawn(async move {
+            mongo_create_index_core(&index_state, "legacy", "app", "users", keys_json, Some(options_json)).await
+        });
+
+        let request_entered = directory.path().join("request-entered");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !request_entered.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("legacy createIndex request must reach the Agent");
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.update_connection_pools(|connections| {
+                connections.insert("other-connection".to_string(), PoolKind::MessageQueue);
+            }),
+        )
+        .await
+        .expect("a stalled Agent call must not retain the registry lock");
+
+        assert_eq!(index_task.await.expect("index task join").as_deref(), Ok("email_1"));
+        assert!(state.pool_handle("other-connection").await.is_some());
     }
 
     #[test]

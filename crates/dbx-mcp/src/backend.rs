@@ -228,6 +228,32 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, schema, table);
         Err("Column metadata is not supported by this backend.".to_string())
     }
+    /// List stored routines (procedures/functions) for a schema. `routine_types`
+    /// filters by object type ("PROCEDURE"/"FUNCTION"); `None` returns both.
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        let _ = (connection, database, schema, routine_types);
+        Err("Routine metadata is not supported by this backend.".to_string())
+    }
+    /// Fetch a stored routine's full source text. `object_type` is
+    /// `PROCEDURE` or `FUNCTION` (SCREAMING_SNAKE_CASE, as in the desktop API).
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let _ = (connection, database, schema, name, object_type, signature);
+        Err("Routine source is not supported by this backend.".to_string())
+    }
     async fn execute_redis_command(
         &self,
         connection: &ConnectionConfig,
@@ -544,6 +570,21 @@ fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| data_dir.join("plugins"))
 }
 
+/// Whether an object listing entry is a stored routine (procedure or function).
+fn is_routine_object(object_type: &str) -> bool {
+    object_type.eq_ignore_ascii_case("PROCEDURE") || object_type.eq_ignore_ascii_case("FUNCTION")
+}
+
+/// Parse a routine type string ("PROCEDURE"/"FUNCTION", case-insensitive) into
+/// the core `ObjectSourceKind` used by `get_object_source_core`.
+fn parse_routine_kind(object_type: &str) -> Result<dbx_core::db::ObjectSourceKind, String> {
+    match object_type.trim().to_ascii_uppercase().as_str() {
+        "PROCEDURE" => Ok(dbx_core::db::ObjectSourceKind::Procedure),
+        "FUNCTION" => Ok(dbx_core::db::ObjectSourceKind::Function),
+        other => Err(format!("Unsupported routine type \"{other}\"; use PROCEDURE or FUNCTION.")),
+    }
+}
+
 fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
     let legacy_driver_base =
         settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
@@ -689,6 +730,53 @@ impl DbxBackend for LocalBackend {
         table: &str,
     ) -> Result<Vec<ColumnInfo>, String> {
         dbx_core::schema::get_columns_core(&self.state, &connection.id, database, schema, table).await
+    }
+
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        let default_types = ["PROCEDURE".to_string(), "FUNCTION".to_string()];
+        let object_types = routine_types.unwrap_or(default_types.as_slice());
+        let objects = dbx_core::schema::list_objects_core(
+            &self.state,
+            &connection.id,
+            database,
+            schema,
+            None,
+            None,
+            None,
+            Some(object_types),
+            None,
+        )
+        .await?;
+        Ok(objects.into_iter().filter(|object| is_routine_object(&object.object_type)).collect())
+    }
+
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let kind = parse_routine_kind(object_type)?;
+        dbx_core::schema::get_object_source_core(
+            &self.state,
+            &connection.id,
+            database,
+            schema,
+            name,
+            kind,
+            signature,
+            None,
+        )
+        .await
     }
 
     async fn collect_docs_snapshot(
@@ -1125,6 +1213,67 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid column list response: {error}"))
+    }
+
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        self.ensure_connected(connection).await?;
+        let types = routine_types.map(|types| types.join(",")).unwrap_or_else(|| "PROCEDURE,FUNCTION".to_string());
+        self.request(
+            reqwest::Method::GET,
+            &format!(
+                "/api/schema/objects?connection_id={}&database={}&schema={}&object_types={}",
+                url_encode(&connection.id),
+                url_encode(database),
+                url_encode(schema),
+                url_encode(&types)
+            ),
+            None,
+        )
+        .await?
+        .json::<Vec<dbx_core::db::ObjectInfo>>()
+        .await
+        .map(|objects| objects.into_iter().filter(|object| is_routine_object(&object.object_type)).collect())
+        .map_err(|error| format!("Invalid routine list response: {error}"))
+    }
+
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let kind = parse_routine_kind(object_type)?;
+        let kind_name = match kind {
+            dbx_core::db::ObjectSourceKind::Procedure => "PROCEDURE",
+            dbx_core::db::ObjectSourceKind::Function => "FUNCTION",
+            _ => unreachable!("parse_routine_kind only yields routines"),
+        };
+        self.ensure_connected(connection).await?;
+        let mut query = format!(
+            "/api/schema/object-source?connection_id={}&database={}&schema={}&table={}&object_type={}",
+            url_encode(&connection.id),
+            url_encode(database),
+            url_encode(schema),
+            url_encode(name),
+            url_encode(kind_name),
+        );
+        if let Some(signature) = signature.filter(|value| !value.trim().is_empty()) {
+            query.push_str(&format!("&signature={}", url_encode(signature)));
+        }
+        self.request(reqwest::Method::GET, &query, None)
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid routine source response: {error}"))
     }
 
     async fn collect_docs_snapshot(

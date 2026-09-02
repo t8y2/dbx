@@ -6575,6 +6575,8 @@ export default withEnglishFallback({
     mcpToolListDatabases: "데이터베이스 나열",
     mcpToolListTables: "테이블 나열",
     mcpToolDescribeTable: "테이블 구조",
+    mcpToolListRoutines: "루틴 목록",
+    mcpToolGetRoutineSource: "루틴 소스",
     mcpToolGetSchemaContext: "Schema 컨텍스트",
     mcpToolExecuteQuery: "SQL / Mongo 명령 실행",
     mcpToolOpenSession: "쿼리 세션 열기",

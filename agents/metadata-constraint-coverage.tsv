@@ -1,5 +1,6 @@
 driver	strategy	scope	reason
 access	intentional-fallback	java-jdbc-metadata	Uses Access JDBC metadata; no portable stable server-side paging API, common constraints filter locally.
+argo-go	shared-fallback	native-go	Uses HiveServer2 metadata APIs and the ArgoDB routine catalog views, then applies stable filtering and paging in the native agent with a SHOW TABLES fallback.
 bigquery	native-pushdown	java-sql	Uses dataset INFORMATION_SCHEMA.TABLES with type, normal-name filter, stable order, and literal LIMIT/OFFSET.
 cassandra-go	shared-fallback	native-go	Uses cassandra-gocql-driver schema metadata, then applies stable filtering and paging in the native agent.
 dameng	native-pushdown	java-sql	Uses ALL_OBJECTS with type, filter, stable order, and LIMIT/OFFSET with legacy fallback.

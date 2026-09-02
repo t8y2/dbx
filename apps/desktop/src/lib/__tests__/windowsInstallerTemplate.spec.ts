@@ -129,10 +129,9 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
   });
 
   it("audits the linked WebView2 loader in the final Win7 binary", () => {
-    expect(win7LoaderAuditScript).toContain('"Failed to find the Web"');
-    expect(win7LoaderAuditScript).toContain('"Failed to find the app"');
-    expect(win7LoaderAuditScript).toContain('"Failed to find an inst"');
-    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find an installed"');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the app exe path."');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the WebView2 client dll at:"');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find an installed WebView2 runtime or non-stable Microsoft Edge installation."');
     expect(win7LoaderAuditScript).toContain("GetEncoding(28591)");
     expect(ciWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
     expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");

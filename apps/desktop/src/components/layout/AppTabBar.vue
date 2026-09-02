@@ -30,6 +30,8 @@ const props = defineProps<{
   settingsPageOpen?: boolean;
   settingsPageActive?: boolean;
   agentDriverUpdateCount?: number;
+  detachedDropTarget?: boolean;
+  canDetachTabs?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -45,6 +47,7 @@ const emit = defineEmits<{
   "save-all-tab-close": [];
   "discard-all-tab-close": [];
   "cancel-tab-close": [];
+  "detach-tab": [tab: QueryTab, position?: { x: number; y: number }];
 }>();
 
 const { t } = useI18n();
@@ -52,16 +55,25 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const { toast } = useToast();
+const tabDrag = useTabDrag(
+  (draggedId, targetId, position) => {
+    return queryStore.reorderTab(draggedId, targetId, position);
+  },
+  (draggedId, position) => {
+    if (!props.canDetachTabs) return false;
+    const tab = queryStore.tabs.find((item) => item.id === draggedId);
+    if (!tab || !isDetachableTab(tab)) return false;
+    emit("detach-tab", tab, position);
+    return true;
+  },
+  () => (isVerticalLayout.value ? "vertical" : "horizontal"),
+);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
 const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
 const isManualTabOrder = computed(() => settingsStore.editorSettings.tabSortMode === "manual");
-const tabDrag = useTabDrag(
-  (draggedId, targetId, position) => queryStore.reorderTab(draggedId, targetId, position),
-  () => (isVerticalLayout.value ? "vertical" : "horizontal"),
-);
 
 function tabGroupKey(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
@@ -153,6 +165,7 @@ function scheduleCloseConfirmListClose() {
 }
 
 onUnmounted(() => {
+  tabDrag.setDetachBoundsProvider(null);
   if (closeConfirmListCloseTimer) {
     clearTimeout(closeConfirmListCloseTimer);
     closeConfirmListCloseTimer = null;
@@ -172,6 +185,10 @@ function toggleCompactTabTitle() {
 
 function canRenameTab(tab: QueryTab) {
   return tab.mode === "query";
+}
+
+function isDetachableTab(tab: QueryTab) {
+  return tab.mode === "query" || tab.mode === "data";
 }
 
 function startRenameTab(tab: QueryTab) {
@@ -390,6 +407,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       icon: Copy,
     },
     {
+      label: t("tabs.openInNewWindow"),
+      action: () => emit("detach-tab", tab),
+      icon: Maximize2,
+      visible: !!props.canDetachTabs && isDetachableTab(tab),
+    },
+    {
       label: t("sidebar.locateActiveTab"),
       action: () => emit("locate-tab", tab),
       icon: Crosshair,
@@ -468,6 +491,13 @@ const {
   onTabsWheel: onFixedTabsWheel,
   startScrollbarDrag: startFixedScrollbarDrag,
 } = useTabScroll(fixedTabsContainerRef);
+tabDrag.setDetachBoundsProvider(() => {
+  const regular = tabsContainerRef.value?.getBoundingClientRect();
+  const fixed = fixedTabsContainerRef.value?.getBoundingClientRect();
+  if (!regular) return fixed;
+  if (!fixed) return regular;
+  return new DOMRect(Math.min(regular.left, fixed.left), Math.min(regular.top, fixed.top), Math.max(regular.right, fixed.right) - Math.min(regular.left, fixed.left), Math.max(regular.bottom, fixed.bottom) - Math.min(regular.top, fixed.top));
+});
 const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
 function updateAllScrollButtons() {
@@ -773,7 +803,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">
+  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" data-main-tab-bar class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[tabBarClass, { 'ring-2 ring-primary ring-inset': detachedDropTarget }]">
     <div v-if="isVerticalLayout" class="relative shrink-0 border-b p-2">
       <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
       <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />

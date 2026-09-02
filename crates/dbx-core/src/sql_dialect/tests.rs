@@ -115,6 +115,11 @@ fn qualifies_schema_only_for_schema_aware_databases() {
         "\"DBX_TEST\".\"PRODUCTS\""
     );
     assert_eq!(qualified_table_name(Some(DatabaseType::Oscar), Some("SYSDBA"), "EMPLOYEE"), "\"SYSDBA\".\"EMPLOYEE\"");
+    // ArgoDB (Transwarp fork of Hive) shares Hive's backtick identifier syntax; it must be
+    // classified as schema-aware AND quoted with backticks (not the default `"..."`, which
+    // ArgoDB parses as a string literal — see dbx-argo-double-quote-bug memory note).
+    assert_eq!(qualified_table_name(Some(DatabaseType::Argo), Some("dws"), "etl_log"), "`dws`.`etl_log`");
+    assert_eq!(qualified_table_name(Some(DatabaseType::Argo), None, "etl_log"), "`etl_log`");
     assert_eq!(qualified_table_name(Some(DatabaseType::Informix), Some("xtdpcky"), "users"), "xtdpcky.users");
     assert_eq!(qualified_table_name(Some(DatabaseType::Sqlite), Some("analytics"), "users"), "\"analytics\".\"users\"");
     assert_eq!(qualified_table_name(Some(DatabaseType::Jdbc), Some("cbsdw_dwd"), "dwd_test_df"), "dwd_test_df");

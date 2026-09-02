@@ -1167,10 +1167,11 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     let connection_id = "live-sqlserver-export";
     let pool_key = format!("{connection_id}:{database}");
     state
-        .connections
-        .write()
-        .await
-        .insert(pool_key, PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(export_client))));
+        .update_connection_pools(|connections| {
+            connections
+                .insert(pool_key, PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(export_client))));
+        })
+        .await;
 
     let file_path = dir.join("result.csv");
     let sql = format!(
@@ -1258,10 +1259,14 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     config.username = user;
     config.password = password;
     state.configs.write().await.insert(connection_id.to_string(), config);
-    state.connections.write().await.insert(
-        format!("{connection_id}:{database}"),
-        PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
-    );
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(
+                format!("{connection_id}:{database}"),
+                PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
+            );
+        })
+        .await;
 
     let script = format!(
         "CREATE TABLE [dbo].[{table}] (id INT NOT NULL);\n\
@@ -1292,8 +1297,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     .expect("execute SQL Server file with GO batches");
 
     let pool_key = format!("{connection_id}:{database}");
-    let connections = state.connections.read().await;
-    let PoolKind::SqlServer(client) = connections.get(&pool_key).expect("SQL Server pool") else {
+    let PoolKind::SqlServer(client) = state.pool_handle(&pool_key).await.expect("SQL Server pool") else {
         panic!("expected SQL Server pool");
     };
     let mut client = client.lock().await;
@@ -1301,7 +1305,6 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     let cleanup = format!("DROP PROCEDURE [dbo].[{procedure}]; DROP TABLE [dbo].[{table}];");
     let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
     drop(client);
-    drop(connections);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(done_seen.load(Ordering::Relaxed));

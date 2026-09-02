@@ -75,6 +75,9 @@ import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/
 import { appendDebugLog } from "@/lib/backend/debugLog";
 import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
+import { isDetachedWindow, resolveWindowContext } from "@/lib/app/windowContext";
+import type { DetachedTabHandoff, DetachedTabRuntimeState } from "@/lib/app/detachedTabHandoff";
+import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
@@ -687,6 +690,7 @@ let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 
 function saveTabs(tabs: QueryTab[], activeTabId: string | null): Promise<void> {
+  if (isDetachedWindow()) return Promise.resolve();
   const payload = { tabs: serializeOpenTabs(tabs), activeTabId };
   saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
   return saveTabsQueue;
@@ -785,6 +789,7 @@ export const useQueryStore = defineStore("query", () => {
   let resultCacheTrimScheduled = false;
   let resultCacheTrimRunning = false;
   let resultCacheTrimRequested = false;
+  let detachedHandoffRevision = 0;
 
   function tableStructureKey(connectionId: string, database: string, schema: string | undefined, tableName: string): string {
     return [connectionId, database, schema || "", tableName].map((part) => part.toLowerCase()).join("\u0000");
@@ -1684,6 +1689,22 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  async function recoverDetachedTabsToMain(options: { validConnectionIds?: Iterable<string> } = {}) {
+    if (!isTauriRuntime() || useSettingsStore().editorSettings.openTabsRestoreMode === "none") return;
+    const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
+    const handoffs = await api.listDetachedTabHandoffs().catch(() => []);
+    for (const handoff of handoffs) {
+      if (!handoff || handoff.schemaVersion !== 1 || !handoff.tabId || !handoff.tab || typeof handoff.tab.id !== "string" || handoff.tab.id !== handoff.tabId) continue;
+      if (validConnectionIds && handoff.tab.mode !== "query" && !validConnectionIds.has(handoff.tab.connectionId)) continue;
+      try {
+        await adoptDetachedTab(handoff);
+        await api.deleteDetachedTabHandoff(handoff.tabId);
+      } catch (error) {
+        console.warn("[DBX][detached-tab:restore:error]", error);
+      }
+    }
+  }
+
   function scheduleResultCacheMaintenance() {
     const maintain = () => {
       const liveKeys = tabs.value.flatMap((tab) => [tab.resultCacheKey, ...(tab.resultRuns?.map((run) => run.resultCacheKey) ?? [])]).filter((key): key is string => !!key);
@@ -1695,6 +1716,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   async function initOpenTabs(options: { validConnectionIds?: Iterable<string> } = {}) {
+    if (isDetachedWindow()) return;
     if (isOpenTabsLoaded.value) return;
     const saved = await api.loadOpenTabsState().catch(() => null);
     if (saved?.tabs && Array.isArray(saved.tabs)) {
@@ -1706,6 +1728,8 @@ export const useQueryStore = defineStore("query", () => {
         clearLegacySavedTabs();
         await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
       }
+      await recoverDetachedTabsToMain(options);
+      await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
       isOpenTabsLoaded.value = true;
       scheduleResultCacheMaintenance();
       return;
@@ -1723,6 +1747,7 @@ export const useQueryStore = defineStore("query", () => {
         scheduleResultCacheMaintenance();
         return;
       }
+      await recoverDetachedTabsToMain(options);
       try {
         await saveTabs(tabs.value, activeTabId.value);
         // Keep old desktop installs readable until the async store has the
@@ -1732,6 +1757,8 @@ export const useQueryStore = defineStore("query", () => {
         /* keep legacy values for a later migration attempt */
       }
     }
+    await recoverDetachedTabsToMain(options);
+    await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
     isOpenTabsLoaded.value = true;
     scheduleResultCacheMaintenance();
   }
@@ -1795,7 +1822,8 @@ export const useQueryStore = defineStore("query", () => {
       if (storePersistGeneration !== persistGeneration) return;
       if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
-        void saveTabs(tabs.value, activeTabId.value).catch(() => {});
+        if (isDetachedWindow()) void flushDetachedTabPersistence(activeTabId.value ?? undefined).catch(() => {});
+        else void saveTabs(tabs.value, activeTabId.value).catch(() => {});
         persistTimer = null;
       }, 300);
     },
@@ -1813,12 +1841,86 @@ export const useQueryStore = defineStore("query", () => {
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
   function flushPendingPersist(): Promise<void> {
+    if (isDetachedWindow()) return flushDetachedTabPersistence(activeTabId.value ?? undefined);
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
     return saveTabs(tabs.value, activeTabId.value);
+  }
+
+  async function prepareDetachedTab(tabId: string, runtime: DetachedTabRuntimeState = {}): Promise<DetachedTabHandoff> {
+    const tab = tabs.value.find((candidate) => candidate.id === tabId);
+    if (!tab) throw new Error("Tab is no longer open");
+    if (tab.mode !== "query" && tab.mode !== "data") throw new Error("Only SQL and data tabs can be detached");
+    if (tab.isExecuting || tab.isCancelling || tab.isExplaining) throw new Error("Wait for the current operation to finish before detaching this tab");
+
+    const savedTab = serializeOpenTabs([tab])[0];
+    if (!savedTab) throw new Error("Unable to serialize tab");
+
+    const resultCacheKey = tabResultCacheKey(tab.id);
+    const snapshot = buildTabResultSnapshot(tab) ?? (tab.resultCacheKey ? await readTabResultSnapshot(tab.resultCacheKey) : undefined);
+    if (snapshot) {
+      const cached = await writeTabResultSnapshot(resultCacheKey, snapshot, tab.connectionId);
+      if (!cached) throw new Error("Unable to cache the tab result for the detached window");
+      tab.resultCacheKey = resultCacheKey;
+      tab.resultCacheState = "disk";
+    }
+
+    detachedHandoffRevision += 1;
+    return {
+      schemaVersion: 1,
+      tabId,
+      sourceWindowLabel: resolveWindowContext().windowLabel,
+      revision: detachedHandoffRevision,
+      tab: savedTab,
+      runtime: {
+        editorViewport: tab.editorViewport,
+        editorSelection: tab.editorSelection,
+        txnSessionId: tab.txnSessionId,
+        txnAutoRolledBack: tab.txnAutoRolledBack,
+        oracleTxnPossiblyDirty: tab.oracleTxnPossiblyDirty,
+        ...runtime,
+      },
+      ...(snapshot ? { resultCacheKey } : {}),
+      updatedAt: Date.now(),
+    };
+  }
+
+  async function flushDetachedTabPersistence(tabId?: string, runtime: DetachedTabRuntimeState = {}): Promise<void> {
+    if (!isDetachedWindow() || !tabId) return;
+    const handoff = await prepareDetachedTab(tabId, runtime);
+    await api.saveDetachedTabHandoff(tabId, handoff);
+  }
+
+  async function adoptDetachedTab(handoff: DetachedTabHandoff): Promise<string> {
+    if (!handoff || handoff.schemaVersion !== 1 || !handoff.tab || typeof handoff.tab.id !== "string" || handoff.tab.id !== handoff.tabId) throw new Error("Unsupported detached tab state");
+    const restored = restoreOpenTabsPayload({ tabs: [handoff.tab], activeTabId: handoff.tabId });
+    const restoredTab = restored.tabs[0];
+    if (!restoredTab) throw new Error("Unable to restore detached tab");
+    Object.assign(restoredTab, handoff.runtime);
+    if (handoff.resultCacheKey) {
+      restoredTab.resultCacheKey = handoff.resultCacheKey;
+      const restoredResult = restoreCachedResultPayload(restoredTab, await readTabResultSnapshot(handoff.resultCacheKey));
+      if (!restoredResult) restoredTab.resultCacheState = "missing";
+    }
+    const existingIndex = tabs.value.findIndex((tab) => tab.id === handoff.tabId);
+    if (existingIndex >= 0) {
+      tabs.value.splice(existingIndex, 1, restoredTab);
+    } else {
+      tabs.value.push(restoredTab);
+    }
+    activeTabId.value = handoff.tabId;
+    return handoff.tabId;
+  }
+
+  function removeTabAfterDetachedReady(tabId: string): boolean {
+    const index = tabs.value.findIndex((tab) => tab.id === tabId);
+    if (index < 0) return false;
+    tabs.value.splice(index, 1);
+    if (activeTabId.value === tabId) activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)]?.id ?? null;
+    return true;
   }
 
   function findTabByIdentity(connectionId: string, database: string, title: string, mode: QueryTab["mode"], schema?: string, catalog?: string) {
@@ -6935,6 +7037,10 @@ export const useQueryStore = defineStore("query", () => {
     isOpenTabsLoaded,
     recentTabIds,
     initOpenTabs,
+    prepareDetachedTab,
+    adoptDetachedTab,
+    removeTabAfterDetachedReady,
+    flushDetachedTabPersistence,
     showCloseConfirm,
     pendingCloseTabId,
     closeConfirmContext,

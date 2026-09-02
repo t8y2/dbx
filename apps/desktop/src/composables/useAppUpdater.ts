@@ -94,6 +94,7 @@ export function resolveUpdateReleaseUrl(info: api.UpdateInfo | null, source: unk
   if (normalizedSource === "cnb" && info?.latest_version) {
     return `https://cnb.cool/dbxio.com/dbx/-/releases/tag/${tagVersion(info.latest_version)}`;
   }
+  if (normalizedSource === "cnb") return "https://cnb.cool/dbxio.com/dbx/-/releases";
   return info?.release_url || fallbackUrl;
 }
 
@@ -115,6 +116,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const checkingUpdates = ref(false);
   const updateInfo = ref<api.UpdateInfo | null>(null);
   const updateCheckMessage = ref("");
+  const updateCheckFailed = ref(false);
   const showUpdateDialog = ref(false);
   const isDownloadingUpdate = ref(false);
   // null while the download size is unknown (backend reported no total) — the UI shows an indeterminate state.
@@ -146,7 +148,9 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       return;
     }
     checkingUpdates.value = true;
+    updateInfo.value = null;
     updateCheckMessage.value = "";
+    updateCheckFailed.value = false;
     try {
       const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
       updateInfo.value = info;
@@ -161,6 +165,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     } catch (e: any) {
       if (!options.silent) {
         updateCheckMessage.value = formatUpdateError(String(e));
+        updateCheckFailed.value = true;
         showUpdateDialog.value = true;
       }
     } finally {
@@ -185,6 +190,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   function openLatestRelease() {
     const url = resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl);
     openUrl(url);
+  }
+
+  async function changeUpdateDownloadSource(source: SettingsUpdateDownloadSource) {
+    await settingsStore.updateEditorSettingsAndPersist({ updateDownloadSource: source });
+    await checkUpdates();
   }
 
   async function ignoreCurrentVersion() {
@@ -342,6 +352,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkingUpdates,
     updateInfo,
     updateCheckMessage,
+    updateCheckFailed,
     showUpdateDialog,
     isDownloadingUpdate,
     downloadProgress,
@@ -356,6 +367,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     checkUpdates,
     formatUpdateError,
     openLatestRelease,
+    changeUpdateDownloadSource,
     ignoreCurrentVersion,
     downloadUpdateInBackground,
     cancelDownload,

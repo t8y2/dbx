@@ -174,7 +174,7 @@ macro_rules! batch {
 #[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
 async fn mysql_batch_rejects_ddl_transaction_and_rolls_back_failed_dml() {
     let (mysql, mysql_database) = mysql_env();
-    let (client, server_task, _dir) = boot_live_server!(vec![mysql], full_access_policy());
+    let (client, server_task, _dir) = boot_live_server!([mysql], full_access_policy());
     let db = mysql_database.as_str();
 
     // 1) DDL + use_transaction is rejected BEFORE execution, and no partial DDL
@@ -240,7 +240,7 @@ async fn mysql_batch_rejects_ddl_transaction_and_rolls_back_failed_dml() {
 #[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
 async fn postgres_transaction_batch_respects_mcp_query_timeout() {
     let (postgres, postgres_database) = postgres_env();
-    let (client, server_task, _dir) = boot_live_server!(vec![postgres], short_timeout_policy());
+    let (client, server_task, _dir) = boot_live_server!([postgres], short_timeout_policy());
     let db = postgres_database.as_str();
 
     // A use_transaction batch must honor the MCP global query-timeout policy:
@@ -263,7 +263,7 @@ async fn postgres_transaction_batch_respects_mcp_query_timeout() {
 #[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
 async fn mysql_transaction_batch_respects_mcp_query_timeout() {
     let (mysql, mysql_database) = mysql_env();
-    let (client, server_task, _dir) = boot_live_server!(vec![mysql], short_timeout_policy());
+    let (client, server_task, _dir) = boot_live_server!([mysql], short_timeout_policy());
     let db = mysql_database.as_str();
 
     // Same shape as the PostgreSQL timeout test: SLEEP(3) exceeds the 1s MCP
@@ -286,7 +286,7 @@ async fn mysql_transaction_batch_respects_mcp_query_timeout() {
 #[ignore = "requires DBX_LIVE_MYSQL_* and DBX_LIVE_PG_* env pointing at reachable MySQL 5.7 / PostgreSQL"]
 async fn postgres_batch_runs_ddl_inside_a_rollbackable_transaction() {
     let (postgres, postgres_database) = postgres_env();
-    let (client, server_task, _dir) = boot_live_server!(vec![postgres], full_access_policy());
+    let (client, server_task, _dir) = boot_live_server!([postgres], full_access_policy());
     let db = postgres_database.as_str();
 
     // PostgreSQL DDL is transactional: a CREATE TABLE + INSERT in one

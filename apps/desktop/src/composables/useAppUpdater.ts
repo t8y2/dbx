@@ -148,12 +148,14 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       return;
     }
     checkingUpdates.value = true;
-    updateInfo.value = null;
-    updateCheckMessage.value = "";
-    updateCheckFailed.value = false;
+    // Keep the previous message/failed state visible while the check is in
+    // flight: pre-clearing would flip the dialog to "up to date" with an empty
+    // version and unmount the source switcher until the request settles.
     try {
       const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
       updateInfo.value = info;
+      updateCheckMessage.value = "";
+      updateCheckFailed.value = false;
       if (info.update_available) {
         if (shouldOpenUpdateDialog({ silent: options.silent })) {
           showUpdateDialog.value = true;
@@ -164,6 +166,11 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       }
     } catch (e: any) {
       if (!options.silent) {
+        // Drop the stale update info only on a surfaced failure; silent
+        // background checks keep the last known state so the toolbar
+        // indicator and an in-flight download's portable-mode flag survive
+        // a single failed poll.
+        updateInfo.value = null;
         updateCheckMessage.value = formatUpdateError(String(e));
         updateCheckFailed.value = true;
         showUpdateDialog.value = true;

@@ -31,16 +31,30 @@ describe("AI assistant applies per-db_type prompt template defaults", () => {
   });
 
   it("namespace switch re-resolves defaults only when both stores are loaded, otherwise clears", () => {
-    const watcherBody = source.slice(source.indexOf('() => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`'), source.indexOf("function toggleTemplateId("));
+    const watcherBody = source.slice(source.indexOf("aiTemplateNamespaceKey,"), source.indexOf("function toggleTemplateId("));
     expect(watcherBody).toContain("if (!settings.isAiConfigLoaded || !promptTemplateStore.isLoaded) {");
     expect(watcherBody).toContain("activeTemplateIds.value = [];");
     // The switch path must resolve through the defaults-only helper; the
     // mount resolver (defaults-else-last-used) would resurrect cleared
     // selections. Pin the exact call so an indirect last-used fallback
     // cannot hide behind a shared helper again.
-    expect(watcherBody).toContain("resolveDefaultTemplateIds(props.connection?.db_type, settings.aiDefaultTemplatesByDbType)");
+    expect(watcherBody).toContain("resolveDefaultTemplateIds(templateDbType.value, settings.aiDefaultTemplatesByDbType)");
     expect(watcherBody).not.toContain("resolveAutoTemplateIds");
     expect(watcherBody).not.toContain("lastUsedTemplatesByDbType");
+  });
+
+  it("keys defaults, last-used, and the badge by the effective AI database type", () => {
+    // Same axis aiDatabaseTypeForConnection established for schema selection:
+    // gbase → mysql, doris-over-mysql protocol → doris, jdbc → inferred
+    // dialect. Raw db_type keying would never match for those connections.
+    expect(source).toContain("const templateDbType = computed(() => (props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));");
+    expect(source).toContain("aiDatabaseTypeForConnection");
+  });
+
+  it("panel-open resolution bails when the namespace switched during the load await", () => {
+    const maybeBody = source.slice(source.indexOf("async function maybeApplyAutoTemplates"), source.indexOf("watch(", source.indexOf("async function maybeApplyAutoTemplates")));
+    expect(maybeBody).toContain("const namespaceAtStart = aiTemplateNamespaceKey.value;");
+    expect(maybeBody).toContain("if (namespaceAtStart !== aiTemplateNamespaceKey.value) return;");
   });
 
   it("selector-open load retry also applies pending defaults", () => {
@@ -50,12 +64,12 @@ describe("AI assistant applies per-db_type prompt template defaults", () => {
 
   it("send records the sent templates as the db_type's last-used selection", () => {
     const sendIdx = source.indexOf("activeTemplates: [...activeTemplates.value],");
-    const recordIdx = source.indexOf("settings.recordLastUsedTemplates(props.connection.db_type, [...activeTemplateIds.value]);");
+    const recordIdx = source.indexOf("settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);");
     expect(recordIdx).toBeGreaterThan(sendIdx);
     // No length guard: an empty selection must also reach the store so the
     // remembered entry is cleared instead of resurrecting old templates.
     const guard = source.slice(sendIdx, recordIdx);
-    expect(guard).toContain("if (props.connection?.db_type) {");
+    expect(guard).toContain("if (templateDbType.value) {");
     expect(guard).not.toContain("activeTemplates.value.length > 0");
   });
 

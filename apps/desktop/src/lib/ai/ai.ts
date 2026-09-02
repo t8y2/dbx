@@ -716,7 +716,7 @@ async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig)
   return [database];
 }
 
-function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType {
+export function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType {
   return effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
 }
 

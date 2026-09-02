@@ -224,7 +224,7 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
     let captured = captured_query_arguments(backend, json!({ "connection_id": "scoped", "sql": "SELECT 1" })).await;
     assert_eq!(captured.len(), 1, "expected one captured execute_query call");
     assert!(
-        !captured[0].get("timeout_secs").is_some(),
+        captured[0].get("timeout_secs").is_none(),
         "no timeout_secs must be injected when the policy inherits the connection: {}",
         captured[0]
     );

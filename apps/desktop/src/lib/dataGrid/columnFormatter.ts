@@ -429,12 +429,15 @@ export function iotdbTimestampFractionDigits(precision: IoTDBTimestampPrecision)
 
 function iotdbTimestampTimeZone(urlParams: string | undefined): string {
   const params = new URLSearchParams(urlParams ?? "");
-  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "UTC";
+  // Keep display aligned with the IoTDB Go client's default session zone.
+  // Otherwise an unconfigured connection interprets SQL literals in
+  // Asia/Shanghai but the grid renders the returned epoch in UTC.
+  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "Asia/Shanghai";
   try {
     dayjs(0).tz(candidate);
     return candidate;
   } catch {
-    return "UTC";
+    return "Asia/Shanghai";
   }
 }
 

@@ -51,6 +51,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.22.x"
+          cache: false
 
       - name: Validate release branch and versions
         id: release
@@ -205,7 +206,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         if: runner.os == 'Linux'
         with:
           python-version: "3.x"
@@ -273,11 +274,11 @@ jobs:
         run: |
           wait_for_package() {
             package="$1"
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 60); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
                 return 0
               fi
-              echo "Waiting for ${package}@${VERSION} (${attempt}/18)."
+              echo "Waiting for ${package}@${VERSION} (${attempt}/60)."
               sleep 10
             done
             return 1
@@ -324,6 +325,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: "1.22.x"
+          cache: false
 
       - name: Install from npm and package every template
         env:
@@ -334,11 +336,11 @@ jobs:
           cd "${work}"
           npm init -y >/dev/null
 
-          for attempt in $(seq 1 18); do
+          for attempt in $(seq 1 60); do
             if npm view "@dbx-app/plugin-cli@${VERSION}" version >/dev/null 2>&1; then
               break
             fi
-            if [ "${attempt}" -eq 18 ]; then
+            if [ "${attempt}" -eq 60 ]; then
               echo "::error::@dbx-app/plugin-cli@${VERSION} did not become visible on npm."
               exit 1
             fi

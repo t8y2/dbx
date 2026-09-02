@@ -1254,6 +1254,36 @@ fn iotdb_tree_count_sql(statement: &str) -> Option<String> {
         }
         _ => return None,
     };
+    // IoTDB's value-filter mode allows WHERE to reference a series that is
+    // not in the SELECT list; `COUNT(<measurement>)` would then count only
+    // the selected series' non-null points and understate the row total, so
+    // only count when every WHERE reference is `time` or the measurement
+    // itself (bare or full-path form).
+    if let Some(selection) = select.selection.as_ref() {
+        let allowed = |expr: &Expr| match expr {
+            Expr::Identifier(identifier) => {
+                identifier.value.eq_ignore_ascii_case("time") || identifier.value == measurement
+            }
+            Expr::CompoundIdentifier(parts) => {
+                parts.iter().map(|part| part.value.as_str()).collect::<Vec<_>>().join(".") == measurement
+            }
+            _ => true,
+        };
+        if visit_expressions(
+            selection,
+            |expr| {
+                if allowed(expr) {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                }
+            },
+        )
+        .is_break()
+        {
+            return None;
+        }
+    }
     let count_projection =
         match Parser::parse_sql(&dialect, &format!("SELECT COUNT({measurement}) AS dbx_total_rows")).ok()?.pop()? {
             Statement::Query(query) => match query.body.as_ref() {
@@ -4164,12 +4194,29 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn iotdb_count_allows_value_filters_on_selected_series() {
+        for sql in [
+            "SELECT s1 FROM root.db.device WHERE s1 > 10",
+            "SELECT root.db.device.s1 FROM root.db.device WHERE root.db.device.s1 > 10",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Iotdb),
+            });
+
+            assert!(result.sql.is_some(), "{sql}");
+        }
+    }
+
+    #[test]
     fn iotdb_count_declines_queries_without_safe_tree_row_semantics() {
         for sql in [
             "SELECT * FROM root.db.device",
             "SELECT s1, s2 FROM root.db.device",
             "SELECT COUNT(s1) FROM root.db.device",
             "SELECT s1 FROM root.db.device GROUP BY ([0, 100), 10ms)",
+            "SELECT s1 FROM root.db.device WHERE s2 > 10",
+            "SELECT s1 FROM root.db.device WHERE root.db.device.s2 > 10",
             "SELECT s1 FROM root.db.device LIMIT 10",
             "SELECT s1 FROM root.db.device, root.db.other",
             "SELECT value FROM metrics",

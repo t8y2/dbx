@@ -2,12 +2,13 @@ export const TAB_WINDOW_PREVIEW_WIDTH = 1200;
 export const TAB_WINDOW_PREVIEW_HEIGHT = 800;
 export const TAB_DRAG_PREVIEW_WIDTH = 300;
 export const TAB_DRAG_PREVIEW_HEIGHT = 34;
+export const TAB_DRAG_PREVIEW_GRAB_X = 18;
+export const TAB_DRAG_PREVIEW_GRAB_Y = 17;
+export const TAB_DRAG_PREVIEW_HOST_PADDING = 8;
 
 const PREVIEW_MARGIN = 12;
 const PREVIEW_GRAB_X = 120;
 const PREVIEW_GRAB_Y = 18;
-const DRAG_PREVIEW_GRAB_X = 18;
-const DRAG_PREVIEW_GRAB_Y = 17;
 
 export interface TabWindowPreviewRect {
   left: number;
@@ -46,7 +47,7 @@ export function tabDragPreviewRect(point: { x: number; y: number }, viewport: { 
   return {
     width,
     height,
-    left: clamp(point.x - DRAG_PREVIEW_GRAB_X, PREVIEW_MARGIN, viewport.width - width - PREVIEW_MARGIN),
-    top: clamp(point.y - DRAG_PREVIEW_GRAB_Y, PREVIEW_MARGIN, viewport.height - height - PREVIEW_MARGIN),
+    left: clamp(point.x - TAB_DRAG_PREVIEW_GRAB_X, PREVIEW_MARGIN, viewport.width - width - PREVIEW_MARGIN),
+    top: clamp(point.y - TAB_DRAG_PREVIEW_GRAB_Y, PREVIEW_MARGIN, viewport.height - height - PREVIEW_MARGIN),
   };
 }

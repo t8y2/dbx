@@ -3,6 +3,7 @@ import { serializeOpenTabs } from "@/lib/app/openTabsPersistence";
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { uuid } from "@/lib/common/utils";
+import { TAB_DRAG_PREVIEW_GRAB_X, TAB_DRAG_PREVIEW_GRAB_Y, TAB_DRAG_PREVIEW_HEIGHT, TAB_DRAG_PREVIEW_HOST_PADDING, TAB_DRAG_PREVIEW_WIDTH } from "@/lib/tabs/tabWindowPreview";
 import type { QueryTab } from "@/types/database";
 
 export const TAB_WINDOW_TRANSFER_MIME = "application/x-dbx-tab";
@@ -21,6 +22,10 @@ const TRANSFER_STORAGE_PREFIX = "dbx-tab-window-transfer:";
 const ACCEPTED_STORAGE_PREFIX = "dbx-tab-window-transfer-accepted:";
 const ACTIVE_TRANSFER_STORAGE_KEY = "dbx-active-tab-window-transfer";
 const ACTIVE_TRANSFER_MAX_AGE_MS = 20_000;
+let tabDragPreviewWebviewCreationPending = false;
+let tabDragPreviewWebviewShouldBeVisible = false;
+let pendingTabDragPreviewContent: { title: string; cursorPhysical: { x: number; y: number } } | null = null;
+let tabDragPreviewMonitor: { x: number; y: number; width: number; height: number; scaleFactor: number } | null = null;
 
 function isTransferableTabWindowLabel(label: string): boolean {
   return label === "main" || (label.startsWith("dbx-tab-") && !label.startsWith(TAB_DRAG_PREVIEW_WINDOW_PREFIX));
@@ -40,6 +45,7 @@ export interface TabWindowTransferPayload {
 export interface TabWindowDragPreviewPayload {
   transferId: string;
   sourceWindowLabel: string;
+  targetWindowLabel?: string;
   title: string;
   cursorPhysical: { x: number; y: number };
   sequence: number;
@@ -260,6 +266,27 @@ export async function tabWindowAtCursor(): Promise<string | null> {
   return candidates.filter((candidate): candidate is { label: string; focused: boolean } => !!candidate).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label ?? null;
 }
 
+/** Finds the visible DBX tab window containing a physical desktop point. */
+export async function tabWindowAtPhysicalPosition(cursorPhysical: { x: number; y: number }): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { getAllWindows } = await import("@tauri-apps/api/window");
+  const windows = await getAllWindows();
+  const candidates = await Promise.all(
+    windows
+      .filter((window) => isTransferableTabWindowLabel(window.label))
+      .map(async (window) => {
+        try {
+          const [position, size, focused, visible, minimized] = await Promise.all([window.outerPosition(), window.outerSize(), window.isFocused(), window.isVisible(), window.isMinimized()]);
+          const containsCursor = visible && !minimized && cursorPhysical.x >= position.x && cursorPhysical.x < position.x + size.width && cursorPhysical.y >= position.y && cursorPhysical.y < position.y + size.height;
+          return containsCursor ? { label: window.label, focused } : null;
+        } catch {
+          return null;
+        }
+      }),
+  );
+  return candidates.filter((candidate): candidate is { label: string; focused: boolean } => !!candidate).sort((a, b) => Number(b.focused) - Number(a.focused))[0]?.label ?? null;
+}
+
 /** 列出其他可接收标签转移的 DBX 窗口。 */
 export async function listOtherTabWindows(): Promise<TabWindowTarget[]> {
   if (!isTauriRuntime()) return [];
@@ -337,17 +364,49 @@ export async function emitTabWindowDragPreview(payload: TabWindowDragPreviewPayl
   await emit(TAB_WINDOW_DRAG_PREVIEW_EVENT, payload);
 }
 
+async function tabDragPreviewHostPosition(cursorPhysical: { x: number; y: number }): Promise<{ x: number; y: number }> {
+  const cachedMonitor = tabDragPreviewMonitor;
+  if (!cachedMonitor || cursorPhysical.x < cachedMonitor.x || cursorPhysical.x >= cachedMonitor.x + cachedMonitor.width || cursorPhysical.y < cachedMonitor.y || cursorPhysical.y >= cachedMonitor.y + cachedMonitor.height) {
+    const { monitorFromPoint } = await import("@tauri-apps/api/window");
+    const monitor = await monitorFromPoint(cursorPhysical.x, cursorPhysical.y).catch(() => null);
+    tabDragPreviewMonitor = monitor
+      ? {
+          x: monitor.position.x,
+          y: monitor.position.y,
+          width: monitor.size.width,
+          height: monitor.size.height,
+          scaleFactor: monitor.scaleFactor,
+        }
+      : null;
+  }
+  const scaleFactor = tabDragPreviewMonitor?.scaleFactor ?? 1;
+  const horizontalOffset = (TAB_DRAG_PREVIEW_GRAB_X + TAB_DRAG_PREVIEW_HOST_PADDING) * scaleFactor;
+  const verticalOffset = (TAB_DRAG_PREVIEW_GRAB_Y + TAB_DRAG_PREVIEW_HOST_PADDING) * scaleFactor;
+  return {
+    x: Math.round(cursorPhysical.x - horizontalOffset),
+    y: Math.round(cursorPhysical.y - verticalOffset),
+  };
+}
+
 export async function showTabDragPreviewWebview(title: string, cursorPhysical: { x: number; y: number }): Promise<void> {
   if (!isTauriRuntime()) return;
+  tabDragPreviewWebviewShouldBeVisible = true;
+  pendingTabDragPreviewContent = { title, cursorPhysical };
   const [{ WebviewWindow }, { emitTo }, { PhysicalPosition }] = await Promise.all([import("@tauri-apps/api/webviewWindow"), import("@tauri-apps/api/event"), import("@tauri-apps/api/dpi")]);
-  const position = new PhysicalPosition(cursorPhysical.x - 18, cursorPhysical.y - 17);
+  if (!tabDragPreviewWebviewShouldBeVisible) return;
   const existing = await WebviewWindow.getByLabel(TAB_DRAG_PREVIEW_WEBVIEW_LABEL);
   if (existing) {
-    await emitTo({ kind: "WebviewWindow", label: TAB_DRAG_PREVIEW_WEBVIEW_LABEL }, TAB_DRAG_PREVIEW_CONTENT_EVENT, { title } satisfies TabDragPreviewContentPayload).catch(() => undefined);
-    await existing.setPosition(position).catch(() => undefined);
-    await existing.show();
+    const pending = pendingTabDragPreviewContent;
+    if (!tabDragPreviewWebviewShouldBeVisible || !pending) return;
+    await emitTo({ kind: "WebviewWindow", label: TAB_DRAG_PREVIEW_WEBVIEW_LABEL }, TAB_DRAG_PREVIEW_CONTENT_EVENT, { title: pending.title } satisfies TabDragPreviewContentPayload).catch(() => undefined);
+    const position = await tabDragPreviewHostPosition(pending.cursorPhysical);
+    if (!tabDragPreviewWebviewShouldBeVisible) return;
+    await existing.setPosition(new PhysicalPosition(position.x, position.y)).catch(() => undefined);
+    if (tabDragPreviewWebviewShouldBeVisible) await existing.show();
     return;
   }
+  if (tabDragPreviewWebviewCreationPending) return;
+  tabDragPreviewWebviewCreationPending = true;
 
   const url = new URL(window.location.href);
   url.searchParams.set("tabDragPreview", "1");
@@ -355,8 +414,8 @@ export async function showTabDragPreviewWebview(title: string, cursorPhysical: {
   const preview = new WebviewWindow(TAB_DRAG_PREVIEW_WEBVIEW_LABEL, {
     url: url.toString(),
     title: "DBX tab preview",
-    width: 300,
-    height: 34,
+    width: TAB_DRAG_PREVIEW_WIDTH + TAB_DRAG_PREVIEW_HOST_PADDING * 2,
+    height: TAB_DRAG_PREVIEW_HEIGHT + TAB_DRAG_PREVIEW_HOST_PADDING * 2,
     visible: false,
     decorations: false,
     transparent: true,
@@ -366,17 +425,31 @@ export async function showTabDragPreviewWebview(title: string, cursorPhysical: {
     shadow: false,
   });
   void preview.once("tauri://created", async () => {
+    tabDragPreviewWebviewCreationPending = false;
     // 透明鼠标穿透能力在不同平台上的可用性不同，不能因为它失败而让
     // 预览宿主窗口始终保持隐藏。
     await preview.setIgnoreCursorEvents(true).catch(() => undefined);
-    await preview.setPosition(position).catch(() => undefined);
     await preview.setAlwaysOnTop(true).catch(() => undefined);
+    const pending = pendingTabDragPreviewContent;
+    if (!tabDragPreviewWebviewShouldBeVisible || !pending) {
+      await preview.hide().catch(() => undefined);
+      return;
+    }
+    await emitTo({ kind: "WebviewWindow", label: TAB_DRAG_PREVIEW_WEBVIEW_LABEL }, TAB_DRAG_PREVIEW_CONTENT_EVENT, { title: pending.title } satisfies TabDragPreviewContentPayload).catch(() => undefined);
+    const position = await tabDragPreviewHostPosition(pending.cursorPhysical);
+    if (!tabDragPreviewWebviewShouldBeVisible) return;
+    await preview.setPosition(new PhysicalPosition(position.x, position.y)).catch(() => undefined);
+    if (!tabDragPreviewWebviewShouldBeVisible) return;
     await preview.show();
+  });
+  void preview.once("tauri://error", () => {
+    tabDragPreviewWebviewCreationPending = false;
   });
 }
 
 export async function hideTabDragPreviewWebview(): Promise<void> {
   if (!isTauriRuntime()) return;
+  tabDragPreviewWebviewShouldBeVisible = false;
   const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
   const preview = await WebviewWindow.getByLabel(TAB_DRAG_PREVIEW_WEBVIEW_LABEL);
   await preview?.hide();

@@ -48,6 +48,7 @@ import {
   requestTabWindowInfo,
   sendTabWindowInfoResponse,
   tabWindowAtCursor,
+  tabWindowAtPhysicalPosition,
   waitForTabWindowTransferAccepted,
   type TabWindowPlacement,
   type TabWindowDragPreviewPayload,
@@ -101,7 +102,6 @@ const tabDrag = useTabDrag(
 const currentWindowLabel = ref(`dbx-webview-${Math.random().toString(36).slice(2)}`);
 const nativeTabDrag = ref<{ payload: TabWindowTransferPayload } | null>(null);
 const otherTabWindows = ref<TabWindowTarget[]>([]);
-const nativeTabDragPreviewActive = ref(false);
 let nativeTabDragPreviewTransferId: string | null = null;
 let removeTabWindowTransferListener: (() => void) | null = null;
 let removeTabWindowInfoRequestListener: (() => void) | null = null;
@@ -120,6 +120,8 @@ let tabPreviewBroadcastFrame: number | null = null;
 let tabPreviewBroadcastTimer: number | null = null;
 let pendingTabPreviewBroadcast: { payload: TabWindowTransferPayload; title: string } | null = null;
 let tabPreviewBroadcastTransferId: string | null = null;
+let tabPreviewBroadcastInFlight = false;
+let tabPreviewDisplayMode: "in-app" | "external" | null = null;
 let tabPreviewBroadcastSequence = 0;
 
 function clearRemoteTabWindowPreview(transferId?: string) {
@@ -142,9 +144,8 @@ function refreshRemoteTabWindowPreviewExpiry(transferId: string, sequence: numbe
   }, 500);
 }
 const tabWindowPreview = computed(() => {
-  if (!tabDrag.state.active || !tabDrag.state.draggedId) return null;
-  const tabBarRect = tabBarRef.value?.getBoundingClientRect();
-  if (!tabBarRect || !pointOutsideRect({ x: tabDrag.state.currentX, y: tabDrag.state.currentY }, tabBarRect, 8)) return null;
+  // 跨窗口转移开始前仅显示本地拖动标签；开始后交由目标窗口或外部宿主显示。
+  if (!tabDrag.state.active || !tabDrag.state.draggedId || nativeTabDrag.value) return null;
   return tabDragPreviewRect({ x: tabDrag.state.currentX, y: tabDrag.state.currentY }, { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight });
 });
 const tabWindowPreviewTitle = computed(() => {
@@ -152,8 +153,8 @@ const tabWindowPreviewTitle = computed(() => {
   const tab = tabId ? queryStore.tabs.find((item) => item.id === tabId) : null;
   return tab ? tabTitleText(tab) : "";
 });
-const visibleTabWindowPreview = computed(() => tabWindowPreview.value ?? remoteTabWindowPreview.value?.rect ?? null);
-const visibleTabWindowPreviewTitle = computed(() => (tabWindowPreview.value ? tabWindowPreviewTitle.value : (remoteTabWindowPreview.value?.title ?? "")));
+const visibleTabWindowPreview = computed(() => remoteTabWindowPreview.value?.rect ?? tabWindowPreview.value);
+const visibleTabWindowPreviewTitle = computed(() => remoteTabWindowPreview.value?.title ?? tabWindowPreviewTitle.value);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
@@ -214,7 +215,6 @@ onUnmounted(() => {
   const activeTransferId = nativeTabDrag.value?.payload.transferId;
   nativeTabDrag.value = null;
   nativeTabDragPreviewTransferId = null;
-  nativeTabDragPreviewActive.value = false;
   if (activeTransferId) void invoke("stop_tab_drag_preview", { transferId: activeTransferId }).catch(() => undefined);
   removeTabWindowTransferListener?.();
   removeTabWindowTransferListener = null;
@@ -773,20 +773,61 @@ function isPointerOutsideTabBar(event: MouseEvent): boolean {
 function queueTabDragPreviewBroadcast(payload: TabWindowTransferPayload, title: string) {
   if (!isTauriRuntime() || tabPreviewBroadcastTransferId !== payload.transferId) return;
   pendingTabPreviewBroadcast = { payload, title };
-  if (tabPreviewBroadcastFrame !== null) return;
+  if (tabPreviewBroadcastFrame !== null || tabPreviewBroadcastInFlight) return;
   tabPreviewBroadcastFrame = window.requestAnimationFrame(() => {
     tabPreviewBroadcastFrame = null;
     const pending = pendingTabPreviewBroadcast;
     pendingTabPreviewBroadcast = null;
     if (!pending || nativeTabDrag.value?.payload.transferId !== pending.payload.transferId || tabPreviewBroadcastTransferId !== pending.payload.transferId) return;
-    void cursorPosition()
-      .then((cursor) => {
-        // 拖动已经结束后，已排队的光标查询不能再次显示独立预览宿主。
-        if (tabPreviewBroadcastTransferId !== pending.payload.transferId) return;
-        return showTabDragPreviewWebview(pending.title, cursor);
-      })
-      .catch(() => undefined);
+    tabPreviewBroadcastInFlight = true;
+    void updateTabDragPreview(pending.payload, pending.title).finally(() => {
+      tabPreviewBroadcastInFlight = false;
+      const queued = pendingTabPreviewBroadcast;
+      if (queued) queueTabDragPreviewBroadcast(queued.payload, queued.title);
+    });
   });
+}
+
+async function updateTabDragPreview(payload: TabWindowTransferPayload, title: string) {
+  try {
+    const cursor = await cursorPosition();
+    if (tabPreviewBroadcastTransferId !== payload.transferId) return;
+    const cursorPhysical = { x: cursor.x, y: cursor.y };
+    const targetWindowLabel = await tabWindowAtPhysicalPosition(cursorPhysical);
+    if (tabPreviewBroadcastTransferId !== payload.transferId) return;
+
+    if (targetWindowLabel) {
+      if (tabPreviewDisplayMode !== "in-app") await hideTabDragPreviewWebview();
+      if (tabPreviewBroadcastTransferId !== payload.transferId) return;
+      tabPreviewDisplayMode = "in-app";
+      await emitTabWindowDragPreview({
+        transferId: payload.transferId,
+        sourceWindowLabel: payload.sourceWindowLabel,
+        targetWindowLabel,
+        title,
+        cursorPhysical,
+        sequence: ++tabPreviewBroadcastSequence,
+        visible: true,
+      });
+      return;
+    }
+
+    if (tabPreviewDisplayMode !== "external") {
+      await emitTabWindowDragPreview({
+        transferId: payload.transferId,
+        sourceWindowLabel: payload.sourceWindowLabel,
+        title: "",
+        cursorPhysical,
+        sequence: ++tabPreviewBroadcastSequence,
+        visible: false,
+      });
+    }
+    if (tabPreviewBroadcastTransferId !== payload.transferId) return;
+    tabPreviewDisplayMode = "external";
+    await showTabDragPreviewWebview(title, cursorPhysical);
+  } catch (error) {
+    console.warn("[DBX][tab-window-preview:update:error]", error);
+  }
 }
 
 function startTabDragPreviewBroadcast(payload: TabWindowTransferPayload, title: string) {
@@ -809,6 +850,7 @@ function stopTabDragPreviewBroadcast(payload?: TabWindowTransferPayload) {
   }
   pendingTabPreviewBroadcast = null;
   if (!payload || tabPreviewBroadcastTransferId === payload.transferId) tabPreviewBroadcastTransferId = null;
+  tabPreviewDisplayMode = null;
   void hideTabDragPreviewWebview().catch(() => undefined);
   if (!payload || !isTauriRuntime()) return;
   void emitTabWindowDragPreview({
@@ -822,11 +864,10 @@ function stopTabDragPreviewBroadcast(payload?: TabWindowTransferPayload) {
 }
 
 async function handleIncomingTabWindowDragPreview(payload: TabWindowDragPreviewPayload) {
-  if (payload.sourceWindowLabel === currentWindowLabel.value) return;
   const lastSequence = remoteTabWindowPreviewSequences.get(payload.sourceWindowLabel) ?? -1;
   if (payload.sequence <= lastSequence) return;
   remoteTabWindowPreviewSequences.set(payload.sourceWindowLabel, payload.sequence);
-  if (!payload.visible) {
+  if (!payload.visible || payload.targetWindowLabel !== currentWindowLabel.value) {
     clearRemoteTabWindowPreview(payload.transferId);
     return;
   }
@@ -875,7 +916,6 @@ async function startNativeTabDragPreview(payload: TabWindowTransferPayload, even
     const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
     if (nativeTabDragPreviewTransferId !== payload.transferId) return;
     const preview = tabDragPreviewRect({ x: event.clientX, y: event.clientY }, { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight });
-    nativeTabDragPreviewActive.value = true;
     await invoke("start_tab_drag_preview", {
       request: {
         transferId: payload.transferId,
@@ -893,7 +933,6 @@ async function startNativeTabDragPreview(payload: TabWindowTransferPayload, even
     console.warn("[DBX][tab-drag-preview:native-host:error]", error);
     if (nativeTabDragPreviewTransferId === payload.transferId) {
       nativeTabDragPreviewTransferId = null;
-      nativeTabDragPreviewActive.value = false;
     }
   }
 }
@@ -932,7 +971,6 @@ async function handleNativeTabDragPreviewRelease(release: NativeTabDragPreviewRe
   if (!drag || drag.payload.transferId !== release.transferId) return;
   nativeTabDrag.value = null;
   nativeTabDragPreviewTransferId = null;
-  nativeTabDragPreviewActive.value = false;
   stopTabDragPreviewBroadcast(drag.payload);
   // The native host owns the mouse after the pointer leaves this WebView, so
   // its release event is also responsible for clearing the source drag state.
@@ -1222,7 +1260,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 <template>
   <Teleport to="body">
     <TabDragPreviewChip
-      v-if="visibleTabWindowPreview && !nativeTabDragPreviewActive && !isTauriRuntime()"
+      v-if="visibleTabWindowPreview"
       :title="visibleTabWindowPreviewTitle"
       class="pointer-events-none fixed z-[9998] h-[34px] w-[300px]"
       :style="{

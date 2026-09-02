@@ -22,8 +22,8 @@ onUnmounted(() => unlisten?.());
 </script>
 
 <template>
-  <div class="flex h-screen w-screen bg-transparent">
-    <TabDragPreviewChip :title="title" class="h-full w-full" />
+  <div class="flex h-screen w-screen items-center justify-center bg-transparent p-2">
+    <TabDragPreviewChip :title="title" />
   </div>
 </template>
 

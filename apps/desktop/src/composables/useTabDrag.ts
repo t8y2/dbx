@@ -41,54 +41,10 @@ let pending: {
   id: string;
   x: number;
   y: number;
-  sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
 let onMoveCallback: ((draggedId: string, event: MouseEvent) => void) | null = null;
 let onEndCallback: ((draggedId: string, event: MouseEvent) => boolean) | null = null;
-let ghostEl: HTMLElement | null = null;
-
-function createGhost(sourceEl: HTMLElement, x: number, y: number) {
-  const ghost = document.createElement("div");
-  const textNode = sourceEl.querySelector(".truncate");
-  ghost.textContent = textNode?.textContent || "";
-  ghost.style.cssText = `
-    position: fixed;
-    pointer-events: none;
-    z-index: 9999;
-    opacity: 0.9;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-    border-radius: var(--dbx-radius-fixed-6);
-    background: var(--background, #fff);
-    border: 1px solid var(--border, #e5e7eb);
-    max-width: 200px;
-    height: 28px;
-    padding: 0 12px;
-    font-size: 12px;
-    line-height: 28px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    left: ${x + 12}px;
-    top: ${y - 14}px;
-  `;
-  document.body.appendChild(ghost);
-  return ghost;
-}
-
-function moveGhost(x: number, y: number) {
-  if (!ghostEl) return;
-  ghostEl.style.left = `${x + 8}px`;
-  ghostEl.style.top = `${y - 14}px`;
-}
-
-function removeGhost() {
-  if (ghostEl) {
-    ghostEl.remove();
-    ghostEl = null;
-  }
-}
-
 function onMouseMove(event: MouseEvent) {
   if (!pending && !state.active) return;
 
@@ -101,9 +57,6 @@ function onMouseMove(event: MouseEvent) {
     state.startY = pending.y;
     state.currentX = event.clientX;
     state.currentY = event.clientY;
-    if (pending.sourceEl) {
-      ghostEl = createGhost(pending.sourceEl, event.clientX, event.clientY);
-    }
     pending = null;
     document.body.style.cursor = "grabbing";
     document.body.style.userSelect = "none";
@@ -112,7 +65,6 @@ function onMouseMove(event: MouseEvent) {
   if (state.active) {
     state.currentX = event.clientX;
     state.currentY = event.clientY;
-    moveGhost(event.clientX, event.clientY);
     if (state.draggedId) onMoveCallback?.(state.draggedId, event);
   }
 }
@@ -138,7 +90,6 @@ function reset() {
   state.currentX = 0;
   state.currentY = 0;
   pending = null;
-  removeGhost();
   document.body.style.cursor = "";
   document.body.style.userSelect = "";
 }
@@ -163,8 +114,7 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
     state.suppressClick = false;
-    const el = (event.currentTarget as HTMLElement) || null;
-    pending = { id: tabId, x: event.clientX, y: event.clientY, sourceEl: el };
+    pending = { id: tabId, x: event.clientX, y: event.clientY };
   }
 
   function updateTarget(event: MouseEvent, tabId: string) {

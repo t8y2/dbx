@@ -141,7 +141,7 @@ fn qualifies_schema_only_for_schema_aware_databases() {
 #[test]
 fn maps_table_pagination_strategy_by_database_type() {
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Mysql)), TablePaginationStrategy::LimitOffset);
-    assert_eq!(table_pagination_strategy(Some(DatabaseType::Dameng)), TablePaginationStrategy::FetchFirst);
+    assert_eq!(table_pagination_strategy(Some(DatabaseType::Dameng)), TablePaginationStrategy::Rownum);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Db2)), TablePaginationStrategy::Db2FetchFirst);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::SqlServer)), TablePaginationStrategy::SqlServerTop);
     assert_eq!(table_pagination_strategy(Some(DatabaseType::Iris)), TablePaginationStrategy::IrisTop);
@@ -244,6 +244,17 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
         }),
         "SELECT \"id\", \"name\" FROM (SELECT \"id\", \"name\" FROM \"DBXTEST\".\"USERS\" ORDER BY \"id\" ASC) WHERE ROWNUM <= 100"
     );
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Dameng),
+            schema: Some("SYSDBA"),
+            table_name: "USERS",
+            columns: &columns,
+            order_columns: &keys,
+            limit: 100,
+        }),
+        "SELECT \"id\", \"name\" FROM (SELECT \"id\", \"name\" FROM \"SYSDBA\".\"USERS\" ORDER BY \"id\" ASC) WHERE ROWNUM <= 100"
+    );
     // JDBC connections skip SQL-level row limiting — the JDBC agent handles
     // it via Statement.setMaxRows() which is universally supported.
     assert_eq!(
@@ -321,7 +332,7 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
             order_columns: &[],
             limit: 100,
         }),
-        "SELECT TOP 100 * FROM \"Ens\".\"AlarmResponse\""
+        "SELECT TOP 100 * FROM Ens.AlarmResponse"
     );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
@@ -778,7 +789,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT TOP 100 * FROM \"Ens\".\"AlarmResponse\""
+        "SELECT TOP 100 * FROM Ens.AlarmResponse"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -797,7 +808,7 @@ fn builds_table_data_where_and_schema_queries() {
             include_row_id: false,
             ..Default::default()
         }),
-        "SELECT * FROM \"Ens\".\"AlarmResponse\" WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
+        "SELECT * FROM Ens.AlarmResponse WHERE (Status = 'Open') ORDER BY \"ID\" ASC"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {
@@ -1078,7 +1089,7 @@ fn explicit_table_data_order_is_preserved() {
 }
 
 #[test]
-fn builds_iris_table_data_sql_with_literal_top_and_quoted_object() {
+fn builds_iris_table_data_sql_with_literal_top_and_ordinary_object() {
     let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
         database_type: Some(DatabaseType::Iris),
         schema: Some("Ens".to_string()),
@@ -1095,13 +1106,23 @@ fn builds_iris_table_data_sql_with_literal_top_and_quoted_object() {
         ..Default::default()
     });
 
-    assert_eq!(
-        sql,
-        "SELECT TOP 25 * FROM \"Ens\".\"AlarmResponse\" WHERE (\"Status\" = 'Open') ORDER BY \"Status\" DESC"
-    );
+    assert_eq!(sql, "SELECT TOP 25 * FROM Ens.AlarmResponse WHERE (\"Status\" = 'Open') ORDER BY \"Status\" DESC");
     assert!(!sql.contains("?"));
     assert!(!sql.contains(":%qpar"));
     assert!(!sql.contains(" LIMIT "));
+}
+
+#[test]
+fn iris_table_data_sql_quotes_only_delimited_object_names() {
+    let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+        database_type: Some(DatabaseType::Iris),
+        schema: Some("App Schema".to_string()),
+        table_name: "Patient Record".to_string(),
+        limit: Some(25),
+        ..Default::default()
+    });
+
+    assert_eq!(sql, "SELECT TOP 25 * FROM \"App Schema\".\"Patient Record\"");
 }
 
 #[test]

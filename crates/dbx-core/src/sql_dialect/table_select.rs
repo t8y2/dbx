@@ -5,7 +5,7 @@ use super::capabilities::{
 };
 use super::identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
-    quote_table_identifier,
+    quote_iris_identifier, quote_table_identifier,
 };
 use super::types::{
     TableDataSelectSqlOptions, TableSelectSqlOptions, DBX_NEO4J_ELEMENT_ID_COLUMN, DBX_ROWID_COLUMN,
@@ -209,6 +209,8 @@ pub fn build_table_data_select_sql_with_database(
     let table = if let Some(database) = jdbc_tdengine_database {
         qualified_table_name(Some(DatabaseType::Tdengine), Some(database), &options.table_name)
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
+    } else if database_type == Some(DatabaseType::Iris) {
+        table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
         table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else if include_database_name {
@@ -416,6 +418,14 @@ pub(crate) fn table_data_qualified_table_name(
     table_name: &str,
     identifier_quote: Option<&str>,
 ) -> String {
+    if database_type == Some(DatabaseType::Iris) {
+        let table = quote_iris_identifier(table_name, identifier_quote);
+        return schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, identifier_quote)))
+            .unwrap_or(table);
+    }
     if !uses_connection_identifier_quote(database_type, identifier_quote) {
         return qualified_table_name(database_type, schema, table_name);
     }
@@ -475,7 +485,17 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
     if database_type == Some(DatabaseType::VictoriaMetrics) {
         return format!("{}[1h]", victoriametrics_metric_selector(options.table_name));
     }
-    let table = qualified_table_name(database_type, options.schema, options.table_name);
+    let table = if database_type == Some(DatabaseType::Iris) {
+        let table = quote_iris_identifier(options.table_name, None);
+        options
+            .schema
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+            .map(|schema| format!("{}.{table}", quote_iris_identifier(schema, None)))
+            .unwrap_or(table)
+    } else {
+        qualified_table_name(database_type, options.schema, options.table_name)
+    };
     let select_columns = quoted_table_columns_or_star(database_type, options.columns);
     let order_by = if options.order_columns.is_empty() {
         String::new()

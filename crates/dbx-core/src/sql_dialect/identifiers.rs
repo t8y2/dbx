@@ -154,6 +154,24 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
     }
 }
 
+/// Quote an IRIS identifier only when its spelling requires a delimited name.
+///
+/// Caché/IRIS installations may disable delimited identifiers. The IRIS JDBC
+/// preparser turns quoted names into `:%qpar(...)` parameters in that mode,
+/// which is not valid in table references. Ordinary metadata names are
+/// case-insensitive and can be sent unquoted; names containing separators or
+/// other punctuation still need the identifier quote character.
+pub(crate) fn quote_iris_identifier(name: &str, identifier_quote: Option<&str>) -> String {
+    let mut chars = name.chars();
+    let ordinary = chars.next().is_some_and(|first| first == '_' || first == '%' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_alphanumeric());
+    if ordinary {
+        return name.to_string();
+    }
+    let quote = identifier_quote.map(str::trim).filter(|quote| !quote.is_empty()).unwrap_or("\"");
+    format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
+}
+
 pub(crate) fn quote_gaussdb_jdbc_identifier(name: &str, identifier_quote: &str) -> String {
     if is_explicitly_quoted_identifier(name) {
         return name.to_string();

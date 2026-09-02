@@ -105,7 +105,7 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
             TablePaginationStrategy::Rownum
         }
         Some(DatabaseType::Oscar) => TablePaginationStrategy::Unbounded,
-        Some(DatabaseType::Dameng) => TablePaginationStrategy::FetchFirst,
+        Some(DatabaseType::Dameng) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,

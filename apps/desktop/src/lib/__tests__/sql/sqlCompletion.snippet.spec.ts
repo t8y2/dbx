@@ -76,7 +76,7 @@ describe("buildSnippetItems", () => {
     ["oscar", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
     ["xugu", "SELECT *\nFROM table\nLIMIT 100;", "SELECT *\nFROM ${table}\nLIMIT 100;"],
     ["yashandb", "SELECT *\nFROM table\nLIMIT 100;", "SELECT *\nFROM ${table}\nLIMIT 100;"],
-    ["dameng", "SELECT *\nFROM table\nFETCH FIRST 100 ROWS ONLY;", "SELECT *\nFROM ${table}\nFETCH FIRST 100 ROWS ONLY;"],
+    ["dameng", "SELECT *\nFROM table\nWHERE ROWNUM <= 100;", "SELECT *\nFROM ${table}\nWHERE ROWNUM <= 100;"],
     ["db2", "SELECT *\nFROM table\nFETCH FIRST 100 ROWS ONLY;", "SELECT *\nFROM ${table}\nFETCH FIRST 100 ROWS ONLY;"],
     ["sqlserver", "SELECT TOP 100 *\nFROM table;", "SELECT TOP 100 *\nFROM ${table};"],
     ["access", "SELECT TOP 100 *\nFROM table;", "SELECT TOP 100 *\nFROM ${table};"],

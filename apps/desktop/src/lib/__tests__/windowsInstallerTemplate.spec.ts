@@ -17,6 +17,25 @@ const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
 
 describe("Windows offline installer template", () => {
+  it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
+    expect(template).toContain("ManifestSupportedOS all");
+    expect(template).toContain("!include WinVer.nsh");
+    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
+    expect(template).toContain("${If} ${IsWin7}");
+    expect(template).toContain("${OrIf} ${IsWin2012R2}");
+    expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
+    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain("SetErrorLevel 1633");
+    expect(template).toContain("${OrIf} $PassiveMode = 1");
+  });
+
+  it("localizes the Windows 7 package guidance in every installer language", () => {
+    expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
+    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2012 R2.");
+    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2012 R2。");
+    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。");
+  });
+
   it.each([
     {
       name: "continues after installer failure when a compatible Runtime remains",

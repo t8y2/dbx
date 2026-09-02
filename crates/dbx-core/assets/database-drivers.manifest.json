@@ -1849,7 +1849,7 @@
       "mcpMode": "bridge",
       "agentKey": "argo",
       "driverStoreVisible": true,
-      "driverStoreOrder": 49,
+      "driverStoreOrder": 50,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,

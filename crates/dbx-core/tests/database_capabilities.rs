@@ -101,7 +101,7 @@ fn maps_agent_database_types_to_driver_keys() {
     assert_eq!(agent_key(&DatabaseType::Hive, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
     assert_eq!(agent_key(&DatabaseType::Impala, None), Some("hive"));
-    assert_eq!(agent_key(&DatabaseType::Argo, None), Some("hive"));
+    assert_eq!(agent_key(&DatabaseType::Argo, None), Some("argo"));
     assert_eq!(agent_key(&DatabaseType::Tdengine, None), Some("tdengine"));
     assert_eq!(agent_key(&DatabaseType::Iotdb, None), Some("iotdb"));
     assert_eq!(agent_key(&DatabaseType::Yashandb, None), Some("yashandb"));

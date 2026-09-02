@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { compactHeaderColumnType, resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnType.ts";
+import { compactHeaderColumnType, formatMetadataColumnTypeLabel, resolveHeaderColumnType } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnType.ts";
 
 test("prefers table-metadata type over the result type", () => {
   const type = resolveHeaderColumnType({
@@ -58,4 +58,14 @@ test("hides MySQL enum values from the compact header type", () => {
   assert.equal(compactHeaderColumnType("enum('pending','active')"), "enum");
   assert.equal(compactHeaderColumnType("ENUM('', 'normal')"), "enum");
   assert.equal(compactHeaderColumnType("varchar(255)"), "varchar(255)");
+});
+
+test("adds character length from table metadata", () => {
+  assert.equal(formatMetadataColumnTypeLabel({ dataType: "NVARCHAR", characterMaximumLength: 100 }), "NVARCHAR(100)");
+  assert.equal(formatMetadataColumnTypeLabel({ dataType: "character varying", characterMaximumLength: 64 }), "character varying(64)");
+});
+
+test("does not append duplicate type parameters", () => {
+  assert.equal(formatMetadataColumnTypeLabel({ dataType: "nvarchar(100)", characterMaximumLength: 100 }), "nvarchar(100)");
+  assert.equal(formatMetadataColumnTypeLabel({ dataType: "numeric(10,2)", numericPrecision: 10, numericScale: 2 }), "numeric(10,2)");
 });

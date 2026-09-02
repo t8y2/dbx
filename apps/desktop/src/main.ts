@@ -77,7 +77,8 @@ function installGlobalInputAttrs() {
 
 async function bootstrap() {
   console.log("[STARTUP] frontend bootstrap begin");
-  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), import("./App.vue")]);
+  const isTabDragPreview = new URLSearchParams(window.location.search).get("tabDragPreview") === "1";
+  const [{ default: i18n, loadSavedLocale }, { default: App }] = await Promise.all([import("./i18n"), isTabDragPreview ? import("./components/layout/TabDragPreviewWindow.vue") : import("./App.vue")]);
   console.log("[STARTUP] frontend modules loaded");
   await loadSavedLocale();
   console.log("[STARTUP] locale ready");

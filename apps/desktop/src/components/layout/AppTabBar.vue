@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
+import TabDragPreviewChip from "@/components/layout/TabDragPreviewChip.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -35,6 +36,7 @@ import {
   listenForTabWindowInfoRequest,
   listenForTabWindowInfoResponse,
   emitTabWindowDragPreview,
+  hideTabDragPreviewWebview,
   markTabWindowTransferAccepted,
   storeDetachedTabTransfer,
   clearTabWindowTransfer,
@@ -42,6 +44,7 @@ import {
   listenForNativeTabDragPreviewRelease,
   listenForTabWindowTransfer,
   sendTabWindowTransfer,
+  showTabDragPreviewWebview,
   requestTabWindowInfo,
   sendTabWindowInfoResponse,
   tabWindowAtCursor,
@@ -116,6 +119,7 @@ let remoteTabWindowPreviewExpiryTimer: number | null = null;
 let tabPreviewBroadcastFrame: number | null = null;
 let tabPreviewBroadcastTimer: number | null = null;
 let pendingTabPreviewBroadcast: { payload: TabWindowTransferPayload; title: string } | null = null;
+let tabPreviewBroadcastTransferId: string | null = null;
 let tabPreviewBroadcastSequence = 0;
 
 function clearRemoteTabWindowPreview(transferId?: string) {
@@ -767,30 +771,26 @@ function isPointerOutsideTabBar(event: MouseEvent): boolean {
 }
 
 function queueTabDragPreviewBroadcast(payload: TabWindowTransferPayload, title: string) {
-  if (!isTauriRuntime()) return;
+  if (!isTauriRuntime() || tabPreviewBroadcastTransferId !== payload.transferId) return;
   pendingTabPreviewBroadcast = { payload, title };
   if (tabPreviewBroadcastFrame !== null) return;
   tabPreviewBroadcastFrame = window.requestAnimationFrame(() => {
     tabPreviewBroadcastFrame = null;
     const pending = pendingTabPreviewBroadcast;
     pendingTabPreviewBroadcast = null;
-    if (!pending || nativeTabDrag.value?.payload.transferId !== pending.payload.transferId) return;
+    if (!pending || nativeTabDrag.value?.payload.transferId !== pending.payload.transferId || tabPreviewBroadcastTransferId !== pending.payload.transferId) return;
     void cursorPosition()
-      .then((cursor) =>
-        emitTabWindowDragPreview({
-          transferId: pending.payload.transferId,
-          sourceWindowLabel: pending.payload.sourceWindowLabel,
-          title: pending.title,
-          cursorPhysical: { x: cursor.x, y: cursor.y },
-          sequence: ++tabPreviewBroadcastSequence,
-          visible: true,
-        }),
-      )
+      .then((cursor) => {
+        // 拖动已经结束后，已排队的光标查询不能再次显示独立预览宿主。
+        if (tabPreviewBroadcastTransferId !== pending.payload.transferId) return;
+        return showTabDragPreviewWebview(pending.title, cursor);
+      })
       .catch(() => undefined);
   });
 }
 
 function startTabDragPreviewBroadcast(payload: TabWindowTransferPayload, title: string) {
+  tabPreviewBroadcastTransferId = payload.transferId;
   queueTabDragPreviewBroadcast(payload, title);
   if (tabPreviewBroadcastTimer !== null) return;
   // Mouse events can pause while the cursor is above another native WebView.
@@ -808,6 +808,8 @@ function stopTabDragPreviewBroadcast(payload?: TabWindowTransferPayload) {
     tabPreviewBroadcastTimer = null;
   }
   pendingTabPreviewBroadcast = null;
+  if (!payload || tabPreviewBroadcastTransferId === payload.transferId) tabPreviewBroadcastTransferId = null;
+  void hideTabDragPreviewWebview().catch(() => undefined);
   if (!payload || !isTauriRuntime()) return;
   void emitTabWindowDragPreview({
     transferId: payload.transferId,
@@ -874,7 +876,6 @@ async function startNativeTabDragPreview(payload: TabWindowTransferPayload, even
     if (nativeTabDragPreviewTransferId !== payload.transferId) return;
     const preview = tabDragPreviewRect({ x: event.clientX, y: event.clientY }, { width: document.documentElement.clientWidth, height: document.documentElement.clientHeight });
     nativeTabDragPreviewActive.value = true;
-    stopTabDragPreviewBroadcast(payload);
     await invoke("start_tab_drag_preview", {
       request: {
         transferId: payload.transferId,
@@ -1220,20 +1221,17 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 
 <template>
   <Teleport to="body">
-    <div
-      v-if="visibleTabWindowPreview && !nativeTabDragPreviewActive"
-      class="pointer-events-none fixed z-[9998] flex items-center gap-2 overflow-hidden rounded-md border border-border bg-background px-2.5 text-xs font-medium text-foreground shadow-lg"
+    <TabDragPreviewChip
+      v-if="visibleTabWindowPreview && !nativeTabDragPreviewActive && !isTauriRuntime()"
+      :title="visibleTabWindowPreviewTitle"
+      class="pointer-events-none fixed z-[9998] h-[34px] w-[300px]"
       :style="{
         left: `${visibleTabWindowPreview.left}px`,
         top: `${visibleTabWindowPreview.top}px`,
         width: `${visibleTabWindowPreview.width}px`,
         height: `${visibleTabWindowPreview.height}px`,
       }"
-    >
-      <span class="h-3 w-3 shrink-0 rounded-sm bg-emerald-500/90" />
-      <span class="min-w-0 flex-1 truncate">{{ visibleTabWindowPreviewTitle }}</span>
-      <span class="shrink-0 text-muted-foreground">×</span>
-    </div>
+    />
   </Teleport>
 
   <div ref="tabBarRef" v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="tabBarClass">

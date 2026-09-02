@@ -2844,6 +2844,42 @@ mod tests {
     }
 
     #[test]
+    fn delimiter_line_after_unterminated_statement_merges() {
+        // A DELIMITER line is only honored as a client directive when no executable
+        // SQL is pending, so an unterminated statement swallows the line instead of
+        // splitting off and switching the delimiter.
+        let sql = "SELECT 1\nDELIMITER $$";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec!["SELECT 1\nDELIMITER $$".to_string()]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec!["SELECT 1\nDELIMITER $$".to_string()]
+        );
+
+        let sql = "SELECT 1\nDELIMITER $$\nSELECT 2$$";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec!["SELECT 1\nDELIMITER $$\nSELECT 2$$".to_string()]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec!["SELECT 1\nDELIMITER $$\nSELECT 2$$".to_string()]
+        );
+    }
+
+    #[test]
     fn mysql_split_skips_comment_only_statement() {
         assert!(split_sql_statements_for_database("-- DBX SQL preview crash reproducer\n\n;", DatabaseType::Mysql)
             .is_empty());

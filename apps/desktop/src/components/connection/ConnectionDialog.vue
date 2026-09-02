@@ -946,6 +946,12 @@ const consulOperatorAutopilotWriteEnabled = ref(false);
 const consulOperatorRaftWriteEnabled = ref(false);
 const consulOperatorKeyringWriteEnabled = ref(false);
 const consulOperatorLicenseWriteEnabled = ref(false);
+const s3Endpoint = ref("http://127.0.0.1:9000");
+const s3Region = ref("us-east-1");
+const s3AddressingStyle = ref<"auto" | "path" | "virtual">("auto");
+const s3SessionToken = ref("");
+const s3DefaultBucket = ref("");
+const s3TlsSkipVerify = ref(false);
 
 // --- MQTT-specific form fields ---
 const mqttHost = ref("127.0.0.1");
@@ -1336,6 +1342,20 @@ function resetConsulFields(value?: Record<string, unknown>) {
 
 function hydrateConsulFields(value: unknown) {
   resetConsulFields(value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
+}
+
+function resetS3Fields(value?: Record<string, unknown>) {
+  s3Endpoint.value = String(value?.endpoint || value?.serverAddr || value?.server_addr || "http://127.0.0.1:9000");
+  s3Region.value = String(value?.region || "us-east-1");
+  const style = String(value?.addressingStyle || value?.addressing_style || "auto").toLowerCase();
+  s3AddressingStyle.value = style === "path" || style === "virtual" ? style : "auto";
+  s3SessionToken.value = String(value?.sessionToken || value?.session_token || "");
+  s3DefaultBucket.value = String(value?.defaultBucket || value?.default_bucket || "");
+  s3TlsSkipVerify.value = Boolean(value?.tlsSkipVerify || value?.tls_skip_verify);
+}
+
+function hydrateS3Fields(value: unknown) {
+  resetS3Fields(value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
 }
 
 function resetMqttFields(config?: Partial<MqttConnectionConfig>) {
@@ -1730,6 +1750,32 @@ function applyConsulServerAddr(config: LegacyConnectionConfig, serverAddr: strin
   const parsed = new URL(serverAddr);
   config.host = parsed.hostname;
   config.port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 8500);
+  config.ssl = parsed.protocol === "https:";
+}
+
+function buildS3ExternalConfig(): Record<string, unknown> {
+  let parsed: URL;
+  try {
+    parsed = new URL(s3Endpoint.value.trim());
+  } catch {
+    throw new Error(t("connection.s3EndpointInvalid"));
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error(t("connection.s3EndpointInvalid"));
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(t("connection.s3EndpointInvalid"));
+  return {
+    endpoint: parsed.toString().replace(/\/$/, ""),
+    region: s3Region.value.trim() || "us-east-1",
+    addressingStyle: s3AddressingStyle.value,
+    sessionToken: s3SessionToken.value.trim() || undefined,
+    defaultBucket: s3DefaultBucket.value.trim() || undefined,
+    tlsSkipVerify: s3TlsSkipVerify.value || undefined,
+  };
+}
+
+function applyS3Endpoint(config: LegacyConnectionConfig, endpoint: string) {
+  const parsed = new URL(endpoint);
+  config.host = parsed.hostname;
+  config.port = Number(parsed.port) || (parsed.protocol === "https:" ? 443 : 9000);
   config.ssl = parsed.protocol === "https:";
 }
 
@@ -2423,6 +2469,12 @@ function applyProfile(val: string, preserveConnectionFields = false) {
       form.value.password = "";
       form.value.url_params = "";
     }
+    if (profile.type === "s3") {
+      resetS3Fields();
+      form.value.database = undefined;
+      form.value.connection_string = undefined;
+      form.value.url_params = "";
+    }
     if (profile.type === "mqtt") {
       resetMqttFields();
       form.value.database = undefined;
@@ -2563,6 +2615,12 @@ watch(
         hydrateConsulFields(config.external_config);
       } else {
         resetConsulFields();
+      }
+      if (config.db_type === "s3") {
+        hydrateS3Fields(config.external_config);
+        if (config.database) s3DefaultBucket.value = config.database;
+      } else {
+        resetS3Fields();
       }
       if (config.db_type === "mqtt") {
         hydrateMqttFields(config.external_config);
@@ -3423,6 +3481,7 @@ const hasRequiredConnectionTarget = computed(() => {
   if (form.value.db_type === "mqtt") return !!mqttHost.value.trim() && mqttPort.value > 0;
   if (form.value.db_type === "nacos") return !!nacosServerAddr.value.trim();
   if (form.value.db_type === "consul") return !!consulServerAddr.value.trim();
+  if (form.value.db_type === "s3") return !!s3Endpoint.value.trim() && !!form.value.username.trim() && !!form.value.password.trim();
   if (isCloudflareD1Connection(form.value)) return hasCloudflareD1Credentials(form.value);
   // Cloud Spanner has no host to fall back on: the resource path is the target.
   if (isSpannerConnection(form.value)) return hasSpannerResourcePath(form.value);
@@ -3938,6 +3997,15 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     config.username = "";
     config.password = config.password.trim();
     config.database = undefined;
+    config.connection_string = undefined;
+    config.url_params = "";
+  } else if (config.db_type === "s3") {
+    const s3Config = buildS3ExternalConfig();
+    config.external_config = s3Config;
+    applyS3Endpoint(config, String(s3Config.endpoint));
+    config.username = config.username.trim();
+    config.password = config.password.trim();
+    config.database = s3DefaultBucket.value.trim() || undefined;
     config.connection_string = undefined;
     config.url_params = "";
   } else if (config.db_type === "mqtt") {
@@ -5948,7 +6016,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
-                <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq' && form.db_type !== 's3'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
                     <Input v-model="connectionUrlInput" class="flex-1" :placeholder="connectionUrlPlaceholder" @keydown.enter.prevent="applyConnectionUrl" />
@@ -6866,6 +6934,52 @@ function openExternalUrl(url: string) {
                       <label class="flex items-center gap-2"><input v-model="consulOperatorRaftWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorRaft") }}</label>
                       <label class="flex items-center gap-2"><input v-model="consulOperatorKeyringWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorKeyring") }}</label>
                       <label class="flex items-center gap-2"><input v-model="consulOperatorLicenseWriteEnabled" type="checkbox" />{{ t("connection.consulOperatorLicense") }}</label>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- S3 / MinIO: endpoint, credentials and bucket defaults -->
+                <template v-else-if="form.db_type === 's3'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3Endpoint") }}</Label>
+                    <Input v-model="s3Endpoint" class="col-span-3" placeholder="http://127.0.0.1:9000" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3Region") }}</Label>
+                    <Input v-model="s3Region" class="col-span-3" placeholder="us-east-1" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3AccessKey") }}</Label>
+                    <Input v-model="form.username" class="col-span-3" placeholder="minioadmin" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3SecretKey") }}</Label>
+                    <PasswordInput v-model="form.password" class="col-span-3" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3SessionToken") }}</Label>
+                    <PasswordInput v-model="s3SessionToken" class="col-span-3" :placeholder="t('connection.s3SessionTokenPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3AddressingStyle") }}</Label>
+                    <Select v-model="s3AddressingStyle">
+                      <SelectTrigger class="col-span-3 h-9"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{{ t("connection.s3AddressingAuto") }}</SelectItem>
+                        <SelectItem value="path">{{ t("connection.s3AddressingPath") }}</SelectItem>
+                        <SelectItem value="virtual">{{ t("connection.s3AddressingVirtual") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3DefaultBucket") }}</Label>
+                    <Input v-model="s3DefaultBucket" class="col-span-3" :placeholder="t('connection.s3DefaultBucketPlaceholder')" />
+                  </div>
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">{{ t("connection.s3TlsSkipVerify") }}</Label>
+                    <div class="col-span-3 flex items-center gap-2">
+                      <Switch v-model="s3TlsSkipVerify" />
+                      <span class="text-xs text-muted-foreground">{{ t("connection.s3TlsSkipVerifyHint") }}</span>
                     </div>
                   </div>
                 </template>
@@ -7849,7 +7963,7 @@ function openExternalUrl(url: string) {
 
             <TabsContent v-if="supportsTlsToggle" value="tls" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto overflow-x-hidden pt-4 pr-2 pb-6">
-                <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions && form.db_type !== 'consul'" class="grid grid-cols-4 items-center gap-4">
+                <div v-if="!supportsPostgresTlsOptions && !supportsMysqlTlsOptions && form.db_type !== 'consul' && form.db_type !== 's3'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelSmallClass">SSL/TLS</Label>
                   <label class="col-span-3 flex items-center gap-2 cursor-pointer">
                     <input type="checkbox" v-model="tlsEnabled" class="mr-0" />

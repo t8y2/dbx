@@ -123,6 +123,7 @@ const supportsExplain = computed(() => {
     dbType !== "etcd" &&
     dbType !== "zookeeper" &&
     dbType !== "consul" &&
+    dbType !== "s3" &&
     dbType !== "mq" &&
     dbType !== "nacos" &&
     dbType !== "victoriametrics"

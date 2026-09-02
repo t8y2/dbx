@@ -5,8 +5,8 @@ use dbx_core::agent_manager::{
 use dbx_core::agent_service::{
     build_agent_list, clear_agent_download_cache, github_url_to_r2_path, import_agent_driver, import_agent_jar,
     import_agents_from_package, import_agents_from_zip, inspect_offline_package, inspect_offline_zip,
-    is_app_version_compatible, jre_needs_install, local_agent_jar_candidates, replace_download, uninstall_agent_driver,
-    AgentProgressEvent,
+    is_app_version_compatible, jre_needs_install, local_agent_jar_candidates, local_agent_native_candidates,
+    replace_download, uninstall_agent_driver, AgentProgressEvent,
 };
 
 fn test_manager(name: &str) -> AgentManager {

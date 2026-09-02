@@ -28,6 +28,7 @@ const MONGO_LEGACY_DRIVER_LABEL: &str = "MongoDB (Legacy)";
 struct NoSaveRuntimeSecrets {
     primary: Option<String>,
     console: Option<String>,
+    s3_session_token: Option<String>,
 }
 
 #[derive(Default)]
@@ -36,16 +37,31 @@ struct SessionCredentialWrites {
     purposes: Vec<PurposeSessionCredentialWriteToken>,
 }
 
+fn take_s3_session_token(config: &mut ConnectionConfig) -> Option<String> {
+    let object = config.external_config.as_mut()?.as_object_mut()?;
+    object.remove("sessionToken").or_else(|| object.remove("session_token")).and_then(|value| match value {
+        serde_json::Value::String(token) if !token.is_empty() => Some(token),
+        _ => None,
+    })
+}
+
 fn prepare_runtime_config(mut config: ConnectionConfig) -> (ConnectionConfig, NoSaveRuntimeSecrets) {
     if config.save_password {
         return (config, NoSaveRuntimeSecrets::default());
     }
     if config.db_type == DatabaseType::Nacos {
         let passwords = take_transient_passwords(&mut config);
-        return (config, NoSaveRuntimeSecrets { primary: passwords.primary, console: passwords.console });
+        return (
+            config,
+            NoSaveRuntimeSecrets { primary: passwords.primary, console: passwords.console, s3_session_token: None },
+        );
     }
+    let s3_session_token = take_s3_session_token(&mut config);
     let primary = std::mem::take(&mut config.password);
-    (config, NoSaveRuntimeSecrets { primary: (!primary.is_empty()).then_some(primary), console: None })
+    (
+        config,
+        NoSaveRuntimeSecrets { primary: (!primary.is_empty()).then_some(primary), console: None, s3_session_token },
+    )
 }
 
 fn record_session_credentials(
@@ -55,8 +71,15 @@ fn record_session_credentials(
     secrets: &NoSaveRuntimeSecrets,
     nacos: bool,
 ) -> SessionCredentialWrites {
-    let primary =
-        secrets.primary.as_deref().and_then(|password| app.session_credentials.set(owner, connection_id, password));
+    let primary = match (secrets.primary.as_deref(), secrets.s3_session_token.as_deref()) {
+        (None, None) => None,
+        (password, token) => app.session_credentials.set_with_s3_session_token(
+            owner,
+            connection_id,
+            password.unwrap_or(""),
+            token.unwrap_or(""),
+        ),
+    };
     let mut purposes = Vec::new();
     if nacos {
         if let Some(token) = secrets.primary.as_deref().and_then(|password| {

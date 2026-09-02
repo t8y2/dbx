@@ -468,7 +468,7 @@ const isRootListPartial = computed(() => sidebarFilterGuards.value.isRootListPar
 
 const SEARCH_SCOPE_TO_NODE_TYPES: Record<SearchScope, TreeNodeType[]> = {
   connection: ["connection"],
-  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "mongo-db"],
+  database: ["database", "redis-db", "mq-tenant", "nacos-namespace", "consul-root", "s3-root", "mongo-db"],
   schema: ["schema"],
   table: ["table", "mongo-collection", "mongo-bucket", "dynamodb-table", "vector-collection", "elasticsearch-index"],
   view: ["view"],
@@ -1661,7 +1661,7 @@ function resolveLoadedLocateTarget(target: ActiveTabSidebarTarget, candidate: Qu
 }
 
 async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: { force?: boolean }) {
-  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root" || target.type === "consul-root") return;
+  if (target.type === "saved-sql-file" || target.type === "etcd-root" || target.type === "etcd-dashboard" || target.type === "etcd-access-control" || target.type === "zookeeper-root" || target.type === "consul-root" || target.type === "s3-root") return;
   const connId = target.connectionId;
   if (!connId) return;
 
@@ -1701,7 +1701,7 @@ async function ensureTreeLoadedForTarget(target: ActiveTabSidebarTarget, opts?: 
     }
   }
 
-  if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul") return;
+  if (config.db_type === "mq" || config.db_type === "nacos" || config.db_type === "consul" || config.db_type === "s3") return;
   if (!("database" in target) || !target.database) return;
 
   const usesExactCatalogScope = target.type === "query-context";

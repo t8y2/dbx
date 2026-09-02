@@ -704,6 +704,9 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
     refreshActiveKvBrowserAfterOpen("consul", node.connectionId);
   } else if (node.type === "consul-overview") {
     queryStore.createTab(node.connectionId, "", `${connectionName}:${t("consul.ui.overview")}`, "consul-overview");
+  } else if (node.type === "s3-root") {
+    const defaultBucket = connectionStore.getConfig(node.connectionId)?.database || "";
+    queryStore.createTab(node.connectionId, defaultBucket, `${connectionName}:${t("tabs.s3")}`, "s3");
   } else if (node.type === "nacos-namespace") {
     queryStore.openNacosAdmin(node.connectionId, { namespace: node.nacosNamespace || "", namespaceName: node.nacosNamespaceName || node.label });
   } else if (node.type === "nacos-access-control") {
@@ -879,6 +882,8 @@ async function toggle(requestId = beginNavigationRequest()) {
         await connectionStore.loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "consul") {
         await connectionStore.loadConsulRoot(node.connectionId);
+      } else if (config?.db_type === "s3") {
+        await connectionStore.loadS3Root(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
@@ -4338,7 +4343,7 @@ const canOpenSqlFileExecution = computed(() => {
 const canExportAllDatabases = computed(() => {
   if (activeNode.value.type !== "connection" || !activeNode.value.connectionId) return false;
   const dbType = connectionStore.getConfig(activeNode.value.connectionId)?.db_type;
-  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(dbType || "");
+  return !["redis", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "s3", "mq", "nacos"].includes(dbType || "");
 });
 
 const canOpenScheduledBackups = computed(() => {
@@ -5564,7 +5569,7 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     return true;
   }
 
-  if (node.type === "nacos-access-control" || node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview") {
+  if (node.type === "nacos-access-control" || node.type === "etcd-root" || node.type === "etcd-dashboard" || node.type === "etcd-access-control" || node.type === "zookeeper-root" || node.type === "consul-root" || node.type === "consul-overview" || node.type === "s3-root") {
     items.push({ label: t("contextMenu.openConnection"), action: toggle, icon: Database });
     return true;
   }

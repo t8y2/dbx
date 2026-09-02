@@ -333,6 +333,7 @@ function getIconInfo(node: TreeNode): { icon: any; colorClass: string } | null {
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
     case "consul-root":
+    case "s3-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "consul-overview":
       return { icon: Gauge, colorClass: "text-blue-500" };

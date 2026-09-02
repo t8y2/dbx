@@ -59,6 +59,7 @@ impl PurposeCredentialKey {
 
 struct SessionCredential {
     password: String,
+    s3_session_token: String,
     generation: u64,
 }
 
@@ -121,14 +122,40 @@ impl SessionCredentialStore {
     /// 显式触发（"断开并忘记本次密码"）。这样连接成功后以空密码 config 建池
     /// 不会误清已记录的凭据。
     pub fn set(&self, owner_scope: &str, connection_id: &str, password: &str) -> Option<SessionCredentialWriteToken> {
-        if password.is_empty() {
+        self.set_with_s3_session_token(owner_scope, connection_id, password, "")
+    }
+
+    pub fn set_with_s3_session_token(
+        &self,
+        owner_scope: &str,
+        connection_id: &str,
+        password: &str,
+        s3_session_token: &str,
+    ) -> Option<SessionCredentialWriteToken> {
+        if password.is_empty() && s3_session_token.is_empty() {
             return None;
         }
         let mut state = self.state.write().unwrap_or_else(|error| error.into_inner());
         state.next_generation = state.next_generation.checked_add(1).expect("session credential generation overflow");
         let key = CredentialKey::new(owner_scope, connection_id);
         let generation = state.next_generation;
-        state.credentials.insert(key.clone(), SessionCredential { password: password.to_string(), generation });
+        let previous = state.credentials.remove(&key);
+        state.credentials.insert(
+            key.clone(),
+            SessionCredential {
+                password: if password.is_empty() {
+                    previous.as_ref().map(|entry| entry.password.clone()).unwrap_or_default()
+                } else {
+                    password.to_string()
+                },
+                s3_session_token: if s3_session_token.is_empty() {
+                    previous.as_ref().map(|entry| entry.s3_session_token.clone()).unwrap_or_default()
+                } else {
+                    s3_session_token.to_string()
+                },
+                generation,
+            },
+        );
         Some(SessionCredentialWriteToken { key, generation })
     }
 
@@ -159,7 +186,10 @@ impl SessionCredentialStore {
         state.next_generation = state.next_generation.checked_add(1).expect("session credential generation overflow");
         let key = PurposeCredentialKey::new(owner_scope, connection_id, purpose);
         let generation = state.next_generation;
-        state.purpose_credentials.insert(key.clone(), SessionCredential { password: password.to_string(), generation });
+        state.purpose_credentials.insert(
+            key.clone(),
+            SessionCredential { password: password.to_string(), s3_session_token: String::new(), generation },
+        );
         Some(PurposeSessionCredentialWriteToken { key, generation })
     }
 
@@ -174,6 +204,15 @@ impl SessionCredentialStore {
     /// 某个 owner 作用域下是否存在本次运行期临时密码。
     pub fn has(&self, owner_scope: &str, connection_id: &str) -> bool {
         self.get(owner_scope, connection_id).is_some()
+    }
+
+    pub fn get_s3_session_token(&self, owner_scope: &str, connection_id: &str) -> Option<String> {
+        let state = self.state.read().unwrap_or_else(|error| error.into_inner());
+        state
+            .credentials
+            .get(&CredentialKey::new(owner_scope, connection_id))
+            .map(|entry| entry.s3_session_token.clone())
+            .filter(|value| !value.is_empty())
     }
 
     /// 清除某个 owner 作用域下的临时密码（连接删除 / "断开并忘记本次密码"）。
@@ -297,6 +336,15 @@ mod tests {
         let empty_write = store.set("", "conn-a", "");
         assert!(empty_write.is_none());
         assert_eq!(store.get("", "conn-a").as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn s3_session_token_round_trips_without_overwriting_password() {
+        let store = SessionCredentialStore::new();
+        let _ = store.set("", "conn-a", "secret-a");
+        let _ = store.set_with_s3_session_token("", "conn-a", "", "sts-token");
+        assert_eq!(store.get("", "conn-a").as_deref(), Some("secret-a"));
+        assert_eq!(store.get_s3_session_token("", "conn-a").as_deref(), Some("sts-token"));
     }
 
     #[test]

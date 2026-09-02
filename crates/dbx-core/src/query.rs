@@ -2223,6 +2223,7 @@ async fn do_execute_typed(
             wait_for_query_opt(cancel_token, query_timeout, execution).await
         }
         PoolKind::Consul(_) => Err("SQL execution is not supported for Consul connections".to_string()),
+        PoolKind::S3(_) => Err("Use S3-specific commands".to_string()),
     };
     result
         .map(normalize_query_result_for_js)
@@ -3917,6 +3918,7 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         PoolKind::MessageQueue
         | PoolKind::Nacos
         | PoolKind::Consul(_)
+        | PoolKind::S3(_)
         | PoolKind::HBase(_)
         | PoolKind::DuckDbWorker(_)
         | PoolKind::Redis(_)
@@ -4185,7 +4187,9 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
                 TxPath::Explicit
             }
             PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
+            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::S3(_) | PoolKind::HBase(_) => {
+                TxPath::None
+            }
             #[cfg(feature = "mq-admin")]
             PoolKind::Mqtt(_) => TxPath::None,
             PoolKind::DuckDbWorker(_)

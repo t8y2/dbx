@@ -69,6 +69,10 @@ export type ActiveTabSidebarTarget =
       connectionId: string;
     }
   | {
+      type: "s3-root";
+      connectionId: string;
+    }
+  | {
       type: "mq-tenant";
       connectionId: string;
       tenant: string;
@@ -213,6 +217,9 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   if (tab.mode === "consul-overview") {
     return { type: "consul-overview", connectionId: tab.connectionId };
   }
+  if (tab.mode === "s3") {
+    return { type: "s3-root", connectionId: tab.connectionId };
+  }
 
   if (tab.mode === "mq" && tab.mqTenant) {
     return { type: "mq-tenant", connectionId: tab.connectionId, tenant: tab.mqTenant };
@@ -311,6 +318,9 @@ export function matchesTarget(node: TreeNode, target: ActiveTabSidebarTarget): b
   }
   if (target.type === "consul-overview") {
     return node.type === "consul-overview" && node.connectionId === target.connectionId;
+  }
+  if (target.type === "s3-root") {
+    return node.type === "s3-root" && node.connectionId === target.connectionId;
   }
 
   if (target.type === "mq-tenant") {

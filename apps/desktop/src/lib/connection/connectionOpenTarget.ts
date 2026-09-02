@@ -1,7 +1,7 @@
 import type { ConnectionConfig } from "@/types/database";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
 
-export type QuickConnectionOpenTarget = { kind: "mq-admin" } | { kind: "nacos-admin" } | { kind: "etcd" } | { kind: "zookeeper" } | { kind: "consul" } | { kind: "query"; database: string };
+export type QuickConnectionOpenTarget = { kind: "mq-admin" } | { kind: "nacos-admin" } | { kind: "etcd" } | { kind: "zookeeper" } | { kind: "consul" } | { kind: "s3" } | { kind: "query"; database: string };
 
 export function quickConnectionOpenTarget(connection: Pick<ConnectionConfig, "db_type" | "database">, databaseOptions: string[] = []): QuickConnectionOpenTarget {
   if (connection.db_type === "mq") {
@@ -18,6 +18,9 @@ export function quickConnectionOpenTarget(connection: Pick<ConnectionConfig, "db
   }
   if (connection.db_type === "consul") {
     return { kind: "consul" };
+  }
+  if (connection.db_type === "s3") {
+    return { kind: "s3" };
   }
   return { kind: "query", database: resolveDefaultDatabase(connection, databaseOptions) };
 }

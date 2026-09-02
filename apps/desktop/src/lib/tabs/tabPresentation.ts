@@ -127,6 +127,10 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@keys`;
   }
+  if (tab.mode === "s3") {
+    if (compact) return connectionDisplayName(tab.connectionId);
+    return `${connectionDisplayName(tab.connectionId)}@${t("tabs.s3")}`;
+  }
   if (tab.mode === "consul-overview") {
     if (compact) return connectionDisplayName(tab.connectionId);
     return `${connectionDisplayName(tab.connectionId)}@${t("consul.ui.overview")}`;
@@ -456,6 +460,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "nacos-access-control") return t("tabs.nacosAccessControl");
   if (tab.mode === "zookeeper") return t("tabs.zookeeper");
   if (tab.mode === "consul") return t("tabs.consul");
+  if (tab.mode === "s3") return t("tabs.s3");
   if (tab.mode === "consul-overview") return t("consul.ui.overview");
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "databases") return t("tabs.databases");

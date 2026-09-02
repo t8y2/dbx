@@ -26,6 +26,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "zookeeper-root",
   "consul-root",
   "consul-overview",
+  "s3-root",
   "mongo-gridfs",
   "mongo-bucket",
   "dynamodb-table",

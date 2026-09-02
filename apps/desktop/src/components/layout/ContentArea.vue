@@ -92,6 +92,7 @@ const EtcdAccessControl = defineAsyncComponent(() => import("@/components/etcd/E
 const ZooKeeperKeyBrowser = defineAsyncComponent(() => import("@/components/zookeeper/ZooKeeperKeyBrowser.vue"));
 const ConsulOverview = defineAsyncComponent(() => import("@/components/consul/ConsulOverview.vue"));
 const ConsulWorkspace = defineAsyncComponent(() => import("@/components/consul/ConsulWorkspace.vue"));
+const S3Browser = defineAsyncComponent(() => import("@/components/s3/S3Browser.vue"));
 const DocumentBrowser = defineAsyncComponent(() => import("@/components/document/DocumentBrowser.vue"));
 const MeilisearchIndexView = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchIndexView.vue"));
 const MeilisearchSystemWorkspace = defineAsyncComponent(() => import("@/components/meilisearch/MeilisearchSystemWorkspace.vue"));
@@ -2281,6 +2282,12 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'consul'">
       <div class="flex-1 min-h-0">
         <ConsulWorkspace ref="consulWorkspaceRef" :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 's3'">
+      <div class="flex-1 min-h-0">
+        <S3Browser :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-bucket="activeTab.database || undefined" :read-only="activeConnection?.read_only ?? false" />
       </div>
     </template>
 

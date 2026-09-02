@@ -1175,6 +1175,7 @@ export const useConnectionStore = defineStore("connection", () => {
       etcd: "etcd",
       zookeeper: "Apache ZooKeeper",
       consul: "Consul",
+      s3: "S3",
       duckdb: "DuckDB",
       clickhouse: "ClickHouse",
       sqlserver: "SQL Server",
@@ -1277,6 +1278,15 @@ export const useConnectionStore = defineStore("connection", () => {
       })(),
       database_info: normalizeDatabaseConnectionInfo(config.database_info),
     };
+  }
+
+  function stripNoSaveS3SessionToken(config: ConnectionConfig) {
+    if (config.save_password !== false || config.db_type !== "s3") return;
+    if (!config.external_config || typeof config.external_config !== "object" || Array.isArray(config.external_config)) return;
+    const next = { ...(config.external_config as Record<string, unknown>) };
+    delete next.sessionToken;
+    delete next.session_token;
+    config.external_config = Object.keys(next).length ? next : undefined;
   }
 
   function loadPinnedTreeNodeOrderFromLocalStorage(): string[] {
@@ -3078,6 +3088,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
     if (normalized.save_password === false) normalized.password = "";
+    stripNoSaveS3SessionToken(normalized);
     await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -3262,6 +3273,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function updateConnection(config: ConnectionConfig) {
     config = normalizeConnection(config);
     if (config.save_password === false) config.password = "";
+    stripNoSaveS3SessionToken(config);
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
@@ -3633,6 +3645,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadZooKeeperRoot(connectionId);
     } else if (config.db_type === "consul") {
       await loadConsulRoot(connectionId);
+    } else if (config.db_type === "s3") {
+      await loadS3Root(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "dynamodb") {
@@ -4401,7 +4415,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "s3", "mongodb", "dynamodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -4593,6 +4607,43 @@ export const useConnectionStore = defineStore("connection", () => {
               id: `${connectionId}:consul-overview`,
               label: i18n.global.t("consul.ui.overview"),
               type: "consul-overview" as const,
+              connectionId,
+              database: "",
+              isExpanded: false,
+              children: [],
+            },
+          ],
+          targetNode,
+        ),
+      );
+      targetNode.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e, load);
+      throw e;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
+  async function loadS3Root(connectionId: string) {
+    const node = findConnectionNode(connectionId);
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      const targetNode = treeNodeLoadTarget(load);
+      if (!targetNode) return;
+      setChildren(
+        targetNode,
+        withSavedSqlRoot(
+          connectionId,
+          [
+            {
+              id: `${connectionId}:s3`,
+              label: i18n.global.t("s3.buckets"),
+              type: "s3-root" as const,
               connectionId,
               database: "",
               isExpanded: false,
@@ -6603,6 +6654,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadZooKeeperRoot(node.connectionId);
       } else if (config?.db_type === "consul") {
         await loadConsulRoot(node.connectionId);
+      } else if (config?.db_type === "s3") {
+        await loadS3Root(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "dynamodb") {
@@ -8925,6 +8978,7 @@ export const useConnectionStore = defineStore("connection", () => {
     loadEtcdRoot,
     loadZooKeeperRoot,
     loadConsulRoot,
+    loadS3Root,
     loadMqTenants,
     loadMqttTopics,
     loadNacosNamespaces,

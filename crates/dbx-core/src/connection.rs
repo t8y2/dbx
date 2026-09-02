@@ -118,6 +118,8 @@ pub enum PoolKind {
     /// MQTT broker connection with an active client.
     #[cfg(feature = "mq-admin")]
     Mqtt(Arc<super::mqtt::client::MqttClient>),
+    /// S3-compatible object storage connection.
+    S3(crate::s3::S3Client),
 }
 
 impl PoolKind {
@@ -1146,10 +1148,20 @@ impl AppState {
         db_config: &mut ConnectionConfig,
         connection_id: &str,
     ) {
-        if !config.save_password && db_config.password.is_empty() {
+        if !config.save_password {
             let owner = crate::session_credentials::current_credential_owner().unwrap_or_default();
-            if let Some(session_password) = self.session_credentials.get(&owner, connection_id) {
-                db_config.password = session_password;
+            if db_config.password.is_empty() {
+                if let Some(session_password) = self.session_credentials.get(&owner, connection_id) {
+                    db_config.password = session_password;
+                }
+            }
+            if config.db_type == DatabaseType::S3 {
+                if let Some(token) = self.session_credentials.get_s3_session_token(&owner, connection_id) {
+                    let external = db_config.external_config.get_or_insert_with(|| serde_json::json!({}));
+                    if let Some(object) = external.as_object_mut() {
+                        object.insert("sessionToken".to_string(), serde_json::Value::String(token));
+                    }
+                }
             }
         }
     }
@@ -2436,6 +2448,10 @@ impl AppState {
                 client.probe().await?;
                 PoolKind::Consul(client)
             }
+            DatabaseType::S3 => {
+                let client = crate::s3::connect_s3_client(&db_config, &host, port).await?;
+                PoolKind::S3(client)
+            }
             agent_connection_pool_database_type!() => {
                 let connect_params = agent_connect_params_with_role(
                     &db_config,
@@ -3715,7 +3731,8 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
-                | PoolKind::Consul(_) => false,
+                | PoolKind::Consul(_)
+                | PoolKind::S3(_) => false,
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => false,
             }
@@ -4776,7 +4793,8 @@ impl AppState {
                 | PoolKind::ExternalDriver { .. }
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
-                | PoolKind::Consul(_) => true,
+                | PoolKind::Consul(_)
+                | PoolKind::S3(_) => true,
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(_) => unreachable!("Redis handled separately"),
@@ -5215,6 +5233,8 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
         parse_nacos_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Consul {
         parse_consul_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
+    } else if config.db_type == DatabaseType::S3 {
+        parse_s3_server_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else {
         (config.host.clone(), config.port)
     }
@@ -5297,6 +5317,19 @@ fn parse_consul_server_host_port(config: &ConnectionConfig) -> Option<(String, u
     if value.is_empty() {
         return None;
     }
+    let url = reqwest::Url::parse(value).ok()?;
+    Some((url.host_str()?.to_string(), url.port_or_known_default()?))
+}
+
+fn parse_s3_server_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let external = config.external_config.as_ref()?;
+    let value = external
+        .get("endpoint")
+        .or_else(|| external.get("serverAddr"))
+        .or_else(|| external.get("server_addr"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
     let url = reqwest::Url::parse(value).ok()?;
     Some((url.host_str()?.to_string(), url.port_or_known_default()?))
 }
@@ -5534,6 +5567,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
         PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
+        PoolKind::S3(client) => PoolKind::S3(client.clone()),
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
@@ -5619,6 +5653,7 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}
         PoolKind::Consul(_) => {}
+        PoolKind::S3(_) => {}
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(client) => {
             // 发送 DISCONNECT 并等待事件循环任务结束
@@ -6562,6 +6597,7 @@ mod tests {
         assert!(!uses_bare_mysql_pool(&DatabaseType::Databend));
         assert!(database_capabilities::is_agent_type(&DatabaseType::Databend));
         assert!(super::uses_agent_connection_pool(&DatabaseType::ZooKeeper));
+        assert!(!super::uses_agent_connection_pool(&DatabaseType::S3));
     }
 
     #[test]

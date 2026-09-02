@@ -2,7 +2,7 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
+import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair, HardDrive } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -656,6 +656,7 @@ function tabMenuIcon(tab: QueryTab) {
   if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;
   if (tab.mode === "vector") return TableProperties;
   if (tab.mode === "etcd" || tab.mode === "zookeeper" || tab.mode === "consul") return KeyRound;
+  if (tab.mode === "s3") return HardDrive;
   if (tab.mode === "consul-overview") return Gauge;
   if (tab.mode === "etcd-dashboard") return Gauge;
   if (tab.mode === "etcd-access-control") return ShieldCheck;
@@ -829,6 +830,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                           <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                           <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                           <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                          <HardDrive v-else-if="tab.mode === 's3'" class="h-3.5 w-3.5" />
                           <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                           <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                           <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
@@ -1045,6 +1047,7 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                           <DatabaseIcon v-else-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5" />
                           <TableProperties v-else-if="tab.mode === 'vector'" class="h-3.5 w-3.5" />
                           <KeyRound v-else-if="tab.mode === 'etcd' || tab.mode === 'zookeeper' || tab.mode === 'consul'" class="h-3.5 w-3.5" />
+                          <HardDrive v-else-if="tab.mode === 's3'" class="h-3.5 w-3.5" />
                           <Gauge v-else-if="tab.mode === 'consul-overview'" class="h-3.5 w-3.5" />
                           <Gauge v-else-if="tab.mode === 'etcd-dashboard'" class="h-3.5 w-3.5" />
                           <ShieldCheck v-else-if="tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />

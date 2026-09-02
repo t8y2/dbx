@@ -677,6 +677,14 @@ profiles:
     user: ""
     host: 127.0.0.1
     category: registry_config
+  - id: s3
+    dbType: s3
+    label: S3 / MinIO
+    icon: s3
+    port: 9000
+    user: ""
+    host: 127.0.0.1
+    category: registry_config
   - id: mqtt
     dbType: mqtt
     label: MQTT

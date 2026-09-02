@@ -151,6 +151,7 @@ export function connectionDisplayUrlScheme(connection: Pick<ConnectionConfig, "d
     case "dynamodb":
     case "mq":
     case "consul":
+    case "s3":
       return connection.ssl ? "https" : "http";
     case "cloudflare-d1":
       return "https";
@@ -188,6 +189,9 @@ export function connectionUrlPlaceholder(dbType: DatabaseType): string {
 
     case "consul":
       return "http://host:8500";
+
+    case "s3":
+      return "http://host:9000";
 
     case "sqlite":
       return "sqlite:///absolute/path/to/database.db";

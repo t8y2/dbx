@@ -22,6 +22,8 @@ pub const MQ_TOKEN_SIGNING_KEY: &str = "mq.token_signing.key";
 pub const NACOS_AUTH_SECRET_PREFIX: &str = "nacos.auth.";
 pub const NACOS_AUTH_PASSWORD_KEY: &str = "nacos.auth.password";
 pub const NACOS_RNACOS_CONSOLE_PASSWORD_KEY: &str = "nacos.auth.rnacos_console_password";
+pub const S3_SECRET_PREFIX: &str = "s3.";
+pub const S3_SESSION_TOKEN_KEY: &str = "s3.session_token";
 pub const MQTT_AUTH_SECRET_PREFIX: &str = "mqtt.auth.";
 pub const MQTT_AUTH_PASSWORD_KEY: &str = "mqtt.auth.password";
 
@@ -111,6 +113,7 @@ pub fn save_connections_to_file(
         persist_optional_secret(store, &config.id, INIT_SCRIPT_KEY, config.init_script.as_deref())?;
         persist_mq_auth_secrets(store, config)?;
         persist_mq_token_signing_secret(store, config)?;
+        persist_s3_session_secret(store, config)?;
         persist_mqtt_auth_secrets(store, config)?;
 
         // New configs persist transport-layer secrets only. Remove legacy transport secret slots after the
@@ -180,6 +183,7 @@ pub fn load_connections_from_file(
         }
         hydrate_mq_auth_secrets(store, config, &mut needs_rewrite)?;
         hydrate_mq_token_signing_secret(store, config, &mut needs_rewrite)?;
+        hydrate_s3_session_secret(store, config, &mut needs_rewrite)?;
         hydrate_mqtt_auth_secrets(store, config, &mut needs_rewrite)?;
     }
 
@@ -455,6 +459,24 @@ fn persist_mq_token_signing_secret(store: &dyn ConnectionSecretStore, config: &C
     persist_json_secret_if_present(store, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key")
 }
 
+fn persist_s3_session_secret(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
+    if config.db_type != DatabaseType::S3 {
+        delete_secret_prefix(store, &config.id, S3_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let secret = config
+        .external_config
+        .as_ref()
+        .and_then(|value| value.get("sessionToken").or_else(|| value.get("session_token")))
+        .and_then(|value| value.as_str());
+    if config.save_password {
+        persist_optional_secret(store, &config.id, S3_SESSION_TOKEN_KEY, secret)?;
+    } else {
+        store.delete_secret(&config.id, S3_SESSION_TOKEN_KEY)?;
+    }
+    Ok(())
+}
+
 fn hydrate_mq_auth_secrets(
     store: &dyn ConnectionSecretStore,
     config: &mut ConnectionConfig,
@@ -497,6 +519,36 @@ fn hydrate_mq_token_signing_secret(
     };
 
     hydrate_json_secret(store, &config.id, MQ_TOKEN_SIGNING_KEY, signing, "key", needs_rewrite)
+}
+
+fn hydrate_s3_session_secret(
+    store: &dyn ConnectionSecretStore,
+    config: &mut ConnectionConfig,
+    needs_rewrite: &mut bool,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::S3 {
+        return Ok(());
+    }
+    let current = config
+        .external_config
+        .as_ref()
+        .and_then(|value| value.get("sessionToken").or_else(|| value.get("session_token")))
+        .and_then(|value| value.as_str())
+        .filter(|secret| !secret.is_empty())
+        .map(str::to_string);
+    if let Some(secret) = current {
+        store.set_secret(&config.id, S3_SESSION_TOKEN_KEY, &secret)?;
+        *needs_rewrite = true;
+    } else if let Some(secret) = store.get_secret(&config.id, S3_SESSION_TOKEN_KEY)? {
+        let external = config.external_config.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(object) = external.as_object_mut() {
+            object.insert("sessionToken".to_string(), serde_json::Value::String(secret));
+        }
+    }
+    if !config.save_password {
+        store.delete_secret(&config.id, S3_SESSION_TOKEN_KEY)?;
+    }
+    Ok(())
 }
 
 fn persist_json_secret_if_present(

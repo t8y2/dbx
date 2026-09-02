@@ -42,6 +42,7 @@ export function getTreeNodeIconInfo(node: TreeNode): TreeNodeIconInfo | null {
       return { icon: ShieldCheck, colorClass: "text-sky-500" };
     case "zookeeper-root":
     case "consul-root":
+    case "s3-root":
       return { icon: Database, colorClass: "text-blue-500" };
     case "table":
       return { icon: Table, colorClass: "text-green-500" };

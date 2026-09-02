@@ -121,6 +121,7 @@ pub fn agent_connect_params_with_role(
         "client_cert_path": config.client_cert_path,
         "client_key_path": config.client_key_path,
         "connect_timeout_secs": config.effective_connect_timeout_secs(),
+        "query_timeout_secs": config.effective_query_timeout_secs(),
         "etcd_endpoints": etcd_endpoints,
         "zookeeper_connect_string": zookeeper_connect_string,
         "gbase_server": config.gbase_server,
@@ -130,6 +131,7 @@ pub fn agent_connect_params_with_role(
         "driver_profile": config.driver_profile.as_deref().unwrap_or(""),
         "sessionRole": session_role.as_str(),
         "database_type": config.db_type,
+        "external_config": config.external_config,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(

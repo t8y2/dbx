@@ -3180,6 +3180,50 @@ export async function consulDelete(connectionId: string, key: string, options?: 
   return post("/api/consul/delete", { connectionId, key, options: options ?? null });
 }
 
+export async function s3ListBuckets(connectionId: string): Promise<import("@/types/s3").S3Bucket[]> {
+  return post("/api/s3/list-buckets", { connectionId });
+}
+
+export async function s3CreateBucket(connectionId: string, bucket: string): Promise<void> {
+  await post("/api/s3/create-bucket", { connectionId, bucket });
+}
+
+export async function s3DeleteBucket(connectionId: string, bucket: string): Promise<void> {
+  await post("/api/s3/delete-bucket", { connectionId, bucket });
+}
+
+export async function s3ListObjects(connectionId: string, bucket: string, prefix: string, delimiter: string | null, maxKeys: number, continuationToken: string | null): Promise<import("@/types/s3").S3ListObjectsResponse> {
+  return post("/api/s3/list-objects", { connectionId, bucket, prefix, delimiter, maxKeys, continuationToken });
+}
+
+export async function s3HeadObject(connectionId: string, bucket: string, key: string): Promise<import("@/types/s3").S3ObjectHead> {
+  return post("/api/s3/head-object", { connectionId, bucket, key });
+}
+
+export async function s3PreviewObject(connectionId: string, bucket: string, key: string, maxBytes: number): Promise<import("@/types/s3").S3ObjectPreview> {
+  return post("/api/s3/preview-object", { connectionId, bucket, key, maxBytes });
+}
+
+export async function s3DownloadObject(connectionId: string, bucket: string, key: string): Promise<number[]> {
+  return post("/api/s3/download-object", { connectionId, bucket, key });
+}
+
+export async function s3UploadObject(connectionId: string, bucket: string, key: string, payloadBase64: string, contentType?: string): Promise<void> {
+  await post("/api/s3/upload-object", { connectionId, bucket, key, payloadBase64, contentType: contentType ?? null });
+}
+
+export async function s3DeleteObject(connectionId: string, bucket: string, key: string): Promise<void> {
+  await post("/api/s3/delete-object", { connectionId, bucket, key });
+}
+
+export async function s3CopyObject(connectionId: string, sourceBucket: string, sourceKey: string, destinationBucket: string, destinationKey: string): Promise<void> {
+  await post("/api/s3/copy-object", { connectionId, sourceBucket, sourceKey, destinationBucket, destinationKey });
+}
+
+export async function s3MoveObject(connectionId: string, sourceBucket: string, sourceKey: string, destinationBucket: string, destinationKey: string): Promise<void> {
+  await post("/api/s3/move-object", { connectionId, sourceBucket, sourceKey, destinationBucket, destinationKey });
+}
+
 export async function consulPreparedQueryList(connectionId: string): Promise<import("@/types/consul").ConsulPreparedQuery[]> {
   return post("/api/consul/prepared-query/list", { connectionId });
 }

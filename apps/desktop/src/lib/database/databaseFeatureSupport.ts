@@ -1,5 +1,5 @@
 import type { CatalogInfo, ConnectionConfig, DatabaseType, TreeNodeType } from "@/types/database";
-import { supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
+import { databaseRuntimeMode, supportsDatabaseFeature } from "@/lib/database/databaseDriverManifest";
 import { canEditTableStructure } from "@/lib/table/tableStructureCapabilities";
 import { CLEARABLE_QUERY_SCHEMA_TYPES, DATABASE_OBJECT_TREE_TYPES, DATABASE_SCHEMA_QUALIFIED_TYPES, FETCH_FIRST_TYPES, PG_LIKE_STRUCTURE_TYPES, PG_VACUUM_TYPES, SCHEMA_AWARE_TYPES, SINGLE_DATABASE_TYPES, TREE_SCHEMA_TYPES } from "@/lib/database/databaseCapabilitySets";
 import { supportsRegisteredConnectionScopedQueryExecution, supportsRegisteredQueryTargetDatabaseListing, usesRegisteredConnectionOnlyQueryTarget } from "@/lib/database/sqlExecutionTargetRegistry";
@@ -113,7 +113,7 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
 }
 
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "s3" && dbType !== "hbase";
 }
 
 /**
@@ -208,7 +208,7 @@ export function supportsTransfer(dbType?: DatabaseType): boolean {
 }
 
 export function supportsDriverManagement(dbType?: DatabaseType): boolean {
-  return supportsDatabaseFeature(dbType, "driverManagement");
+  return supportsDatabaseFeature(dbType, "driverManagement") || databaseRuntimeMode(dbType) === "agent";
 }
 
 export function supportsObjectBrowser(dbType?: DatabaseType): boolean {

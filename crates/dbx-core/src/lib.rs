@@ -79,6 +79,7 @@ pub mod query_result_sql;
 pub mod redis_ops;
 pub mod risk_metrics;
 pub mod runtime_config;
+pub mod s3;
 pub mod saved_sql;
 pub mod schema;
 pub mod schema_diff;

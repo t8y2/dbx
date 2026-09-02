@@ -1940,10 +1940,10 @@ async function openConnectionQuery(connectionId: string) {
     }
     return;
   }
-  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper" || initialTarget.kind === "consul") {
+  if (initialTarget.kind === "etcd" || initialTarget.kind === "zookeeper" || initialTarget.kind === "consul" || initialTarget.kind === "s3") {
     try {
       await connectionStore.ensureConnected(connectionId);
-      queryStore.createTab(connectionId, "", `${connection.name}:keys`, initialTarget.kind);
+      queryStore.createTab(connectionId, initialTarget.kind === "s3" ? connection.database || "" : "", `${connection.name}:${initialTarget.kind === "s3" ? "objects" : "keys"}`, initialTarget.kind);
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {
@@ -2383,6 +2383,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "consul") {
         await connectionStore.loadConsulRoot(item.connectionId);
+      } else if (config?.db_type === "s3") {
+        await connectionStore.loadS3Root(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch") {
@@ -2410,6 +2412,8 @@ async function handleQuickOpenSelect(item: any) {
         await connectionStore.loadZooKeeperRoot(item.connectionId);
       } else if (config?.db_type === "consul") {
         await connectionStore.loadConsulRoot(item.connectionId);
+      } else if (config?.db_type === "s3") {
+        await connectionStore.loadS3Root(item.connectionId);
       } else if (config?.db_type === "mongodb") {
         await connectionStore.loadMongoDatabases(item.connectionId);
       } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch") {

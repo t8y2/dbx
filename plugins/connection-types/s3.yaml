@@ -1,0 +1,30 @@
+schemaVersion: 1
+order: 705
+dbType: s3
+rustVariant: S3
+label: S3 Object Storage
+runtimeMode: native
+mcpMode: unsupported
+singleConnectionPool: true
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 443
+supportLevel: connect
+specializedSurface: true
+capabilities:
+  queryExecution: false
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: false
+  schemaSearch: false
+  diagram: false
+  tableDataEdit: false
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: false
+  sqlFileExecution: false
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: false

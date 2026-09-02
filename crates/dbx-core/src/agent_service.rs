@@ -401,6 +401,19 @@ pub fn local_agent_jar_candidates(db_type: &str) -> Vec<PathBuf> {
     candidates
 }
 
+pub fn local_agent_native_candidates(db_type: &str) -> Vec<PathBuf> {
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+    let bin_name = format!("dbx-agent-{db_type}{exe_suffix}");
+    let mut candidates = Vec::new();
+
+    if let Some(workspace_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().and_then(|path| path.parent()) {
+        candidates.push(workspace_root.join("target").join("debug").join(&bin_name));
+        candidates.push(workspace_root.join("target").join("release").join(&bin_name));
+    }
+
+    candidates
+}
+
 fn local_agents_dir_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![PathBuf::from("agents"), PathBuf::from("..").join("agents")];
     if let Some(workspace_root) = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().and_then(|path| path.parent()) {
@@ -421,6 +434,10 @@ fn agent_legacy_jar_path(agents_dir: &Path, db_type: &str, jar_name: &str) -> Pa
 
 pub fn find_local_agent_jar(db_type: &str) -> Option<PathBuf> {
     local_agent_jar_candidates(db_type).into_iter().find(|path| path.exists())
+}
+
+pub fn find_local_agent_native(db_type: &str) -> Option<PathBuf> {
+    local_agent_native_candidates(db_type).into_iter().find(|path| path.exists())
 }
 
 pub fn install_local_agent(am: &AgentManager, db_type: &str, source: PathBuf) -> Result<(), String> {
@@ -1208,6 +1225,16 @@ async fn install_agent_driver_with_batch_unlocked(
                     // back here would install a bundled JAR after the user
                     // explicitly aborted the download.
                     if can_fallback_to_local_agent(am, db_type, cancellations).await {
+                        if let Some(local_native) = find_local_agent_native(db_type) {
+                            install_local_native_agent(am, db_type, local_native, None)?;
+                            am.stop_daemon_by_key(db_type).await;
+                            progress(AgentProgressEvent::step("done").with_batch(
+                                Some(db_type),
+                                current,
+                                total_drivers,
+                            ));
+                            return Ok(());
+                        }
                         if let Some(local_jar) = find_local_agent_jar(db_type) {
                             install_local_agent_with_registry_jre(
                                 am,
@@ -1233,6 +1260,12 @@ async fn install_agent_driver_with_batch_unlocked(
             // must not start the local fallback (the fallback guard refuses it
             // anyway because the same tokens are cancelled).
             if can_fallback_to_local_agent(am, db_type, cancellations).await {
+                if let Some(local_native) = find_local_agent_native(db_type) {
+                    install_local_native_agent(am, db_type, local_native, None)?;
+                    am.stop_daemon_by_key(db_type).await;
+                    progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
+                    return Ok(());
+                }
                 if let Some(local_jar) = find_local_agent_jar(db_type) {
                     install_local_agent(am, db_type, local_jar)?;
                     am.stop_daemon_by_key(db_type).await;
@@ -1521,6 +1554,12 @@ async fn install_agent_driver_from_registry(
     cancellations: &[&AgentInstallCancellation],
 ) -> Result<(), String> {
     let Some(driver) = agent_registry_driver(registry, db_type) else {
+        if let Some(local_native) = find_local_agent_native(db_type) {
+            install_local_native_agent(am, db_type, local_native, None)?;
+            am.stop_daemon_by_key(db_type).await;
+            progress(AgentProgressEvent::step("done").with_batch(Some(db_type), current, total_drivers));
+            return Ok(());
+        }
         if let Some(local_jar) = find_local_agent_jar(db_type) {
             install_local_agent_with_registry_jre(
                 am,
@@ -3269,6 +3308,33 @@ pub async fn import_agent_driver(am: &AgentManager, db_type: &str, source_path: 
             db_type.to_string(),
             InstalledDriver {
                 version: "0.1.0-local".to_string(),
+                installed_at: chrono::Utc::now().to_rfc3339(),
+                jre: DEFAULT_JRE_KEY.to_string(),
+            },
+        );
+    })
+}
+
+fn install_local_native_agent(
+    am: &AgentManager,
+    db_type: &str,
+    source_path: PathBuf,
+    version: Option<&str>,
+) -> Result<(), String> {
+    validate_native_agent_binary(&source_path)?;
+    let native_path = am.driver_native_path(db_type);
+    let parent = native_path.parent().ok_or_else(|| format!("Invalid driver path: {}", native_path.display()))?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let staging_path = parent.join(format!(".agent-native-import-{}", uuid::Uuid::new_v4()));
+    std::fs::copy(&source_path, &staging_path).map_err(|e| format!("Failed to copy local native agent: {e}"))?;
+    mark_executable(&staging_path)?;
+    replace_imported_agent_file(&staging_path, &native_path)?;
+    std::fs::remove_file(am.driver_jar_path(db_type)).ok();
+    am.mutate_state(|state| {
+        state.installed_drivers.insert(
+            db_type.to_string(),
+            InstalledDriver {
+                version: version.unwrap_or("0.1.0-local").to_string(),
                 installed_at: chrono::Utc::now().to_rfc3339(),
                 jre: DEFAULT_JRE_KEY.to_string(),
             },

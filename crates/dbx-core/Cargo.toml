@@ -75,6 +75,7 @@ aes = "0.8"
 cbc = "0.1"
 argon2 = "0.5"
 sha2 = "0.10"
+hmac = "0.12"
 async-trait = "0.1"
 bytes = "1"
 font-kit = { version = "0.14.3", optional = true }

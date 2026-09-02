@@ -96,6 +96,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace editing already uses the Nacos admin flow" },
   consul: { deferred: "Consul KV scopes are configured on the connection" },
+  s3: { deferred: "S3 bucket settings are managed in the object browser" },
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabasePropertyEditingEntry>;
 

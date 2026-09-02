@@ -71,6 +71,7 @@ export const DATABASE_TYPES = [
   "zookeeper",
   "nacos",
   "consul",
+  "s3",
   "mq",
   "mqtt",
   "iotdb",

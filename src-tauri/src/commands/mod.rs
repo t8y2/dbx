@@ -39,6 +39,7 @@ pub mod query_cancel;
 pub mod query_result_export;
 pub mod redis_cmd;
 pub mod redis_pubsub_server;
+pub mod s3_cmd;
 pub mod saved_sql;
 pub mod schema;
 pub mod schema_cache;

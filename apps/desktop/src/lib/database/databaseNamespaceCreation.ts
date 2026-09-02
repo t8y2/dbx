@@ -96,6 +96,7 @@ export const DATABASE_NAMESPACE_CREATION_MATRIX = {
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace creation already uses the Nacos admin flow" },
   consul: { deferred: "Consul namespaces and partitions are connection scopes, not KV resources" },
+  s3: { deferred: "S3 buckets are managed in the object browser" },
   mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabaseNamespaceCreationMatrixEntry>;
 

@@ -1126,6 +1126,7 @@ impl ConnectionConfig {
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Mqtt => self.mqtt_broker_url(),
+            DatabaseType::S3 => self.s3_endpoint_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Consul => self.consul_api_url(),
         }
@@ -1404,6 +1405,7 @@ impl ConnectionConfig {
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
             DatabaseType::Mqtt => self.mqtt_broker_url(),
+            DatabaseType::S3 => self.s3_endpoint_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
             DatabaseType::Consul => self.consul_api_url(),
         }
@@ -1485,6 +1487,36 @@ impl ConnectionConfig {
         }
         let scheme = if self.ssl { "mqtts" } else { "mqtt" };
         format!("{}://{}:{}", scheme, self.host, self.port)
+    }
+
+    fn s3_endpoint_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| {
+                value.get("endpoint").or_else(|| value.get("serverAddr")).or_else(|| value.get("server_addr"))
+            })
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                if self.host.trim().is_empty() {
+                    let region = self
+                        .external_config
+                        .as_ref()
+                        .and_then(|value| value.get("region"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("us-east-1");
+                    crate::s3::default_aws_endpoint(region)
+                } else {
+                    let scheme = if self.ssl { "https" } else { "http" };
+                    if self.port == 0 || self.port == if self.ssl { 443 } else { 80 } {
+                        format!("{scheme}://{}", self.host.trim())
+                    } else {
+                        format!("{scheme}://{}:{}", self.host.trim(), self.port)
+                    }
+                }
+            })
     }
 
     fn normalized_url_params(&self) -> String {

@@ -740,7 +740,11 @@ impl DbxBackend for LocalBackend {
         sql: &str,
         options: dbx_core::query::QueryExecutionOptions,
     ) -> Result<Vec<BatchStatementResult>, String> {
-        let results = dbx_core::query::execute_multi_core_with_options_for_client(
+        // The multi-statement executor dispatches across every database engine
+        // and produces a very large future. Boxing it keeps the async-trait
+        // implementation below Rust's type-layout recursion limit (query depth
+        // overflow reported at this async block) without changing behaviour.
+        let results = Box::pin(dbx_core::query::execute_multi_core_with_options_for_client(
             &self.state,
             &connection.id,
             database,
@@ -748,7 +752,7 @@ impl DbxBackend for LocalBackend {
             schema,
             None,
             options,
-        )
+        ))
         .await?;
         Ok(results.into_iter().map(BatchStatementResult::from).collect())
     }

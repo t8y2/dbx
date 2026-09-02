@@ -69,6 +69,8 @@ fn full_access_policy() -> McpGlobalPolicy {
         read_only: false,
         allow_dangerous_sql: true,
         allowed_connection_ids: None,
+        allowed_tool_names: None,
+        connection_policies: vec![],
         query_timeout_secs: None,
     }
 }
@@ -80,6 +82,8 @@ fn short_timeout_policy() -> McpGlobalPolicy {
         read_only: false,
         allow_dangerous_sql: true,
         allowed_connection_ids: None,
+        allowed_tool_names: None,
+        connection_policies: vec![],
         query_timeout_secs: Some(1),
     }
 }

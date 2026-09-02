@@ -739,6 +739,8 @@ impl DbxBackend for LocalBackend {
         schema: &str,
         routine_types: Option<&[String]>,
     ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        let default_types = ["PROCEDURE".to_string(), "FUNCTION".to_string()];
+        let object_types = routine_types.unwrap_or(default_types.as_slice());
         let objects = dbx_core::schema::list_objects_core(
             &self.state,
             &connection.id,
@@ -747,7 +749,7 @@ impl DbxBackend for LocalBackend {
             None,
             None,
             None,
-            routine_types,
+            Some(object_types),
             None,
         )
         .await?;
@@ -1225,7 +1227,7 @@ impl DbxBackend for WebBackend {
         self.request(
             reqwest::Method::GET,
             &format!(
-                "/api/schema/objects?connection_id={}&database={}&schema={}&objectTypes={}",
+                "/api/schema/objects?connection_id={}&database={}&schema={}&object_types={}",
                 url_encode(&connection.id),
                 url_encode(database),
                 url_encode(schema),

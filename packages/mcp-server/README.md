@@ -17,7 +17,7 @@ The MCP protocol, connection loading, SQL safety, schema access, Redis support, 
 
 ## Features
 
-- **15 MCP tools** for connection and database discovery, schemas, SQL, Redis, sessions, messages, and DBX UI integration
+- **17 MCP tools** for connection and database discovery, schemas, SQL, Redis, sessions, messages, and DBX UI integration
 - **Precompiled native binaries** with no local Rust, Cargo, Python, or C/C++ build requirement
 - **No `better-sqlite3` runtime dependency** and no Node native-addon ABI coupling
 - **Local, Web, and Docker modes** using the same tool interface
@@ -149,6 +149,8 @@ Ask the MCP client to:
 | `dbx_remove_connection` | Remove a connection from DBX storage |
 | `dbx_list_tables` | List tables, views, collections, or message queue topics |
 | `dbx_describe_table` | Return columns and table metadata |
+| `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
+| `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context suitable for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
@@ -433,7 +435,7 @@ MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web �
 
 ### 主要能力
 
-- 15 个 MCP 工具，涵盖连接和数据库发现、Schema、SQL、Redis、会话、消息队列和 DBX 桌面集成
+- 17 个 MCP 工具，涵盖连接和数据库发现、Schema、SQL、Redis、会话、消息队列和 DBX 桌面集成
 - 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
 - 支持本地 DBX、DBX Web 和 Docker
 - 可选 Streamable HTTP 传输，使用 Bearer Token 保护；stdio 仍为默认方式

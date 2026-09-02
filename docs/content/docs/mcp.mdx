@@ -87,7 +87,7 @@ Run `dsh web --dump-config` to verify the composed configuration, then restart D
 
 ## Tools
 
-DBX MCP currently provides 15 tools:
+DBX MCP currently provides 17 tools:
 
 | Tool | Description |
 | --- | --- |
@@ -98,6 +98,8 @@ DBX MCP currently provides 15 tools:
 | `dbx_remove_connection` | Remove a connection from DBX storage |
 | `dbx_list_tables` | List tables, views, or collections |
 | `dbx_describe_table` | Return columns and table metadata |
+| `dbx_list_routines` | List stored procedures and functions in a schema, with an optional `routine_type` filter (PROCEDURE or FUNCTION) |
+| `dbx_get_routine_source` | Return the source of a stored procedure or function by name, with an optional `signature` for overloaded names |
 | `dbx_get_schema_context` | Return compact schema context for an AI model |
 | `dbx_execute_query` | Execute SQL or a supported MongoDB shell command, returning at most 100 rows |
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |

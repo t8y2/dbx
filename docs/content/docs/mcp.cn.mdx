@@ -87,7 +87,7 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 15 个工具：
+DBX MCP 当前提供 17 个工具：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -98,6 +98,8 @@ DBX MCP 当前提供 15 个工具：
 | `dbx_remove_connection` | 从 DBX 存储删除连接 |
 | `dbx_list_tables` | 列出表、视图或集合 |
 | `dbx_describe_table` | 返回列定义和表元数据 |
+| `dbx_list_routines` | 列出 Schema 中的存储过程和函数，支持可选的 `routine_type` 过滤（PROCEDURE 或 FUNCTION） |
+| `dbx_get_routine_source` | 按名称返回存储过程或函数的源码，重载场景可用可选的 `signature` 区分 |
 | `dbx_get_schema_context` | 返回适合 AI 使用的紧凑 Schema 上下文 |
 | `dbx_execute_query` | 执行 SQL 或支持的 MongoDB shell 命令，最多返回 100 行 |
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |

@@ -122,18 +122,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # assetNamePattern renames every bundle artifact of a matrix leg, so
+          # it is set only on aarch64 legs (aarch64 -> arm64). x64 legs leave
+          # it empty and keep the default Tauri CLI names (x64.dmg, amd64
+          # deb/rpm/AppImage) used by downloadLinks and package consumers.
           - platform: macos-latest
             target: aarch64-apple-darwin
-            artifact_arch: arm64
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
           - platform: macos-15-intel
             target: x86_64-apple-darwin
-            artifact_arch: x64
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            artifact_arch: x64
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact_arch: arm64
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -272,7 +274,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
-          releaseAssetNamePattern: "DBX_[version]_${{ matrix.artifact_arch }}[setup][ext]"
+          # Empty on x64 legs: tauri-action then keeps the default Tauri CLI names.
+          assetNamePattern: ${{ matrix.asset_pattern }}
           args: --target ${{ matrix.target }}
 
       - name: Verify AppImage input methods
@@ -417,7 +420,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
-          releaseAssetNamePattern: "DBX_[version]_${{ matrix.arch }}[setup][ext]"
+          # No assetNamePattern: the default Tauri CLI names already produce
+          # DBX_[version]_x64/arm64-setup.exe and keep the _en-US.msi names.
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
 
       - name: Verify Windows bundles

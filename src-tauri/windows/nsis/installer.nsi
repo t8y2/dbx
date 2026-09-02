@@ -546,7 +546,7 @@ Function .onInit
       Quit
 
       dbx_open_win7_installer:
-        ExecShell "open" "https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe?v=${VERSION}"
+        ExecShell "open" "https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}"
         SetErrorLevel 1633
         Quit
     ${EndIf}

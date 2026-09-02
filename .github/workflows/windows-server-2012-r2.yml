@@ -82,13 +82,13 @@ jobs:
             throw "Missing Win7 / Server 2012 R2 fixed-runtime installer in $bundleDir"
           }
           Copy-Item -LiteralPath $installer.FullName `
-            -Destination "DBX_${{ github.sha }}_x64-win7-server2012r2-webview2-109-offline-setup.exe" `
+            -Destination "DBX_${{ github.sha }}_x64-win7-server2012r2-offline-setup.exe" `
             -Force
 
       - name: Audit installer contents
         shell: pwsh
         run: |
-          $installer = Get-ChildItem -Filter "DBX_*_x64-win7-server2012r2-webview2-109-offline-setup.exe" |
+          $installer = Get-ChildItem -Filter "DBX_*_x64-win7-server2012r2-offline-setup.exe" |
             Select-Object -First 1
           ./.github/scripts/assert-win7-installer-content.ps1 -InstallerPath $installer.FullName
 
@@ -96,7 +96,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: DBX-win7-server2012r2-offline-test
-          path: DBX_*_x64-win7-server2012r2-webview2-109-offline-setup.exe
+          path: DBX_*_x64-win7-server2012r2-offline-setup.exe
           if-no-files-found: error
           retention-days: 7
 

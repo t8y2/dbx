@@ -21,14 +21,14 @@ test("Windows downloads include standard, offline, and Windows 7 installers", ()
         label: "Windows 完整离线安装包",
         description: "内置 WebView2 · 适用于内网部署或运行库缺失",
         badge: "离线",
-        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-webview2-offline-setup.exe?v=0.5.82",
+        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-offline-setup.exe?v=0.5.82",
       },
       {
         id: "windows-7-offline",
         label: "Windows 7 / Server 2012 R2 离线安装包",
         description: "内置 WebView2 109 · 仅支持 x64",
         badge: "旧系统",
-        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2012r2-webview2-109-offline-setup.exe?v=0.5.82",
+        href: "https://dl.dbxio.com/releases/v0.5.82/DBX_0.5.82_x64-win7-server2012r2-offline-setup.exe?v=0.5.82",
       },
     ],
   );

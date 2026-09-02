@@ -124,12 +124,16 @@ jobs:
         include:
           - platform: macos-latest
             target: aarch64-apple-darwin
+            artifact_arch: arm64
           - platform: macos-15-intel
             target: x86_64-apple-darwin
+            artifact_arch: x64
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            artifact_arch: x64
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            artifact_arch: arm64
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -268,6 +272,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          releaseAssetNamePattern: "DBX_[version]_${{ matrix.artifact_arch }}[setup][ext]"
           args: --target ${{ matrix.target }}
 
       - name: Verify AppImage input methods
@@ -412,6 +417,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          releaseAssetNamePattern: "DBX_[version]_${{ matrix.arch }}[setup][ext]"
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
 
       - name: Verify Windows bundles
@@ -445,7 +451,7 @@ jobs:
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
           $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
-          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $offlineName = "DBX_${version}_${arch}-offline-setup.exe"
           $before = @{}
 
           if (Test-Path $bundleDir) {
@@ -660,7 +666,7 @@ jobs:
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          $offlineName = "DBX_${version}_x64-win7-server2012r2-webview2-109-offline-setup.exe"
+          $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
           $checksumName = "${offlineName}.sha256"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version

@@ -25,7 +25,7 @@ const downloadArtifacts: DownloadArtifact[] = [
     id: "macos-arm",
     iconId: "macos-arm",
     labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)" },
-    suffix: "aarch64.dmg",
+    suffix: "arm64.dmg",
   },
   {
     id: "macos-intel",
@@ -47,7 +47,7 @@ const downloadArtifacts: DownloadArtifact[] = [
     labels: { en: "Windows complete offline installer", cn: "Windows 完整离线安装包" },
     descriptions: { en: "Includes WebView2 · For offline deployment or missing runtime", cn: "内置 WebView2 · 适用于内网部署或运行库缺失" },
     badges: { en: "Offline", cn: "离线" },
-    suffix: "x64-webview2-offline-setup.exe",
+    suffix: "x64-offline-setup.exe",
   },
   {
     id: "windows-7-offline",
@@ -55,7 +55,7 @@ const downloadArtifacts: DownloadArtifact[] = [
     labels: { en: "Windows 7 / Server 2012 R2 offline installer", cn: "Windows 7 / Server 2012 R2 离线安装包" },
     descriptions: { en: "Includes WebView2 109 · x64 only", cn: "内置 WebView2 109 · 仅支持 x64" },
     badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-server2012r2-webview2-109-offline-setup.exe",
+    suffix: "x64-win7-server2012r2-offline-setup.exe",
   },
   {
     id: "linux",
@@ -67,7 +67,7 @@ const downloadArtifacts: DownloadArtifact[] = [
     id: "linux-arm",
     iconId: "linux-arm",
     labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64" },
-    suffix: "aarch64.AppImage",
+    suffix: "arm64.AppImage",
   },
 ];
 

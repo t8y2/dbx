@@ -27,6 +27,7 @@ export interface ElasticsearchCompletionContext {
   replaceClosingQuote?: '"';
   jsonSlot?: ElasticsearchJsonSlot;
   hasKeySeparator?: boolean;
+  jsonIndent?: string;
 }
 
 export interface ElasticsearchCompletionInput {
@@ -89,6 +90,16 @@ const JSON_SNIPPETS = [
     detail: "Match all documents",
   },
   {
+    label: "match",
+    apply: '"match": {\n  "${field}": "${value}"\n}',
+    detail: "Match query",
+  },
+  {
+    label: "term",
+    apply: '"term": {\n  "${field}": "${value}"\n}',
+    detail: "Term query",
+  },
+  {
     label: "bool",
     apply: '"bool": {\n  "must": [\n    {}\n  ],\n  "filter": []\n}',
     detail: "Bool query",
@@ -97,6 +108,11 @@ const JSON_SNIPPETS = [
     label: "range",
     apply: '"range": {\n  "${field}": {\n    "gte": "${value}"\n  }\n}',
     detail: "Range query",
+  },
+  {
+    label: "exists",
+    apply: '"exists": {\n  "field": "${field}"\n}',
+    detail: "Exists query",
   },
   {
     label: "terms",
@@ -117,7 +133,10 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
   // Check the current line before falling back to JSON mode so completion also
   // works after leading comments and on subsequent REST requests.
   const methodMatch = /^\s*([A-Za-z]*)$/.exec(beforeCursorOnLine);
-  if (methodMatch) {
+  // A bare word on a JSON body line is a DSL key, not another HTTP method.
+  // Without this guard, typing `term` after an opening `{` incorrectly enters
+  // method mode and produces no JSON suggestions until a quote is added.
+  if (methodMatch && (lineStart === 0 || !hasOpenJsonContainer(text, safeCursor))) {
     const leadingWhitespace = beforeCursorOnLine.length - beforeCursorOnLine.trimStart().length;
     return {
       mode: "method",
@@ -158,6 +177,7 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
       replaceClosingQuote,
       jsonSlot: readJsonSlot(text, jsonPrefix.from),
       hasKeySeparator: hasJsonKeySeparator(text, safeCursor),
+      jsonIndent: beforeCursorOnLine.match(/^\s*/)?.[0] ?? "",
     };
   }
 
@@ -275,7 +295,7 @@ function jsonItems(context: ElasticsearchCompletionContext): ElasticsearchComple
         label: snippet.label,
         type: "snippet" as const,
         detail: snippet.detail,
-        apply: snippet.apply,
+        apply: indentJsonSnippet(snippet.apply, context.jsonIndent ?? ""),
         // Bare snippet labels cannot match a typed opening quote, so let the
         // editor filter them on the quoted form it sees in the document.
         filterText: quoted ? `"${snippet.label}"` : undefined,
@@ -286,12 +306,26 @@ function jsonItems(context: ElasticsearchCompletionContext): ElasticsearchComple
   return dedupeAndSort([...snippetItems, ...keyItems]);
 }
 
+function indentJsonSnippet(snippet: string, baseIndent: string): string {
+  if (!baseIndent) return snippet;
+  return snippet.replace(/\n/g, `\n${baseIndent}`);
+}
+
 // Reads the body of the request the cursor sits in, with strings and comments
 // blanked out so their quotes and braces cannot be mistaken for structure.
 function readRequestBody(text: string, from: number): string {
   const before = text.slice(0, from);
   const requestLine = /[\s\S]*(?:^|\n)[ \t]*(?:GET|POST|PUT|DELETE|HEAD)[ \t][^\n]*/i.exec(before);
   return before.slice(requestLine?.[0].length ?? 0).replace(/"(?:\\.|[^"\\])*"|(?:#|\/\/)[^\n]*/g, "");
+}
+
+function hasOpenJsonContainer(text: string, cursor: number): boolean {
+  const stack: string[] = [];
+  for (const char of readRequestBody(text, cursor)) {
+    if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") stack.pop();
+  }
+  return stack.length > 0;
 }
 
 // Tracks open brackets so an array element or a value after `:` is never

@@ -1,11 +1,16 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it } from "vitest";
-import { ExternalSqlFileTooLargeError, externalSqlFileDisplayTitles, externalSqlFileOpenErrorMessage, formatSqlFileSize, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES, normalizeExternalSqlPath, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
+import { ExternalSqlFileTooLargeError, externalSqlFileDisplayTitles, externalSqlFileOpenErrorMessage, formatSqlFileSize, isSqlFilePath, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES, normalizeExternalSqlPath, readBrowserSqlFile } from "@/lib/sql/sqlFileOpen";
 
 describe("external SQL file paths", () => {
   it("normalizes Windows separators for identity checks", () => {
     expect(normalizeExternalSqlPath(" C:\\work\\demo.sql ")).toBe("C:/work/demo.sql");
+  });
+
+  it("distinguishes SQL files from other filtered text files", () => {
+    expect(isSqlFilePath("C:\\work\\demo.SQL")).toBe(true);
+    expect(isSqlFilePath("/work/script.py")).toBe(false);
   });
 
   it("uses the shortest unique parent path for duplicate filenames", () => {

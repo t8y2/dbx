@@ -445,6 +445,16 @@ function onObjectsScroll() {
   });
 }
 
+function flushObjectBrowserViewport() {
+  if (viewportFrame) {
+    window.cancelAnimationFrame(viewportFrame);
+    viewportFrame = 0;
+  }
+  const el = scrollerElement();
+  if (!el) return;
+  emitViewportChange(el.scrollTop);
+}
+
 function applyObjectBrowserScrollTop(scrollTop: number) {
   const scroller = activeScroller();
   if (scroller && !(scroller instanceof HTMLElement)) {
@@ -1436,6 +1446,7 @@ async function onEventSaved(savedName: string) {
 }
 
 async function openNewQuery(row: ObjectBrowserRow) {
+  flushObjectBrowserViewport();
   const schema = row.schema || selectedSchema.value;
   const tabId = queryStore.createTab(props.connection.id, props.database, row.name, "query", schema, undefined, props.catalog);
   queryStore.updateSql(

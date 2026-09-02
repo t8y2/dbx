@@ -503,7 +503,7 @@ func TestListObjectsIncludesProceduresAndFunctionsFromSystemViews(t *testing.T) 
 	server.params.DatabaseType = "argo"
 	defer server.disconnect()
 
-	values, err := server.listObjects("ods", metadataListConstraints{
+	values, err := server.listObjects("ods", "ods", metadataListConstraints{
 		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
 		Filter:      "sp", // "sp" overlaps the procedure filter; both lists get "%sp%" applied
 	})
@@ -611,6 +611,104 @@ func TestGetObjectSourceRoutesFunctionsToSystemFunctionsView(t *testing.T) {
 	}
 }
 
+func TestListRoutinesUsesDatabaseParameterWhenSchemaEmpty(t *testing.T) {
+	proceduresQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	defaultQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('default') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			switch query {
+			case defaultQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{}), nil
+			case proceduresQuery:
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_daily_etl"},
+				}), nil
+			default:
+				return nil, errors.New("unexpected query: " + query)
+			}
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	values, err := server.listObjects("ods", "", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	if len(values) != 1 || values[0].Name != "sp_daily_etl" {
+		t.Fatalf("expected procedure from database parameter, got %+v", values)
+	}
+}
+
+func TestListRoutinesDoesNotFallbackToConnectionDefaultForExplicitSchema(t *testing.T) {
+	defaultQuery := "SELECT procedure_name FROM system.procedures_v WHERE lower(database_name) = lower('default') AND lower(procedure_name) LIKE '%%' ORDER BY procedure_name"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query == defaultQuery {
+				// Serving this row proves the driver fell back to the
+				// connection default after the explicit schema came back empty.
+				return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{
+					{"sp_should_not_leak"},
+				}), nil
+			}
+			return newScriptedRows(context.Background(), []string{"procedure_name"}, []string{"STRING"}, [][]driver.Value{}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	values, err := server.listObjects("", "ods", metadataListConstraints{
+		ObjectTypes: []string{"PROCEDURE"},
+	})
+	if err != nil {
+		t.Fatalf("listObjects: %v", err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("expected no routines to leak from the connection default database, got %+v", values)
+	}
+}
+
+func TestGetObjectSourceUsesDatabaseParameterForRoutineSource(t *testing.T) {
+	expectedSQL := "SELECT full_text FROM system.procedures_v WHERE lower(database_name) = lower('ods') AND procedure_name = 'sp_daily_etl'"
+	behavior := &scriptedBehavior{
+		query: func(_ context.Context, query string) (driver.Rows, error) {
+			if query != expectedSQL {
+				return nil, errors.New("unexpected query: " + query)
+			}
+			return newScriptedRows(context.Background(), []string{"full_text"}, []string{"STRING"}, [][]driver.Value{
+				{"CREATE PROCEDURE sp_daily_etl() BEGIN SELECT 1; END"},
+			}), nil
+		},
+	}
+	server := newScriptedServer(t, behavior)
+	server.params.DatabaseType = "argo"
+	server.config.Database = "default"
+	defer server.disconnect()
+
+	result, _, err := server.dispatch("get_object_source", map[string]json.RawMessage{
+		"database":    json.RawMessage(`"ods"`),
+		"schema":      json.RawMessage(`""`),
+		"name":        json.RawMessage(`"sp_daily_etl"`),
+		"object_type": json.RawMessage(`"PROCEDURE"`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, ok := result.(objectSource)
+	if !ok {
+		t.Fatalf("get_object_source returned %T instead of objectSource", result)
+	}
+	if source.Source != "CREATE PROCEDURE sp_daily_etl() BEGIN SELECT 1; END\n" {
+		t.Fatalf("unexpected procedure source: %q", source.Source)
+	}
+}
+
 func TestListObjectsDoesNotQueryRoutinesForVanillaHive(t *testing.T) {
 	behavior := &scriptedBehavior{
 		query: func(ctx context.Context, query string) (driver.Rows, error) {
@@ -624,7 +722,7 @@ func TestListObjectsDoesNotQueryRoutinesForVanillaHive(t *testing.T) {
 	server.params.DatabaseType = "hive"
 	defer server.disconnect()
 
-	values, err := server.listObjects("ods", metadataListConstraints{
+	values, err := server.listObjects("ods", "ods", metadataListConstraints{
 		ObjectTypes: []string{"PROCEDURE", "FUNCTION"},
 	})
 	if err != nil {

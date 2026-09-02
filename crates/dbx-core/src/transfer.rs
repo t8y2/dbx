@@ -4683,6 +4683,21 @@ fn sql_rows_to_mongo_documents(columns: &[String], rows: &[Vec<serde_json::Value
         .collect()
 }
 
+/// Select the representation used by a MongoDB transfer. MongoDB-to-MongoDB
+/// writes consume canonical Extended JSON so BSON values (for example dates)
+/// keep their server-side types; SQL targets continue using the browser view.
+fn mongo_documents_for_transfer(result: MongoDocumentResult, preserve_bson_types: bool) -> Vec<serde_json::Value> {
+    let MongoDocumentResult { documents, extended_documents, .. } = result;
+    if preserve_bson_types {
+        match extended_documents {
+            Some(extended_documents) if extended_documents.len() == documents.len() => extended_documents,
+            _ => documents,
+        }
+    } else {
+        documents
+    }
+}
+
 async fn find_mongo_documents_extended_json(
     state: &AppState,
     connection_id: &str,
@@ -6943,7 +6958,7 @@ where
                 .await?
             };
             total_rows = Some(result.total);
-            result.documents
+            mongo_documents_for_transfer(result, is_mongodb_transfer_type(target_db_type))
         } else {
             let columns = get_columns_for_transfer(
                 state,
@@ -10954,6 +10969,71 @@ mod tests {
         );
 
         assert_eq!(rows, vec![vec![json!(1), json!("Ada")], vec![json!(2), serde_json::Value::Null]]);
+    }
+
+    #[test]
+    fn mongo_transfer_uses_extended_json_to_preserve_bson_dates() {
+        let result = MongoDocumentResult {
+            documents: vec![json!({"gmtModified": "ISODate(\"2026-08-31T10:14:01.105Z\")"})],
+            raw_documents: None,
+            extended_documents: Some(vec![json!({
+                "gmtModified": {"$date": {"$numberLong": "1788161641105"}}
+            })]),
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+
+        let documents = mongo_documents_for_transfer(result, true);
+
+        assert_eq!(documents[0]["gmtModified"]["$date"]["$numberLong"], json!("1788161641105"));
+    }
+
+    #[test]
+    fn mongo_transfer_falls_back_to_browser_documents_without_extended_json() {
+        let result = MongoDocumentResult {
+            documents: vec![json!({"value": "text"})],
+            raw_documents: None,
+            extended_documents: None,
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+
+        assert_eq!(mongo_documents_for_transfer(result, true), vec![json!({"value": "text"})]);
+    }
+
+    #[test]
+    fn mongo_transfer_keeps_browser_documents_for_sql_targets() {
+        let result = MongoDocumentResult {
+            documents: vec![json!({"gmtModified": "ISODate(\"2026-08-31T10:14:01.105Z\")"})],
+            raw_documents: None,
+            extended_documents: Some(vec![json!({
+                "gmtModified": {"$date": {"$numberLong": "1788161641105"}}
+            })]),
+            total: 1,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+
+        assert_eq!(
+            mongo_documents_for_transfer(result, false),
+            vec![json!({"gmtModified": "ISODate(\"2026-08-31T10:14:01.105Z\")"})]
+        );
+    }
+
+    #[test]
+    fn mongo_transfer_falls_back_when_extended_json_row_count_differs() {
+        let result = MongoDocumentResult {
+            documents: vec![json!({"id": 1}), json!({"id": 2})],
+            raw_documents: None,
+            extended_documents: Some(vec![json!({"id": {"$numberInt": "1"}})]),
+            total: 2,
+            total_is_exact: true,
+            next_cursor: None,
+        };
+
+        assert_eq!(mongo_documents_for_transfer(result, true), vec![json!({"id": 1}), json!({"id": 2})]);
     }
 
     #[test]

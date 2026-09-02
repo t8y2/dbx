@@ -13,15 +13,6 @@ const mocks = vi.hoisted(() => ({
   getColumns: vi.fn().mockResolvedValue([{ name: "ID", data_type: "NUMBER", is_primary_key: true }]),
 }));
 
-function passthrough(tag: string) {
-  return defineComponent({
-    inheritAttrs: false,
-    setup(_, { attrs, slots }) {
-      return () => h(tag, attrs, slots.default?.());
-    },
-  });
-}
-
 vi.mock("@/stores/connectionStore", () => {
   const connections = [
     { id: "oracle-11g", name: "Oracle XE 11g", db_type: "oracle", driver_profile: "oracle", database: "XE" },
@@ -37,15 +28,15 @@ vi.mock("@/stores/connectionStore", () => {
   return {
     useConnectionStore: () => ({
       connections,
+      sidebarLayout: {
+        groups: [{ id: "oracle", name: "Oracle", collapsed: false }],
+        order: [{ type: "group", id: "oracle", children: connections.map((connection) => ({ type: "connection", id: connection.id })) }],
+      },
       getConfig: (id: string) => connections.find((connection) => connection.id === id),
       ensureConnected: mocks.ensureConnected,
     }),
   };
 });
-
-vi.mock("@/components/connection/ConnectionGroupBadge.vue", () => ({
-  default: passthrough("span"),
-}));
 
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: mocks.listDatabases,
@@ -94,7 +85,7 @@ describe("DataCompareDialog source prefill", () => {
     expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-11g", "XE", true);
 
     const searchableSelectTriggers = [...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")];
-    const sourceDatabaseTrigger = searchableSelectTriggers[1];
+    const sourceDatabaseTrigger = searchableSelectTriggers[0];
     expect(sourceDatabaseTrigger?.title).toBe("DBX_TEST");
     expect(sourceDatabaseTrigger?.disabled).toBe(false);
     sourceDatabaseTrigger?.click();
@@ -127,13 +118,12 @@ describe("DataCompareDialog source prefill", () => {
     app.mount(container);
     await flushAsyncSetup();
 
-    const searchableSelectTriggers = [...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")];
-    const targetConnectionTrigger = searchableSelectTriggers[3];
+    const targetConnectionTrigger = document.querySelectorAll<HTMLButtonElement>("button.dbx-diff-connection-trigger")[1];
     expect(targetConnectionTrigger).toBeDefined();
     targetConnectionTrigger?.click();
     await flushAsyncSetup();
 
-    const jdbcConnectionOption = [...document.querySelectorAll<HTMLButtonElement>(".dbx-searchable-select-list button")].find((button) => button.textContent?.trim() === "Oracle JDBC 11g");
+    const jdbcConnectionOption = document.querySelector<HTMLButtonElement>('[data-picker-connection="oracle-jdbc-11g"]');
     expect(jdbcConnectionOption).toBeDefined();
     jdbcConnectionOption?.click();
     await flushAsyncSetup();
@@ -141,7 +131,7 @@ describe("DataCompareDialog source prefill", () => {
     expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-jdbc-11g", "", true);
 
     const triggersAfterTargetLoad = [...document.querySelectorAll<HTMLButtonElement>("button.dbx-searchable-select-trigger")];
-    const targetDatabaseTrigger = triggersAfterTargetLoad[4];
+    const targetDatabaseTrigger = triggersAfterTargetLoad[2];
     expect(targetDatabaseTrigger?.disabled).toBe(false);
     targetDatabaseTrigger?.click();
     await flushAsyncSetup();

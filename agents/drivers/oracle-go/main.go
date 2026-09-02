@@ -261,6 +261,17 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// oracleDriverPanicError keeps a third-party driver panic on the request path
+// so the agent can try a safe projection rewrite instead of terminating the
+// process and breaking the RPC stream.
+type oracleDriverPanicError struct {
+	value any
+}
+
+func (e oracleDriverPanicError) Error() string {
+	return fmt.Sprintf("oracle driver panic: %v", e.value)
+}
+
 type connectParams struct {
 	Host             string `json:"host"`
 	Port             int    `json:"port"`
@@ -419,8 +430,9 @@ type querySession struct {
 }
 
 type oracleColumnMeta struct {
-	Name     string
-	DataType string
+	Name          string
+	DataType      string
+	DataTypeOwner string
 }
 
 type oracleColumnMetaLoader func(schema, table string) ([]oracleColumnMeta, error)
@@ -2600,7 +2612,7 @@ func (s *server) loadOracleColumnMeta(schema, table string) ([]oracleColumnMeta,
 
 func (s *server) loadOracleColumnMetaByName(schema, table string) ([]oracleColumnMeta, error) {
 	rows, err := s.queryRows(`
-SELECT COLUMN_NAME, DATA_TYPE
+SELECT COLUMN_NAME, DATA_TYPE, DATA_TYPE_OWNER
 FROM ALL_TAB_COLUMNS
 WHERE OWNER = :1 AND TABLE_NAME = :2
 ORDER BY COLUMN_ID`, []any{schema, table})
@@ -2611,8 +2623,12 @@ ORDER BY COLUMN_ID`, []any{schema, table})
 	var result []oracleColumnMeta
 	for rows.Next() {
 		var item oracleColumnMeta
-		if err := rows.Scan(&item.Name, &item.DataType); err != nil {
+		var dataTypeOwner sql.NullString
+		if err := rows.Scan(&item.Name, &item.DataType, &dataTypeOwner); err != nil {
 			return nil, err
+		}
+		if dataTypeOwner.Valid {
+			item.DataTypeOwner = dataTypeOwner.String
 		}
 		result = append(result, item)
 	}
@@ -4104,6 +4120,13 @@ func (s *server) queryRowsWithOracleValueRewriteIfNeeded(sqlText string, timeout
 	}
 	rows, err := s.queryRowsWithTimeout(sqlText, nil, timeoutSecs)
 	if err != nil {
+		var panicErr oracleDriverPanicError
+		if errors.As(err, &panicErr) {
+			rewritten, rewriteErr := rewriteOracleSelectSQL(sqlText, s.loadOracleColumnMeta, false)
+			if rewriteErr == nil && rewritten != sqlText {
+				return s.queryRowsWithTimeout(rewritten, nil, timeoutSecs)
+			}
+		}
 		return nil, err
 	}
 	typeNames := columnTypeNames(rows)
@@ -4270,7 +4293,7 @@ func rewriteDirectOracleSelectSQL(sqlText string, loadColumns oracleColumnMetaLo
 	if fromIdx < 0 {
 		return sqlText, false, false, nil
 	}
-	if deferLOBs && oracleSQLHasTopLevelSetOperator(sqlText, fromIdx+len("from")) {
+	if oracleSQLHasTopLevelSetOperator(sqlText, fromIdx+len("from")) {
 		return sqlText, false, false, nil
 	}
 	selectListPrefix, selectList := splitOracleSelectListModifier(sqlText[selectStart:fromIdx])
@@ -4422,10 +4445,12 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 			for _, column := range columns {
 				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
 				outputAlias := quoteIdentifier(column.Name)
-				if isOracleXMLType(column.DataType) && !deferLOBs {
+				if isOracleSTGeometry(column) && !deferLOBs {
+					rewritten = append(rewritten, oracleSTGeometryExpression(columnRef, outputAlias))
+				} else if isOracleXMLType(column.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 				} else if deferLOBs {
-					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column.DataType); ok {
+					if expressions, ok := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, column); ok {
 						rewritten = append(rewritten, expressions...)
 					} else {
 						rewritten = append(rewritten, columnRef)
@@ -4446,6 +4471,12 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					outputAlias = quoteIdentifier(meta.Name)
 				}
 				columnRef := oracleColumnRef(qualifier, meta.Name)
+				if isOracleSTGeometry(meta) && !deferLOBs {
+					rewritten = append(rewritten, oracleSTGeometryExpression(columnRef, outputAlias))
+					changed = true
+					sourceIndex++
+					continue
+				}
 				if isOracleXMLType(meta.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 					changed = true
@@ -4453,7 +4484,7 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					continue
 				}
 				if deferLOBs {
-					if expressions, isLOB := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, meta.DataType); isLOB {
+					if expressions, isLOB := oracleDeferredLOBExpressions(columnRef, outputAlias, sourceIndex, meta); isLOB {
 						rewritten = append(rewritten, expressions...)
 						changed = true
 						sourceIndex++
@@ -4468,15 +4499,23 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 	return rewritten, changed
 }
 
-func oracleDeferredLOBExpressions(columnRef, outputAlias string, sourceIndex int, dataType string) ([]string, bool) {
-	kind, placeholder, ok := oracleDeferredLOBKind(dataType)
+func oracleDeferredLOBExpressions(columnRef, outputAlias string, sourceIndex int, column oracleColumnMeta) ([]string, bool) {
+	kind, placeholder, ok := oracleDeferredLOBKind(column.DataType)
+	valueRef := columnRef
+	if isOracleSTGeometry(column) {
+		kind, placeholder, ok = "C", "<ST_GEOMETRY>", true
+	}
 	if !ok {
 		return nil, false
 	}
-	valueExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '%s' END AS %s", columnRef, placeholder, outputAlias)
+	valueExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE '%s' END AS %s", valueRef, placeholder, outputAlias)
 	markerAlias := fmt.Sprintf("%s%s_%d", largeValueBytesColumnPrefix, kind, sourceIndex)
-	markerExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE 'D:1' END AS %s", columnRef, quoteIdentifier(markerAlias))
+	markerExpression := fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE 'D:1' END AS %s", valueRef, quoteIdentifier(markerAlias))
 	return []string{valueExpression, markerExpression}, true
+}
+
+func oracleSTGeometryExpression(columnRef, alias string) string {
+	return fmt.Sprintf("SDE.ST_AsText(%s) AS %s", columnRef, alias)
 }
 
 func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) {
@@ -4576,7 +4615,7 @@ func oracleQualifierMatchesTable(qualifier string, tableRef oracleTableRef) bool
 
 func oracleColumnsNeedValueRewrite(columns []oracleColumnMeta, deferLOBs bool) bool {
 	for _, column := range columns {
-		if isOracleXMLType(column.DataType) || (deferLOBs && isOracleDeferredLOBType(column.DataType)) {
+		if isOracleSTGeometry(column) || isOracleXMLType(column.DataType) || (deferLOBs && isOracleDeferredLOBType(column.DataType)) {
 			return true
 		}
 	}
@@ -4600,6 +4639,16 @@ func isOracleDeferredLOBType(dataType string) bool {
 func isOracleXMLType(dataType string) bool {
 	normalized := strings.ToUpper(strings.TrimSpace(dataType))
 	return normalized == "XMLTYPE" || normalized == "SYS.XMLTYPE"
+}
+
+func isOracleSTGeometry(column oracleColumnMeta) bool {
+	// Esri's SDE.ST_GEOMETRY is an unregistered Oracle object for go-ora;
+	// SDE.ST_AsText provides the supported CLOB representation for reads.
+	dataType := strings.ToUpper(strings.TrimSpace(column.DataType))
+	if dataType == "SDE.ST_GEOMETRY" {
+		return true
+	}
+	return dataType == "ST_GEOMETRY" && strings.EqualFold(strings.TrimSpace(column.DataTypeOwner), "SDE")
 }
 
 func leadingSQLSelectListStart(sqlText string) int {
@@ -4884,7 +4933,7 @@ func (s *server) queryRows(sqlText string, args []any) (*sql.Rows, error) {
 	return s.queryRowsWithTimeout(sqlText, args, 0)
 }
 
-func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (*sql.Rows, error) {
+func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs int) (rows *sql.Rows, queryErr error) {
 	if _, err := s.requireDB(); err != nil {
 		return nil, err
 	}
@@ -4907,8 +4956,27 @@ func (s *server) queryRowsWithTimeout(sqlText string, args []any, timeoutSecs in
 	s.activeTimer = timer
 	s.activeTimedOut = false
 	s.activeCancelMu.Unlock()
-	var rows *sql.Rows
-	var queryErr error
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			cancel()
+			if timer != nil {
+				timer.Stop()
+			}
+			if rows != nil {
+				_ = rows.Close()
+			}
+			s.activeCancelMu.Lock()
+			s.activeCancel = nil
+			s.activeTimer = nil
+			s.activeTimedOut = false
+			if rows != nil {
+				delete(s.activeRows, rows)
+			}
+			s.activeCancelMu.Unlock()
+			rows = nil
+			queryErr = oracleDriverPanicError{value: recovered}
+		}
+	}()
 	if s.manualTx != nil {
 		rows, queryErr = s.manualTx.QueryContext(ctx, sqlText, args...)
 	} else {

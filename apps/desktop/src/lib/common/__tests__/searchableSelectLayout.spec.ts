@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 const searchableSelectSource = readFileSync(new URL("../../../components/ui/searchable-select/SearchableSelect.vue", import.meta.url), "utf8");
 const dataTransferDialogSource = readFileSync(new URL("../../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
+const schemaDiffConfigStepSource = readFileSync(new URL("../../../components/diff/SchemaDiffConfigStep.vue", import.meta.url), "utf8");
+const dataCompareDialogSource = readFileSync(new URL("../../../components/diff/DataCompareDialog.vue", import.meta.url), "utf8");
 
 describe("SearchableSelect layout", () => {
   it("keeps slotted option labels inside a shrinkable overflow boundary", () => {
@@ -30,5 +32,15 @@ describe("SearchableSelect layout", () => {
     expect(editorToolbarSource).toContain("<ConnectionTreeSelect");
     expect(editorToolbarSource).toContain(':connections="connectionStore.connections"');
     expect(editorToolbarSource).toContain(':layout="connectionStore.sidebarLayout"');
+  });
+
+  it.each([
+    ["schema compare", schemaDiffConfigStepSource],
+    ["data compare", dataCompareDialogSource],
+  ])("renders %s connection pickers as sidebar-like trees", (_name, source) => {
+    expect(source.match(/<ConnectionTreeSelect/g) ?? []).toHaveLength(2);
+    expect(source).toContain(':connections="sqlConnections"');
+    expect(source).toContain(':layout="store.sidebarLayout"');
+    expect(source).not.toContain("ConnectionGroupBadge");
   });
 });

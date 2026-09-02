@@ -26,6 +26,8 @@ export interface BuildTableSelectSqlOptions {
   offset?: number;
   useDriverRowOffset?: boolean;
   whereInput?: string;
+  /** Time-series quick-open: inject a rolling `time` window when no WHERE is supplied. */
+  injectDefaultTimeSeriesWhere?: boolean;
   includeRowId?: boolean;
   catalog?: string;
   database?: string;

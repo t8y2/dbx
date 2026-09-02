@@ -239,7 +239,20 @@ pub fn build_table_data_select_sql_with_database(
         )
     };
     let predicate = normalize_where_input(options.where_input.as_deref());
-    let where_clause = if predicate.is_empty() { String::new() } else { format!(" WHERE ({predicate})") };
+    // Time-series engines like InfluxDB scan every shard when no time
+    // predicate is given, which turns the sidebar quick-open ("show me
+    // the latest rows") into a full-shard scan on any non-trivial
+    // dataset. Data-tab callers opt in to a rolling 5-minute window when
+    // the user has not provided their own WHERE; sampling and export
+    // callers keep the historical unfiltered behavior, and users can
+    // broaden the window by editing the SQL.
+    let effective_predicate = if predicate.is_empty() && options.inject_default_time_series_where {
+        default_time_series_predicate(database_type).unwrap_or_default()
+    } else {
+        predicate
+    };
+    let where_clause =
+        if effective_predicate.is_empty() { String::new() } else { format!(" WHERE ({effective_predicate})") };
     let default_order_by = if matches!(database_type, Some(DatabaseType::InfluxDb) | Some(DatabaseType::InfluxDb3)) {
         // InfluxQL only allows sorting of the timestamp column; SQL-mode
         // InfluxDB 3 tables also key naturally on `time`.
@@ -386,6 +399,32 @@ pub fn build_table_data_select_sql_with_database(
                 .unwrap_or_default();
             format!("SELECT {select_columns} FROM {table_alias}{where_clause}{order} LIMIT {limit}{offset};")
         }
+    }
+}
+
+/// Default WHERE predicate for time-series engines whose data model
+/// makes an unbounded `SELECT *` an accidental full-shard scan. When a
+/// data-tab caller opts in and the user has not supplied their own
+/// WHERE, we inject a rolling five-minute window on the mandatory
+/// `time` column so that sidebar quick-open queries stay cheap on
+/// production-sized tables. Users can broaden or drop the filter by
+/// editing the generated SQL.
+///
+/// Syntax is per-engine and cannot be shared:
+///
+/// * **InfluxDB 1.x / 2.x** — sidebar SELECTs go to the `/query`
+///   endpoint and are parsed as InfluxQL. InfluxQL accepts Go-style
+///   duration literals directly (`5m`, `1h`, `30s`).
+/// * **InfluxDB 3.x** — queries go through DataFusion SQL and require
+///   ANSI interval literals (`INTERVAL '5 minutes'`).
+///
+/// Returns `None` for engines where no default is appropriate — the
+/// caller then falls through to the historical unfiltered behavior.
+fn default_time_series_predicate(database_type: Option<DatabaseType>) -> Option<String> {
+    match database_type? {
+        DatabaseType::InfluxDb => Some("time > now() - 5m".to_string()),
+        DatabaseType::InfluxDb3 => Some("time > now() - INTERVAL '5 minutes'".to_string()),
+        _ => None,
     }
 }
 
@@ -633,15 +672,14 @@ pub(super) fn build_select_columns(
             .collect::<Vec<_>>()
             .join(", ");
     }
+    // Everything outside the Hive-family identifier projection reads
+    // `SELECT *`. That includes InfluxDB (v1 / v2 / 3.x), whose tables
+    // can carry dozens of tags and fields — a full column list turns the
+    // generated SQL into a wall of names, while InfluxQL supports `*`
+    // natively and users can narrow the projection by editing the SQL.
     if !matches!(
         database_type,
-        Some(
-            DatabaseType::Hive
-                | DatabaseType::Kyuubi
-                | DatabaseType::Impala
-                | DatabaseType::Argo
-                | DatabaseType::InfluxDb
-        )
+        Some(DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
     ) {
         return "*".to_string();
     }
@@ -808,24 +846,89 @@ mod tests {
             offset: None,
             use_driver_row_offset: false,
             where_input: None,
+            inject_default_time_series_where: false,
             include_row_id: false,
         }
     }
 
     #[test]
-    fn influxdb_table_select_quotes_explicit_columns() {
-        // InfluxQL needs double-quoted identifiers and only permits ORDER BY on
-        // the time column; explicit column lists must not fall back to "*".
+    fn influxdb_table_select_uses_star_and_rolling_window() {
+        // InfluxDB tables can carry dozens of tags/fields; enumerating them
+        // all in the SELECT list produces an unreadable wall of names.
+        // Emit `SELECT *` (InfluxQL supports it natively) and inject a
+        // rolling five-minute WHERE so the query stays cheap on production
+        // data. Users can narrow the projection or widen the window by
+        // editing the generated SQL.
         assert_eq!(
             build_table_data_select_sql(TableDataSelectSqlOptions {
                 database_type: Some(DatabaseType::InfluxDb),
                 database: Some("monitor".to_string()),
                 table_name: "cpu".to_string(),
                 columns: vec!["time".to_string(), "host".to_string(), "value".to_string()],
+                inject_default_time_series_where: true,
                 ..Default::default()
             }),
-            "SELECT \"time\", \"host\", \"value\" FROM \"cpu\" ORDER BY time DESC LIMIT 100;"
+            "SELECT * FROM \"cpu\" WHERE (time > now() - 5m) ORDER BY time DESC LIMIT 100;"
         );
+    }
+
+    #[test]
+    fn influxdb3_table_select_injects_datafusion_interval() {
+        // InfluxDB 3.x runs DataFusion SQL, which needs ANSI INTERVAL
+        // literals rather than InfluxQL's Go-style duration form.
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb3),
+                database: Some("monitor".to_string()),
+                table_name: "cpu".to_string(),
+                inject_default_time_series_where: true,
+                ..Default::default()
+            }),
+            "SELECT * FROM \"cpu\" WHERE (time > now() - INTERVAL '5 minutes') ORDER BY time DESC LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn influxdb_table_select_without_opt_in_stays_unfiltered() {
+        // Sampling (agent_tools) and whole-table export (csv_export) build
+        // SQL without the opt-in flag and must keep the historical
+        // unbounded scan semantics.
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::InfluxDb),
+            database: Some("monitor".to_string()),
+            table_name: "cpu".to_string(),
+            ..Default::default()
+        });
+        assert!(!sql.contains("WHERE"), "unexpected default WHERE in non-opt-in SQL: {sql}");
+    }
+
+    #[test]
+    fn influxdb_table_select_honors_user_supplied_where() {
+        // When the caller passes their own predicate the default window is
+        // dropped — otherwise widening the range would require a new option.
+        assert_eq!(
+            build_table_data_select_sql(TableDataSelectSqlOptions {
+                database_type: Some(DatabaseType::InfluxDb),
+                database: Some("monitor".to_string()),
+                table_name: "cpu".to_string(),
+                where_input: Some("host = 'web-01'".to_string()),
+                ..Default::default()
+            }),
+            "SELECT * FROM \"cpu\" WHERE (host = 'web-01') ORDER BY time DESC LIMIT 100;"
+        );
+    }
+
+    #[test]
+    fn non_time_series_engines_get_no_default_where() {
+        // The rolling-window default is scoped to time-series engines; other
+        // dialects keep their historical unfiltered behavior.
+        let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Postgres),
+            schema: Some("public".to_string()),
+            table_name: "orders".to_string(),
+            ..Default::default()
+        });
+        assert!(!sql.contains("WHERE"), "unexpected WHERE in non-time-series SQL: {sql}");
     }
 
     #[test]

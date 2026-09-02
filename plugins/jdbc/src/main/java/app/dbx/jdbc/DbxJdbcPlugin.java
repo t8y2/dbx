@@ -3979,6 +3979,9 @@ public final class DbxJdbcPlugin {
         if (isHive2RoutinesConnection(connection)) {
             String routineName = stripRoutineSignature(name);
             String normalizedType = normalizeObjectType(objectType);
+            if ("VIEW".equals(normalizedType) || "TABLE".equals(normalizedType) || "MATERIALIZED_VIEW".equals(normalizedType)) {
+                return hive2ShowCreateObjectSource(conn, database, schema, name, objectType);
+            }
 
             LinkedHashSet<String> candidates = new LinkedHashSet<>();
             String db = emptyToNull(database);
@@ -4026,6 +4029,83 @@ public final class DbxJdbcPlugin {
         }
 
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    private static JsonNode hive2ShowCreateObjectSource(
+        Connection conn,
+        String database,
+        String schema,
+        String name,
+        String objectType
+    ) throws SQLException {
+        LinkedHashSet<String> candidates = hive2DatabaseCandidates(database, schema);
+        if (candidates.isEmpty()) {
+            throw new SQLException("Object source requires database context for Hive/Inceptor objects");
+        }
+
+        SQLException lastError = null;
+        for (String candidateSchema : candidates) {
+            String sql = "SHOW CREATE TABLE " + qualifiedHiveName(candidateSchema, name);
+            try (Statement statement = conn.createStatement();
+                 ResultSet rs = statement.executeQuery(sql)) {
+                StringBuilder source = new StringBuilder();
+                while (rs.next()) {
+                    String line = rs.getString(1);
+                    if (line == null || line.isBlank()) {
+                        continue;
+                    }
+                    if (!source.isEmpty()) {
+                        source.append('\n');
+                    }
+                    source.append(line);
+                }
+                if (source.isEmpty()) {
+                    continue;
+                }
+                if (source.charAt(source.length() - 1) != '\n') {
+                    source.append('\n');
+                }
+                ObjectNode item = MAPPER.createObjectNode();
+                item.put("name", name);
+                item.put("object_type", objectType);
+                putNullable(item, "schema", emptyToNull(schema) != null ? schema : candidateSchema);
+                putNullable(item, "source", source.toString());
+                return item;
+            } catch (SQLException error) {
+                lastError = error;
+            }
+        }
+
+        if (lastError != null) {
+            throw lastError;
+        }
+        throw new SQLException("Object source not found");
+    }
+
+    private static LinkedHashSet<String> hive2DatabaseCandidates(String database, String schema) {
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        String db = emptyToNull(database);
+        if (db != null) {
+            candidates.add(db);
+        }
+        String sc = emptyToNull(schema);
+        if (sc != null) {
+            candidates.add(sc);
+        }
+        return candidates;
+    }
+
+    private static String qualifiedHiveName(String schema, String table) {
+        String trimmedSchema = schema == null ? "" : schema.trim();
+        String trimmedTable = table == null ? "" : table.trim();
+        if (trimmedSchema.isEmpty()) {
+            return quoteHiveBacktickIdentifier(trimmedTable);
+        }
+        return quoteHiveBacktickIdentifier(trimmedSchema) + "." + quoteHiveBacktickIdentifier(trimmedTable);
+    }
+
+    private static String quoteHiveBacktickIdentifier(String identifier) {
+        return "`" + identifier.replace("`", "``") + "`";
     }
 
     private static String oracleMetadataObjectType(String objectType) {

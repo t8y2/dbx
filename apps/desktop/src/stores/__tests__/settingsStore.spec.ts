@@ -120,6 +120,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ sidebarShowConnectionNotes: false }).sidebarShowConnectionNotes).toBe(false);
   });
 
+  it("shows sidebar tooltips by default and preserves an explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).sidebarShowTooltips).toBe(true);
+    expect(normalizeEditorSettings({ sidebarShowTooltips: false }).sidebarShowTooltips).toBe(false);
+    expect(normalizeEditorSettings({ sidebarShowTooltips: true }).sidebarShowTooltips).toBe(true);
+  });
+
   it("defaults SQL execution to the current statement and migrates legacy execute-all settings", () => {
     expect(normalizeEditorSettings({}).executeMode).toBe("current");
     expect(normalizeEditorSettings({ executeMode: "all" }).executeMode).toBe("current");

@@ -397,6 +397,21 @@ struct ServerLargeValueMarkerValue {
     original_bytes: Option<usize>,
 }
 
+/// Some PostgreSQL-compatible servers (for example KingbaseES instances with
+/// case-insensitive identifiers) fold even quoted column aliases, so the
+/// internal preview marker prefix must be matched ASCII case-insensitively.
+fn strip_large_value_marker_prefix(column: &str) -> Option<&str> {
+    let prefix = crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX;
+    if column.len() < prefix.len() {
+        return None;
+    }
+    let head = column.get(..prefix.len())?;
+    if !head.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    column.get(prefix.len()..)
+}
+
 fn server_large_value_alias(
     suffix: &str,
 ) -> Option<(usize, Option<ServerLargeValuePreviewKind>, Option<&'static str>)> {
@@ -406,16 +421,16 @@ fn server_large_value_alias(
     let (kind, source_index) = suffix.split_once('_')?;
     let source_index = source_index.parse::<usize>().ok()?;
     let (preview_kind, source_type) = match kind {
-        "T" => (ServerLargeValuePreviewKind::Text, None),
-        "B" => (ServerLargeValuePreviewKind::Binary, None),
-        "V" => (ServerLargeValuePreviewKind::Vector, Some("vector")),
-        "J" => (ServerLargeValuePreviewKind::Text, Some("json")),
-        "K" => (ServerLargeValuePreviewKind::Text, Some("jsonb")),
-        "S" => (ServerLargeValuePreviewKind::Text, Some("tsvector")),
-        "C" => (ServerLargeValuePreviewKind::Deferred, Some("clob")),
-        "N" => (ServerLargeValuePreviewKind::Deferred, Some("nclob")),
-        "L" => (ServerLargeValuePreviewKind::Deferred, Some("blob")),
-        "F" => (ServerLargeValuePreviewKind::Deferred, Some("bfile")),
+        "T" | "t" => (ServerLargeValuePreviewKind::Text, None),
+        "B" | "b" => (ServerLargeValuePreviewKind::Binary, None),
+        "V" | "v" => (ServerLargeValuePreviewKind::Vector, Some("vector")),
+        "J" | "j" => (ServerLargeValuePreviewKind::Text, Some("json")),
+        "K" | "k" => (ServerLargeValuePreviewKind::Text, Some("jsonb")),
+        "S" | "s" => (ServerLargeValuePreviewKind::Text, Some("tsvector")),
+        "C" | "c" => (ServerLargeValuePreviewKind::Deferred, Some("clob")),
+        "N" | "n" => (ServerLargeValuePreviewKind::Deferred, Some("nclob")),
+        "L" | "l" => (ServerLargeValuePreviewKind::Deferred, Some("blob")),
+        "F" | "f" => (ServerLargeValuePreviewKind::Deferred, Some("bfile")),
         _ => return None,
     };
     Some((source_index, Some(preview_kind), source_type))
@@ -483,9 +498,8 @@ fn truncate_server_large_value_preview(
 fn server_large_value_markers(result: &db::QueryResult) -> Vec<ServerLargeValueMarker> {
     let mut markers = Vec::new();
     for (result_index, column) in result.columns.iter().enumerate() {
-        let Some((source_index, preview_kind, source_type)) = column
-            .strip_prefix(crate::sql_dialect::DBX_LARGE_VALUE_BYTES_COLUMN_PREFIX)
-            .and_then(server_large_value_alias)
+        let Some((source_index, preview_kind, source_type)) =
+            strip_large_value_marker_prefix(column).and_then(server_large_value_alias)
         else {
             continue;
         };
@@ -8985,6 +8999,72 @@ for line in sys.stdin:
                 column_index: 1,
                 original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES,
             }]
+        );
+    }
+
+    #[test]
+    fn extracts_lowercased_server_large_value_markers_from_case_folding_servers() {
+        // KingbaseES instances with case-insensitive identifiers return even
+        // quoted marker aliases folded to lowercase; the markers must still be
+        // consumed and stripped instead of leaking into the data grid.
+        let mut result = db::QueryResult {
+            columns: vec![
+                "id".to_string(),
+                "payload".to_string(),
+                "__dbx_large_value_bytes_t_1".to_string(),
+                "note".to_string(),
+                "__dbx_large_value_bytes_t_2".to_string(),
+            ],
+            column_types: vec![
+                "integer".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+                "text".to_string(),
+            ],
+            column_sortables: vec![true; 5],
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![
+                vec![
+                    serde_json::json!(1),
+                    serde_json::json!("长文本预览内容"),
+                    serde_json::json!("T:4"),
+                    serde_json::json!("abcdefgh"),
+                    serde_json::json!("T:4"),
+                ],
+                vec![
+                    serde_json::json!(2),
+                    serde_json::json!("短值"),
+                    serde_json::json!("T:4"),
+                    serde_json::json!("b"),
+                    serde_json::json!("T:4"),
+                ],
+            ],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        };
+
+        let cells = extract_server_large_value_markers(&mut result);
+
+        assert_eq!(result.columns, vec!["id", "payload", "note"]);
+        assert_eq!(result.column_types, vec!["integer", "text", "text"]);
+        assert_eq!(
+            result.rows[0],
+            vec![serde_json::json!(1), serde_json::json!("长文本预..."), serde_json::json!("abcd...")]
+        );
+        assert_eq!(result.rows[1], vec![serde_json::json!(2), serde_json::json!("短值"), serde_json::json!("b")]);
+        assert_eq!(
+            cells,
+            vec![
+                db::LargeValueCell { row_index: 0, column_index: 1, original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES },
+                db::LargeValueCell { row_index: 0, column_index: 2, original_bytes: SERVER_LARGE_VALUE_UNKNOWN_BYTES },
+            ]
         );
     }
 

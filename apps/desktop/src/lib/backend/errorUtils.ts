@@ -92,6 +92,13 @@ export function isManualTransactionSessionExpired(error: unknown): boolean {
   return message?.startsWith("Transaction session not found or expired;") === true || message === "Transaction was auto-rolled back due to 5 minutes of inactivity";
 }
 
+export function isUnsupportedManualTransactionMethod(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  if (!message) return false;
+  const normalized = message.toLowerCase();
+  return normalized.includes("begin_manual_transaction") && (normalized.includes("unknown method") || normalized.includes("method not found"));
+}
+
 function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, depth: number): BackendError | null {
   if (depth > MAX_ERROR_PARSE_DEPTH) return null;
 

@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { currentLocale } from "@/i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, createLatestRequestGuard, fetchChangelog, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
+import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
+import { changelogLangFromLocale, changelogReleaseUrl, changelogWebsiteUrl, createLatestRequestGuard, fetchChangelog, type ChangelogItem, type ChangelogLang, type ChangelogRelease } from "@/lib/app/changelog";
 
 const PAGE_SIZE = 5;
 
@@ -78,6 +79,11 @@ function openExternalUrl(url: string) {
   } else {
     window.open(url, "_blank", "noopener,noreferrer");
   }
+}
+
+function formatChangelogItemHtml(item: ChangelogItem): string {
+  const title = formatAiInlineMarkdownFragment(item.title);
+  return item.desc ? `${title} — ${formatAiInlineMarkdownFragment(item.desc)}` : title;
 }
 
 function isExpanded(tag: string) {
@@ -193,10 +199,7 @@ watch(changelogLang, (lang) => {
               <ul class="space-y-1.5">
                 <li v-for="(item, itemIndex) in section.items" :key="itemIndex" class="flex gap-2 text-xs leading-relaxed text-muted-foreground">
                   <span class="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-muted-foreground/60" />
-                  <span>
-                    <template v-if="item.desc">{{ item.title }} — {{ item.desc }}</template>
-                    <template v-else>{{ item.title }}</template>
-                  </span>
+                  <span class="min-w-0 [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2" v-html="formatChangelogItemHtml(item)" @click="handleAiMarkdownLinkClick($event, openExternalUrl)" />
                 </li>
               </ul>
             </div>

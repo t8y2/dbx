@@ -937,8 +937,8 @@ export async function writeExternalSqlFile(path: string, content: string, option
   });
 }
 
-export async function saveExternalSqlFile(defaultFileName: string, content: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
-  return invoke("save_external_sql_file", { defaultFileName, content });
+export async function saveExternalSqlFile(defaultFileName: string, content: string, filterExtension?: string): Promise<{ path: string; version: ExternalSqlFileVersion } | null> {
+  return invoke("save_external_sql_file", { defaultFileName, content, filterExtension });
 }
 
 export interface SqlFileEntry {

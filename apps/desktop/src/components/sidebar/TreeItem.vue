@@ -581,6 +581,7 @@ const detailTooltip = computed(() => {
 });
 
 function isTooltipDisabled(): boolean {
+  if (!settingsStore.editorSettings.sidebarShowTooltips) return true;
   if (detailTooltip.value?.rows.length) return isRenamingGroup.value;
   return isRenamingGroup.value || !labelOverflowing.value;
 }
@@ -1033,6 +1034,7 @@ function shouldMeasureLabelOverflow(): boolean {
     hasDetailTooltip: !!detailTooltip.value?.rows.length,
     isRenaming: isRenamingGroup.value || isRenamingSavedSql.value || isRenamingConnection.value,
     usesFullWidthLabel: usesFullWidthLabel.value,
+    tooltipsDisabled: !settingsStore.editorSettings.sidebarShowTooltips,
   });
 }
 

@@ -80,6 +80,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "updateNotificationsEnabled",
   "sidebarObjectInfoMode",
   "sidebarAllowHorizontalScroll",
+  "sidebarShowTooltips",
   "sidebarIndent",
   "sidebarFontSize",
   "sidebarHiddenTablePrefixes",

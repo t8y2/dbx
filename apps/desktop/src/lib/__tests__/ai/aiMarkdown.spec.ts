@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aiMarkdownLinkUrlFromClick, formatAiInlineMarkdown, handleAiMarkdownLinkClick, normalizeAiMarkdownLink } from "@/lib/ai/aiMarkdown";
+import { aiMarkdownLinkUrlFromClick, formatAiInlineMarkdown, formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick, normalizeAiMarkdownLink } from "@/lib/ai/aiMarkdown";
 
 describe("formatAiInlineMarkdown", () => {
   it("renders http links for external browser handling", () => {
@@ -20,6 +20,24 @@ describe("formatAiInlineMarkdown", () => {
 
   it("escapes raw html from assistant text", () => {
     const html = formatAiInlineMarkdown("<script>alert(1)</script>");
+
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).not.toContain("<script>");
+  });
+});
+
+describe("formatAiInlineMarkdownFragment", () => {
+  it("renders single-line content without a block paragraph wrapper", () => {
+    const html = formatAiInlineMarkdownFragment("Title — see [PR #1](https://example.com/pull/1) and `code`.");
+
+    expect(html).not.toContain("<p>");
+    expect(html).toContain('href="https://example.com/pull/1"');
+    expect(html).toContain("<code");
+    expect(html).toContain("Title — see");
+  });
+
+  it("escapes raw html like the block renderer", () => {
+    const html = formatAiInlineMarkdownFragment("<script>alert(1)</script>");
 
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).not.toContain("<script>");

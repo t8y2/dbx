@@ -93,6 +93,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
+      injectDefaultTimeSeriesWhere: true,
       ...options,
     });
   }

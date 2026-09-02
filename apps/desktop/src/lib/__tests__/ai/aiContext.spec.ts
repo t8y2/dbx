@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
+import { aiSchemaSelectionSupported, buildAiContext, resolveAiDatabaseTarget, resolveAiNamespaceSelection, resolveDefaultAiSchema, runAgentStream } from "@/lib/ai/ai";
 import type { AiConfig } from "@/types/ai";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
@@ -182,5 +182,30 @@ describe("PostgreSQL AI schema routing", () => {
       "session-postgres",
     );
     expect(apiMock.aiAgentStream).toHaveBeenCalledWith("session-postgres", expect.any(Object), "postgres-1", "app", "main_chatdr", "postgres", expect.any(Function), "agent", false, undefined, undefined, undefined, undefined);
+  });
+});
+
+describe("AI schema selector visibility", () => {
+  it("matches the effective type consumed by resolveAiDatabaseTarget", () => {
+    const gbaseLikeMysql: ConnectionConfig = {
+      id: "gbase-1",
+      name: "GBase",
+      db_type: "gbase",
+      host: "localhost",
+      port: 5258,
+      username: "dbx",
+      password: "",
+      database: "app",
+    };
+    // gbase is schema-aware at the raw metadata level but maps to a
+    // MySQL-like effective type, so the AI target ignores schema selections
+    // and the selector must stay hidden to avoid a silently dropped choice.
+    expect(aiSchemaSelectionSupported(gbaseLikeMysql)).toBe(false);
+    const tab: QueryTab = queryTab("app", "sysmaster");
+    expect(resolveAiDatabaseTarget(tab, gbaseLikeMysql)).toEqual({ database: "app" });
+
+    const postgres: ConnectionConfig = { ...gbaseLikeMysql, id: "pg-1", db_type: "postgres" };
+    expect(aiSchemaSelectionSupported(postgres)).toBe(true);
+    expect(resolveAiDatabaseTarget(queryTab("app", "public"), postgres)).toEqual({ database: "app", schema: "public" });
   });
 });

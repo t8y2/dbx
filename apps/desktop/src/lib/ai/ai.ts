@@ -720,6 +720,17 @@ function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType
   return effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
 }
 
+/**
+ * Whether the AI target resolution honors a schema selection for this
+ * connection. Mirrors the `isSchemaAware(aiDatabaseTypeForConnection(...))`
+ * gate inside `resolveAiDatabaseTarget` so UI visibility cannot diverge from
+ * what the AI request actually consumes (e.g. gbase maps to a MySQL-like
+ * effective type that ignores schemas).
+ */
+export function aiSchemaSelectionSupported(connection: ConnectionConfig): boolean {
+  return isSchemaAware(aiDatabaseTypeForConnection(connection));
+}
+
 function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
   return resolveAiDatabaseTarget(tab, connection).database;
 }

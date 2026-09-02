@@ -73,6 +73,7 @@ import {
   resolveAiDatabaseTarget,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
+  aiSchemaSelectionSupported,
   runAgentStream,
   isVectorDbType,
   isValidActionForMode,
@@ -1321,7 +1322,7 @@ const selectedDatabaseLabel = computed(() => {
 
 const showAiSchemaSelector = computed(() => {
   const connection = props.connection;
-  return !!connection && connection.db_type !== "dameng" && isSchemaAware(connection.db_type);
+  return !!connection && connection.db_type !== "dameng" && aiSchemaSelectionSupported(connection);
 });
 
 const aiSchemaDatabaseKey = computed(() => {

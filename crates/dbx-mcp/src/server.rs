@@ -1,22 +1,21 @@
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{ConnectionSummary, DbxBackend, format_query_result, new_connection_config, parse_database_type};
+use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
 use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use crate::session::{McpSession, McpSessionStore};
 use dbx_core::{
-    agent_tools::{QueryCellWindow, format_query_result_as_text, normalize_sql_for_confirmation},
+    agent_tools::{format_query_result_as_text, normalize_sql_for_confirmation, QueryCellWindow},
     database_manifest,
-    db::redis_driver::{RedisCommandResult, RedisCommandSafety, classify_command, parse_command_argv},
+    db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
     production_safety::{
         is_production_database, mongo_pipeline_targets_production_database, sql_references_disallowed_database,
@@ -24,7 +23,7 @@ use dbx_core::{
     },
     query_execution_sql::is_write_sql_for_database,
     sql_risk::{
-        SqlRisk, classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch,
+        classify_sql_risk_for_database, is_dangerous_sql_for_database, mcp_sql_has_forbidden_database_switch, SqlRisk,
     },
     storage::{McpDatabaseScope, McpGlobalPolicy},
 };
@@ -700,7 +699,10 @@ impl DbxMcpServer {
         // statement like the other rejects: a single DDL statement is plain
         // auto-commit and safe.
         if transactional
-            && dbx_core::query::batch_transaction_ddl_is_unrollbackable(Some(connection.db_type), &execution_plan.statements)
+            && dbx_core::query::batch_transaction_ddl_is_unrollbackable(
+                Some(connection.db_type),
+                &execution_plan.statements,
+            )
         {
             return tool_error(
                 "TRANSACTION_WITH_DDL_UNSUPPORTED",
@@ -2325,13 +2327,11 @@ mod tests {
 
         assert_eq!(tables.get("type"), Some(&serde_json::json!("array")));
         assert_eq!(tables.pointer("/items/type"), Some(&serde_json::json!("string")));
-        assert!(
-            !tool
-                .input_schema
-                .get("required")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|required| required.iter().any(|field| field == "tables"))
-        );
+        assert!(!tool
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|required| required.iter().any(|field| field == "tables")));
     }
 
     #[test]
@@ -3453,9 +3453,7 @@ mod tests {
         let confirmed = Some("INSERT INTO t VALUES (1)");
 
         // An exact match (modulo surrounding whitespace) passes.
-        assert!(
-            confirmed_batch_sql_block_reason("  INSERT INTO t VALUES (1)  ", postgres_db_type, confirmed).is_none()
-        );
+        assert!(confirmed_batch_sql_block_reason("  INSERT INTO t VALUES (1)  ", postgres_db_type, confirmed).is_none());
         // A differing write script fails closed.
         let blocked = confirmed_batch_sql_block_reason(
             "INSERT INTO t VALUES (1); INSERT INTO u VALUES (2)",

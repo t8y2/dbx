@@ -1,4 +1,5 @@
 import { classifyElasticsearchRequestRisk, classifyElasticsearchSourceRisk, type ElasticsearchRequestRisk } from "@/lib/elasticsearch/elasticsearchRequestRisk";
+import { mongoAggregateWriteStage, splitMongoCommandRanges, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
 
 export type SqlRiskLevel = "read" | "write" | "ddl" | "transaction" | "unknown";
@@ -45,6 +46,12 @@ export function splitSqlStatementsForSafety(sql: string): string[] {
 }
 
 export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskAssessment {
+  const mongoStatements = mongoShellStatements(sql, options.dialect);
+  if (mongoStatements) {
+    const highest = highestRiskStatement(mongoStatements);
+    return { ...highest, statements: mongoStatements };
+  }
+
   // REST requests carry a JSON body that must not be split on semicolons, and
   // every request in the text is classified so the highest risk wins.
   const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchSourceRisk);
@@ -57,6 +64,9 @@ export function classifySqlRisk(sql: string, options: SqlRiskOptions = {}): SqlR
 }
 
 export function classifySqlStatementRisk(sql: string, options: SqlRiskOptions = {}): SqlRiskStatementAssessment {
+  const mongoStatements = mongoShellStatements(sql, options.dialect);
+  if (mongoStatements) return highestRiskStatement(mongoStatements);
+
   const dynamodbRisk = classifyDynamoDbStatementRisk(sql, options.dialect);
   if (dynamodbRisk) return dynamodbRisk;
   const searchEngineRisk = searchEngineAssessment(sql, options.dialect, classifyElasticsearchRequestRisk);
@@ -80,6 +90,39 @@ function searchEngineAssessment(sql: string, dialect: DatabaseType | string | un
   const risk = classify(sql);
   if (!risk) return null;
   return { risk: risk === "read" ? "read" : risk === "write" ? "write" : "ddl", firstKeyword: "rest" };
+}
+
+const MONGO_READ_KINDS = new Set<MongoCommand["kind"]>(["find", "findOne", "countDocuments", "distinct", "getIndexes", "collectionStats", "version", "showDatabases", "use"]);
+const MONGO_DDL_KINDS = new Set<MongoCommand["kind"]>(["createIndex", "dropIndex", "dropIndexes", "dropCollection", "createUser"]);
+
+/**
+ * Mongo query tabs execute shell commands through the structured Mongo path,
+ * not the SQL tokenizer. Classify the same parsed command kinds here so
+ * production protection does not turn ordinary reads into write confirmations.
+ * Unknown or unparsed commands remain unsafe by falling through to the generic
+ * classifier.
+ */
+function mongoShellStatements(sql: string, dialect: DatabaseType | string | undefined): SqlRiskStatementAssessment[] | null {
+  if (dialect !== "mongodb") return null;
+  const commands = splitMongoCommandRanges(sql);
+  if (!commands.length) return null;
+
+  return commands.map(({ command }) => ({
+    risk: mongoCommandRisk(command),
+    firstKeyword: command.kind,
+  }));
+}
+
+function highestRiskStatement(statements: SqlRiskStatementAssessment[]): SqlRiskStatementAssessment {
+  return statements.reduce<SqlRiskStatementAssessment>((current, statement) => (RISK_ORDER[statement.risk] > RISK_ORDER[current.risk] ? statement : current), { risk: "read" });
+}
+
+function mongoCommandRisk(command: MongoCommand): SqlRiskLevel {
+  if (MONGO_READ_KINDS.has(command.kind)) return "read";
+  if (command.kind === "aggregate") return mongoAggregateWriteStage(command.pipeline) ? "write" : "read";
+  if (command.kind === "runCommand") return "unknown";
+  if (MONGO_DDL_KINDS.has(command.kind)) return "ddl";
+  return "write";
 }
 
 function classifyDynamoDbStatementRisk(sql: string, dialect?: DatabaseType | string): SqlRiskStatementAssessment | null {

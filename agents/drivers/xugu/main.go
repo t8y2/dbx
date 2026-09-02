@@ -2765,7 +2765,7 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		item.DataType = normalizeXuguColumnType(item.DataType, varying)
 		item.IsNullable = !truthy(notNull)
 		item.DefaultOnNull = xuguInt(onNull)
-		item.IsPrimaryKey = primaryKeys[item.Name]
+		item.IsPrimaryKey = xuguPrimaryKeyMatches(item.Name, primaryKeys)
 		item.NumericPrecision, item.NumericScale, item.CharacterMaximumLength = decodeXuguScale(item.DataType, scale)
 		result = append(result, item)
 	}
@@ -2802,7 +2802,7 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 		item := columnInfo{
 			Name:         columnType.Name(),
 			DataType:     columnType.DatabaseTypeName(),
-			IsPrimaryKey: primaryKeys[columnType.Name()],
+			IsPrimaryKey: xuguPrimaryKeyMatches(columnType.Name(), primaryKeys),
 		}
 		if nullable, ok := columnType.Nullable(); ok {
 			item.IsNullable = nullable
@@ -2858,6 +2858,24 @@ func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error
 		}
 	}
 	return result, rows.Err()
+}
+
+// Xugu may report an unquoted primary-key name with a different case from
+// ALL_COLUMNS (for example, DEFINE contains "ID" while COL_NAME is "id").
+// Exact matches always win so quoted identifiers that differ only by case stay
+// distinct; a case-insensitive fallback is used only when it identifies one
+// primary-key column.
+func xuguPrimaryKeyMatches(columnName string, primaryKeys map[string]bool) bool {
+	if primaryKeys[columnName] {
+		return true
+	}
+	matches := 0
+	for primaryKey := range primaryKeys {
+		if strings.EqualFold(primaryKey, columnName) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {

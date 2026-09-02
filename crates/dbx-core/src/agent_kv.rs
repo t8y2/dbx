@@ -1007,13 +1007,20 @@ async fn ensure_etcd_dangerous_action_capability(
         _ => AgentCapability::EtcdAuth,
     };
     ensure_agent_kv_pool(state, connection_id).await?;
+    let agent_key = {
+        let configs = state.configs.read().await;
+        configs
+            .get(connection_id)
+            .and_then(|config| crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()))
+    };
     let connections = state.connections.read().await;
     let PoolKind::Agent(client) = connections.get(connection_id).ok_or("Connection not found")? else {
         return Err("Not an agent key-value connection".to_string());
     };
     if !client.lock().await.supports_capability(capability) {
+        let note = etcd_capability_unavailable_note(agent_key);
         return Err(format!(
-            "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}. Update the etcd driver and reconnect.",
+            "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}.{note}",
             capability.as_str()
         ));
     }
@@ -1724,6 +1731,12 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             .is_some_and(|value| value.as_str() == Some("0") || value.as_i64() == Some(0));
     ensure_agent_kv_pool(state, connection_id).await?;
 
+    let agent_key = {
+        let configs = state.configs.read().await;
+        configs
+            .get(connection_id)
+            .and_then(|config| crate::agent_catalog::agent_key(&config.db_type, config.driver_profile.as_deref()))
+    };
     let client = {
         let connections = state.connections.read().await;
         match connections.get(connection_id) {
@@ -1740,38 +1753,35 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
         if let Some(capability) =
             required_capabilities.into_iter().find(|capability| !agent.supports_capability(*capability))
         {
+            let note = etcd_capability_unavailable_note(agent_key);
             return Err(match capability {
-                    AgentCapability::KvTtl => {
-                        "Installed etcd Agent does not support TTL. Update the etcd driver and reconnect.".to_string()
-                    }
-                    AgentCapability::KvCas => {
-                        "ETCD_CAS_UNSUPPORTED: Installed etcd Agent cannot safely compare and update Keys. Update the etcd driver and reconnect."
-                            .to_string()
-                    }
-                    AgentCapability::KvListValues => {
-                        "ETCD_LIST_VALUES_UNSUPPORTED: Installed etcd Agent cannot export or search Key values safely. Update the etcd driver and reconnect."
-                            .to_string()
-                    }
-                    AgentCapability::KvStatus => {
-                        "ETCD_STATUS_UNSUPPORTED: Installed etcd Agent does not support Dashboard status. Update the etcd driver and reconnect."
-                            .to_string()
-                    }
-                    AgentCapability::KvHistory => {
-                        "ETCD_HISTORY_UNSUPPORTED: Installed etcd Agent does not support key history. Update the etcd driver and reconnect."
-                            .to_string()
-                    }
-                    AgentCapability::EtcdCompaction
-                    | AgentCapability::EtcdDefrag
-                    | AgentCapability::EtcdWatch
-                    | AgentCapability::EtcdLease
-                    | AgentCapability::EtcdAuth => {
-                        format!(
-                            "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}. Update the etcd driver and reconnect.",
-                            capability.as_str()
-                        )
-                    }
-                    _ => format!("Agent does not support required capability: {}", capability.as_str()),
-                });
+                AgentCapability::KvTtl => {
+                    format!("Installed etcd Agent does not support TTL.{note}")
+                }
+                AgentCapability::KvCas => {
+                    format!("ETCD_CAS_UNSUPPORTED: Installed etcd Agent cannot safely compare and update Keys.{note}")
+                }
+                AgentCapability::KvListValues => {
+                    format!("ETCD_LIST_VALUES_UNSUPPORTED: Installed etcd Agent cannot export or search Key values safely.{note}")
+                }
+                AgentCapability::KvStatus => {
+                    format!("ETCD_STATUS_UNSUPPORTED: Installed etcd Agent does not support Dashboard status.{note}")
+                }
+                AgentCapability::KvHistory => {
+                    format!("ETCD_HISTORY_UNSUPPORTED: Installed etcd Agent does not support key history.{note}")
+                }
+                AgentCapability::EtcdCompaction
+                | AgentCapability::EtcdDefrag
+                | AgentCapability::EtcdWatch
+                | AgentCapability::EtcdLease
+                | AgentCapability::EtcdAuth => {
+                    format!(
+                        "ETCD_CAPABILITY_UNSUPPORTED: Installed etcd Agent does not support {}.{note}",
+                        capability.as_str()
+                    )
+                }
+                _ => format!("Agent does not support required capability: {}", capability.as_str()),
+            });
         }
         agent.call_kv_method(method, params).await
     };
@@ -1785,6 +1795,17 @@ async fn call_agent_kv<T: serde::de::DeserializeOwned + Send + 'static>(
             }
             Err(normalized)
         }
+    }
+}
+
+/// Capability-blocked etcd calls explain themselves differently depending on
+/// the backend: a missing capability on the v3 agent suggests upgrading the
+/// driver, while the dedicated v2 agent simply cannot offer it.
+fn etcd_capability_unavailable_note(agent_key: Option<&str>) -> &'static str {
+    if agent_key == Some("etcd2") {
+        " The etcd v2 API does not provide this capability."
+    } else {
+        " Update the etcd driver and reconnect."
     }
 }
 

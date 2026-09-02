@@ -11,7 +11,7 @@ SOURCE_GLOBS = ("*/src/main/**/*.java", "drivers/*/src/main/**/*.java")
 KOTLIN_FILE_SUFFIXES = (".kt", ".kts")
 KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
-NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
+NON_JDBC_AGENT_MODULES = {"mongodb", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
     "cassandra": "drivers/cassandra-go",
     "duckdb": "drivers/duckdb",
@@ -27,6 +27,8 @@ NATIVE_ONLY_AGENT_MODULES = {
     "rabbitmq": "drivers/rabbitmq",
     "rocketmq": "drivers/rocketmq",
     "zookeeper": "drivers/zookeeper",
+    "etcd": "drivers/etcd-go",
+    "etcd2": "drivers/etcd2-go",
 }
 CRATE_NATIVE_AGENT_MODULES = {
     "sqlite-worker": Path("..") / "crates" / "dbx-sqlite-worker",

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-License-Identifier: MIT
 
+mod clipboard_history;
 mod drag_drop;
 mod util;
 
@@ -74,6 +75,7 @@ impl Drop for InnerWebView {
       let _ = unsafe { DestroyWindow(self.hwnd) };
     }
     unsafe { Self::dettach_parent_subclass(*self.parent.borrow()) }
+    unsafe { clipboard_history::detach(*self.parent.borrow()) }
   }
 }
 
@@ -597,6 +599,12 @@ impl InnerWebView {
     if !is_child {
       unsafe { Self::attach_parent_subclass(parent, controller) };
     }
+
+    // Keep Windows Clipboard History (Win+V) working for copies made inside
+    // the WebView: WebView2 writes the clipboard from an internal window the
+    // history service ignores (MicrosoftEdge/WebView2Feedback#5650). The
+    // host window re-owns those writes; see webview2/clipboard_history.rs.
+    unsafe { clipboard_history::attach(parent) };
 
     unsafe {
       controller.SetIsVisible(attributes.visible)?;
@@ -1755,6 +1763,8 @@ impl InnerWebView {
       if !self.is_child {
         Self::dettach_parent_subclass(*self.parent.borrow());
         Self::attach_parent_subclass(parent, &self.controller);
+        clipboard_history::detach(*self.parent.borrow());
+        clipboard_history::attach(parent);
 
         *self.parent.borrow_mut() = parent;
 

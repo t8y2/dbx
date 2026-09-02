@@ -15,7 +15,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, moveExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
@@ -257,7 +257,7 @@ async function openFile(path: string) {
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
-    if (isExternalSqlFileTooLargeError(e)) {
+    if (isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)) {
       executeFile(path);
       toast(t("sqlFile.largeFileExecutionOpened", { size: formatSqlFileSize(e.sizeBytes) }), 6000);
       return;
@@ -376,7 +376,12 @@ function handlePanelClick(event: MouseEvent) {
 
 function normalizedSqlFileName(name: string) {
   const trimmed = name.trim();
-  return /\.sql$/i.test(trimmed) ? trimmed : `${trimmed}.sql`;
+  return isSqlFilePath(trimmed) ? trimmed : `${trimmed}.sql`;
+}
+
+function normalizedRenamedFileName(name: string, currentName: string) {
+  const trimmed = name.trim();
+  return isSqlFilePath(currentName) ? normalizedSqlFileName(trimmed) : trimmed;
 }
 
 function openCreateDialog(rootPath: string, directoryPath: string) {
@@ -409,7 +414,7 @@ async function renameSqlFile() {
   const target = renameTarget.value;
   if (!target || !fileNameInput.value.trim()) return;
   try {
-    const nextPath = await api.renameSqlFileInFolder(target.folderPath, target.entry.path, normalizedSqlFileName(fileNameInput.value));
+    const nextPath = await api.renameSqlFileInFolder(target.folderPath, target.entry.path, normalizedRenamedFileName(fileNameInput.value, target.entry.name));
     // Renaming does not change content, and re-reading here would make a
     // successful rename appear to fail for files too large for the editor.
     queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath);
@@ -487,9 +492,11 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
   }
 
   // file
-  return [
-    { label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode },
-    { label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play },
+  const items: ContextMenuItem[] = [{ label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode }];
+  if (isSqlFilePath(target.entry.name)) {
+    items.push({ label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play });
+  }
+  items.push(
     { label: "", separator: true },
     { label: t("sqlFileTree.revealInFileManager"), action: () => revealInFileManager(target.entry.path), icon: FolderSearch },
     { label: t("sqlFileTree.copyPath"), action: () => copyPath(target.entry.path), icon: Copy },
@@ -497,7 +504,8 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
     { label: t("sqlFileTree.renameFile"), action: () => openRenameDialog(target), icon: Pencil },
     { label: "", separator: true },
     { label: t("sqlFileTree.deleteFile"), action: () => openDeleteDialog(target), icon: Trash2, variant: "destructive" },
-  ];
+  );
+  return items;
 });
 
 function expandSubtree(target: Extract<ContextTarget, { kind: "dir" }>) {

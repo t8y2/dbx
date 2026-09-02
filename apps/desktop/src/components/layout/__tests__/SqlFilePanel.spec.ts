@@ -39,6 +39,11 @@ describe("SqlFilePanel file renaming", () => {
     expect(renameFunction).toContain("queryStore.relocateExternalSqlFilePath(target.entry.path, nextPath)");
     expect(renameFunction).not.toContain("readExternalSqlFileSnapshot(nextPath)");
   });
+
+  it("preserves non-SQL extensions while keeping SQL rename convenience", () => {
+    expect(panelSource).toContain("normalizedRenamedFileName(fileNameInput.value, target.entry.name)");
+    expect(panelSource).toContain("isSqlFilePath(currentName) ? normalizedSqlFileName(trimmed) : trimmed");
+  });
 });
 
 describe("SqlFilePanel directory actions", () => {
@@ -57,5 +62,10 @@ describe("SqlFilePanel file filter", () => {
   it("renders the translated filter placeholder", () => {
     expect(panelSource).toContain("t('sqlFileTree.fileFilterPlaceholder')");
     expect(panelSource).not.toContain("const fileFilterPlaceholder =");
+  });
+
+  it("offers SQL execution only for SQL files", () => {
+    expect(panelSource).toContain("if (isSqlFilePath(target.entry.name))");
+    expect(panelSource).toContain("isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)");
   });
 });

@@ -100,6 +100,7 @@ const assetIcons: Record<string, string> = {
   xugu: "xugu.png",
   iotdb: "iotdb",
   etcd: "etcd",
+  etcd2: "etcd",
   qdrant: "qdrant",
   milvus: "milvus.png",
   weaviate: "weaviate",

@@ -476,6 +476,7 @@ profiles:
     icon: hive
     port: 10000
     user: ""
+    urlParams: auth=noSasl
     category: domestic
     pickerLabel: ArgoDB
   - id: impala
@@ -621,6 +622,12 @@ profiles:
     port: 2379
     user: ""
     category: registry_config
+  - id: etcd-v2
+    dbType: etcd
+    label: etcd 2.x (v2 API)
+    icon: etcd
+    port: 2379
+    user: ""
   - id: zookeeper
     dbType: zookeeper
     label: Apache ZooKeeper

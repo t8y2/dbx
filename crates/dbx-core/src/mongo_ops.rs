@@ -6,7 +6,7 @@ use crate::db::mongo_driver::{
 };
 use crate::document_ops::CollectionInfo;
 use crate::mongo_shell::MongoCommand;
-use crate::types::{IndexInfo, QueryResult};
+use crate::types::QueryResult;
 
 pub const MONGO_SHOW_DATABASES_DATABASE: &str = "admin";
 pub const MONGO_SHOW_DATABASES_COMMAND_JSON: &str = r#"{"listDatabases":1}"#;
@@ -1009,8 +1009,8 @@ pub async fn execute_mongo_command_core(
             Ok(mongo_documents_query_result(limit_mongo_documents(result, max_rows).documents))
         }
         MongoCommand::GetIndexes { collection } => {
-            let indexes = crate::schema::list_indexes_core(state, connection_id, database, "", collection).await?;
-            Ok(mongo_indexes_query_result(indexes, max_rows))
+            let specs = mongo_list_index_specs_core(state, connection_id, database, collection).await?;
+            Ok(mongo_indexes_query_result(specs, max_rows))
         }
         MongoCommand::CollectionStats { collection, metric, scale } => {
             let stats = mongo_collection_stats_core(state, connection_id, database, collection, scale.clone()).await?;
@@ -1156,20 +1156,38 @@ fn affected_query_result(affected_rows: u64) -> QueryResult {
     query_result(Vec::new(), Vec::new(), affected_rows)
 }
 
-pub fn mongo_indexes_query_result(indexes: Vec<IndexInfo>, max_rows: usize) -> QueryResult {
+/// Format [`MongoIndexSpec`]s the way the desktop index panel reports them, plus
+/// the TTL column (`expireAfterSeconds`) that the shared `IndexInfo` could never carry.
+pub fn mongo_indexes_query_result(indexes: Vec<mongo_driver::MongoIndexSpec>, max_rows: usize) -> QueryResult {
     use serde_json::Value;
 
     let rows = indexes
         .into_iter()
         .take(max_rows.max(1))
         .map(|index| {
+            let columns = index.keys.iter().map(|key| key.field.clone()).collect::<Vec<_>>().join(", ");
+            let index_type = index.keys.iter().any(|key| !key.direction.is_empty()).then(|| {
+                index
+                    .keys
+                    .iter()
+                    .map(|key| {
+                        if key.direction.is_empty() {
+                            key.field.clone()
+                        } else {
+                            format!("{}: {}", key.field, key.direction)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            });
             vec![
                 Value::String(index.name),
-                Value::String(index.columns.join(", ")),
+                Value::String(columns),
                 Value::Bool(index.is_unique),
                 Value::Bool(index.is_primary),
-                index.index_type.map(Value::String).unwrap_or(Value::Null),
-                index.filter.map(Value::String).unwrap_or(Value::Null),
+                index_type.map(Value::String).unwrap_or(Value::Null),
+                index.partial_filter_expression.map(Value::String).unwrap_or(Value::Null),
+                index.expire_after_seconds.map(Value::from).unwrap_or(Value::Null),
             ]
         })
         .collect::<Vec<_>>();
@@ -1182,6 +1200,7 @@ pub fn mongo_indexes_query_result(indexes: Vec<IndexInfo>, max_rows: usize) -> Q
             "primary".to_string(),
             "type".to_string(),
             "filter".to_string(),
+            "expireAfterSeconds".to_string(),
         ],
         rows,
         affected_rows,
@@ -1843,45 +1862,121 @@ for line in sys.stdin:
     fn mongo_indexes_query_result_matches_desktop_contract_and_limits_rows() {
         let result = mongo_indexes_query_result(
             vec![
-                IndexInfo {
+                mongo_driver::MongoIndexSpec {
                     name: "_id_".to_string(),
-                    columns: vec!["_id".to_string()],
-                    is_unique: false,
+                    keys: vec![mongo_driver::MongoIndexKey { field: "_id".to_string(), direction: "1".to_string() }],
+                    is_unique: true,
                     is_primary: true,
-                    filter: None,
-                    index_type: Some("_id: 1".to_string()),
-                    included_columns: None,
-                    comment: None,
-                    key_is_expression: Vec::new(),
+                    is_sparse: false,
+                    expire_after_seconds: None,
+                    partial_filter_expression: None,
+                    background: false,
+                    bucket_size: None,
+                    hidden: false,
+                    properties_complete: true,
+                    extra_options: None,
                 },
-                IndexInfo {
+                mongo_driver::MongoIndexSpec {
                     name: "email_1".to_string(),
-                    columns: vec!["email".to_string()],
+                    keys: vec![mongo_driver::MongoIndexKey { field: "email".to_string(), direction: "1".to_string() }],
                     is_unique: true,
                     is_primary: false,
-                    filter: Some("{\"active\":true}".to_string()),
-                    index_type: Some("email: 1".to_string()),
-                    included_columns: None,
-                    comment: None,
-                    key_is_expression: Vec::new(),
+                    is_sparse: false,
+                    expire_after_seconds: None,
+                    partial_filter_expression: Some("{\"active\":true}".to_string()),
+                    background: false,
+                    bucket_size: None,
+                    hidden: false,
+                    properties_complete: true,
+                    extra_options: None,
                 },
             ],
             1,
         );
 
-        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter"]);
+        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter", "expireAfterSeconds"]);
         assert_eq!(
             result.rows,
             [vec![
                 serde_json::json!("_id_"),
                 serde_json::json!("_id"),
-                serde_json::json!(false),
+                serde_json::json!(true),
                 serde_json::json!(true),
                 serde_json::json!("_id: 1"),
+                serde_json::Value::Null,
                 serde_json::Value::Null,
             ]]
         );
         assert_eq!(result.affected_rows, 1);
+    }
+
+    #[test]
+    fn mongo_indexes_query_result_preserves_ttl_expiry_and_compound_keys() {
+        let result = mongo_indexes_query_result(
+            vec![
+                mongo_driver::MongoIndexSpec {
+                    name: "createdAt_1".to_string(),
+                    keys: vec![mongo_driver::MongoIndexKey {
+                        field: "createdAt".to_string(),
+                        direction: "1".to_string(),
+                    }],
+                    is_unique: false,
+                    is_primary: false,
+                    is_sparse: false,
+                    expire_after_seconds: Some(3600),
+                    partial_filter_expression: None,
+                    background: false,
+                    bucket_size: None,
+                    hidden: false,
+                    properties_complete: true,
+                    extra_options: None,
+                },
+                mongo_driver::MongoIndexSpec {
+                    name: "tenantId_1_createdAt_-1".to_string(),
+                    keys: vec![
+                        mongo_driver::MongoIndexKey { field: "tenantId".to_string(), direction: "1".to_string() },
+                        mongo_driver::MongoIndexKey { field: "createdAt".to_string(), direction: "-1".to_string() },
+                    ],
+                    is_unique: false,
+                    is_primary: false,
+                    is_sparse: false,
+                    expire_after_seconds: None,
+                    partial_filter_expression: Some("{\"status\":\"active\"}".to_string()),
+                    background: false,
+                    bucket_size: None,
+                    hidden: false,
+                    properties_complete: true,
+                    extra_options: None,
+                },
+            ],
+            100,
+        );
+
+        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter", "expireAfterSeconds"]);
+        assert_eq!(
+            result.rows,
+            [
+                vec![
+                    serde_json::json!("createdAt_1"),
+                    serde_json::json!("createdAt"),
+                    serde_json::json!(false),
+                    serde_json::json!(false),
+                    serde_json::json!("createdAt: 1"),
+                    serde_json::Value::Null,
+                    serde_json::json!(3600),
+                ],
+                vec![
+                    serde_json::json!("tenantId_1_createdAt_-1"),
+                    serde_json::json!("tenantId, createdAt"),
+                    serde_json::json!(false),
+                    serde_json::json!(false),
+                    serde_json::json!("tenantId: 1, createdAt: -1"),
+                    serde_json::json!("{\"status\":\"active\"}"),
+                    serde_json::Value::Null,
+                ],
+            ]
+        );
+        assert_eq!(result.affected_rows, 2);
     }
 
     #[cfg(unix)]

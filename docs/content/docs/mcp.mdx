@@ -210,7 +210,7 @@ DBX stores one authoritative MCP policy under **Settings → MCP** and reloads i
 
 An ineffective condition such as `WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}`, or an opaque MongoDB filter remains high risk. Connection-level read-only protection, production protection, database credentials, and the MCP connection allowlist remain upper bounds in every mode.
 
-For connections that are exposed to MCP, **Settings → MCP** can apply an additional per-connection ceiling: inherit the global mode, read only, safe write, or high-risk write. A connection rule only narrows access. For example, a global high-risk policy cannot make a connection writable when its connection rule is read only, and no connection rule can override DBX production or connection-level protection.
+For connections exposed to MCP, **Settings → MCP** can set a default execution permission: inherit the global mode, read only, safe write, or high-risk write. When selected databases are used, individual databases can receive their own execution permission. Execution permissions fall back from the most specific scope: **database setting → connection default → global default**. For example, a database can use full access while both the global and connection defaults use data read/write. Connection-level read-only protection, production protection, database scope, and database credentials remain independent hard limits that no database setting can bypass.
 
 The same page can also expose only selected MCP tools. This is enforced at every call, rather than being only a client-side display preference; a client that retained an old tool list is denied once the server-side allowlist changes.
 
@@ -219,11 +219,13 @@ The same page can also expose only selected MCP tools. This is enforced at every
 Use **Settings → MCP** to define the effective scope in this order:
 
 1. Choose whether MCP can see **all connections** (including future connections) or only **specified connections**.
-2. For every exposed connection, choose **all databases**, **specified databases**, or **no access**. Specified database names are exact matches; use `dbx_list_databases` to discover the names that are currently allowed.
-3. Optionally set a per-connection execution ceiling to narrow the global permission mode for a sensitive connection.
-4. Select only the MCP tools that the client needs, then choose the global permission mode.
+2. For every exposed connection, choose **all databases**, **specified databases**, or **no access**. Specified database names are exact matches; use `dbx_list_databases` to discover the names that are currently allowed, then optionally set execution permissions for those databases.
+3. Set each connection's default execution permission. It applies to every database when all databases are exposed, and to selected databases that do not have an override.
+4. Select only the MCP tools that the client needs, then choose the global default execution permission.
 
-Every layer is an upper bound: an allowed tool still cannot bypass a hidden connection, a database scope, connection read-only status, production protection, or the database account's own privileges. Requests for a database outside the selected scope are rejected with `DATABASE_OUT_OF_SCOPE`.
+The most specific execution setting wins, but an allowed tool still cannot bypass a hidden connection, database scope, connection read-only status, production protection, or the database account's own privileges. Requests for a database outside the selected scope are rejected with `DATABASE_OUT_OF_SCOPE`. When database-specific execution permissions exist, cross-database SQL and MongoDB aggregation writes are rejected to prevent bypassing those limits.
+
+During upgrade, saved connection rules without an execution policy version keep the previous ceiling semantics and cannot widen the global permission. Only a rule saved by the current Settings UI is marked for scoped override semantics; editing an existing legacy rule first carries its effective ceiling forward before enabling the new behavior.
 
 Updated servers do not let `DBX_MCP_ALLOW_WRITES` or `DBX_MCP_ALLOW_DANGEROUS_SQL` widen the DBX policy. For upgrade compatibility, `DBX_MCP_ALLOW_WRITES=0` (or `false`) still keeps MCP read-only until a central policy is saved for the first time. After that, the central policy is authoritative and the legacy permission variables are ignored. Legacy connection-scope variables can only narrow the DBX allowlist.
 

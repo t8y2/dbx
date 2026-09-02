@@ -68,6 +68,11 @@ pub struct TableDataSelectSqlOptions {
     pub use_driver_row_offset: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub where_input: Option<String>,
+    /// Time-series quick-open ergonomics: inject a rolling `time` window
+    /// when no WHERE was supplied. Opt-in so sampling and export callers
+    /// keep the historical unbounded scan semantics.
+    #[serde(default)]
+    pub inject_default_time_series_where: bool,
     #[serde(default)]
     pub include_row_id: bool,
 }

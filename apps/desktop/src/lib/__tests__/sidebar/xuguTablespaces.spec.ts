@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildXuguTablespaceChildren, xuguDatafileDisplayName } from "@/lib/sidebar/xuguTablespaces";
+import { buildXuguTablespaceChildren, xuguDatafileDetailRows, xuguDatafileDisplayName, xuguTablespaceDetailRows } from "@/lib/sidebar/xuguTablespaces";
 
 describe("Xugu tablespace tree", () => {
   it("uses the physical file basename while retaining the full path", () => {
@@ -25,8 +25,60 @@ describe("Xugu tablespace tree", () => {
       id: "conn:storage:tablespace:7:files:1:/data/DATA1.DBF",
       type: "datafile",
       label: "DATA1.DBF",
+      xuguDatafile: { node_id: "1", space_id: 7, path: "/data/DATA1.DBF", file_no: 1, curr_size: 1024 },
       xuguDatafilePath: "/data/DATA1.DBF",
     });
+  });
+
+  it("builds tablespace details and derives chunk usage", () => {
+    expect(
+      xuguTablespaceDetailRows({
+        node_id: "1",
+        space_id: 7,
+        space_name: "DATA1",
+        datafile_num: 2,
+        space_type: "DATA_SPACE",
+        media_error: "F",
+        total_chunk_num: 64,
+        free_chunk_num: 16,
+        datafiles: [],
+      }),
+    ).toEqual([
+      { key: "name", value: "DATA1" },
+      { key: "nodeId", value: "1" },
+      { key: "spaceId", value: "7" },
+      { key: "spaceType", value: "DATA_SPACE" },
+      { key: "datafileCount", value: "2" },
+      { key: "totalChunks", value: "64" },
+      { key: "freeChunks", value: "16" },
+      { key: "usedChunks", value: "48" },
+      { key: "usage", value: "75.0%" },
+      { key: "mediaError", value: "F" },
+    ]);
+  });
+
+  it("builds datafile details while preserving nullable size fields", () => {
+    expect(
+      xuguDatafileDetailRows({
+        node_id: "1",
+        space_id: 7,
+        path: "/data/DATA1.DBF",
+        file_no: 1,
+        max_size: -1,
+        step_size: 64,
+        curr_size: 512,
+        reserved1: null,
+      }),
+    ).toEqual([
+      { key: "name", value: "DATA1.DBF" },
+      { key: "path", value: "/data/DATA1.DBF", multiline: true },
+      { key: "nodeId", value: "1" },
+      { key: "spaceId", value: "7" },
+      { key: "fileNo", value: "1" },
+      { key: "currentSize", value: "512" },
+      { key: "maxSize", value: "-1" },
+      { key: "stepSize", value: "64" },
+    ]);
   });
 
   it("preserves expanded state on refresh", () => {

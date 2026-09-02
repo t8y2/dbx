@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from "vue";
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, useId, watch } from "vue";
 import { Compartment, type Extension } from "@codemirror/state";
 import { StreamLanguage, ensureSyntaxTree } from "@codemirror/language";
 import type { EditorView } from "@codemirror/view";
@@ -56,6 +56,7 @@ import { useTheme } from "@/composables/useTheme";
 import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
   NacosBatchReport,
@@ -167,6 +168,10 @@ const configEditorHost = ref<HTMLDivElement | null>(null);
 const configEditorView = shallowRef<EditorView | null>(null);
 const configSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const configEditorFontSize = ref(clampEditorFontSize(settingsStore.editorSettings.fontSize));
+let configEditorViewportFrame: number | null = null;
+let configEditorViewportRestoreFrame: number | null = null;
+let latestConfigEditorViewport: NacosConfigEditorViewport | undefined;
+let configEditorIsActive = true;
 const configEditorZoomCommitScheduler = createEditorZoomCommitScheduler((fontSize) => {
   if (settingsStore.editorSettings.fontSize === fontSize) return;
   settingsStore.updateEditorSettings({ fontSize });
@@ -589,12 +594,138 @@ async function mountConfigEditor() {
     return;
   }
   configEditorView.value = view;
+  view.scrollDOM.addEventListener("scroll", scheduleConfigEditorViewportCapture, { passive: true });
+  restoreConfigEditorViewport();
 }
 
 function destroyConfigEditor() {
   configEditorGeneration += 1;
+  flushConfigEditorViewport();
+  if (configEditorViewportRestoreFrame !== null) {
+    cancelAnimationFrame(configEditorViewportRestoreFrame);
+    configEditorViewportRestoreFrame = null;
+  }
+  configEditorView.value?.scrollDOM.removeEventListener("scroll", scheduleConfigEditorViewportCapture);
   configEditorView.value?.destroy();
   configEditorView.value = null;
+}
+
+function configEditorViewportIdentity() {
+  const config = selectedConfig.value;
+  if (!config) return undefined;
+  return {
+    namespace: config.namespace || namespace.value || "",
+    dataId: config.dataId,
+    group: config.group || "DEFAULT_GROUP",
+  };
+}
+
+function isCurrentConfigEditorViewport(viewport: NacosConfigEditorViewport) {
+  const identity = configEditorViewportIdentity();
+  return !!identity && viewport.namespace === identity.namespace && viewport.dataId === identity.dataId && viewport.group === identity.group;
+}
+
+function storedConfigEditorViewport() {
+  const viewport = savedConfigEditorViewport();
+  return viewport && isCurrentConfigEditorViewport(viewport) ? viewport : undefined;
+}
+
+function savedConfigEditorViewport() {
+  const tab = queryStore.tabs.find((candidate) => candidate.mode === "nacos" && candidate.connectionId === props.connectionId && (candidate.nacosNamespace || "") === namespace.value);
+  return tab?.nacosConfigEditorViewport;
+}
+
+function initializeConfigEditorViewport() {
+  const identity = configEditorViewportIdentity();
+  if (!identity) return;
+  const saved = savedConfigEditorViewport();
+  const viewport = latestConfigEditorViewport && isCurrentConfigEditorViewport(latestConfigEditorViewport) ? latestConfigEditorViewport : saved && isCurrentConfigEditorViewport(saved) ? saved : { ...identity, scrollTop: 0, scrollLeft: 0 };
+  latestConfigEditorViewport = viewport;
+  queryStore.updateNacosConfigEditorViewport(props.connectionId, namespace.value, viewport);
+}
+
+async function restoreSelectedConfig() {
+  const viewport = savedConfigEditorViewport();
+  if (!viewport?.dataId) return;
+  await selectConfig({
+    namespace: viewport.namespace,
+    dataId: viewport.dataId,
+    group: viewport.group,
+  });
+}
+
+function captureConfigEditorViewport() {
+  const view = configEditorView.value;
+  const identity = configEditorViewportIdentity();
+  if (!view || !identity) return false;
+  const viewport = {
+    ...identity,
+    scrollTop: Math.max(0, view.scrollDOM.scrollTop),
+    scrollLeft: Math.max(0, view.scrollDOM.scrollLeft),
+  };
+  if (
+    latestConfigEditorViewport?.namespace === viewport.namespace &&
+    latestConfigEditorViewport.dataId === viewport.dataId &&
+    latestConfigEditorViewport.group === viewport.group &&
+    latestConfigEditorViewport.scrollTop === viewport.scrollTop &&
+    latestConfigEditorViewport.scrollLeft === viewport.scrollLeft
+  ) {
+    return false;
+  }
+  latestConfigEditorViewport = viewport;
+  return true;
+}
+
+function persistConfigEditorViewport() {
+  const viewport = latestConfigEditorViewport;
+  if (!viewport || !isCurrentConfigEditorViewport(viewport)) return;
+  queryStore.updateNacosConfigEditorViewport(props.connectionId, namespace.value, viewport);
+}
+
+function scheduleConfigEditorViewportCapture() {
+  if (!configEditorIsActive) return;
+  captureConfigEditorViewport();
+  if (configEditorViewportFrame !== null) return;
+  configEditorViewportFrame = requestAnimationFrame(() => {
+    configEditorViewportFrame = null;
+    persistConfigEditorViewport();
+  });
+}
+
+function flushConfigEditorViewport() {
+  if (configEditorViewportFrame !== null) {
+    cancelAnimationFrame(configEditorViewportFrame);
+    configEditorViewportFrame = null;
+  }
+  persistConfigEditorViewport();
+}
+
+function restoreConfigEditorViewport() {
+  const view = configEditorView.value;
+  const viewport = latestConfigEditorViewport && isCurrentConfigEditorViewport(latestConfigEditorViewport) ? latestConfigEditorViewport : storedConfigEditorViewport();
+  if (!view || !viewport) return;
+  const restore = () => {
+    if (configEditorView.value !== view) return;
+    view.scrollDOM.scrollTo({ top: viewport.scrollTop, left: viewport.scrollLeft });
+    view.scrollDOM.scrollTop = viewport.scrollTop;
+    view.scrollDOM.scrollLeft = viewport.scrollLeft;
+  };
+  restore();
+  nextTick(() => {
+    restore();
+    let attempts = 0;
+    const restoreNextFrame = () => {
+      restore();
+      attempts += 1;
+      if (attempts >= 8) {
+        configEditorViewportRestoreFrame = null;
+        return;
+      }
+      configEditorViewportRestoreFrame = requestAnimationFrame(restoreNextFrame);
+    };
+    if (configEditorViewportRestoreFrame !== null) cancelAnimationFrame(configEditorViewportRestoreFrame);
+    configEditorViewportRestoreFrame = requestAnimationFrame(restoreNextFrame);
+  });
 }
 
 async function refreshConfigEditor() {
@@ -829,6 +960,7 @@ async function selectConfig(item: NacosConfigItem) {
     group: item.group,
   };
   selectedConfig.value = { ...item };
+  initializeConfigEditorViewport();
   configContent.value = item.content || "";
   configType.value = configFormatValue(item) || "text";
   rememberOriginalConfigState(item, configContent.value, configType.value);
@@ -891,6 +1023,7 @@ function newConfig() {
   };
   configContent.value = "";
   configType.value = selectedConfig.value.configType || "text";
+  initializeConfigEditorViewport();
   rememberOriginalConfigState(selectedConfig.value, "", configType.value);
   configAdvancedOpen.value = false;
   void mountConfigEditor();
@@ -908,6 +1041,7 @@ function saveConfigAsCopy() {
   configContent.value = copy.content || "";
   originalConfigContent.value = "";
   configType.value = copy.configType || configType.value || "text";
+  initializeConfigEditorViewport();
   originalConfigType.value = configType.value;
   originalConfigMetadata.value = {
     appName: copy.appName || "",
@@ -2377,7 +2511,25 @@ onMounted(async () => {
   await loadInfo();
   await Promise.all([loadConfigsWithRetry(1), loadServicesWithRetry(1)]);
   if (props.targetDataId) await openTargetConfig(props.targetDataId, props.targetGroup || "DEFAULT_GROUP", props.targetKeyword);
+  else await restoreSelectedConfig();
 });
+
+function pauseConfigEditorViewportWork() {
+  flushConfigEditorViewport();
+  configEditorIsActive = false;
+  if (configEditorViewportRestoreFrame !== null) {
+    cancelAnimationFrame(configEditorViewportRestoreFrame);
+    configEditorViewportRestoreFrame = null;
+  }
+}
+
+function resumeConfigEditorViewportWork() {
+  configEditorIsActive = true;
+  restoreConfigEditorViewport();
+}
+
+onActivated(resumeConfigEditorViewportWork);
+onDeactivated(pauseConfigEditorViewportWork);
 
 onBeforeUnmount(() => {
   configListRequestGuard.invalidate();
@@ -2396,6 +2548,7 @@ onBeforeUnmount(() => {
   if (activeSearchOperationId.value) void api.nacosCancelConfigContentSearch(activeSearchOperationId.value);
   configListResizeObserver?.disconnect();
   configEditorZoomCommitScheduler.dispose();
+  pauseConfigEditorViewportWork();
   destroyConfigEditor();
 });
 </script>

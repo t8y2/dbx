@@ -183,11 +183,13 @@ func TestTreeTimeAggregationColumnsPresentAsTimestamps(t *testing.T) {
 		"max_time(root.db.d1.s1)",
 		"MIN_TIME(root.db.d1.s1)",
 		" max_time(root.db.d1.s1) ",
+		"max_by(Time,root.db.d1.s1)",
+		"MIN_BY( time , root.db.d1.s1 )",
 		"avg(root.db.d1.s1)",
 		"count(root.db.d1.s1)",
 	}
-	got := normalizedColumnTypes([]string{"INT64", "INT64", "INT64", "DOUBLE", "INT64"}, columns, client.TreeSqlDialect, "ms")
-	want := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "DOUBLE", "INT64"}
+	got := normalizedColumnTypes([]string{"INT64", "INT64", "INT64", "INT64", "INT64", "DOUBLE", "INT64"}, columns, client.TreeSqlDialect, "ms")
+	want := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "TIMESTAMP(ms)", "DOUBLE", "INT64"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected tree aggregation types: %#v", got)
 	}
@@ -196,6 +198,11 @@ func TestTreeTimeAggregationColumnsPresentAsTimestamps(t *testing.T) {
 	}
 	if table := normalizedColumnTypes([]string{"INT64"}, []string{"max_time(t1.s1)"}, client.TableSqlDialect, "ms"); !reflect.DeepEqual(table, []string{"INT64"}) {
 		t.Fatalf("table dialect must stay INT64: %#v", table)
+	}
+	for _, column := range []string{"max_by(s1,time)", "max_by(event_time,s1)", "max_bytes(time,s1)"} {
+		if got := normalizedColumnTypes([]string{"INT64"}, []string{column}, client.TreeSqlDialect, "ms"); !reflect.DeepEqual(got, []string{"INT64"}) {
+			t.Fatalf("non-time max_by result %q must stay INT64: %#v", column, got)
+		}
 	}
 }
 

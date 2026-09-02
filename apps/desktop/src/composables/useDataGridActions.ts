@@ -93,6 +93,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
       includeRowId: useRowId,
       limit,
+      injectDefaultTimeSeriesWhere: true,
       ...options,
     });
   }
@@ -314,11 +315,13 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       return;
     }
     if (sql?.trim()) {
+      const hasMultiResults = tab.mode === "query" && (tab.results?.length ?? 0) > 1;
       await queryStore.executeTabSql(tab.id, sql, {
         ...(tab.mode === "query" ? activeQueryTargetOptions(tab) : {}),
         resultBaseSql: sql,
         resultSortedSql: undefined,
         preserveResultDuringExecution: true,
+        ...(hasMultiResults ? { replaceActiveResultInGroup: true, preserveActiveResultIndex: true } : {}),
       });
       return;
     }

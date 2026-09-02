@@ -358,6 +358,16 @@ describe("sqlSemanticModel baseline fixtures", () => {
     expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["users", "orders", "audit_log", "events"]);
   });
 
+  it("keeps table highlighting linear for a 24,000-line Oracle select list", () => {
+    const sql = `SELECT\n${Array.from({ length: 23_997 }, (_, index) => `  t.col_${index} AS alias_${index},`).join("\n")}\n  t.final_col\nFROM app.huge_table t`;
+    const startedAt = performance.now();
+    const spans = sqlSemanticTableNameSpans(sql, { databaseType: "oracle" });
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(spans.map((span) => sql.slice(span.start, span.end))).toEqual(["huge_table"]);
+    expect(elapsedMs).toBeLessThan(2_000);
+  });
+
   it("highlights mutation targets but ignores strings, comments, and table functions", () => {
     const sql = "UPDATE users SET name = 'FROM fake'; INSERT INTO audit_log(id) VALUES (1); -- FROM ignored\nSELECT * FROM read_csv('events.csv') e";
     const spans = sqlSemanticTableNameSpans(sql);

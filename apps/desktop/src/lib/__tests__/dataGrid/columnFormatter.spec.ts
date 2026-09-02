@@ -164,9 +164,14 @@ describe("defaultIoTDBTimestampFormatter", () => {
     expect(defaultIoTDBTimestampFormatter("iotdb", "INT64", "time_zone=Asia%2FShanghai")).toBeUndefined();
   });
 
-  it("uses UTC when the connection does not specify a time zone", () => {
+  it("uses the IoTDB client session default when the connection does not specify a time zone", () => {
     const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "");
-    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T00:00:00.001+00:00");
+    expect(applyColumnFormatter("1787759999000", formatter)).toBe("2026-08-26T23:59:59.000+08:00");
+  });
+
+  it("falls back to the IoTDB client session default for an invalid configured zone", () => {
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "time_zone=Not%2FAZone");
+    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T08:00:00.001+08:00");
   });
 
   it("round-trips a negative nanosecond timestamp without truncating toward zero", () => {

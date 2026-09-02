@@ -93,7 +93,7 @@ impl RuntimeConfig {
         validate_path(&path)?;
 
         let is_loopback = ip.is_loopback();
-        if !is_loopback && !(allow_remote && explicit_allow_remote) {
+        if !(is_loopback || (allow_remote && explicit_allow_remote)) {
             return Err(
                 "non-loopback HTTP binding requires both DBX_MCP_HTTP_ALLOW_REMOTE=1 and --http-allow-remote".into()
             );

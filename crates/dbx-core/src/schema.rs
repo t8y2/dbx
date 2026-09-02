@@ -5840,7 +5840,7 @@ async fn list_objects_once(
     let db_config = connection_config(state, connection_id).await;
     let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
     let (mysql_limit, mysql_offset) = if filter.is_none_or(|value| value.trim().is_empty())
-        && !table_name_filter.is_some_and(|filter| !filter.is_empty())
+        && table_name_filter.is_none_or(|filter| filter.is_empty())
     {
         (limit, offset)
     } else {
@@ -9420,10 +9420,18 @@ async fn postgres_object_source(
 
 fn postgres_missing_prokind_error(err: &str) -> bool {
     let lower = err.to_ascii_lowercase();
-    lower.contains("does not exist")
-        && (lower.contains("column p.prokind")
-            || lower.contains("column \"p\".\"prokind\"")
-            || lower.contains("column \"prokind\""))
+    let mentions_prokind =
+        lower.contains("p.prokind") || lower.contains("\"p\".\"prokind\"") || lower.contains("\"prokind\"");
+    if !mentions_prokind {
+        return false;
+    }
+
+    // PostgreSQL localizes the undefined-column message (for example, Chinese
+    // servers report "字段 p.prokind 不存在"). Keep the column context so an
+    // unrelated relation named `prokind` cannot trigger this compatibility path.
+    lower.contains("sqlstate 42703")
+        || (lower.contains("does not exist") && lower.contains("column"))
+        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind")))
 }
 
 fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {
@@ -9705,7 +9713,11 @@ mod object_source_tests {
     fn detects_legacy_postgres_prokind_errors() {
         assert!(postgres_missing_prokind_error("ERROR: column p.prokind does not exist"));
         assert!(postgres_missing_prokind_error("ERROR: column \"p\".\"prokind\" does not exist"));
+        assert!(postgres_missing_prokind_error("错误: 字段 p.prokind 不存在\n提示: 也许您想要引用列 \"p.probin\"。"));
+        assert!(postgres_missing_prokind_error("ERROR: undefined column p.prokind (SQLSTATE 42703)"));
         assert!(!postgres_missing_prokind_error("ERROR: relation public.prokind does not exist"));
+        assert!(!postgres_missing_prokind_error("错误: 关系 public.prokind 不存在\n提示: 请检查列 p.probin。"));
+        assert!(!postgres_missing_prokind_error("ERROR: permission denied for column p.prokind"));
     }
 
     #[test]

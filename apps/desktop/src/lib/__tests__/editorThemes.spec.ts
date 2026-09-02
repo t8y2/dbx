@@ -162,6 +162,16 @@ describe("SQL completion theme", () => {
     expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
     expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
   });
+
+  it("keeps the batch column insertion action fixed at the bottom of its menu", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action"]).toMatchObject({
+      bottom: "0",
+      position: "sticky",
+      zIndex: "1",
+    });
+  });
 });
 
 describe("editor gutters", () => {

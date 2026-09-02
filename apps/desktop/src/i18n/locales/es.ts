@@ -6806,6 +6806,8 @@ export default withEnglishFallback({
     mcpToolListDatabases: "Listar bases de datos",
     mcpToolListTables: "Listar tablas",
     mcpToolDescribeTable: "Estructura de tabla",
+    mcpToolListRoutines: "Listar rutinas",
+    mcpToolGetRoutineSource: "Código de rutina",
     mcpToolGetSchemaContext: "Contexto de Schema",
     mcpToolExecuteQuery: "Ejecutar SQL / comandos Mongo",
     mcpToolOpenSession: "Abrir sesión de consulta",

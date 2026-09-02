@@ -7168,6 +7168,8 @@ export default withEnglishFallback({
     mcpToolListDatabases: "列出数据库",
     mcpToolListTables: "列出表",
     mcpToolDescribeTable: "表结构",
+    mcpToolListRoutines: "存储过程列表",
+    mcpToolGetRoutineSource: "存储过程源码",
     mcpToolGetSchemaContext: "Schema 上下文",
     mcpToolExecuteQuery: "执行 SQL / Mongo 命令",
     mcpToolOpenSession: "打开查询会话",

@@ -5840,7 +5840,7 @@ async fn list_objects_once(
     let db_config = connection_config(state, connection_id).await;
     let force_local_table_name_filter = table_name_filter.is_some_and(|filter| !filter.is_empty());
     let (mysql_limit, mysql_offset) = if filter.is_none_or(|value| value.trim().is_empty())
-        && !table_name_filter.is_some_and(|filter| !filter.is_empty())
+        && table_name_filter.is_none_or(|filter| filter.is_empty())
     {
         (limit, offset)
     } else {
@@ -9429,10 +9429,9 @@ fn postgres_missing_prokind_error(err: &str) -> bool {
     // PostgreSQL localizes the undefined-column message (for example, Chinese
     // servers report "字段 p.prokind 不存在"). Keep the column context so an
     // unrelated relation named `prokind` cannot trigger this compatibility path.
-    let undefined_column = lower.contains("sqlstate 42703")
+    lower.contains("sqlstate 42703")
         || (lower.contains("does not exist") && lower.contains("column"))
-        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind")));
-    undefined_column
+        || (err.contains("不存在") && (err.contains("字段") || err.contains("列 p.prokind")))
 }
 
 fn opengauss_sequence_cache_metadata_error(err: &str) -> bool {

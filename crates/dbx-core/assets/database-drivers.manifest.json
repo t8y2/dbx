@@ -2397,6 +2397,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "etcd",
+      "driverProfiles": [
+        {
+          "profile": "etcd-v2",
+          "agentKey": "etcd2",
+          "label": "etcd 2.x (v2 API)",
+          "storeVisible": true,
+          "storeOrder": 49
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 39,
       "singleConnectionPool": false,

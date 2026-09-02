@@ -147,10 +147,24 @@ export function resolveNewQueryTable(input: ResolveNewQueryTableInput): NewQuery
  * Builds a `SELECT * FROM <table>` statement for the new-query prefill, reusing
  * the same per-dialect identifier quoting and schema/catalog qualification used
  * by the table-data view.
+ *
+ * Time-series engines get the same rolling-window scoping the sidebar
+ * quick-open uses (see `default_time_series_predicate` in
+ * `crates/dbx-core/src/sql_dialect/table_select.rs`). Without a `time`
+ * predicate InfluxDB scans every shard (v1/v2) or every Parquet file
+ * (v3), which turns "let me draft a query against this table" into a
+ * full-history scan the moment the user hits Run. VictoriaMetrics
+ * already has its own metric range template above.
  */
 export function buildSelectAllSql(databaseType: DatabaseType | undefined, table: Pick<NewQueryTable, "schema" | "catalog" | "tableName"> & Partial<Pick<NewQueryTable, "database">>, identifierQuote?: string, driverProfile?: string, includeDatabaseName = false): string {
   if (databaseType === "victoriametrics") return metricRangeQuery(table.tableName);
   const ref = qualifiedTableName({ databaseType, driverProfile, identifierQuote, database: table.database, schema: table.schema, catalog: table.catalog, tableName: table.tableName, includeDatabaseName });
+  if (databaseType === "influxdb") {
+    return `SELECT * FROM ${ref} WHERE time > now() - 5m ORDER BY time DESC LIMIT 100`;
+  }
+  if (databaseType === "influxdb3") {
+    return `SELECT * FROM ${ref} WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`;
+  }
   return `SELECT * FROM ${ref}`;
 }
 

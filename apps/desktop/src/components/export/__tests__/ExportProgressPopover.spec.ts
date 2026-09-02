@@ -281,6 +281,45 @@ describe("ExportProgressPopover task duration", () => {
     expect(document.body.textContent).toContain("1 additional failure detail(s) not shown");
     expect(document.body.textContent).not.toContain("failure 100");
   });
+
+  it("keeps SQL-file statement failures inspectable after a successful continue-on-error run", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-failure-details", "migration.sql", "/tmp/migration.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "statementFailed",
+      statementIndex: 7,
+      successCount: 6,
+      failureCount: 1,
+      affectedRows: 6,
+      elapsedMs: 10,
+      statementSummary: "ALTER TABLE users ADD missing_type",
+      error: "type missing_type does not exist",
+    });
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "done",
+      statementIndex: 8,
+      successCount: 7,
+      failureCount: 1,
+      affectedRows: 7,
+      elapsedMs: 12,
+      statementSummary: "INSERT INTO users VALUES (1)",
+      error: null,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("7 succeeded, 1 failed");
+    const detailsButton = document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+    expect(detailsButton?.textContent).toContain("Failure details (1)");
+    detailsButton?.click();
+    await nextTick();
+
+    expect(document.body.textContent).toContain("#7");
+    expect(document.body.textContent).toContain("ALTER TABLE users ADD missing_type");
+    expect(document.body.textContent).toContain("type missing_type does not exist");
+  });
 });
 
 describe("ExportProgressPopover file name and reveal action", () => {

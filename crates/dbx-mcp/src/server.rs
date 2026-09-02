@@ -496,6 +496,7 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
+        let policy = effective_policy_for_database(&resolved.policy, connection, &database);
         if let Some(session) = &session {
             if session.database != database {
                 return tool_error(
@@ -538,12 +539,17 @@ impl DbxMcpServer {
             {
                 return error;
             }
+            if let Err(error) =
+                ensure_sql_database_execution_scope(&resolved.policy, connection, &database, &request.sql)
+            {
+                return error;
+            }
         }
-        let permissions =
-            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, allow_database_switch) {
-                Ok(permissions) => permissions,
-                Err(error) => return error,
-            };
+        let permissions = match validate_sql_policy(connection, &policy, &database, &request.sql, allow_database_switch)
+        {
+            Ok(permissions) => permissions,
+            Err(error) => return error,
+        };
         let mut arguments = json!({ "sql": request.sql, "limit": 100 });
         if let Some(schema) = self.scope.schema.as_deref() {
             arguments["schema"] = json!(schema);
@@ -652,14 +658,22 @@ impl DbxMcpServer {
         if connection.db_type != DatabaseType::Redis {
             return tool_error("INVALID_CONNECTION_TYPE", format!("Connection \"{}\" is not Redis.", connection.name));
         }
+        let database = match self.resolve_redis_database(request.db, &resolved) {
+            Ok(database) => database,
+            Err(error) => return error,
+        };
         let argv = match parse_command_argv(&request.command) {
             Ok(argv) => argv,
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
         let safety = classify_command(&argv[0]);
-        let permissions = mcp_permissions(connection, &resolved.policy);
-        if safety != RedisCommandSafety::Allowed && resolved.policy.read_only {
-            return tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. Redis command blocked.");
+        let policy = effective_policy_for_database(&resolved.policy, connection, &database.to_string());
+        let permissions = mcp_permissions(connection, &policy);
+        if safety != RedisCommandSafety::Allowed && policy.read_only {
+            return tool_error(
+                "MCP_READ_ONLY",
+                format!("MCP execution permission for Redis database {database} is read-only. Redis command blocked."),
+            );
         }
         if safety != RedisCommandSafety::Allowed && connection.read_only {
             return tool_error(
@@ -682,10 +696,6 @@ impl DbxMcpServer {
                 "MCP Redis command execution is read-only in DBX MCP settings.",
             );
         }
-        let database = match self.resolve_redis_database(request.db, &resolved) {
-            Ok(database) => database,
-            Err(error) => return error,
-        };
         // Production protection is stricter than the opt-in write flags by design.
         if safety != RedisCommandSafety::Allowed && is_production_database(connection, &database.to_string()) {
             return tool_error(
@@ -736,10 +746,15 @@ impl DbxMcpServer {
             if request.topic.trim().is_empty() {
                 return tool_error("MESSAGE_TOPIC_REQUIRED", "Message topic must not be empty.");
             }
-            if resolved.policy.read_only {
+            let policy = effective_policy_for_database(
+                &resolved.policy,
+                connection,
+                connection.database.as_deref().unwrap_or(""),
+            );
+            if policy.read_only {
                 return tool_error(
                     "MCP_READ_ONLY",
-                    "DBX global MCP read-only mode is enabled. Message sending is blocked.",
+                    "The effective MCP execution permission is read-only. Message sending is blocked.",
                 );
             }
             if connection.read_only {
@@ -1059,16 +1074,22 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
+        let policy = effective_policy_for_database(&resolved.policy, connection, &database);
         if connection.db_type != DatabaseType::MongoDb {
             if let Err(error) = ensure_sql_database_scope(&resolved.database_scope, connection, &database, &request.sql)
             {
                 return error;
             }
+            if let Err(error) =
+                ensure_sql_database_execution_scope(&resolved.policy, connection, &database, &request.sql)
+            {
+                return error;
+            }
         }
         let permissions = if connection.db_type == DatabaseType::MongoDb {
-            mcp_permissions(connection, &resolved.policy)
+            mcp_permissions(connection, &policy)
         } else {
-            match validate_sql_policy(connection, &resolved.policy, &database, &request.sql, false) {
+            match validate_sql_policy(connection, &policy, &database, &request.sql, false) {
                 Ok(permissions) => permissions,
                 Err(error) => return error,
             }
@@ -1336,6 +1357,7 @@ fn backend_tool_error(default_code: &str, error: impl Into<String>) -> CallToolR
         "MCP_READ_ONLY",
         "CONNECTION_OUT_OF_SCOPE",
         "DATABASE_OUT_OF_SCOPE",
+        "DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE",
         "INVALID_DATABASE_SCOPE",
         "CONNECTION_READ_ONLY",
         "PRODUCTION_DATABASE_READ_ONLY",
@@ -1388,7 +1410,6 @@ fn resolved_connection(
     connection: dbx_core::models::connection::ConnectionConfig,
 ) -> ResolvedConnection {
     let database_scope = database_scope_for_connection(&policy, &connection);
-    let policy = effective_policy_for_connection(policy, &connection);
     ResolvedConnection { connection, policy, database_scope }
 }
 
@@ -1440,24 +1461,38 @@ fn format_database_names(databases: &[String]) -> String {
     }
 }
 
-/// A connection-level rule is a restrictive overlay, never an escalation. It
-/// therefore composes safely with the global policy, the connection's own
-/// read-only flag, and production-database protections checked elsewhere.
-fn effective_policy_for_connection(
-    mut policy: McpGlobalPolicy,
+/// Execution modes are scoped defaults: a database rule overrides a configured
+/// connection default, which in turn overrides the global default. Connection
+/// read-only protection and production-database protections are enforced
+/// separately and cannot be bypassed by these defaults.
+fn effective_policy_for_database(
+    policy: &McpGlobalPolicy,
     connection: &dbx_core::models::connection::ConnectionConfig,
+    database: &str,
 ) -> McpGlobalPolicy {
-    if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection.id) {
-        if rule.execution_mode_configured {
-            policy.read_only |= rule.read_only;
-            policy.allow_dangerous_sql &= !rule.read_only && rule.allow_dangerous_sql;
-        }
-    }
+    let mut policy = policy.clone();
+    (policy.read_only, policy.allow_dangerous_sql) =
+        dbx_core::mcp_policy::effective_database_execution_policy(&policy, &connection.id, database);
     // This returned value is carried through the request only; retaining a
     // complete policy document here could accidentally be reused for another
     // connection by a future caller.
     policy.connection_policies.clear();
     policy
+}
+
+/// A database-level execution rule must not be bypassed by qualifying another
+/// allowed database in SQL. Until individual references are evaluated with
+/// their own policies, cross-database SQL is intentionally rejected whenever
+/// this connection has database-specific execution rules.
+#[allow(clippy::result_large_err)]
+fn ensure_sql_database_execution_scope(
+    policy: &McpGlobalPolicy,
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    active_database: &str,
+    sql: &str,
+) -> Result<(), CallToolResult> {
+    dbx_core::mcp_policy::ensure_sql_database_execution_scope(policy, connection, active_database, sql)
+        .map_err(|error| tool_error("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE", error))
 }
 
 fn mcp_permissions(
@@ -1510,7 +1545,10 @@ fn validate_sql_policy(
     // is permitted. Fail closed on either signal so read-only stays read-only.
     let is_write = risk != SqlRisk::ReadOnly || is_write_sql_for_database(sql, connection.db_type);
     if policy.read_only && is_write {
-        return Err(tool_error("MCP_READ_ONLY", "DBX global MCP read-only mode is enabled. SQL write blocked."));
+        return Err(tool_error(
+            "MCP_READ_ONLY",
+            format!("MCP execution permission for database \"{database}\" is read-only. SQL write blocked."),
+        ));
     }
     if connection.read_only && is_write {
         return Err(tool_error(
@@ -1552,11 +1590,21 @@ fn validate_mongo_command(
         ));
     }
     if let MongoCommand::Aggregate { pipeline, .. } = &command {
+        dbx_core::mcp_policy::ensure_mongo_database_execution_scope(policy, &connection.id, database, pipeline)
+            .map_err(|error| {
+                let (code, message) = error
+                    .strip_prefix("QUERY_ERROR: ")
+                    .map_or(("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE", error.as_str()), |message| {
+                        ("QUERY_ERROR", message)
+                    });
+                tool_error(code, message)
+            })?;
         for target_database in mongo_aggregate_target_databases(pipeline, database)? {
             ensure_database_in_scope(database_scope, &target_database)?;
         }
     }
-    let permissions = mcp_permissions(connection, policy);
+    let effective_policy = effective_policy_for_database(policy, connection, database);
+    let permissions = mcp_permissions(connection, &effective_policy);
     let production_database = match &command {
         MongoCommand::Aggregate { pipeline, .. } => {
             mongo_pipeline_targets_production_database(connection, database, pipeline)
@@ -1568,8 +1616,8 @@ fn validate_mongo_command(
     {
         return Err(match error {
             MongoSafetyError::WritesDisabled => tool_error(
-                if policy.read_only { "MCP_READ_ONLY" } else { "CONNECTION_READ_ONLY" },
-                "MCP MongoDB execution is read-only in DBX MCP settings.",
+                if effective_policy.read_only { "MCP_READ_ONLY" } else { "CONNECTION_READ_ONLY" },
+                "MCP MongoDB execution is read-only for this database in DBX MCP settings.",
             ),
             MongoSafetyError::EmptyFilter => tool_error(
                 "SQL_BLOCKED",
@@ -1589,36 +1637,8 @@ fn validate_mongo_command(
 
 #[allow(clippy::result_large_err)]
 fn mongo_aggregate_target_databases(pipeline: &str, active_database: &str) -> Result<Vec<String>, CallToolResult> {
-    let stages = serde_json::from_str::<serde_json::Value>(pipeline)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .ok_or_else(|| tool_error("QUERY_ERROR", "MongoDB aggregate pipeline must be a JSON array."))?;
-    let mut databases = Vec::new();
-    for stage in stages {
-        let Some(stage) = stage.as_object() else { continue };
-        for key in ["$out", "$merge"] {
-            let Some(target) = stage.get(key) else { continue };
-            let target_database = match target {
-                serde_json::Value::String(_) => active_database.to_string(),
-                serde_json::Value::Object(target) => target
-                    .get("db")
-                    .or_else(|| {
-                        target.get("into").and_then(serde_json::Value::as_object).and_then(|into| into.get("db"))
-                    })
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(active_database)
-                    .to_string(),
-                _ => {
-                    return Err(tool_error(
-                        "QUERY_ERROR",
-                        "MongoDB aggregate output target must be a string or object.",
-                    ))
-                }
-            };
-            databases.push(target_database);
-        }
-    }
-    Ok(databases)
+    dbx_core::mcp_policy::mongo_pipeline_output_databases(pipeline, active_database)
+        .map_err(|error| tool_error("QUERY_ERROR", error.strip_prefix("QUERY_ERROR: ").unwrap_or(&error)))
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -2249,6 +2269,52 @@ mod tests {
         assert!(result_text(&error).contains("DATABASE_OUT_OF_SCOPE"));
     }
 
+    #[test]
+    fn database_execution_policy_overrides_connection_and_global_defaults_and_blocks_cross_database_sql() {
+        let connection = connection("sql", "sql", "mysql", "operations");
+        let policy = McpGlobalPolicy {
+            connection_policies: vec![dbx_core::storage::McpConnectionPolicy {
+                connection_id: "sql".to_string(),
+                read_only: false,
+                allow_dangerous_sql: false,
+                execution_mode_configured: true,
+                execution_mode_policy_version: Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION),
+                database_scope: McpDatabaseScope::Selected,
+                allowed_databases: vec!["operations".to_string(), "reporting".to_string()],
+                database_policies: vec![
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "operations".to_string(),
+                        read_only: false,
+                        allow_dangerous_sql: true,
+                    },
+                    dbx_core::storage::McpDatabasePolicy {
+                        database_name: "reporting".to_string(),
+                        read_only: true,
+                        allow_dangerous_sql: false,
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let operations = effective_policy_for_database(&policy, &connection, "operations");
+        assert!(!operations.read_only);
+        assert!(operations.allow_dangerous_sql);
+
+        let reporting = effective_policy_for_database(&policy, &connection, "reporting");
+        assert!(reporting.read_only);
+        assert!(!reporting.allow_dangerous_sql);
+
+        let error = ensure_sql_database_execution_scope(
+            &policy,
+            &connection,
+            "operations",
+            "UPDATE reporting.jobs SET done = 1",
+        )
+        .unwrap_err();
+        assert!(result_text(&error).contains("DATABASE_EXECUTION_POLICY_OUT_OF_SCOPE"));
+    }
+
     #[tokio::test]
     async fn selected_database_scope_can_be_discovered_without_a_connection_default_database() {
         let connection = connection("sql", "sql", "mysql", "");
@@ -2262,7 +2328,9 @@ mod tests {
                     allow_dangerous_sql: false,
                     database_scope: McpDatabaseScope::Selected,
                     allowed_databases: vec!["aa".to_string(), "aaa".to_string(), "abc".to_string()],
+                    database_policies: Vec::new(),
                     execution_mode_configured: false,
+                    execution_mode_policy_version: None,
                 }],
                 ..Default::default()
             },

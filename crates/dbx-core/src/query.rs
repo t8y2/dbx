@@ -1291,7 +1291,9 @@ fn options_for_sequential_statements(
     db_type: Option<DatabaseType>,
 ) -> QueryExecutionOptions {
     let mut statement_options = options.clone();
-    if statement_count <= 1 || db_type != Some(DatabaseType::Kingbase) || statement_options.result_session_id.is_some()
+    if statement_count <= 1
+        || !matches!(db_type, Some(DatabaseType::Kingbase | DatabaseType::Vastbase))
+        || statement_options.result_session_id.is_some()
     {
         return statement_options;
     }
@@ -3068,10 +3070,9 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         .map_err(Into::into);
     }
 
-    // Kingbase Go keeps one physical connection per Agent session, so an open
-    // result cursor prevents the next statement from acquiring that connection.
-    // Multi-result execution therefore reads a bounded first page for each
-    // Kingbase statement without retaining cursors.
+    // Some Agent drivers cannot execute another statement while a paged result
+    // cursor remains open on the same physical connection. Multi-result execution
+    // therefore reads a bounded first page without retaining those cursors.
     let statement_options = options_for_sequential_statements(&options, statements.len(), db_type);
     let mut results = Vec::with_capacity(statements.len());
     for (statement_index, stmt) in statements.iter().enumerate() {
@@ -8837,12 +8838,14 @@ for line in sys.stdin:
             ..Default::default()
         };
 
-        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Kingbase));
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Vastbase] {
+            let adjusted = options_for_sequential_statements(&options, 2, Some(db_type));
 
-        assert_eq!(adjusted.page_size, None);
-        assert_eq!(adjusted.max_rows, Some(100));
-        assert_eq!(adjusted.fetch_size, Some(100));
-        assert_eq!(adjusted.timeout_secs, Some(30));
+            assert_eq!(adjusted.page_size, None);
+            assert_eq!(adjusted.max_rows, Some(100));
+            assert_eq!(adjusted.fetch_size, Some(100));
+            assert_eq!(adjusted.timeout_secs, Some(30));
+        }
     }
 
     #[test]

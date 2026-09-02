@@ -200,7 +200,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.windows_win7_bundle == 'true'
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
@@ -257,6 +257,10 @@ jobs:
       - name: Audit Windows 7 PE imports
         shell: pwsh
         run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
+      - name: Audit Win7 WebView2 loader markers
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-loader.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
 
       - name: Bundle Windows 7 fixed-runtime installer
         shell: pwsh
@@ -698,6 +702,7 @@ jobs:
               - '.github/workflows/update-nix-pnpm-hash.yml'
             windows_win7_bundle:
               - '.github/scripts/assert-win7-pe-compat.ps1'
+              - '.github/scripts/assert-webview2-win7-loader.ps1'
               - '.github/scripts/assert-win7-installer-content.ps1'
               - '.github/scripts/assert-webview2-win7-runtime.ps1'
               - '.github/scripts/prepare-webview2-win7-loader.ps1'

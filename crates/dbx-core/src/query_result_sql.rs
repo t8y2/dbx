@@ -9,8 +9,8 @@ use crate::sql_dialect::{
     firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
 };
 use sqlparser::ast::{
-    visit_expressions, Expr, GroupByExpr, LimitClause, OrderByKind, Select, SelectItem, SelectModifiers, SetExpr,
-    Statement, TableFactor, Value, ValueWithSpan,
+    visit_expressions, Expr, GroupByExpr, LimitClause, ObjectNamePart, OrderByKind, Select, SelectItem,
+    SelectModifiers, SetExpr, Statement, TableFactor, Value, ValueWithSpan,
 };
 use sqlparser::dialect::{ClickHouseDialect, GenericDialect, MsSqlDialect, MySqlDialect};
 use sqlparser::parser::Parser;
@@ -316,6 +316,15 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
             .map(|sql| ok(format!("{execution_hint}{sql}")))
             .unwrap_or_else(|| err("unsupported"));
     }
+    if options.database_type == Some(DatabaseType::Iotdb) {
+        // IoTDB Tree Model does not support derived tables. Count the selected
+        // time series directly when doing so is guaranteed to preserve the
+        // result cardinality; decline complex queries instead of issuing SQL
+        // that IoTDB cannot parse or returning a misleading total.
+        return iotdb_tree_count_sql(&statement)
+            .map(|sql| ok(format!("{execution_hint}{sql}")))
+            .unwrap_or_else(|| err("unsupported"));
+    }
 
     if options.database_type == Some(DatabaseType::Iris) {
         // IRIS JDBC can parameterize a derived-table alias as `:%qpar` during
@@ -390,7 +399,8 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         && options.database_type != Some(DatabaseType::DuckDb)
         && options.database_type != Some(DatabaseType::Dameng)
         && options.database_type != Some(DatabaseType::Oracle)
-        && options.database_type != Some(DatabaseType::OceanbaseOracle);
+        && options.database_type != Some(DatabaseType::OceanbaseOracle)
+        && options.database_type != Some(DatabaseType::SapHana);
     let sort_alias = if use_derived_column_aliases {
         aliases
             .get(options.column_index)
@@ -412,7 +422,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let use_sort_ordinal = !use_derived_column_aliases
         && matches!(
             options.database_type,
-            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::SapHana)
         )
         && options.result_columns.get(options.column_index).is_some_and(|column| {
             options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
@@ -1185,6 +1195,106 @@ fn mysql_count_sql(statement: &str) -> Option<String> {
 fn mysql_wrapped_count_sql(statement: &str) -> String {
     let alias = quote_table_identifier(Some(DatabaseType::Mysql), "dbx_count");
     derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", statement, &format!("{alias};"))
+}
+
+fn iotdb_tree_count_sql(statement: &str) -> Option<String> {
+    let dialect = GenericDialect {};
+    let mut statements = Parser::parse_sql(&dialect, statement).ok()?;
+    let [Statement::Query(query)] = statements.as_mut_slice() else {
+        return None;
+    };
+    if query.with.is_some()
+        || query.limit_clause.is_some()
+        || query.fetch.is_some()
+        || !query.locks.is_empty()
+        || query.for_clause.is_some()
+    {
+        return None;
+    }
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return None;
+    };
+    let group_by_is_empty = matches!(&select.group_by, GroupByExpr::Expressions(expressions, modifiers) if expressions.is_empty() && modifiers.is_empty());
+    let tree_path = match select.from.as_slice() {
+        [source] if source.joins.is_empty() => match &source.relation {
+            TableFactor::Table { name, .. } => name,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let tree_path_parts = tree_path.0.iter().map(ObjectNamePart::as_ident).collect::<Option<Vec<_>>>()?;
+    if tree_path_parts.len() < 3 || !tree_path_parts[0].value.eq_ignore_ascii_case("root") {
+        return None;
+    }
+    if select.distinct.is_some()
+        || select.top.is_some()
+        || select.exclude.is_some()
+        || select.prewhere.is_some()
+        || select.into.is_some()
+        || !group_by_is_empty
+        || select.having.is_some()
+        || select.qualify.is_some()
+        || !select.lateral_views.is_empty()
+        || !select.optimizer_hints.is_empty()
+        || select.select_modifiers.as_ref().is_some_and(SelectModifiers::is_any_set)
+        || !select.connect_by.is_empty()
+        || !select.cluster_by.is_empty()
+        || !select.distribute_by.is_empty()
+        || !select.sort_by.is_empty()
+        || !select.named_window.is_empty()
+        || select.value_table_mode.is_some()
+    {
+        return None;
+    }
+
+    let measurement = match select.projection.as_slice() {
+        [SelectItem::UnnamedExpr(expr @ (Expr::Identifier(_) | Expr::CompoundIdentifier(_)))] => expr.to_string(),
+        [SelectItem::ExprWithAlias { expr: expr @ (Expr::Identifier(_) | Expr::CompoundIdentifier(_)), .. }] => {
+            expr.to_string()
+        }
+        _ => return None,
+    };
+    // IoTDB's value-filter mode allows WHERE to reference a series that is
+    // not in the SELECT list; `COUNT(<measurement>)` would then count only
+    // the selected series' non-null points and understate the row total, so
+    // only count when every WHERE reference is `time` or the measurement
+    // itself (bare or full-path form).
+    if let Some(selection) = select.selection.as_ref() {
+        let allowed = |expr: &Expr| match expr {
+            Expr::Identifier(identifier) => {
+                identifier.value.eq_ignore_ascii_case("time") || identifier.value == measurement
+            }
+            Expr::CompoundIdentifier(parts) => {
+                parts.iter().map(|part| part.value.as_str()).collect::<Vec<_>>().join(".") == measurement
+            }
+            _ => true,
+        };
+        if visit_expressions(
+            selection,
+            |expr| {
+                if allowed(expr) {
+                    ControlFlow::Continue(())
+                } else {
+                    ControlFlow::Break(())
+                }
+            },
+        )
+        .is_break()
+        {
+            return None;
+        }
+    }
+    let count_projection =
+        match Parser::parse_sql(&dialect, &format!("SELECT COUNT({measurement}) AS dbx_total_rows")).ok()?.pop()? {
+            Statement::Query(query) => match query.body.as_ref() {
+                SetExpr::Select(select) => select.projection.clone(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+    select.projection = count_projection;
+    query.order_by = None;
+    Some(format!("{query};"))
 }
 
 fn iris_count_sql(statement: &str) -> Option<String> {
@@ -4070,6 +4180,74 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn iotdb_tree_count_rewrites_single_series_without_derived_table() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "SELECT WGEN_GnTmpSta1 FROM root.dbx_time_preview.device WHERE time >= 1 ORDER BY time DESC"
+                .to_string(),
+            database_type: Some(DatabaseType::Iotdb),
+        });
+
+        assert_eq!(
+            result.sql.as_deref(),
+            Some("SELECT COUNT(WGEN_GnTmpSta1) AS dbx_total_rows FROM root.dbx_time_preview.device WHERE time >= 1;")
+        );
+    }
+
+    #[test]
+    fn iotdb_count_allows_value_filters_on_selected_series() {
+        for sql in [
+            "SELECT s1 FROM root.db.device WHERE s1 > 10",
+            "SELECT root.db.device.s1 FROM root.db.device WHERE root.db.device.s1 > 10",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Iotdb),
+            });
+
+            assert!(result.sql.is_some(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn iotdb_count_declines_queries_without_safe_tree_row_semantics() {
+        for sql in [
+            "SELECT * FROM root.db.device",
+            "SELECT s1, s2 FROM root.db.device",
+            "SELECT COUNT(s1) FROM root.db.device",
+            "SELECT s1 FROM root.db.device GROUP BY ([0, 100), 10ms)",
+            "SELECT s1 FROM root.db.device WHERE s2 > 10",
+            "SELECT s1 FROM root.db.device WHERE root.db.device.s2 > 10",
+            "SELECT s1 FROM root.db.device LIMIT 10",
+            "SELECT s1 FROM root.db.device, root.db.other",
+            "SELECT value FROM metrics",
+        ] {
+            let result = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: sql.to_string(),
+                database_type: Some(DatabaseType::Iotdb),
+            });
+
+            assert_eq!(result, err("unsupported"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn iotdb_pagination_plan_uses_tree_model_count_query() {
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: "SELECT WGEN_GnTmpSta1 FROM root.dbx_time_preview.device".to_string(),
+            query_base_sql: "SELECT WGEN_GnTmpSta1 FROM root.dbx_time_preview.device".to_string(),
+            database_type: Some(DatabaseType::Iotdb),
+            pagination: QueryPagination { limit: 100, offset: 0, session_id: None },
+            use_agent_cursor: true,
+            first_page_uses_actual_sql: false,
+        });
+
+        assert_eq!(
+            plan.count_sql.as_deref(),
+            Some("SELECT COUNT(WGEN_GnTmpSta1) AS dbx_total_rows FROM root.dbx_time_preview.device;")
+        );
+    }
+
+    #[test]
     fn iris_count_query_removes_top_level_order_by() {
         let result = build_count_query_sql(CountQuerySqlOptions {
             original_sql: "SELECT id, appointment_time FROM patients WHERE status = ? ORDER BY appointment_time DESC"
@@ -4565,6 +4743,23 @@ WHERE u.id = picked.id;
     }
 
     #[test]
+    fn builds_saphana_sorted_query_without_derived_column_alias_list() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT ID, NAME, AMOUNT FROM DBX_ISSUE_7274_SORT".to_string(),
+            database_type: Some(DatabaseType::SapHana),
+            result_columns: vec!["ID".to_string(), "NAME".to_string(), "AMOUNT".to_string()],
+            column_index: 1,
+            column: "NAME".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT ID, NAME, AMOUNT FROM DBX_ISSUE_7274_SORT) t ORDER BY \"NAME\" ASC;"
+        );
+    }
+
+    #[test]
     fn mysql_sort_preserves_directives_at_outermost_start() {
         for prefix in [
             "/*sets:allsets*/",
@@ -4703,6 +4898,23 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 1 ASC;"
+        );
+    }
+
+    #[test]
+    fn builds_saphana_sorted_query_by_ordinal_for_duplicate_columns() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::SapHana),
+            result_columns: vec!["ID".to_string(), "ID".to_string()],
+            column_index: 1,
+            column: "ID".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 ASC;"
         );
     }
 

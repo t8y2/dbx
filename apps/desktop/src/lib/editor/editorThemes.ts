@@ -973,6 +973,15 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: "var(--popover-foreground) !important",
       outline: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--primary) 22%, transparent)"),
     },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action": {
+      background: "var(--popover)",
+      borderRadius: "0",
+      borderTop: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
+      bottom: "0",
+      boxShadow: "0 -6px 12px rgb(0 0 0 / 0.06)",
+      position: "sticky",
+      zIndex: "1",
+    },
     ".cm-completionIcon": {
       alignItems: "center",
       display: "inline-flex",

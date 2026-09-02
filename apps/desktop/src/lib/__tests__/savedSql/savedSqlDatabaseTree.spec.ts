@@ -65,6 +65,11 @@ describe("database saved SQL tree", () => {
     expect(root).toMatchObject({ id: "conn-1:app:__queries", label: "tree.queries", type: "saved-sql-root", children: [] });
   });
 
+  it("collapses the Queries node by default when opening a connection", () => {
+    expect(buildDatabaseSavedSqlRootNode(database, files)?.isExpanded).toBe(false);
+    expect(buildDatabaseSavedSqlRootNode(database, [])?.isExpanded).toBe(false);
+  });
+
   it("adds Queries after database metadata and preserves its expansion state", () => {
     const existingRoot = { ...buildDatabaseSavedSqlRootNode(database, files)!, isExpanded: false };
     const decorated = decorateDatabaseSavedSqlTreeNodes(

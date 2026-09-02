@@ -1,12 +1,22 @@
 export type InstallLang = "en" | "cn";
+export type BrowserStaticArch = "x64" | "arm64";
+
+export type BrowserStaticDownload = {
+  arch: BrowserStaticArch;
+  href: string;
+};
 
 export type InstallOption = {
   id: string;
   iconId: string;
   label: string;
   description?: string;
+  driverLinkLabel?: string;
+  descriptionSuffix?: string;
   badge?: string;
   href: string;
+  action?: "download" | "instructions";
+  browserStaticDownloads?: BrowserStaticDownload[];
 };
 
 type DownloadArtifact = {
@@ -14,8 +24,12 @@ type DownloadArtifact = {
   iconId: string;
   labels: Record<InstallLang, string>;
   descriptions?: Record<InstallLang, string>;
+  driverLinkLabels?: Record<InstallLang, string>;
+  descriptionSuffixes?: Record<InstallLang, string>;
   badges?: Record<InstallLang, string>;
   suffix: string;
+  action?: "download" | "instructions";
+  browserStaticSuffixes?: Record<BrowserStaticArch, string>;
 };
 
 const DOWNLOAD_BASE_URL = "https://dl.dbxio.com/releases";
@@ -44,16 +58,18 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "windows-offline",
     iconId: "windows",
-    labels: { en: "Windows complete offline installer", cn: "Windows 完整离线安装包" },
-    descriptions: { en: "Includes WebView2 · For offline deployment or missing runtime", cn: "内置 WebView2 · 适用于内网部署或运行库缺失" },
-    badges: { en: "Offline", cn: "离线" },
+    labels: { en: "Windows 10 intranet environment installer", cn: "Windows10内网环境安装包" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
+    badges: { en: "Intranet", cn: "内网" },
     suffix: "x64-offline-setup.exe",
   },
   {
     id: "windows-7-offline",
-    iconId: "windows",
-    labels: { en: "Windows 7 / Server 2012 R2 offline installer", cn: "Windows 7 / Server 2012 R2 离线安装包" },
-    descriptions: { en: "Includes WebView2 109 · x64 only", cn: "内置 WebView2 109 · 仅支持 x64" },
+    iconId: "windows-legacy",
+    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动" },
     badges: { en: "Legacy", cn: "旧系统" },
     suffix: "x64-win7-server2012r2-offline-setup.exe",
   },
@@ -69,6 +85,19 @@ const downloadArtifacts: DownloadArtifact[] = [
     labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64" },
     suffix: "arm64.AppImage",
   },
+  {
+    id: "linux-browser",
+    iconId: "linux",
+    labels: { en: "Linux browser package", cn: "Linux 浏览器版" },
+    descriptions: { en: "For Kylin, UnionTech UOS, and other Linux distributions", cn: "适用于麒麟、统信 UOS 等 Linux 发行版" },
+    badges: { en: "Guide", cn: "安装说明" },
+    suffix: "x64-browser-static.tar.gz",
+    action: "instructions",
+    browserStaticSuffixes: {
+      x64: "x64-browser-static.tar.gz",
+      arm64: "arm64-browser-static.tar.gz",
+    },
+  },
 ];
 
 export function createInstallOptions(lang: InstallLang, version: string): InstallOption[] {
@@ -77,7 +106,16 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
     iconId: artifact.iconId,
     label: artifact.labels[lang],
     description: artifact.descriptions?.[lang],
+    driverLinkLabel: artifact.driverLinkLabels?.[lang],
+    descriptionSuffix: artifact.descriptionSuffixes?.[lang],
     badge: artifact.badges?.[lang],
     href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    action: artifact.action ?? "download",
+    browserStaticDownloads: artifact.browserStaticSuffixes
+      ? Object.entries(artifact.browserStaticSuffixes).map(([arch, suffix]) => ({
+          arch: arch as BrowserStaticArch,
+          href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${suffix}?v=${version}`,
+        }))
+      : undefined,
   }));
 }

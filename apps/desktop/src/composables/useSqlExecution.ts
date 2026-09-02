@@ -541,9 +541,8 @@ export function useSqlExecution(deps: {
     return t("explain.emptySql");
   }
 
-  async function tryExplain(sqlOverride?: SqlExecutionOverride) {
+  async function runExplain(sql: string) {
     const tab = deps.activeTab.value;
-    const { sql } = await resolvedExecutableSql(sqlOverride);
     if (!tab || !sql.trim()) {
       toast(t("explain.emptySql"));
       return;
@@ -560,6 +559,19 @@ export function useSqlExecution(deps: {
 
     const current = deps.activeTab.value;
     if (current?.explainError) toast(current.explainError, 5000);
+  }
+
+  async function tryExplain(sqlOverride?: SqlExecutionOverride) {
+    const tab = deps.activeTab.value;
+    const { sql, sourceOffset } = await resolvedExecutableSql(sqlOverride);
+    if (!tab || !sql.trim()) {
+      toast(t("explain.emptySql"));
+      return;
+    }
+    // Resolve SQL template variables exactly like tryExecute so EXPLAIN never runs the raw
+    // placeholders (e.g. `EXPLAIN (FORMAT JSON) SELECT :var;` fails on PostgreSQL).
+    if (supportsSqlTemplateParameters(deps.activeConnection.value, sql) && prepareSqlParameterDialog(sql, sourceOffset, {}, (resolvedSql) => runExplain(resolvedSql))) return;
+    await runExplain(sql);
   }
 
   async function onDangerConfirm() {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -437,7 +438,7 @@ func showViewsUnsupported(err error) bool {
 	return false
 }
 
-func (server *server) listObjects(schema string, constraints metadataListConstraints) ([]objectInfo, error) {
+func (server *server) listObjects(database, schema string, constraints metadataListConstraints) ([]objectInfo, error) {
 	if !acceptsHiveTable(constraints.ObjectTypes) && !(server.supportsRoutines() && acceptsHiveRoutine(constraints.ObjectTypes)) {
 		return []objectInfo{}, nil
 	}
@@ -453,14 +454,14 @@ func (server *server) listObjects(schema string, constraints metadataListConstra
 		}
 	}
 	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "PROCEDURE") {
-		procedures, err := server.listRoutines(schema, constraints, "PROCEDURE")
+		procedures, err := server.listRoutines(database, schema, constraints, "PROCEDURE")
 		if err != nil {
 			return nil, err
 		}
 		values = append(values, procedures...)
 	}
 	if server.supportsRoutines() && acceptsRoutineType(constraints.ObjectTypes, "FUNCTION") {
-		functions, err := server.listRoutines(schema, constraints, "FUNCTION")
+		functions, err := server.listRoutines(database, schema, constraints, "FUNCTION")
 		if err != nil {
 			return nil, err
 		}
@@ -484,6 +485,36 @@ func (server *server) supportsRoutines() bool {
 	}
 }
 
+// routineDatabaseCandidates returns the database_name filters to try against
+// system.procedures_v / system.functions_v. The sidebar may pass the active
+// database through either the schema or database RPC parameter, so mirror the
+// JDBC plugin and try both. The connection default is only a candidate when
+// the caller supplied neither parameter: appending it unconditionally would
+// return the default database's routines under an explicit database node that
+// has none of its own.
+func routineDatabaseCandidates(schema, database, connectionDatabase string) []string {
+	seen := map[string]bool{}
+	values := make([]string, 0, 3)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			return
+		}
+		key := strings.ToLower(candidate)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		values = append(values, candidate)
+	}
+	add(database)
+	add(schema)
+	if strings.TrimSpace(database) == "" && strings.TrimSpace(schema) == "" {
+		add(connectionDatabase)
+	}
+	return values
+}
+
 // listRoutines queries the server's procedure / function catalog views when the
 // driver supports them. Hive and most forks (ArgoDB, Inceptor, Transwarp) expose
 // stored procedures / functions through the system.procedures_v / system.functions_v
@@ -493,42 +524,53 @@ func (server *server) supportsRoutines() bool {
 // The query is best-effort: when the view is missing or the server rejects it
 // (older Hive without procedure support), the call returns an empty slice and
 // nil error so the caller can fall back to listing tables.
-func (server *server) listRoutines(schema string, constraints metadataListConstraints, routineType string) ([]objectInfo, error) {
+func (server *server) listRoutines(database, schema string, constraints metadataListConstraints, routineType string) ([]objectInfo, error) {
 	nameColumn := "procedure_name"
 	viewName := "system.procedures_v"
 	if strings.EqualFold(routineType, "FUNCTION") {
 		nameColumn = "function_name"
 		viewName = "system.functions_v"
 	}
-	// Routine listings are pinned to the active schema (or the connection's default
-	// database when the caller passes an empty schema). system.procedures_v /
-	// system.functions_v only contain rows for one specific database per query;
-	// there is no wildcard form. Falling back to the connection default keeps
-	// callers like the sidebar schema tree happy when they pass "" as the schema.
-	targetSchema := firstNonEmpty(schema, server.config.Database)
-	likePattern := buildRoutineLikePattern(constraints.Filter)
-	// database_name is a string column, so the schema filter must be a single-quoted
-	// literal — not a backtick-quoted identifier. ArgoDB/Inceptor reject lower(`ods`)
-	// against system.procedures_v with an ERROR_STATUS, while lower('ods') works.
-	schemaLiteral := "'" + strings.ReplaceAll(targetSchema, "'", "''") + "'"
-	sql := "SELECT " + nameColumn + " FROM " + viewName +
-		" WHERE lower(database_name) = lower(" + schemaLiteral + ")" +
-		" AND lower(" + nameColumn + ") LIKE " + likePattern +
-		" ORDER BY " + nameColumn
-	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
-	if err != nil {
-		// View missing or not supported — silently return empty list.
+	candidates := routineDatabaseCandidates(schema, database, server.config.Database)
+	if len(candidates) == 0 {
 		return []objectInfo{}, nil
 	}
-	values := make([]objectInfo, 0, len(result.Rows))
-	for _, row := range result.Rows {
-		name := rowString(row, 0)
-		if name == "" {
+	likePattern := buildRoutineLikePattern(constraints.Filter)
+	resolvedSchema := firstNonEmpty(schema, database, server.config.Database)
+	for _, targetSchema := range candidates {
+		// database_name is a string column, so the schema filter must be a single-quoted
+		// literal — not a backtick-quoted identifier. ArgoDB/Inceptor reject lower(`ods`)
+		// against system.procedures_v with an ERROR_STATUS, while lower('ods') works.
+		schemaLiteral := "'" + strings.ReplaceAll(targetSchema, "'", "''") + "'"
+		sql := "SELECT " + nameColumn + " FROM " + viewName +
+			" WHERE lower(database_name) = lower(" + schemaLiteral + ")" +
+			" AND lower(" + nameColumn + ") LIKE " + likePattern +
+			" ORDER BY " + nameColumn
+		result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
+		if err != nil {
+			log.Printf(
+				"[hive-go][listRoutines] query failed: database=%q schema=%q routineType=%s sql=%q err=%v",
+				targetSchema,
+				resolvedSchema,
+				routineType,
+				sql,
+				err,
+			)
 			continue
 		}
-		values = append(values, objectInfo{Name: name, ObjectType: strings.ToUpper(routineType), Schema: schema, Comment: nil})
+		values := make([]objectInfo, 0, len(result.Rows))
+		for _, row := range result.Rows {
+			name := rowString(row, 0)
+			if name == "" {
+				continue
+			}
+			values = append(values, objectInfo{Name: name, ObjectType: strings.ToUpper(routineType), Schema: resolvedSchema, Comment: nil})
+		}
+		if len(values) > 0 {
+			return values, nil
+		}
 	}
-	return values, nil
+	return []objectInfo{}, nil
 }
 
 // buildRoutineLikePattern turns a user-supplied filter into a Hive-safe LIKE
@@ -692,8 +734,8 @@ func (server *server) getTableDDL(schema, table string) (string, error) {
 	return strings.Join(lines, "\n") + "\n", nil
 }
 
-func (server *server) getObjectSource(schema, name, objectType string) (objectSource, error) {
-	schema = firstNonEmpty(schema, server.config.Database)
+func (server *server) getObjectSource(database, schema, name, objectType string) (objectSource, error) {
+	schema = firstNonEmpty(schema, database, server.config.Database)
 	var source string
 	var err error
 	switch strings.ToUpper(objectType) {
@@ -701,7 +743,7 @@ func (server *server) getObjectSource(schema, name, objectType string) (objectSo
 		if !server.supportsRoutines() {
 			return objectSource{}, fmt.Errorf("routine source is not supported for %s connections", server.params.DatabaseType)
 		}
-		source, err = server.getRoutineSource(schema, name, strings.ToUpper(objectType))
+		source, err = server.getRoutineSource(database, schema, name, strings.ToUpper(objectType))
 	default:
 		source, err = server.getTableDDL(schema, name)
 	}
@@ -721,30 +763,47 @@ func (server *server) getObjectSource(schema, name, objectType string) (objectSo
 // string when the view is missing or the routine is not found, so callers can
 // fall back to other sources. full_text may span multiple rows (the underlying
 // query driver splits long strings), so we join them like getTableDDL does.
-func (server *server) getRoutineSource(schema, name, routineType string) (string, error) {
+func (server *server) getRoutineSource(database, schema, name, routineType string) (string, error) {
 	nameColumn := "procedure_name"
 	viewName := "system.procedures_v"
 	if strings.EqualFold(routineType, "FUNCTION") {
 		nameColumn = "function_name"
 		viewName = "system.functions_v"
 	}
-	sql := "SELECT full_text FROM " + viewName +
-		" WHERE lower(database_name) = lower('" + strings.ReplaceAll(schema, "'", "''") + "')" +
-		" AND " + nameColumn + " = '" + strings.ReplaceAll(name, "'", "''") + "'"
-	result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
-	if err != nil {
+	candidates := routineDatabaseCandidates(schema, database, server.config.Database)
+	if len(candidates) == 0 {
 		return "", nil
 	}
-	lines := make([]string, 0, len(result.Rows))
-	for _, row := range result.Rows {
-		if line := firstRowValue(row); line != "" {
-			lines = append(lines, line)
+	escapedName := strings.ReplaceAll(name, "'", "''")
+	for _, targetSchema := range candidates {
+		sql := "SELECT full_text FROM " + viewName +
+			" WHERE lower(database_name) = lower('" + strings.ReplaceAll(targetSchema, "'", "''") + "')" +
+			" AND " + nameColumn + " = '" + escapedName + "'"
+		result, err := server.executeQuery(queryOptions{SQL: sql, MaxRows: metadataQueryLimit})
+		if err != nil {
+			log.Printf(
+				"[hive-go][getRoutineSource] query failed: database=%q schema=%q name=%q routineType=%s sql=%q err=%v",
+				targetSchema,
+				schema,
+				name,
+				routineType,
+				sql,
+				err,
+			)
+			continue
 		}
+		lines := make([]string, 0, len(result.Rows))
+		for _, row := range result.Rows {
+			if line := firstRowValue(row); line != "" {
+				lines = append(lines, line)
+			}
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		return strings.Join(lines, "\n") + "\n", nil
 	}
-	if len(lines) == 0 {
-		return "", nil
-	}
-	return strings.Join(lines, "\n") + "\n", nil
+	return "", nil
 }
 
 func (server *server) getExplainInfo(sqlText string) (string, error) {

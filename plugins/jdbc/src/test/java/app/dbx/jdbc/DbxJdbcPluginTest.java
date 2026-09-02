@@ -2172,6 +2172,43 @@ final class DbxJdbcPluginTest {
     }
 
     @Test
+    void getObjectSourceReturnsHive2ViewDdlFromShowCreateTable() throws Exception {
+        List<String> executedSql = new ArrayList<>();
+        Driver driver = new Hive2ViewDdlDriver(executedSql);
+        DriverManager.registerDriver(driver);
+        String connection = """
+            {
+              "connection_string": "jdbc:hive2://hive2-view-ddl-test:10000/default"
+            }
+            """;
+        try {
+            JsonNode response = request("getObjectSource", """
+                {
+                  "connection": %s,
+                  "database": "ods",
+                  "schema": "",
+                  "name": "active_users",
+                  "object_type": "VIEW"
+                }
+                """.formatted(connection));
+
+            assertFalse(response.has("error"), response.toString());
+            assertEquals(List.of("SHOW CREATE TABLE `ods`.`active_users`"), executedSql);
+            assertEquals(
+                "CREATE VIEW `ods`.`active_users` AS SELECT 1\n",
+                response.path("result").path("source").asText()
+            );
+            assertEquals("VIEW", response.path("result").path("object_type").asText());
+            assertEquals("active_users", response.path("result").path("name").asText());
+        } finally {
+            request("close", """
+                { "connection": %s }
+                """.formatted(connection));
+            DriverManager.deregisterDriver(driver);
+        }
+    }
+
+    @Test
     void listDataTypesUsesJdbcTypeInfo() throws Exception {
         JsonNode response = request("listDataTypes", """
             { "connection": %s }
@@ -4672,6 +4709,99 @@ final class DbxJdbcPluginTest {
         if (returnType == double.class) return 0d;
         if (returnType == char.class) return '\0';
         return null;
+    }
+
+    private static final class Hive2ViewDdlDriver implements Driver {
+        private final List<String> executedSql;
+
+        private Hive2ViewDdlDriver(List<String> executedSql) {
+            this.executedSql = executedSql;
+        }
+
+        @Override
+        public Connection connect(String url, Properties info) {
+            if (!acceptsURL(url)) {
+                return null;
+            }
+            return (Connection) Proxy.newProxyInstance(
+                DbxJdbcPluginTest.class.getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "createStatement" -> hive2ViewDdlStatement(executedSql);
+                    case "isClosed" -> false;
+                    case "close" -> null;
+                    default -> defaultValue(method.getReturnType());
+                }
+            );
+        }
+
+        @Override
+        public boolean acceptsURL(String url) {
+            return url != null && url.startsWith("jdbc:hive2://hive2-view-ddl-test:");
+        }
+
+        @Override
+        public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) {
+            return new DriverPropertyInfo[0];
+        }
+
+        @Override
+        public int getMajorVersion() {
+            return 1;
+        }
+
+        @Override
+        public int getMinorVersion() {
+            return 0;
+        }
+
+        @Override
+        public boolean jdbcCompliant() {
+            return false;
+        }
+
+        @Override
+        public java.util.logging.Logger getParentLogger() {
+            return java.util.logging.Logger.getGlobal();
+        }
+    }
+
+    private static Statement hive2ViewDdlStatement(List<String> executedSql) {
+        return (Statement) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { Statement.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> {
+                    executedSql.add(String.valueOf(args[0]));
+                    yield hive2ViewDdlResultSet();
+                }
+                case "close" -> null;
+                default -> defaultValue(method.getReturnType());
+            }
+        );
+    }
+
+    private static ResultSet hive2ViewDdlResultSet() {
+        final String[] lines = {
+            "CREATE VIEW `ods`.`active_users` AS SELECT 1"
+        };
+        return (ResultSet) Proxy.newProxyInstance(
+            DbxJdbcPluginTest.class.getClassLoader(),
+            new Class<?>[] { ResultSet.class },
+            new java.lang.reflect.InvocationHandler() {
+                private int index = -1;
+
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> ++index < lines.length;
+                        case "getString" -> lines[index];
+                        case "close" -> null;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            }
+        );
     }
 
     private static final class AdhocFailingHiveDriver implements Driver {

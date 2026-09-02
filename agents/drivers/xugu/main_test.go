@@ -949,6 +949,23 @@ func TestGetColumnsFallsBackWhenOnNullMetadataIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestXuguPrimaryKeyMatchesColumnCaseWhenCatalogsDisagree(t *testing.T) {
+	primaryKeys := map[string]bool{"ID": true}
+	if !xuguPrimaryKeyMatches("id", primaryKeys) {
+		t.Fatal("expected an unquoted primary key to match the column despite case differences")
+	}
+	if !xuguPrimaryKeyMatches("ID", primaryKeys) {
+		t.Fatal("expected an exact primary-key match")
+	}
+}
+
+func TestXuguPrimaryKeyMatchingDoesNotGuessAmbiguousCase(t *testing.T) {
+	primaryKeys := map[string]bool{"ID": true, "id": true}
+	if xuguPrimaryKeyMatches("Id", primaryKeys) {
+		t.Fatal("must not choose between primary-key names that differ only by case")
+	}
+}
+
 func TestIndexSQLUsesLowPrivilegeDictionary(t *testing.T) {
 	sqlText := strings.ToUpper(xuguListIndexesSQL)
 

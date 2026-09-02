@@ -200,7 +200,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.windows_win7_bundle == 'true'
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static

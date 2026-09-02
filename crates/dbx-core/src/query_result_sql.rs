@@ -413,7 +413,7 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let use_sort_ordinal = !use_derived_column_aliases
         && matches!(
             options.database_type,
-            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle)
+            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::SapHana)
         )
         && options.result_columns.get(options.column_index).is_some_and(|column| {
             options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
@@ -4721,6 +4721,23 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 1 ASC;"
+        );
+    }
+
+    #[test]
+    fn builds_saphana_sorted_query_by_ordinal_for_duplicate_columns() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::SapHana),
+            result_columns: vec!["ID".to_string(), "ID".to_string()],
+            column_index: 1,
+            column: "ID".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 ASC;"
         );
     }
 

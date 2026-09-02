@@ -86,7 +86,7 @@ export const CONNECTION_PROFILES = {
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
   kyuubi: { type: "kyuubi", port: 10009, user: "", label: "Apache Kyuubi", icon: "kyuubi", urlParams: "auth=NONE" },
-  argo: { type: "argo", port: 10000, user: "", label: "ArgoDB (Transwarp)", icon: "hive" },
+  argo: { type: "argo", port: 10000, user: "", label: "ArgoDB (Transwarp)", icon: "hive", urlParams: "auth=noSasl" },
   impala: { type: "impala", port: 21050, user: "", label: "Apache Impala", icon: "impala", urlParams: "auth=noSasl" },
   spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },

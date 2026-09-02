@@ -476,6 +476,7 @@ profiles:
     icon: hive
     port: 10000
     user: ""
+    urlParams: auth=noSasl
     category: domestic
     pickerLabel: ArgoDB
   - id: impala

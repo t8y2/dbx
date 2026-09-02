@@ -296,6 +296,50 @@ func TestImpalaDefaultsToNoSASL(t *testing.T) {
 	}
 }
 
+func TestArgoDefaultsToNoSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "argo",
+		Host:         "argo.example.com",
+		Port:         10000,
+		Database:     "analytics",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NOSASL" {
+		t.Fatalf("unexpected ArgoDB auth mode: %q", config.Auth)
+	}
+}
+
+func TestArgoExplicitAuthenticationOverridesDefault(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "argo",
+		Host:         "argo.example.com",
+		Port:         10000,
+		URLParams:    "auth=NONE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" || !config.AuthExplicit {
+		t.Fatalf("explicit ArgoDB authentication was not preserved: %#v", config)
+	}
+}
+
+func TestHiveDefaultAuthenticationRemainsSASL(t *testing.T) {
+	config, err := parseConnectionConfig(connectParams{
+		DatabaseType: "hive",
+		Host:         "hive.example.com",
+		Port:         10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Auth != "NONE" {
+		t.Fatalf("unexpected Hive auth mode: %q", config.Auth)
+	}
+}
+
 func TestImpalaExplicitAuthenticationOverridesDefaults(t *testing.T) {
 	config, err := parseConnectionConfig(connectParams{
 		DatabaseType: "impala",

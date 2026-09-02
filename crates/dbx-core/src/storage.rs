@@ -5036,6 +5036,7 @@ mod tests {
     };
     use crate::saved_sql::SavedSqlFile;
     use rusqlite::{Connection, TransactionBehavior};
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
@@ -7165,12 +7166,47 @@ mod tests {
                 selection: AiEffortSelection::Enum("high".to_string()),
             }],
             default_mode: Some(AiAssistantMode::Agent),
+            default_templates_by_db_type: BTreeMap::from([("postgresql".to_string(), vec!["tpl-1".to_string()])]),
+            last_used_templates_by_db_type: BTreeMap::from([("mysql".to_string(), vec!["tpl-2".to_string()])]),
         };
 
         storage.save_ai_chat_selection(&selection).await.unwrap();
 
         assert_eq!(storage.load_ai_chat_selection().await.unwrap(), Some(selection));
         assert_eq!(storage.load_app_settings_json().await.unwrap().get("ai_chat_selection_v1"), None);
+    }
+
+    // Selection JSON written before per-db-type prompt template defaults existed
+    // must still deserialize; the new maps fall back to empty.
+    #[tokio::test]
+    async fn ai_chat_selection_loads_legacy_payload_without_template_defaults() {
+        let path = temp_db_path("ai-chat-selection-legacy");
+        let storage = Storage::open(&path).await.unwrap();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "active": { "configId": "config-1", "modelId": "model-1" },
+            "effortPreferences": [],
+            "defaultMode": "ask"
+        });
+        storage.save_app_state_value(super::APP_STATE_AI_CHAT_SELECTION_KEY, &legacy).await.unwrap();
+
+        let loaded = storage.load_ai_chat_selection().await.unwrap().unwrap();
+        assert_eq!(
+            loaded.active,
+            Some(AiActiveModelSelection { config_id: "config-1".to_string(), model_id: "model-1".to_string() })
+        );
+        assert!(loaded.default_templates_by_db_type.is_empty());
+        assert!(loaded.last_used_templates_by_db_type.is_empty());
+    }
+
+    // Serialization must omit the per-db-type maps while empty so the payload
+    // stays identical to the pre-defaults format for users without picks.
+    #[test]
+    fn ai_chat_selection_serialization_omits_empty_template_maps() {
+        let json = serde_json::to_value(AiChatSelectionState::default()).unwrap();
+        let object = json.as_object().unwrap();
+        assert!(!object.contains_key("defaultTemplatesByDbType"));
+        assert!(!object.contains_key("lastUsedTemplatesByDbType"));
     }
 
     #[tokio::test]

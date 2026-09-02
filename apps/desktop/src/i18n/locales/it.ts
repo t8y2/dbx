@@ -2654,6 +2654,10 @@ export default withEnglishFallback({
     templateSelectorLoading: "Caricamento...",
     templateSelectorEmpty: "Nessun modello. Clicca Gestisci per aggiungerne.",
     templateSelectorTooLong: "I modelli selezionati superano il limite totale di contenuto ({max} caratteri). Deseleziona alcuni per continuare.",
+    templateSetDefault: "Imposta come predefinito",
+    templateDefaultsTitle: "Predefinito per tipo di database",
+    templateDefaultsEmpty: "Non ancora predefinito per alcun tipo di database. I modelli predefiniti vengono applicati automaticamente all'apertura del pannello AI su una connessione corrispondente.",
+    templateDefaultBadgeTitle: "Modello predefinito per {type}",
     exportMarkdown: "Esporta come Markdown",
     analysis: "AI Analysis",
     agentSteps: {

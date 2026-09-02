@@ -1506,6 +1506,18 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
+/** Keep only well-formed, non-empty template id lists keyed by db_type. */
+function normalizeTemplateIdsByDbType(value?: Record<string, string[]>): Record<string, string[]> {
+  if (!value) return {};
+  const out: Record<string, string[]> = {};
+  for (const [dbType, ids] of Object.entries(value)) {
+    if (!Array.isArray(ids)) continue;
+    const cleaned = [...new Set(ids.filter((id): id is string => typeof id === "string" && id.trim() !== "").map((id) => id.trim()))];
+    if (cleaned.length > 0) out[dbType] = cleaned;
+  }
+  return out;
+}
+
 export interface SettingsNavigationRequest {
   id: number;
   tab: string;
@@ -1518,6 +1530,10 @@ export const useSettingsStore = defineStore("settings", () => {
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
   const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const defaultAiMode = ref<AiAssistantMode>("ask");
+  // Per-db_type prompt template defaults (explicit opt-in) and last-used
+  // fallback; both resolved when an AI panel mounts or its namespace changes.
+  const aiDefaultTemplatesByDbType = ref<Record<string, string[]>>({});
+  const aiLastUsedTemplatesByDbType = ref<Record<string, string[]>>({});
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
@@ -1707,6 +1723,8 @@ export const useSettingsStore = defineStore("settings", () => {
     const savedSelection = await api.loadAiChatSelection().catch(() => null);
     effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
     defaultAiMode.value = savedSelection?.defaultMode ?? "ask";
+    aiDefaultTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.defaultTemplatesByDbType);
+    aiLastUsedTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.lastUsedTemplatesByDbType);
 
     const savedActive = savedSelection?.active;
     const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
@@ -1845,6 +1863,57 @@ export const useSettingsStore = defineStore("settings", () => {
     persistAiChatSelection();
   }
 
+  /** Empty id list clears the db_type entry so unsetting a default is expressible. */
+  function setDefaultTemplatesForDbType(dbType: string, templateIds: string[]) {
+    if (!dbType) return;
+    const next = { ...aiDefaultTemplatesByDbType.value };
+    const cleaned = [...new Set(templateIds.map((id) => id.trim()).filter((id) => id !== ""))];
+    if (cleaned.length === 0) delete next[dbType];
+    else next[dbType] = cleaned;
+    aiDefaultTemplatesByDbType.value = next;
+    persistAiChatSelection();
+  }
+
+  /**
+   * Called on send: a non-empty selection is remembered for the db_type, while
+   * sending with every template deselected is an explicit choice that clears
+   * the remembered selection — otherwise the stale entry would resurrect the
+   * old templates the next time a panel opens.
+   */
+  function recordLastUsedTemplates(dbType: string, templateIds: string[]) {
+    if (!dbType) return;
+    if (templateIds.length === 0) {
+      if (!(dbType in aiLastUsedTemplatesByDbType.value)) return;
+      const next = { ...aiLastUsedTemplatesByDbType.value };
+      delete next[dbType];
+      aiLastUsedTemplatesByDbType.value = next;
+      persistAiChatSelection();
+      return;
+    }
+    aiLastUsedTemplatesByDbType.value = { ...aiLastUsedTemplatesByDbType.value, [dbType]: [...templateIds] };
+    persistAiChatSelection();
+  }
+
+  function removeTemplateFromDefaultAndLastUsed(templateId: string) {
+    const strip = (record: Record<string, string[]>): Record<string, string[]> => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+      for (const [dbType, ids] of Object.entries(record)) {
+        const filtered = ids.filter((id) => id !== templateId);
+        if (filtered.length !== ids.length) changed = true;
+        if (filtered.length > 0) next[dbType] = filtered;
+      }
+      // Identity-preserving no-op lets the caller skip a needless persist.
+      return changed ? next : record;
+    };
+    const nextDefaults = strip(aiDefaultTemplatesByDbType.value);
+    const nextLastUsed = strip(aiLastUsedTemplatesByDbType.value);
+    if (nextDefaults === aiDefaultTemplatesByDbType.value && nextLastUsed === aiLastUsedTemplatesByDbType.value) return;
+    aiDefaultTemplatesByDbType.value = nextDefaults;
+    aiLastUsedTemplatesByDbType.value = nextLastUsed;
+    persistAiChatSelection();
+  }
+
   function persistAiChatSelection() {
     pendingAiChatSelection = {
       version: 1,
@@ -1854,6 +1923,11 @@ export const useSettingsStore = defineStore("settings", () => {
         selection: { ...preference.selection },
       })),
       defaultMode: defaultAiMode.value,
+      // Match the backend's skip_serializing_if(empty): omit the per-db_type
+      // records entirely while nothing is configured so the payload stays
+      // identical to the pre-defaults format for users without template picks.
+      ...(Object.keys(aiDefaultTemplatesByDbType.value).length > 0 ? { defaultTemplatesByDbType: aiDefaultTemplatesByDbType.value } : {}),
+      ...(Object.keys(aiLastUsedTemplatesByDbType.value).length > 0 ? { lastUsedTemplatesByDbType: aiLastUsedTemplatesByDbType.value } : {}),
     };
     if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
   }
@@ -2225,6 +2299,11 @@ export const useSettingsStore = defineStore("settings", () => {
     activeEffort,
     defaultAiMode,
     setDefaultAiMode,
+    aiDefaultTemplatesByDbType,
+    aiLastUsedTemplatesByDbType,
+    setDefaultTemplatesForDbType,
+    recordLastUsedTemplates,
+    removeTemplateFromDefaultAndLastUsed,
     isAiConfigLoaded,
     aiConfigs,
     initAiConfigs,

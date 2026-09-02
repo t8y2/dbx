@@ -2762,6 +2762,10 @@ export default withEnglishFallback({
     templateSelectorLoading: "Carregando...",
     templateSelectorEmpty: "Nenhum modelo. Clique em Gerenciar para adicionar.",
     templateSelectorTooLong: "Os modelos selecionados excedem o limite total de conteúdo ({max} caracteres). Desmarque alguns para continuar.",
+    templateSetDefault: "Definir como padrão",
+    templateDefaultsTitle: "Padrão por tipo de banco de dados",
+    templateDefaultsEmpty: "Ainda não é o padrão de nenhum tipo de banco de dados. Os modelos padrão são aplicados automaticamente ao abrir o painel de IA em uma conexão correspondente.",
+    templateDefaultBadgeTitle: "Modelo padrão para {type}",
     exportMarkdown: "Exportar como Markdown",
     analysis: "AI Analysis",
     agentSteps: {

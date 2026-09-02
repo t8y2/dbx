@@ -2653,6 +2653,10 @@ export default withEnglishFallback({
     templateSelectorLoading: "載入中...",
     templateSelectorEmpty: "尚無範本，請點擊管理以新增。",
     templateSelectorTooLong: "已選範本內容合計超過限制（最多 {max} 字元），請取消部分選取。",
+    templateSetDefault: "設為預設",
+    templateDefaultsTitle: "按資料庫類型設為預設",
+    templateDefaultsEmpty: "尚未設為任何資料庫類型的預設範本。設定後，開啟對應資料庫的 AI 助手時會自動勾選。",
+    templateDefaultBadgeTitle: "{type} 的預設範本",
     exportMarkdown: "匯出為 Markdown",
     analysis: "AI 分析",
     agentSteps: {

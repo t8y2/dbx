@@ -2760,6 +2760,10 @@ export default withEnglishFallback({
     templateSelectorLoading: "Cargando...",
     templateSelectorEmpty: "Sin plantillas. Haz clic en Gestionar para añadir.",
     templateSelectorTooLong: "Las plantillas seleccionadas superan el límite total de contenido ({max} caracteres). Deselecciona algunas para continuar.",
+    templateSetDefault: "Establecer como predeterminada",
+    templateDefaultsTitle: "Predeterminada por tipo de base de datos",
+    templateDefaultsEmpty: "Aún no es predeterminada para ningún tipo de base de datos. Las plantillas predeterminadas se aplican automáticamente al abrir el panel de IA en una conexión coincidente.",
+    templateDefaultBadgeTitle: "Plantilla predeterminada para {type}",
     exportMarkdown: "Exportar como Markdown",
     analysis: "AI Analysis",
     agentSteps: {

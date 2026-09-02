@@ -2793,6 +2793,10 @@ export default withEnglishFallback({
     templateSelectorLoading: "読み込み中...",
     templateSelectorEmpty: "テンプレートがありません。「管理」をクリックして追加してください。",
     templateSelectorTooLong: "選択されたテンプレートの合計が上限（{max}文字）を超えています。選択を解除してください。",
+    templateSetDefault: "デフォルトに設定",
+    templateDefaultsTitle: "データベース種別ごとのデフォルト",
+    templateDefaultsEmpty: "まだどのデータベース種別のデフォルトにも設定されていません。設定すると、該当するデータベースへの接続で AI パネルを開いたときに自動的に選択されます。",
+    templateDefaultBadgeTitle: "{type} のデフォルトテンプレート",
     exportMarkdown: "Markdown としてエクスポート",
     analysis: "AI 分析",
     agentSteps: {

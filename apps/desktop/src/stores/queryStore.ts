@@ -5475,7 +5475,7 @@ export const useQueryStore = defineStore("query", () => {
             const risk = classifySqlRisk(sqlToExecute, { dialect: effectiveDbType }).risk;
             if (!isUnsupportedManualTransactionMethod(error) || risk !== "read") throw error;
             tab.autoCommit = true;
-            tab.txnSessionId = undefined;
+            clearManualTransactionSession(tab);
             useLegacyReadFallback = true;
             queryExecutionLog("warn", "begin-manual-txn:legacy-read-fallback", {
               traceId,

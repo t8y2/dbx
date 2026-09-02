@@ -145,6 +145,8 @@ const props = defineProps<{
   initialTabRequestId?: number;
   initialTarget?: TableStructureEditorTarget;
   draft?: TableStructureEditorDraft;
+  /** Reference-pane presentation: hide mutation actions and reject saves. */
+  readOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -3399,6 +3401,7 @@ function toggleSqlPreviewCollapsed() {
 }
 
 async function applyChanges() {
+  if (props.readOnly) return false;
   if (!canApply.value || !props.connectionId || !props.database) return false;
   // Layer B runtime guard: a stale `concurrently: true` whose availability is
   // no longer enabled must never be executed — reject the save with an
@@ -3579,6 +3582,7 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
     return;
   }
   if (isPlainModShortcut(event, "s")) {
+    if (props.readOnly) return;
     event.preventDefault();
     event.stopPropagation();
     void applyChanges();
@@ -4832,7 +4836,7 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
       {{ errorMessage }}
     </div>
 
-    <div class="flex shrink-0 items-center justify-end gap-2">
+    <div v-if="!readOnly" class="flex shrink-0 items-center justify-end gap-2">
       <Button :class="structureToolbarButtonClass" :disabled="!canApply" @click="applyChanges">
         <Loader2 v-if="saving" :class="[structureIconClass, 'mr-1.5 animate-spin']" />
         <Save v-else :class="[structureIconClass, 'mr-1.5']" />

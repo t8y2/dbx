@@ -41,11 +41,11 @@ describe("focusEditorView", () => {
 describe("QueryEditor auto focus wiring", () => {
   it("keeps auto focus opt-in for shared editor instances", () => {
     expect(queryEditorSource).toContain("autoFocus?: boolean;");
-    expect(queryEditorSource).toMatch(/if \(props\.autoFocus\) \{[\s\S]*focusEditorView\(view\.value\);/);
+    expect(queryEditorSource).toMatch(/if \(props\.autoFocus && !props\.viewOnly\) \{[\s\S]*focusEditorView\(view\.value\);/);
   });
 
-  it("enables auto focus for query tabs", () => {
-    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?\sauto-focus\s[\s\S]*?:model-value="activeTab\.sql"/);
+  it("enables auto focus for query tabs outside view-only panes", () => {
+    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?:auto-focus="!viewOnly"[\s\S]*?:model-value="activeTab\.sql"/);
   });
 });
 

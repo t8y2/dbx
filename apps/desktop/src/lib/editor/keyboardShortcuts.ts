@@ -141,6 +141,14 @@ export function isCloseOtherTabsShortcut(event: ShortcutLikeEvent, shortcuts?: P
   return matchesShortcut(event, actionShortcut("closeOtherTabs", shortcuts), platform);
 }
 
+export function isSplitTabShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("splitTab", shortcuts));
+}
+
+export function isSplitTabHorizontallyShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("splitTabHorizontally", shortcuts));
+}
+
 export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }

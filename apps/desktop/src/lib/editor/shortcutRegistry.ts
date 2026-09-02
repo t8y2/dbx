@@ -40,6 +40,8 @@ export type ShortcutActionId =
   | "openSettings"
   | "closeTab"
   | "closeOtherTabs"
+  | "splitTab"
+  | "splitTabHorizontally"
   | "focusSearch"
   | "quickOpen"
   | "navigateTabHistoryBack"
@@ -347,6 +349,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "contextMenu.closeOtherTabs",
     scope: "global",
     defaultShortcut: closeOtherTabsDefaultShortcut(),
+  },
+  {
+    id: "splitTab",
+    labelKey: "settings.shortcutSplitTab",
+    scope: "global",
+    defaultShortcut: "Mod+D",
+  },
+  {
+    id: "splitTabHorizontally",
+    labelKey: "settings.shortcutSplitTabHorizontally",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+D",
   },
   {
     id: "focusSearch",

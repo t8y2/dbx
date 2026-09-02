@@ -3,6 +3,13 @@ import type { QueryTab } from "@/types/database";
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
 
+/** Layout of the split view: "vertical" places the reference pane to the right, "horizontal" below. */
+export type SplitPaneDirection = "vertical" | "horizontal";
+
+export function parseSplitPaneDirection(value: unknown): SplitPaneDirection {
+  return value === "horizontal" ? "horizontal" : "vertical";
+}
+
 export interface SavedQueryResultRun {
   id: string;
   title: string;
@@ -64,6 +71,12 @@ export interface SavedOpenTab {
 export interface RestoredOpenTabs {
   tabs: QueryTab[];
   activeTabId: string | null;
+  splitPaneTabId: string | null;
+  splitPaneDirection: SplitPaneDirection;
+}
+
+function emptyRestoredOpenTabs(): RestoredOpenTabs {
+  return { tabs: [], activeTabId: null, splitPaneTabId: null, splitPaneDirection: "vertical" };
 }
 
 export type OpenTabsRestoreFilter = "all" | "pinned";
@@ -159,8 +172,8 @@ function isSavedOpenTab(value: unknown): value is SavedOpenTab {
   return typeof tab.id === "string" && typeof tab.title === "string" && typeof tab.connectionId === "string" && typeof tab.database === "string" && (typeof tab.sql === "string" || typeof tab.savedSqlId === "string");
 }
 
-function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
-  if (!Array.isArray(parsed)) return { tabs: [], activeTabId: null };
+function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, rawSplitPaneTabId: string | null, rawSplitPaneDirection: unknown, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
+  if (!Array.isArray(parsed)) return emptyRestoredOpenTabs();
 
   try {
     const validConnectionIds = options.validConnectionIds ? new Set(options.validConnectionIds) : undefined;
@@ -208,23 +221,25 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
     return {
       tabs,
       activeTabId: tabs.some((tab) => tab.id === activeTabId) ? activeTabId : tabs[0]?.id || null,
+      splitPaneTabId: rawSplitPaneTabId && rawSplitPaneTabId !== activeTabId && tabs.some((tab) => tab.id === rawSplitPaneTabId) ? rawSplitPaneTabId : null,
+      splitPaneDirection: parseSplitPaneDirection(rawSplitPaneDirection),
     };
   } catch {
-    return { tabs: [], activeTabId: null };
+    return emptyRestoredOpenTabs();
   }
 }
 
-export function restoreOpenTabsPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
-  if (!payload) return { tabs: [], activeTabId: null };
-  return restoreOpenTabsArray(payload.tabs, typeof payload.activeTabId === "string" ? payload.activeTabId : null, options);
+export function restoreOpenTabsPayload(payload: { tabs?: unknown; activeTabId?: unknown; splitPaneTabId?: unknown; splitPaneDirection?: unknown } | null | undefined, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
+  if (!payload) return emptyRestoredOpenTabs();
+  return restoreOpenTabsArray(payload.tabs, typeof payload.activeTabId === "string" ? payload.activeTabId : null, typeof payload.splitPaneTabId === "string" ? payload.splitPaneTabId : null, payload.splitPaneDirection, options);
 }
 
 export function restoreOpenTabsState(rawTabs: string | null, rawActiveTabId: string | null, options: OpenTabsRestoreOptions = {}): RestoredOpenTabs {
-  if (!rawTabs) return { tabs: [], activeTabId: null };
+  if (!rawTabs) return emptyRestoredOpenTabs();
 
   try {
-    return restoreOpenTabsArray(JSON.parse(rawTabs), rawActiveTabId, options);
+    return restoreOpenTabsArray(JSON.parse(rawTabs), rawActiveTabId, null, undefined, options);
   } catch {
-    return { tabs: [], activeTabId: null };
+    return emptyRestoredOpenTabs();
   }
 }

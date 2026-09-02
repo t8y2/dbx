@@ -322,6 +322,13 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       });
       return;
     }
+    // The split reference pane reuses this composable with its own tab ref, so
+    // the bare-reload fallback must stay tab-scoped instead of executing the
+    // main pane's active tab.
+    if (tab.id !== queryStore.activeTabId) {
+      await queryStore.executeTabSql(tab.id, tab.sql, { preserveResultDuringExecution: true });
+      return;
+    }
     await queryStore.executeCurrentTab();
   }
 

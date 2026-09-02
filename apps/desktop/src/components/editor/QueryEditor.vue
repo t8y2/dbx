@@ -195,6 +195,7 @@ const props = defineProps<{
   resultSourceFrom?: number;
   resultSourceTo?: number;
   readOnly?: boolean;
+  viewOnly?: boolean;
   autoFocus?: boolean;
   forceWordWrap?: boolean;
   hideExecutionControls?: boolean;
@@ -2026,32 +2027,38 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
   const shortcuts = normalizeShortcutSettings(settingsStore.editorSettings.shortcuts);
   const Prec = codeMirrorPrec;
   const binding = (shortcut: string, run: (view: EditorViewType) => boolean) => (shortcut ? [{ key: shortcutToCodeMirrorKey(shortcut), preventDefault: true, run }] : []);
+  // Reference-pane editors are read-only surfaces for comparing content, so
+  // their keymap must not emit actions the surrounding app routes elsewhere.
+  const blockEditorActions = !!props.viewOnly;
   // Keep the shortcut on the shared execution-mode path (selection priority + configured cursor/all target),
   // but bypass the picker so the keyboard shortcut always executes directly instead of popping a dialog.
-  const executeBindings = props.hideExecutionControls
-    ? []
-    : createQueryEditorExecutionShortcutBindings(
-        shortcuts.executeSql,
-        () => requestExecute({ bypassPicker: true }),
-        (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
-      );
-  const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
+  const executeBindings =
+    props.hideExecutionControls || blockEditorActions
+      ? []
+      : createQueryEditorExecutionShortcutBindings(
+          shortcuts.executeSql,
+          () => requestExecute({ bypassPicker: true }),
+          (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+        );
+  const executeInNewResultTabBindings = props.hideExecutionControls || blockEditorActions ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
   const replaceShortcutBindings = createQueryEditorReplaceShortcutBindings(shortcuts.replace, openReplace);
   const replaceShortcutHandler = createQueryEditorReplaceShortcutHandler({
     shortcut: shortcuts.replace,
     openReplace,
-    isReadOnly: () => !!props.readOnly,
+    isReadOnly: () => !!props.readOnly || !!props.viewOnly,
   });
   const sqlShortcutActions = enabledSqlShortcutActions(settingsStore.editorSettings.sqlShortcuts);
-  const sqlShortcutKeymapActions = sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
+  const sqlShortcutKeymapActions = blockEditorActions ? [] : sqlShortcutActions.filter((action) => !isCharacterProducingShortcut(action.shortcut));
   const sqlShortcutBindings = sqlShortcutKeymapActions.flatMap((action) => binding(action.shortcut, (currentView) => runSqlShortcutAction(action, currentView)));
-  const sqlShortcutDomHandler = createQueryEditorSqlShortcutDomHandler(
-    () => settingsStore.editorSettings.sqlShortcuts,
-    (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
-  );
+  const sqlShortcutDomHandler = blockEditorActions
+    ? undefined
+    : createQueryEditorSqlShortcutDomHandler(
+        () => settingsStore.editorSettings.sqlShortcuts,
+        (action, currentView, event) => runSqlShortcutAction(action, currentView, event),
+      );
   const combinedDomKeydownHandler = (event: KeyboardEvent, view: EditorViewType) => {
     if (replaceShortcutHandler(event)) return true;
-    return sqlShortcutDomHandler(event, view);
+    return sqlShortcutDomHandler ? sqlShortcutDomHandler(event, view) : false;
   };
   const moveCompletion = (view: EditorViewType, forward: boolean, by?: "page") => codeMirrorMoveCompletionSelection?.(forward, by)?.(view) ?? false;
   return [
@@ -2084,14 +2091,18 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
-        ...binding(shortcuts.saveSql, () => {
-          emit("save");
-          return true;
-        }),
-        ...binding(shortcuts.formatSql, () => {
-          void formatCurrentSql();
-          return true;
-        }),
+        ...(blockEditorActions
+          ? []
+          : binding(shortcuts.saveSql, () => {
+              emit("save");
+              return true;
+            })),
+        ...(blockEditorActions
+          ? []
+          : binding(shortcuts.formatSql, () => {
+              void formatCurrentSql();
+              return true;
+            })),
         ...binding(shortcuts.expandSelectStar, (currentView) => {
           const target = selectStarExpansionTargetForView(currentView);
           if (!target) return false;
@@ -2135,7 +2146,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...createQueryEditorSearchKeymap({
           openSearch,
           openReplace,
-          isReadOnly: () => !!props.readOnly,
+          isReadOnly: () => !!props.readOnly || !!props.viewOnly,
         }),
         ...sqlShortcutBindings,
       ]),
@@ -5796,7 +5807,7 @@ onMounted(async () => {
         }),
       ),
       wordWrapComp.of(props.forceWordWrap || initialSettings.wordWrap ? EditorView.lineWrapping : []),
-      readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly), EditorView.editable.of(!props.readOnly)]),
+      readOnlyComp.of([EditorState.readOnly.of(!!props.readOnly || !!props.viewOnly), EditorView.editable.of(!(props.readOnly || props.viewOnly))]),
       indentComp.of(indentExtension()),
       // Alt+drag belongs exclusively to rectangular selection. Registering the
       // same gesture as an added cursor preserves the previous cursor.
@@ -6187,7 +6198,7 @@ onMounted(async () => {
   cachedCompletionObjectsByScope.clear();
   scheduleSemanticDiagnostics();
 
-  if (props.autoFocus) {
+  if (props.autoFocus && !props.viewOnly) {
     // Query tabs opt in; shared editor instances must preserve the surrounding UI focus.
     nextTick(() => {
       requestAnimationFrame(() => {

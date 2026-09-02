@@ -51,6 +51,39 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.originalSql).toBe("");
   });
 
+  it("restores a valid split pane tab id", () => {
+    const restored = restoreOpenTabsPayload({
+      tabs: [
+        { id: "t1", title: "query_1", connectionId: "c1", database: "db", mode: "query", sql: "SELECT 1" },
+        { id: "t2", title: "query_2", connectionId: "c1", database: "db", mode: "query", sql: "SELECT 2" },
+      ],
+      activeTabId: "t1",
+      splitPaneTabId: "t2",
+    });
+    expect(restored.splitPaneTabId).toBe("t2");
+  });
+
+  it("drops a split pane tab id that no longer matches a restored tab", () => {
+    const restored = restoreOpenTabsPayload({
+      tabs: [{ id: "t1", title: "query_1", connectionId: "c1", database: "db", mode: "query", sql: "SELECT 1" }],
+      activeTabId: "t1",
+      splitPaneTabId: "t-gone",
+    });
+    expect(restored.splitPaneTabId).toBeNull();
+  });
+
+  it("drops a split pane tab id equal to the active tab", () => {
+    const restored = restoreOpenTabsPayload({
+      tabs: [
+        { id: "t1", title: "query_1", connectionId: "c1", database: "db", mode: "query", sql: "SELECT 1" },
+        { id: "t2", title: "query_2", connectionId: "c1", database: "db", mode: "query", sql: "SELECT 2" },
+      ],
+      activeTabId: "t1",
+      splitPaneTabId: "t1",
+    });
+    expect(restored.splitPaneTabId).toBeNull();
+  });
+
   it("does not persist the transient result execution target", () => {
     const tab = queryTab({ activeResultRunId: "run-1", executingResultRunId: "run-1", isExecuting: true });
     const [saved] = serializeOpenTabs([tab]);

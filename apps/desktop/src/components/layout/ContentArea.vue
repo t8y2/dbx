@@ -209,6 +209,16 @@ const props = defineProps<{
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
+  /** Read-only reference-pane mode: the SQL editor becomes non-editable and editor action shortcuts are suppressed. */
+  viewOnly?: boolean;
+  /**
+   * Hard read-only switch for the split reference pane. Unlike the cloned
+   * connection object (whose read_only flag is bypassed while a write-unlock
+   * session is active for the real connection id, and which store-backed paths
+   * like activeResultConnection re-read anyway), this prop is checked first at
+   * every editing entry point inside this pane.
+   */
+  forcedReadOnly?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -1220,7 +1230,8 @@ defineExpose({
             <QueryEditor
               ref="queryEditorRef"
               class="relative z-0 flex-1"
-              auto-focus
+              :auto-focus="!viewOnly"
+              :view-only="viewOnly"
               :model-value="activeTab.sql"
               :connection-id="activeTab.connectionId"
               :catalog="activeTab.catalog"
@@ -1786,7 +1797,7 @@ defineExpose({
                 :sql="activeResultSql"
                 :export-sql="activeResultExportSql"
                 :loading="activeResultIsLoading"
-                :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
+                :editable="!forcedReadOnly && (!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler)"
                 :source-columns="activeTab.querySourceColumns"
                 :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="activeTab.resultColumnComments"
@@ -2172,7 +2183,7 @@ defineExpose({
           :initial-order-by-input="activeTab.orderByInput"
           :sql="activeTab.sql"
           :loading="activeTab.isExecuting"
-          :editable="!activeTab.tableMetaPending && isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType)"
+          :editable="!forcedReadOnly && !activeTab.tableMetaPending && isTableDataEditable(activeEffectiveDatabaseType, activeTableMeta?.primaryKeys ?? [], activeTableMeta?.tableType)"
           context="table-data"
           :initial-where-input="activeTab.whereInput"
           :database-type="activeEffectiveDatabaseType"
@@ -2260,7 +2271,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'nacos-access-control'">
       <div class="flex-1 min-h-0">
-        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
+        <NacosAccessControlConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :read-only="forcedReadOnly || connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2331,7 +2342,7 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="connectionIsEffectivelyReadOnly(activeConnection)" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="forcedReadOnly || connectionIsEffectivelyReadOnly(activeConnection)" />
       </div>
     </template>
 
@@ -2352,7 +2363,7 @@ defineExpose({
           :target-group="activeTab.nacosTargetGroup"
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
-          :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
+          :read-only="forcedReadOnly || connectionIsEffectivelyReadOnly(activeConnection)"
         />
       </div>
     </template>
@@ -2391,6 +2402,7 @@ defineExpose({
       <TableStructureEditor
         ref="tableStructureEditorRef"
         :key="activeTab.id"
+        :read-only="viewOnly"
         :connection-id="activeTab.connectionId"
         :database="activeTab.database"
         :catalog="activeTab.catalog"

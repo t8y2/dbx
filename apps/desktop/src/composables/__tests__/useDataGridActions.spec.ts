@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(),
   buildSortedQuerySql: vi.fn(),
   executeTabSql: vi.fn(),
+  executeCurrentTab: vi.fn(),
+  activeTabId: "tab-1",
   sortTabResultLocally: vi.fn(),
   getConfig: vi.fn(),
   setExecuting: vi.fn(),
@@ -52,6 +54,8 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     executeTabSql: mocks.executeTabSql,
+    executeCurrentTab: mocks.executeCurrentTab,
+    activeTabId: mocks.activeTabId,
     sortTabResultLocally: mocks.sortTabResultLocally,
     activeResultExecutionTarget: mocks.activeResultExecutionTarget,
     setExecuting: mocks.setExecuting,
@@ -139,6 +143,7 @@ describe("useDataGridActions", () => {
     mocks.queryResultMaxRowsEnabled = true;
     mocks.queryResultMaxRows = 10_000;
     mocks.metadataGeneration = 0;
+    mocks.activeTabId = "tab-1";
     mocks.getConfig.mockReturnValue({ id: "postgres-1", db_type: "postgres" });
     mocks.buildTableSelectSql.mockResolvedValue("SELECT * FROM public.users LIMIT 100 OFFSET 0");
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });
@@ -164,6 +169,28 @@ describe("useDataGridActions", () => {
     );
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 250 OFFSET 0", expect.objectContaining({ pagination: { limit: 250, offset: 0 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
+  });
+
+  it("keeps the bare-reload fallback on the active tab", async () => {
+    const tab = tableDataTab({ mode: "query", tableMeta: undefined, tableMetaUpdatedAt: undefined, resultSortedSql: undefined });
+    const actions = useDataGridActions(computed(() => tab));
+    mocks.activeTabId = "tab-1";
+
+    await actions.onReloadData();
+
+    expect(mocks.executeCurrentTab).toHaveBeenCalledTimes(1);
+    expect(mocks.executeTabSql).not.toHaveBeenCalled();
+  });
+
+  it("keeps the bare-reload fallback tab-scoped for a non-active reference pane tab", async () => {
+    const tab = tableDataTab({ id: "tab-split", mode: "query", tableMeta: undefined, tableMetaUpdatedAt: undefined, resultSortedSql: undefined });
+    const actions = useDataGridActions(computed(() => tab));
+    mocks.activeTabId = "tab-1";
+
+    await actions.onReloadData();
+
+    expect(mocks.executeCurrentTab).not.toHaveBeenCalled();
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-split", tab.sql, { preserveResultDuringExecution: true });
   });
 
   it("preserves the toolbar page segment and offset for table-data refresh", async () => {

@@ -266,7 +266,11 @@ const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY"
 const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu"]);
+// Mirrors the backend list in dbx-core/src/sql.rs is_oracle_like_database — keep both
+// in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
+// language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
+// ranges must stay whole instead of splitting at every body semicolon.
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
 const MYSQL_CREATE_TABLE_OPTION_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);

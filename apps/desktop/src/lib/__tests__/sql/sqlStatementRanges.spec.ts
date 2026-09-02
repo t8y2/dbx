@@ -109,6 +109,34 @@ BEGIN
   NULL;
 END;`;
 
+// Mirrors the SP_ETL_LOG procedure from the 2026-09-01 ArgoDB session: PL/SQL-style
+// body with semicolons inside INSERT statements plus a block comment header. The
+// frontend splitter must keep the whole definition as ONE statement — otherwise
+// "execute current statement" sends only the first fragment
+// (`CREATE ... IS BEGIN INSERT INTO ...`) and the server returns 42000 + 1101.
+const argoProcedureFixture = `CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING --模式名
+)
+/****************************************
+@AUTHOR:xiangxu
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME
+  );
+END;`;
+
 const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
 
 CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
@@ -442,6 +470,17 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
+    expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+  });
+
+  it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {
+    const range = statementRangeAtCursor(argoProcedureFixture, indexOf(argoProcedureFixture, "ETL_LOG", 2), "argo");
+    expect(range?.sql.trim()).toBe(argoProcedureFixture.trim());
   });
 
   it("keeps consecutive nested Oracle blocks inside their procedure", () => {

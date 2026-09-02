@@ -14,8 +14,8 @@ const downloadLabel = { en: "Download DBX", cn: "下载 DBX" };
 const selectDownloadLabel = { en: "Choose a version", cn: "选择下载版本" };
 const selectMacLabel = { en: "Choose a macOS version", cn: "选择 macOS 版本" };
 const offlineHint = {
-  en: "Offline network or Windows 7? Choose an offline installer",
-  cn: "无法联网或使用 Windows 7？选择专用离线安装包",
+  en: "Installing offline or using legacy Windows? View the matching installer",
+  cn: "需要离线安装或使用旧版 Windows？查看对应安装包",
 };
 
 const platformIconPaths = {
@@ -26,6 +26,7 @@ const platformIconPaths = {
     "macos-intel": "/icons/platform/macos.png",
     "macos-unknown": "/icons/platform/macos.png",
     windows: "/icons/platform/windows.png",
+    "windows-legacy": "/icons/platform/windows-legacy.svg",
   },
   light: {
     "linux-arm": "/icons/platform/linux.svg",
@@ -34,6 +35,7 @@ const platformIconPaths = {
     "macos-intel": "/icons/platform/macos-white.png",
     "macos-unknown": "/icons/platform/macos-white.png",
     windows: "/icons/platform/windows.png",
+    "windows-legacy": "/icons/platform/windows-legacy.svg",
   },
 };
 
@@ -129,7 +131,7 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
           </button>
         </div>
         <div
-          className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(380px,calc(100vw-32px))] border border-[rgba(173,176,182,0.17)] rounded-xl py-1.5 max-[760px]:left-auto max-[760px]:translate-x-0"
+          className="landing-install-menu absolute z-30 top-[calc(100%+12px)] left-1/2 -translate-x-1/2 grid w-[min(440px,calc(100vw-32px))] border border-[rgba(173,176,182,0.17)] rounded-xl py-1.5 max-[760px]:left-auto max-[760px]:translate-x-0"
           id="landing-install-menu"
           role="menu"
           aria-label={lang === "cn" ? "下载选项" : "Download options"}
@@ -138,11 +140,11 @@ export function InstallTabs({ lang, version }: InstallTabsProps) {
             <a className="landing-install-option grid grid-cols-[24px_minmax(0,1fr)_18px] gap-3 items-center min-h-11 min-w-0 border-0 px-[18px] py-3 bg-transparent text-left cursor-pointer" href={item.href} key={item.id} role="menuitem">
               <PlatformIcon id={item.iconId} size={20} variant="light" />
               <span className="grid min-w-0 gap-1">
-                <span className="flex min-w-0 items-center gap-2">
-                  <strong className="overflow-hidden text-sm font-[640] leading-[1.2] truncate">{item.label}</strong>
-                  {item.badge ? <small className="shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-[680] leading-none text-white/70">{item.badge}</small> : null}
+                <span className="flex min-w-0 items-start gap-2">
+                  <strong className="min-w-0 text-sm font-[640] leading-[1.2]">{item.label}</strong>
+                  {item.badge ? <small className={`shrink-0 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-[680] leading-none text-white/70 ${item.id === "windows-7-offline" ? "max-[400px]:hidden" : ""}`}>{item.badge}</small> : null}
                 </span>
-                {item.description ? <small className="overflow-hidden text-xs leading-[1.3] text-white/45 truncate">{item.description}</small> : null}
+                {item.description ? <small className="text-xs leading-[1.35] text-white/45">{item.description}</small> : null}
               </span>
               <Download size={15} aria-hidden="true" />
             </a>

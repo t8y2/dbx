@@ -547,7 +547,11 @@ impl SqlStatementSplitter {
                         .options
                         .profile
                         .supports_custom_delimiter_commands
-                        .then(|| parse_delimiter_command(last_line))
+                        .then(|| {
+                            parse_delimiter_command(last_line).filter(|_| {
+                                !has_executable_sql_with_options(&self.buffer[..last_line_start], self.options)
+                            })
+                        })
                         .flatten()
                     {
                         self.custom_delimiter = if new_delim == ";" { None } else { Some(new_delim.to_string()) };
@@ -605,7 +609,11 @@ impl SqlStatementSplitter {
         }
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-        if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+        let before_last_line = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
+        if self.options.profile.supports_custom_delimiter_commands
+            && parse_delimiter_command(last_line)
+                .is_some_and(|_| !has_executable_sql_with_options(before_last_line, self.options))
+        {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
                 statements.push(SqlStatementWithControl { sql: before.to_string(), stop_on_error: self.stop_on_error });
@@ -644,7 +652,9 @@ impl SqlStatementSplitter {
     fn on_delimiter_line(&self) -> bool {
         let start = self.buffer.rfind('\n').map_or(0, |p| p + 1);
         let line = self.buffer[start..].trim_start().as_bytes();
-        line.len() >= 9 && line[..9].eq_ignore_ascii_case(b"delimiter")
+        line.len() >= 9
+            && line[..9].eq_ignore_ascii_case(b"delimiter")
+            && !has_executable_sql_with_options(self.buffer[..start].trim(), self.options)
     }
 }
 
@@ -926,7 +936,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             if let Some(tag) =
                 options.profile.supports_dollar_quoted_strings.then(|| dollar_quote_tag_at_str(sql, i)).flatten()
             {
-                if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i) {
+                if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i, options) {
                     if options.profile.supports_postgres_dollar_quoted_routines
                         && starts_with_postgres_dollar_quoted_routine_prefix(&sql[start..i])
                     {
@@ -947,8 +957,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     i = start;
                     continue;
                 }
-                if let Some(new_delimiter) =
-                    options.profile.supports_custom_delimiter_commands.then(|| parse_delimiter_command(line)).flatten()
+                if let Some(new_delimiter) = options
+                    .profile
+                    .supports_custom_delimiter_commands
+                    .then(|| {
+                        parse_delimiter_command(line)
+                            .filter(|_| !has_executable_sql_with_options(&sql[start..line_start], options))
+                    })
+                    .flatten()
                 {
                     let before = sql[start..line_start].trim();
                     if has_executable_sql_with_options(before, options) {
@@ -980,7 +996,8 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 || in_double_quote
                 || in_backtick
                 || custom_delimiter.is_some()
-                || (options.profile.supports_custom_delimiter_commands && is_on_delimiter_line(sql, start, i))) =>
+                || (options.profile.supports_custom_delimiter_commands
+                    && is_on_delimiter_line(sql, start, i, options))) =>
             {
                 let is_mysql_routine =
                     options.profile.supports_mysql_routine_blocks && starts_with_mysql_routine_block(&sql[start..i]);
@@ -1032,7 +1049,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
 
     let trimmed = sql[start..].trim();
     let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-    if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+    let before_last_line = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
+    if options.profile.supports_custom_delimiter_commands
+        && parse_delimiter_command(last_line)
+            .is_some_and(|_| !has_executable_sql_with_options(before_last_line, options))
+    {
         if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
             push_statement_range(&mut ranges, sql, start, line_start, options);
         }
@@ -1099,13 +1120,12 @@ fn is_escaped_single_quote(sql: &str, index: usize) -> bool {
     index > 0 && sql.as_bytes().get(index - 1) == Some(&b'\\')
 }
 
-fn is_on_delimiter_line(sql: &str, range_start: usize, index: usize) -> bool {
+fn is_on_delimiter_line(sql: &str, range_start: usize, index: usize, options: SqlParsingOptions) -> bool {
     let line_start = sql[range_start..index].rfind('\n').map_or(range_start, |pos| range_start + pos + 1);
-    sql[line_start..index]
-        .trim_start()
-        .as_bytes()
-        .get(..9)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"delimiter"))
+    sql[line_start..index].trim_start().as_bytes().get(..9).is_some_and(|prefix| {
+        prefix.eq_ignore_ascii_case(b"delimiter")
+            && !has_executable_sql_with_options(sql[range_start..line_start].trim(), options)
+    })
 }
 
 fn dollar_quote_tag_at_str(sql: &str, index: usize) -> Option<String> {
@@ -2796,6 +2816,30 @@ mod tests {
         assert_eq!(
             split_sql_script("CREATE TABLE a(id int); INSERT INTO a VALUES (1);").unwrap(),
             vec!["CREATE TABLE a(id int)", "INSERT INTO a VALUES (1)"]
+        );
+    }
+
+    #[test]
+    fn keeps_postgres_e_string_newlines_inside_batch_statement() {
+        let sql = "SELECT version();\n\nCREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n);";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec![
+                "SELECT version()".to_string(),
+                "CREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n)".to_string(),
+            ]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec![
+                "SELECT version()".to_string(),
+                "CREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n)".to_string(),
+            ]
         );
     }
 

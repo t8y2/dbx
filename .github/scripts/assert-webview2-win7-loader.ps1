@@ -16,10 +16,9 @@ $ErrorActionPreference = "Stop"
 # dbx.exe proves the pinned loader was not the one linked. The PE import audit
 # cannot catch this: 1.0.1054.31 imports nothing newer than 1.0.902.49.
 $loaderMarkers = @(
-  "Failed to find the Web",
-  "Failed to find the app",
-  "Failed to find an inst",
-  "WebView2: Failed to find an installed"
+  "WebView2: Failed to find the app exe path.",
+  "WebView2: Failed to find the WebView2 client dll at:",
+  "WebView2: Failed to find an installed WebView2 runtime or non-stable Microsoft Edge installation."
 )
 
 if (!(Test-Path -LiteralPath $BinaryPath -PathType Leaf)) {

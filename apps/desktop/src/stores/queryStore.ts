@@ -56,6 +56,7 @@ import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { agentProtocolQueryResultMaxRows, capQueryResultTotal, effectiveQueryResultMaxRows, limitQueryPagination, queryResultLimitReached } from "@/lib/dataGrid/queryResultRowLimit";
 import { elasticsearchRestRequestRanges, executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUseDatabaseFromStatement } from "@/lib/sql/sqlCompletionLookupTarget";
+import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
@@ -72,7 +73,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { recordQueryCancellationLatency, resourceLifecycleDiagnostics } from "@/lib/diagnostics/resourceLifecycleDiagnostics";
 import { appendDebugLog } from "@/lib/backend/debugLog";
-import { BackendErrorException, formatError, isManualTransactionSessionExpired, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
+import { BackendErrorException, formatError, isManualTransactionSessionExpired, isUnsupportedManualTransactionMethod, normalizeBackendError, type BackendError } from "@/lib/backend/errorUtils";
 import { createSavedSqlEditorPosition, initSavedSqlEditorPositions, restoreSavedSqlEditorPosition, saveSavedSqlEditorPosition } from "@/lib/app/savedSqlEditorPosition";
 import { ensureSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromTab, type SavedSqlExecutionTarget, type SavedSqlOpenTargetMode } from "@/lib/savedSql/savedSqlExecutionTarget";
@@ -5404,45 +5405,7 @@ export const useQueryStore = defineStore("query", () => {
         return false;
       }
 
-      let executionPromise: Promise<QueryResult[]>;
-      if (tab.autoCommit === false) {
-        if (!tab.txnSessionId) {
-          queryExecutionLog("info", "begin-manual-txn:start", { traceId, elapsed: elapsed() });
-          tab.txnSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
-          queryExecutionLog("info", "begin-manual-txn:done", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
-        }
-        queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
-        executionDispatched = true;
-        // Only an initial manual execution classifies the user SQL (Oracle-only).
-        // A later cursor-page fetch must neither set nor clear the sticky bit.
-        const isInitialOracleManualExecution = effectiveDbType === "oracle" && !options?.pagination?.sessionId;
-        const classificationSql = isInitialOracleManualExecution ? queryBaseSql : undefined;
-        let manualTransactionRecoveryAttempted = false;
-        executionPromise = (async () => {
-          const txnSessionId = tab.txnSessionId;
-          if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
-          const executeInTransaction = (sessionId: string) =>
-            useAgentResultSession
-              ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId, classificationSql)
-              : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, undefined, undefined, classificationSql);
-          try {
-            return await executeInTransaction(txnSessionId);
-          } catch (error) {
-            if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
-            manualTransactionRecoveryAttempted = true;
-            // The expired session was discarded by the backend; the replacement
-            // session starts fresh, so the old sticky state resets with it.
-            clearOracleTxnPossiblyDirty(tab);
-            tab.txnSessionId = undefined;
-            tab.txnAutoRolledBack = true;
-            queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
-            const refreshedSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
-            tab.txnSessionId = refreshedSessionId;
-            queryExecutionLog("info", "manual-txn:restarted", { traceId, txnSessionId: refreshedSessionId, elapsed: elapsed() });
-            return executeInTransaction(refreshedSessionId);
-          }
-        })();
-      } else {
+      const executeWithoutManualTransaction = (): Promise<QueryResult[]> => {
         queryExecutionLog("info", "execute-multi:start", { traceId, elapsed: elapsed() });
         // Query and data tabs use a tab-scoped pool so repeated executions keep
         // connection-local state and avoid MySQL pool resets on every refresh.
@@ -5483,22 +5446,81 @@ export const useQueryStore = defineStore("query", () => {
           clientSession: Boolean(executionClientSessionId),
         });
         executionDispatched = true;
-        executionPromise =
-          tab.batchSqlExecution && tab.batchSqlExecution.total > 1
-            ? api.executeMultiWithProgress(
-                executionConnectionId,
-                executionDatabase,
-                sqlToExecute,
-                (progress) => {
-                  const current = findExecutionTab(id);
-                  if (current?.executionId === executionId) {
-                    applyBatchSqlProgress(current, progress, continueOnBatchError, batchResume?.startStatementIndex ?? 0);
-                  }
-                },
-                executionSchema,
-                { ...executionOptions, executionId },
-              )
-            : api.executeMulti(executionConnectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
+        return tab.batchSqlExecution && tab.batchSqlExecution.total > 1
+          ? api.executeMultiWithProgress(
+              executionConnectionId,
+              executionDatabase,
+              sqlToExecute,
+              (progress) => {
+                const current = findExecutionTab(id);
+                if (current?.executionId === executionId) {
+                  applyBatchSqlProgress(current, progress, continueOnBatchError, batchResume?.startStatementIndex ?? 0);
+                }
+              },
+              executionSchema,
+              { ...executionOptions, executionId },
+            )
+          : api.executeMulti(executionConnectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
+      };
+
+      let executionPromise: Promise<QueryResult[]>;
+      if (tab.autoCommit === false) {
+        let useLegacyReadFallback = false;
+        if (!tab.txnSessionId) {
+          queryExecutionLog("info", "begin-manual-txn:start", { traceId, elapsed: elapsed() });
+          try {
+            tab.txnSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
+            queryExecutionLog("info", "begin-manual-txn:done", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
+          } catch (error) {
+            const risk = classifySqlRisk(sqlToExecute, { dialect: effectiveDbType }).risk;
+            if (!isUnsupportedManualTransactionMethod(error) || risk !== "read") throw error;
+            tab.autoCommit = true;
+            tab.txnSessionId = undefined;
+            useLegacyReadFallback = true;
+            queryExecutionLog("warn", "begin-manual-txn:legacy-read-fallback", {
+              traceId,
+              elapsed: elapsed(),
+              databaseType: effectiveDbType,
+            });
+          }
+        }
+        if (useLegacyReadFallback) {
+          executionPromise = executeWithoutManualTransaction();
+        } else {
+          queryExecutionLog("info", "execute-in-txn:invoke", { traceId, txnSessionId: tab.txnSessionId, elapsed: elapsed() });
+          executionDispatched = true;
+          // Only an initial manual execution classifies the user SQL (Oracle-only).
+          // A later cursor-page fetch must neither set nor clear the sticky bit.
+          const isInitialOracleManualExecution = effectiveDbType === "oracle" && !options?.pagination?.sessionId;
+          const classificationSql = isInitialOracleManualExecution ? queryBaseSql : undefined;
+          let manualTransactionRecoveryAttempted = false;
+          executionPromise = (async () => {
+            const txnSessionId = tab.txnSessionId;
+            if (!txnSessionId) throw new Error("Manual transaction session was not initialized");
+            const executeInTransaction = (sessionId: string) =>
+              useAgentResultSession
+                ? api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, pageLimit, options?.pagination?.sessionId, classificationSql)
+                : api.executeInManualTransaction(sessionId, sqlToExecute, executionDatabase, executionSchema, pageLimit ?? agentProtocolQueryResultMaxRows(queryResultMaxRows), useOracleLobPreview, undefined, undefined, classificationSql);
+            try {
+              return await executeInTransaction(txnSessionId);
+            } catch (error) {
+              if (options?.pagination?.sessionId || manualTransactionRecoveryAttempted || !isManualTransactionSessionExpired(error)) throw error;
+              manualTransactionRecoveryAttempted = true;
+              // The expired session was discarded by the backend; the replacement
+              // session starts fresh, so the old sticky state resets with it.
+              clearOracleTxnPossiblyDirty(tab);
+              tab.txnSessionId = undefined;
+              tab.txnAutoRolledBack = true;
+              queryExecutionLog("info", "manual-txn:expired-recover", { traceId, elapsed: elapsed() });
+              const refreshedSessionId = await api.beginManualTransaction(executionConnectionId, executionDatabase, executionSchema, executionCatalog);
+              tab.txnSessionId = refreshedSessionId;
+              queryExecutionLog("info", "manual-txn:restarted", { traceId, txnSessionId: refreshedSessionId, elapsed: elapsed() });
+              return executeInTransaction(refreshedSessionId);
+            }
+          })();
+        }
+      } else {
+        executionPromise = executeWithoutManualTransaction();
       }
       const annotatedResults = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
       const results = offsetBatchQueryResultIndexes(annotatedResults.results, batchResume?.startStatementIndex ?? 0);

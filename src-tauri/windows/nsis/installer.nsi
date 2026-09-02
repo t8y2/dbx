@@ -505,9 +505,9 @@ LangString dbxFileWriteError ${LANG_SIMPCHINESE} "无法打开要写入的文件
 LangString dbxFileWriteErrorNoIgnore ${LANG_SIMPCHINESE} "无法打开要写入的文件：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升级安装于 Program Files 的 DBX，请取消本次安装，然后右键单击安装程序并选择“以管理员身份运行”。$\r$\n$\r$\n单击“重试”再次尝试，或$\r$\n单击“取消”停止安装。"
 LangString dbxFileWriteError ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請中止本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「中止」以停止安裝，$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「忽略」以略過此檔案。"
 LangString dbxFileWriteErrorNoIgnore ${LANG_TRADCHINESE} "無法開啟要寫入的檔案：$\r$\n$\r$\n$0$\r$\n$\r$\n如果正在升級安裝於 Program Files 的 DBX，請取消本次安裝，然後以滑鼠右鍵按一下安裝程式並選擇「以系統管理員身分執行」。$\r$\n$\r$\n按一下「重試」以再次嘗試，或$\r$\n按一下「取消」以停止安裝。"
-LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead:$\r$\nDBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe$\r$\n$\r$\nOpen the download now?"
-LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包：$\r$\nDBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe$\r$\n$\r$\n是否立即打开下载地址？"
-LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件：$\r$\nDBX_${VERSION}_x64-win7-server2012r2-webview2-109-offline-setup.exe$\r$\n$\r$\n是否立即開啟下載網址？"
+LangString dbxWin7InstallerRequired ${LANG_ENGLISH} "This installer does not support Windows 7 or Windows Server 2012 R2.$\r$\n$\r$\nPlease use the dedicated Windows 7 / Server 2012 R2 package instead.$\r$\n$\r$\nOpen the download now?"
+LangString dbxWin7InstallerRequired ${LANG_SIMPCHINESE} "此安装包不支持 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n请改用 Windows 7 / Server 2012 R2 专用包。$\r$\n$\r$\n是否立即打开下载地址？"
+LangString dbxWin7InstallerRequired ${LANG_TRADCHINESE} "此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。$\r$\n$\r$\n請改用 Windows 7 / Server 2012 R2 專用套件。$\r$\n$\r$\n是否立即開啟下載網址？"
 FileErrorText "$(dbxFileWriteError)" "$(dbxFileWriteErrorNoIgnore)"
 
 Function .onInit

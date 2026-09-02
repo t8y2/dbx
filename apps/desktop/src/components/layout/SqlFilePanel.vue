@@ -15,7 +15,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { forgetExternalSqlFileTarget, moveExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, formatSqlFileSize, isExternalSqlFileTooLargeError, isSqlFilePath } from "@/lib/sql/sqlFileOpen";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, saveSqlFileFilter, saveSqlFileFolderPaths, notifySqlFileFoldersChanged } from "@/lib/sqlFile/sqlFileFolders";
@@ -257,7 +257,7 @@ async function openFile(path: string) {
     const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
     queryStore.openExternalSqlFile(target.connectionId, target.database, path, snapshot.content, snapshot.version, target.catalog, target.schema);
   } catch (e: any) {
-    if (isExternalSqlFileTooLargeError(e) && /\.sql$/i.test(path)) {
+    if (isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)) {
       executeFile(path);
       toast(t("sqlFile.largeFileExecutionOpened", { size: formatSqlFileSize(e.sizeBytes) }), 6000);
       return;
@@ -376,12 +376,12 @@ function handlePanelClick(event: MouseEvent) {
 
 function normalizedSqlFileName(name: string) {
   const trimmed = name.trim();
-  return /\.sql$/i.test(trimmed) ? trimmed : `${trimmed}.sql`;
+  return isSqlFilePath(trimmed) ? trimmed : `${trimmed}.sql`;
 }
 
 function normalizedRenamedFileName(name: string, currentName: string) {
   const trimmed = name.trim();
-  return /\.sql$/i.test(currentName) ? normalizedSqlFileName(trimmed) : trimmed;
+  return isSqlFilePath(currentName) ? normalizedSqlFileName(trimmed) : trimmed;
 }
 
 function openCreateDialog(rootPath: string, directoryPath: string) {
@@ -493,7 +493,7 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
 
   // file
   const items: ContextMenuItem[] = [{ label: t("sqlFileTree.openFile"), action: () => openFile(target.entry.path), icon: FileCode }];
-  if (/\.sql$/i.test(target.entry.name)) {
+  if (isSqlFilePath(target.entry.name)) {
     items.push({ label: t("sqlFileTree.executeSqlFile"), action: () => executeFile(target.entry.path), icon: Play });
   }
   items.push(

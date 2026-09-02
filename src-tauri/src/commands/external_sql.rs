@@ -85,9 +85,19 @@ pub async fn save_external_sql_file(
     window: tauri::Window,
     default_file_name: String,
     content: String,
+    filter_extension: Option<String>,
 ) -> Result<Option<ExternalSqlFileSaveResult>, String> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    window.dialog().file().set_file_name(default_file_name).add_filter("SQL", &["sql"]).save_file(move |file_path| {
+    // Non-SQL external tabs (custom-filtered text files) keep their own
+    // extension when saving a copy; without a usable extension leave the
+    // dialog unfiltered instead of forcing the SQL filter.
+    let dialog = window.dialog().file().set_file_name(default_file_name);
+    let dialog = match filter_extension.as_deref().map(str::trim).filter(|extension| !extension.is_empty()) {
+        Some("sql") => dialog.add_filter("SQL", &["sql"]),
+        Some(extension) => dialog.add_filter(extension.to_uppercase(), &[extension]),
+        None => dialog,
+    };
+    dialog.save_file(move |file_path| {
         let _ = sender.send(file_path);
     });
     let path = receiver

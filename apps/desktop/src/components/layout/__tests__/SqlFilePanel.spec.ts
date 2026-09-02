@@ -42,7 +42,7 @@ describe("SqlFilePanel file renaming", () => {
 
   it("preserves non-SQL extensions while keeping SQL rename convenience", () => {
     expect(panelSource).toContain("normalizedRenamedFileName(fileNameInput.value, target.entry.name)");
-    expect(panelSource).toContain("/\\.sql$/i.test(currentName) ? normalizedSqlFileName(trimmed) : trimmed");
+    expect(panelSource).toContain("isSqlFilePath(currentName) ? normalizedSqlFileName(trimmed) : trimmed");
   });
 });
 
@@ -65,7 +65,7 @@ describe("SqlFilePanel file filter", () => {
   });
 
   it("offers SQL execution only for SQL files", () => {
-    expect(panelSource).toContain("if (/\\.sql$/i.test(target.entry.name))");
-    expect(panelSource).toContain("isExternalSqlFileTooLargeError(e) && /\\.sql$/i.test(path)");
+    expect(panelSource).toContain("if (isSqlFilePath(target.entry.name))");
+    expect(panelSource).toContain("isExternalSqlFileTooLargeError(e) && isSqlFilePath(path)");
   });
 });

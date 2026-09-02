@@ -1591,7 +1591,11 @@ async function confirmSaveSqlToLibrary() {
 async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
   if (!canSaveSqlTab(tab) || !isTauriRuntime()) return false;
   try {
-    const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), await formattedSqlForSave(tab));
+    // Non-SQL external tabs (custom-filtered text files) keep their own file
+    // name and extension when saving a copy instead of being forced to .sql.
+    const currentFileName = tab.externalSqlPath?.split(/[\\/]/).pop()?.trim() ?? "";
+    const filterExtension = currentFileName.includes(".") ? currentFileName.split(".").pop()?.toLowerCase() : undefined;
+    const saved = await api.saveExternalSqlFile(currentFileName || defaultSavedSqlName(tab.title), await formattedSqlForSave(tab), filterExtension);
     if (!saved) return false;
     queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version);
     rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema: tab.schema });

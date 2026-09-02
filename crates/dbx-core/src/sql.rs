@@ -1671,11 +1671,15 @@ pub fn optimize_sql_file_import_statements(
                 });
             }
             SqlFileStatementAction::Execute(sql) => {
-                let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
                 // Combining separate MySQL INSERT statements changes session
                 // semantics such as LAST_INSERT_ID(), so execute them with the
                 // same statement boundaries as the source file.
-                let mergeable_insert = merge_adjacent_inserts.then(|| parse_mergeable_insert(&sql, options)).flatten();
+                let mergeable_insert = merge_adjacent_inserts
+                    .then(|| {
+                        let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
+                        parse_mergeable_insert(&sql, options)
+                    })
+                    .flatten();
                 if let Some(insert) = mergeable_insert {
                     match pending_insert.as_mut() {
                         Some(batch) if batch.can_accept(&insert) => batch.push(insert),

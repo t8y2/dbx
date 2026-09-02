@@ -161,6 +161,20 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     expect(tab.oracleTxnPossiblyDirty).toBe(true);
   });
 
+  it("marks an Oracle manual session dirty when the result grid dispatches a mutation", async () => {
+    mocks.executeInManualTransaction.mockResolvedValue(cleanSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = await setupManualTab(store);
+    await store.executeTabSql(tabId, "SELECT * FROM EMP");
+
+    store.markManualTransactionDirty(tabId);
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.oracleTxnPossiblyDirty).toBe(true);
+  });
+
   it("never clears the sticky state after a later read (UPDATE -> SELECT)", async () => {
     mocks.executeInManualTransaction.mockResolvedValueOnce(dirtyUpdate()).mockResolvedValueOnce(cleanSelect());
 
@@ -332,6 +346,7 @@ describe("queryStore Oracle manual-transaction sticky state", () => {
     store.setAutoCommit(tabId, false);
 
     await store.executeTabSql(tabId, "SELECT 1");
+    store.markManualTransactionDirty(tabId);
 
     const tab = store.tabs.find((item) => item.id === tabId)!;
     // No classificationSql was sent and no Oracle sticky state exists.

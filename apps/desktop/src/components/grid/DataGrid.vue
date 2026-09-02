@@ -515,6 +515,8 @@ interface DataGridProps {
   }>;
   exportFileBaseName?: string;
   customSaveHandler?: import("@/composables/useDataGridEditor").CustomSaveHandler;
+  manualTransactionSessionId?: string;
+  onManualTransactionMutation?: () => void;
   mongoUpdateTarget?: MongoCopyUpdateTarget;
   queryEditabilityReason?: QueryEditabilityReason;
   allowInsertRows?: boolean;
@@ -4268,6 +4270,8 @@ const editor = useDataGridEditor({
   canEditExistingRows,
   onExecuteSql: computed(() => props.onExecuteSql),
   customSaveHandler: computed(() => props.customSaveHandler),
+  manualTransactionSessionId: computed(() => props.manualTransactionSessionId),
+  onManualTransactionMutation: () => props.onManualTransactionMutation?.(),
   sql: computed(() => props.sql),
   searchText,
   whereFilterInput,

@@ -57,6 +57,16 @@ vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
 }));
 
+vi.mock("@/components/connection/ConnectionGroupBadge.vue", async () => {
+  const { defineComponent, h } = await import("vue");
+  return {
+    default: defineComponent({
+      props: { connectionId: { type: String, required: true } },
+      setup: (props) => () => h("span", { "data-connection-group-badge": "", "data-connection-id": props.connectionId }),
+    }),
+  };
+});
+
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(async () => "/backups"),
 }));
@@ -334,6 +344,19 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(dialog?.textContent).toContain(String(i18n.global.t("databaseBackup.scheduleName")));
     expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1");
     expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-1");
+  });
+
+  it("shows connection group badges in the backup connection picker", async () => {
+    mocks.connections.push({ id: "mysql-primary", name: "Shared name", db_type: "mysql" }, { id: "mysql-archive", name: "Shared name", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    currentDialog().querySelector<HTMLButtonElement>("[data-backup-connection-picker]")?.click();
+    await flush();
+
+    const connectionIds = Array.from(document.body.querySelectorAll<HTMLElement>("[data-connection-group-badge]")).map((badge) => badge.dataset.connectionId);
+    expect(connectionIds).toEqual(["mysql-primary", "mysql-archive"]);
   });
 
   it("opens an independent one-shot dialog without schedule fields", async () => {

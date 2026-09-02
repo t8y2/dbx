@@ -3681,6 +3681,97 @@ END;";
     }
 
     #[test]
+    fn argo_split_keeps_procedure_with_dash_line_comments() {
+        // Mirrors the SP_ETL_LOG definition in the 2026-09-01 screenshot where each
+        // parameter row carries a trailing `--中文` line comment. The PL/SQL tokenizer must
+        // still recognise the procedure as a block; otherwise the splitter emits the
+        // parameter list, "COMMIT", and "END" as three separate statements (the failure
+        // mode shown in the 21:22:59 screenshot).
+        let sql = "\
+CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING, --模式名
+  IV_PROCEDURE_NAME IN STRING, --存储过程名称
+  II_STEP_ID       IN INT, --任务号
+  IV_STEP_DESC     IN STRING, --任务描述
+  II_STEP_FLAG     IN INT, --执行状态
+  II_START_TIME    IN TIMESTAMP --起始时间
+);
+END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements, vec![sql.to_string()], "splitter produced: {statements:#?}");
+    }
+
+    #[test]
+    fn argo_split_handles_full_user_procedure_with_block_comment_and_at_meta() {
+        // Mirrors the EXACT procedure text shown in the 2026-09-01 21:22:59 screenshot:
+        // - parameter list with trailing `--中文` comments
+        // - block comment `/********...********/` containing `@AUTHOR:` and `#0.20150906-...`
+        //   which are NOT standard SQL comment markers (ArgoDB/Hive ignores them, but the
+        //   splitter must still treat them as part of the surrounding block comment)
+        // - `IS BEGIN INSERT INTO ... ; END;`
+        // The result panel showed three split fragments; if this test passes, the splitter
+        // is fine and the issue is on the DBX.app side.
+        let sql = "CREATE OR REPLACE PROCEDURE SP_ETL_LOG\n\
+(\n\
+  II_DATDATE       IN INT, --数据日期\n\
+  IV_SCHEMA_NAME   IN STRING, --模式名\n\
+  IV_PROCEDURE_NAME IN STRING, --存储过程名称\n\
+  II_STEP_ID       IN INT, --任务号\n\
+  IV_STEP_DESC     IN STRING, --任务描述\n\
+  II_STEP_FLAG     IN INT, --执行状态\n\
+  II_START_TIME    IN TIMESTAMP --起始时间\n\
+)\n\
+/****************************************\n\
+@AUTHOR:xiangxu\n\
+@CREATE-DATE:2015-09-06\n\
+@DESCRIPTION:处理执行信息插入日志表(ETL_LOG)\n\
+@MODIFICATION HISTORY:\n\
+#0.20150906-xiangxu-处理执行信息插入日志表\n\
+*****************************************/\n\
+IS\n\
+BEGIN INSERT INTO dws.ETL_LOG\n\
+  (\n\
+    DATA_DATE,           --数据日期\n\
+    SCHEMA_NAME,           --模式名\n\
+    PROCEDURE_NAME,           --存储过程名称\n\
+    STEP_ID,           --任务号\n\
+    STEP_DESC,           --任务描述\n\
+    STEP_FLAG,           --执行状态\n\
+    START_TIME            --起始时间\n\
+  )\n\
+  ;\n\
+END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements.len(), 1, "splitter produced {statements:#?}");
+        assert_eq!(statements[0], sql);
+    }
+
+    #[test]
+    fn argo_split_handles_minimal_user_procedure_no_body_semicolon() {
+        // Mirrors the user's 2026-09-02 10:09 procedure: simple CREATE OR REPLACE PROCEDURE
+        // body with no semicolon after INSERT INTO ... SELECT, only after the SELECT expression.
+        let sql = "CREATE OR REPLACE PROCEDURE SP_TEST_PART_A\n\
+ (\n\
+   II_DATADATE IN INT\n\
+ )\n\
+ IS\n\
+   I_DATADATE INT;\n\
+ BEGIN\n\
+   I_DATADATE := II_DATADATE;\n\
+   INSERT INTO dws.TEST_PART_PROC\n\
+   SELECT 1, 'testA1', I_DATADATE;\n\
+ END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements.len(), 1, "splitter produced {statements:#?}");
+        assert_eq!(statements[0], sql);
+    }
+
+    #[test]
     fn gaussdb_split_ignores_psql_controls_before_anonymous_block_per_issue_6468() {
         let block = "\
 /* 将逻辑放到匿名块中，便于捕获异常 pl/pgsql */

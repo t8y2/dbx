@@ -89,6 +89,7 @@ import {
   resolveInsertColumnIndex,
   restoreCharacterLengthUnitsAfterSave,
   sameStructureIndexType,
+  supportsTableStructureExtendedProperties,
   structureColumnSelectionRange,
   isSyntheticContextMenuClick,
   resolveColumnSelectionActiveId,
@@ -420,7 +421,7 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
     column.isPrimaryKey !== original.is_primary_key ||
     !sameText(column.characterSet, original.character_set) ||
     !sameText(column.collation, original.collation) ||
-    JSON.stringify(column.extra) !== JSON.stringify(parseExtraToColumnExtra(original.extra, databaseType.value))
+    (showExtendedProperties.value && JSON.stringify(column.extra) !== JSON.stringify(parseExtraToColumnExtra(original.extra, databaseType.value)))
   );
 }
 
@@ -922,14 +923,7 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
   return [...universal, ...(dialectPresets[structureDialect.value] ?? [])];
 });
 
-function isPostgresIdentityType(dbType: string | undefined): boolean {
-  return dbType === "postgres" || dbType === "gaussdb" || dbType === "kwdb" || dbType === "opengauss" || dbType === "highgo" || dbType === "uxdb" || dbType === "vastbase" || dbType === "kingbase";
-}
-
-const showExtendedProperties = computed(() => {
-  const dt = databaseType.value;
-  return dt === "mysql" || dt === "dameng" || dt === "manticoresearch" || isPostgresIdentityType(dt) || dt === "sqlserver";
-});
+const showExtendedProperties = computed(() => supportsTableStructureExtendedProperties(databaseType.value));
 const showCharacterSet = computed(() => structureDialect.value === "mysql");
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
@@ -1611,7 +1605,9 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     databaseType: databaseType.value,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
-    columns: columns.value,
+    // Do not let a draft created by an older build submit properties that the
+    // current database cannot represent (notably PostgreSQL-style identity on openGauss).
+    columns: showExtendedProperties.value ? columns.value : columns.value.map((column) => ({ ...column, extra: {} })),
     indexes: sanitizeStructureIndexesForCapabilities(indexes.value, structureCapabilities.value),
     foreignKeys: foreignKeys.value,
     triggers: triggers.value,

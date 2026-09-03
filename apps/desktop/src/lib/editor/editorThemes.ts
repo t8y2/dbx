@@ -998,7 +998,13 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       backgroundColor: "currentColor",
       content: "''",
       display: "block",
-      height: "14px",
+      height: "15px",
+      // The pseudo element must be pinned to the icon box: with `left`/`top`
+      // left auto, engines disagree on the static position of an absolutely
+      // positioned child of a flex container, and WebKit places it far enough
+      // left for `overflow: hidden` to cut off half the glyph.
+      left: "0",
+      top: "0",
       position: "absolute",
       WebkitMaskImage: "var(--dbx-completion-icon-mask)",
       WebkitMaskPosition: "center",
@@ -1008,7 +1014,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       maskPosition: "center",
       maskRepeat: "no-repeat",
       maskSize: "14px 14px",
-      width: "14px",
+      width: "15px",
     },
     ".cm-completionIcon:after": {
       content: "'none'",

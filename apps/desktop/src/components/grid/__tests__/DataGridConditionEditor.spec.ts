@@ -195,6 +195,21 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it("selects the first WHERE field suggestion with Enter", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
+    input.focus();
+    input.value = "cus";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("customer_id");
+  });
+
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
     const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
     input.focus();

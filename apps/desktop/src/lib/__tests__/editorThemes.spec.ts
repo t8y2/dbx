@@ -172,6 +172,23 @@ describe("SQL completion theme", () => {
       zIndex: "1",
     });
   });
+
+  it("pins the completion icon glyph to its box so engines cannot clip it", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    // With `left`/`top` auto, the absolutely positioned pseudo element relies on
+    // engine-specific static positions inside the flex icon, and WebKit places it
+    // far enough left for `overflow: hidden` to cut off the left half of the glyph.
+    expect(rules[".cm-completionIcon:before"]).toMatchObject({
+      left: "0",
+      top: "0",
+      width: "15px",
+      height: "15px",
+      maskSize: "14px 14px",
+      maskPosition: "center",
+    });
+    expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
+  });
 });
 
 describe("editor gutters", () => {

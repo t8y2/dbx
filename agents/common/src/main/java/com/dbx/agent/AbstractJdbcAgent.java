@@ -196,7 +196,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            resultValueReader()
+            resultValueReader(),
+            JdbcExecutor.StatementMessageReader.NONE,
+            advancePastUpdateCounts()
         );
     }
 
@@ -211,7 +213,8 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             this::setSchemaSQL,
             this::resetSchemaSQL,
             options,
-            resultValueReader()
+            resultValueReader(),
+            advancePastUpdateCounts()
         );
     }
 
@@ -527,6 +530,10 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     }
 
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
+    }
+
+    protected boolean advancePastUpdateCounts() {
+        return false;
     }
 
     protected void beforePooledConnectionReturn(Connection connection) throws Exception {

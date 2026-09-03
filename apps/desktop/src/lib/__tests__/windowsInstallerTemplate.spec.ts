@@ -21,7 +21,10 @@ describe("Windows offline installer template", () => {
   it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
     expect(template).toContain("ManifestSupportedOS all");
     expect(template).toContain("!include WinVer.nsh");
-    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
+    // Tauri 2.11 renders fixedRuntime as an empty NSIS install mode instead of
+    // the literal "fixedRuntime" string.
+    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != ""');
+    expect(template).not.toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
     expect(template).toContain("${If} ${IsWin7}");
     expect(template).toContain("${OrIf} ${IsWin2012R2}");
     expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');

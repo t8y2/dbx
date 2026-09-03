@@ -18,7 +18,7 @@ const STREAM_ENTRY_PAGE_SIZE: usize = 50;
 const STREAM_PENDING_PAGE_SIZE: usize = 100;
 const COLLECTION_PAGE_SIZE: usize = 200;
 const STRING_PREVIEW_MAX_BYTES: usize = 64 * 1024;
-const HASH_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
+const COLLECTION_FILTER_SCAN_MAX_ITERATIONS: usize = 10;
 const DEFAULT_REDIS_DATABASES: u32 = 16;
 const JS_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const CLUSTER_CURSOR_NODE_BITS: u64 = 16;
@@ -3536,13 +3536,18 @@ pub async fn load_more_collection<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
+    let filter_query = filter_query.filter(|query| !query.is_empty());
     match key_type {
         "list" => {
+            let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
+            if let Some(query) = filter_query {
+                let (items, next) = lrange_filtered_page_raw(con, key, cursor, count, len, query).await?;
+                return Ok(RedisCollectionPage::List { items, scan_cursor: (next < len).then_some(next) });
+            }
             let start = cursor as i64;
             let end = start + count as i64 - 1;
             let v: RedisRawValue =
                 redis::cmd("LRANGE").arg(key).arg(start).arg(end).query_async(con).await.map_err(|e| e.to_string())?;
-            let len: u64 = redis::cmd("LLEN").arg(key).query_async(con).await.unwrap_or(0);
             let next = cursor + count as u64;
             Ok(RedisCollectionPage::List {
                 items: redis_list_items_from_raw(v, cursor),
@@ -3550,7 +3555,11 @@ where
             })
         }
         "set" => {
-            let (next_cursor, items) = sscan_page_raw(con, key, cursor, count).await?;
+            let (next_cursor, items) = if let Some(query) = filter_query {
+                sscan_filtered_page_raw(con, key, cursor, count, query).await?
+            } else {
+                sscan_page_raw(con, key, cursor, count).await?
+            };
             Ok(RedisCollectionPage::Set { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
         "zset" => {
@@ -3559,6 +3568,11 @@ where
                 "desc" => true,
                 direction => return Err(format!("Invalid ZSet sort direction: {direction}")),
             };
+            if let Some(query) = filter_query {
+                let (items, next, has_more) =
+                    zrange_filtered_page_raw(con, key, cursor, count, descending, query).await?;
+                return Ok(RedisCollectionPage::Zset { items, scan_cursor: has_more.then_some(next) });
+            }
             let start = cursor as i64;
             let end = start + count as i64;
             let mut items = zrange_page_raw(con, key, start, end, descending).await?;
@@ -3568,7 +3582,7 @@ where
             Ok(RedisCollectionPage::Zset { items, scan_cursor: has_more.then_some(next) })
         }
         "hash" => {
-            let (next_cursor, mut items) = if let Some(query) = filter_query.filter(|query| !query.is_empty()) {
+            let (next_cursor, mut items) = if let Some(query) = filter_query {
                 hscan_filtered_page_raw(con, key, cursor, count, query).await?
             } else {
                 hscan_page_raw(con, key, cursor, count, None).await?
@@ -3612,10 +3626,11 @@ where
     let mut cur = cursor;
     let mut items = Vec::new();
     let target = count.max(1);
+    let lowered = query.to_lowercase();
 
-    for _ in 0..HASH_FILTER_SCAN_MAX_ITERATIONS {
+    for _ in 0..COLLECTION_FILTER_SCAN_MAX_ITERATIONS {
         let (next, page) = hscan_page_raw(con, key, cur, target, None).await?;
-        items.extend(page.into_iter().filter(|item| hash_entry_matches_query(item, query)));
+        items.extend(page.into_iter().filter(|item| hash_entry_matches_query(item, &lowered)));
         cur = next;
         // HSCAN MATCH only checks field names, so value search has to filter returned pairs client-side.
         // Keep a hard scan bound so sparse value matches cannot turn one UI search into a full hash walk.
@@ -3625,6 +3640,118 @@ where
     }
 
     Ok((cur, items))
+}
+
+async fn sscan_filtered_page_raw<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    query: &str,
+) -> Result<(u64, Vec<RedisSetItem>), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut cur = cursor;
+    let mut items = Vec::new();
+    let target = count.max(1);
+    let lowered = query.to_lowercase();
+
+    for _ in 0..COLLECTION_FILTER_SCAN_MAX_ITERATIONS {
+        let (next, page) = sscan_page_raw(con, key, cur, target).await?;
+        items.extend(page.into_iter().filter(|item| blob_matches_query(&item.member, &lowered)));
+        cur = next;
+        // SSCAN MATCH uses glob syntax over the raw member bytes, so substring search filters
+        // returned members client-side. Keep the same hard scan bound the hash filter uses.
+        if cur == 0 || items.len() >= target {
+            break;
+        }
+    }
+
+    Ok((cur, items))
+}
+
+/// Scans ZRANGE/ZREVRANGE pages so score ordering and the index-based cursor survive filtering.
+async fn zrange_filtered_page_raw<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    descending: bool,
+    query: &str,
+) -> Result<(Vec<RedisZsetItem>, u64, bool), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut cur = cursor;
+    let mut items = Vec::new();
+    let target = count.max(1);
+    let lowered = query.to_lowercase();
+    let mut has_more = false;
+
+    for _ in 0..COLLECTION_FILTER_SCAN_MAX_ITERATIONS {
+        let start = cur as i64;
+        // Overshoot by one so a full page tells us more members remain past this window.
+        let mut page = zrange_page_raw(con, key, start, start + target as i64, descending).await?;
+        has_more = page.len() > target;
+        page.truncate(target);
+        let scanned = page.len();
+        items.extend(page.into_iter().filter(|item| blob_matches_query(&item.member, &lowered)));
+        cur += scanned as u64;
+        if !has_more || items.len() >= target {
+            break;
+        }
+    }
+
+    Ok((items, cur, has_more))
+}
+
+/// Walks LRANGE windows and filters each one after indices are assigned, so the surviving
+/// items keep their real list positions (the UI deletes list entries by index).
+async fn lrange_filtered_page_raw<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    len: u64,
+    query: &str,
+) -> Result<(Vec<RedisListItem>, u64), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let mut cur = cursor;
+    let mut items = Vec::new();
+    let target = count.max(1);
+    let lowered = query.to_lowercase();
+
+    for _ in 0..COLLECTION_FILTER_SCAN_MAX_ITERATIONS {
+        // LLEN is only a bound here: it falls back to 0 when the command is unavailable,
+        // and an empty LRANGE window is what actually proves the walk is done.
+        if len > 0 && cur >= len {
+            break;
+        }
+        let start = cur as i64;
+        let raw: RedisRawValue = redis::cmd("LRANGE")
+            .arg(key)
+            .arg(start)
+            .arg(start + target as i64 - 1)
+            .query_async(con)
+            .await
+            .map_err(|e| e.to_string())?;
+        let page = redis_list_items_from_raw(raw, cur);
+        let scanned = page.len();
+        items.extend(page.into_iter().filter(|item| blob_matches_query(&item.value, &lowered)));
+        if scanned == 0 {
+            cur = len;
+            break;
+        }
+        cur += scanned as u64;
+        if items.len() >= target {
+            break;
+        }
+    }
+
+    Ok((items, cur))
 }
 
 async fn attach_hash_field_ttls<C>(con: &mut C, key: &[u8], items: &mut [RedisHashItem]) -> Result<(), String>
@@ -3697,14 +3824,12 @@ fn is_optional_hash_field_expiry_error(error: &redis::RedisError) -> bool {
         || detail.contains("no permission")
 }
 
-fn hash_entry_matches_query(item: &RedisHashItem, query: &str) -> bool {
-    let query = query.to_lowercase();
-    if query.is_empty() {
-        return true;
-    }
-    let field = redis_blob_display_text(&item.field);
-    let value = redis_blob_display_text(&item.value);
-    field.to_lowercase().contains(&query) || value.to_lowercase().contains(&query)
+fn blob_matches_query(blob: &RedisBlob, lowered_query: &str) -> bool {
+    redis_blob_display_text(blob).to_lowercase().contains(lowered_query)
+}
+
+fn hash_entry_matches_query(item: &RedisHashItem, lowered_query: &str) -> bool {
+    blob_matches_query(&item.field, lowered_query) || blob_matches_query(&item.value, lowered_query)
 }
 
 async fn sscan_page_raw<C>(
@@ -3846,8 +3971,9 @@ mod tests {
         redis_key_matches_query, redis_key_raw_to_bytes, redis_key_value_preview, redis_sentinel_master_endpoint,
         redis_value_matches_query, redis_value_to_bytes, standalone_connection_infos, RedisAuthCandidate, RedisBlob,
         RedisBlobEncoding, RedisClusterSlotRange, RedisCollectionPage, RedisCommandSafety, RedisHashItem,
-        RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer, RedisStreamEntry,
-        RedisStreamField, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData, RedisZsetItem,
+        RedisListItem, RedisNodeEndpoint, RedisNodeRoute, RedisRawValue, RedisSetItem, RedisStreamConsumer,
+        RedisStreamEntry, RedisStreamField, RedisStreamGroup, RedisStreamPendingEntry, RedisValue, RedisValueData,
+        RedisZsetItem,
     };
     use crate::models::connection::ConnectionConfig;
     use redis::{aio::ConnectionLike, Cmd, ConnectionAddr, Pipeline, RedisFuture};
@@ -5522,6 +5648,208 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filtered_set_load_more_matches_members() {
+        let mut con = FakeRedisConnection::new(vec![scan_response("0", vec!["Ada Lovelace", "Bob"])]);
+
+        let result =
+            super::load_more_collection(&mut con, b"set-key", "set", 0, 20, Some("lovelace"), None).await.unwrap();
+
+        let RedisCollectionPage::Set { items, scan_cursor } = result else {
+            panic!("expected set collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items, vec![RedisSetItem { member: text_blob("Ada Lovelace") }]);
+        assert_eq!(con.command_count("SSCAN"), 1);
+        // Substring search cannot be expressed as an SSCAN glob, so no MATCH is sent.
+        assert!(!con.commands[0].contains("\r\nMATCH\r\n"));
+    }
+
+    #[tokio::test]
+    async fn filtered_set_load_more_keeps_scanning_until_the_page_fills() {
+        let mut con =
+            FakeRedisConnection::new(vec![scan_response("512", vec!["Bob"]), scan_response("0", vec!["Ada Lovelace"])]);
+
+        let result =
+            super::load_more_collection(&mut con, b"set-key", "set", 0, 20, Some("lovelace"), None).await.unwrap();
+
+        let RedisCollectionPage::Set { items, scan_cursor } = result else {
+            panic!("expected set collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items, vec![RedisSetItem { member: text_blob("Ada Lovelace") }]);
+        assert_eq!(con.command_count("SSCAN"), 2);
+    }
+
+    #[tokio::test]
+    async fn filtered_set_load_more_caps_sparse_scan_iterations() {
+        let responses = (1..=super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS + 1)
+            .map(|cursor| scan_response(&cursor.to_string(), vec![]))
+            .collect();
+        let mut con = FakeRedisConnection::new(responses);
+
+        let result =
+            super::load_more_collection(&mut con, b"set-key", "set", 0, 20, Some("missing"), None).await.unwrap();
+
+        let RedisCollectionPage::Set { items, scan_cursor } = result else {
+            panic!("expected set collection page");
+        };
+        assert_eq!(scan_cursor, Some(super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS as u64));
+        assert!(items.is_empty());
+        assert_eq!(con.command_count("SSCAN"), super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS);
+    }
+
+    #[tokio::test]
+    async fn filtered_zset_load_more_matches_members_and_keeps_score_order() {
+        let mut con = FakeRedisConnection::new(vec![zrange_response(vec![
+            ("rank:alice", "1"),
+            ("bob", "2"),
+            ("rank:carol", "3"),
+        ])]);
+
+        let result =
+            super::load_more_collection(&mut con, b"scores", "zset", 0, 20, Some("RANK:"), Some("asc")).await.unwrap();
+
+        let RedisCollectionPage::Zset { items, scan_cursor } = result else {
+            panic!("expected zset collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(
+            items,
+            vec![
+                RedisZsetItem { score: "1".to_string(), member: text_blob("rank:alice") },
+                RedisZsetItem { score: "3".to_string(), member: text_blob("rank:carol") },
+            ]
+        );
+        // Ranked paging is kept so the score sort and the index cursor survive filtering.
+        assert_eq!(con.command_count("ZRANGE"), 1);
+        assert_eq!(con.command_count("ZSCAN"), 0);
+    }
+
+    #[tokio::test]
+    async fn filtered_zset_load_more_honors_descending_pages() {
+        let mut con = FakeRedisConnection::new(vec![zrange_response(vec![
+            ("rank:carol", "3"),
+            ("bob", "2"),
+            ("rank:alice", "1"),
+        ])]);
+
+        let result =
+            super::load_more_collection(&mut con, b"scores", "zset", 0, 20, Some("rank:"), Some("desc")).await.unwrap();
+
+        let RedisCollectionPage::Zset { items, scan_cursor } = result else {
+            panic!("expected zset collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(
+            items,
+            vec![
+                RedisZsetItem { score: "3".to_string(), member: text_blob("rank:carol") },
+                RedisZsetItem { score: "1".to_string(), member: text_blob("rank:alice") },
+            ]
+        );
+        assert_eq!(con.command_count("ZREVRANGE"), 1);
+        assert_eq!(con.command_count("ZRANGE"), 0);
+    }
+
+    #[tokio::test]
+    async fn filtered_zset_load_more_advances_the_cursor_past_every_scanned_member() {
+        let mut con = FakeRedisConnection::new(vec![
+            zrange_response(vec![("bob", "2"), ("dave", "4"), ("erin", "5")]),
+            zrange_response(vec![("rank:alice", "1"), ("rank:carol", "3"), ("grace", "7")]),
+        ]);
+
+        let result =
+            super::load_more_collection(&mut con, b"scores", "zset", 0, 2, Some("rank:"), Some("asc")).await.unwrap();
+
+        let RedisCollectionPage::Zset { items, scan_cursor } = result else {
+            panic!("expected zset collection page");
+        };
+        assert_eq!(
+            items,
+            vec![
+                RedisZsetItem { score: "1".to_string(), member: text_blob("rank:alice") },
+                RedisZsetItem { score: "3".to_string(), member: text_blob("rank:carol") },
+            ]
+        );
+        // Two windows of two were consumed, so resuming must not replay the first one.
+        assert_eq!(scan_cursor, Some(4));
+        assert_eq!(con.command_count("ZRANGE"), 2);
+    }
+
+    #[tokio::test]
+    async fn filtered_list_load_more_preserves_original_indices() {
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Int(8),
+            RedisRawValue::Array(vec![
+                bulk("alpha"),
+                bulk("beta"),
+                bulk("gamma"),
+                bulk("target-one"),
+                bulk("delta"),
+                bulk("epsilon"),
+                bulk("zeta"),
+                bulk("target-two"),
+            ]),
+        ]);
+
+        let result =
+            super::load_more_collection(&mut con, b"list-key", "list", 0, 20, Some("target-"), None).await.unwrap();
+
+        let RedisCollectionPage::List { items, scan_cursor } = result else {
+            panic!("expected list collection page");
+        };
+        assert_eq!(scan_cursor, None);
+        // Indices must stay absolute: the viewer deletes list entries by index.
+        assert_eq!(
+            items,
+            vec![
+                RedisListItem { index: 3, value: text_blob("target-one") },
+                RedisListItem { index: 7, value: text_blob("target-two") },
+            ]
+        );
+        assert_eq!(con.command_count("LRANGE"), 1);
+    }
+
+    #[tokio::test]
+    async fn filtered_list_load_more_still_walks_when_llen_is_not_permitted() {
+        let mut con = FakeRedisConnection::with_results(vec![
+            Err(noperm("llen")),
+            Ok(RedisRawValue::Array(vec![bulk("target-one"), bulk("beta")])),
+            Ok(RedisRawValue::Array(vec![])),
+        ]);
+
+        let result =
+            super::load_more_collection(&mut con, b"list-key", "list", 0, 2, Some("target-"), None).await.unwrap();
+
+        let RedisCollectionPage::List { items, scan_cursor } = result else {
+            panic!("expected list collection page");
+        };
+        assert_eq!(items, vec![RedisListItem { index: 0, value: text_blob("target-one") }]);
+        assert_eq!(scan_cursor, None);
+        assert_eq!(con.command_count("LRANGE"), 2);
+    }
+
+    #[tokio::test]
+    async fn filtered_list_load_more_stops_at_the_list_length() {
+        let mut con = FakeRedisConnection::new(vec![
+            RedisRawValue::Int(3),
+            RedisRawValue::Array(vec![bulk("alpha"), bulk("beta")]),
+            RedisRawValue::Array(vec![bulk("gamma")]),
+        ]);
+
+        let result =
+            super::load_more_collection(&mut con, b"list-key", "list", 0, 2, Some("missing"), None).await.unwrap();
+
+        let RedisCollectionPage::List { items, scan_cursor } = result else {
+            panic!("expected list collection page");
+        };
+        assert!(items.is_empty());
+        assert_eq!(scan_cursor, None);
+        assert_eq!(con.command_count("LRANGE"), 2);
+        assert_eq!(con.command_count("LLEN"), 1);
+    }
+
+    #[tokio::test]
     async fn hash_load_more_attaches_field_ttl_when_supported() {
         let mut con = FakeRedisConnection::new(vec![
             hscan_response("0", vec![("session", "Ada")]),
@@ -5764,7 +6092,7 @@ mod tests {
 
     #[tokio::test]
     async fn filtered_hash_load_more_caps_sparse_scan_iterations() {
-        let responses = (1..=super::HASH_FILTER_SCAN_MAX_ITERATIONS + 1)
+        let responses = (1..=super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS + 1)
             .map(|cursor| hscan_response(&cursor.to_string(), vec![]))
             .collect();
         let mut con = FakeRedisConnection::new(responses);
@@ -5775,9 +6103,9 @@ mod tests {
         let RedisCollectionPage::Hash { items, scan_cursor } = result else {
             panic!("expected hash collection page");
         };
-        assert_eq!(scan_cursor, Some(super::HASH_FILTER_SCAN_MAX_ITERATIONS as u64));
+        assert_eq!(scan_cursor, Some(super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS as u64));
         assert!(items.is_empty());
-        assert_eq!(con.command_count("HSCAN"), super::HASH_FILTER_SCAN_MAX_ITERATIONS);
+        assert_eq!(con.command_count("HSCAN"), super::COLLECTION_FILTER_SCAN_MAX_ITERATIONS);
     }
 
     #[tokio::test]

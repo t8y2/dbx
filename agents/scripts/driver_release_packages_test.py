@@ -50,6 +50,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "zookeeper": "0.1.0",
                 "cassandra": "0.1.37",
                 "hive": "0.1.43",
+                "argo": "0.1.0",
                 "tdengine": "0.1.0",
                 "etcd": "0.1.40",
                 "etcd2": "0.1.0",

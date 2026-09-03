@@ -27,10 +27,10 @@ describe("DataGrid cell detail selection", () => {
   });
 
   it("removes the Canvas action overlay and reservation only when no action remains", () => {
-    expect(dataGridSource).toContain("if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey) return null;");
-    expect(dataGridSource).toContain("canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value)");
-    expect(dataGridSource).toContain("canvasDataGridActionOverlayWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value)");
-    expect(dataGridSource).toContain("canvasDataGridActionReservedWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value)");
+    expect(dataGridSource).toContain("if (!cellDetailButtonEnabled.value && !canQuickDownload && !foreignKey && !externalUrl) return null;");
+    expect(dataGridSource).toContain("canvasDataGridActionOverlayWidth(canQuickDownload, !!foreignKey, cellDetailButtonEnabled.value, !!externalUrl)");
+    expect(dataGridSource).toContain("canvasDataGridActionOverlayWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value, !!cell.externalUrl)");
+    expect(dataGridSource).toContain("canvasDataGridActionReservedWidth(cell.canQuickDownload, !!cell.foreignKey, cellDetailButtonEnabled.value, !!cell.externalUrl)");
     expect(dataGridSource).toMatch(/watch\([\s\S]*?cellDetailButtonEnabled,[\s\S]*?scheduleCanvasDraw/);
   });
 

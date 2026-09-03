@@ -67,12 +67,9 @@
 
 <table>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
-          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" height="48" />
-        </picture>
+        <img src="docs/public/sponsors/rainyun-card.png" alt="RainYun" width="175" />
       </a>
     </td>
     <td>
@@ -81,9 +78,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="Qiniu Cloud" height="64" />
+        <img src="docs/public/sponsors/qiniu-card.png" alt="Qiniu Cloud" width="175" />
       </a>
     </td>
     <td>
@@ -92,26 +89,9 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
-      <a href="https://easysearch.cn" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
-          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-        </picture>
-      </a>
-    </td>
-    <td>
-      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
-      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
-          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-        </picture>
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>
     </td>
     <td>
@@ -120,17 +100,47 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
-          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
-        </picture>
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
       </a>
     </td>
     <td>
       TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
       <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
+        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Jalapeño Cloud is an AI infrastructure and token compute platform, with an exclusive DBX entry offering free credits and top-up bonuses.
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">Visit Jalapeño Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch-card.png" alt="Easysearch" width="175" />
+      </a>
+    </td>
+    <td>
+      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
+      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
     </td>
   </tr>
 </table>

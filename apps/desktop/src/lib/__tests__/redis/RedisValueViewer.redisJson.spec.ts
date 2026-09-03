@@ -238,7 +238,7 @@ describe("native RedisJSON editor", () => {
 
   it("keeps retained drafts out of background refresh and exposes word wrap for every JSON editor", () => {
     const refreshAutoValue = findFunction("refreshAutoValue");
-    const hashSearch = findFunction("onHashSearch");
+    const collectionSearch = findFunction("onCollectionSearch");
     const viewMember = findFunction("viewMember");
     const setMemberValueFormat = findFunction("setMemberValueFormat");
     const selectMember = findFunction("selectMember");
@@ -254,7 +254,7 @@ describe("native RedisJSON editor", () => {
     const refreshButton = findTemplateElement((element) => element.tag === "Button" && element.props.some((prop) => prop.type === 6 && prop.name === "data-redis-value-refresh"));
 
     expect(refreshAutoValue.getText().match(/hasUnsavedRedisDraft\.value/g)).toHaveLength(2);
-    expect(hashSearch.getText()).toContain("if (!hasRetainedMemberDraft.value) clearSelectedMember();");
+    expect(collectionSearch.getText()).toContain("if (!hasRetainedMemberDraft.value) clearSelectedMember();");
     expect(viewMember.getText()).toContain("hasRetainedMemberDraft.value");
     // Clean JSON → other format must clear memberDraftFormat so rawText is not compared to the pretty baseline.
     expect(setMemberValueFormat.getText()).toContain("memberDraftFormat.value = null");

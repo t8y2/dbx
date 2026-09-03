@@ -530,9 +530,10 @@ Function .onInit
     !insertmacro MUI_LANGDLL_DISPLAY
   !endif
 
-  ; Evergreen WebView2 installers no longer run on Windows 7. Route interactive
-  ; users to the fixed WebView2 109 bundle before the generic installer fails.
-  !if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"
+  ; Tauri renders fixedRuntime (and skip) as an empty install mode in NSIS;
+  ; DBX does not ship a skip-mode installer. Only route builds that actually
+  ; install an Evergreen WebView2 runtime to the fixed WebView2 109 bundle.
+  !if "${INSTALLWEBVIEW2MODE}" != ""
     ${If} ${IsWin7}
     ${OrIf} ${IsWin2012R2}
       ${If} ${Silent}

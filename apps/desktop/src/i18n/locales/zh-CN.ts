@@ -5901,6 +5901,21 @@ export default withEnglishFallback({
     filterInvalid: "文件过滤规则无效，已保留原规则：{message}",
     fileFilterHint: "支持通配符（如 *.sql、*.sh）或正则表达式（如 {regex}）。",
   },
+  functionDictionary: {
+    title: "函数字典",
+    searchPlaceholder: "搜索函数...",
+    noConnection: "打开一个带连接的查询页签即可浏览函数字典",
+    noData: "暂无 {type} 的内置函数数据",
+    functionsCount: "{count} 个函数",
+    allGroups: "全部",
+    moreResults: "还有 {count} 个，继续输入以缩小范围",
+    overloads: "{count} 个重载",
+    aliases: "别名：{aliases}",
+    argsCount: "{count} 个参数",
+    copy: "复制",
+    copied: "已复制",
+    copyFailed: "复制失败",
+  },
   diff: {
     progress: {
       loadingObjects: "正在读取源库和目标库对象…",

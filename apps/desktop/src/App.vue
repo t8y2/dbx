@@ -145,6 +145,7 @@ const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAss
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
 const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/SqlLibraryPanel.vue"));
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
+const FunctionDictionaryPanel = defineAsyncComponent(() => import("@/components/layout/FunctionDictionaryPanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
@@ -267,21 +268,24 @@ const isAiPanelMaximized = ref(false);
 const isZenMode = ref(false);
 const showSqlLibraryPanel = ref(safeLocalStorageGet("dbx-sql-library-open") === "true");
 const showSqlFilePanel = ref(safeLocalStorageGet("dbx-sql-file-panel-open") === "true");
+const showFunctionDictionaryPanel = ref(safeLocalStorageGet("dbx-function-dictionary-open") === "true");
 const rightSidebarPanelRefs: Record<RightSidebarPanelId, typeof showAiPanel> = {
   ai: showAiPanel,
   history: showHistory,
   sqlLibrary: showSqlLibraryPanel,
   sqlFile: showSqlFilePanel,
+  functionDictionary: showFunctionDictionaryPanel,
 };
 const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>> = {
   ai: "dbx-ai-panel-open",
   sqlLibrary: "dbx-sql-library-open",
   sqlFile: "dbx-sql-file-panel-open",
+  functionDictionary: "dbx-function-dictionary-open",
 };
 let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
-const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
+const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, functionDictionaryWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize, startFunctionDictionaryResize } = usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
@@ -3312,6 +3316,7 @@ onUnmounted(() => {
           :show-sql-library="showSqlLibraryPanel"
           :sql-library-save-feedback-id="sqlLibrarySaveFeedbackId"
           :show-sql-file-panel="showSqlFilePanel"
+          :show-function-dictionary="showFunctionDictionaryPanel"
           :show-driver-store="showDriverStore"
           :show-settings-page="showSettingsPage"
           :checking-updates="checkingUpdates"
@@ -3331,6 +3336,7 @@ onUnmounted(() => {
           @toggle-history="toggleRightSidebarPanel('history')"
           @toggle-sql-library="toggleRightSidebarPanel('sqlLibrary')"
           @toggle-sql-file-panel="toggleRightSidebarPanel('sqlFile')"
+          @toggle-function-dictionary="toggleRightSidebarPanel('functionDictionary')"
           @open-github="openGitHub"
           @open-settings="openSettings(toolbarMcpUpdateAvailable ? 'mcp' : 'appearance')"
           @open-driver-store="openDriverStorePage"
@@ -3627,6 +3633,18 @@ onUnmounted(() => {
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
+            </div>
+          </div>
+
+          <div
+            v-if="showFunctionDictionaryPanel"
+            v-show="!isAiPanelMaximized"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
+            :style="{ width: functionDictionaryWidth + 'px' }"
+          >
+            <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startFunctionDictionaryResize" />
+            <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
+              <FunctionDictionaryPanel :connection="activeConnection" @close="closeRightSidebarPanel('functionDictionary')" />
             </div>
           </div>
         </div>

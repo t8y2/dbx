@@ -817,6 +817,7 @@ export interface ToolbarItems {
   checkUpdates: boolean;
   sqlLibrary: boolean;
   sqlFileTree: boolean;
+  functionDictionary: boolean;
   history: boolean;
   ai: boolean;
   theme: boolean;
@@ -833,6 +834,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   checkUpdates: true,
   sqlLibrary: true,
   sqlFileTree: true,
+  functionDictionary: true,
   history: true,
   ai: true,
   theme: true,
@@ -840,7 +842,7 @@ export const DEFAULT_TOOLBAR_ITEMS: ToolbarItems = {
   exclusiveRightSidebarPanels: true,
 };
 
-export const RIGHT_SIDEBAR_PANEL_IDS = ["ai", "history", "sqlLibrary", "sqlFile"] as const;
+export const RIGHT_SIDEBAR_PANEL_IDS = ["ai", "history", "sqlLibrary", "sqlFile", "functionDictionary"] as const;
 export type RightSidebarPanelId = (typeof RIGHT_SIDEBAR_PANEL_IDS)[number];
 export type RightSidebarPanelState = Record<RightSidebarPanelId, boolean>;
 
@@ -1259,6 +1261,7 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
     checkUpdates: items.checkUpdates ?? defaults.checkUpdates,
     sqlLibrary: items.sqlLibrary ?? defaults.sqlLibrary,
     sqlFileTree: items.sqlFileTree ?? defaults.sqlFileTree,
+    functionDictionary: items.functionDictionary ?? defaults.functionDictionary,
     history: items.history ?? defaults.history,
     ai: items.ai ?? defaults.ai,
     theme: items.theme ?? defaults.theme,

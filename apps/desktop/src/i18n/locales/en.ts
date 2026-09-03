@@ -5917,6 +5917,21 @@ export default {
     filterInvalid: "Invalid file filter, kept the previous one: {message}",
     fileFilterHint: "Use a glob such as *.sql or *.sh, or a regular expression such as {regex}.",
   },
+  functionDictionary: {
+    title: "Function Dictionary",
+    searchPlaceholder: "Search functions...",
+    noConnection: "Open a query tab with a connection to browse its function dictionary",
+    noData: "No built-in function data for {type} yet",
+    functionsCount: "{count} functions",
+    allGroups: "All",
+    moreResults: "+{count} more — keep typing to narrow down",
+    overloads: "{count} overloads",
+    aliases: "Aliases: {aliases}",
+    argsCount: "{count} args",
+    copy: "Copy",
+    copied: "Copied",
+    copyFailed: "Failed to copy",
+  },
   diff: {
     progress: {
       loadingObjects: "Reading source and target database objects...",

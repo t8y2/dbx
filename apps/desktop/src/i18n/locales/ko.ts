@@ -5333,6 +5333,21 @@ export default withEnglishFallback({
     filterInvalid: "파일 필터가 잘못되어 이전 설정을 유지합니다: {message}",
     fileFilterHint: "*.sql 또는 *.sh 같은 와일드카드나 {regex} 같은 정규식을 사용할 수 있습니다.",
   },
+  functionDictionary: {
+    title: "함수 사전",
+    searchPlaceholder: "함수 검색...",
+    noConnection: "연결된 쿼리 탭을 열면 함수 사전을 찾아볼 수 있습니다",
+    noData: "{type} 에 대한 내장 함수 데이터가 아직 없습니다",
+    functionsCount: "함수 {count}개",
+    allGroups: "전체",
+    moreResults: "+{count}개 더 — 계속 입력하여 범위를 줄이세요",
+    overloads: "{count}개 오버로드",
+    aliases: "별칭: {aliases}",
+    argsCount: "인자 {count}개",
+    copy: "복사",
+    copied: "복사됨",
+    copyFailed: "복사 실패",
+  },
   diff: {
     progress: {
       loadingObjects: "원본 및 대상 데이터베이스 객체를 읽는 중...",

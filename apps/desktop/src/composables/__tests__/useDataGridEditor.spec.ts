@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
@@ -872,5 +873,33 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+});
+
+describe("useDataGridEditor cell edit focus", () => {
+  it("selects the editor value only on the first frame so fast typing is not clobbered (#7336)", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["long json value", "hidden", "last"]]);
+    const select = vi.fn();
+    const setSelectionRange = vi.fn();
+    const focus = vi.fn();
+    const input = { focus, select, setSelectionRange, dataset: {}, value: "long json value" };
+    const rafCallbacks: Array<(time: number) => void> = [];
+    vi.stubGlobal("document", { querySelector: () => input });
+    vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {
+      rafCallbacks.push(callback);
+      return rafCallbacks.length;
+    });
+
+    editor.startEdit(0, 0);
+    await nextTick();
+    for (let frame = 0; frame < 3; frame += 1) {
+      const callbacks = rafCallbacks.splice(0);
+      callbacks.forEach((callback) => callback(0));
+      await nextTick();
+    }
+
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(setSelectionRange).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

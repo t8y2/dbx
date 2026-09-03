@@ -361,13 +361,20 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function focusEditInput(select = true) {
-    const focusInput = () => {
+    // `selectText` is tri-state: true selects the full value once when the
+    // editor opens, false places the caret at the end, and undefined only
+    // refocuses without touching the selection. The requestAnimationFrame
+    // retry below uses the undefined mode so a user who starts typing or
+    // moving the caret immediately after the editor opens is not clobbered by
+    // a second select-all on a later frame.
+    const focusInput = (selectText?: boolean) => {
       if (typeof document === "undefined") return;
       const scroller = getScrollerElement();
       const root = scroller?.closest("[data-grid-root]");
       const input = (root ?? document).querySelector(".cell-edit-input") as HTMLInputElement | HTMLTextAreaElement | null;
       if (input) focusDataGridEditorWithoutScrolling(input, scroller);
-      if (select && input) {
+      if (selectText === undefined) return;
+      if (selectText && input) {
         if (input instanceof HTMLTextAreaElement && input.dataset.expandedCellEditor === "true") {
           // Expanded editors must match single-line editors: a double-click selects the whole value.
           input.select();
@@ -382,11 +389,11 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       }
     };
     nextTick(() => {
-      focusInput();
+      focusInput(select);
       if (typeof requestAnimationFrame === "undefined") return;
       let attempts = 0;
       const focusNextFrame = () => {
-        focusInput();
+        focusInput(undefined);
         attempts += 1;
         if (attempts < 3) requestAnimationFrame(focusNextFrame);
       };

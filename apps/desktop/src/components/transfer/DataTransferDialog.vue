@@ -19,6 +19,7 @@ import type { TransferContent, TransferMode, TransferObjectKind, TransferTableNa
 import { crossFamilyTransferableKinds, isSameTransferFamily, transferObjectKindsForDatabase } from "@/lib/database/transferObjectKinds";
 import ObjectSelectionTree from "@/components/transfer/ObjectSelectionTree.vue";
 import TransferTaskTree from "@/components/transfer/TransferTaskTree.vue";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import type { DatabaseType } from "@/types/database";
 import type { TransferTask, TransferTaskConfig } from "@/types/database";
 import { isSchemaAware, supportsTransfer } from "@/lib/database/databaseCapabilities";
@@ -159,6 +160,9 @@ const transferMode = ref<TransferMode>("append");
 const targetTableNameCase = ref<TransferTableNameCase>("preserve");
 const quoteTargetColumnNames = ref(true);
 const batchSize = ref(1000);
+const dropTargetBeforeCreateChecked = ref(false);
+const showDropDangerConfirm = ref(false);
+const dropDangerSql = ref("");
 const isSubmitting = ref(false);
 const showStartConfirm = ref(false);
 const ownershipDialogOpen = ref(false);
@@ -185,6 +189,16 @@ function isMongoConnection(id: string): boolean {
 }
 
 const showTargetColumnQuoteOption = computed(() => ["gaussdb", "opengauss"].includes(connectionType(targetConnectionId.value) ?? ""));
+
+const SUPPORTED_DROP_TARGET_DB_TYPES: DatabaseType[] = ["mysql", "postgres", "oracle", "sqlserver", "dameng", "oceanbase-oracle", "kingbase", "gaussdb", "opengauss", "kwdb", "goldendb", "sqlite", "duckdb", "cloudflare-d1"];
+
+const canDropTargetBeforeCreate = computed(() => {
+  if (transferContent.value === "dataOnly") return false;
+  const targetType = connectionType(targetConnectionId.value);
+  return targetType ? SUPPORTED_DROP_TARGET_DB_TYPES.includes(targetType) : false;
+});
+
+const dropTargetBeforeCreate = computed(() => canDropTargetBeforeCreate.value && dropTargetBeforeCreateChecked.value);
 
 function isCatalogCapable(id: string): boolean {
   const config = store.getConfig(id);
@@ -618,6 +632,12 @@ watch(
   { immediate: true },
 );
 
+watch([transferContent, targetConnectionId], () => {
+  if (!canDropTargetBeforeCreate.value && dropTargetBeforeCreateChecked.value) {
+    dropTargetBeforeCreateChecked.value = false;
+  }
+});
+
 function resetState(cancelTaskLoad = true) {
   if (cancelTaskLoad) taskLoadTracker.cancel();
   sourceConnectionId.value = "";
@@ -646,6 +666,7 @@ function resetState(cancelTaskLoad = true) {
   targetTableNameCase.value = "preserve";
   quoteTargetColumnNames.value = true;
   batchSize.value = 1000;
+  dropTargetBeforeCreateChecked.value = false;
   isSubmitting.value = false;
   showStartConfirm.value = false;
   ownershipDialogOpen.value = false;
@@ -773,6 +794,8 @@ async function startTransfer() {
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     ownershipPolicy: "preserve",
     batchSize: batchSize.value,
+    dropTargetBeforeCreate: dropTargetBeforeCreate.value,
+    dropTargetConfirmed: dropTargetBeforeCreate.value,
   };
 
   if (transferContent.value !== "dataOnly") {
@@ -858,6 +881,8 @@ function currentConfig(): TransferTaskConfig {
     targetTableNameCase: targetTableNameCase.value,
     quoteTargetColumnNames: quoteTargetColumnNames.value,
     batchSize: batchSize.value,
+    dropTargetBeforeCreate: dropTargetBeforeCreate.value,
+    dropTargetConfirmed: false,
   };
 }
 
@@ -887,6 +912,7 @@ async function loadTaskIntoForm(task: TransferTask) {
   targetTableNameCase.value = config.targetTableNameCase;
   quoteTargetColumnNames.value = config.quoteTargetColumnNames;
   batchSize.value = config.batchSize;
+  dropTargetBeforeCreateChecked.value = config.dropTargetBeforeCreate ?? false;
   pendingSelectedObjectsPrefill.value = Object.keys(config.objects).length > 0 ? JSON.parse(JSON.stringify(config.objects)) : null;
 
   skipSourceWatch.value = true;
@@ -1011,12 +1037,63 @@ const startConfirmTarget = computed(() => `${getConnectionName(targetConnectionI
 /** Opens the confirmation dialog before starting a transfer. */
 function requestStartTransfer() {
   if (!canStart.value || isSubmitting.value) return;
+
+  // Production block: check if drop is enabled and target is production
+  if (dropTargetBeforeCreate.value) {
+    const targetConfig = store.getConfig(targetConnectionId.value);
+    if (targetConfig?.is_production) {
+      toast(t("transfer.dropTargetBeforeCreateProductionBlock"), 5000);
+      return;
+    }
+  }
+
   showStartConfirm.value = true;
 }
 
 /** Confirmed: close the prompt and run the normal start flow. */
 function confirmStartTransfer() {
   showStartConfirm.value = false;
+
+  // If drop is enabled, show danger confirmation with DROP SQL preview
+  if (dropTargetBeforeCreate.value) {
+    generateDropDangerSql();
+    showDropDangerConfirm.value = true;
+    return;
+  }
+
+  void startTransfer();
+}
+
+/** Generate DROP SQL preview for danger confirmation */
+function generateDropDangerSql() {
+  const targetType = connectionType(targetConnectionId.value);
+  const effectiveTargetSchema = targetSchema.value || targetDatabaseName.value;
+  const lines: string[] = [];
+
+  for (const table of selectedTables.value) {
+    let sql = "";
+    if (targetType === "postgres" || targetType === "kingbase" || targetType === "opengauss" || targetType === "gaussdb") {
+      sql = `DROP TABLE IF EXISTS "${effectiveTargetSchema}"."${table}";`;
+    } else if (targetType === "mysql" || targetType === "goldendb" || targetType === "kwdb") {
+      sql = `DROP TABLE IF EXISTS \`${effectiveTargetSchema}\`.\`${table}\`;`;
+    } else if (targetType === "oracle" || targetType === "dameng" || targetType === "oceanbase-oracle") {
+      sql = `DROP TABLE "${effectiveTargetSchema}"."${table}";`;
+    } else if (targetType === "sqlserver") {
+      sql = `DROP TABLE IF EXISTS [${effectiveTargetSchema}].[${table}];`;
+    } else if (targetType === "sqlite" || targetType === "duckdb" || targetType === "cloudflare-d1") {
+      sql = `DROP TABLE IF EXISTS "${table}";`;
+    } else {
+      sql = `DROP TABLE IF EXISTS ${effectiveTargetSchema}.${table};`;
+    }
+    lines.push(sql);
+  }
+
+  dropDangerSql.value = lines.join("\n");
+}
+
+/** Confirmed danger dialog: proceed with transfer */
+function confirmDropDanger() {
+  showDropDangerConfirm.value = false;
   void startTransfer();
 }
 
@@ -1275,6 +1352,15 @@ async function saveConfigTask() {
                 <Label for="transfer-quote-target-column-names" class="text-xs shrink-0">{{ t("transfer.quoteTargetColumnNames") }}</Label>
                 <Switch id="transfer-quote-target-column-names" v-model="quoteTargetColumnNames" size="sm" />
               </div>
+              <div v-if="canDropTargetBeforeCreate" class="space-y-2">
+                <div class="flex items-center gap-3">
+                  <Label for="transfer-drop-target-before-create" class="text-xs shrink-0">{{ t("transfer.dropTargetBeforeCreate") }}</Label>
+                  <Switch id="transfer-drop-target-before-create" v-model="dropTargetBeforeCreateChecked" size="sm" />
+                </div>
+                <p v-if="dropTargetBeforeCreateChecked" class="text-xs text-muted-foreground pl-0">
+                  {{ t("transfer.dropTargetBeforeCreateHint") }}
+                </p>
+              </div>
               <div class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.batchSize") }}</Label>
                 <Input v-model.number="batchSize" type="number" min="100" max="10000" step="100" class="h-7 text-xs w-24" />
@@ -1327,6 +1413,7 @@ async function saveConfigTask() {
           {{ t("transfer.startConfirmMessage", { source: startConfirmSource, target: startConfirmTarget, count: selectedObjectCount }) }}
         </DialogDescription>
       </DialogHeader>
+      <div v-if="dropTargetBeforeCreate" class="rounded-md border border-orange-500/30 bg-orange-500/10 px-3 py-2.5 text-xs text-orange-600 dark:text-orange-400">⚠️ {{ t("transfer.dropTargetBeforeCreateWarning") }}</div>
       <DialogFooter class="gap-2">
         <Button variant="outline" size="sm" @click="showStartConfirm = false">
           {{ t("transfer.cancel") }}
@@ -1337,6 +1424,8 @@ async function saveConfigTask() {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <DangerConfirmDialog v-model:open="showDropDangerConfirm" :sql="dropDangerSql" :title="t('transfer.dropTargetBeforeCreate')" :message="t('transfer.dropTargetBeforeCreateDanger', { count: selectedTables.size })" :confirm-label="t('transfer.start')" @confirm="confirmDropDanger" />
 
   <Dialog v-model:open="ownershipDialogOpen">
     <DialogContent class="sm:max-w-[520px]" @interact-outside.prevent>

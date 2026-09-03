@@ -436,6 +436,9 @@ fn wrap_if_not_exists(sql: &str, db_type: DatabaseType) -> String {
         let (prefix, suffix) = sql.split_at(idx);
         format!("{prefix} IF NOT EXISTS{suffix}")
     } else if upper.starts_with("DROP TABLE") {
+        if !profile.drop_table_supports_if_exists {
+            return sql.to_string();
+        }
         if upper.contains("IF EXISTS") {
             return sql.to_string();
         }
@@ -1602,6 +1605,24 @@ mod tests {
         let sql = "DROP TABLE old_users;";
         let result = apply_idempotent_strategy(sql, DatabaseType::Mysql, IdempotentStrategy::IfNotExists);
         assert!(result.contains("DROP TABLE IF EXISTS"), "Got: {result}");
+    }
+
+    /// Oracle before 23c rejects `DROP TABLE IF EXISTS`, so the wrapper must leave the
+    /// statement alone instead of generating invalid SQL.
+    #[test]
+    fn idempotent_drop_table_skips_if_exists_where_unsupported() {
+        for db_type in [DatabaseType::Oracle, DatabaseType::Db2, DatabaseType::Access] {
+            let result = apply_idempotent_strategy("DROP TABLE old_users;", db_type, IdempotentStrategy::IfNotExists);
+            assert_eq!(result, "DROP TABLE old_users;", "{db_type:?} must not gain IF EXISTS");
+        }
+        // The ConditionalCheck strategy falls back to the guarded comment form instead.
+        let conditional = apply_idempotent_strategy(
+            "DROP TABLE old_users;",
+            DatabaseType::Oracle,
+            IdempotentStrategy::ConditionalCheck,
+        );
+        assert!(!conditional.contains("IF EXISTS"), "Got: {conditional}");
+        assert!(conditional.contains("-- Conditional"), "Got: {conditional}");
     }
 
     #[test]

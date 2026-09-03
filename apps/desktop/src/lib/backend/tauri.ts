@@ -4582,6 +4582,8 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  dropTargetBeforeCreate: boolean;
+  dropTargetConfirmed: boolean;
 }
 
 export interface TransferOwnershipPreview {

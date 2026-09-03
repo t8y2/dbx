@@ -106,6 +106,7 @@ pub mod temporal_format;
 pub mod text_export;
 pub mod token_usage;
 pub mod transfer;
+pub mod transfer_rebuild;
 pub mod two_phase_commit;
 pub mod types;
 pub mod update;

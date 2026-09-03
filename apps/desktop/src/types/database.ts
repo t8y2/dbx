@@ -1452,6 +1452,8 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  dropTargetBeforeCreate: boolean;
+  dropTargetConfirmed: boolean;
 }
 
 export interface TransferTask {

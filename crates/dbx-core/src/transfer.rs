@@ -200,6 +200,14 @@ pub struct TransferRequest {
     #[serde(default)]
     pub ownership_policy: TransferOwnershipPolicy,
     pub batch_size: usize,
+    /// When true, rename the target table to a backup before creating it from the
+    /// source structure. Only after the transfer succeeds is the backup dropped.
+    /// Requires `create_table = true` and `content != DataOnly`.
+    #[serde(default)]
+    pub drop_target_before_create: bool,
+    /// Production database confirmation for drop_target_before_create.
+    #[serde(default)]
+    pub drop_target_confirmed: bool,
 }
 
 fn default_quote_target_column_names() -> bool {
@@ -728,6 +736,13 @@ pub fn validate_transfer_request(request: &TransferRequest) -> Result<(), String
     validate_transfer_target_table_names(request)?;
     if matches!(request.content, TransferContent::DataOnly) && !request.objects.is_empty() {
         return Err("仅数据模式不传输非表对象".to_string());
+    }
+    if request.drop_target_before_create
+        && (matches!(request.content, TransferContent::DataOnly) || !request.create_table)
+    {
+        return Err("drop_target_before_create requires structure transfer (create_table and content != DataOnly). \
+             Data-only mode does not create tables, so a dropped target would not be rebuilt."
+            .to_string());
     }
     for selection in &request.objects {
         if selection.names.is_empty() {
@@ -7215,8 +7230,211 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
     }
 }
 
+/// Rename every existing target table to its backup name before the main
+/// create/insert pass.
+///
+/// Called only when `drop_target_before_create` is true. `tables` must already be in
+/// `parents_first = false` order (children first): MySQL `RENAME TABLE` and PostgreSQL
+/// `ALTER TABLE ... RENAME` keep incoming foreign keys attached to the renamed table,
+/// so renaming children first leaves each backup pair consistent with the other.
+///
+/// Two passes over `tables`, both before any DDL runs: resolve the target name and
+/// existence of each table (through the same `resolve_transfer_target_table_name` the
+/// main pass uses, so the two cannot disagree on which table is rebuilt), then refuse
+/// the whole transfer if a table outside the collection references one of them.
+///
+/// Returns a map from source table name to backup table name for the tables that were
+/// renamed. Tables absent from the target are skipped and absent from the map, which
+/// is what tells the main pass to create them without a backup to clean up.
+#[allow(clippy::too_many_arguments)]
+pub async fn rename_tables_to_backup<F>(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    tables: &[String],
+    target_db_type: DatabaseType,
+    target_pool_key: &str,
+    mut progress_callback: F,
+) -> Result<HashMap<String, String>, String>
+where
+    F: FnMut(TransferProgress),
+{
+    let total_tables = tables.len();
+
+    // Resolve target names first so the fail-fast check below sees the names that will
+    // actually be renamed (target name casing and existing-table matching included).
+    let mut resolved: Vec<(String, String, bool)> = Vec::with_capacity(total_tables);
+    for table in tables {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        let ResolvedTransferTargetTable { name, preexisting } = resolve_transfer_target_table_name(
+            state,
+            request,
+            table,
+            target_pool_key,
+            &target_db_type,
+            request.source_catalog.as_deref(),
+            request.target_catalog.as_deref(),
+        )
+        .await;
+        resolved.push((table.clone(), name, preexisting));
+    }
+
+    // Refuse before the first rename: a foreign key from outside the collection would
+    // follow the rename onto the backup table, and nothing later in the transfer can
+    // put it back.
+    let target_names = resolved.iter().map(|(_, name, _)| name.clone()).collect::<Vec<_>>();
+    crate::transfer_rebuild::ensure_no_external_incoming_foreign_keys(
+        state,
+        target_pool_key,
+        &request.target_database,
+        &request.target_schema,
+        &target_names,
+        target_db_type,
+    )
+    .await?;
+
+    let mut backup_names = HashMap::new();
+    for (i, (table, target_table, preexisting)) in resolved.iter().enumerate() {
+        if is_cancelled(&request.transfer_id).await {
+            return Err("Cancelled".to_string());
+        }
+        if !preexisting {
+            log::info!("[transfer] rename pre-pass: target table {target_table} does not exist, nothing to back up");
+            continue;
+        }
+
+        progress_callback(TransferProgress {
+            transfer_id: request.transfer_id.clone(),
+            table: format!("rename: {table}"),
+            table_index: i,
+            total_tables,
+            rows_transferred: i as u64,
+            total_rows: Some(total_tables as u64),
+            status: TransferStatus::Running,
+            error: None,
+            terminal: false,
+        });
+
+        let backup_name = crate::transfer_rebuild::backup_table_name(
+            target_db_type,
+            &request.transfer_id,
+            &format!("{}.{}", request.source_schema, table),
+            target_table,
+        )?;
+
+        // The backup name is derived, not user-supplied, so a hit means an earlier run of
+        // this same transfer left one behind. Never overwrite it: it may be the only copy
+        // of the original table (mirrors sqlite_rebuild.rs:498-511).
+        let backup_exists = {
+            let lookup = list_transfer_tables_isolated(
+                state.clone(),
+                request.target_connection_id.clone(),
+                request.target_database.clone(),
+                request.target_schema.clone(),
+                request.target_catalog.clone(),
+                target_db_type,
+                backup_name.clone(),
+                1,
+            )
+            .await?;
+            !lookup.is_empty()
+        };
+        if backup_exists {
+            return Err(format!(
+                "Backup table name '{}' already exists in the target database. Cannot proceed with \
+                 drop_target_before_create; remove the existing backup manually or retry the transfer.",
+                backup_name
+            ));
+        }
+
+        log::info!("[transfer] rename pre-pass: renaming {} to backup {}", target_table, backup_name);
+
+        let rename_sql = crate::db_admin_sql::build_rename_object_sql(crate::db_admin_sql::RenameObjectSqlOptions {
+            database_type: Some(target_db_type),
+            object_type: crate::db_admin_sql::DatabaseObjectType::Table,
+            schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
+            old_name: target_table.clone(),
+            new_name: backup_name.clone(),
+        })?;
+
+        execute_on_pool(state, target_pool_key, &rename_sql).await.map_err(|e| {
+            format!("Failed to rename target table '{}' to backup '{}' in pre-pass: {}", target_table, backup_name, e)
+        })?;
+
+        // PostgreSQL family: `ALTER TABLE ... RENAME TO` does NOT rename the table's indexes
+        // or constraints. They remain under their original names, occupying those schema-scoped
+        // identifiers. When the main pass later runs `CREATE INDEX IF NOT EXISTS {original_name}`,
+        // Postgres silently no-ops (the name is already taken by the backup's index), and the
+        // rebuilt table loses all secondary indexes. Rename them now to free up the names.
+        if is_postgres_family_target(&target_db_type) {
+            let indexes = get_postgres_indexes_for_transfer(
+                state,
+                target_pool_key,
+                &request.target_database,
+                &request.target_schema,
+                &backup_name,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                log::warn!("[transfer] failed to list indexes on backup table {}: {}", backup_name, e);
+                Vec::new()
+            });
+
+            for index in &indexes {
+                if is_cancelled(&request.transfer_id).await {
+                    return Err("Cancelled".to_string());
+                }
+
+                // Derive the backup index name using the same hash suffix as the table, truncated
+                // to fit the identifier budget. PostgreSQL enforces 63 bytes for index names.
+                let backup_index_name = crate::transfer_rebuild::backup_table_name(
+                    target_db_type,
+                    &request.transfer_id,
+                    &format!("{}.{}", request.source_schema, table),
+                    &index.name,
+                )?;
+
+                let schema_prefix = if request.target_schema.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}.", quote_identifier(&request.target_schema, &DatabaseType::Postgres))
+                };
+
+                let rename_index_sql = format!(
+                    "ALTER INDEX {}{} RENAME TO {}",
+                    schema_prefix,
+                    quote_identifier(&index.name, &DatabaseType::Postgres),
+                    quote_identifier(&backup_index_name, &DatabaseType::Postgres)
+                );
+
+                if let Err(e) = execute_on_pool(state, target_pool_key, &rename_index_sql).await {
+                    log::warn!(
+                        "[transfer] failed to rename index '{}' to '{}' on backup table {}: {}",
+                        index.name,
+                        backup_index_name,
+                        backup_name,
+                        e
+                    );
+                    // Non-fatal: the main pass may still succeed if index creation is skipped,
+                    // though the rebuilt table will be missing that index. Log and continue.
+                }
+            }
+        }
+
+        backup_names.insert(table.clone(), backup_name);
+    }
+
+    Ok(backup_names)
+}
+
 /// Transfer a single table. Returns rows transferred.
 /// `progress_callback` is invoked for progress updates.
+///
+/// `preexisting_backup_names` carries the output of [`rename_tables_to_backup`] and is
+/// required whenever `drop_target_before_create` is set — this pass only checks whether the
+/// table was renamed aside, and never renames or drops anything itself. Removing the backups
+/// is [`drop_backup_tables`], after every table has succeeded.
 #[allow(clippy::too_many_arguments)]
 async fn transfer_table_inner<F>(
     state: &Arc<AppState>,
@@ -7229,6 +7447,7 @@ async fn transfer_table_inner<F>(
     target_pool_key: &str,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
+    preexisting_backup_names: Option<&HashMap<String, String>>,
     mut progress_callback: F,
 ) -> Result<u64, String>
 where
@@ -7360,6 +7579,22 @@ where
     };
     log::info!("[transfer] {} total_rows={:?}", table, total_rows);
 
+    // Did the rename pre-pass move this table's target aside? False when the option is off,
+    // or when the target table did not exist, so nothing was renamed. Removing the backup is
+    // `drop_backup_tables`' job once the whole table loop has succeeded.
+    let target_renamed_to_backup =
+        match (request.drop_target_before_create, preexisting_backup_names) {
+            (false, _) => false,
+            (true, Some(backup_map)) => backup_map.contains_key(table),
+            // rename_tables_to_backup owns the rename; without it the target table would
+            // still be in place and this pass would quietly append into it.
+            (true, None) => return Err(
+                "drop_target_before_create requires the rename pre-pass: call rename_tables_to_backup and pass its \
+                 result to transfer_table."
+                    .to_string(),
+            ),
+        };
+
     // Create table on target if requested
     if request.create_table {
         if transfer_table_needs_inline_postgres_schema_ensure(source_db_type, target_db_type)
@@ -7371,6 +7606,14 @@ where
                 .await
                 .map_err(|e| format!("Failed to ensure schema exists: {e}"))?;
         }
+
+        // The pre-pass renamed the target away, so the name is free again. Resetting the
+        // flag is what keeps the index / foreign key / PG schema restore paths — all
+        // gated on `!target_table_preexisting` — from silently skipping.
+        if target_renamed_to_backup {
+            target_table_preexisting = false;
+        }
+
         if target_table_preexisting {
             log::info!("[transfer] target table {} already exists, skipping create-table DDL", target_table);
         } else {
@@ -7666,7 +7909,11 @@ where
     // "skipping create-table DDL" above). If the untouched target structure
     // can't accept the planned insert, fail fast here instead of truncating
     // the target's existing data and then hitting an opaque driver error.
-    if request.create_table && target_table_preexisting {
+    //
+    // Skip this validation when drop_target_before_create is true: the original
+    // target table was renamed to a backup and a fresh table matching the source
+    // structure was just created, so structural incompatibility is not possible.
+    if request.create_table && target_table_preexisting && !request.drop_target_before_create {
         validate_preexisting_target_columns(
             &target_columns,
             &col_names,
@@ -7676,8 +7923,10 @@ where
         )?;
     }
 
-    // Truncate target if overwrite mode
-    if request.mode == TransferMode::Overwrite {
+    // Truncate target if overwrite mode (only when not rebuilding the table).
+    // When drop_target_before_create is true, the target table was just created
+    // and is already empty, so TRUNCATE is unnecessary.
+    if request.mode == TransferMode::Overwrite && !request.drop_target_before_create {
         let full_table =
             qualified_table(&target_table, &request.target_schema, target_db_type, request.target_catalog.as_deref());
         let truncate_sql = match target_db_type {
@@ -7872,8 +8121,74 @@ where
     Ok(total_transferred)
 }
 
+/// Drop the backups left behind by [`rename_tables_to_backup`].
+///
+/// Two ordering rules make this a post-loop step rather than per-table cleanup, and neither
+/// shows up until a foreign key connects two selected tables:
+///
+/// - A backup can still be referenced by another backup. Renaming children first keeps each
+///   pair consistent, which also means `DROP TABLE parent_bak` fails while `child_bak` exists.
+///   So the drops run children first, and only once every table has succeeded.
+/// - The backups still carry the target's original constraint names. On MySQL those are unique
+///   per database, so a deferred `ADD CONSTRAINT` for a rebuilt table collides with the backup
+///   still holding that name. Callers must run this before `pending_fk_alters`.
+///
+/// `drop_order` is the children-first list handed to the rename pre-pass. A backup whose table
+/// is missing from it is still dropped, in name order, so none can leak.
+pub async fn drop_backup_tables(
+    state: &Arc<AppState>,
+    request: &TransferRequest,
+    target_db_type: DatabaseType,
+    target_pool_key: &str,
+    backup_names: &HashMap<String, String>,
+    drop_order: &[String],
+) -> Result<(), String> {
+    let mut ordered: Vec<&String> = drop_order.iter().filter(|table| backup_names.contains_key(*table)).collect();
+    let mut leftovers: Vec<&String> = backup_names.keys().filter(|table| !drop_order.contains(*table)).collect();
+    leftovers.sort();
+    ordered.extend(leftovers);
+
+    let mut retained: Vec<String> = Vec::new();
+    for table in ordered {
+        let Some(backup_name) = backup_names.get(table) else {
+            continue;
+        };
+        let drop_sql = crate::db_admin_sql::build_drop_table_sql(crate::db_admin_sql::TableAdminSqlOptions {
+            database_type: Some(target_db_type),
+            schema: if request.target_schema.is_empty() { None } else { Some(request.target_schema.clone()) },
+            table_name: backup_name.clone(),
+            // Rendered for the PostgreSQL family only — `build_drop_table_sql` drops the
+            // keyword everywhere else. A foreign key cycle among the backups has no valid
+            // drop order at all, and CASCADE is safe here because the dependent constraint
+            // sits on another backup that this same pass removes.
+            cascade: Some(true),
+            identifier_quote: None,
+        });
+        match execute_on_pool(state, target_pool_key, &drop_sql).await {
+            Ok(_) => log::info!("[transfer] dropped backup table {backup_name}"),
+            Err(error) => {
+                log::error!("[transfer] failed to drop backup table {backup_name}: {error}");
+                retained.push(format!("{backup_name} ({error})"));
+            }
+        }
+    }
+
+    if retained.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Transfer completed, but {} backup table(s) could not be dropped and still occupy space: {}. \
+         Remove them manually to finish cleanup.",
+        retained.len(),
+        retained.join(", ")
+    ))
+}
+
 /// Transfer one table on its own Tokio task so the large transfer future and
 /// nested driver metadata futures do not share a single worker stack.
+///
+/// Pass the [`rename_tables_to_backup`] result as `preexisting_backup_names` whenever
+/// `drop_target_before_create` is set; the transfer errors out without it.
 #[allow(clippy::too_many_arguments)]
 pub async fn transfer_table<F>(
     state: &Arc<AppState>,
@@ -7886,6 +8201,7 @@ pub async fn transfer_table<F>(
     target_pool_key: &str,
     known_foreign_keys: &HashMap<String, Vec<db::ForeignKeyInfo>>,
     pending_fk_alters: &mut Vec<(String, String)>,
+    preexisting_backup_names: Option<&HashMap<String, String>>,
     mut progress_callback: F,
 ) -> Result<u64, String>
 where
@@ -7902,6 +8218,15 @@ where
         .get(&table)
         .map(|foreign_keys| HashMap::from([(table.clone(), foreign_keys.clone())]))
         .unwrap_or_default();
+    let preexisting_backup_names = preexisting_backup_names.map(|m| m.clone());
+    // Kept outside the spawned task: `request` moves into it, and the error path below
+    // still needs the backup's qualified name to point the user at their data.
+    let backup_for_this_table = request
+        .drop_target_before_create
+        .then(|| preexisting_backup_names.as_ref().and_then(|names| names.get(&table).cloned()))
+        .flatten();
+    let request_target_schema = request.target_schema.clone();
+    let request_target_catalog = request.target_catalog.clone();
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(TRANSFER_PROGRESS_CHANNEL_CAPACITY);
 
     let mut task = tokio::spawn(async move {
@@ -7917,6 +8242,7 @@ where
             &target_pool_key,
             &known_foreign_keys,
             &mut task_pending_fk_alters,
+            preexisting_backup_names.as_ref(),
             move |progress| {
                 try_send_transfer_progress(&progress_tx, progress);
             },
@@ -7934,7 +8260,16 @@ where
                 let (result, task_pending_fk_alters) =
                     result.map_err(|error| format!("Transfer table task failed: {error}"))?;
                 pending_fk_alters.extend(task_pending_fk_alters);
-                return result;
+                // Every failure past the rename pre-pass leaves the original table under its
+                // backup name. This is the last place that still holds the name, so the note
+                // is attached here rather than at each of the inner `?` sites.
+                return match (result, backup_for_this_table.as_deref()) {
+                    (Err(error), Some(backup_name)) => Err(crate::transfer_rebuild::annotate_error_with_retained_backup(
+                        error,
+                        &qualified_table(backup_name, &request_target_schema, &target_db_type, request_target_catalog.as_deref()),
+                    )),
+                    (result, _) => result,
+                };
             }
         }
     }
@@ -8584,6 +8919,30 @@ mod tests {
         );
     }
 
+    /// The rename pre-pass of `drop_target_before_create` consumes the `parents_first =
+    /// false` order, and a foreign key cycle has no such order. Cycle members must still
+    /// come out — appended in their original order — because dropping them would silently
+    /// leave those tables un-renamed and the main pass would append into the old table.
+    #[test]
+    fn table_dependency_sort_keeps_cycle_members_instead_of_dropping_them() {
+        let tables = vec!["employees".to_string(), "departments".to_string(), "regions".to_string()];
+        // employees <-> departments is a cycle; regions is free of foreign keys.
+        let dependencies = vec![
+            ("employees".to_string(), "departments".to_string()),
+            ("departments".to_string(), "employees".to_string()),
+        ];
+
+        for parents_first in [true, false] {
+            let sorted = sort_table_names_by_dependencies(&tables, &dependencies, parents_first);
+            assert_eq!(sorted.len(), tables.len(), "cycle members were dropped (parents_first={parents_first})");
+            assert_eq!(
+                sorted,
+                vec!["regions".to_string(), "employees".to_string(), "departments".to_string()],
+                "the acyclic table sorts first, then the cycle in input order (parents_first={parents_first})"
+            );
+        }
+    }
+
     #[test]
     fn table_dependency_sort_ignores_duplicates_and_out_of_scope_tables() {
         let tables = vec!["orders".to_string(), "users".to_string(), "logs".to_string()];
@@ -8691,6 +9050,8 @@ mod tests {
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
+            drop_target_before_create: false,
+            drop_target_confirmed: false,
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json["content"], "structureOnly");
@@ -8766,6 +9127,8 @@ mod tests {
                 batch_size: 1000,
                 content: TransferContent::DataOnly,
                 objects: Vec::new(),
+                drop_target_before_create: false,
+                drop_target_confirmed: false,
             };
             assert!(validate_transfer_request(&base).is_ok());
 
@@ -8781,6 +9144,56 @@ mod tests {
 
             let structure_only = TransferRequest { content: TransferContent::StructureOnly, ..base.clone() };
             assert!(validate_transfer_request(&structure_only).is_ok());
+        }
+
+        #[test]
+        fn rejects_drop_target_before_create_with_data_only() {
+            let base = TransferRequest {
+                transfer_id: "t".into(),
+                source_connection_id: "s".into(),
+                source_database: "db".into(),
+                source_schema: "public".into(),
+                source_catalog: None,
+                target_connection_id: "t".into(),
+                target_database: "db".into(),
+                target_schema: "public".into(),
+                target_catalog: None,
+                tables: vec!["orders".into()],
+                create_table: true,
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                batch_size: 1000,
+                content: TransferContent::StructureAndData,
+                objects: Vec::new(),
+                drop_target_before_create: false,
+                drop_target_confirmed: false,
+            };
+
+            // drop_target_before_create=false → valid
+            assert!(validate_transfer_request(&base).is_ok());
+
+            // drop_target_before_create=true + StructureAndData → valid
+            let with_drop = TransferRequest { drop_target_before_create: true, ..base.clone() };
+            assert!(validate_transfer_request(&with_drop).is_ok());
+
+            // drop_target_before_create=true + StructureOnly → valid
+            let structure_only = TransferRequest {
+                content: TransferContent::StructureOnly,
+                drop_target_before_create: true,
+                ..base.clone()
+            };
+            assert!(validate_transfer_request(&structure_only).is_ok());
+
+            // drop_target_before_create=true + DataOnly → error
+            let data_only =
+                TransferRequest { content: TransferContent::DataOnly, drop_target_before_create: true, ..base.clone() };
+            let err = validate_transfer_request(&data_only).unwrap_err();
+            assert!(
+                err.contains("drop_target_before_create") && err.contains("DataOnly"),
+                "expected error to mention drop_target_before_create and DataOnly, got: {err}"
+            );
         }
     }
 
@@ -9792,6 +10205,8 @@ mod tests {
             quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 1000,
+            drop_target_before_create: false,
+            drop_target_confirmed: false,
         }
     }
 

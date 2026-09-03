@@ -91,6 +91,8 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
+      dropTargetBeforeCreate: config.dropTargetBeforeCreate ?? false,
+      dropTargetConfirmed: config.dropTargetConfirmed ?? false,
     },
     createdAt: candidate.createdAt || nowIso(),
     updatedAt: candidate.updatedAt || nowIso(),

@@ -275,6 +275,7 @@ Connection providers may add ordered custom actions before DBX-owned lifecycle b
 A workbench opens in a normal persistent DBX tab. The iframe is loaded with `sandbox="allow-scripts"`, a restrictive CSP, no Tauri object, no parent DOM access, and no direct network access. The host injects `window.dbxPlugin`:
 
 - `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`
+- `theme` — `{ appearance: "light" | "dark", tokens }` with the resolved DBX design tokens; theme changes are pushed live through env updates, and the SDK applies them to the plugin document root
 - `onContext(listener)` — context changes are pushed live; the iframe is not reloaded, so plugin UI state survives navigation
 - `invoke(method, params, options)`
 - `notify(method, params)`
@@ -286,6 +287,18 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
 All backend calls are rebound to the owning plugin ID by the host. A plugin UI cannot invoke another plugin.
+
+### Official UI kit and theming
+
+Every sandbox document ships with a small official component kit built on the DBX design tokens, so plugin UI follows light/dark mode and custom palettes automatically:
+
+```html
+<button class="dbx-btn dbx-btn--primary">Connect</button>
+<input class="dbx-input" placeholder="Endpoint" />
+<span class="dbx-badge">Ready</span>
+```
+
+Available classes: `dbx-card`, `dbx-section-title`, `dbx-btn` (`--primary` / `--danger` / `--ghost`), `dbx-label`, `dbx-input`, `dbx-select`, `dbx-textarea`, `dbx-hint`, `dbx-row` (label + field grid), `dbx-table`, `dbx-badge`, `dbx-link`. Custom plugin CSS can use the same `var(--color-*)` tokens; `document.documentElement.dataset.dbxTheme` reflects the current appearance.
 
 Plugin-authored names, descriptions, contribution labels, form-field text, and select-option labels can be localized through `manifest.json > localizations`. DBX selects the exact current locale first, then its base language, and finally falls back to the manifest's default text:
 

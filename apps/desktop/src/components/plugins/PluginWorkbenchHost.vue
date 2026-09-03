@@ -2,9 +2,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { AlertTriangle, Loader2 } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
-import { PluginHostBridge, pluginSandboxDocument, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
+import { PluginHostBridge, pluginSandboxDocument, type PluginBridgeTheme, type PluginWorkbenchContext } from "@/lib/plugins/pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { useTheme } from "@/composables/useTheme";
 
 const props = withDefaults(
   defineProps<{
@@ -23,6 +24,7 @@ const emit = defineEmits<{
 }>();
 
 const { t, locale: appLocale } = useI18n();
+const { isDark, activeCustomUiColors } = useTheme();
 const iframe = ref<HTMLIFrameElement>();
 const source = ref("");
 const loading = ref(true);
@@ -33,6 +35,22 @@ let disposed = false;
 let loadGeneration = 0;
 
 const title = computed(() => `${props.plugin.manifest.name} · ${props.contribution.label}`);
+
+/** Collect resolved DBX design tokens so the sandbox can theme itself with the same values. */
+function currentBridgeTheme(): PluginBridgeTheme {
+  const tokens: Record<string, string> = {};
+  if (typeof document !== "undefined") {
+    const style = getComputedStyle(document.documentElement);
+    for (const name of style) {
+      if (!name.startsWith("--") || name.startsWith("--dbx-")) continue;
+      if (/^--(color|radius|font)/.test(name)) {
+        const value = style.getPropertyValue(name).trim();
+        if (value) tokens[name] = value;
+      }
+    }
+  }
+  return { appearance: isDark.value ? "dark" : "light", tokens };
+}
 
 function createBridge() {
   bridge = new PluginHostBridge(
@@ -49,6 +67,7 @@ function createBridge() {
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
     },
     appLocale.value,
+    currentBridgeTheme(),
   );
 }
 
@@ -110,6 +129,7 @@ watch(
   { deep: true },
 );
 watch(appLocale, (locale) => bridge?.updateLocale(locale));
+watch([isDark, activeCustomUiColors], () => bridge?.updateTheme(currentBridgeTheme()), { deep: true });
 
 onBeforeUnmount(() => {
   disposed = true;

@@ -226,11 +226,26 @@ describe("PluginHostBridge", () => {
     expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.binary'" });
   });
 
-  it("injects the SDK and a restrictive sandbox CSP", () => {
+  it("injects the SDK, the official UI kit, and a restrictive sandbox CSP", () => {
     const document = pluginSandboxDocument("<html><head></head><body>Hello</body></html>");
     expect(document).toContain("window.dbxPlugin");
     expect(document).toContain("get locale() { return locale; }");
     expect(document).toContain("openFilesystem");
     expect(document).toContain("connect-src 'none'");
+    expect(document).toContain(".dbx-btn");
+    expect(document).toContain("var(--color-background");
+  });
+
+  it("sends the theme in init and pushes theme updates through env messages", () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const theme = { appearance: "dark" as const, tokens: { "--color-background": "#09090b" } };
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() }, "en", theme);
+
+    bridge.sendInit();
+    expect(messages[0]).toMatchObject({ type: "init", theme: { appearance: "dark", tokens: { "--color-background": "#09090b" } } });
+
+    bridge.updateTheme({ appearance: "light", tokens: {} });
+    expect(messages[1]).toMatchObject({ type: "env", locale: "en", theme: { appearance: "light" } });
   });
 });

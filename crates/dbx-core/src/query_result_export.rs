@@ -10,7 +10,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::connection::{AppState, PoolKind};
-use crate::csv_export::{format_query_result_csv, format_tsv, push_query_result_csv_row, push_tsv_row};
+use crate::csv_export::{
+    format_query_result_csv_with_quote_mode, format_tsv, push_query_result_csv_row_with_quote_mode, push_tsv_row,
+    CsvQuoteMode,
+};
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
 use crate::models::connection::DatabaseType;
@@ -78,6 +81,8 @@ pub struct QueryResultExportRequest {
     pub use_agent_cursor: bool,
     pub file_path: String,
     pub format: String,
+    #[serde(default)]
+    pub csv_quote_mode: CsvQuoteMode,
     #[serde(default)]
     pub include_sql_sheet: bool,
     pub page_size: usize,
@@ -410,8 +415,12 @@ fn effective_row_limit(request: &QueryResultExportRequest) -> Option<usize> {
     request.row_limit
 }
 
-fn format_text_export_header(format: &str, columns: &[String]) -> String {
-    let content = if format == "csv" { format_query_result_csv(columns, &[]) } else { format_tsv(columns, &[]) };
+fn format_text_export_header(format: &str, columns: &[String], csv_quote_mode: CsvQuoteMode) -> String {
+    let content = if format == "csv" {
+        format_query_result_csv_with_quote_mode(columns, &[], csv_quote_mode)
+    } else {
+        format_tsv(columns, &[])
+    };
     content.strip_suffix('\n').unwrap_or(&content).to_string()
 }
 
@@ -420,11 +429,12 @@ fn write_text_export_row<W: Write>(
     format: &str,
     row: &[Value],
     buffer: &mut String,
+    csv_quote_mode: CsvQuoteMode,
 ) -> Result<(), String> {
     buffer.clear();
     buffer.push('\n');
     if format == "csv" {
-        push_query_result_csv_row(buffer, row);
+        push_query_result_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
     } else {
         push_tsv_row(buffer, row);
     }
@@ -436,12 +446,13 @@ fn write_text_export_rows<W: Write>(
     format: &str,
     rows: &[Vec<Value>],
     buffer: &mut String,
+    csv_quote_mode: CsvQuoteMode,
 ) -> Result<(), String> {
     buffer.clear();
     for row in rows {
         buffer.push('\n');
         if format == "csv" {
-            push_query_result_csv_row(buffer, row);
+            push_query_result_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
         } else {
             push_tsv_row(buffer, row);
         }
@@ -905,14 +916,26 @@ async fn export_query_result_core_inner(
         if format == "csv" || format == "txt" {
             if let Some(file) = text_file.as_mut() {
                 if !wrote_text_header {
-                    let header = format_text_export_header(&format, &columns);
+                    let header = format_text_export_header(&format, &columns, request.csv_quote_mode);
                     file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     if row_count > 0 {
-                        write_text_export_rows(file, &format, formatted_rows.as_ref(), &mut text_buffer)?;
+                        write_text_export_rows(
+                            file,
+                            &format,
+                            formatted_rows.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     }
                     wrote_text_header = true;
                 } else if row_count > 0 {
-                    write_text_export_rows(file, &format, formatted_rows.as_ref(), &mut text_buffer)?;
+                    write_text_export_rows(
+                        file,
+                        &format,
+                        formatted_rows.as_ref(),
+                        &mut text_buffer,
+                        request.csv_quote_mode,
+                    )?;
                 }
             }
         } else if format == "sql" {
@@ -981,7 +1004,7 @@ async fn export_query_result_core_inner(
 
     if format == "csv" || format == "txt" {
         if !wrote_text_header {
-            let header = format_text_export_header(&format, &columns);
+            let header = format_text_export_header(&format, &columns, request.csv_quote_mode);
             if let Some(file) = text_file.as_mut() {
                 file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
             }
@@ -1092,7 +1115,7 @@ async fn try_export_postgres_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1114,7 +1137,13 @@ async fn try_export_postgres_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1327,7 +1356,7 @@ async fn try_export_mysql_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1349,7 +1378,13 @@ async fn try_export_mysql_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1541,7 +1576,7 @@ async fn try_export_clickhouse_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1563,7 +1598,13 @@ async fn try_export_clickhouse_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1724,7 +1765,7 @@ async fn try_export_sqlserver_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &temporal_column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1742,7 +1783,13 @@ async fn try_export_sqlserver_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1922,6 +1969,7 @@ mod tests {
             client_session_id: None,
             execution_id: None,
             date_time_format: None,
+            csv_quote_mode: CsvQuoteMode::All,
             export_table_name: None,
             export_column_types: None,
             numeric_column_right_align: false,
@@ -1969,7 +2017,10 @@ mod tests {
 
     #[test]
     fn txt_export_header_keeps_columns_for_empty_results() {
-        assert_eq!(format_text_export_header("txt", &["id".to_string(), "note".to_string()]), "id\tnote");
+        assert_eq!(
+            format_text_export_header("txt", &["id".to_string(), "note".to_string()], CsvQuoteMode::All),
+            "id\tnote"
+        );
     }
 
     #[test]
@@ -1978,7 +2029,7 @@ mod tests {
         let mut output = Vec::new();
         let mut buffer = String::new();
 
-        write_text_export_row(&mut output, "csv", &row, &mut buffer).expect("write csv row");
+        write_text_export_row(&mut output, "csv", &row, &mut buffer, CsvQuoteMode::All).expect("write csv row");
         assert_eq!(String::from_utf8(output).expect("utf8 csv"), "\n,\"\",\"line\n\"\"two\"\"\"");
     }
 

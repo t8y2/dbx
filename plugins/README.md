@@ -286,6 +286,8 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `onEvent(listener)` — events are forwarded only with `host.events`
 - `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
+The sandbox default is no network access at all. A plugin may declare per-origin permissions such as `host.network:https://api.vendor.com` (https only, no path, at most 8 origins, duplicates rejected); declared origins — and only those — are added to the sandbox `connect-src`, so reviewers can see exactly which services the plugin UI may call.
+
 All backend calls are rebound to the owning plugin ID by the host. A plugin UI cannot invoke another plugin.
 
 ### Official UI kit and theming
@@ -320,6 +322,21 @@ Plugin-authored names, descriptions, contribution labels, form-field text, and s
   }
 }
 ```
+
+### `context-menu`
+
+A context-menu entry is rendered **natively** by DBX (no sandbox iframe, native theme and keyboard behavior) in the declared menu surface. v1 supports the saved-connection sidebar menu:
+
+```json
+{
+  "type": "context-menu",
+  "id": "vendor.example.inspect",
+  "label": "Inspect endpoint",
+  "menu": "connection"
+}
+```
+
+Clicking the item dispatches a `contextMenu/<id>` backend request with a non-secret connection summary (`{ id, dbType, name, database }`). The backend entrypoint is required; return `{ "message": "..." }` to surface a toast.
 
 ### `filesystem-provider`
 
@@ -433,7 +450,7 @@ Sidecars are shared per plugin process, not spawned per tab. Plugins own their i
 - **UI isolation:** sandboxed iframe, restrictive CSP, bounded bridge payloads, safe asset paths, plugin identity binding.
 - **Secret persistence:** plugin secrets are removed from connection JSON and stored through DBX's secret-store path. Ordinary cloud-sync snapshots always contain redacted placeholders. Secrets enter sync data only inside the encrypted payload when the user has configured a sync passphrase; without one, plugin secrets remain local and are not synchronized.
 - **Native backend trust:** a native sidecar runs with the current OS user's privileges. A signature identifies the repository that approved and published the package; it is not an OS sandbox or proof that the author is harmless. Install only plugins whose backend code you trust.
-- **Permission declarations:** privileged host bridge operations require declared permissions. Native process filesystem/network access cannot currently be completely mediated by DBX.
+- **Permission declarations:** privileged host bridge operations require declared permissions. Plugin UI network egress is fully blocked except for explicitly declared `host.network:` origins. Native process filesystem/network access cannot currently be completely mediated by DBX.
 
 Custom repository public keys can be added or removed in Plugin Center. Obtain them through a channel independent from the downloaded package.
 

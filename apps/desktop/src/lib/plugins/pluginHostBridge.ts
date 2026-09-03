@@ -194,8 +194,27 @@ export class PluginHostBridge {
   }
 }
 
-export function pluginSandboxDocument(html: string): string {
-  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; connect-src 'none'; media-src data: blob:;">`;
+/**
+ * Parse `host.network:<origin>` permission entries into CSP connect-src
+ * origins. Must stay aligned with `parse_host_network_permission` in
+ * crates/dbx-core/src/plugins/manifest.rs.
+ */
+export function pluginNetworkOrigins(permissions: readonly string[] | undefined): string[] {
+  const origins = new Set<string>();
+  for (const permission of permissions || []) {
+    if (!permission.startsWith("host.network:")) continue;
+    const origin = permission.slice("host.network:".length);
+    if (!/^https:\/\/[A-Za-z0-9._-]+(?::[0-9]+)?$/.test(origin)) continue;
+    origins.add(origin);
+    if (origins.size >= 8) break;
+  }
+  return [...origins];
+}
+
+export function pluginSandboxDocument(html: string, permissions?: readonly string[]): string {
+  const networkOrigins = pluginNetworkOrigins(permissions);
+  const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
+  const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; ${connectSrc} media-src data: blob:;">`;
   const sdk = `<script>${pluginSdkSource()}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
   const injection = `${csp}${uiKit}${sdk}`;

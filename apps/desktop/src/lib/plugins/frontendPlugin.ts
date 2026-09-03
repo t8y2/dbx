@@ -5,6 +5,7 @@ import type {
   PluginConnectionProviderContribution,
   PluginContribution,
   PluginContributionLocalization,
+  PluginContextMenuContribution,
   PluginFilesystemProviderContribution,
   PluginFormField,
   PluginFormFieldLocalization,
@@ -52,6 +53,11 @@ export class FrontendPluginRegistry {
 
   listFilesystemProviders(): PluginContributionEntry<PluginFilesystemProviderContribution>[] {
     return this.listContributions("filesystem-provider");
+  }
+
+  /** Native context-menu entries declared for a specific menu surface such as `connection`. */
+  listContextMenuItems(menu: string): PluginContributionEntry<PluginContextMenuContribution>[] {
+    return this.listContributions("context-menu").filter((entry) => entry.contribution.menu === menu);
   }
 
   findWorkbench(pluginId: string, contributionId: string): PluginContributionEntry<PluginWorkbenchContribution> | undefined {

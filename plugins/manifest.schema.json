@@ -26,7 +26,12 @@
     "permissions": {
       "type": "array",
       "uniqueItems": true,
-      "items": { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem"] }
+      "items": {
+        "anyOf": [
+          { "enum": ["host.events", "host.binary", "host.workbench", "host.filesystem"] },
+          { "type": "string", "pattern": "^host\\.network:https://[A-Za-z0-9._-]+(:[0-9]+)?$" }
+        ]
+      }
     },
     "entrypoints": {
       "type": "object",
@@ -39,7 +44,7 @@
     "contributions": {
       "type": "array",
       "items": {
-        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }]
+        "oneOf": [{ "$ref": "#/$defs/connectionProviderContribution" }, { "$ref": "#/$defs/workbenchContribution" }, { "$ref": "#/$defs/filesystemProviderContribution" }, { "$ref": "#/$defs/contextMenuContribution" }]
       }
     },
     "localizations": {
@@ -215,6 +220,19 @@
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
         "icon": { "$ref": "#/$defs/assetPath" }
+      }
+    },
+    "contextMenuContribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "label", "menu"],
+      "properties": {
+        "type": { "const": "context-menu" },
+        "id": { "$ref": "#/$defs/identifier" },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "icon": { "$ref": "#/$defs/assetPath" },
+        "menu": { "const": "connection" }
       }
     },
     "filesystemProviderContribution": {

@@ -395,6 +395,10 @@ pub struct AiConfig {
     pub enable_thinking: bool,
     #[serde(default)]
     pub reasoning_level: AiReasoningLevel,
+    /// Per-request effort selected in the assistant. Provider settings do not
+    /// persist this field; it is attached to a runtime config clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_effort: Option<AiEffortSelection>,
     /// Optional output token budget configured for this provider.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,

@@ -1023,7 +1023,24 @@ SELECT @value AS Message;`;
       if (!tab) return;
       const successfulResult = { columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 };
       tab.result = successfulResult;
-      tab.results = [successfulResult, { columns: ["Error"], execution_error: true, rows: [["Duplicate entry '1'"]], affected_rows: 0, execution_time_ms: 1 }];
+      tab.results = [
+        successfulResult,
+        {
+          columns: ["Error"],
+          execution_error: true,
+          error: {
+            version: 1,
+            code: "DBX-LEGACY-0001",
+            messageKey: "backendErrors.legacy",
+            messageParams: {},
+            source: "legacyBackend",
+            operationOutcome: "unknown",
+          },
+          rows: [["Duplicate entry '1'"]],
+          affected_rows: 0,
+          execution_time_ms: 1,
+        },
+      ];
       tab.activeResultIndex = 0;
     });
     const addHistory = vi.spyOn(historyStore, "add").mockResolvedValue(undefined);
@@ -1038,7 +1055,13 @@ SELECT @value AS Message;`;
 
     await execution.tryExecute();
 
-    expect(addHistory).toHaveBeenCalledWith(expect.objectContaining({ success: false, error: "Duplicate entry '1'", affected_rows: undefined }));
+    expect(addHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        error: "backendErrors.unknown\n\nDuplicate entry '1'",
+        affected_rows: undefined,
+      }),
+    );
     expect(refreshObjects).not.toHaveBeenCalled();
   });
 

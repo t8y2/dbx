@@ -411,7 +411,7 @@ function reconcileBatchSqlResults(tab: QueryTab, executionId: string, results: Q
     item.executionTimeMs = result.execution_time_ms;
     item.affectedRows = result.affected_rows;
     item.errorDetails = failed ? result.error : undefined;
-    item.error = failed ? (result.error ? translateBackendError(i18n.global.t, result.error) : String(result.rows[0]?.[0] ?? "")) : undefined;
+    item.error = failed ? (result.error ? translateBackendError(i18n.global.t, result.error, result.rows[0]?.[0]) : String(result.rows[0]?.[0] ?? "")) : undefined;
   }
   batch.completed = batch.items.filter((item) => item.status === "success" || item.status === "error").length;
 }
@@ -423,7 +423,7 @@ function failBatchSqlExecution(tab: QueryTab, executionId: string, error: unknow
   if (!item) return;
   item.status = cancelled ? "cancelled" : "error";
   item.errorDetails = cancelled ? undefined : (normalizeBackendError(error) ?? undefined);
-  item.error = cancelled ? undefined : translateBackendError(i18n.global.t, error);
+  item.error = cancelled ? undefined : translateBackendError(i18n.global.t, error, error instanceof Error ? error.message : undefined);
   batch.completed = batch.items.filter((candidate) => candidate.status === "success" || candidate.status === "error").length;
 }
 
@@ -3856,7 +3856,7 @@ export const useQueryStore = defineStore("query", () => {
     // Single funnel for every query execution failure, so backend messages DBX
     // knows about are shown in the active locale rather than as raw English.
     const error = normalizeBackendError(e) ?? undefined;
-    const message = translateBackendError(i18n.global.t, e);
+    const message = translateBackendError(i18n.global.t, e, e instanceof Error ? e.message : undefined);
     return markQueryResultRowsRaw({
       columns: ["Error"],
       execution_error: true,

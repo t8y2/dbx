@@ -345,6 +345,34 @@ describe("backend error translation", () => {
     expect(translateBackendError(t, error)).toBe(`${t("backendErrors.legacy")}\n\nlegacy backend failure`);
   });
 
+  test("keeps an explicit original detail when a structured legacy error omits detail", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      operationOutcome: "unknown" as const,
+    };
+
+    expect(translateBackendError(t, error, "ClickHouse error: table analytics.events does not exist")).toBe(`${t("backendErrors.legacy")}\n\nClickHouse error: table analytics.events does not exist`);
+  });
+
+  test("does not append the generic transport fallback to a structured error", () => {
+    const t = translatorFor("zh-CN");
+    const error = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend",
+      operationOutcome: "unknown" as const,
+    };
+
+    expect(translateBackendError(t, error, "Backend request failed")).toBe(t("backendErrors.legacy"));
+  });
+
   test("preserves JSON envelopes carried by strings and Error messages", () => {
     const envelope = {
       version: 1,

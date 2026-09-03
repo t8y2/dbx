@@ -2594,7 +2594,7 @@ export default withEnglishFallback({
     contextWindowHint: "토큰. 자동 감지하려면 비워 두세요. 로컬/사용자 지정 모델은 수동으로 설정하세요.",
     maxOutputTokens: "최대 출력 토큰",
     maxOutputTokensAuto: "자동 (모델 기본값)",
-    maxOutputTokensHint: "공급자에게 전송할 선택적 출력 토큰 제한입니다. 비워 두면 기본 동작을 사용합니다.",
+    maxOutputTokensHint: "공급자에게 전송되는 선택적 구성별 출력 토큰 제한입니다. 범위: {min}–{max}. 사고 요청은 여전히 최소 8192 토큰을 사용합니다.",
     codexCliPath: "Codex CLI 경로",
     codexCliPathHint: "PATH의 codex를 사용하려면 비워 두세요. codex login으로 별도로 로그인하세요.",
     codexCliPathEnvError: "Codex CLI 경로에는 실행 파일 경로만 포함해야 합니다. 환경 변수는 아래에 추가하세요.",

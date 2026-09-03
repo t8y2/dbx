@@ -1217,8 +1217,12 @@ pub fn responses_stream_text(event: &serde_json::Value) -> Option<&str> {
     event["delta"].as_str().filter(|s| !s.is_empty())
 }
 
-fn responses_max_output_tokens(max_tokens: Option<u32>) -> u32 {
-    max_tokens.unwrap_or(2048).max(16)
+fn output_token_limit(max_tokens: Option<u32>, config: &AiConfig, default: u32) -> u32 {
+    max_tokens.or(config.max_output_tokens).unwrap_or(default)
+}
+
+fn responses_max_output_tokens(max_tokens: Option<u32>, config: &AiConfig) -> u32 {
+    output_token_limit(max_tokens, config, 2048).max(16)
 }
 
 fn responses_token_usage(event: &serde_json::Value) -> Option<TokenUsage> {
@@ -1250,7 +1254,8 @@ fn uses_chat_completion_max_completion_tokens(config: &AiConfig) -> bool {
         || is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
 }
 
-fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: Option<u32>) {
+    let max_tokens = output_token_limit(max_tokens, config, 4096);
     if uses_chat_completion_max_completion_tokens(config) {
         body["max_completion_tokens"] = json!(max_tokens);
     } else {
@@ -1264,7 +1269,7 @@ fn apply_minimax_chat_completion_fields(body: &mut serde_json::Value, config: &A
     }
 }
 
-fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig, max_tokens: Option<u32>) {
     set_chat_completion_token_limit(body, config, max_tokens);
     apply_minimax_chat_completion_fields(body, config);
     apply_chat_completion_thinking_toggle(body, config);
@@ -2136,7 +2141,7 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
 pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest) -> Result<String, String> {
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(2048),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": claude_messages(&request.messages),
     });
@@ -2216,7 +2221,7 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         "model": request.config.model,
         "messages": messages,
     });
-    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
     let res = client
         .post(resolve_endpoint(&request.config))
@@ -2241,7 +2246,7 @@ pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionR
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
 
@@ -2271,7 +2276,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         },
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(2048),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 2048),
         },
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -2790,7 +2795,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                                 "messages": messages,
                                 "stream": true,
                             });
-                            decorate_chat_completion_body(&mut body, &config_inner, 16);
+                            decorate_chat_completion_body(&mut body, &config_inner, Some(16));
                             body
                         };
                         let headers = maybe_bearer_headers(&config_inner)?;
@@ -3170,7 +3175,7 @@ async fn stream_claude(
 ) -> Result<(), String> {
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(2048),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 2048),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": claude_messages(&request.messages),
         "stream": true,
@@ -3278,7 +3283,7 @@ async fn stream_openai(
         "messages": messages,
         "stream": true,
     });
-    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
+    decorate_chat_completion_body(&mut body_obj, &request.config, request.max_tokens);
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
@@ -3409,7 +3414,7 @@ async fn stream_responses_api(
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
         "stream": true,
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -3501,7 +3506,7 @@ async fn stream_gemini(
         },
         "contents": contents,
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(2048),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 2048),
         },
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -3736,7 +3741,7 @@ async fn stream_claude_with_tools(
 
     let mut body = json!({
         "model": claude_http_model(&request.config.model),
-        "max_tokens": request.max_tokens.unwrap_or(4096),
+        "max_tokens": output_token_limit(request.max_tokens, &request.config, 4096),
         "system": claude_system_prompt(&request.system_prompt),
         "messages": messages,
         "tools": tool_json,
@@ -3921,7 +3926,7 @@ async fn stream_openai_with_tools(
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
+    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens);
     apply_minimax_chat_completion_fields(&mut body, &request.config);
 
     if request.config.runtime_effort.is_none() && !request.config.enable_thinking {
@@ -4097,7 +4102,7 @@ async fn stream_responses_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "input": build_responses_input_with_tools(&request.system_prompt, &request.messages),
-        "max_output_tokens": responses_max_output_tokens(request.max_tokens),
+        "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
         "tools": tool_json,
         "tool_choice": "auto",
         "stream": true,
@@ -4349,7 +4354,7 @@ async fn stream_gemini_with_tools(
         "systemInstruction": { "parts": [{ "text": request.system_prompt }] },
         "tools": [{ "functionDeclarations": tool_declarations }],
         "generationConfig": {
-            "maxOutputTokens": request.max_tokens.unwrap_or(4096),
+            "maxOutputTokens": output_token_limit(request.max_tokens, &request.config, 4096),
         }
     });
     crate::ai_effort::apply_runtime_effort(&mut body, &request.config);
@@ -6541,10 +6546,15 @@ mod tests {
 
     #[test]
     fn responses_api_clamps_tiny_output_token_requests() {
-        assert_eq!(responses_max_output_tokens(Some(1)), 16);
-        assert_eq!(responses_max_output_tokens(Some(16)), 16);
-        assert_eq!(responses_max_output_tokens(Some(2400)), 2400);
-        assert_eq!(responses_max_output_tokens(None), 2048);
+        let mut config = minimax_test_config("https://api.minimaxi.com/v1");
+        assert_eq!(responses_max_output_tokens(Some(1), &config), 16);
+        assert_eq!(responses_max_output_tokens(Some(16), &config), 16);
+        assert_eq!(responses_max_output_tokens(Some(2400), &config), 2400);
+        assert_eq!(responses_max_output_tokens(None, &config), 2048);
+
+        config.max_output_tokens = Some(32_768);
+        assert_eq!(responses_max_output_tokens(None, &config), 32_768);
+        assert_eq!(responses_max_output_tokens(Some(2400), &config), 2400);
     }
 
     #[test]
@@ -6812,7 +6822,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_tokens").is_none());
@@ -6823,7 +6833,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_completion_tokens").is_none());
@@ -6835,7 +6845,7 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_tokens").is_none());
@@ -6848,10 +6858,19 @@ mod tests {
             "messages": [{ "role": "user", "content": TEST_PROMPT }],
             "stream": true,
         });
-        set_chat_completion_token_limit(&mut body, &config, 1024);
+        set_chat_completion_token_limit(&mut body, &config, Some(1024));
 
         assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
         assert!(body.get("max_completion_tokens").is_none());
+
+        config.max_output_tokens = Some(32_768);
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, None);
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(32_768)));
     }
 
     #[test]
@@ -7200,7 +7219,7 @@ mod tests {
         config.enable_thinking = false;
         let mut body = serde_json::json!({ "model": &config.model });
 
-        decorate_chat_completion_body(&mut body, &config, 1024);
+        decorate_chat_completion_body(&mut body, &config, Some(1024));
 
         assert_eq!(body["reasoning_split"], true);
         assert_eq!(body["max_completion_tokens"], 1024);

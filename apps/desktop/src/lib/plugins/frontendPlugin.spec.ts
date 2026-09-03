@@ -68,6 +68,22 @@ describe("FrontendPluginRegistry", () => {
     expect(registry.listConnectionProviders()[0]?.contribution.filesystem_provider).toBe("example.files");
   });
 
+  it("indexes context-menu contributions per menu surface", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("com.example.plugin", [
+        { type: "context-menu", id: "example.inspect", label: "Inspect endpoint", menu: "connection" },
+        { type: "context-menu", id: "example.other", label: "Wrong surface", menu: "tree" },
+      ]),
+    ]);
+
+    const items = registry.listContextMenuItems("connection");
+    expect(items).toHaveLength(1);
+    expect(items[0]?.contribution.id).toBe("example.inspect");
+    expect(items[0]?.plugin.manifest.id).toBe("com.example.plugin");
+    expect(registry.listContextMenuItems("tree")).toHaveLength(1);
+    expect(registry.listContextMenuItems("missing")).toHaveLength(0);
+  });
+
   it("prefers provider display metadata and falls back to plugin metadata", () => {
     const explicit = installedPlugin("com.example.explicit", [
       {

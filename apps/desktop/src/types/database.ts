@@ -260,6 +260,169 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
+export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "textarea";
+export type PluginFormFieldBinding = "config" | "secret" | "name" | "host" | "port" | "username" | "password" | "database";
+
+export type PluginFormFieldValue = string | number | boolean | undefined;
+
+export interface PluginFormFieldOption {
+  label: string;
+  value: string;
+}
+
+export interface PluginFormField {
+  key: string;
+  label: string;
+  type: PluginFormFieldType;
+  description?: string;
+  placeholder?: string;
+  required?: boolean;
+  default?: PluginFormFieldValue;
+  options?: PluginFormFieldOption[];
+  binding?: PluginFormFieldBinding;
+}
+
+export type PluginConnectionCapability = "test" | "connect" | "disconnect";
+export type PluginConnectionActionKind = "test" | "save" | "save-and-connect" | "custom";
+export type PluginConnectionActionVariant = "default" | "outline" | "secondary" | "destructive" | "ghost";
+export type PluginConnectionActionWhen = "always" | "create" | "edit";
+
+export interface PluginConnectionActionContribution {
+  id: string;
+  label: string;
+  description?: string;
+  variant?: PluginConnectionActionVariant;
+  when?: PluginConnectionActionWhen;
+  close_on_success?: boolean;
+  requires_valid_form?: boolean;
+  timeout_ms?: number;
+}
+
+export interface PluginConnectionAction {
+  id: string;
+  kind: PluginConnectionActionKind;
+  label?: string;
+  description?: string;
+  variant?: PluginConnectionActionVariant;
+  when?: PluginConnectionActionWhen;
+  close_on_success?: boolean;
+  requires_valid_form?: boolean;
+  timeout_ms?: number;
+}
+
+export interface PluginConnectionProviderContribution {
+  type: "connection-provider";
+  id: string;
+  label: string;
+  icon?: string;
+  database_type: string;
+  description?: string;
+  fields: PluginFormField[];
+  workbench?: string;
+  filesystem_provider?: string;
+  capabilities?: PluginConnectionCapability[];
+  actions?: PluginConnectionActionContribution[];
+}
+
+export interface PluginWorkbenchContribution {
+  type: "workbench";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+}
+
+export interface PluginFilesystemProviderContribution {
+  type: "filesystem-provider";
+  id: string;
+  label: string;
+  schemes: string[];
+  description?: string;
+  root_uri?: string;
+  capabilities?: Array<"read" | "write" | "delete" | "rename" | "mkdir">;
+}
+
+export type PluginFilesystemEntryKind = "file" | "directory" | "symlink" | "other";
+
+export interface PluginFilesystemEntry {
+  name: string;
+  uri: string;
+  kind: PluginFilesystemEntryKind;
+  size?: number;
+  modifiedAt?: string;
+  contentType?: string;
+}
+
+export interface PluginFilesystemListResult {
+  entries: PluginFilesystemEntry[];
+  nextCursor?: string;
+}
+
+export interface PluginFilesystemReadResult {
+  dataBase64: string;
+  contentType?: string;
+  truncated: boolean;
+  etag?: string;
+}
+
+export interface PluginFilesystemMutationResult {
+  success: boolean;
+  message?: string;
+  entry?: PluginFilesystemEntry;
+}
+
+export interface PluginContextMenuContribution {
+  type: "context-menu";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  menu: string;
+}
+
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution;
+
+export interface PluginEngines {
+  dbx: string;
+  host_api: string;
+}
+
+export interface PluginBackendEntrypoint {
+  protocol_versions?: number[];
+  transport?: "stdio-jsonl" | "stdio-framed";
+  executable: string;
+}
+
+export interface PluginUiEntrypoint {
+  root?: string;
+  entry: string;
+}
+
+export interface PluginEntrypoints {
+  backend?: PluginBackendEntrypoint;
+  ui?: PluginUiEntrypoint;
+}
+
+export interface PluginFormFieldLocalization {
+  label?: string;
+  description?: string;
+  placeholder?: string;
+  options?: Record<string, string>;
+}
+
+export interface PluginContributionLocalization {
+  label?: string;
+  description?: string;
+  fields?: Record<string, PluginFormFieldLocalization>;
+  actions?: Record<string, { label?: string; description?: string }>;
+}
+
+export interface PluginManifestLocalization {
+  name?: string;
+  description?: string;
+  contributions?: Record<string, PluginContributionLocalization>;
+}
+
 export interface PluginManifest {
   id: string;
   name: string;

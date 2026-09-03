@@ -236,6 +236,16 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("var(--color-background");
   });
 
+  it("opens connect-src only for declared host.network origins", () => {
+    const allowed = pluginSandboxDocument("<html><head></head><body></body></html>", ["host.events", "host.network:https://api.vendor.com", "host.network:https://metrics.vendor.com:8443", "host.network:http://insecure.vendor.com", "host.network:https://evil.vendor.com/path"]);
+    expect(allowed).toContain("connect-src https://api.vendor.com https://metrics.vendor.com:8443;");
+    expect(allowed).not.toContain("insecure.vendor.com");
+    expect(allowed).not.toContain("evil.vendor.com");
+
+    const closed = pluginSandboxDocument("<html><head></head><body></body></html>", ["host.events"]);
+    expect(closed).toContain("connect-src 'none';");
+  });
+
   it("sends the theme in init and pushes theme updates through env messages", () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

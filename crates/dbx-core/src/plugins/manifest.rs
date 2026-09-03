@@ -13,6 +13,34 @@ pub const PLUGIN_CONNECTION_DISCONNECT_METHOD: &str = "connection/disconnect";
 pub const PLUGIN_CONNECTION_ACTION_METHOD: &str = "connection/action";
 pub const SUPPORTED_PLUGIN_PERMISSIONS: &[&str] = &["host.events", "host.binary", "host.workbench", "host.filesystem"];
 
+/// Cap the number of `host.network:<origin>` entries so a manifest cannot bloat
+/// the sandbox CSP or enumerate large origin lists.
+pub const MAX_PLUGIN_NETWORK_ORIGINS: usize = 8;
+const HOST_NETWORK_PERMISSION_PREFIX: &str = "host.network:";
+
+/// Parse a `host.network:https://host[:port]` permission into the origin that
+/// may appear in the sandbox `connect-src`. Only https origins without path,
+/// query, or fragment parts are accepted.
+pub fn parse_host_network_permission(permission: &str) -> Option<&str> {
+    let origin = permission.strip_prefix(HOST_NETWORK_PERMISSION_PREFIX)?;
+    let rest = origin.strip_prefix("https://")?;
+    if rest.is_empty() || rest.contains('/') || rest.contains('?') || rest.contains('#') {
+        return None;
+    }
+    let host = rest.split(':').next().unwrap_or_default();
+    if host.is_empty()
+        || !host.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    if let Some(port) = rest.rsplit(':').next() {
+        if rest.contains(':') && (port.is_empty() || !port.chars().all(|character| character.is_ascii_digit())) {
+            return None;
+        }
+    }
+    Some(origin)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginManifest {
     #[serde(rename = "$schema", default, skip_serializing)]
@@ -181,6 +209,7 @@ pub enum PluginContribution {
     ConnectionProvider(PluginConnectionProviderContribution),
     Workbench(PluginWorkbenchContribution),
     FilesystemProvider(PluginFilesystemProviderContribution),
+    ContextMenu(PluginContextMenuContribution),
 }
 
 impl PluginContribution {
@@ -189,6 +218,7 @@ impl PluginContribution {
             Self::ConnectionProvider(contribution) => &contribution.id,
             Self::Workbench(contribution) => &contribution.id,
             Self::FilesystemProvider(contribution) => &contribution.id,
+            Self::ContextMenu(contribution) => &contribution.id,
         }
     }
 }
@@ -352,6 +382,23 @@ pub struct PluginWorkbenchContribution {
     pub icon: Option<String>,
 }
 
+/// Native context-menu entry contributed to DBX surfaces. v1 targets the
+/// saved-connection sidebar menu; clicks are dispatched to the plugin backend
+/// as `contextMenu/<id>` requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginContextMenuContribution {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Menu surface the item belongs to; currently only `connection`.
+    #[serde(default)]
+    pub menu: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginFilesystemProviderContribution {
@@ -501,12 +548,28 @@ impl PluginManifest {
         }
 
         let mut seen_permissions = HashSet::new();
+        let mut network_origins: HashSet<&str> = HashSet::new();
         for permission in &self.permissions {
-            if !SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str()) {
-                errors.push(format!("Unsupported plugin Host API permission '{permission}'"));
+            let valid = SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str())
+                || (permission.starts_with("host.network:") && parse_host_network_permission(permission).is_some());
+            if !valid {
+                errors.push(format!(
+                    "Unsupported plugin Host API permission '{permission}' (network permissions must look like host.network:https://example.com)"
+                ));
             } else if !seen_permissions.insert(permission) {
                 errors.push(format!("Duplicate plugin permission '{permission}'"));
             }
+            if let Some(origin) = parse_host_network_permission(permission) {
+                if !network_origins.insert(origin) {
+                    errors.push(format!("Duplicate plugin network origin '{origin}'"));
+                }
+            }
+        }
+        if network_origins.len() > MAX_PLUGIN_NETWORK_ORIGINS {
+            errors.push(format!(
+                "Plugin declares {} network origins; at most {MAX_PLUGIN_NETWORK_ORIGINS} are allowed",
+                network_origins.len()
+            ));
         }
         validate_localizations(&self.localizations, &mut errors);
         validate_declared_icon(plugin_dir, "Plugin icon", self.icon.as_deref(), &mut errors);
@@ -765,6 +828,19 @@ fn validate_contributions(
                     errors.push(format!("Workbench contribution '{id}' requires a UI entrypoint"));
                 }
             }
+            PluginContribution::ContextMenu(menu) => {
+                validate_required_text(&menu.label, &format!("Context menu '{id}' label"), errors);
+                validate_declared_icon(plugin_dir, &format!("Context menu '{id}' icon"), menu.icon.as_deref(), errors);
+                if menu.menu != "connection" {
+                    errors.push(format!(
+                        "Context menu '{id}' declares unsupported menu '{}'; only 'connection' is available",
+                        menu.menu
+                    ));
+                }
+                if !has_backend {
+                    errors.push(format!("Context menu contribution '{id}' requires a backend entrypoint"));
+                }
+            }
             PluginContribution::FilesystemProvider(provider) => {
                 validate_required_text(&provider.label, &format!("Filesystem provider '{id}' label"), errors);
                 if valid_identifier(id) {
@@ -1008,9 +1084,49 @@ fn valid_locale_tag(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_safe_plugin_path, validate_connection_actions, PluginConnectionActionContribution,
-        PluginConnectionProviderContribution, PluginFormFieldBinding, PluginManifest,
+        parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions,
+        PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
+        PluginManifest,
     };
+
+    #[test]
+    fn parses_only_strict_https_network_permissions() {
+        assert_eq!(
+            parse_host_network_permission("host.network:https://api.vendor.com"),
+            Some("https://api.vendor.com")
+        );
+        assert_eq!(
+            parse_host_network_permission("host.network:https://metrics.vendor.com:8443"),
+            Some("https://metrics.vendor.com:8443")
+        );
+        assert_eq!(parse_host_network_permission("host.events"), None);
+        assert_eq!(parse_host_network_permission("host.network:"), None);
+        assert_eq!(parse_host_network_permission("host.network:http://api.vendor.com"), None);
+        assert_eq!(parse_host_network_permission("host.network:https://api.vendor.com/path"), None);
+        assert_eq!(parse_host_network_permission("host.network:https://api.vendor.com?q=1"), None);
+        assert_eq!(parse_host_network_permission("host.network:https://api.vendor.com:notaport"), None);
+        assert_eq!(parse_host_network_permission("host.network:https://"), None);
+    }
+
+    #[test]
+    fn manifest_rejects_malformed_network_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "io.dbx.example",
+            "name": "Example",
+            "version": "1.0.0",
+            "publisher": "example",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } },
+            "permissions": ["host.network:http://api.vendor.com", "host.network:https://api.vendor.com"]
+        }))
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("ui")).unwrap();
+        std::fs::write(dir.path().join("ui").join("index.html"), "<!doctype html>").unwrap();
+        let compatibility = manifest.compatibility(dir.path(), "0.1.0");
+        assert!(compatibility.errors.iter().any(|error| error.contains("host.network:http://api.vendor.com")));
+    }
 
     #[test]
     fn validates_manifest_v1_and_resolves_package_executable() {

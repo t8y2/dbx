@@ -81,7 +81,7 @@ async function loadWorkbench() {
     const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
     if (disposed || generation !== loadGeneration) return;
     const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    source.value = pluginSandboxDocument(new TextDecoder().decode(bytes));
+    source.value = pluginSandboxDocument(new TextDecoder().decode(bytes), props.plugin.manifest.permissions);
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();

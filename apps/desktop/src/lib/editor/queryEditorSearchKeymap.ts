@@ -7,27 +7,48 @@ interface QueryEditorSearchKeymapOptions {
   openSearch: () => boolean;
   openReplace: () => boolean;
   isReadOnly: () => boolean;
+  includeFind?: boolean;
 }
 
 export function createQueryEditorSearchKeymap(options: QueryEditorSearchKeymapOptions): KeyBinding[] {
-  return [
-    {
+  const bindings: KeyBinding[] = [];
+  if (options.includeFind !== false) {
+    bindings.push({
       key: "Mod-f",
       preventDefault: true,
       run: options.openSearch,
-    },
-    {
-      key: "Mod-h",
-      preventDefault: true,
-      // Consume the shortcut in previews without exposing mutation controls.
-      run: () => options.isReadOnly() || options.openReplace(),
-    },
-  ];
+    });
+  }
+  bindings.push({
+    key: "Mod-h",
+    preventDefault: true,
+    // Consume the shortcut in previews without exposing mutation controls.
+    run: () => options.isReadOnly() || options.openReplace(),
+  });
+  return bindings;
 }
 
 export function createQueryEditorReplaceShortcutBindings(shortcut: string, openReplace: () => boolean): KeyBinding[] {
   const normalizedShortcut = shortcut.trim();
   return normalizedShortcut && /\s/.test(normalizedShortcut) ? [{ key: shortcutToCodeMirrorKey(normalizedShortcut), preventDefault: true, run: openReplace }] : [];
+}
+
+/**
+ * Handle the configurable find shortcut outside CodeMirror's character keymap.
+ * The same shifted-character matching issue described for replace applies to
+ * `Mod+F`: CodeMirror lets it match `Shift+Mod+F`, so a bare `Mod+F` find
+ * binding can consume a custom `Shift+Mod+F` format action before the exact
+ * format binding is considered.
+ */
+export function createQueryEditorFindShortcutHandler(options: { shortcut: string; openSearch: () => boolean }): (event: KeyboardEvent) => boolean {
+  const shortcut = options.shortcut.trim();
+  if (!shortcut || /\s/.test(shortcut)) return () => false;
+
+  return (event) => {
+    if (!matchesShortcut(event, shortcut)) return false;
+    options.openSearch();
+    return true;
+  };
 }
 
 /**

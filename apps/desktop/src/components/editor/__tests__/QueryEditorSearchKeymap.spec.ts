@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 // pi-lens-ignore: typescript:2307
 import { createQueryEditorExecutionShortcutBindings } from "@/lib/editor/queryEditorExecutionShortcut";
 // pi-lens-ignore: typescript:2307
-import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { createQueryEditorFindShortcutHandler, createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
 
 describe("QueryEditor search keymap precedence", () => {
   it("runs configured editor actions before the built-in search fallback", () => {
@@ -88,6 +88,36 @@ describe("QueryEditor search keymap precedence", () => {
     expect(runScopeHandlers(view, new KeyboardEvent("keydown", { key: "f", ctrlKey: true }), "editor")).toBe(true);
     expect(openSearch).toHaveBeenCalledOnce();
     expect(lowerPrioritySearch).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it("handles Mod+F exactly without consuming a Shift+Mod+F format binding", () => {
+    const openSearch = vi.fn(() => true);
+    const formatSql = vi.fn(() => true);
+    const findShortcutHandler = createQueryEditorFindShortcutHandler({ shortcut: "Mod+F", openSearch });
+    const view = new EditorView({
+      parent: document.createElement("div"),
+      state: EditorState.create({
+        extensions: [
+          Prec.high(
+            EditorView.domEventHandlers({
+              keydown: findShortcutHandler,
+            }),
+          ),
+          Prec.high(keymap.of([{ key: "Shift-Mod-f", preventDefault: true, run: formatSql }, ...createQueryEditorSearchKeymap({ openSearch, openReplace: () => true, isReadOnly: () => false, includeFind: false })])),
+        ],
+      }),
+    });
+
+    const shifted = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    expect(runScopeHandlers(view, shifted, "editor")).toBe(true);
+    expect(formatSql).toHaveBeenCalledOnce();
+    expect(openSearch).not.toHaveBeenCalled();
+
+    const find = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
+    view.contentDOM.dispatchEvent(find);
+    expect(openSearch).toHaveBeenCalledOnce();
+    expect(find.defaultPrevented).toBe(true);
     view.destroy();
   });
 });

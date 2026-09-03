@@ -1773,7 +1773,7 @@ function onKeydown(event: KeyboardEvent) {
   position: sticky;
   top: 0;
   z-index: 2;
-  background-color: var(--background);
+  background-color: var(--sidebar);
 }
 
 .tree-item-connection-tint:hover::before {

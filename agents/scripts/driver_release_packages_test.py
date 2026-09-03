@@ -53,6 +53,7 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "tdengine": "0.1.0",
                 "etcd": "0.1.40",
                 "etcd2": "0.1.0",
+                "argo": "0.1.0",
                 "sqlite-worker": "0.1.0",
             }
 

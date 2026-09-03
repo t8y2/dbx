@@ -632,6 +632,22 @@ const XUGU_TYPE_LENGTH_DISABLES = new Set([...ORACLE_LIKE_TYPE_LENGTH_DISABLES, 
 
 export const SQLSERVER_TYPE_LENGTH_DISABLES: string[] = ["bigint", "bit", "date", "datetime", "image", "int", "integer", "money", "ntext", "real", "smalldatetime", "smallint", "smallmoney", "sql_variant", "text", "timestamp", "tinyint", "uniqueidentifier", "xml"];
 
+export function supportsTableStructureExtendedProperties(databaseType?: DatabaseType): boolean {
+  return (
+    databaseType === "mysql" ||
+    databaseType === "dameng" ||
+    databaseType === "manticoresearch" ||
+    databaseType === "sqlserver" ||
+    databaseType === "postgres" ||
+    databaseType === "gaussdb" ||
+    databaseType === "kwdb" ||
+    databaseType === "highgo" ||
+    databaseType === "uxdb" ||
+    databaseType === "vastbase" ||
+    databaseType === "kingbase"
+  );
+}
+
 export function parseExtraToColumnExtra(extra: string | null | undefined, databaseType?: DatabaseType): ColumnExtra {
   const result: ColumnExtra = {};
   if (!extra) return result;
@@ -645,7 +661,7 @@ export function parseExtraToColumnExtra(extra: string | null | undefined, databa
     if (lower.includes("on update current_timestamp")) {
       result.onUpdateCurrentTimestamp = true;
     }
-  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "opengauss" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
+  } else if (databaseType === "postgres" || databaseType === "gaussdb" || databaseType === "kwdb" || databaseType === "questdb" || databaseType === "highgo" || databaseType === "uxdb" || databaseType === "vastbase" || databaseType === "kingbase") {
     const identityMatch = lower.match(/generated\s+(by\s+default|always)\s+as\s+identity/i);
     if (identityMatch) {
       const sequenceMatch = lower.match(/start\s+with\s*(-?\d+)\s+increment\s+by\s*(-?\d+)/i);

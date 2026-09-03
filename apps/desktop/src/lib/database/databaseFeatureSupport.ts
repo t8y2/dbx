@@ -240,7 +240,12 @@ export function usesPostgresLikeStructureCopy(dbType?: DatabaseType): boolean {
   return !!dbType && PG_LIKE_STRUCTURE_TYPES.has(dbType);
 }
 
-const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc"];
+const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "oracle", "jdbc", "oceanbase-oracle"];
+
+/** Oracle-family databases that use the sticky manual-transaction UX. OceanBase
+ * Oracle mode runs the same transaction model as Oracle, so it shares the
+ * commit/rollback dirty-state behavior rather than the generic transaction path. */
+const ORACLE_STICKY_TRANSACTION_TYPES: ReadonlySet<string> = new Set(["oracle", "oceanbase-oracle"]);
 
 /**
  * Returns true if the given database type supports explicit transaction control
@@ -248,6 +253,14 @@ const TRANSACTION_SUPPORTED_TYPES: readonly string[] = ["postgres", "mysql", "or
  */
 export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
+}
+
+/**
+ * Returns true if the database type uses Oracle's sticky manual-transaction state
+ * (commit/rollback hidden until an unproven statement dirties the session).
+ */
+export function usesOracleStickyTransactionState(dbType?: string): boolean {
+  return !!dbType && ORACLE_STICKY_TRANSACTION_TYPES.has(dbType);
 }
 
 /**

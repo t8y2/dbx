@@ -17,6 +17,7 @@ import {
   supportsTableImport,
   supportsTableVacuum,
   supportsTransaction,
+  usesOracleStickyTransactionState,
   usesConnectionOnlyQueryTarget,
   usesTreeSchemaMode,
   schemaNodeHasLoadableName,
@@ -105,10 +106,10 @@ describe("supportsTransaction", () => {
     expect(supportsTransaction("mysql")).toBe(true);
     expect(supportsTransaction("oracle")).toBe(true);
     expect(supportsTransaction("jdbc")).toBe(true);
+    expect(supportsTransaction("oceanbase-oracle")).toBe(true);
   });
 
   it("returns false for unsupported database types", () => {
-    expect(supportsTransaction("oceanbase-oracle")).toBe(false);
     expect(supportsTransaction("redis")).toBe(false);
     expect(supportsTransaction("mongodb")).toBe(false);
     expect(supportsTransaction("duckdb")).toBe(false);
@@ -143,6 +144,7 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("postgres", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("jdbc", "manual")).toBe(false);
+    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(false);
     expect(defaultAutoCommitForDbType("mysql", "auto")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "auto")).toBe(true);
   });
@@ -153,8 +155,21 @@ describe("defaultAutoCommitForDbType", () => {
     expect(defaultAutoCommitForDbType("sqlite", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("dameng", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType("clickhouse", "manual")).toBe(true);
-    expect(defaultAutoCommitForDbType("oceanbase-oracle", "manual")).toBe(true);
     expect(defaultAutoCommitForDbType(undefined, "manual")).toBe(true);
+  });
+});
+
+describe("usesOracleStickyTransactionState", () => {
+  it("enables sticky manual-transaction state for Oracle family", () => {
+    expect(usesOracleStickyTransactionState("oracle")).toBe(true);
+    expect(usesOracleStickyTransactionState("oceanbase-oracle")).toBe(true);
+  });
+
+  it("keeps other databases on the generic transaction path", () => {
+    expect(usesOracleStickyTransactionState("mysql")).toBe(false);
+    expect(usesOracleStickyTransactionState("postgres")).toBe(false);
+    expect(usesOracleStickyTransactionState("jdbc")).toBe(false);
+    expect(usesOracleStickyTransactionState(undefined)).toBe(false);
   });
 });
 

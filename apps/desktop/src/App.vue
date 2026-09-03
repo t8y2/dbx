@@ -121,7 +121,7 @@ import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionT
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
 import { initSavedSqlEditorPositions } from "@/lib/app/savedSqlEditorPosition";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
-import { isSchemaAware, isSingleDatabase, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
+import { isSchemaAware, isSingleDatabase, usesOracleStickyTransactionState, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { canFormatSqlForDatabaseType, formatSqlForEditing, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
 import { formatSqlSnapshotForSave } from "@/lib/sql/sqlFormatOnSave";
@@ -641,7 +641,7 @@ const activeConnection = computed(() => {
 // Oracle connection uses the agent runtime but reports db_type "oracle"), so
 // the toolbar's Commit/Rollback visibility can apply the Oracle dirty-state rule
 // without inferring Oracle from the raw transport type.
-const isOracleManualTransaction = computed(() => effectiveDatabaseTypeForConnection(activeConnection.value) === "oracle" && (activeTab.value?.autoCommit ?? true) === false);
+const isOracleManualTransaction = computed(() => usesOracleStickyTransactionState(effectiveDatabaseTypeForConnection(activeConnection.value)) && (activeTab.value?.autoCommit ?? true) === false);
 
 function updateAgentDriverUpdateCount(count: number) {
   if (!settingsStore.editorSettings.updateNotificationsEnabled) {

@@ -5007,7 +5007,7 @@ pub async fn execute_in_manual_transaction_with_options(
             empty_query_result(0),
             options.table_data_preview,
         );
-        if db_type == Some(DatabaseType::Oracle) {
+        if matches!(db_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle)) {
             result = result.with_manual_transaction_no_statement();
         }
         return Ok(vec![result]);
@@ -5069,11 +5069,12 @@ pub async fn execute_in_manual_transaction_with_options(
     // same non-zero count and every paired user statement is proven read-only;
     // any mismatch is fail-closed (no marker). This is deliberately a
     // trust-boundary count/position pairing, not a SQL-equivalence parser.
-    let classification: Vec<bool> = if db_type == Some(DatabaseType::Oracle) {
+    let classification: Vec<bool> = if let Some(dialect) = db_type
+        .filter(|db_type| matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+    {
         match options.classification_sql.as_deref() {
             Some(classification_sql) => {
-                let user_statements =
-                    crate::sql::split_sql_statements_for_database(classification_sql, DatabaseType::Oracle);
+                let user_statements = crate::sql::split_sql_statements_for_database(classification_sql, dialect);
                 let paired = user_statements.len() == statements.len() && !user_statements.is_empty();
                 if paired {
                     user_statements.iter().map(|statement| is_oracle_proven_read_only_statement(statement)).collect()

@@ -169,7 +169,7 @@ The runtime also validates semantic versions, engine ranges, IDs, contribution r
 }
 ```
 
-Use `stdio-jsonl` for ordinary request/event traffic. Use `stdio-framed` when PTY, SFTP, file transfer, or another feature needs binary channels.
+Use `stdio-jsonl` for ordinary request/event traffic. Use `stdio-framed` when PTY, SFTP, file transfer, or another feature needs binary channels. The workbench bridge transfers plugin-UI binary payloads as transferable `ArrayBuffer`s in both directions (8 MiB per message; chunk larger transfers), so UI-side binary traffic no longer pays a base64 round trip.
 
 ## Contributions
 
@@ -275,6 +275,7 @@ Connection providers may add ordered custom actions before DBX-owned lifecycle b
 A workbench opens in a normal persistent DBX tab. The iframe is loaded with `sandbox="allow-scripts"`, a restrictive CSP, no Tauri object, no parent DOM access, and no direct network access. The host injects `window.dbxPlugin`:
 
 - `ready` / `context` / `locale` — `locale` is the current DBX locale such as `en` or `zh-CN`
+- `onContext(listener)` — context changes are pushed live; the iframe is not reloaded, so plugin UI state survives navigation
 - `invoke(method, params, options)`
 - `notify(method, params)`
 - `sendBinary(channel, data)` — requires `host.binary`
@@ -282,7 +283,7 @@ A workbench opens in a normal persistent DBX tab. The iframe is loaded with `san
 - `openWorkbench(contributionId, context)` — requires `host.workbench`
 - `openFilesystem(providerId, context)` — requires `host.filesystem`
 - `onEvent(listener)` — events are forwarded only with `host.events`
-- `onBinary(listener)` — binary frames are forwarded only with `host.binary`
+- `onBinary(listener)` — binary frames are forwarded only with `host.binary`; listeners receive `{ channel, data: Uint8Array }`
 
 All backend calls are rebound to the owning plugin ID by the host. A plugin UI cannot invoke another plugin.
 

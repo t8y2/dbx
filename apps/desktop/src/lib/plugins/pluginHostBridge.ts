@@ -4,6 +4,7 @@ const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
 const BRIDGE_VERSION = 1;
 const MAX_BRIDGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 
 export interface PluginWorkbenchContext {
   connectionId?: string;
@@ -29,17 +30,25 @@ interface PluginRequestMessage {
   id: string;
   method: string;
   params?: unknown;
+  /** Optional zero-copy binary payload transferred with the request. */
+  data?: ArrayBuffer;
 }
 
 export class PluginHostBridge {
+  private context: PluginWorkbenchContext;
+  private locale: string;
+
   constructor(
     private readonly plugin: InstalledPlugin,
     private readonly workbench: PluginWorkbenchContribution,
-    private readonly context: PluginWorkbenchContext,
+    context: PluginWorkbenchContext,
     private readonly targetWindow: () => Window | null,
     private readonly api: PluginHostBridgeApi,
-    private readonly locale = "en",
-  ) {}
+    locale = "en",
+  ) {
+    this.context = structuredCloneSafe(context);
+    this.locale = locale;
+  }
 
   handleWindowMessage(event: MessageEvent): boolean {
     const target = this.targetWindow();
@@ -67,6 +76,22 @@ export class PluginHostBridge {
     });
   }
 
+  /**
+   * Push a new workbench context into the already-loaded plugin UI instead of
+   * rebuilding the iframe. Identity changes (plugin/contribution) still require
+   * a full reload; context-only changes must not lose plugin state.
+   */
+  updateContext(context: PluginWorkbenchContext): void {
+    this.context = structuredCloneSafe(context);
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: structuredCloneSafe(this.context) });
+  }
+
+  /** Notify the plugin UI about a locale change without a reload. */
+  updateLocale(locale: string): void {
+    this.locale = locale;
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "env", locale });
+  }
+
   forwardEvent(event: PluginEvent): void {
     if (event.pluginId !== this.plugin.manifest.id || !this.hasPermission("host.events")) return;
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "event", method: event.method, params: event.params });
@@ -74,20 +99,23 @@ export class PluginHostBridge {
 
   forwardBinary(event: PluginBinaryEvent): void {
     if (event.pluginId !== this.plugin.manifest.id || !this.hasPermission("host.binary")) return;
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "binary", channel: event.channel, dataBase64: event.dataBase64 });
+    const target = this.targetWindow();
+    if (!target) return;
+    const buffer = base64ToBytes(event.dataBase64);
+    target.postMessage({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "binary", channel: event.channel, data: buffer }, "*", [buffer]);
   }
 
   private async handleRequest(request: PluginRequestMessage, target: Window): Promise<void> {
     try {
       enforcePayloadLimit(request.params);
-      const result = await this.dispatch(request.method, request.params);
+      const result = await this.dispatch(request.method, request.params, request.data);
       this.respond(target, request.id, { result: result ?? null });
     } catch (error) {
       this.respond(target, request.id, { error: error instanceof Error ? error.message : String(error) });
     }
   }
 
-  private async dispatch(method: string, params: unknown): Promise<unknown> {
+  private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
     if (method === "host.getContext") return structuredCloneSafe(this.context);
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
@@ -103,7 +131,13 @@ export class PluginHostBridge {
     if (method === "backend.sendBinary") {
       this.requirePermission("host.binary");
       const input = requireRecord(params, "backend.sendBinary params");
-      await this.api.sendBinary(this.plugin.manifest.id, requireProtocolName(input.channel, "binary channel"), requireBase64(input.dataBase64));
+      const channel = requireProtocolName(input.channel, "binary channel");
+      if (binary instanceof ArrayBuffer) {
+        if (binary.byteLength > MAX_BRIDGE_BINARY_BYTES) throw new Error("Plugin binary payload exceeds 8 MiB; chunk the transfer");
+        await this.api.sendBinary(this.plugin.manifest.id, channel, bytesToBase64(new Uint8Array(binary)));
+        return null;
+      }
+      await this.api.sendBinary(this.plugin.manifest.id, channel, requireBase64(input.dataBase64));
       return null;
     }
     if (method === "ui.readAsset") {
@@ -155,16 +189,22 @@ export function pluginSandboxDocument(html: string): string {
 function pluginSdkSource(): string {
   return `(() => {
     const pending = new Map();
-    const listeners = { event: new Set(), binary: new Set(), init: new Set() };
+    const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
     let sequence = 0;
     let context;
     let locale = 'en';
     let resolveReady;
     const ready = new Promise((resolve) => { resolveReady = resolve; });
-    const request = (method, params) => new Promise((resolve, reject) => {
+    const request = (method, params, options = {}) => new Promise((resolve, reject) => {
       const id = String(++sequence);
       pending.set(id, { resolve, reject });
-      parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'request', id, method, params }, '*');
+      const message = { source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'request', id, method, params };
+      if (options.transfer) {
+        message.data = options.transfer;
+        parent.postMessage(message, '*', [options.transfer]);
+      } else {
+        parent.postMessage(message, '*');
+      }
     });
     const decode = (value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
     const encode = (value) => {
@@ -180,7 +220,11 @@ function pluginSdkSource(): string {
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       notify: (method, params) => request('backend.notify', { method, params }),
-      sendBinary: (channel, data) => request('backend.sendBinary', { channel, dataBase64: typeof data === 'string' ? data : encode(data) }),
+      sendBinary: (channel, data) => {
+        if (typeof data === 'string') return request('backend.sendBinary', { channel, dataBase64: data });
+        const bytes = data instanceof ArrayBuffer ? data : (data instanceof Uint8Array ? data.buffer : new Uint8Array(data).buffer);
+        return request('backend.sendBinary', { channel }, { transfer: bytes });
+      },
       readAsset: (path) => request('ui.readAsset', { path }),
       readAssetUrl: async (path) => {
         const asset = await request('ui.readAsset', { path });
@@ -190,6 +234,7 @@ function pluginSdkSource(): string {
       openFilesystem: (providerId, childContext) => request('host.openFilesystem', { providerId, context: childContext }),
       onEvent: (listener) => { listeners.event.add(listener); return () => listeners.event.delete(listener); },
       onBinary: (listener) => { listeners.binary.add(listener); return () => listeners.binary.delete(listener); },
+      onContext: (listener) => { listeners.context.add(listener); return () => listeners.context.delete(listener); },
       onInit: (listener) => { listeners.init.add(listener); if (context !== undefined) listener(context); return () => listeners.init.delete(listener); },
       decodeBase64: decode,
       encodeBase64: encode,
@@ -208,12 +253,21 @@ function pluginSdkSource(): string {
         resolveReady(context);
         listeners.init.forEach((listener) => listener(context));
         dispatchEvent(new CustomEvent('dbx-plugin-init', { detail: message }));
+      } else if (message.type === 'context') {
+        context = message.context;
+        listeners.context.forEach((listener) => listener(context));
+        dispatchEvent(new CustomEvent('dbx-plugin-context', { detail: context }));
+      } else if (message.type === 'env') {
+        if (typeof message.locale === 'string') locale = message.locale;
+        listeners.event.forEach((listener) => listener(message));
+        dispatchEvent(new CustomEvent('dbx-plugin-env', { detail: message }));
       } else if (message.type === 'event') {
         listeners.event.forEach((listener) => listener(message));
         dispatchEvent(new CustomEvent('dbx-plugin-event', { detail: message }));
       } else if (message.type === 'binary') {
-        listeners.binary.forEach((listener) => listener(message));
-        dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: message }));
+        const payload = { channel: message.channel, data: message.data ? new Uint8Array(message.data) : new Uint8Array(0) };
+        listeners.binary.forEach((listener) => listener(payload));
+        dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       }
     });
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready' }, '*');
@@ -237,6 +291,22 @@ function requireProtocolName(value: unknown, label: string): string {
 function requireTimeout(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("timeoutMs must be a number");
   return Math.min(120_000, Math.max(1, Math.round(value)));
+}
+
+function base64ToBytes(value: string): ArrayBuffer {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
 }
 
 function requireBase64(value: unknown): string {

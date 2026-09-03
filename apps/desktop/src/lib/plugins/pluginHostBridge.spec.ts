@@ -160,6 +160,72 @@ describe("PluginHostBridge", () => {
     expect(secondMessages).toHaveLength(0);
   });
 
+  it("pushes context and locale updates without rebuilding the iframe", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, { connectionId: "first" }, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.updateContext({ connectionId: "second", values: { path: "/tmp" } });
+    bridge.updateLocale("ja");
+
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "context", context: { connectionId: "second" } });
+    expect(messages[1]).toMatchObject({ source: "dbx-host", type: "env", locale: "ja" });
+
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: "ctx", method: "host.getContext" } } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(3));
+    expect(messages[2]).toMatchObject({ type: "response", id: "ctx", result: { connectionId: "second", values: { path: "/tmp" } } });
+  });
+
+  it("accepts zero-copy binary requests and forwards binary frames as raw buffers", async () => {
+    const messages: unknown[] = [];
+    const target = {
+      postMessage: (message: unknown, _origin?: string, _transfer?: Transferable[]) => messages.push(message),
+    } as unknown as Window;
+    const sendBinary = vi.fn().mockResolvedValue(undefined);
+    const bridge = new PluginHostBridge(plugin(["host.binary"]), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary,
+      readAsset: vi.fn(),
+    });
+
+    bridge.forwardBinary({ pluginId: "sample", channel: "pty", dataBase64: "AQID" });
+    expect(messages[0]).toMatchObject({ type: "binary", channel: "pty" });
+    expect((messages[0] as { data: ArrayBuffer }).data).toBeInstanceOf(ArrayBuffer);
+    expect(Array.from(new Uint8Array((messages[0] as { data: ArrayBuffer }).data))).toEqual([1, 2, 3]);
+
+    const bytes = new Uint8Array([4, 5, 6]).buffer;
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "bin", method: "backend.sendBinary", params: { channel: "pty" }, data: bytes },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(sendBinary).toHaveBeenCalledWith("sample", "pty", "BAUG");
+    expect(messages[1]).toMatchObject({ type: "response", id: "bin", result: null });
+  });
+
+  it("rejects binary transfer requests without the host.binary permission", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "denied", method: "backend.sendBinary", params: { channel: "pty" }, data: new Uint8Array([1]).buffer },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    expect(messages[0]).toMatchObject({ id: "denied", error: "Plugin has not declared permission 'host.binary'" });
+  });
+
   it("injects the SDK and a restrictive sandbox CSP", () => {
     const document = pluginSandboxDocument("<html><head></head><body>Hello</body></html>");
     expect(document).toContain("window.dbxPlugin");

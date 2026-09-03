@@ -1337,6 +1337,11 @@ function updateEditorSelectionDropCursor(currentView: EditorViewType, event: Mou
 }
 
 function startEditorSelectionDrag(currentView: EditorViewType, event: MouseEvent): boolean {
+  // Shift is CodeMirror's native extend-selection gesture. Keep it out of the
+  // custom selection drag path so a shift-click inside the current selection
+  // extends or shrinks the selection instead of collapsing it to the cursor.
+  if (event.shiftKey) return false;
+
   const selection = selectedRangeAtPointer(currentView, event);
   if (!selection) return false;
 

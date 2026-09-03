@@ -5069,8 +5069,8 @@ pub async fn execute_in_manual_transaction_with_options(
     // same non-zero count and every paired user statement is proven read-only;
     // any mismatch is fail-closed (no marker). This is deliberately a
     // trust-boundary count/position pairing, not a SQL-equivalence parser.
-    let classification: Vec<bool> = if let Some(dialect) = db_type
-        .filter(|db_type| matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
+    let classification: Vec<bool> = if let Some(dialect) =
+        db_type.filter(|db_type| matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
     {
         match options.classification_sql.as_deref() {
             Some(classification_sql) => {

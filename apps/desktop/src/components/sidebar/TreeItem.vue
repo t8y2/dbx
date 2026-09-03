@@ -1746,7 +1746,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint::before {
   content: "";
   position: absolute;
-  inset: 0 -9999px;
+  inset: 0;
   z-index: 0;
   background-color: var(--tree-connection-row-bg);
   border-radius: inherit;
@@ -1801,7 +1801,7 @@ function onKeydown(event: KeyboardEvent) {
 .tree-table-search-control::before {
   content: "";
   position: absolute;
-  inset: 0 -9999px;
+  inset: 0;
   z-index: 0;
   background-color: var(--tree-table-search-row-bg);
   pointer-events: none;

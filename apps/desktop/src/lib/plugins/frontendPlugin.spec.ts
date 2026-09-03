@@ -68,6 +68,15 @@ describe("FrontendPluginRegistry", () => {
     expect(registry.listConnectionProviders()[0]?.contribution.filesystem_provider).toBe("example.files");
   });
 
+  it("indexes result-view contributions", () => {
+    const registry = createFrontendPluginRegistry([installedPlugin("com.example.plugin", [{ type: "result-view", id: "example.graph", label: "Graph" }])]);
+
+    const views = registry.listResultViews();
+    expect(views).toHaveLength(1);
+    expect(views[0]?.contribution.id).toBe("example.graph");
+    expect(views[0]?.contribution.label).toBe("Graph");
+  });
+
   it("indexes context-menu contributions per menu surface", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("com.example.plugin", [

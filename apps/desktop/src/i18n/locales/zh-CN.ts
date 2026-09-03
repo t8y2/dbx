@@ -90,6 +90,7 @@ export default withEnglishFallback({
   },
   docs,
   pluginPlatform: {
+    openResultView: "用 {label} 打开",
     centerTitle: "插件中心",
     centerDescription: "在统一商店中发现可选的 DBX 能力，并分别管理已安装插件和插件仓库。",
     marketplace: "插件商店",

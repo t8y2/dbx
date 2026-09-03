@@ -167,6 +167,7 @@ export default withEnglishFallback({
   },
   docs,
   pluginPlatform: {
+    openResultView: "Abrir com {label}",
     centerTitle: "Central de plugins",
     centerDescription: "Descubra recursos opcionais do DBX em um marketplace unificado e gerencie separadamente plugins instalados e repositórios.",
     marketplace: "Marketplace",

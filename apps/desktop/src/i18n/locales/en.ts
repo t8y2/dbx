@@ -165,6 +165,7 @@ export default {
   },
   docs,
   pluginPlatform: {
+    openResultView: "Open with {label}",
     centerTitle: "Plugin Center",
     centerDescription: "Discover optional DBX capabilities in one marketplace, then manage installed plugins and repositories separately.",
     marketplace: "Marketplace",

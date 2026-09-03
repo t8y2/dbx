@@ -167,6 +167,7 @@ export default withEnglishFallback({
   },
   docs,
   pluginPlatform: {
+    openResultView: "{label} で開く",
     centerTitle: "プラグインセンター",
     centerDescription: "統合マーケットプレイスで DBX の追加機能を探し、インストール済みプラグインとリポジトリを個別に管理します。",
     marketplace: "マーケットプレイス",

@@ -27,5 +27,6 @@ test("data tab header shows the active connection before the table context", () 
   assert.ok(connectionIndex >= 0 && connectionIndex < tableIndex);
   assert.match(template, /v-if="activeConnection\?\.name\?\.trim\(\)"/);
   assert.match(template, /:title="activeConnection\.name"/);
-  assert.match(template, /data-data-header-connection class="[^"]*max-w-48[^"]*truncate/);
+  assert.doesNotMatch(template, /data-data-header-connection class="[^"]*(?:max-w-4[89]|max-w-5[0-9])/);
+  assert.match(template, /data-data-header-connection class="[^"]*min-w-0[^"]*truncate/);
 });

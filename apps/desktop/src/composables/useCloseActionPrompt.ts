@@ -4,15 +4,25 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import * as api from "@/lib/backend/api";
 import { invoke } from "@tauri-apps/api/core";
 
-export type AppCloseAction = "quit" | "hide";
-type AppCloseRequestTarget = "settings" | "quit";
+export type AppCloseAction = "quit" | "hide" | "window";
+type AppCloseRequestTarget = "settings" | "quit" | "window";
 
 export interface AppCloseRequestOptions {
   requireCloseActionChoice?: boolean;
 }
 
+type AppCloseRequestEventPayload = AppCloseRequestTarget | { target?: AppCloseRequestTarget; windowLabel?: string };
+
 interface AppCloseRequestPayload {
-  payload?: AppCloseRequestTarget;
+  payload?: AppCloseRequestEventPayload;
+}
+
+function parseCloseRequestPayload(payload: AppCloseRequestEventPayload | undefined): { target: AppCloseRequestTarget; windowLabel?: string } {
+  if (typeof payload === "object" && payload) {
+    const target = payload.target === "quit" || payload.target === "window" ? payload.target : "settings";
+    return { target, windowLabel: typeof payload.windowLabel === "string" ? payload.windowLabel : undefined };
+  }
+  return { target: payload === "quit" || payload === "window" ? payload : "settings" };
 }
 
 export function useCloseActionPrompt(options: { requestClose: (action: AppCloseAction, requestOptions?: AppCloseRequestOptions) => void }) {
@@ -27,10 +37,18 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
 
   async function performCloseAction(action: AppCloseAction) {
     if (!isTauriRuntime()) return;
+    if (action === "window") {
+      await api.completeWindowClose();
+      return;
+    }
     await api.completeAppClose(action);
   }
 
   function handleCloseRequest(target: AppCloseRequestTarget = "settings") {
+    if (target === "window") {
+      options.requestClose("window");
+      return;
+    }
     const action = actionForRequest(target);
     options.requestClose(action, {
       requireCloseActionChoice: target === "settings" && !settingsStore.desktopSettings.close_action_prompted,
@@ -60,15 +78,22 @@ export function useCloseActionPrompt(options: { requestClose: (action: AppCloseA
 
   function setupCloseActionPromptListener() {
     if (!isTauriRuntime()) return;
-    void import("@tauri-apps/api/event").then(({ listen }) => {
-      listen<AppCloseRequestTarget>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
-        handleCloseRequest(event.payload === "quit" ? "quit" : "settings");
-      }).then((unlisten) => {
-        unlistenHandles.push(unlisten);
-        // Rust falls back to native Quit until this listener is installed, so a
-        // failed WebView2 startup cannot leave the tray request waiting forever.
-        void invoke("mark_frontend_ready");
-      });
+    void import("@tauri-apps/api/webviewWindow").then(({ getCurrentWebviewWindow }) => {
+      // 模块级 `listen` 默认订阅 `Any`，会让每个 WebView 都收到子窗口关闭事件。
+      // 同时校验事件携带的目标窗口标签，以兼容某些运行时把事件广播给所有 WebView 的情况。
+      const currentWindow = getCurrentWebviewWindow();
+      currentWindow
+        .listen<AppCloseRequestEventPayload>("dbx-app-close-requested", (event: AppCloseRequestPayload) => {
+          const request = parseCloseRequestPayload(event.payload);
+          if (request.windowLabel && request.windowLabel !== currentWindow.label) return;
+          handleCloseRequest(request.target);
+        })
+        .then((unlisten) => {
+          unlistenHandles.push(unlisten);
+          // Rust falls back to native Quit until this listener is installed, so a
+          // failed WebView2 startup cannot leave the tray request waiting forever.
+          void invoke("mark_frontend_ready");
+        });
     });
   }
 

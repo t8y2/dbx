@@ -12,6 +12,10 @@ function sourceBetween(start: string, end: string): string {
 }
 
 describe("AppTabBar close confirmation layout", () => {
+  it("marks unsaved scratch SQL as dirty in the tab title", () => {
+    expect(tabBarSource).toContain("return queryStore.isTabDirty(tab) || queryStore.isTabUnsavedForWindowClose(tab);");
+  });
+
   it("allows long unbroken tab titles to shrink and wrap inside the dialog", () => {
     expect(tabBarSource).toMatch(/<DialogContent class="[^"]*\bmin-w-0\b[^"]*\bsm:max-w-md\b/);
     expect(tabBarSource).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bspace-y-2\b">\s*<p class="[^"]*\bwrap-anywhere\b/);
@@ -19,11 +23,20 @@ describe("AppTabBar close confirmation layout", () => {
 
   it("keeps all single and bulk close actions while allowing the footer to wrap", () => {
     expect(tabBarSource).toMatch(/<DialogFooter class="[^"]*\bmin-w-0\b[^"]*\bsm:flex-wrap\b">/);
-    expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose"');
+    expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" variant="outline" @click="handleDiscardAllAndClose"');
     expect(tabBarSource).toContain('v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose"');
-    expect(tabBarSource).toContain('variant="secondary" class="border-border" @click="handleDiscardAndClose"');
+    expect(tabBarSource).toContain('variant="outline" @click="handleDiscardAndClose"');
     expect(tabBarSource).toContain('@click="handleSaveAndClose"');
     expect(tabBarSource).toContain('@click="handleCancelClose"');
+  });
+
+  it("only dismisses the confirmation dialog through the cancellation flow", () => {
+    const closeConfirmDialog = sourceBetween('<Dialog :open="queryStore.showCloseConfirm">', "<DialogHeader>");
+
+    expect(closeConfirmDialog).toContain(':show-close-button="false"');
+    expect(closeConfirmDialog).toContain("@pointer-down-outside.prevent");
+    expect(closeConfirmDialog).toContain("@escape-key-down.prevent");
+    expect(closeConfirmDialog).toContain('@click="handleCancelClose"');
   });
 });
 

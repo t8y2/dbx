@@ -2513,14 +2513,31 @@ export const useQueryStore = defineStore("query", () => {
   const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
   const keepUnsavedTabsDraftsOnAppClose = computed(() => useSettingsStore().editorSettings.appCloseUnsavedTabsMode === "keep-drafts");
   const requiresAppCloseDraftPersist = computed(() => shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab)));
+  const isConfirmingWindowClose = ref(false);
 
   function shouldConfirmTabOnAppClose(tab: QueryTab): boolean {
     if (!shouldConfirmTabClose(tab)) return false;
     return !keepUnsavedTabsDraftsOnAppClose.value || tab.mode !== "query";
   }
 
+  function shouldConfirmTabOnWindowClose(tab: QueryTab): boolean {
+    if (isTabDirty(tab)) return true;
+    // A scratch query with SQL but no saved-SQL/file backing is still unsaved,
+    // even if another flow has already refreshed its in-memory SQL baseline.
+    return tab.mode === "query" && !tab.savedSqlId && !tab.externalSqlPath && !!tab.sql.trim();
+  }
+
+  function isTabUnsavedForWindowClose(tab: QueryTab): boolean {
+    return shouldConfirmTabOnWindowClose(tab);
+  }
+
+  const hasUnsavedWindowTabs = computed(() => tabs.value.some((tab) => shouldConfirmTabOnWindowClose(tab)));
+
   const closeConfirmDirtyTabIds = computed(() => {
-    if (isConfirmingAppClose.value) return tabs.value.filter((tab) => shouldConfirmTabOnAppClose(tab)).map((tab) => tab.id);
+    if (isConfirmingAppClose.value) {
+      const shouldConfirm = isConfirmingWindowClose.value ? shouldConfirmTabOnWindowClose : shouldConfirmTabOnAppClose;
+      return tabs.value.filter((tab) => shouldConfirm(tab)).map((tab) => tab.id);
+    }
     if (pendingBatchCloseTabIds.value) {
       return pendingBatchCloseTabIds.value
         .map((id) => tabs.value.find((tab) => tab.id === id))
@@ -2631,6 +2648,17 @@ export const useQueryStore = defineStore("query", () => {
     tab.sql = "";
     tab.originalSql = "";
     return true;
+  }
+
+  function discardScratchTabForWindowClose(id: string) {
+    const tab = tabs.value.find((item) => item.id === id);
+    // Unlike app close, a detached workspace is destroyed after confirmation.
+    // Its unbacked scratch SQL must be cleared too; restoring its original SQL
+    // would make it look unsaved again and reopen the same confirmation loop.
+    if (tab?.mode === "query" && !tab.savedSqlId && !tab.externalSqlPath && !tab.objectSource) {
+      tab.sql = "";
+      tab.originalSql = "";
+    }
   }
 
   function finishPendingBatchClose() {
@@ -2748,12 +2776,17 @@ export const useQueryStore = defineStore("query", () => {
   function forceClosePendingTab() {
     const id = pendingCloseTabId.value;
     const confirmingAppClose = isConfirmingAppClose.value;
+    const confirmingWindowClose = isConfirmingWindowClose.value;
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
     closeConfirmContext.value = "tab";
     if (confirmingAppClose) {
-      if (id) discardTabChanges(id);
+      if (id) {
+        discardTabChanges(id);
+        if (confirmingWindowClose) discardScratchTabForWindowClose(id);
+      }
       isConfirmingAppClose.value = false;
+      isConfirmingWindowClose.value = false;
       return;
     }
     if (id) closeTab(id, { force: true });
@@ -2766,6 +2799,7 @@ export const useQueryStore = defineStore("query", () => {
     const finalActiveTabId = pendingBatchCloseFinalActiveTabId.value;
     const onBatchComplete = pendingBatchCloseComplete;
     const confirmingAppClose = isConfirmingAppClose.value;
+    const confirmingWindowClose = isConfirmingWindowClose.value;
 
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
@@ -2773,9 +2807,13 @@ export const useQueryStore = defineStore("query", () => {
     pendingBatchCloseFinalActiveTabId.value = undefined;
     pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
+    isConfirmingWindowClose.value = false;
     closeConfirmContext.value = "tab";
 
-    for (const id of dirtyIds) discardTabChanges(id);
+    for (const id of dirtyIds) {
+      discardTabChanges(id);
+      if (confirmingWindowClose) discardScratchTabForWindowClose(id);
+    }
     if (confirmingAppClose) return;
 
     const idsToClose = batchIds ?? (pendingId ? [pendingId] : []);
@@ -2793,6 +2831,7 @@ export const useQueryStore = defineStore("query", () => {
     pendingBatchCloseFinalActiveTabId.value = undefined;
     pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
+    isConfirmingWindowClose.value = false;
     closeConfirmContext.value = "tab";
   }
 
@@ -2801,6 +2840,7 @@ export const useQueryStore = defineStore("query", () => {
     pendingCloseTabId.value = null;
     showCloseConfirm.value = false;
     isConfirmingAppClose.value = false;
+    isConfirmingWindowClose.value = false;
     closeConfirmContext.value = "tab";
     if (id) return id;
     return null;
@@ -2833,6 +2873,7 @@ export const useQueryStore = defineStore("query", () => {
     pendingBatchCloseFinalActiveTabId.value = undefined;
     pendingBatchCloseComplete = null;
     isConfirmingAppClose.value = false;
+    isConfirmingWindowClose.value = false;
     closeConfirmContext.value = "tab";
 
     if (confirmingAppClose) return "app" as const;
@@ -2924,9 +2965,19 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function requestAppCloseConfirmation() {
+    isConfirmingWindowClose.value = false;
     const dirtyTab = tabs.value.find((tab) => shouldConfirmTabOnAppClose(tab));
     if (!dirtyTab) return false;
     isConfirmingAppClose.value = true;
+    showDirtyTabCloseConfirm(dirtyTab, "app");
+    return true;
+  }
+
+  function requestWindowCloseConfirmation() {
+    const dirtyTab = tabs.value.find((tab) => shouldConfirmTabOnWindowClose(tab));
+    if (!dirtyTab) return false;
+    isConfirmingAppClose.value = true;
+    isConfirmingWindowClose.value = true;
     showDirtyTabCloseConfirm(dirtyTab, "app");
     return true;
   }
@@ -6710,6 +6761,8 @@ export const useQueryStore = defineStore("query", () => {
     closeConfirmContext,
     closeConfirmDirtyTabIds,
     hasDirtyTabs,
+    hasUnsavedWindowTabs,
+    isTabUnsavedForWindowClose,
     requiresAppCloseDraftPersist,
     isConfirmingAppClose,
     createTab,
@@ -6736,6 +6789,7 @@ export const useQueryStore = defineStore("query", () => {
     acknowledgeExternalSqlFileMissing,
     discardTabChanges,
     requestAppCloseConfirmation,
+    requestWindowCloseConfirmation,
     closeOtherTabs,
     closeRightTabs,
     closeOtherRegularTabs,

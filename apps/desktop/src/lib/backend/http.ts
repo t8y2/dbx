@@ -1850,6 +1850,10 @@ export async function completeAppClose(_action: "quit" | "hide"): Promise<void> 
   return undefined;
 }
 
+export async function completeWindowClose(): Promise<void> {
+  return undefined;
+}
+
 export async function requestAppClose(): Promise<void> {
   return undefined;
 }

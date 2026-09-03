@@ -4,7 +4,7 @@ use std::{
 };
 
 use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
-use tauri::{AppHandle, Manager, State, Window};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
@@ -107,13 +107,27 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
-    // Frameless detached windows use the shared custom titlebar controls. Their
-    // close action must only close the current workspace, not the whole app.
     if window.label() != "main" {
-        return window.close().map_err(|err| format!("failed to close detached window: {err}"));
+        return window
+            .emit_to(
+                EventTarget::webview_window(window.label()),
+                "dbx-app-close-requested",
+                serde_json::json!({ "target": "window", "windowLabel": window.label() }),
+            )
+            .map_err(|err| format!("failed to request detached window close: {err}"));
     }
     request_app_close(&app, "settings");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn complete_window_close(window: Window) -> Result<(), String> {
+    if window.label() == "main" {
+        return Err("main window must use the app close flow".to_string());
+    }
+    // `close` emits CloseRequested again. The close has already been confirmed
+    // by this window's frontend, so destroy it without re-entering that flow.
+    window.destroy().map_err(|err| format!("failed to close detached window: {err}"))
 }
 
 #[tauri::command]

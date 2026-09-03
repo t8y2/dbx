@@ -32,7 +32,7 @@ use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, EventTarget, Manager};
 #[cfg(target_os = "macos")]
 use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(any(windows, target_os = "linux"))]
@@ -717,7 +717,11 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
-    let _ = app.emit(APP_CLOSE_REQUESTED_EVENT, target);
+    let _ = app.emit_to(
+        EventTarget::webview_window("main"),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": "main" }),
+    );
 }
 
 fn open_connection_deep_links(app: &tauri::AppHandle, links: Vec<String>) {
@@ -1775,9 +1779,15 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Detached windows are independent workspaces. Closing one must not
-                // enter the main window's app-wide close flow.
                 if window.label() != "main" {
+                    // A detached workspace owns its own unsaved tabs. Ask that
+                    // window's frontend to resolve them before destroying it.
+                    api.prevent_close();
+                    let _ = window.emit_to(
+                        EventTarget::webview_window(window.label()),
+                        APP_CLOSE_REQUESTED_EVENT,
+                        serde_json::json!({ "target": "window", "windowLabel": window.label() }),
+                    );
                     return;
                 }
                 if !should_hide_window_on_close(std::env::consts::OS) {
@@ -1828,6 +1838,7 @@ pub fn run() {
             commands::app_settings::save_max_retries,
             commands::app_settings::set_app_locale,
             commands::app_settings::complete_app_close,
+            commands::app_settings::complete_window_close,
             commands::app_settings::mark_frontend_ready,
             commands::app_settings::request_app_close_from_window_controls,
             commands::window_controls::set_macos_traffic_light_position,

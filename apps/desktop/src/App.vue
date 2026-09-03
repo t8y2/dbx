@@ -1074,7 +1074,12 @@ function closePendingSavedTab() {
   pendingPrevActiveTabId.value = null;
   const shouldCloseTab = pendingSaveShouldCloseTab.value;
   pendingSaveShouldCloseTab.value = true;
-  if (shouldCloseTab) queryStore.closeTab(closeId, { force: true });
+  if (shouldCloseTab) {
+    queryStore.closeTab(closeId, { force: true });
+    return;
+  }
+  // 关闭工作区时，标签会保留到保存完成；保存后继续完成挂起的窗口关闭。
+  completePendingTabSave(closeId);
 }
 
 function cancelPendingSaveAndClose() {
@@ -1101,7 +1106,7 @@ async function finishPendingAppClose(action: AppCloseAction) {
   pendingAppCloseAction.value = null;
   pendingSaveShouldCloseTab.value = true;
   const disposeRuntimeBeforeClose = () => (action === "quit" ? disposeAllSqlServerActivityTraces().catch(() => undefined) : Promise.resolve());
-  if (queryStore.requiresAppCloseDraftPersist) {
+  if (action !== "window" && queryStore.requiresAppCloseDraftPersist) {
     await finishAppCloseWithRequiredPersist({
       persist: () => queryStore.flushPendingPersist(),
       beforeClose: disposeRuntimeBeforeClose,
@@ -1124,19 +1129,20 @@ async function finishPendingAppClose(action: AppCloseAction) {
 function continuePendingAppCloseAfterSave() {
   const action = pendingAppCloseAction.value;
   if (!action) return;
-  if (queryStore.hasDirtyTabs) {
+  if (queryStore.hasUnsavedWindowTabs) {
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestAppCloseConfirmation()) return;
+    if (queryStore.requestWindowCloseConfirmation()) return;
   }
   finishPendingAppClose(action);
 }
 
 function requestAppClose(action: AppCloseAction, options: AppCloseRequestOptions = {}) {
+  if (pendingAppCloseAction.value) return;
   pendingCloseActionChoice.value = !!options.requireCloseActionChoice;
-  if (queryStore.hasDirtyTabs) {
+  if (queryStore.hasUnsavedWindowTabs) {
     pendingAppCloseAction.value = action;
     pendingSaveShouldCloseTab.value = false;
-    if (queryStore.requestAppCloseConfirmation()) return;
+    if (queryStore.requestWindowCloseConfirmation()) return;
   }
   finishPendingAppClose(action);
 }

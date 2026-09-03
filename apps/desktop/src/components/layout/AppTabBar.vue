@@ -321,7 +321,7 @@ function cancelRenameTab() {
 }
 
 function isDirtyTab(tab: QueryTab) {
-  return queryStore.isTabDirty(tab);
+  return queryStore.isTabDirty(tab) || queryStore.isTabUnsavedForWindowClose(tab);
 }
 
 function tabTitleLabel(tab: QueryTab) {
@@ -1642,15 +1642,12 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
     </div>
   </div>
 
-  <Dialog
-    :open="queryStore.showCloseConfirm"
-    @update:open="
-      (open) => {
-        if (!open) queryStore.cancelClosePendingTab();
-      }
-    "
-  >
-    <DialogContent class="min-w-0 sm:max-w-md">
+  <Dialog :open="queryStore.showCloseConfirm">
+    <DialogContent class="min-w-0 sm:max-w-md" :show-close-button="false" @pointer-down-outside.prevent @interact-outside.prevent @escape-key-down.prevent>
+      <Button type="button" variant="ghost" class="absolute top-2 right-2" size="icon-sm" :aria-label="t('common.close')" @click="handleCancelClose">
+        <X />
+        <span class="sr-only">{{ t("common.close") }}</span>
+      </Button>
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2">
           <AlertTriangle class="h-5 w-5 text-amber-500" />
@@ -1687,9 +1684,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
       </div>
       <DialogFooter class="min-w-0 sm:flex-wrap">
         <Button variant="outline" @click="handleCancelClose">{{ t("common.cancel") }}</Button>
-        <Button v-if="showCloseConfirmBulkActions" variant="secondary" class="border-border" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
+        <Button v-if="showCloseConfirmBulkActions" variant="outline" @click="handleDiscardAllAndClose">{{ t("editor.discardAllChanges") }}</Button>
         <Button v-if="showCloseConfirmBulkActions" @click="handleSaveAllAndClose">{{ t("editor.saveAllChanges") }}</Button>
-        <Button variant="secondary" class="border-border" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
+        <Button variant="outline" @click="handleDiscardAndClose">{{ t("editor.discardChanges") }}</Button>
         <Button @click="handleSaveAndClose">{{ t("savedSql.save") }}</Button>
       </DialogFooter>
     </DialogContent>

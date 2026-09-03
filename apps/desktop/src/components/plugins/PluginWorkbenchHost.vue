@@ -98,11 +98,18 @@ onMounted(async () => {
   await loadWorkbench();
 });
 
+// Identity changes require rebuilding the sandbox document; context and locale
+// changes are pushed through the bridge so plugin UI state survives them.
 watch(
-  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id, props.context, appLocale.value] as const,
+  () => [props.plugin.manifest.id, props.plugin.manifest.version, props.contribution.id] as const,
   () => void loadWorkbench(),
+);
+watch(
+  () => props.context,
+  (context) => bridge?.updateContext(context ?? {}),
   { deep: true },
 );
+watch(appLocale, (locale) => bridge?.updateLocale(locale));
 
 onBeforeUnmount(() => {
   disposed = true;

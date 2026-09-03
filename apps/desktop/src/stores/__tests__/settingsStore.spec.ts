@@ -669,6 +669,12 @@ describe("settingsStore AI API key normalization", () => {
   it("trims API keys when normalizing loaded configurations", () => {
     expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
   });
+  it("preserves and bounds a configured maximum output token budget", () => {
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 32768 }).maxOutputTokens).toBe(32768);
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 1_500_000 }).maxOutputTokens).toBe(1_000_000);
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 128 }).maxOutputTokens).toBeUndefined();
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: Number.NaN }).maxOutputTokens).toBeUndefined();
+  });
 
   it("provides Kimi defaults and recognizes legacy Kimi configurations", () => {
     expect(AI_PROVIDER_PRESETS.kimi).toMatchObject({

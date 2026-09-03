@@ -457,6 +457,8 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
 const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high", "xhigh", "max"];
+export const AI_OUTPUT_TOKENS_MIN = 256;
+export const AI_OUTPUT_TOKENS_MAX = 1_000_000;
 const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
@@ -487,6 +489,8 @@ export function normalizeAiHeaders(value: unknown): Record<string, string> {
 
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
+  const rawMaxOutputTokens = config?.maxOutputTokens;
+  const maxOutputTokens = typeof rawMaxOutputTokens === "number" && Number.isFinite(rawMaxOutputTokens) && rawMaxOutputTokens >= AI_OUTPUT_TOKENS_MIN ? Math.min(AI_OUTPUT_TOKENS_MAX, Math.round(rawMaxOutputTokens)) : undefined;
   return {
     ...defaultConfigs[provider],
     ...config,
@@ -499,6 +503,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     proxyUrl: config?.proxyUrl ?? "",
     enableThinking: config?.enableThinking ?? true,
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
+    maxOutputTokens,
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),

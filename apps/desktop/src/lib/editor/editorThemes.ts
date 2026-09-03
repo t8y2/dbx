@@ -810,6 +810,10 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       width: "1px",
       zIndex: "10",
     },
+    // Single lines render vertically centered here. Wrapped lines are anchored
+    // to the first visual row by createQueryEditorLineNumberAlignmentExtension,
+    // which sets an inline `align-items: flex-start` (inline style survives
+    // CodeMirror's className rebuild, unlike a toggled class).
     ".cm-lineNumbers .cm-gutterElement": {
       alignItems: "center",
       cursor: "pointer",
@@ -817,9 +821,6 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       justifyContent: "flex-end",
       paddingRight: "8px",
       userSelect: "none",
-    },
-    ".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number": {
-      alignItems: "flex-start",
     },
     ".cm-run-statement-gutter": {
       minWidth: "28px",

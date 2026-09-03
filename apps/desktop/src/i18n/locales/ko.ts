@@ -6631,6 +6631,10 @@ export default withEnglishFallback({
     shortcutUppercaseSelection: "선택 영역을 대문자로 변환",
     shortcutLowercaseSelection: "선택 영역을 소문자로 변환",
     shortcutExPasteSqlInCondition: "ExPaste: IN 조건으로 붙여넣기",
+    csvQuoteMode: "CSV 필드 따옴표",
+    csvQuoteModeDescription: "CSV 내보내기 시 필드에 큰따옴표를 사용하는 방식을 선택합니다.",
+    csvQuoteModeAll: "모든 필드",
+    csvQuoteModeNecessary: "필수 필드만",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

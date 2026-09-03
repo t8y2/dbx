@@ -2242,7 +2242,7 @@ fn generate_postgres_sequence_sync_sql(columns: &[db::ColumnInfo], table: &str, 
         .map(|column| {
             let quoted_column = quote_identifier(&column.name, &DatabaseType::Postgres);
             format!(
-                "SELECT setval(pg_get_serial_sequence({}, {}), GREATEST(COALESCE(MAX({quoted_column}), 0), 1), MAX({quoted_column}) IS NOT NULL) FROM {full_table}",
+                "SELECT setval(pg_get_serial_sequence({}, {})::regclass, GREATEST(COALESCE(MAX({quoted_column}::bigint), 0), 1), MAX({quoted_column}::bigint) IS NOT NULL) FROM {full_table}",
                 quote_string_literal(&full_table),
                 quote_string_literal(&column.name)
             )
@@ -2613,10 +2613,15 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 _ => format!("'{escaped}'"),
             }
         }
-        serde_json::Value::Array(arr) => match db_type {
-            DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
-            _ => format_pg_array_sql_literal(arr),
-        },
+        serde_json::Value::Array(arr) => {
+            if *db_type == DatabaseType::Postgres && is_postgres_vector_type(column_type) {
+                return format_postgres_vector_sql_literal(val);
+            }
+            match db_type {
+                DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
+                _ => format_pg_array_sql_literal(arr),
+            }
+        }
         _ => {
             let s = val.to_string();
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
@@ -2828,6 +2833,46 @@ pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
     let elements: Vec<String> = arr.iter().map(format_pg_array_element).collect();
     let inner = format!("{{{}}}", elements.join(","));
     format!("'{}'", inner.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+pub(crate) fn is_postgres_vector_type(column_type: Option<&str>) -> bool {
+    column_type
+        .map(|column_type| {
+            let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+            if normalized.trim_end().ends_with("[]") {
+                return false;
+            }
+            let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim_matches('"');
+            matches!(base, "vector" | "halfvec") || base.ends_with(".vector") || base.ends_with(".halfvec")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn format_postgres_vector_sql_literal(value: &serde_json::Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    let text = match value {
+        // pgvector vector/halfvec are scalar extension types whose importable
+        // literal grammar uses square brackets, unlike PostgreSQL arrays.
+        serde_json::Value::Array(arr) => {
+            let elements = arr.iter().map(format_postgres_vector_element).collect::<Vec<_>>();
+            format!("[{}]", elements.join(","))
+        }
+        serde_json::Value::String(text) => text.to_string(),
+        _ => value.to_string(),
+    };
+    quote_postgres_string_literal(&text)
+}
+
+fn format_postgres_vector_element(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "NULL".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn format_pg_array_element(val: &serde_json::Value) -> String {
@@ -4958,11 +5003,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 }
 
 /// Strips inline `CONSTRAINT ... FOREIGN KEY ... REFERENCES ...` lines from a
-/// `CREATE TABLE` statement, fixing up the now-dangling trailing comma on the
-/// preceding line. Dialect-agnostic: relies only on the ` FOREIGN KEY ` clause
-/// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
-/// and on foreign key constraints always being the last items before the closing
-/// paren (true for both dialects' DDL dumps).
+/// `CREATE TABLE` statement, fixing up a trailing comma only when removing the
+/// foreign key leaves one immediately before the table's closing parenthesis.
+/// Dialect-agnostic: relies only on the definition-line shape shared by Postgres
+/// and MySQL-family DDL dumps.
 ///
 /// Only genuine constraint definition lines match (`CONSTRAINT <name> FOREIGN
 /// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
@@ -4973,18 +5017,26 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     }
 
     let mut lines: Vec<String> = Vec::new();
+    let mut removed_foreign_key = false;
     for line in statement.lines() {
         if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
-            if let Some(previous) = lines.last_mut() {
-                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
-                if previous[..trimmed_len].ends_with(',') {
-                    previous.truncate(trimmed_len - 1);
-                }
-            }
+            removed_foreign_key = true;
             continue;
         }
         lines.push(line.to_string());
     }
+
+    if removed_foreign_key {
+        if let Some(closing_index) = lines.iter().rposition(|line| line.trim_start().starts_with(')')) {
+            if let Some(previous) = lines[..closing_index].iter_mut().rfind(|line| !line.trim().is_empty()) {
+                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
+                if previous[..trimmed_len].ends_with(',') {
+                    previous.remove(trimmed_len - 1);
+                }
+            }
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -10537,6 +10589,30 @@ mod tests {
     }
 
     #[test]
+    fn postgres_transfer_ddl_preserves_constraint_after_inline_foreign_key() {
+        let ddl = "CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_parent_fk\" FOREIGN KEY (\"parent_id\") REFERENCES \"source_7931\".\"dbx_parent\"(\"id\"),\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_removes_multiple_inline_foreign_keys_without_damaging_retained_items() {
+        let ddl = "CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY (\"owner_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY (\"reviewer_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n)".to_string()]
+        );
+    }
+
+    #[test]
     fn transfer_create_table_result_treats_existing_table_as_preexisting() {
         assert!(!transfer_create_table_created(
             Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
@@ -11582,8 +11658,68 @@ mod tests {
         assert_eq!(
             sql,
             vec![
-                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 0), 1), MAX(\"id\") IS NOT NULL) FROM \"public\".\"users\"".to_string(),
-                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'identity_id'), GREATEST(COALESCE(MAX(\"identity_id\"), 0), 1), MAX(\"identity_id\") IS NOT NULL) FROM \"public\".\"users\"".to_string()
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'id')::regclass, GREATEST(COALESCE(MAX(\"id\"::bigint), 0), 1), MAX(\"id\"::bigint) IS NOT NULL) FROM \"public\".\"users\"".to_string(),
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"users\"', 'identity_id')::regclass, GREATEST(COALESCE(MAX(\"identity_id\"::bigint), 0), 1), MAX(\"identity_id\"::bigint) IS NOT NULL) FROM \"public\".\"users\"".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_sequence_sync_sql_casts_text_and_numeric_columns_to_bigint() {
+        let sql = generate_postgres_sequence_sync_sql(
+            &[
+                db::ColumnInfo {
+                    name: "text_id".to_string(),
+                    data_type: "text".to_string(),
+                    is_nullable: false,
+                    column_default: Some("nextval('public.dbx_text_id_seq'::regclass)::text".to_string()),
+                    is_primary_key: true,
+                    extra: None,
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                    enum_values: None,
+                    ..Default::default()
+                },
+                db::ColumnInfo {
+                    name: "numeric_id".to_string(),
+                    data_type: "numeric".to_string(),
+                    is_nullable: false,
+                    column_default: Some("nextval('public.dbx_numeric_id_seq'::regclass)".to_string()),
+                    is_primary_key: false,
+                    extra: None,
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                    enum_values: None,
+                    ..Default::default()
+                },
+                db::ColumnInfo {
+                    name: "plain_text".to_string(),
+                    data_type: "text".to_string(),
+                    is_nullable: true,
+                    column_default: None,
+                    is_primary_key: false,
+                    extra: None,
+                    comment: None,
+                    numeric_precision: None,
+                    numeric_scale: None,
+                    character_maximum_length: None,
+                    enum_values: None,
+                    ..Default::default()
+                },
+            ],
+            "seq_test",
+            "public",
+        );
+
+        assert_eq!(
+            sql,
+            vec![
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"seq_test\"', 'text_id')::regclass, GREATEST(COALESCE(MAX(\"text_id\"::bigint), 0), 1), MAX(\"text_id\"::bigint) IS NOT NULL) FROM \"public\".\"seq_test\"".to_string(),
+                "SELECT setval(pg_get_serial_sequence('\"public\".\"seq_test\"', 'numeric_id')::regclass, GREATEST(COALESCE(MAX(\"numeric_id\"::bigint), 0), 1), MAX(\"numeric_id\"::bigint) IS NOT NULL) FROM \"public\".\"seq_test\"".to_string(),
             ]
         );
     }
@@ -11698,7 +11834,7 @@ mod tests {
         assert_eq!(
             sequence_sync_sql,
             vec![
-                "SELECT setval(pg_get_serial_sequence('\"archive\".\"it_quick_entry\"', 'id'), GREATEST(COALESCE(MAX(\"id\"), 0), 1), MAX(\"id\") IS NOT NULL) FROM \"archive\".\"it_quick_entry\"".to_string()
+                "SELECT setval(pg_get_serial_sequence('\"archive\".\"it_quick_entry\"', 'id')::regclass, GREATEST(COALESCE(MAX(\"id\"::bigint), 0), 1), MAX(\"id\"::bigint) IS NOT NULL) FROM \"archive\".\"it_quick_entry\"".to_string()
             ]
         );
     }
@@ -12114,6 +12250,50 @@ mod tests {
             r#"INSERT INTO "public"."files" ("path") VALUES
 (E'C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn postgres_insert_preserves_pgvector_literals_and_array_controls() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("embedding"),
+                String::from("qualified_embedding"),
+                String::from("compact_embedding"),
+                String::from("scores"),
+                String::from("embedding_history"),
+            ],
+            &[
+                Some(String::from("vector(3)")),
+                Some(String::from("public.vector(3)")),
+                Some(String::from("extensions.halfvec(3)")),
+                Some(String::from("real[]")),
+                Some(String::from("vector(3)[]")),
+            ],
+            &[vec![
+                json!([1.25, -2.5, 3.75]),
+                json!([0, 0.875, -0.014]),
+                json!(["0.5", "-0.25", "4"]),
+                json!([1.25, -2.5, 3.75]),
+                json!([[1.25, -2.5, 3.75], [0, 0.875, -0.014]]),
+            ]],
+            "pgvector_probe",
+            "target_7955",
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "target_7955"."pgvector_probe" ("embedding", "qualified_embedding", "compact_embedding", "scores", "embedding_history") VALUES
+('[1.25,-2.5,3.75]', '[0,0.875,-0.014]', '[0.5,-0.25,4]', '{1.25,-2.5,3.75}', '{{1.25,-2.5,3.75},{0,0.875,-0.014}}')"#
+        );
+    }
+
+    #[test]
+    fn postgres_vector_literal_keeps_null_and_preformatted_string_behavior() {
+        assert_eq!(escape_value_typed(&serde_json::Value::Null, &DatabaseType::Postgres, Some("vector(3)")), "NULL");
+        assert_eq!(escape_value_typed(&json!("[1,2,3]"), &DatabaseType::Postgres, Some("halfvec(3)")), "'[1,2,3]'");
+        assert_eq!(escape_value_typed(&json!([1, 2, 3]), &DatabaseType::Postgres, Some("integer[]")), "'{1,2,3}'");
     }
 
     #[test]

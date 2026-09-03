@@ -382,7 +382,7 @@ test("default data grid export file names use sanitized base names and compact l
 });
 
 test("full query result CSV export streams through the backend without loading all rows", async () => {
-  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss" });
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY/M/D HH:mm:ss", csvQuoteMode: "necessary" });
   const { composable, fullExportResult, queryResultExportRequest, exportProgressDialog, exportProgressState } = buildExportHarness();
 
   await composable.exportCsv();
@@ -391,6 +391,7 @@ test("full query result CSV export streams through the backend without loading a
   assert.equal(queryResultExportRequest.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls.length, 1);
   assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].dateTimeFormat, "YYYY/M/D HH:mm:ss");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].csvQuoteMode, "necessary");
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 0);
   assert.equal(exportProgressDialog.value, true);
   assert.equal(exportProgressState.value.status, "Done");
@@ -687,6 +688,7 @@ test("missing query result export request does not fall back to the in-memory pa
 });
 
 test("selected query result CSV export keeps the existing in-memory path", async () => {
+  useSettingsStore().updateEditorSettings({ csvQuoteMode: "necessary" });
   const { composable, queryResultExportRequest } = buildExportHarness();
 
   await composable.exportCsv([1]);
@@ -696,6 +698,7 @@ test("selected query result CSV export keeps the existing in-memory path", async
   assert.equal(apiMock.exportQueryResultCsv.mock.calls.length, 1);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][1], ["id", "name"]);
   assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [[1, "Ada"]]);
+  assert.equal(apiMock.exportQueryResultCsv.mock.calls[0][3], "necessary");
 });
 
 test("selected query result CSV export formats only typed temporal columns", async () => {
@@ -852,6 +855,7 @@ test("table data export leaves row limit unset by default", async () => {
 
     assert.equal(apiMock.startTableExport.mock.calls.length, 1);
     assert.equal(apiMock.startTableExport.mock.calls[0][0].rowLimit, null);
+    assert.equal(apiMock.startTableExport.mock.calls[0][0].csvQuoteMode, "all");
   } finally {
     restoreStorage();
   }

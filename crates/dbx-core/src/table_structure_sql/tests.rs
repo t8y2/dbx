@@ -4243,7 +4243,138 @@ fn mysql_coalesces_migration_away_from_existing_auto_increment_primary_key() {
     ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
+    // The old key column keeps its AUTO_INCREMENT checkbox in the draft, but MySQL refuses an
+    // auto column that no longer leads a key, so the flag is cleared in the same statement.
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);"
+        ]
+    );
+}
+
+/// Regression for #7973: swapping the primary key onto another column left the previous
+/// AUTO_INCREMENT key column untouched, so the coalesced ALTER failed with
+/// `ERROR 1075 Incorrect table definition; there can be only one auto column ...`.
+#[test]
+fn mysql_clears_auto_increment_on_column_replaced_by_new_auto_increment_primary_key() {
+    let mut old_pk = existing_pk_column("ID", "bigint unsigned", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.comment = "自增ID".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    let old_original = old_pk.original.as_mut().unwrap();
+    old_original.extra = Some("auto_increment".to_string());
+    old_original.comment = Some("自增ID".to_string());
+
+    let mut new_pk = existing_pk_column("ProjectID", "bigint", false, true);
+    new_pk.id = "project_id".to_string();
+    new_pk.comment = "对应project表的主键ID".to_string();
+    new_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    new_pk.original.as_mut().unwrap().comment = Some("对应project表的主键ID".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "issue7973_repro",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `issue7973_repro` DROP PRIMARY KEY, MODIFY COLUMN `ID` bigint unsigned NOT NULL COMMENT '自增ID', MODIFY COLUMN `ProjectID` bigint NOT NULL AUTO_INCREMENT COMMENT '对应project表的主键ID', ADD PRIMARY KEY (`ProjectID`);"
+        ]
+    );
+}
+
+/// A surviving secondary index still keys the column, so AUTO_INCREMENT stays legal there
+/// and must not be stripped just because the primary key moved elsewhere.
+#[test]
+fn mysql_keeps_auto_increment_when_a_kept_index_still_leads_with_the_column() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, new_pk]);
+    options.indexes = vec![existing_index("idx_users_id", &["id"], false)];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE `users` DROP PRIMARY KEY, ADD PRIMARY KEY (`external_id`);"]);
+}
+
+/// An index the same draft edits is rebuilt as DROP + CREATE *after* the column DDL, so it
+/// cannot excuse the AUTO_INCREMENT flag: the DROP INDEX would hit ERROR 1075 itself.
+#[test]
+fn mysql_clears_auto_increment_when_the_only_covering_index_is_rebuilt_by_the_same_draft() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut rebuilt_index = existing_index("idx_users_id", &["id"], false);
+    rebuilt_index.is_unique = true;
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, new_pk]);
+    options.indexes = vec![rebuilt_index];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);",
+            "DROP INDEX `idx_users_id` ON `users`;",
+            "CREATE UNIQUE INDEX `idx_users_id` ON `users` (`id`);",
+        ]
+    );
+}
+
+/// The covering index is matched by persisted names on both sides, so a draft that swaps two
+/// column names cannot credit one column's index to the other.
+#[test]
+fn mysql_index_cover_does_not_follow_a_column_name_swap() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.name = "legacy_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    // Takes over the name the surviving index was built on, but not the index itself.
+    let mut renamed = existing_pk_column("tenant_id", "bigint", false, false);
+    renamed.id = "tenant".to_string();
+    renamed.name = "id".to_string();
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, renamed, new_pk]);
+    options.indexes = vec![existing_index("idx_users_tenant_id", &["tenant_id"], false)];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // Only the second statement is what this test is about: the auto column lost AUTO_INCREMENT
+    // even though `idx_users_tenant_id` leads with a column *named* `id` in the draft. The
+    // separate rename statement, and the order the two renames run in, are pre-existing
+    // name-swap behavior unrelated to this fix.
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` CHANGE COLUMN `tenant_id` `id` bigint NOT NULL;",
+            "ALTER TABLE `users` DROP PRIMARY KEY, CHANGE COLUMN `id` `legacy_id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);",
+        ]
+    );
 }
 
 #[test]

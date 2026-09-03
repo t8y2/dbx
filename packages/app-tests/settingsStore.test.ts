@@ -186,6 +186,21 @@ test("updateEditorSettings persists numericColumnRightAlign toggles", async () =
   });
 });
 
+test("updateEditorSettings persists the CSV quote mode", async () => {
+  await withMockLocalStorage({}, async () => {
+    setActivePinia(createPinia());
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    store.updateEditorSettings({ csvQuoteMode: "necessary" });
+    assert.equal(store.editorSettings.csvQuoteMode, "necessary");
+    await vi.waitFor(() => {
+      const saved = saveEditorSettingsMock.mock.calls.at(-1)?.[0] as { csvQuoteMode?: string } | undefined;
+      assert.equal(saved?.csvQuoteMode, "necessary");
+    });
+  });
+});
+
 test("migrates legacy execute-all settings to current once and preserves later explicit choices", async () => {
   await withMockLocalStorage({ "dbx-app-state:editor_settings": JSON.stringify({ executeMode: "all" }) }, async () => {
     setActivePinia(createPinia());
@@ -227,6 +242,13 @@ test("defaults export batch size to 2000 rows", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.exportBatchSize, 2000);
   assert.equal(normalizeEditorSettings({}).exportBatchSize, 2000);
   assert.equal(normalizeEditorSettings({ exportBatchSize: 2000 }).exportBatchSize, 2000);
+});
+
+test("CSV quote mode defaults to all fields and preserves a saved necessary mode", () => {
+  assert.equal(DEFAULT_EDITOR_SETTINGS.csvQuoteMode, "all");
+  assert.equal(normalizeEditorSettings({}).csvQuoteMode, "all");
+  assert.equal(normalizeEditorSettings({ csvQuoteMode: "necessary" }).csvQuoteMode, "necessary");
+  assert.equal(normalizeEditorSettings({ csvQuoteMode: "invalid" as any }).csvQuoteMode, "all");
 });
 
 test("migrates the legacy saved export batch default to 2000 once", async () => {

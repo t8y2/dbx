@@ -18,7 +18,9 @@ use crate::database_export::{
 };
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
-use crate::query::{close_query_session, execute_sql_statement_with_options, QueryExecutionOptions};
+use crate::query::{
+    close_query_session, execute_sql_statement_with_options, query_timeout_duration, QueryExecutionOptions,
+};
 use crate::transfer::{
     count_sql_with_where_and_identifier_quote, execute_read_on_pool, execute_read_on_pool_with_max_rows,
     keyset_pagination_sql_with_identifier_quote, pagination_sql_with_filter_order_and_identifier_quote,
@@ -668,6 +670,7 @@ async fn fetch_table_export_batch(
                 let sql = table_cursor_sql(request, sql_context, query_col_names, column_types, primary_keys);
                 let max_rows = request.row_limit.unwrap_or(i32::MAX as usize);
                 let query_timeout = table_export_query_timeout_secs(state, pool_key).await;
+                let rpc_timeout = query_timeout_duration(Some(query_timeout));
                 let params = AgentTableReadStartParams {
                     sql,
                     database: Some(request.database.clone()),
@@ -683,7 +686,14 @@ async fn fetch_table_export_batch(
                 };
                 let client = client.clone();
                 let mut client = client.lock().await;
-                match client.start_table_read::<QueryResult>(params).await {
+                match client
+                    .start_table_read_with_timeout_and_cancel::<QueryResult>(
+                        params,
+                        rpc_timeout,
+                        Some(cancel_token.clone()),
+                    )
+                    .await
+                {
                     Ok(result) => {
                         *cursor_session = result.session_id.clone().map(TableExportCursorSession::Agent);
                         if result.session_id.is_none() && !result.has_more {
@@ -736,7 +746,16 @@ async fn fetch_table_export_batch(
                 };
                 let client = client.clone();
                 let mut client = client.lock().await;
-                match client.fetch_table_read_page::<QueryResult>(&session_id, active_batch_size).await {
+                let query_timeout = table_export_query_timeout_secs(state, pool_key).await;
+                match client
+                    .fetch_table_read_page_with_timeout_and_cancel::<QueryResult>(
+                        &session_id,
+                        active_batch_size,
+                        query_timeout_duration(Some(query_timeout)),
+                        Some(cancel_token.clone()),
+                    )
+                    .await
+                {
                     Ok(result) => {
                         *cursor_session =
                             result.session_id.clone().or(Some(session_id)).map(TableExportCursorSession::Agent);

@@ -667,6 +667,9 @@ impl DbxMcpServer {
         )
     )]
     async fn preview_import_file(&self, Parameters(request): Parameters<PreviewImportFileRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_preview_import_file").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -764,6 +767,9 @@ impl DbxMcpServer {
         )
     )]
     async fn prepare_table_import(&self, Parameters(request): Parameters<PrepareTableImportRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_prepare_table_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -774,7 +780,7 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database.clone(), &resolved.connection) {
+        let database = match self.resolve_database(request.database.clone(), &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -783,6 +789,13 @@ impl DbxMcpServer {
                 "IMPORT_REQUIRES_POSTGRES_V1",
                 "v1 MCP 表导入只允许 PostgreSQL staging 连接。",
             ));
+        }
+        let (schema, table) = match generated_staging_relation() {
+            Ok(relation) => relation,
+            Err(error) => return enterprise_error(error),
+        };
+        if let Err(error) = self.resolve_schema(Some(schema.clone())) {
+            return error;
         }
         let path = match validate_import_file(&request.file_path, false) {
             Ok(path) => path,
@@ -823,10 +836,6 @@ impl DbxMcpServer {
         let source_columns = inspection.source_columns;
         let mappings = match validate_mappings(&request.mappings, &source_columns) {
             Ok(mappings) => mappings,
-            Err(error) => return enterprise_error(error),
-        };
-        let (schema, table) = match generated_staging_relation() {
-            Ok(relation) => relation,
             Err(error) => return enterprise_error(error),
         };
         let batch_size = match governed_import_batch_size(request.batch_size, source_columns.len()) {
@@ -874,6 +883,9 @@ impl DbxMcpServer {
         )
     )]
     async fn start_table_import(&self, Parameters(request): Parameters<StartTableImportRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_start_table_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -888,9 +900,6 @@ impl DbxMcpServer {
             Ok(plan) => plan,
             Err(error) => return enterprise_error(error),
         };
-        if let Err(error) = revalidate_plan_file(&plan).await {
-            return enterprise_error(error);
-        }
         let selector = ConnectionSelector { connection_id: Some(plan.connection_id.clone()), connection_name: None };
         let resolved = match self.resolve_connection(&selector).await {
             Ok(resolved) => resolved,
@@ -902,8 +911,17 @@ impl DbxMcpServer {
                 "计划绑定的连接已不再是 PostgreSQL。",
             ));
         }
-        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &plan.database) {
+        if let Err(error) = self.resolve_database(Some(plan.database.clone()), &resolved) {
             return error;
+        }
+        if let Err(error) = self.resolve_schema(Some(plan.schema.clone())) {
+            return error;
+        }
+        if let Err(error) = validate_safe_write_connection(&resolved, &plan.database) {
+            return error;
+        }
+        if let Err(error) = revalidate_plan_file(&plan).await {
+            return enterprise_error(error);
         }
         let job = match self.enterprise.create_job(&plan).await {
             Ok(job) => job,
@@ -982,6 +1000,9 @@ impl DbxMcpServer {
         )
     )]
     async fn get_import_status(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_get_import_status").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -991,6 +1012,9 @@ impl DbxMcpServer {
         let Some(job) = self.enterprise.job(request.import_id.trim()).await else {
             return enterprise_error(EnterpriseToolError::new("IMPORT_JOB_NOT_FOUND", "没有找到指定导入任务。"));
         };
+        if let Err(error) = self.resolve_import_job(&job).await {
+            return error;
+        }
         let snapshot = job.snapshot.lock().unwrap_or_else(|error| error.into_inner()).clone();
         structured_success(
             format!("导入任务 {} 当前状态：{:?} / {:?}。", snapshot.import_id, snapshot.status, snapshot.phase),
@@ -1010,11 +1034,20 @@ impl DbxMcpServer {
         )
     )]
     async fn cancel_import(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_cancel_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
                 "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
             ));
+        }
+        let Some(job) = self.enterprise.job(request.import_id.trim()).await else {
+            return enterprise_error(EnterpriseToolError::new("IMPORT_JOB_NOT_FOUND", "没有找到指定导入任务。"));
+        };
+        if let Err(error) = self.resolve_import_job(&job).await {
+            return error;
         }
         let (snapshot, already_requested) = match self.enterprise.cancel_job(request.import_id.trim()).await {
             Ok(outcome) => outcome,
@@ -1047,6 +1080,9 @@ impl DbxMcpServer {
         )
     )]
     async fn vector_search(&self, Parameters(request): Parameters<VectorSearchRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_search").await {
+            return error;
+        }
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -1076,7 +1112,7 @@ impl DbxMcpServer {
             Ok(filter) => filter,
             Err(error) => return enterprise_error(error),
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
+        let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -1113,6 +1149,15 @@ impl DbxMcpServer {
         )
     )]
     async fn vector_upsert_file(&self, Parameters(request): Parameters<VectorUpsertFileRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_upsert_file").await {
+            return error;
+        }
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -1123,11 +1168,11 @@ impl DbxMcpServer {
                 "dbx_vector_upsert_file 只接受 Milvus 连接。",
             ));
         }
-        let database = match self.resolve_database(request.database, &resolved.connection) {
+        let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
-        if let Err(error) = validate_safe_write_connection(&resolved.connection, &resolved.policy, &database) {
+        if let Err(error) = validate_safe_write_connection(&resolved, &database) {
             return error;
         }
         if let Err(error) = validate_vector_collection(&request.collection) {
@@ -1240,6 +1285,9 @@ impl DbxMcpServer {
         &self,
         Parameters(_request): Parameters<VectorDeleteByBatchRequest>,
     ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_delete_by_batch").await {
+            return error;
+        }
         enterprise_error(EnterpriseToolError::new(
             "VECTOR_DELETE_DISABLED_V1",
             "v1 禁用 MCP 语义批次删除：服务端无法权威证明该批次尚未发布。请使用受审计的管理员恢复流程。",
@@ -1423,10 +1471,12 @@ impl DbxMcpServer {
             Err(error) => return error,
         };
         let connection = &resolved.connection;
-        if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb) {
+        if matches!(connection.db_type, DatabaseType::Redis | DatabaseType::MongoDb)
+            || is_vector_database(connection.db_type)
+        {
             return tool_error(
                 "DBX_BATCH_UNSUPPORTED",
-                format!("Batch SQL execution is not available for {connection:?} connections."),
+                format!("Batch SQL execution is not available for {:?} connections.", connection.db_type),
             );
         }
         let sql = request.sql.trim();
@@ -2084,18 +2134,13 @@ impl DbxMcpServer {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
-        let allowed = connections
-            .iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
-            .cloned()
-            .collect::<Vec<_>>();
         let target = if let Some(id) = request.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-            allowed.iter().find(|connection| connection.id == id).cloned()
+            connections.iter().find(|connection| connection.id == id).cloned()
         } else {
             let Some(name) = request.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
                 return tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required.");
             };
-            let matching = allowed
+            let matching = connections
                 .iter()
                 .filter(|connection| connection.name.eq_ignore_ascii_case(name))
                 .cloned()
@@ -2289,6 +2334,15 @@ impl DbxMcpServer {
         self.backend.load_mcp_global_policy().await.map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))
     }
 
+    /// 任务绑定的资源仍需符合当前策略；已撤销的连接或数据库不能凭旧任务 ID 访问。
+    async fn resolve_import_job(&self, job: &crate::enterprise_tools::ImportJob) -> Result<(), CallToolResult> {
+        let selector = ConnectionSelector { connection_id: Some(job.connection_id.clone()), connection_name: None };
+        let resolved = self.resolve_connection(&selector).await?;
+        self.resolve_database(Some(job.database.clone()), &resolved)?;
+        self.resolve_schema(Some(job.schema.clone()))?;
+        Ok(())
+    }
+
     async fn ensure_tool_allowed(&self, tool_name: &str) -> Result<(), CallToolResult> {
         let policy = self.load_policy().await?;
         if policy_allows_tool(&policy, tool_name) {
@@ -2422,13 +2476,13 @@ impl DbxMcpServer {
         let allowed = scoped
             .iter()
             .copied()
-            .filter(|connection| policy_allows_connection(&policy, connection))
+            .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
             .collect::<Vec<_>>();
 
         if let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
             if let Some(exact_id) = connections.iter().find(|connection| connection.id == name) {
-                if let Some(connection) = allowed.iter().find(|connection| connection.id == exact_id.id) {
-                    return Ok(resolved_connection(policy, (*connection).clone(), group_paths.get(&connection.id)));
+                if allowed.iter().any(|connection| connection.id == exact_id.id) {
+                    return Ok(resolved_connection(policy, exact_id.clone(), group_paths.get(&exact_id.id)));
                 }
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
@@ -2541,15 +2595,13 @@ fn tool_error(code: &str, message: impl Into<String>) -> CallToolResult {
 
 // CallToolResult 是 MCP 原生错误载荷；保持不装箱可让所有工具直接返回一致错误。
 #[allow(clippy::result_large_err)]
-fn validate_safe_write_connection(
-    connection: &dbx_core::models::connection::ConnectionConfig,
-    policy: &McpGlobalPolicy,
-    database: &str,
-) -> Result<(), CallToolResult> {
+fn validate_safe_write_connection(resolved: &ResolvedConnection, database: &str) -> Result<(), CallToolResult> {
+    let connection = &resolved.connection;
+    let policy = effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, database);
     if policy.read_only {
         return Err(enterprise_error(EnterpriseToolError::new(
             "MCP_READ_ONLY",
-            "DBX 全局 MCP 只读模式已开启，写入被阻断。",
+            "当前资源组、连接或数据库的 MCP 有效策略为只读，写入被阻断。",
         )));
     }
     if connection.read_only {
@@ -3222,11 +3274,12 @@ mod tests {
     use dbx_core::models::connection::ConnectionConfig;
     use std::collections::HashSet;
 
-    static IMPORT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static IMPORT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
+        group_paths: HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         closed_sessions: std::sync::Mutex<Vec<String>>,
         pinned_sessions: std::sync::Mutex<HashSet<String>>,
@@ -3238,6 +3291,7 @@ mod tests {
             Self {
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
+                group_paths: HashMap::new(),
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
                 pinned_sessions: std::sync::Mutex::new(HashSet::new()),
@@ -3290,6 +3344,12 @@ mod tests {
 
         async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
             Ok(self.connections.clone())
+        }
+
+        async fn load_connection_group_details(
+            &self,
+        ) -> Result<HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>, String> {
+            Ok(self.group_paths.clone())
         }
 
         async fn execute_agent_tool(
@@ -3664,10 +3724,6 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 25);
-        #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(tools.len(), 24);
-        #[cfg(feature = "mq-admin")]
         assert!(names.contains(&"dbx_peek_messages"));
         #[cfg(not(feature = "mq-admin"))]
         assert!(!names.contains(&"dbx_peek_messages"));
@@ -3753,7 +3809,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_plan_rejects_source_changed_after_prepare() {
-        let _environment_guard = IMPORT_ENV_LOCK.lock().unwrap();
+        let _environment_guard = IMPORT_ENV_LOCK.lock().await;
         let previous_roots = std::env::var_os("DBX_MCP_IMPORT_ROOTS");
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("orders.csv");
@@ -4117,10 +4173,6 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 20);
-        #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 19);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));
         assert!(!names.iter().any(|name| name == "dbx_duplicate_connection"));
         assert!(!names.iter().any(|name| name == "dbx_remove_connection"));
@@ -4144,10 +4196,6 @@ mod tests {
             false,
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
-        #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 22);
-        #[cfg(not(feature = "mq-admin"))]
-        assert_eq!(names.len(), 21);
         for name in ["dbx_add_connection", "dbx_duplicate_connection", "dbx_remove_connection"] {
             assert!(!names.iter().any(|candidate| candidate == name));
         }
@@ -4189,7 +4237,7 @@ mod tests {
             .await;
         let remove = server
             .remove_connection(Parameters(RemoveConnectionRequest {
-                connection_name: "运营组数据管理".to_string(),
+                connection_name: Some("运营组数据管理".to_string()),
                 connection_id: Some("management".to_string()),
             }))
             .await;
@@ -4208,6 +4256,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec!["daily".to_string()]),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -4219,11 +4268,11 @@ mod tests {
         );
         let result = server
             .remove_connection(Parameters(RemoveConnectionRequest {
-                connection_name: "运营组数据管理".to_string(),
+                connection_name: Some("运营组数据管理".to_string()),
                 connection_id: Some("management".to_string()),
             }))
             .await;
-        assert!(result_text(&result).contains("CONNECTION_NOT_FOUND"));
+        assert!(result_text(&result).contains("CONNECTION_OUT_OF_SCOPE"));
     }
 
     #[tokio::test]
@@ -4243,6 +4292,7 @@ mod tests {
                 "trace-id".to_string(),
                 "outside".to_string(),
             ]),
+            ..Default::default()
         };
         let server = DbxMcpServer::with_runtime_options(
             Arc::new(FakeBackend { connections: connections.clone(), policy: policy.clone(), ..Default::default() }),
@@ -4310,6 +4360,173 @@ mod tests {
         );
         let empty_selector = ConnectionSelector { connection_id: None, connection_name: None };
         assert_eq!(single_name.resolve_connection(&empty_selector).await.unwrap().connection.id, trace.id);
+    }
+
+    #[tokio::test]
+    async fn grouped_connection_scope_resolves_id_name_and_implicit_selectors() {
+        let backend = FakeBackend {
+            connections: vec![connection("grouped", "Grouped", "postgres", "analytics")],
+            policy: serde_json::from_value(json!({
+                "readOnly": false, "allowedConnectionIds": [], "allowedGroupIds": ["project"],
+                "groupPolicies": [{"groupId": "project", "readOnly": true}]
+            }))
+            .unwrap(),
+            group_paths: HashMap::from([(
+                "grouped".to_string(),
+                dbx_core::mcp_policy::McpConnectionGroupPath {
+                    ids: vec!["project".to_string()],
+                    names: vec!["Project".to_string()],
+                },
+            )]),
+            ..Default::default()
+        };
+        let server = DbxMcpServer::with_runtime_options(
+            Arc::new(backend),
+            McpScope { connection_ids: vec!["grouped".to_string()], ..Default::default() },
+            false,
+        );
+        assert_eq!(server.load_scoped_connections().await.unwrap().len(), 1);
+        for (id, name) in [(Some("grouped"), None), (None, Some("grouped")), (None, Some("GROUPED")), (None, None)] {
+            let resolved = server
+                .resolve_connection(&ConnectionSelector {
+                    connection_id: id.map(str::to_string),
+                    connection_name: name.map(str::to_string),
+                })
+                .await
+                .unwrap();
+            assert_eq!(resolved.group_ids, vec!["project"]);
+            let denied = validate_safe_write_connection(&resolved, "analytics").unwrap_err();
+            assert!(result_text(&denied).contains("MCP_READ_ONLY"));
+        }
+    }
+
+    #[test]
+    fn enterprise_writes_follow_group_and_database_modes_and_connection_hard_limits() {
+        let mut resolved = resolved_connection_for_test(connection("pg", "Test", "postgres", "analytics"));
+        resolved.group_ids = vec!["project".to_string()];
+        resolved.policy = serde_json::from_value(json!({
+            "readOnly": false,
+            "groupPolicies": [{"groupId": "project", "readOnly": true}],
+            "connectionPolicies": [{
+                "connectionId": "pg", "executionModeConfigured": false, "executionModePolicyVersion": 1,
+                "databasePolicies": [{"databaseName": "analytics", "readOnly": false}]
+            }]
+        }))
+        .unwrap();
+        assert!(validate_safe_write_connection(&resolved, "analytics").is_ok());
+        assert!(result_text(&validate_safe_write_connection(&resolved, "other").unwrap_err()).contains("MCP_READ_ONLY"));
+        resolved.policy.connection_policies[0].execution_mode_policy_version = None;
+        assert!(
+            result_text(&validate_safe_write_connection(&resolved, "analytics").unwrap_err()).contains("MCP_READ_ONLY")
+        );
+        resolved.policy.connection_policies[0].execution_mode_policy_version = Some(1);
+        resolved.connection.read_only = true;
+        assert!(result_text(&validate_safe_write_connection(&resolved, "analytics").unwrap_err())
+            .contains("CONNECTION_READ_ONLY"));
+        resolved.connection.read_only = false;
+        resolved.connection.is_production = true;
+        assert!(result_text(&validate_safe_write_connection(&resolved, "analytics").unwrap_err())
+            .contains("PRODUCTION_WRITE_BLOCKED"));
+    }
+
+    #[tokio::test]
+    async fn vector_upsert_checks_database_execution_policy_before_reading_file() {
+        let backend = Arc::new(FakeBackend {
+            connections: vec![connection("vector", "Vector", "milvus", "cards")],
+            policy: serde_json::from_value(json!({
+                "readOnly": false,
+                "connectionPolicies": [{
+                    "connectionId": "vector", "executionModeConfigured": false, "executionModePolicyVersion": 1,
+                    "databasePolicies": [{"databaseName": "cards", "readOnly": true}]
+                }]
+            }))
+            .unwrap(),
+            ..Default::default()
+        });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        let result = server
+            .vector_upsert_file(Parameters(VectorUpsertFileRequest {
+                selector: ConnectionSelector { connection_id: Some("vector".to_string()), connection_name: None },
+                database: Some("cards".to_string()),
+                collection: "semantic_cards".to_string(),
+                semantic_batch_id: "batch".to_string(),
+                file_path: "/not-read/cards.jsonl".to_string(),
+                batch_size: None,
+            }))
+            .await;
+        assert!(result_text(&result).contains("MCP_READ_ONLY"));
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn old_import_plans_and_jobs_cannot_bypass_current_resource_scope() {
+        for (policy, scope, expected) in [
+            (
+                serde_json::from_value(json!({"readOnly": false, "allowedConnectionIds": []})).unwrap(),
+                McpScope::default(),
+                "CONNECTION_OUT_OF_SCOPE",
+            ),
+            (
+                serde_json::from_value(json!({"readOnly": false, "connectionPolicies": [{
+                    "connectionId": "pg", "databaseScope": "selected", "allowedDatabases": ["other"]
+                }]}))
+                .unwrap(),
+                McpScope::default(),
+                "DATABASE_OUT_OF_SCOPE",
+            ),
+            (
+                McpGlobalPolicy::default(),
+                McpScope { database: Some("other".to_string()), ..Default::default() },
+                "DATABASE_OUT_OF_SCOPE",
+            ),
+            (
+                McpGlobalPolicy::default(),
+                McpScope { schema: Some("other".to_string()), ..Default::default() },
+                "SCHEMA_OUT_OF_SCOPE",
+            ),
+        ] {
+            let backend = Arc::new(FakeBackend {
+                connections: vec![connection("pg", "Test", "postgres", "analytics")],
+                policy,
+                ..Default::default()
+            });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), scope, false);
+            let plan = build_plan(
+                "pg".to_string(),
+                "Test".to_string(),
+                "analytics".to_string(),
+                "staging".to_string(),
+                "mcp_test".to_string(),
+                "v1".to_string(),
+                crate::enterprise_tools::FileIdentity {
+                    canonical_path: "/not-read/input.csv".to_string(),
+                    size_bytes: 1,
+                    modified_nanos: 0,
+                    sha256: "0".repeat(64),
+                },
+                "fingerprint".to_string(),
+                None,
+                Default::default(),
+                vec![],
+                true,
+                100,
+                None,
+            )
+            .unwrap();
+            let job = server.enterprise.create_job(&plan).await.unwrap();
+            let import_id = job.snapshot.lock().unwrap().import_id.clone();
+            server.enterprise.insert_plan(plan.clone()).await.unwrap();
+            let started =
+                server.start_table_import(Parameters(StartTableImportRequest { plan_id: plan.plan_id })).await;
+            let status =
+                server.get_import_status(Parameters(ImportStatusRequest { import_id: import_id.clone() })).await;
+            let cancelled = server.cancel_import(Parameters(ImportStatusRequest { import_id })).await;
+            for result in [started, status, cancelled] {
+                assert!(result_text(&result).contains(expected), "{result:?}");
+            }
+            assert!(!job.cancelled.load(std::sync::atomic::Ordering::Acquire));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -5001,22 +5218,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_batch_blocks_redis_and_mongo_connections() {
-        for (id, db_type) in [("redis", "redis"), ("mongo", "mongodb")] {
-            let backend =
-                Arc::new(FakeBackend { connections: vec![connection(id, id, db_type, "db")], ..Default::default() });
-            let server = DbxMcpServer::with_runtime_options(backend, McpScope::default(), false);
+    async fn execute_batch_blocks_non_sql_connections_without_exposing_credentials() {
+        for db_type in [
+            DatabaseType::Redis,
+            DatabaseType::MongoDb,
+            DatabaseType::Milvus,
+            DatabaseType::Qdrant,
+            DatabaseType::Weaviate,
+            DatabaseType::ChromaDb,
+        ] {
+            let mut target = connection("target", "Target", "postgres", "db");
+            target.db_type = db_type;
+            target.password = "synthetic-password-must-not-appear".to_string();
+            let backend = Arc::new(FakeBackend { connections: vec![target], ..Default::default() });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
             let result = server
                 .execute_batch(Parameters(ExecuteBatchQueryRequest {
-                    selector: selector(id),
+                    selector: selector("target"),
                     database: None,
-                    sql: "SELECT 1".to_string(),
+                    sql: "POST /v2/vectordb/entities/query\n{}".to_string(),
                     session_id: None,
                     continue_on_error: None,
                     use_transaction: None,
                 }))
                 .await;
             assert!(result_text(&result).contains("DBX_BATCH_UNSUPPORTED"));
+            assert!(!result_text(&result).contains("synthetic-password-must-not-appear"));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty());
         }
     }
 

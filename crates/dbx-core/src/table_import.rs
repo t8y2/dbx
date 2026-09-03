@@ -2471,6 +2471,20 @@ fn parse_xlsx_preview_file_with_options(
     options: &TableImportParseOptions,
     preview_limit: usize,
 ) -> Result<(ParsedImportFile, Vec<String>), String> {
+    parse_xlsx_preview_file_with_header_mode(path, options, preview_limit, false)
+}
+
+/// 使用与 XLSX 预览相同的绝对行号和列窗口读取原始表头，保留空白与重复名称。
+pub fn preview_xlsx_raw_headers(path: &str, options: &TableImportParseOptions) -> Result<Vec<String>, String> {
+    parse_xlsx_preview_file_with_header_mode(path, options, 1, true).map(|(parsed, _)| parsed.columns)
+}
+
+fn parse_xlsx_preview_file_with_header_mode(
+    path: &str,
+    options: &TableImportParseOptions,
+    preview_limit: usize,
+    raw_headers: bool,
+) -> Result<(ParsedImportFile, Vec<String>), String> {
     // Read worksheet XML directly so preview can stop after the requested rows instead of
     // materializing the workbook's complete cell range.
     let file = File::open(path).map_err(|error| error.to_string())?;
@@ -2643,8 +2657,7 @@ fn parse_xlsx_preview_file_with_options(
     }
     let start_row = observed_min_row;
     let title_column_bounds = row_range.title_row.and_then(|title_row| {
-        let absolute_title_row = start_row.saturating_add(title_row.saturating_sub(1));
-        let mut columns = raw_cells.keys().filter_map(|(row, column)| (*row == absolute_title_row).then_some(*column));
+        let mut columns = raw_cells.keys().filter_map(|(row, column)| (*row == title_row).then_some(*column));
         let first = columns.next()?;
         Some(columns.fold((first, first), |(min, max), column| (min.min(column), max.max(column))))
     });
@@ -2673,14 +2686,23 @@ fn parse_xlsx_preview_file_with_options(
     let end_column = dimension_end_column.unwrap_or(observed_end_column).max(observed_end_column);
     let column_count = end_column.saturating_sub(start_column).saturating_add(1);
     let mut columns = if let Some(title_row) = row_range.title_row {
-        unique_import_headers((0..column_count).map(|index| {
+        let headers = (0..column_count).map(|index| {
             let column = start_column + index;
             let value = raw_cells
                 .get(&(title_row, column))
                 .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904, empty_string_as_null))
                 .unwrap_or(serde_json::Value::Null);
-            normalize_header(&xlsx_preview_cell_label(&value), index)
-        }))
+            if raw_headers {
+                xlsx_preview_cell_label(&value)
+            } else {
+                normalize_header(&xlsx_preview_cell_label(&value), index)
+            }
+        });
+        if raw_headers {
+            headers.collect()
+        } else {
+            unique_import_headers(headers)
+        }
     } else {
         Vec::new()
     };
@@ -2952,7 +2974,6 @@ struct XlsxStreamRowsState {
     sender: tokio::sync::mpsc::Sender<Result<XlsxStreamMessage, String>>,
     row_range: ImportRowRange,
     dimension: Option<((usize, usize), (usize, usize))>,
-    start_row: Option<usize>,
     start_column: usize,
     declared_column_count: Option<usize>,
     columns: Vec<String>,
@@ -2981,7 +3002,6 @@ impl XlsxStreamRowsState {
             sender,
             row_range,
             dimension,
-            start_row: None,
             start_column: 0,
             declared_column_count: None,
             columns: expected_columns.unwrap_or_default(),
@@ -2998,10 +3018,8 @@ impl XlsxStreamRowsState {
     }
 
     fn initialize_range(&mut self, first_row: usize, first_column: usize) {
-        let start_row = *self.start_row.get_or_insert(first_row);
-        let relative_row = first_row.saturating_sub(start_row).saturating_add(1);
         let selected_first_row = self.row_range.title_row.unwrap_or(self.row_range.data_start_row);
-        if relative_row < selected_first_row || self.start_column > 0 {
+        if first_row < selected_first_row || self.start_column > 0 {
             return;
         }
         let expected_column_count = (!self.columns.is_empty()).then_some(self.columns.len());
@@ -3122,19 +3140,21 @@ impl XlsxStreamRowsState {
         }
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
-        let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
-        if row_bytes > self.max_batch_bytes {
-            return Err(format!(
-                "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
-                self.max_batch_bytes
-            ));
-        }
-        if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
-            self.emit_rows(progress)?;
+        if self.max_batch_bytes != usize::MAX {
+            let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
+            if row_bytes > self.max_batch_bytes {
+                return Err(format!(
+                    "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
+                    self.max_batch_bytes
+                ));
+            }
+            if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
+                self.emit_rows(progress)?;
+            }
+            self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
         }
         self.pending_rows.push(values);
         self.pending_source_row_numbers.push(absolute_row);
-        self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
             self.emit_rows(progress)?;
@@ -3615,7 +3635,7 @@ where
             row.push(value);
         }
         rows.push(row);
-        source_row_numbers.push(range_start_row + row_number);
+        source_row_numbers.push(row_number);
     }
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
@@ -7689,6 +7709,10 @@ mod tests {
                                 let parsed =
                                     parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
                                 assert_eq!(parsed.total_rows, if last_data_row == 0 { 4 } else { 2 });
+                                assert_eq!(
+                                    parsed.source_row_numbers,
+                                    (9..=if last_data_row == 0 { 12 } else { 10 }).collect::<Vec<_>>()
+                                );
                                 (parsed.columns, parsed.rows)
                             }
                             "stream" => {
@@ -7708,7 +7732,7 @@ mod tests {
                                 while let Some(message) = receiver.blocking_recv() {
                                     match message.unwrap() {
                                         XlsxStreamMessage::Header(header) => columns = header,
-                                        XlsxStreamMessage::Rows(batch) => rows.extend(batch),
+                                        XlsxStreamMessage::Rows { rows: batch, .. } => rows.extend(batch),
                                         _ => {}
                                     }
                                 }
@@ -7750,6 +7774,45 @@ mod tests {
     #[test]
     fn xlsx_absolute_rows_streaming() {
         assert_xlsx_absolute_row_selection("stream");
+    }
+
+    #[test]
+    fn xlsx_absolute_header_bounds_preserve_sparse_columns_and_lineage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sparse-header.xlsx");
+        let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<dimension ref="A3:D10"/><sheetData>
+<row r="3"><c r="A3" t="inlineStr"><is><t>报表说明</t></is></c></row>
+<row r="8"><c r="C8" t="inlineStr"><is><t>标识</t></is></c><c r="D8" t="inlineStr"><is><t>数值</t></is></c></row>
+<row r="9"><c r="C9"><v>1</v></c><c r="D9"><v>2</v></c></row>
+<row r="10"><c r="D10"><v>4</v></c></row>
+</sheetData></worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet, None)).unwrap();
+        let options = TableImportParseOptions {
+            title_row: Some(8),
+            data_start_row: Some(9),
+            last_data_row: Some(10),
+            ..Default::default()
+        };
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 50).unwrap();
+        let expected =
+            vec![vec![serde_json::json!(1), serde_json::json!(2)], vec![serde_json::Value::Null, serde_json::json!(4)]];
+        assert_eq!(preview.columns, vec!["标识", "数值"]);
+        assert_eq!(preview.rows, expected);
+        assert_eq!(preview.source_row_numbers, vec![9, 10]);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+        let mut streamed_rows = Vec::new();
+        let mut source_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            if let XlsxStreamMessage::Rows { rows, source_row_numbers } = message.unwrap() {
+                streamed_rows.extend(rows);
+                source_rows.extend(source_row_numbers);
+            }
+        }
+        assert_eq!(streamed_rows, expected);
+        assert_eq!(source_rows, vec![9, 10]);
     }
 
     #[test]
@@ -7823,7 +7886,7 @@ mod tests {
         .unwrap();
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -7840,8 +7903,14 @@ mod tests {
             ..TableImportParseOptions::default()
         };
         let (sender, _receiver) = tokio::sync::mpsc::channel(16);
-        let mut state =
-            XlsxStreamRowsState::new(sender, effective_import_row_range(&options).unwrap(), None, None, 500);
+        let mut state = XlsxStreamRowsState::new(
+            sender,
+            effective_import_row_range(&options).unwrap(),
+            None,
+            None,
+            500,
+            usize::MAX,
+        );
         state.initialize_range(7, 3);
         assert!(!state.selected_range_finished(10));
         assert!(state.selected_range_finished(11));
@@ -9531,6 +9600,22 @@ mod tests {
             assert!(error.contains(expected), "unexpected error: {error}");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unlimited_xlsx_batches_skip_json_byte_accounting() {
+        let row_range = ImportRowRange { title_row: None, data_start_row: 1, last_data_row: None };
+        let columns = Some(vec!["value".to_string()]);
+
+        let (unlimited_sender, _unlimited_receiver) = tokio::sync::mpsc::channel(2);
+        let mut unlimited = XlsxStreamRowsState::new(unlimited_sender, row_range, None, columns.clone(), 2, usize::MAX);
+        unlimited.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert_eq!(unlimited.pending_bytes, 0);
+
+        let (bounded_sender, _bounded_receiver) = tokio::sync::mpsc::channel(2);
+        let mut bounded = XlsxStreamRowsState::new(bounded_sender, row_range, None, columns, 2, 1_024);
+        bounded.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert!(bounded.pending_bytes > 0);
     }
 
     #[test]
@@ -11707,6 +11792,7 @@ mod tests {
                 vec![serde_json::json!(1), serde_json::json!("Ada")],
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
             ],
+            source_row_numbers: vec![1, 2],
             total_rows: 2,
             effective_encoding: None,
         };

@@ -429,6 +429,9 @@ impl ImportJobSnapshot {
 }
 
 pub struct ImportJob {
+    pub connection_id: String,
+    pub database: String,
+    pub schema: String,
     pub snapshot: Mutex<ImportJobSnapshot>,
     pub cancelled: Arc<AtomicBool>,
 }
@@ -521,6 +524,9 @@ impl EnterpriseRuntime {
     pub async fn create_job(&self, plan: &PreparedImportPlan) -> Result<Arc<ImportJob>, EnterpriseToolError> {
         let import_id = format!("mcp-import-{}", Uuid::new_v4());
         let job = Arc::new(ImportJob {
+            connection_id: plan.connection_id.clone(),
+            database: plan.database.clone(),
+            schema: plan.schema.clone(),
             snapshot: Mutex::new(ImportJobSnapshot::initial(import_id.clone(), plan)),
             cancelled: Arc::new(AtomicBool::new(false)),
         });
@@ -1194,7 +1200,18 @@ pub async fn source_columns_for_preview(
 ) -> Result<Vec<McpSourceColumn>, EnterpriseToolError> {
     let row_range = dbx_core::table_import::effective_import_row_range(parse_options)
         .map_err(|error| EnterpriseToolError::new("IMPORT_ROW_RANGE_INVALID", error))?;
-    let raw_names = if let Some(title_row) = row_range.title_row {
+    let xlsx = Path::new(file_path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "xlsx" | "xlsm"));
+    let raw_names = if row_range.title_row.is_some() && xlsx {
+        let path = file_path.to_string();
+        let options = parse_options.clone();
+        tokio::task::spawn_blocking(move || dbx_core::table_import::preview_xlsx_raw_headers(&path, &options))
+            .await
+            .map_err(|error| EnterpriseToolError::new("IMPORT_HEADER_PREVIEW_FAILED", error.to_string()))?
+            .map_err(|error| EnterpriseToolError::new("IMPORT_HEADER_PREVIEW_FAILED", error))?
+    } else if let Some(title_row) = row_range.title_row {
         let header_options = TableImportParseOptions {
             has_header: Some(false),
             title_row: Some(0),
@@ -1900,7 +1917,7 @@ pub fn vector_top_k(top_k: Option<usize>) -> Result<usize, EnterpriseToolError> 
 }
 
 pub fn validate_embedding(embedding: &[f32]) -> Result<(), EnterpriseToolError> {
-    let dimension = DEFAULT_VECTOR_DIMENSION;
+    let dimension = configured_vector_dimension()?;
     if embedding.len() != dimension {
         return Err(EnterpriseToolError::new(
             "VECTOR_DIMENSION_MISMATCH",
@@ -1911,6 +1928,25 @@ pub fn validate_embedding(embedding: &[f32]) -> Result<(), EnterpriseToolError> 
         return Err(EnterpriseToolError::new("VECTOR_VALUE_INVALID", "向量包含 NaN 或无穷值。"));
     }
     Ok(())
+}
+
+fn configured_vector_dimension() -> Result<usize, EnterpriseToolError> {
+    match std::env::var("DBX_MCP_VECTOR_DIMENSION") {
+        Ok(value) => parse_vector_dimension(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_vector_dimension(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(EnterpriseToolError::new("VECTOR_DIMENSION_CONFIG_INVALID", "DBX_MCP_VECTOR_DIMENSION 必须是正整数。"))
+        }
+    }
+}
+
+fn parse_vector_dimension(value: Option<&str>) -> Result<usize, EnterpriseToolError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_VECTOR_DIMENSION);
+    };
+    value.trim().parse::<usize>().ok().filter(|dimension| *dimension > 0).ok_or_else(|| {
+        EnterpriseToolError::new("VECTOR_DIMENSION_CONFIG_INVALID", "DBX_MCP_VECTOR_DIMENSION 必须是正整数。")
+    })
 }
 
 pub fn vector_output_fields(requested: Option<Vec<String>>) -> Result<Vec<String>, EnterpriseToolError> {
@@ -1995,7 +2031,7 @@ pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<V
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| EnterpriseToolError::new("VECTOR_JSONL_READ_FAILED", format!("读取 JSONL 失败：{error}")))?;
-    let expected_dimension = DEFAULT_VECTOR_DIMENSION;
+    let expected_dimension = configured_vector_dimension()?;
     let mut records = Vec::new();
     let mut card_ids = HashSet::new();
     let mut file_semantic_version: Option<String> = None;
@@ -2464,7 +2500,7 @@ mod tests {
         zip.write_all(content.as_bytes()).unwrap();
     }
 
-    fn write_governed_test_xlsx(path: &Path) {
+    fn write_governed_test_xlsx(path: &Path, sheet: Option<&str>) {
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         write_xlsx_entry(
@@ -2505,7 +2541,7 @@ mod tests {
         write_xlsx_entry(
             &mut zip,
             "xl/worksheets/sheet1.xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+            sheet.unwrap_or(r#"<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:A1"/>
   <sheetData>
@@ -2515,7 +2551,7 @@ mod tests {
     <row r="4"/>
     <row r="5"><c r="A5" t="inlineStr"><is><t>C</t></is></c><c r="B5" t="inlineStr"><is><t>D</t></is></c><c r="C5"><v>20</v></c></row>
   </sheetData>
-</worksheet>"#,
+</worksheet>"#),
         );
         zip.finish().unwrap();
     }
@@ -2532,7 +2568,7 @@ mod tests {
             std::fs::canonicalize(&source).unwrap()
         );
         assert_eq!(
-            validate_import_file_with_roots(source.to_str().unwrap(), &[source.clone()], false, 1024,)
+            validate_import_file_with_roots(source.to_str().unwrap(), std::slice::from_ref(&source), false, 1024,)
                 .unwrap_err()
                 .code,
             "IMPORT_PATH_OUTSIDE_ROOTS"
@@ -2564,7 +2600,7 @@ mod tests {
     fn xlsx_archive_preflight_enforces_entry_and_uncompressed_budgets() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("budget.xlsx");
-        write_governed_test_xlsx(&source);
+        write_governed_test_xlsx(&source, None);
         let permissive = XlsxArchiveLimits {
             entry_count: 16,
             total_uncompressed_bytes: 1024 * 1024,
@@ -2689,6 +2725,16 @@ mod tests {
             build_milvus_filter("2026-08-25T00:00:00+08:00", "semantic-v3", &BTreeMap::new()).unwrap_err().code,
             "VECTOR_ACTIVE_AT_INVALID"
         );
+    }
+
+    #[test]
+    fn vector_dimension_defaults_to_1024_and_accepts_common_overrides() {
+        assert_eq!(parse_vector_dimension(None).unwrap(), 1_024);
+        assert_eq!(parse_vector_dimension(Some("768")).unwrap(), 768);
+        assert_eq!(parse_vector_dimension(Some(" 1536 ")).unwrap(), 1_536);
+        for invalid in ["", "0", "-1", "not-a-number"] {
+            assert_eq!(parse_vector_dimension(Some(invalid)).unwrap_err().code, "VECTOR_DIMENSION_CONFIG_INVALID");
+        }
     }
 
     #[test]
@@ -3143,11 +3189,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sparse_xlsx_header_window_keeps_raw_canonical_and_dbx_columns_aligned() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("sparse.xlsx");
+        write_governed_test_xlsx(
+            &source,
+            Some(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<dimension ref="A3:D10"/><sheetData>
+<row r="3"><c r="A3" t="inlineStr"><is><t>报表说明</t></is></c></row>
+<row r="8"><c r="C8" t="inlineStr"><is><t>备注</t></is></c><c r="D8" t="inlineStr"><is><t>备注</t></is></c></row>
+<row r="9"><c r="C9"><v>1</v></c><c r="D9"><v>2</v></c></row>
+<row r="10"><c r="D10"><v>4</v></c></row>
+</sheetData></worksheet>"#,
+            ),
+        );
+        let options = TableImportParseOptions {
+            title_row: Some(8),
+            data_start_row: Some(9),
+            last_data_row: Some(10),
+            ..Default::default()
+        };
+        let preview = dbx_core::table_import::preview_table_import_file_with_request(
+            dbx_core::table_import::TableImportPreviewRequest {
+                file_path: source.to_string_lossy().to_string(),
+                source_ref: None,
+                source_format: Some(TableImportSourceFormat::Excel),
+                parse_options: options.clone(),
+                preview_limit: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        let columns = source_columns_for_preview(
+            &source.to_string_lossy(),
+            Some(TableImportSourceFormat::Excel),
+            &options,
+            &preview.columns,
+        )
+        .await
+        .unwrap();
+        assert_eq!(columns.len(), 2);
+        for (index, column) in columns.iter().enumerate() {
+            assert_eq!(column.source_position, index + 1);
+            assert_eq!(column.raw_source_name, "备注");
+            assert_eq!(column.canonical_source_name, format!("备注__{}", index + 1));
+            assert_eq!(column.dbx_source_name, preview.columns[index]);
+        }
+        assert_eq!(preview.columns, vec!["备注", "备注_1"]);
+        assert_eq!(preview.source_row_numbers, vec![9, 10]);
+    }
+
+    #[tokio::test]
     async fn governed_xlsx_stream_preserves_absolute_rows_duplicate_positions_and_cancellation() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("input.xlsx");
         let output = directory.path().join("normalized.csv");
-        write_governed_test_xlsx(&source);
+        write_governed_test_xlsx(&source, None);
         let parse_options =
             TableImportParseOptions { title_row: Some(2), data_start_row: Some(3), ..Default::default() };
         let preview = dbx_core::table_import::preview_table_import_file_with_request(

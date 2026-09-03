@@ -103,6 +103,34 @@ public final class JdbcExecutor {
         ResultValueReader valueReader,
         StatementMessageReader statementMessageReader
     ) {
+        return execute(
+            conn,
+            sql,
+            schema,
+            setSchemaSql,
+            resetSchemaSql,
+            maxRows,
+            fetchSize,
+            timeoutSecs,
+            valueReader,
+            statementMessageReader,
+            false
+        );
+    }
+
+    public QueryResult execute(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        int maxRows,
+        Integer fetchSize,
+        int timeoutSecs,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader,
+        boolean advancePastUpdateCounts
+    ) {
         return unchecked(() -> {
             String trimmedSql = trimSql(sql);
             long start = System.currentTimeMillis();
@@ -122,17 +150,31 @@ public final class JdbcExecutor {
                 // Do not translate them to Connection.commit(), which requires autoCommit=false.
                 boolean hasResultSet = stmt.execute(trimmedSql);
                 long elapsed = System.currentTimeMillis() - start;
+                long affectedRows;
+                if (advancePastUpdateCounts) {
+                    affectedRows = 0L;
+                    while (!hasResultSet) {
+                        int updateCount = stmt.getUpdateCount();
+                        if (updateCount < 0) {
+                            break;
+                        }
+                        affectedRows += updateCount;
+                        hasResultSet = stmt.getMoreResults();
+                    }
+                } else {
+                    int updateCount = hasResultSet ? -1 : stmt.getUpdateCount();
+                    affectedRows = updateCount >= 0 ? updateCount : 0L;
+                }
                 QueryResult result;
                 if (hasResultSet) {
                     try (ResultSet rs = stmt.getResultSet()) {
                         result = readResultSet(rs, elapsed, effectiveMaxRows, valueReader);
                     }
                 } else {
-                    int updateCount = stmt.getUpdateCount();
                     result = new QueryResult(
                         Collections.emptyList(),
                         Collections.emptyList(),
-                        updateCount >= 0 ? updateCount : 0,
+                        affectedRows,
                         elapsed,
                         false
                     );
@@ -240,6 +282,30 @@ public final class JdbcExecutor {
         return executePage(conn, sql, schema, setSchemaSql, resetSchemaSql, options, valueReader, StatementMessageReader.NONE, sessions);
     }
 
+    public QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader,
+        boolean advancePastUpdateCounts
+    ) {
+        return executePage(
+            conn,
+            sql,
+            schema,
+            setSchemaSql,
+            resetSchemaSql,
+            options,
+            valueReader,
+            StatementMessageReader.NONE,
+            sessions,
+            advancePastUpdateCounts
+        );
+    }
+
     public QueryPageResult startTableRead(
         Connection conn,
         String sql,
@@ -274,6 +340,32 @@ public final class JdbcExecutor {
         StatementMessageReader statementMessageReader,
         ConcurrentHashMap<String, QuerySession> targetSessions
     ) {
+        return executePage(
+            conn,
+            sql,
+            schema,
+            setSchemaSql,
+            resetSchemaSql,
+            options,
+            valueReader,
+            statementMessageReader,
+            targetSessions,
+            false
+        );
+    }
+
+    private QueryPageResult executePage(
+        Connection conn,
+        String sql,
+        String schema,
+        Function<String, String> setSchemaSql,
+        Supplier<String> resetSchemaSql,
+        QueryPageOptions options,
+        ResultValueReader valueReader,
+        StatementMessageReader statementMessageReader,
+        ConcurrentHashMap<String, QuerySession> targetSessions,
+        boolean advancePastUpdateCounts
+    ) {
         return unchecked(() -> {
             expireIdleSessions(targetSessions, System.currentTimeMillis(), QUERY_SESSION_IDLE_TIMEOUT_MILLIS);
             String trimmedSql = trimSql(sql);
@@ -293,12 +385,26 @@ public final class JdbcExecutor {
                 // JDBC transaction APIs are reserved for executeTransaction.
                 boolean hasResultSet = stmt.execute(trimmedSql);
                 long elapsed = System.currentTimeMillis() - start;
+                long affectedRows;
+                if (advancePastUpdateCounts) {
+                    affectedRows = 0L;
+                    while (!hasResultSet) {
+                        int updateCount = stmt.getUpdateCount();
+                        if (updateCount < 0) {
+                            break;
+                        }
+                        affectedRows += updateCount;
+                        hasResultSet = stmt.getMoreResults();
+                    }
+                } else {
+                    int updateCount = hasResultSet ? -1 : stmt.getUpdateCount();
+                    affectedRows = updateCount >= 0 ? updateCount : 0L;
+                }
                 if (!hasResultSet) {
-                    int updateCount = stmt.getUpdateCount();
                     QueryResult result = new QueryResult(
                         Collections.emptyList(),
                         Collections.emptyList(),
-                        updateCount >= 0 ? updateCount : 0,
+                        affectedRows,
                         elapsed,
                         false
                     );

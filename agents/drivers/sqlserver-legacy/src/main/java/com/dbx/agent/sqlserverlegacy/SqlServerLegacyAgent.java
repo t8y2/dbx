@@ -126,6 +126,11 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    protected boolean advancePastUpdateCounts() {
+        return true;
+    }
+
+    @Override
     protected void afterDisconnect() {
         sqlServer2000Mode = false;
     }

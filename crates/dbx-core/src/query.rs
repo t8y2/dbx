@@ -2929,7 +2929,13 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(pool_key.as_str());
 
-    let is_sqlserver = { matches!(state.pool_handle(&pool_key).await, Some(PoolKind::SqlServer(_))) };
+    let (is_sqlserver, is_sqlserver_agent) = {
+        match state.pool_handle(&pool_key).await {
+            Some(PoolKind::SqlServer(_)) => (true, false),
+            Some(PoolKind::Agent(_)) if db_type == Some(DatabaseType::SqlServer) => (false, true),
+            _ => (false, false),
+        }
+    };
 
     if is_sqlserver {
         return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await.map_err(Into::into);
@@ -2961,10 +2967,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
         );
     }
 
-    let execution_plan = db_type.map_or_else(
-        || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
-        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
-    );
+    let execution_plan = query_execution_plan(sql, db_type, is_sqlserver_agent);
     let continue_on_error = options.continue_on_error && !execution_plan.stop_on_error;
     let statements = execution_plan.statements;
     if statements.is_empty() {
@@ -3101,6 +3104,21 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     }
 
     Ok(results)
+}
+
+fn query_execution_plan(
+    sql: &str,
+    db_type: Option<DatabaseType>,
+    preserve_sqlserver_batches: bool,
+) -> crate::sql::SqlExecutionPlan {
+    if preserve_sqlserver_batches && db_type == Some(DatabaseType::SqlServer) {
+        return crate::sql::SqlExecutionPlan { statements: split_sql_batches(sql), stop_on_error: false };
+    }
+
+    db_type.map_or_else(
+        || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
+        |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
+    )
 }
 
 fn single_statement_multi_result(
@@ -6211,6 +6229,88 @@ for line in sys.stdin:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    async fn sqlserver_agent_echo_state(
+    ) -> (AppState, std::path::PathBuf, std::sync::Arc<crate::db::agent_driver::AgentRuntimeClient>) {
+        let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("agent.py");
+        std::fs::write(
+            &script_path,
+            r#"import json, sys
+print(json.dumps({'ready': True}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['method'] == 'handshake':
+        result = {'protocolVersion': 2, 'agentProtocolVersion': 2, 'capabilities': ['multi_session']}
+    elif req['method'] == 'execute_query':
+        result = {
+            'columns': ['sql'], 'column_types': ['nvarchar'], 'column_sortables': [],
+            'rows': [[req['params']['sql']]], 'affected_rows': 0, 'execution_time_ms': 1,
+            'truncated': False, 'session_id': None, 'has_more': False
+        }
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': result}), flush=True)
+"#,
+        )
+        .unwrap();
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let runtime = crate::db::agent_driver::AgentRuntimeClient::spawn(
+            crate::db::agent_driver::AgentLaunchSpec::new(python)
+                .with_args([script_path.to_string_lossy().to_string()]),
+            "test",
+        )
+        .await
+        .unwrap();
+        runtime.increment_session_count();
+
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        state.configs.write().await.insert("conn-1".to_string(), test_connection_config(DatabaseType::SqlServer));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "conn-1".to_string(),
+                    PoolKind::agent(crate::db::agent_driver::AgentDriverClient::shared_session(
+                        runtime.clone(),
+                        "session-1".to_string(),
+                    )),
+                );
+            })
+            .await;
+
+        (state, dir, runtime)
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_multi_execution_sends_table_variable_script_as_one_batch() {
+        let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+        let sql = "DECLARE @TargetTables TABLE (TableName NVARCHAR(128));\n\
+                   INSERT INTO @TargetTables VALUES ('Bill_Record');\n\
+                   SELECT TableName FROM @TargetTables;";
+
+        let results = execute_multi_core_with_options_for_client_and_progress_typed(
+            &state,
+            "conn-1",
+            "",
+            sql,
+            None,
+            None,
+            QueryExecutionOptions::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].result.rows, vec![vec![serde_json::Value::String(sql.to_string())]]);
+
+        runtime.kill();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     async fn agent_error_state(
         disposition: &str,
     ) -> (AppState, std::path::PathBuf, std::sync::Arc<crate::db::agent_driver::AgentRuntimeClient>) {
@@ -7310,6 +7410,33 @@ for line in sys.stdin:
 
         let serialized = serde_json::to_value(&results[1]).unwrap();
         assert_eq!(serialized.get("server_message"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn sqlserver_agent_execution_plan_preserves_table_variable_batch() {
+        let sql = "DECLARE @TargetTables TABLE (TableName NVARCHAR(128));\n\
+                   INSERT INTO @TargetTables VALUES ('Bill_Record');\n\
+                   SELECT TableName FROM @TargetTables;";
+
+        let plan = query_execution_plan(sql, Some(DatabaseType::SqlServer), true);
+
+        assert_eq!(plan.statements, vec![sql]);
+    }
+
+    #[test]
+    fn sqlserver_agent_execution_plan_splits_only_on_go() {
+        let sql = "DECLARE @x TABLE (id INT);\nINSERT INTO @x VALUES (1);\nGO\nSELECT 2;";
+
+        let plan = query_execution_plan(sql, Some(DatabaseType::SqlServer), true);
+
+        assert_eq!(plan.statements, vec!["DECLARE @x TABLE (id INT);\nINSERT INTO @x VALUES (1);", "SELECT 2;"]);
+    }
+
+    #[test]
+    fn ordinary_agent_execution_plan_still_splits_semicolon_statements() {
+        let plan = query_execution_plan("SELECT 1; SELECT 2;", Some(DatabaseType::Dameng), false);
+
+        assert_eq!(plan.statements, vec!["SELECT 1", "SELECT 2"]);
     }
 
     // Regression test for #6097: SQL Server queries share a single mutex-guarded

@@ -6,6 +6,12 @@ const BRIDGE_VERSION = 1;
 const MAX_BRIDGE_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const MAX_BRIDGE_BINARY_BYTES = 8 * 1024 * 1024;
 
+export interface PluginBridgeTheme {
+  appearance: "light" | "dark";
+  /** Resolved DBX design tokens (`--color-*`, `--radius-*`, ...) for the current theme. */
+  tokens: Record<string, string>;
+}
+
 export interface PluginWorkbenchContext {
   connectionId?: string;
   database?: string;
@@ -37,6 +43,7 @@ interface PluginRequestMessage {
 export class PluginHostBridge {
   private context: PluginWorkbenchContext;
   private locale: string;
+  private theme?: PluginBridgeTheme;
 
   constructor(
     private readonly plugin: InstalledPlugin,
@@ -45,9 +52,11 @@ export class PluginHostBridge {
     private readonly targetWindow: () => Window | null,
     private readonly api: PluginHostBridgeApi,
     locale = "en",
+    theme?: PluginBridgeTheme,
   ) {
     this.context = structuredCloneSafe(context);
     this.locale = locale;
+    this.theme = theme ? structuredCloneSafe(theme) : undefined;
   }
 
   handleWindowMessage(event: MessageEvent): boolean {
@@ -71,6 +80,7 @@ export class PluginHostBridge {
       pluginId: this.plugin.manifest.id,
       contributionId: this.workbench.id,
       locale: this.locale,
+      theme: this.theme ? structuredCloneSafe(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
       context: structuredCloneSafe(this.context),
     });
@@ -90,6 +100,12 @@ export class PluginHostBridge {
   updateLocale(locale: string): void {
     this.locale = locale;
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "env", locale });
+  }
+
+  /** Push resolved theme tokens so the plugin UI can follow DBX light/dark and palette changes. */
+  updateTheme(theme: PluginBridgeTheme): void {
+    this.theme = structuredCloneSafe(theme);
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "env", locale: this.locale, theme: this.theme });
   }
 
   forwardEvent(event: PluginEvent): void {
@@ -181,9 +197,86 @@ export class PluginHostBridge {
 export function pluginSandboxDocument(html: string): string {
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; connect-src 'none'; media-src data: blob:;">`;
   const sdk = `<script>${pluginSdkSource()}</script>`;
-  const injection = `${csp}${sdk}`;
+  const uiKit = `<style>${pluginUiKitCss()}</style>`;
+  const injection = `${csp}${uiKit}${sdk}`;
   if (/<head(?:\s[^>]*)?>/i.test(html)) return html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}${injection}`);
   return `<!doctype html><html><head>${injection}</head><body>${html}</body></html>`;
+}
+
+/**
+ * Minimal official component kit for plugin workbenches. Every class is built
+ * on the DBX design tokens the host pushes through the bridge, so plugin UI
+ * follows light/dark and palette changes without any plugin-side logic.
+ */
+export function pluginUiKitCss(): string {
+  return `
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-foreground, #18181b);
+  background: var(--color-background, #ffffff);
+}
+.dbx-card {
+  border: 1px solid var(--color-border, #e4e4e7);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--color-card, #ffffff);
+  padding: 14px 16px;
+}
+.dbx-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted-foreground, #71717a);
+  margin: 0 0 10px;
+}
+.dbx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--color-border, #d4d4d8);
+  background: var(--color-background, #ffffff);
+  color: var(--color-foreground, #18181b);
+  font-size: 13px;
+  cursor: pointer;
+}
+.dbx-btn:hover { background: var(--color-muted, #f4f4f5); }
+.dbx-btn--primary { background: var(--color-primary, #2563eb); border-color: var(--color-primary, #2563eb); color: var(--color-primary-foreground, #ffffff); }
+.dbx-btn--primary:hover { background: var(--color-primary, #2563eb); opacity: 0.9; }
+.dbx-btn--danger { background: var(--color-destructive, #dc2626); border-color: var(--color-destructive, #dc2626); color: var(--color-destructive-foreground, #ffffff); }
+.dbx-btn--ghost { border-color: transparent; background: transparent; }
+.dbx-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.dbx-label { display: inline-flex; font-size: 12px; font-weight: 500; color: var(--color-foreground, #18181b); }
+.dbx-input, .dbx-select, .dbx-textarea {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--color-input, #d4d4d8);
+  background: var(--color-background, #ffffff);
+  color: var(--color-foreground, #18181b);
+  font-size: 13px;
+  font-family: inherit;
+}
+.dbx-textarea { height: auto; min-height: 64px; padding: 6px 10px; resize: vertical; }
+.dbx-input:focus, .dbx-select:focus, .dbx-textarea:focus { outline: 2px solid var(--color-ring, #93c5fd); outline-offset: 1px; border-color: var(--color-ring, #93c5fd); }
+.dbx-hint { font-size: 12px; color: var(--color-muted-foreground, #71717a); }
+.dbx-row { display: grid; grid-template-columns: minmax(96px, auto) minmax(0, 1fr); gap: 8px 12px; align-items: center; margin-bottom: 10px; }
+.dbx-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.dbx-table th { text-align: left; font-weight: 600; color: var(--color-muted-foreground, #71717a); border-bottom: 1px solid var(--color-border, #e4e4e7); padding: 6px 8px; }
+.dbx-table td { border-bottom: 1px solid var(--color-border, #e4e4e7); padding: 6px 8px; }
+.dbx-badge { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--color-primary-alpha, rgba(37, 99, 235, 0.12)); color: var(--color-primary, #2563eb); font-size: 11px; font-weight: 500; }
+.dbx-link { color: var(--color-primary, #2563eb); text-decoration: none; cursor: pointer; }
+.dbx-link:hover { text-decoration: underline; }
+`.trim();
 }
 
 function pluginSdkSource(): string {
@@ -193,7 +286,18 @@ function pluginSdkSource(): string {
     let sequence = 0;
     let context;
     let locale = 'en';
+    let theme;
     let resolveReady;
+    const applyTheme = (value) => {
+      if (!value || typeof value !== 'object') return;
+      theme = value;
+      const root = document.documentElement;
+      root.dataset.dbxTheme = value.appearance === 'dark' ? 'dark' : 'light';
+      const tokens = value.tokens && typeof value.tokens === 'object' ? value.tokens : {};
+      for (const [name, tokenValue] of Object.entries(tokens)) {
+        if (/^--[a-z0-9-]+$/i.test(name) && typeof tokenValue === 'string') root.style.setProperty(name, tokenValue);
+      }
+    };
     const ready = new Promise((resolve) => { resolveReady = resolve; });
     const request = (method, params, options = {}) => new Promise((resolve, reject) => {
       const id = String(++sequence);
@@ -217,6 +321,7 @@ function pluginSdkSource(): string {
       ready,
       get context() { return context; },
       get locale() { return locale; },
+      get theme() { return theme; },
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
       notify: (method, params) => request('backend.notify', { method, params }),
@@ -250,6 +355,7 @@ function pluginSdkSource(): string {
       } else if (message.type === 'init') {
         context = message.context;
         locale = typeof message.locale === 'string' ? message.locale : 'en';
+        applyTheme(message.theme);
         resolveReady(context);
         listeners.init.forEach((listener) => listener(context));
         dispatchEvent(new CustomEvent('dbx-plugin-init', { detail: message }));
@@ -259,6 +365,7 @@ function pluginSdkSource(): string {
         dispatchEvent(new CustomEvent('dbx-plugin-context', { detail: context }));
       } else if (message.type === 'env') {
         if (typeof message.locale === 'string') locale = message.locale;
+        if (message.theme) applyTheme(message.theme);
         listeners.event.forEach((listener) => listener(message));
         dispatchEvent(new CustomEvent('dbx-plugin-env', { detail: message }));
       } else if (message.type === 'event') {

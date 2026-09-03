@@ -1,5 +1,54 @@
 import type { TreeNode, XuguTablespaceInfo } from "@/types/database";
 
+export type XuguStorageDetailEntry = {
+  key: string;
+  value: string;
+  multiline?: boolean;
+};
+
+function detailValue(value: string | number | null | undefined): string {
+  return value == null ? "" : String(value).trim();
+}
+
+function detailEntries(entries: XuguStorageDetailEntry[]): XuguStorageDetailEntry[] {
+  return entries.filter((entry) => entry.value.length > 0);
+}
+
+/** Build the fields shown by the sidebar's Xugu tablespace detail popover. */
+export function xuguTablespaceDetailRows(tablespace: XuguTablespaceInfo): XuguStorageDetailEntry[] {
+  const total = tablespace.total_chunk_num;
+  const free = tablespace.free_chunk_num;
+  const used = total != null && free != null ? Math.max(total - free, 0) : null;
+  const usage = total != null && total > 0 && used != null ? `${((used / total) * 100).toFixed(1)}%` : "";
+  return detailEntries([
+    { key: "name", value: detailValue(tablespace.space_name) },
+    { key: "nodeId", value: detailValue(tablespace.node_id) },
+    { key: "spaceId", value: detailValue(tablespace.space_id) },
+    { key: "spaceType", value: detailValue(tablespace.space_type) },
+    { key: "datafileCount", value: detailValue(tablespace.datafile_num) },
+    { key: "totalChunks", value: detailValue(total) },
+    { key: "freeChunks", value: detailValue(free) },
+    { key: "usedChunks", value: detailValue(used) },
+    { key: "usage", value: usage },
+    { key: "mediaError", value: detailValue(tablespace.media_error) },
+  ]);
+}
+
+/** Build the fields shown by the sidebar's Xugu datafile detail popover. */
+export function xuguDatafileDetailRows(datafile: NonNullable<TreeNode["xuguDatafile"]>): XuguStorageDetailEntry[] {
+  return detailEntries([
+    { key: "name", value: xuguDatafileDisplayName(datafile.path, datafile.file_no) },
+    { key: "path", value: detailValue(datafile.path), multiline: true },
+    { key: "nodeId", value: detailValue(datafile.node_id) },
+    { key: "spaceId", value: detailValue(datafile.space_id) },
+    { key: "fileNo", value: detailValue(datafile.file_no) },
+    { key: "currentSize", value: detailValue(datafile.curr_size) },
+    { key: "maxSize", value: detailValue(datafile.max_size) },
+    { key: "stepSize", value: detailValue(datafile.step_size) },
+    { key: "reserved", value: detailValue(datafile.reserved1) },
+  ]);
+}
+
 export function xuguDatafileDisplayName(path: string, fileNo: number): string {
   const normalized = path.trim().replaceAll("\\", "/");
   const parts = normalized.split("/").filter(Boolean);
@@ -21,6 +70,7 @@ export function buildXuguTablespaceChildren(parent: Pick<TreeNode, "id" | "conne
       connectionId: parent.connectionId,
       database: parent.database,
       objectName: file.path,
+      xuguDatafile: file,
       xuguDatafilePath: file.path,
       comment: file.path,
     }));

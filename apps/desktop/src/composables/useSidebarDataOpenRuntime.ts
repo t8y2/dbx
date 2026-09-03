@@ -350,6 +350,7 @@ export function useSidebarDataOpenRuntime() {
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         limit,
         includeRowId,
+        injectDefaultTimeSeriesWhere: true,
       });
       // SQL 构建是异步后端调用：期间更晚的导航（openData/openTableTarget）
       // 接管会替换 executionId，旧流程不得再覆盖 SQL/启动查询

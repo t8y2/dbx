@@ -3,7 +3,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -313,6 +313,14 @@ pub struct AiChatSelectionState {
     pub effort_preferences: Vec<AiModelEffortPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<AiAssistantMode>,
+    /// Prompt template ids auto-applied when the AI panel opens, keyed by
+    /// connection db_type. BTreeMap keeps serialized key order stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_templates_by_db_type: BTreeMap<String, Vec<String>>,
+    /// Prompt template ids from the most recent send, keyed by connection
+    /// db_type; used as fallback when no defaults are configured.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_used_templates_by_db_type: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AiChatSelectionState {
@@ -322,6 +330,8 @@ impl Default for AiChatSelectionState {
             active: None,
             effort_preferences: Vec::new(),
             default_mode: None,
+            default_templates_by_db_type: BTreeMap::new(),
+            last_used_templates_by_db_type: BTreeMap::new(),
         }
     }
 }

@@ -350,6 +350,7 @@ fn object_type_keyword(object_type: &ObjectSourceKind) -> &'static str {
         ObjectSourceKind::Event => "EVENT",
         ObjectSourceKind::Sequence => "SEQUENCE",
         ObjectSourceKind::Synonym => "SYNONYM",
+        ObjectSourceKind::Job => "JOB",
         ObjectSourceKind::Package => "PACKAGE",
         ObjectSourceKind::PackageBody => "PACKAGE BODY",
         ObjectSourceKind::Type => "TYPE",
@@ -947,6 +948,8 @@ fn parse_object_source_kind(value: &str) -> Option<ObjectSourceKind> {
         Some(ObjectSourceKind::Sequence)
     } else if value.eq_ignore_ascii_case("SYNONYM") {
         Some(ObjectSourceKind::Synonym)
+    } else if value.eq_ignore_ascii_case("JOB") {
+        Some(ObjectSourceKind::Job)
     } else if value.eq_ignore_ascii_case("PACKAGE") {
         Some(ObjectSourceKind::Package)
     } else if value.eq_ignore_ascii_case("PACKAGE BODY") || value.eq_ignore_ascii_case("PACKAGE_BODY") {
@@ -1736,6 +1739,7 @@ mod tests {
     fn parses_programmable_metadata_object_kinds() {
         assert_eq!(parse_object_source_kind("TRIGGER"), Some(ObjectSourceKind::Trigger));
         assert_eq!(parse_object_source_kind("SYNONYM"), Some(ObjectSourceKind::Synonym));
+        assert_eq!(parse_object_source_kind("JOB"), Some(ObjectSourceKind::Job));
         assert_eq!(parse_object_source_kind("TYPE"), Some(ObjectSourceKind::Type));
         assert_eq!(parse_object_source_kind("TYPE_BODY"), Some(ObjectSourceKind::TypeBody));
         assert_eq!(parse_object_source_kind("PACKAGE BODY"), Some(ObjectSourceKind::PackageBody));

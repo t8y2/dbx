@@ -9,6 +9,7 @@ import AppSidebar from "@/components/layout/AppSidebar.vue";
 import EditorToolbar from "@/components/layout/EditorToolbar.vue";
 import ContentArea from "@/components/layout/ContentArea.vue";
 import AppDialogs from "@/components/layout/AppDialogs.vue";
+import DetachedTabHeader from "@/components/layout/DetachedTabHeader.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -62,7 +63,7 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { openQueryResultArchiveFile } from "@/lib/query/queryResultArchiveFile";
 import { rememberExternalSqlFileTarget, resolveExternalSqlFileTarget, unassociatedExternalSqlFileTarget } from "@/lib/sql/externalSqlFileTarget";
-import { externalSqlFileOpenErrorMessage, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
+import { externalSqlFileOpenErrorMessage, isSqlFilePath, readBrowserSqlFile, sqlFileTitleFromPath } from "@/lib/sql/sqlFileOpen";
 import type { ConnectionConfig, DatabaseType, ObjectSourceKind, QueryTab, TreeNode } from "@/types/database";
 import { parseConnectionDeepLink, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { parseAiConfigDeepLink, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
@@ -137,6 +138,8 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import type { HistoryEntry } from "@/lib/backend/tauri";
 import { resolveDefaultAiSchema, type AiAction } from "@/lib/ai/ai";
 import ExternalSqlFileChangeDialog from "@/components/editor/ExternalSqlFileChangeDialog.vue";
+import { resolveWindowContext } from "@/lib/app/windowContext";
+import { openDetachedTabWindow } from "@/lib/app/detachedTabWindow";
 
 const AiAssistant = defineAsyncComponent(() => import("@/components/editor/AiAssistant.vue"));
 const QueryHistory = defineAsyncComponent(() => import("@/components/editor/QueryHistory.vue"));
@@ -194,6 +197,7 @@ const {
   checkingUpdates,
   updateInfo,
   updateCheckMessage,
+  updateCheckFailed,
   showUpdateDialog,
   isDownloadingUpdate,
   downloadProgress,
@@ -206,6 +210,7 @@ const {
   openUrl,
   checkUpdates,
   openLatestRelease,
+  changeUpdateDownloadSource,
   ignoreCurrentVersion,
   downloadUpdateInBackground,
   cancelDownload,
@@ -217,6 +222,9 @@ const {
 const { setupFileDrop } = useFileDrop();
 
 const isDesktop = isTauriRuntime();
+const windowContext = resolveWindowContext();
+const isDetachedWindowContext = windowContext.kind === "detached-tab";
+const detachedContextTabId = windowContext.kind === "detached-tab" ? windowContext.tabId : undefined;
 const activeAiRunCount = computed(() => (isDesktop ? activeDesktopAiRuns().length : 0));
 /** Runs waiting for a write confirmation — the panel-entry badge shows these
  *  with a higher-priority indicator (parent PRD §4 line 71 / §9). */
@@ -326,6 +334,267 @@ let aiRunsQuitConfirmed = false;
 const activeTab = computed(() => queryStore.tabs.find((t) => t.id === queryStore.activeTabId));
 const tabNavigationHistory = ref(createTabNavigationHistory());
 let pendingTabHistoryNavigationId: string | null = null;
+let detachedEventUnlisteners: Array<() => void> = [];
+let detachedCloseInProgress = false;
+const detachedDropTargetTabId = ref<string | null>(null);
+const showDetachedClosePrompt = ref(false);
+
+function isDetachableTab(tab: QueryTab | undefined): tab is QueryTab {
+  return !!tab && (tab.mode === "query" || tab.mode === "data");
+}
+
+async function emitDetachedEvent(event: string, payload: unknown) {
+  if (!isDesktop) return;
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit(event, payload);
+}
+
+async function isPointOverMainTabBar(position: { x: number; y: number }): Promise<boolean> {
+  if (isDetachedWindowContext) return false;
+  const tabBar = document.querySelector<HTMLElement>("[data-main-tab-bar]");
+  if (!tabBar) return false;
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const currentWindow = getCurrentWindow();
+    const [innerPosition, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
+    const rect = tabBar.getBoundingClientRect();
+    const safeScale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
+    const left = innerPosition.x + rect.left * safeScale;
+    const top = innerPosition.y + rect.top * safeScale;
+    const right = innerPosition.x + rect.right * safeScale;
+    const bottom = innerPosition.y + rect.bottom * safeScale;
+    return position.x >= left && position.x <= right && position.y >= top && position.y <= bottom;
+  } catch {
+    return false;
+  }
+}
+
+async function handleDetachedTabDragging(payload: unknown) {
+  if (isDetachedWindowContext) return;
+  const data = payload as { tabId?: unknown; x?: unknown; y?: unknown } | null;
+  if (typeof data?.tabId !== "string" || typeof data.x !== "number" || typeof data.y !== "number") return;
+  detachedDropTargetTabId.value = (await isPointOverMainTabBar({ x: data.x, y: data.y })) ? data.tabId : null;
+}
+
+async function handleDetachedTabDropped(payload: unknown) {
+  if (isDetachedWindowContext) return;
+  const data = payload as { tabId?: unknown; x?: unknown; y?: unknown } | null;
+  const pointerIsOverTabBar = typeof data?.x === "number" && typeof data.y === "number" ? await isPointOverMainTabBar({ x: data.x, y: data.y }) : false;
+  const shouldReturn = typeof data?.tabId === "string" && (detachedDropTargetTabId.value === data.tabId || pointerIsOverTabBar);
+  detachedDropTargetTabId.value = null;
+  if (!shouldReturn) return;
+  await handleDetachedReturnRequested(payload);
+}
+
+async function finishDetachedWindowClose() {
+  if (!isDetachedWindowContext) return;
+  detachedCloseInProgress = true;
+  await api.approveDetachedWindowClose().catch(() => {});
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow()
+    .close()
+    .catch(() => {});
+}
+
+async function requestDetachedReturn(reason: "return" | "close" = "return") {
+  if (!isDetachedWindowContext || !detachedContextTabId || detachedCloseInProgress) return;
+  const tab = activeTab.value;
+  if (!tab) {
+    if (reason === "close") await closeDetachedTabAndWindow();
+    return;
+  }
+  if (reason === "close" && queryStore.isTabDirty(tab)) {
+    showDetachedClosePrompt.value = true;
+    return;
+  }
+  if (reason === "close") {
+    await closeDetachedTabAndWindow();
+    return;
+  }
+  await persistDetachedReturnRequest(reason);
+}
+
+async function closeDetachedTabAndWindow() {
+  if (!detachedContextTabId) return;
+  try {
+    // X means explicitly discard this detached tab. Delete the durable
+    // handoff before closing so a subsequent startup/lost-window recovery
+    // cannot resurrect a tab the user chose to remove.
+    await api.deleteDetachedTabHandoff(detachedContextTabId);
+    showDetachedClosePrompt.value = false;
+    await finishDetachedWindowClose();
+  } catch (error: any) {
+    detachedCloseInProgress = false;
+    toast(error?.message || String(error), 5000);
+  }
+}
+
+async function persistDetachedReturnRequest(reason: "return" | "close") {
+  if (!detachedContextTabId) return;
+  try {
+    const handoff = await queryStore.prepareDetachedTab(detachedContextTabId, { activeOutputView: activeOutputView.value });
+    await api.saveDetachedTabHandoff(detachedContextTabId, handoff);
+    detachedCloseInProgress = true;
+    await emitDetachedEvent("dbx:detached-tab-return-requested", { tabId: detachedContextTabId, revision: handoff.revision, reason });
+  } catch (error: any) {
+    detachedCloseInProgress = false;
+    toast(error?.message || String(error), 5000);
+  }
+}
+
+async function saveDetachedTabBeforeClose() {
+  if (!detachedContextTabId) return;
+  const tab = activeTab.value;
+  if (!tab) return;
+  const saved = await saveTabForCloseAll(detachedContextTabId);
+  if (!saved || queryStore.isTabDirty(tab)) return;
+  showDetachedClosePrompt.value = false;
+  await closeDetachedTabAndWindow();
+}
+
+async function discardDetachedTabBeforeClose() {
+  if (!detachedContextTabId) return;
+  queryStore.discardTabChanges(detachedContextTabId);
+  showDetachedClosePrompt.value = false;
+  await closeDetachedTabAndWindow();
+}
+
+function cancelDetachedTabClose() {
+  showDetachedClosePrompt.value = false;
+}
+
+async function handleDetachedHeaderDragStart(position: { x: number; y: number }) {
+  if (!detachedContextTabId) return;
+  await emitDetachedEvent("dbx:detached-tab-dragging", { tabId: detachedContextTabId, x: position.x, y: position.y });
+}
+
+async function handleDetachedHeaderDragging(position: { x: number; y: number }) {
+  if (!detachedContextTabId) return;
+  await emitDetachedEvent("dbx:detached-tab-dragging", { tabId: detachedContextTabId, x: position.x, y: position.y });
+}
+
+async function handleDetachedHeaderDragEnd(position: { x: number; y: number }) {
+  if (!detachedContextTabId) return;
+  try {
+    const handoff = await queryStore.prepareDetachedTab(detachedContextTabId, { activeOutputView: activeOutputView.value });
+    await api.saveDetachedTabHandoff(detachedContextTabId, handoff);
+    await emitDetachedEvent("dbx:detached-tab-dropped", { tabId: detachedContextTabId, revision: handoff.revision, x: position.x, y: position.y });
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
+  }
+}
+
+async function handleDetachedCloseRequested(payload: unknown) {
+  const tabId = (payload as { tabId?: unknown } | null)?.tabId;
+  if (typeof tabId !== "string" || tabId !== detachedContextTabId) return;
+  await requestDetachedReturn("close");
+}
+
+async function handleDetachedReturnComplete(payload: unknown) {
+  const tabId = (payload as { tabId?: unknown } | null)?.tabId;
+  if (!isDetachedWindowContext || tabId !== detachedContextTabId) return;
+  await finishDetachedWindowClose();
+}
+
+async function handleDetachedTabReady(payload: unknown) {
+  if (isDetachedWindowContext) return;
+  const data = payload as { tabId?: unknown; revision?: unknown } | null;
+  if (typeof data?.tabId !== "string") return;
+  const handoff = await api.loadDetachedTabHandoff(data.tabId).catch(() => null);
+  if (!handoff || handoff.tabId !== data.tabId) return;
+  if (typeof data.revision === "number" && handoff.revision !== data.revision) return;
+  queryStore.removeTabAfterDetachedReady(data.tabId);
+  await queryStore.flushPendingPersist();
+}
+
+async function handleDetachedTabLost(payload: unknown) {
+  if (isDetachedWindowContext) return;
+  const tabId = (payload as { tabId?: unknown } | null)?.tabId;
+  if (typeof tabId !== "string") return;
+  const handoff = await api.loadDetachedTabHandoff(tabId).catch(() => null);
+  if (!handoff || handoff.tabId !== tabId) return;
+  try {
+    await queryStore.adoptDetachedTab(handoff);
+    // Persist the adopted tab before dropping the durable handoff so an
+    // interrupted shutdown cannot lose it from both stores.
+    await queryStore.flushPendingPersist();
+    await api.deleteDetachedTabHandoff(tabId);
+  } catch (error) {
+    console.warn("[DBX][detached-tab:lost-restore:error]", error);
+  }
+}
+
+async function handleDetachedReturnRequested(payload: unknown) {
+  if (isDetachedWindowContext) return;
+  const data = payload as { tabId?: unknown; revision?: unknown } | null;
+  if (typeof data?.tabId !== "string") return;
+  const handoff = await api.loadDetachedTabHandoff(data.tabId).catch(() => null);
+  if (!handoff || handoff.tabId !== data.tabId) return;
+  if (typeof data.revision === "number" && handoff.revision !== data.revision) return;
+  try {
+    await queryStore.adoptDetachedTab(handoff);
+    // Persist before deleting the handoff so the returned tab exists in at
+    // least one durable store at every point of the flow.
+    await queryStore.flushPendingPersist();
+    await api.deleteDetachedTabHandoff(data.tabId);
+    await emitDetachedEvent("dbx:detached-tab-return-complete", { tabId: data.tabId });
+  } catch (error: any) {
+    toast(error?.message || String(error), 5000);
+  }
+}
+
+async function initDetachedWindow() {
+  if (!isDetachedWindowContext || !detachedContextTabId) return;
+  await settingsStore.initEditorSettings();
+  await connectionStore.initFromDisk();
+  const handoff = await api.loadDetachedTabHandoff(detachedContextTabId);
+  if (!handoff) {
+    toast(t("tabs.detachedTabUnavailable"), 5000);
+    await finishDetachedWindowClose();
+    return;
+  }
+  await queryStore.adoptDetachedTab(handoff);
+  await queryStore.hydrateSavedSqlTabs();
+  if (handoff.runtime.activeOutputView) activeOutputView.value = handoff.runtime.activeOutputView;
+  const { emit } = await import("@tauri-apps/api/event");
+  await emit("dbx:detached-tab-ready", { tabId: detachedContextTabId, revision: handoff.revision });
+}
+
+async function setupDetachedWindowEvents() {
+  if (!isDesktop) return;
+  const { listen } = await import("@tauri-apps/api/event");
+  const events: Array<[string, (payload: unknown) => Promise<void>]> = isDetachedWindowContext
+    ? [
+        ["dbx:detached-tab-close-requested", handleDetachedCloseRequested],
+        ["dbx:detached-tab-return-complete", handleDetachedReturnComplete],
+      ]
+    : [
+        ["dbx:detached-tab-ready", handleDetachedTabReady],
+        ["dbx:detached-tab-return-requested", handleDetachedReturnRequested],
+        ["dbx:detached-tab-dragging", handleDetachedTabDragging],
+        ["dbx:detached-tab-dropped", handleDetachedTabDropped],
+        ["dbx:detached-tab-lost", handleDetachedTabLost],
+      ];
+  for (const [event, handler] of events) {
+    detachedEventUnlisteners.push(await listen(event, (message) => void (handler as (payload: unknown) => Promise<void>)(message.payload)));
+  }
+}
+
+async function detachTab(tab: QueryTab, position?: { x: number; y: number }) {
+  if (isDetachedWindowContext || !isDetachableTab(tab)) return;
+  try {
+    const handoff = await queryStore.prepareDetachedTab(tab.id, { activeOutputView: tab.id === queryStore.activeTabId ? activeOutputView.value : "result" });
+    await api.saveDetachedTabHandoff(tab.id, handoff);
+    const result = await openDetachedTabWindow(tab.id, tab.title, position);
+    if (!result.opened) {
+      await api.deleteDetachedTabHandoff(tab.id);
+      toast(result.error ? `${t("tabs.openInNewWindowFailed")} ${result.error}` : t("tabs.openInNewWindowFailed"), 7000);
+    }
+  } catch (error: any) {
+    await api.deleteDetachedTabHandoff(tab.id).catch(() => {});
+    toast(error?.message || String(error), 5000);
+  }
+}
 
 watch(
   () => activeTab.value?.mode,
@@ -333,6 +602,12 @@ watch(
     if (mode !== "data") isZenMode.value = false;
   },
 );
+
+watch(activeOutputView, (view) => {
+  if (isDetachedWindowContext && detachedContextTabId) {
+    void queryStore.flushDetachedTabPersistence(detachedContextTabId, { activeOutputView: view }).catch(() => {});
+  }
+});
 
 function toggleZenMode() {
   if (activeTab.value?.mode !== "data") return;
@@ -1311,6 +1586,7 @@ function savedSqlTargetForSave(tab: QueryTab) {
  */
 async function formattedSqlForSave(tab: QueryTab): Promise<string> {
   if (!settingsStore.editorSettings.formatSqlOnSqlFileSave) return tab.sql;
+  if (tab.externalSqlPath && !isSqlFilePath(tab.externalSqlPath)) return tab.sql;
   const sqlSnapshot = tab.sql;
   if (!sqlSnapshot.trim()) return sqlSnapshot;
   const connection = connectionStore.getConfig(tab.connectionId);
@@ -1590,7 +1866,11 @@ async function confirmSaveSqlToLibrary() {
 async function saveExternalSqlTabAs(tab: QueryTab): Promise<boolean> {
   if (!canSaveSqlTab(tab) || !isTauriRuntime()) return false;
   try {
-    const saved = await api.saveExternalSqlFile(defaultSavedSqlName(tab.title), await formattedSqlForSave(tab));
+    // Non-SQL external tabs (custom-filtered text files) keep their own file
+    // name and extension when saving a copy instead of being forced to .sql.
+    const currentFileName = tab.externalSqlPath?.split(/[\\/]/).pop()?.trim() ?? "";
+    const filterExtension = currentFileName.includes(".") ? currentFileName.split(".").pop()?.toLowerCase() : undefined;
+    const saved = await api.saveExternalSqlFile(currentFileName || defaultSavedSqlName(tab.title), await formattedSqlForSave(tab), filterExtension);
     if (!saved) return false;
     queryStore.linkExternalSqlPath(tab.id, saved.path, sqlFileTitleFromPath(saved.path), saved.version);
     rememberExternalSqlFileTarget(saved.path, { connectionId: tab.connectionId, database: tab.database, catalog: tab.catalog, schema: tab.schema });
@@ -2908,6 +3188,15 @@ watch(updateNotificationsEnabled, (enabled) => {
 onMounted(async () => {
   console.log("[STARTUP] onMounted begin");
   const mountStart = performance.now();
+  if (isDetachedWindowContext) {
+    await setupDetachedWindowEvents();
+    await initDetachedWindow().catch((error) => {
+      console.error("[STARTUP] detached window initialization failed", error);
+      toast(error?.message || String(error), 5000);
+      void finishDetachedWindowClose();
+    });
+    return;
+  }
   requestAnimationFrame(() => {
     aiPanelReady.value = true;
   });
@@ -2975,6 +3264,7 @@ onMounted(async () => {
     .catch(() => {});
   setupTauriListeners();
   setupCloseActionPromptListener();
+  void setupDetachedWindowEvents();
   void openPendingSqlFiles();
   void openPendingDbFiles();
   void openPendingConnectionLinks();
@@ -2983,6 +3273,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  detachedEventUnlisteners.forEach((unlisten) => unlisten());
+  detachedEventUnlisteners = [];
   cleanupTauriListeners();
   cleanupCloseActionPromptListener();
   if (updateCheckTimer) {
@@ -3010,6 +3302,7 @@ onUnmounted(() => {
     <TooltipProvider :delay-duration="300">
       <div class="h-screen w-screen max-w-full min-w-[760px] min-h-[600px] flex flex-col bg-background text-foreground overflow-hidden" :class="{ 'dbx-desktop-window-frame': drawDesktopWindowFrame }" :style="appUiFontFamilyStyle">
         <AppToolbar
+          v-if="!isDetachedWindowContext"
           :is-dark="isDark"
           :theme-mode="themeMode"
           :show-ai-panel="showAiPanel"
@@ -3048,8 +3341,9 @@ onUnmounted(() => {
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
         />
 
-        <div :class="isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
+        <div :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
           <AppSidebar
+            v-if="!isDetachedWindowContext"
             v-show="sidebarOpen && !isZenMode"
             ref="appSidebarRef"
             :sidebar-width="sidebarWidth"
@@ -3061,21 +3355,24 @@ onUnmounted(() => {
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
             @add-to-ai="addToAi"
           />
-          <div v-show="!sidebarOpen && !isZenMode" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
+          <div v-if="!isDetachedWindowContext" v-show="!sidebarOpen && !isZenMode" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
             <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
               <ChevronsRight class="h-4 w-4" />
             </Button>
           </div>
 
-          <div v-show="!isAiPanelMaximized || isZenMode" :class="isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
-            <div class="h-full flex min-w-0" :class="tabWorkspaceLayoutClass">
+          <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
+            <div class="h-full flex min-w-0" :class="isDetachedWindowContext ? 'flex-col' : tabWorkspaceLayoutClass">
               <AppTabBar
+                v-if="!isDetachedWindowContext"
                 ref="appTabBarRef"
                 :driver-store-open="driverStoreTabOpen"
                 :driver-store-active="driverStoreActive"
                 :settings-page-open="settingsPageTabOpen"
                 :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
+                :detached-drop-target="detachedDropTargetTabId !== null"
+                :can-detach-tabs="isDesktop"
                 @toggle-zen-mode="toggleZenMode"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
@@ -3088,7 +3385,31 @@ onUnmounted(() => {
                 @save-all-tab-close="handleSaveAllPendingTabClose"
                 @discard-all-tab-close="handleDiscardAllPendingTabClose"
                 @cancel-tab-close="cancelPendingAppClose"
+                @detach-tab="detachTab"
               />
+              <DetachedTabHeader
+                v-else-if="activeTab"
+                :title="activeTab.title"
+                :dirty="queryStore.isTabDirty(activeTab)"
+                @return="requestDetachedReturn('return')"
+                @close="requestDetachedReturn('close')"
+                @drag-start="handleDetachedHeaderDragStart"
+                @dragging="handleDetachedHeaderDragging"
+                @drag-end="handleDetachedHeaderDragEnd"
+              />
+              <Dialog v-if="isDetachedWindowContext" :open="showDetachedClosePrompt" @update:open="(open) => (showDetachedClosePrompt = open)">
+                <DialogContent class="sm:max-w-[420px]">
+                  <DialogHeader>
+                    <DialogTitle>{{ t("tabs.detachedCloseTitle") }}</DialogTitle>
+                  </DialogHeader>
+                  <p class="text-sm text-muted-foreground">{{ t("tabs.detachedCloseMessage") }}</p>
+                  <DialogFooter>
+                    <Button variant="outline" @click="cancelDetachedTabClose">{{ t("common.cancel") }}</Button>
+                    <Button variant="secondary" class="border-border" @click="discardDetachedTabBeforeClose">{{ t("editor.discardChanges") }}</Button>
+                    <Button @click="saveDetachedTabBeforeClose">{{ t("savedSql.save") }}</Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
               <div class="flex min-h-0 min-w-0 flex-1 flex-col">
                 <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
                 <EditorSettingsPage
@@ -3247,7 +3568,7 @@ onUnmounted(() => {
           </div>
 
           <div
-            v-if="showAiPanel"
+            v-if="!isDetachedWindowContext && showAiPanel"
             v-show="!isZenMode"
             :class="[isClassicLayout ? 'h-full relative z-30 isolate bg-background' : 'h-full relative z-30 isolate rounded-md border border-border/80 bg-background', isAiPanelMaximized ? 'min-w-0 flex-1' : 'min-w-[180px] max-w-full']"
             :style="isAiPanelMaximized ? {} : { width: aiPanelWidth + 'px' }"
@@ -3273,21 +3594,36 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-if="showHistory" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: historyWidth + 'px' }">
+          <div
+            v-if="!isDetachedWindowContext && showHistory"
+            v-show="!isAiPanelMaximized && !isZenMode"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
+            :style="{ width: historyWidth + 'px' }"
+          >
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startHistoryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <QueryHistory :current-connection-id="activeTab?.connectionId" :current-database="activeTab?.database" @restore="restoreHistorySql" @analyze-ai="analyzeHistoryWithAi" @close="closeRightSidebarPanel('history')" />
             </div>
           </div>
 
-          <div v-if="showSqlLibraryPanel" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlLibraryWidth + 'px' }">
+          <div
+            v-if="!isDetachedWindowContext && showSqlLibraryPanel"
+            v-show="!isAiPanelMaximized && !isZenMode"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
+            :style="{ width: sqlLibraryWidth + 'px' }"
+          >
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlLibraryResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlLibraryPanel @close="closeRightSidebarPanel('sqlLibrary')" />
             </div>
           </div>
 
-          <div v-if="showSqlFilePanel" v-show="!isAiPanelMaximized && !isZenMode" :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'" :style="{ width: sqlFilePanelWidth + 'px' }">
+          <div
+            v-if="!isDetachedWindowContext && showSqlFilePanel"
+            v-show="!isAiPanelMaximized && !isZenMode"
+            :class="isClassicLayout ? 'h-full shrink-0 relative z-30 isolate bg-background' : 'h-full shrink-0 relative z-30 isolate rounded-md border border-border/80 bg-background'"
+            :style="{ width: sqlFilePanelWidth + 'px' }"
+          >
             <div class="panel-resize-handle panel-resize-handle--left" @mousedown="startSqlFilePanelResize" />
             <div class="h-full min-h-0 overflow-hidden rounded-[inherit]">
               <SqlFilePanel @close="closeRightSidebarPanel('sqlFile')" />
@@ -3354,6 +3690,9 @@ onUnmounted(() => {
           v-model:open="showUpdateDialog"
           :update-info="updateInfo"
           :update-check-message="updateCheckMessage"
+          :checking-updates="checkingUpdates"
+          :update-check-failed="updateCheckFailed"
+          :update-download-source="settingsStore.editorSettings.updateDownloadSource"
           :is-downloading-update="isDownloadingUpdate"
           :download-progress="downloadProgress"
           :update-downloaded="updateDownloaded"
@@ -3362,6 +3701,7 @@ onUnmounted(() => {
           :is-ignoring-update="isIgnoringUpdate"
           :active-task-count="activeUpdateTaskCount"
           @open-latest-release="openLatestRelease"
+          @change-download-source="changeUpdateDownloadSource"
           @download-in-background="downloadUpdateInBackground"
           @cancel-download="cancelDownload"
           @install-downloaded="installDownloadedUpdate"

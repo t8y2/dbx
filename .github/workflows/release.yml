@@ -122,14 +122,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # assetNamePattern renames every bundle artifact of a matrix leg, so
+          # it is set only on aarch64 legs (aarch64 -> arm64). x64 legs leave
+          # it empty and keep the default Tauri CLI names (x64.dmg, amd64
+          # deb/rpm/AppImage) used by downloadLinks and package consumers.
           - platform: macos-latest
             target: aarch64-apple-darwin
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
           - platform: macos-15-intel
             target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - platform: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+            asset_pattern: "DBX_[version]_arm64[setup][ext]"
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -268,6 +274,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          # Empty on x64 legs: tauri-action then keeps the default Tauri CLI names.
+          assetNamePattern: ${{ matrix.asset_pattern }}
           args: --target ${{ matrix.target }}
 
       - name: Verify AppImage input methods
@@ -412,6 +420,8 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseDraft: true
+          # No assetNamePattern: the default Tauri CLI names already produce
+          # DBX_[version]_x64/arm64-setup.exe and keep the _en-US.msi names.
           args: --target ${{ matrix.target }} --config src-tauri/tauri.vsign.conf.json
 
       - name: Verify Windows bundles
@@ -445,7 +455,7 @@ jobs:
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $arch = "${{ matrix.arch }}"
           $bundleDir = "target/${{ matrix.target }}/release/bundle/nsis"
-          $offlineName = "DBX_${version}_${arch}-webview2-offline-setup.exe"
+          $offlineName = "DBX_${version}_${arch}-offline-setup.exe"
           $before = @{}
 
           if (Test-Path $bundleDir) {
@@ -551,10 +561,14 @@ jobs:
     needs: release-ready
     runs-on: windows-2022
     environment: release-signing
+    # No sccache here: the loader patch rewrites a file inside the cargo
+    # registry, which is invisible to any compile cache. v0.6.0 shipped a
+    # binary linked against the wrong (>= 1.0.1054.31) WebView2 loader even
+    # though the patched 1.0.902.49 loader was verified on disk, so caching is
+    # disabled for this target until the patch is vendored into the source
+    # tree.
     env:
       CARGO_INCREMENTAL: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
       RUSTFLAGS: -C debuginfo=line-tables-only -C target-feature=+crt-static
       VSIGN_CERT_HASH: ${{ vars.VSIGN_CERT_HASH }}
       VSIGN_OPERATOR_SHA1: ${{ vars.VSIGN_OPERATOR_SHA1 }}
@@ -579,36 +593,6 @@ jobs:
         with:
           toolchain: nightly-2026-07-22
           components: rust-src
-
-      - name: Setup sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        with:
-          version: "v0.10.0"
-
-      - name: Configure S3 sccache
-        if: env.SCCACHE_GHA_ENABLED != 'true'
-        shell: bash
-        env:
-          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
-          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
-          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
-          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
-          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
-          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
-        run: |
-          {
-            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
-            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
-            echo "SCCACHE_REGION=${CACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
-            echo "SCCACHE_S3_USE_SSL=true"
-            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
-            # Linking, bundling, and signing run for 30+ minutes after the last
-            # rustc call; the server's 10-minute default idle timeout would
-            # exit first and zero the counters shown by "Show sccache stats".
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-          } >> "$GITHUB_ENV"
 
       - name: Prepare Win7-compatible WebView2 loader
         shell: pwsh
@@ -644,6 +628,10 @@ jobs:
         shell: pwsh
         run: ./.github/scripts/assert-win7-pe-compat.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
 
+      - name: Audit Win7 WebView2 loader markers
+        shell: pwsh
+        run: ./.github/scripts/assert-webview2-win7-loader.ps1 -BinaryPath target/x86_64-win7-windows-msvc/release/dbx.exe
+
       - name: Setup TrustAsia VSign
         shell: pwsh
         env:
@@ -660,7 +648,7 @@ jobs:
         run: |
           $version = "${env:GITHUB_REF_NAME}".TrimStart("v")
           $bundleDir = "target/x86_64-win7-windows-msvc/release/bundle/nsis"
-          $offlineName = "DBX_${version}_x64-win7-server2012r2-webview2-109-offline-setup.exe"
+          $offlineName = "DBX_${version}_x64-win7-server2012r2-offline-setup.exe"
           $checksumName = "${offlineName}.sha256"
           $cargoMetadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $appVersion = ($cargoMetadata.packages | Where-Object { $_.name -eq "dbx" } | Select-Object -First 1).version
@@ -690,12 +678,6 @@ jobs:
           "$hash  $offlineName" | Set-Content -LiteralPath $checksumName -Encoding ascii
           gh release upload "${env:GITHUB_REF_NAME}" $offlineName $checksumName `
             --repo "${env:GITHUB_REPOSITORY}" --clobber
-
-      - name: Show sccache stats
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: ${SCCACHE_PATH} --show-stats
 
       - name: Remove temporary VSign files
         if: always()

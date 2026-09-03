@@ -158,6 +158,7 @@ pub enum ObjectSourceKind {
     Event,
     Sequence,
     Synonym,
+    Job,
     Package,
     PackageBody,
     Type,
@@ -848,6 +849,14 @@ mod tests {
 
         assert_eq!(kind, ObjectSourceKind::Synonym);
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"SYNONYM\"");
+    }
+
+    #[test]
+    fn object_source_kind_accepts_job_wire_value() {
+        let kind: ObjectSourceKind = serde_json::from_str("\"JOB\"").unwrap();
+
+        assert_eq!(kind, ObjectSourceKind::Job);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"JOB\"");
     }
 
     #[test]

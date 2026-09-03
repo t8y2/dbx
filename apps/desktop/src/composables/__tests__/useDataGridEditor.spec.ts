@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   executeConditionalUpdate: vi.fn(),
   cancelConditionalUpdate: vi.fn(),
   executeInTransaction: vi.fn(),
+  executeInManualTransaction: vi.fn(),
   addHistory: vi.fn(),
 }));
 
@@ -19,6 +20,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeConditionalUpdate: mocks.executeConditionalUpdate,
   cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
+  executeInManualTransaction: mocks.executeInManualTransaction,
   unlockConnectionWrites: vi.fn(),
   lockConnectionWrites: vi.fn(),
   connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
@@ -586,11 +588,21 @@ describe("useDataGridEditor saveChanges reload", () => {
     mocks.executeConditionalUpdate.mockReset();
     mocks.cancelConditionalUpdate.mockReset();
     mocks.executeInTransaction.mockReset();
+    mocks.executeInManualTransaction.mockReset();
     mocks.addHistory.mockReset();
     mocks.getConfig.mockReset();
   });
 
-  function createSaveTestEditor(options: { currentPage?: Ref<number>; prepareFullReload?: () => void; customSaveHandler?: { save: ReturnType<typeof vi.fn> } } = {}) {
+  function createSaveTestEditor(
+    options: {
+      currentPage?: Ref<number>;
+      prepareFullReload?: () => void;
+      customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      manualTransactionSessionId?: string;
+      refreshSavedRows?: ReturnType<typeof vi.fn>;
+      onManualTransactionMutation?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
     const emit = vi.fn();
     const currentPage = options.currentPage ?? ref(1);
     const result = ref<{ columns: string[]; rows: CellValue[][] }>({
@@ -617,6 +629,8 @@ describe("useDataGridEditor saveChanges reload", () => {
       sourceColumns: computed(() => undefined),
       onExecuteSql: computed(() => undefined),
       customSaveHandler: computed(() => options.customSaveHandler),
+      manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
+      onManualTransactionMutation: options.onManualTransactionMutation,
       sql: computed(() => undefined),
       searchText: ref(""),
       whereFilterInput: ref(""),
@@ -629,6 +643,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       cacheKey: computed(() => undefined),
       getRowItem: () => undefined,
       prepareFullReload: options.prepareFullReload,
+      refreshSavedRows: options.refreshSavedRows,
       emit,
     });
     return { editor, emit, currentPage };
@@ -645,6 +660,39 @@ describe("useDataGridEditor saveChanges reload", () => {
 
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("saves query-result edits through the active manual transaction session", async () => {
+    const statement = "UPDATE orders_test SET status='shipped' WHERE id=1";
+    const refreshSavedRows = vi.fn().mockResolvedValue(true);
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [statement], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+
+    const { editor, emit } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", refreshSavedRows, onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("txn-session-1", statement, "app", undefined);
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(refreshSavedRows).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("marks the manual transaction dirty before a result-grid mutation can fail", async () => {
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockRejectedValue(new Error("Query timed out"));
+
+    const { editor } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toContain("Query timed out");
   });
 
   it("executes a conditional update immediately, records affected rows, and reloads", async () => {

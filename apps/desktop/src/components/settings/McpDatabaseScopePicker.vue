@@ -10,6 +10,8 @@ import type { McpConnectionPolicy } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 type DatabaseScope = McpConnectionPolicy["databaseScope"];
+type DatabaseExecutionMode = "inherit" | "read_only" | "safe_write" | "high_risk_write";
+type ExecutionMode = Exclude<DatabaseExecutionMode, "inherit">;
 
 const { t } = useI18n();
 
@@ -20,6 +22,7 @@ const props = withDefaults(
     connections: readonly ConnectionConfig[];
     allowedConnectionIds: readonly string[] | null;
     connectionPolicies: readonly McpConnectionPolicy[];
+    globalExecutionMode: ExecutionMode;
     disabled?: boolean;
     busy?: boolean;
   }>(),
@@ -45,6 +48,7 @@ const selectedConnection = computed(() => scopedConnections.value.find((connecti
 const selectedPolicy = computed(() => props.connectionPolicies.find((policy) => policy.connectionId === selectedConnectionId.value));
 const selectedScope = computed<DatabaseScope>(() => selectedPolicy.value?.databaseScope ?? "all");
 const selectedDatabases = computed(() => selectedPolicy.value?.allowedDatabases ?? []);
+const selectedDatabasePolicies = computed(() => selectedPolicy.value?.databasePolicies ?? []);
 const displayedDatabases = computed(() => {
   const query = search.value.trim().toLocaleLowerCase();
   return (databasesByConnection.value[selectedConnectionId.value] ?? []).filter((database) => !query || database.toLocaleLowerCase().includes(query));
@@ -77,21 +81,29 @@ function policyFor(connectionId: string): McpConnectionPolicy {
       readOnly: false,
       allowDangerousSql: false,
       executionModeConfigured: false,
+      executionModePolicyVersion: null,
       databaseScope: "all",
       allowedDatabases: [],
+      databasePolicies: [],
     }
   );
 }
 
 function updateSelectedPolicy(patch: Partial<McpConnectionPolicy>) {
   if (props.disabled || !selectedConnectionId.value) return;
-  const next = { ...policyFor(selectedConnectionId.value), ...patch };
+  const existing = policyFor(selectedConnectionId.value);
+  const migration = existing.executionModePolicyVersion === 1 ? {} : { ...promoteLegacyConnectionDefault(existing), executionModePolicyVersion: 1 as const };
+  const next = { ...existing, ...migration, ...patch };
   const policies = props.connectionPolicies.filter((policy) => policy.connectionId !== selectedConnectionId.value);
   emit("update:connectionPolicies", [...policies, next]);
 }
 
 function setScope(scope: DatabaseScope) {
-  updateSelectedPolicy({ databaseScope: scope, allowedDatabases: scope === "selected" ? selectedDatabases.value : [] });
+  updateSelectedPolicy({
+    databaseScope: scope,
+    allowedDatabases: scope === "selected" ? selectedDatabases.value : [],
+    databasePolicies: scope === "selected" ? selectedDatabasePolicies.value.filter((policy) => selectedDatabases.value.includes(policy.databaseName)) : [],
+  });
 }
 
 function setConnectionPage(page: number) {
@@ -111,7 +123,77 @@ function selectConnection(connectionId: string) {
 
 function toggleDatabase(database: string, checked: boolean) {
   const databases = checked ? [...new Set([...selectedDatabases.value, database])] : selectedDatabases.value.filter((item) => item !== database);
-  updateSelectedPolicy({ databaseScope: "selected", allowedDatabases: databases });
+  updateSelectedPolicy({
+    databaseScope: "selected",
+    allowedDatabases: databases,
+    databasePolicies: selectedDatabasePolicies.value.filter((policy) => databases.includes(policy.databaseName)),
+  });
+}
+
+function databaseExecutionMode(database: string): DatabaseExecutionMode {
+  const policy = selectedDatabasePolicies.value.find((item) => item.databaseName === database);
+  if (!policy) return "inherit";
+  if (policy.readOnly) return "read_only";
+  return policy.allowDangerousSql ? "high_risk_write" : "safe_write";
+}
+
+function connectionExecutionMode(): DatabaseExecutionMode {
+  const policy = selectedPolicy.value;
+  if (!policy || !policy.executionModeConfigured) return "inherit";
+  if (policy.readOnly) return "read_only";
+  return policy.allowDangerousSql ? "high_risk_write" : "safe_write";
+}
+
+function effectiveDatabaseExecutionMode(database: string): ExecutionMode {
+  const databaseMode = databaseExecutionMode(database);
+  if (databaseMode !== "inherit") return databaseMode;
+  const connectionMode = connectionExecutionMode();
+  return connectionMode === "inherit" ? props.globalExecutionMode : connectionMode;
+}
+
+function executionModeLabel(mode: ExecutionMode): string {
+  return t(mode === "read_only" ? "settings.mcpExecutionModeReadOnly" : mode === "safe_write" ? "settings.mcpExecutionModeSafeWrite" : "settings.mcpExecutionModeHighRiskWrite");
+}
+
+function executionModeRank(mode: DatabaseExecutionMode): number {
+  return mode === "read_only" ? 0 : mode === "safe_write" ? 1 : mode === "high_risk_write" ? 2 : 3;
+}
+
+function promoteLegacyConnectionDefault(policy: McpConnectionPolicy): Pick<McpConnectionPolicy, "readOnly" | "allowDangerousSql" | "executionModeConfigured" | "databasePolicies"> {
+  if (policy.executionModePolicyVersion === 1) {
+    return { readOnly: policy.readOnly, allowDangerousSql: policy.allowDangerousSql, executionModeConfigured: policy.executionModeConfigured, databasePolicies: policy.databasePolicies };
+  }
+  const legacyMode = connectionExecutionMode();
+  const effectiveMode = executionModeRank(legacyMode) < executionModeRank(props.globalExecutionMode) ? legacyMode : props.globalExecutionMode;
+  const databasePolicies = policy.databasePolicies.map((databasePolicy) => {
+    const databaseMode = databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
+    const effectiveDatabaseMode = executionModeRank(databaseMode) < executionModeRank(effectiveMode) ? databaseMode : effectiveMode;
+    return {
+      ...databasePolicy,
+      readOnly: effectiveDatabaseMode === "read_only",
+      allowDangerousSql: effectiveDatabaseMode === "high_risk_write",
+    };
+  });
+  return {
+    readOnly: effectiveMode === "read_only",
+    allowDangerousSql: effectiveMode === "high_risk_write",
+    executionModeConfigured: true,
+    databasePolicies,
+  };
+}
+
+function setDatabaseExecutionMode(database: string, mode: DatabaseExecutionMode) {
+  const existing = policyFor(selectedConnectionId.value);
+  const migrated = promoteLegacyConnectionDefault(existing);
+  const policies = migrated.databasePolicies.filter((policy) => policy.databaseName !== database);
+  if (mode !== "inherit") {
+    policies.push({
+      databaseName: database,
+      readOnly: mode === "read_only",
+      allowDangerousSql: mode === "high_risk_write",
+    });
+  }
+  updateSelectedPolicy({ ...promoteLegacyConnectionDefault(existing), databasePolicies: policies, executionModePolicyVersion: 1 });
 }
 
 function addManualDatabase() {
@@ -185,12 +267,21 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
           </label>
         </div>
         <div class="space-y-1">
-          <button v-for="connection in pagedScopedConnections" :key="connection.id" type="button" class="w-full rounded-md px-2 py-2 text-left transition-colors hover:bg-muted" :class="selectedConnectionId === connection.id ? 'bg-muted' : ''" @click="selectConnection(connection.id)">
-            <div class="flex items-center justify-between gap-2">
+          <button
+            v-for="connection in pagedScopedConnections"
+            :key="connection.id"
+            type="button"
+            class="w-full cursor-pointer rounded-md px-2 py-2 text-left transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+            :class="selectedConnectionId === connection.id ? 'bg-muted' : ''"
+            :aria-current="selectedConnectionId === connection.id ? 'true' : undefined"
+            @pointerdown="selectConnection(connection.id)"
+            @click="selectConnection(connection.id)"
+          >
+            <div class="pointer-events-none flex items-center justify-between gap-2">
               <span class="min-w-0 truncate text-sm font-medium">{{ connection.name }}</span>
               <Badge variant="outline" class="shrink-0 text-[10px] font-normal">{{ scopeSummary(connection) }}</Badge>
             </div>
-            <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{{ connection.db_type }} · {{ connection.host || connection.database || connection.id }}</p>
+            <p class="pointer-events-none mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{{ connection.db_type }} · {{ connection.host || connection.database || connection.id }}</p>
           </button>
         </div>
         <div v-if="connectionPageCount > 1" class="mt-2 flex items-center justify-center gap-2 border-t pt-2 text-xs text-muted-foreground">
@@ -246,6 +337,16 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
             <label v-for="database in pagedDatabases" :key="database" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 text-xs last:border-b-0 hover:bg-muted/50">
               <input type="checkbox" :checked="selectedDatabases.includes(database)" :disabled="disabled || busy" @change="toggleDatabase(database, ($event.target as HTMLInputElement).checked)" />
               <span class="min-w-0 flex-1 truncate font-mono">{{ database }}</span>
+              <div v-if="selectedDatabases.includes(database)" class="flex shrink-0 items-center gap-1.5">
+                <span class="text-[11px] text-muted-foreground">{{ t("settings.mcpDatabasePolicySetting") }}</span>
+                <select :value="databaseExecutionMode(database)" :disabled="disabled || busy" class="h-7 max-w-32 rounded border bg-background px-1.5 text-[11px]" @click.stop @change="setDatabaseExecutionMode(database, ($event.target as HTMLSelectElement).value as DatabaseExecutionMode)">
+                  <option value="inherit">{{ t("settings.mcpDatabasePolicyInherit") }}</option>
+                  <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
+                  <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
+                  <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
+                </select>
+                <Badge variant="secondary" class="text-[10px] font-normal">{{ t("settings.mcpDatabasePolicyEffective", { mode: executionModeLabel(effectiveDatabaseExecutionMode(database)) }) }}</Badge>
+              </div>
               <Check v-if="selectedDatabases.includes(database)" class="h-3.5 w-3.5 text-green-600" />
             </label>
             <div v-if="databasePageCount > 1" class="flex items-center justify-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground">

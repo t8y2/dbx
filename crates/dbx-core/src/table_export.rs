@@ -519,8 +519,8 @@ enum TableExportCursorSession {
 }
 
 async fn table_export_cursor_kind(state: &AppState, pool_key: &str) -> Option<TableExportCursorKind> {
-    let connections = state.connections.read().await;
-    match connections.get(pool_key) {
+    let pool_handle = state.pool_handle(pool_key).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::Agent(_)) => Some(TableExportCursorKind::Agent),
         Some(PoolKind::ExternalDriver { .. }) => Some(TableExportCursorKind::ExternalDriver),
         _ => None,
@@ -677,12 +677,11 @@ async fn fetch_table_export_batch(
                     fetch_size: Some(active_batch_size),
                     timeout_secs: (query_timeout > 0).then_some(query_timeout),
                 };
-                let connections = state.connections.read().await;
-                let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+                let pool_handle = state.pool_handle(pool_key).await;
+                let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
                     return Err("Agent table read requires an agent connection".to_string());
                 };
                 let client = client.clone();
-                drop(connections);
                 let mut client = client.lock().await;
                 match client.start_table_read::<QueryResult>(params).await {
                     Ok(result) => {
@@ -731,12 +730,11 @@ async fn fetch_table_export_batch(
     if let Some(session) = cursor_session.clone() {
         return match session {
             TableExportCursorSession::Agent(session_id) => {
-                let connections = state.connections.read().await;
-                let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+                let pool_handle = state.pool_handle(pool_key).await;
+                let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
                     return Err("Table read session requires an agent connection".to_string());
                 };
                 let client = client.clone();
-                drop(connections);
                 let mut client = client.lock().await;
                 match client.fetch_table_read_page::<QueryResult>(&session_id, active_batch_size).await {
                     Ok(result) => {
@@ -848,12 +846,11 @@ async fn close_table_export_cursor_if_open(
     };
     match session {
         TableExportCursorSession::Agent(session_id) => {
-            let connections = state.connections.read().await;
-            let Some(PoolKind::Agent(client)) = connections.get(pool_key) else {
+            let pool_handle = state.pool_handle(pool_key).await;
+            let Some(PoolKind::Agent(client)) = pool_handle.as_ref() else {
                 return;
             };
             let client = client.clone();
-            drop(connections);
             let mut client = client.lock().await;
             let _ = client.close_table_read_session::<bool>(&session_id).await;
         }
@@ -893,12 +890,11 @@ async fn stream_native_table_rows(
     cancel_token: CancellationToken,
     on_row: impl FnMut(&[Value]) -> Result<(), String>,
 ) -> Result<bool, String> {
-    let connections = state.connections.read().await;
-    match connections.get(pool_key) {
+    let pool_handle = state.pool_handle(pool_key).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::Mysql(pool, mode)) => {
             let pool = pool.clone();
             let bare = *mode == MysqlMode::Bare;
-            drop(connections);
             crate::db::mysql::stream_query_rows(
                 &pool,
                 sql,
@@ -913,13 +909,11 @@ async fn stream_native_table_rows(
         }
         Some(PoolKind::Postgres(pool)) => {
             let pool = pool.clone();
-            drop(connections);
             crate::db::postgres::stream_query_rows(&pool, sql, row_limit, cancelled, on_row).await?;
             Ok(true)
         }
         Some(PoolKind::SqlServer(client)) => {
             let client = client.clone();
-            drop(connections);
             let mut on_row = on_row;
             let mut client = client.lock().await;
             crate::db::sqlserver::stream_first_result_set(&mut client, sql, row_limit, Some(cancel_token), |item| {
@@ -2188,10 +2182,14 @@ mod tests {
         let export_id = format!("export-{}", uuid::Uuid::new_v4());
         let pool_key =
             format!("{}:session:{}", config.id, table_export_client_session_id(&export_id).replace(':', "_"));
-        state.connections.write().await.insert(
-            pool_key,
-            PoolKind::ExternalDriver { driver_id: "jdbc".to_string(), config: Arc::new(config), session },
-        );
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    pool_key,
+                    PoolKind::ExternalDriver { driver_id: "jdbc".to_string(), config: Arc::new(config), session },
+                );
+            })
+            .await;
 
         let output = dir.join("export.csv");
         let request = TableExportRequest {
@@ -2942,7 +2940,7 @@ mod tests {
         );
         assert_eq!(progress.last().and_then(|event| event.total_rows), Some(3));
         assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Done)));
-        assert!(fixture.state.connections.read().await.is_empty());
+        assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
 
         cleanup_external_driver_export_fixture(fixture);
     }
@@ -2999,7 +2997,7 @@ mod tests {
 
         run_external_driver_export(&fixture).await.expect("row-limited JDBC export should succeed");
         assert_eq!(std::fs::read_to_string(&fixture.calls).unwrap(), "executeQueryPage\ncloseQuerySession\n");
-        assert!(fixture.state.connections.read().await.is_empty());
+        assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
 
         cleanup_external_driver_export_fixture(fixture);
     }
@@ -3052,7 +3050,7 @@ mod tests {
             std::fs::read_to_string(&fixture.calls).unwrap(),
             "executeQueryPage\nfetchQueryPage\ncloseQuerySession\n"
         );
-        assert!(fixture.state.connections.read().await.is_empty());
+        assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
 
         cleanup_external_driver_export_fixture(fixture);
     }
@@ -3087,7 +3085,7 @@ mod tests {
 
         assert!(cancel_requested_at.elapsed() < Duration::from_secs(2));
         assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Cancelled)));
-        assert!(fixture.state.connections.read().await.is_empty());
+        assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
         clear_export_cancelled(&fixture.request.export_id).await;
         cleanup_external_driver_export_fixture(fixture);
     }
@@ -3126,7 +3124,7 @@ mod tests {
 
         assert!(cancel_requested_at.elapsed() < Duration::from_secs(2));
         assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Cancelled)));
-        assert!(fixture.state.connections.read().await.is_empty());
+        assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
         clear_export_cancelled(&fixture.request.export_id).await;
         cleanup_external_driver_export_fixture(fixture);
     }

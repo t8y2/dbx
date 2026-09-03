@@ -2655,6 +2655,11 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
         }
         serde_json::Value::Object(obj) => {
             if obj.len() == 1 {
+                if obj.contains_key("$regularExpression") {
+                    if let Ok(Some(value)) = parse_extended_json_value(obj) {
+                        return value;
+                    }
+                }
                 if let Some(serde_json::Value::String(hex)) = obj.get("$oid") {
                     if let Ok(oid) = ObjectId::parse_str(hex) {
                         return Bson::ObjectId(oid);
@@ -3966,6 +3971,25 @@ mod tests {
         assert!(matches!(doc.get("_id"), Some(Bson::ObjectId(oid)) if oid.to_hex() == "507f1f77bcf86cd799439011"));
         assert!(matches!(doc.get("created_at"), Some(Bson::DateTime(_))));
         assert!(matches!(doc.get("count"), Some(Bson::Int64(42))));
+    }
+
+    #[test]
+    fn json_filter_to_document_parses_extended_json_regex() {
+        let value = serde_json::json!({
+            "packagingRatio": {
+                "$regularExpression": {
+                    "pattern": "^[^:：]*盒",
+                    "options": "im",
+                }
+            }
+        });
+        let doc = json_filter_to_document(&value).unwrap();
+
+        assert!(matches!(
+            doc.get("packagingRatio"),
+            Some(Bson::RegularExpression(regex))
+                if regex.pattern == "^[^:：]*盒" && regex.options == "im"
+        ));
     }
 
     #[test]

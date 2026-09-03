@@ -1037,14 +1037,13 @@ async fn try_export_postgres_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(pool) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::Postgres(pool) => Some(pool.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1212,14 +1211,13 @@ async fn try_export_mysql_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some((pool, bare)) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some((pool, bare)) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::Mysql(pool, mode) => Some((pool.clone(), *mode == crate::connection::MysqlMode::Bare)),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1487,14 +1485,13 @@ async fn try_export_clickhouse_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some(client) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(client) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::ClickHouse(client) => Some(client.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1659,14 +1656,13 @@ async fn try_export_sqlserver_query_result_stream(
     }
 
     let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
-    let connections = state.connections.read().await;
-    let Some(client) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(client) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::SqlServer(client) => Some(client.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key);

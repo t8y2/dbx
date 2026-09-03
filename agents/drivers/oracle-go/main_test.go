@@ -2274,6 +2274,93 @@ func TestRewriteOracleXMLTypeNestedRownumQuery(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleSTGeometrySelectStar(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM TEST_GEOM`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"},
+				{Name: "NOTE", DataType: "VARCHAR2"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "ID", SDE.ST_AsText("GEOM") AS "GEOM", "NOTE" FROM TEST_GEOM`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSTGeometryExplicitColumn(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.GEOM AS shape FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "sde"}}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT SDE.ST_AsText(t."GEOM") AS shape FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSTGeometryAsDeferredValue(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.GEOM FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"},
+			}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."GEOM" IS NULL THEN NULL ELSE '<ST_GEOMETRY>' END AS "GEOM", CASE WHEN t."GEOM" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1" FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestOracleSTGeometryRequiresSDEOwner(t *testing.T) {
+	if !isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY", DataTypeOwner: "sDe"}) {
+		t.Fatal("expected SDE.ST_GEOMETRY to be recognized")
+	}
+	if isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY", DataTypeOwner: "OTHER"}) {
+		t.Fatal("unexpected rewrite for an unrelated ST_GEOMETRY type")
+	}
+	if isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY"}) {
+		t.Fatal("unexpected rewrite when the type owner is unknown")
+	}
+}
+
+func TestRewriteOracleSTGeometrySkipsSetQueries(t *testing.T) {
+	input := `SELECT GEOM FROM TEST_GEOM UNION ALL SELECT GEOM FROM TEST_GEOM`
+	sqlText, err := rewriteOracleSelectSQL(
+		input,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"}}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqlText != input {
+		t.Fatalf("set query should remain unchanged, got: %s", sqlText)
+	}
+}
+
 func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
 	called := false
 	sqlText, err := rewriteOracleXMLTypeSelectSQL(
@@ -2967,6 +3054,24 @@ func (r *oracleFastRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+type oraclePanicDriver struct{}
+
+func (d *oraclePanicDriver) Open(string) (driver.Conn, error) {
+	return &oraclePanicConn{}, nil
+}
+
+type oraclePanicConn struct{}
+
+func (c *oraclePanicConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("use QueryContext directly")
+}
+func (c *oraclePanicConn) Close() error              { return nil }
+func (c *oraclePanicConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+func (c *oraclePanicConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	panic("simulated go-ora panic")
+}
+
 // -- timeout tests --
 
 func TestOracleDMLCancelInterruptsExecContext(t *testing.T) {
@@ -3038,6 +3143,32 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 	}
 	if rowCount != 3 {
 		t.Fatalf("expected 3 rows, got %d", rowCount)
+	}
+}
+
+func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
+	driverName := "oracle-test-panic-" + strings.ReplaceAll(t.Name(), "/", "-")
+	sql.Register(driverName, &oraclePanicDriver{})
+	db, err := sql.Open(driverName, "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := newServer()
+	s.db = db
+	rows, err := s.queryRowsWithTimeout("SELECT geom FROM test", nil, 1)
+	if rows != nil {
+		t.Fatal("panic path must not return rows")
+	}
+	var panicErr oracleDriverPanicError
+	if !errors.As(err, &panicErr) {
+		t.Fatalf("expected oracle driver panic error, got %v", err)
+	}
+	s.activeCancelMu.Lock()
+	defer s.activeCancelMu.Unlock()
+	if s.activeCancel != nil || s.activeTimer != nil || len(s.activeRows) != 0 {
+		t.Fatalf("panic cleanup left active query state: cancel=%v timer=%v rows=%d", s.activeCancel != nil, s.activeTimer != nil, len(s.activeRows))
 	}
 }
 

@@ -102,6 +102,21 @@ test("Elasticsearch JSON keys bring their value brackets along", () => {
   assert.equal(applyCompletion(scalarKey, scalarKey.length, '"size"'), 'GET /orders/_search\n{\n  "size": ');
 });
 
+test("Elasticsearch query snippets provide term field and value placeholders", () => {
+  const text = 'GET /orders/_search\n{\n    te';
+  assert.equal(getElasticsearchCompletionContext(text, text.length).mode, "json");
+  const term = buildElasticsearchCompletionItems(text, text.length).find((item) => item.label === "term");
+
+  assert.ok(term);
+  assert.equal(term?.type, "snippet");
+  assert.equal(
+    applyCompletion(text, text.length, "term"),
+    'GET /orders/_search\n{\n    "term": {\n      "field": "value"\n    }',
+  );
+  assert.match(term?.apply ?? "", /\$\{field\}/);
+  assert.match(term?.apply ?? "", /\$\{value\}/);
+});
+
 test("Elasticsearch JSON keys keep the scaffold out when a separator already exists", () => {
   const text = 'GET /orders/_search\n{\n  "qu": {}';
   const cursor = 'GET /orders/_search\n{\n  "qu'.length;

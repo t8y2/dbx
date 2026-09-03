@@ -109,6 +109,34 @@ BEGIN
   NULL;
 END;`;
 
+// Mirrors the SP_ETL_LOG procedure from the 2026-09-01 ArgoDB session: PL/SQL-style
+// body with semicolons inside INSERT statements plus a block comment header. The
+// frontend splitter must keep the whole definition as ONE statement — otherwise
+// "execute current statement" sends only the first fragment
+// (`CREATE ... IS BEGIN INSERT INTO ...`) and the server returns 42000 + 1101.
+const argoProcedureFixture = `CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING --模式名
+)
+/****************************************
+@AUTHOR:xiangxu
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME
+  );
+END;`;
+
 const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
 
 CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
@@ -442,6 +470,17 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
+    expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+  });
+
+  it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {
+    const range = statementRangeAtCursor(argoProcedureFixture, indexOf(argoProcedureFixture, "ETL_LOG", 2), "argo");
+    expect(range?.sql.trim()).toBe(argoProcedureFixture.trim());
   });
 
   it("keeps consecutive nested Oracle blocks inside their procedure", () => {
@@ -842,6 +881,67 @@ GET /_cat/indices`;
     const sql = "UPDATE users\nSET name = 'a'\nWHERE id = 1\nSELECT * FROM users;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "name"));
     expect(range?.sql.trim()).toBe("UPDATE users\nSET name = 'a'\nWHERE id = 1");
+  });
+
+  it("keeps StarRocks asynchronous materialized-view clauses in the CREATE statement", () => {
+    const createSql = `CREATE MATERIALIZED VIEW mv_monthly_events
+PARTITION BY date_trunc('month', event_time)
+DISTRIBUTED BY RANDOM BUCKETS 1
+REFRESH ASYNC
+AS
+SELECT
+  id,
+  event_time,
+  amount
+FROM base_events`;
+    const sql = `${createSql}\nREFRESH MATERIALIZED VIEW mv_monthly_events;`;
+
+    for (const marker of ["CREATE", "PARTITION", "DISTRIBUTED", "REFRESH ASYNC", "SELECT", "base_events"]) {
+      expect(statementRangeAtCursor(sql, indexOf(sql, marker), "starrocks")?.sql.trim()).toBe(createSql);
+    }
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH MATERIALIZED"), "starrocks")?.sql.trim()).toBe("REFRESH MATERIALIZED VIEW mv_monthly_events");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([createSql, "REFRESH MATERIALIZED VIEW mv_monthly_events"]);
+  });
+
+  it("keeps StarRocks scheduled materialized-view clauses in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_daily_events
+REFRESH SCHEDULE EVERY (INTERVAL 1 DAY)
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks manual materialized-view refresh in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_manual_events
+REFRESH MANUAL
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks deferred and immediate refresh modifiers with async on the next line", () => {
+    const deferredSql = `CREATE MATERIALIZED VIEW mv_deferred_events
+REFRESH DEFERRED ASYNC
+AS
+SELECT id FROM base_events`;
+    const immediateSql = `CREATE MATERIALIZED VIEW mv_immediate_events
+REFRESH IMMEDIATE
+ASYNC
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "SELECT"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "ASYNC"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(rangeSqlTexts(executableStatementRanges(deferredSql, "starrocks"))).toEqual([deferredSql]);
+    expect(rangeSqlTexts(executableStatementRanges(immediateSql, "starrocks"))).toEqual([immediateSql]);
   });
 
   it("keeps MySQL ALTER TABLE column comments with the column definition", () => {

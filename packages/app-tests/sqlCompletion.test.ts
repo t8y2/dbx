@@ -948,6 +948,27 @@ test("replaces partially typed quoted identifiers without duplicating quotes", (
   }
 });
 
+test("replaces typed unquoted prefixes through semantic SQL completion", () => {
+  for (const prefix of ["n", "na"] as const) {
+    const sql = `select * from test where ${prefix}`;
+    const cursor = sql.length;
+    const options = { databaseType: "sqlserver", dialect: "sqlserver" } as const;
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, options), getSqlCompletionContext(sql, cursor, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [{ name: "test", schema: "dbo", type: "table" }],
+      columnsByTable: new Map([["test", [{ name: "name", table: "test", schema: "dbo" }]]]),
+      ...options,
+    });
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+    const column = replacement.items.find((item) => item.type === "column" && item.label === "name");
+
+    assert.ok(column, prefix);
+    assert.deepEqual(context.replacementRange, { start: cursor - prefix.length, end: cursor }, prefix);
+    assert.equal(replacement.from, cursor - prefix.length, prefix);
+    assert.equal(`${sql.slice(0, replacement.from)}${column.apply ?? column.label}${sql.slice(cursor)}`, "select * from test where name", prefix);
+  }
+});
+
 test("suggests same-prefix tables while editing double-quoted Oracle-family identifiers", () => {
   for (const databaseType of ["oracle", "dameng"] as const) {
     const markedSql = 'SELECT * FROM "Fo|"';

@@ -499,6 +499,16 @@ func isTimeAggregationColumn(column string) bool {
 			return true
 		}
 	}
+	for _, prefix := range []string{"max_by(", "min_by("} {
+		if len(trimmed) <= len(prefix) || !strings.EqualFold(trimmed[:len(prefix)], prefix) {
+			continue
+		}
+		arguments := trimmed[len(prefix):]
+		comma := strings.IndexByte(arguments, ',')
+		if comma > 0 && strings.EqualFold(strings.TrimSpace(arguments[:comma]), "time") {
+			return true
+		}
+	}
 	return false
 }
 

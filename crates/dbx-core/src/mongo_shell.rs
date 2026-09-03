@@ -847,10 +847,202 @@ fn parse_explain_verbosity(args: &[String]) -> Result<String, String> {
 }
 
 fn normalized_json(input: &str) -> Result<String, String> {
-    let transformed = transform_shell_constructors(input.trim())?;
+    let transformed = transform_shell_regex_literals(input.trim())?;
+    let transformed = transform_shell_constructors(&transformed)?;
     let value: Value =
         json5::from_str(&transformed).map_err(|error| format!("Invalid MongoDB JSON argument: {error}"))?;
     serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+struct ShellRegexLiteral {
+    end: usize,
+    pattern: String,
+    options: String,
+}
+
+fn shell_regex_literal_at(input: &str, index: usize) -> Result<Option<ShellRegexLiteral>, String> {
+    if !input[index..].starts_with('/') || !is_shell_regex_value_position(input, index) {
+        return Ok(None);
+    }
+
+    read_shell_regex_literal(input, index).map(Some)
+}
+
+fn read_shell_regex_literal(input: &str, index: usize) -> Result<ShellRegexLiteral, String> {
+    let mut cursor = index + 1;
+    let mut pattern = String::new();
+    let mut escaped = false;
+    let mut in_character_class = false;
+    let mut closed = false;
+    while cursor < input.len() {
+        let current = input[cursor..].chars().next().ok_or("Invalid MongoDB regex literal.")?;
+        if matches!(current, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+            return Err("MongoDB regex literals cannot contain an unescaped line break.".to_string());
+        }
+        cursor += current.len_utf8();
+        if escaped {
+            pattern.push(current);
+            escaped = false;
+            continue;
+        }
+        if current == '\\' {
+            pattern.push(current);
+            escaped = true;
+            continue;
+        }
+        if current == '[' {
+            in_character_class = true;
+        } else if current == ']' && in_character_class {
+            in_character_class = false;
+        } else if current == '/' && !in_character_class {
+            closed = true;
+            break;
+        }
+        pattern.push(current);
+    }
+    if !closed {
+        return Err("Unclosed MongoDB regex literal.".to_string());
+    }
+
+    let mut options = Vec::new();
+    while cursor < input.len() {
+        let option = input[cursor..].chars().next().ok_or("Invalid MongoDB regex literal.")?;
+        if !option.is_ascii_alphabetic() {
+            break;
+        }
+        // JS-only regex flags (d/g/v/y) have no server-side meaning for a
+        // stored regex literal — MongoDB's $regex has no global modifier — so
+        // drop them instead of failing the whole command.
+        if matches!(option, 'd' | 'g' | 'v' | 'y') {
+            cursor += option.len_utf8();
+            continue;
+        }
+        if !matches!(option, 'i' | 'm' | 's' | 'u') || options.contains(&option) {
+            return Err(format!("Unsupported or duplicate MongoDB regex option: {option}"));
+        }
+        options.push(option);
+        cursor += option.len_utf8();
+    }
+    options.sort_unstable();
+    Ok(ShellRegexLiteral { end: cursor, pattern, options: options.into_iter().collect() })
+}
+
+fn transform_shell_regex_literals(input: &str) -> Result<String, String> {
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        let rest = &input[index..];
+        let ch = rest.chars().next().ok_or("Invalid MongoDB argument.")?;
+
+        if matches!(ch, '"' | '\'') {
+            let start = index;
+            index += ch.len_utf8();
+            let mut escaped = false;
+            while index < input.len() {
+                let current = input[index..].chars().next().ok_or("Invalid MongoDB argument.")?;
+                index += current.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == ch {
+                    break;
+                }
+            }
+            output.push_str(&input[start..index]);
+            continue;
+        }
+
+        if rest.starts_with("//") {
+            let end = rest.find(['\n', '\r']).map(|offset| index + offset).unwrap_or(input.len());
+            output.push_str(&input[index..end]);
+            index = end;
+            continue;
+        }
+        if rest.starts_with("/*") {
+            let end = rest.find("*/").map(|offset| index + offset + 2).unwrap_or(input.len());
+            output.push_str(&input[index..end]);
+            index = end;
+            continue;
+        }
+
+        if ch != '/' || !is_shell_regex_value_position(input, index) {
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        }
+
+        let literal = shell_regex_literal_at(input, index)?.ok_or("Invalid MongoDB regex literal.")?;
+        output.push_str(
+            &serde_json::to_string(&serde_json::json!({
+                "$regularExpression": {
+                    "pattern": literal.pattern,
+                    "options": literal.options,
+                }
+            }))
+            .map_err(|error| error.to_string())?,
+        );
+        index = literal.end;
+    }
+    Ok(output)
+}
+
+fn is_shell_regex_value_position(input: &str, index: usize) -> bool {
+    let mut previous_significant = None;
+    let mut cursor = 0;
+    while cursor < index {
+        let rest = &input[cursor..];
+        let current = rest.chars().next().expect("cursor is on a character boundary");
+
+        if matches!(current, '"' | '\'') {
+            let quote = current;
+            cursor += current.len_utf8();
+            let mut escaped = false;
+            while cursor < index {
+                let character = input[cursor..].chars().next().expect("cursor is on a character boundary");
+                cursor += character.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else if character == quote {
+                    break;
+                }
+            }
+            previous_significant = Some('\0');
+            continue;
+        }
+
+        if rest.starts_with("//") {
+            cursor = rest.find(['\n', '\r']).map(|offset| cursor + offset).unwrap_or(index).min(index);
+            continue;
+        }
+        if rest.starts_with("/*") {
+            cursor = rest.find("*/").map(|offset| cursor + offset + 2).unwrap_or(index).min(index);
+            continue;
+        }
+
+        if current == '/' && is_shell_regex_value_prefix(previous_significant) {
+            if let Ok(literal) = read_shell_regex_literal(input, cursor) {
+                if literal.end <= index {
+                    previous_significant = Some('\0');
+                    cursor = literal.end;
+                    continue;
+                }
+            }
+        }
+
+        if !current.is_whitespace() {
+            previous_significant = Some(current);
+        }
+        cursor += current.len_utf8();
+    }
+
+    is_shell_regex_value_prefix(previous_significant)
+}
+
+fn is_shell_regex_value_prefix(previous_significant: Option<char>) -> bool {
+    previous_significant.is_none_or(|character| matches!(character, ':' | '[' | ',' | '('))
 }
 
 fn transform_shell_constructors(input: &str) -> Result<String, String> {
@@ -858,6 +1050,25 @@ fn transform_shell_constructors(input: &str) -> Result<String, String> {
     let mut index = 0;
     while index < input.len() {
         let rest = &input[index..];
+        let ch = rest.chars().next().ok_or("Invalid MongoDB argument.")?;
+        if matches!(ch, '"' | '\'') {
+            let start = index;
+            index += ch.len_utf8();
+            let mut escaped = false;
+            while index < input.len() {
+                let current = input[index..].chars().next().ok_or("Invalid MongoDB argument.")?;
+                index += current.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == ch {
+                    break;
+                }
+            }
+            output.push_str(&input[start..index]);
+            continue;
+        }
         let constructor = if rest.starts_with("ObjectId(") {
             Some("ObjectId(")
         } else if rest.starts_with("ISODate(") {
@@ -866,7 +1077,6 @@ fn transform_shell_constructors(input: &str) -> Result<String, String> {
             None
         };
         let Some(constructor) = constructor else {
-            let ch = rest.chars().next().ok_or("Invalid MongoDB argument.")?;
             output.push(ch);
             index += ch.len_utf8();
             continue;
@@ -944,14 +1154,15 @@ fn aggregate_writes(pipeline: &str) -> bool {
 }
 
 fn matching_paren(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
     let mut depth = 0;
     let mut quote = None;
     let mut escape = false;
-    for (index, byte) in bytes.iter().enumerate().skip(open) {
-        let ch = *byte as char;
+    let mut index = open;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
         if escape {
             escape = false;
+            index += ch.len_utf8();
             continue;
         }
         if quote.is_some() {
@@ -960,10 +1171,16 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
             } else if Some(ch) == quote {
                 quote = None;
             }
+            index += ch.len_utf8();
             continue;
         }
         if ch == '\'' || ch == '"' || ch == '`' {
             quote = Some(ch);
+        } else if ch == '/' && is_shell_regex_value_position(source, index) {
+            if let Ok(Some(literal)) = shell_regex_literal_at(source, index) {
+                index = literal.end;
+                continue;
+            }
         } else if ch == '(' {
             depth += 1;
         } else if ch == ')' {
@@ -972,6 +1189,7 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
                 return Some(index);
             }
         }
+        index += ch.len_utf8();
     }
     None
 }
@@ -985,10 +1203,12 @@ fn split_top_level(source: &str) -> Vec<String> {
     let mut depth = 0;
     let mut quote = None;
     let mut escape = false;
-    for (index, byte) in source.as_bytes().iter().enumerate() {
-        let ch = *byte as char;
+    let mut index = 0;
+    while index < source.len() {
+        let ch = source[index..].chars().next().expect("index is on a character boundary");
         if escape {
             escape = false;
+            index += ch.len_utf8();
             continue;
         }
         if quote.is_some() {
@@ -997,10 +1217,16 @@ fn split_top_level(source: &str) -> Vec<String> {
             } else if Some(ch) == quote {
                 quote = None;
             }
+            index += ch.len_utf8();
             continue;
         }
         if ch == '\'' || ch == '"' || ch == '`' {
             quote = Some(ch);
+        } else if ch == '/' && is_shell_regex_value_position(source, index) {
+            if let Ok(Some(literal)) = shell_regex_literal_at(source, index) {
+                index = literal.end;
+                continue;
+            }
         } else if matches!(ch, '(' | '[' | '{') {
             depth += 1;
         } else if matches!(ch, ')' | ']' | '}') {
@@ -1009,6 +1235,7 @@ fn split_top_level(source: &str) -> Vec<String> {
             result.push(source[start..index].trim().to_string());
             start = index + 1;
         }
+        index += ch.len_utf8();
     }
     result.push(source[start..].trim().to_string());
     result
@@ -1229,6 +1456,130 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(update, MongoCommand::Update { many: true, options: Some(_), .. }));
+    }
+
+    #[test]
+    fn parses_mongo_shell_regex_literals_in_update_filters() {
+        let command = parse(
+            r#"db.code_info.updateMany(
+                { level: "SECOND_LAYER", position: "B", packagingRatio: /^[^:：]*盒/, type: { $ne: "PACK_IN" } },
+                { $set: { type: "PACK_IN" }, $currentDate: { lastUpdateTime: true } }
+            )"#,
+        )
+        .unwrap();
+        let MongoCommand::Update { collection, filter, many, .. } = command else {
+            panic!("expected update command");
+        };
+
+        assert_eq!(collection, "code_info");
+        assert!(many);
+        assert_eq!(
+            serde_json::from_str::<Value>(&filter).unwrap(),
+            serde_json::json!({
+                "level": "SECOND_LAYER",
+                "position": "B",
+                "packagingRatio": {
+                    "$regularExpression": {
+                        "pattern": "^[^:：]*盒",
+                        "options": "",
+                    }
+                },
+                "type": { "$ne": "PACK_IN" },
+            })
+        );
+    }
+
+    #[test]
+    fn drops_js_only_regex_literal_flags() {
+        let command = parse(r#"db.items.find({ value: /abc/gi })"#).unwrap();
+        let MongoCommand::Find { filter, .. } = command else {
+            panic!("expected find command");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(&filter).unwrap(),
+            serde_json::json!({
+                "value": {
+                    "$regularExpression": {
+                        "pattern": "abc",
+                        "options": "i",
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_delimiters_inside_mongo_shell_regex_literals() {
+        let command = parse(r#"db.items.updateMany({ value: /a\),b/ }, { $set: { matched: true } })"#).unwrap();
+        let MongoCommand::Update { filter, many, .. } = command else {
+            panic!("expected update command");
+        };
+
+        assert!(many);
+        assert_eq!(
+            serde_json::from_str::<Value>(&filter).unwrap(),
+            serde_json::json!({
+                "value": {
+                    "$regularExpression": {
+                        "pattern": r#"a\),b"#,
+                        "options": "",
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn normalizes_regex_literal_edges_without_touching_strings_or_comments() {
+        let normalized = normalized_json(
+            r#"{
+                pattern: /a\/b[/:：]/mi,
+                constructorText: "ObjectId('literal')",
+                url: "https://example.com/a/b",
+                // slash comments stay comments
+                active: true,
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&normalized).unwrap(),
+            serde_json::json!({
+                "pattern": {
+                    "$regularExpression": {
+                        "pattern": r#"a\/b[/:：]"#,
+                        "options": "im",
+                    }
+                },
+                "constructorText": "ObjectId('literal')",
+                "url": "https://example.com/a/b",
+                "active": true,
+            })
+        );
+
+        for source in ["{pattern: /unterminated}", "{pattern: /value/ii}", "{pattern: /value/q}"] {
+            assert!(normalized_json(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn normalizes_regex_literals_after_comments() {
+        let normalized = normalized_json(
+            r#"{
+                block: /* explain the pattern */ /block/i,
+                line: // explain the next pattern
+                    /line/m,
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&normalized).unwrap(),
+            serde_json::json!({
+                "block": { "$regularExpression": { "pattern": "block", "options": "i" } },
+                "line": { "$regularExpression": { "pattern": "line", "options": "m" } },
+            })
+        );
     }
 
     #[test]

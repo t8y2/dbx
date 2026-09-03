@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -91,6 +91,7 @@ import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibili
 import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -2026,6 +2027,15 @@ function docPreview(doc: JsonRecord): string {
   return `${id} - ${preview}`;
 }
 
+async function copyDocument() {
+  try {
+    await copyToClipboard(editJson.value);
+    toast(t("grid.copied"), 1500);
+  } catch (error: unknown) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 3000);
+  }
+}
+
 function handleDocumentViewerDoubleClick(event: MouseEvent) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -2689,6 +2699,9 @@ defineExpose({ focusSearch });
                 <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               </Badge>
               <span class="flex-1" />
+              <Button v-if="!isEditing" variant="ghost" size="icon" class="h-6 w-7" :title="t('grid.copy')" @click="copyDocument">
+                <Copy class="h-3.5 w-3.5" />
+              </Button>
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
                 <div class="flex items-center border rounded-md overflow-hidden mr-1">
@@ -2722,7 +2735,7 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else data-document-json-viewer class="flex-1 min-h-0 bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+            <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
               <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>

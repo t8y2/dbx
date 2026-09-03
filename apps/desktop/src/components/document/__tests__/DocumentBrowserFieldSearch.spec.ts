@@ -21,6 +21,10 @@ const documentJsonEditor = vi.hoisted(() => ({
   openSearch: vi.fn().mockReturnValue(true),
 }));
 
+const clipboard = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
+}));
+
 const dataGrid = vi.hoisted(() => ({
   fullExportResult: undefined as
     | ((onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<
@@ -93,6 +97,10 @@ vi.mock("@/stores/settingsStore", () => ({
   TABLE_FONT_SIZE_MIN: 8,
   TABLE_FONT_SIZE_MAX: 16,
   useSettingsStore: () => settings,
+}));
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: clipboard.copyToClipboard,
 }));
 
 vi.mock("@/components/grid/DataGrid.vue", () => {
@@ -324,6 +332,8 @@ beforeEach(async () => {
   dataGrid.paginate = undefined;
   dataGrid.editable = true;
   documentJsonEditor.openSearch.mockClear();
+  clipboard.copyToClipboard.mockReset();
+  clipboard.copyToClipboard.mockResolvedValue(undefined);
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   backend.documentInsertDocument.mockResolvedValue("created");
   backend.documentUpdateDocument.mockResolvedValue(1);
@@ -1086,6 +1096,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     const jsonText = viewer.querySelector<HTMLElement>(".cm-line .json-string")!;
     const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
+    expect(viewer.classList.contains("select-text")).toBe(true);
     expect(documentId.readOnly).toBe(true);
     expect(documentId.value).toBe("document-1");
     expect(documentId.classList.contains("select-text")).toBe(true);
@@ -1096,6 +1107,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.readOnly).toBe("true");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.lineNumbers).toBe("false");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.presentation).toBe("viewer");
+
+    buttonWithTitle("grid.copy").click();
+    await flushUi();
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('"_id": "document-1"'));
 
     documentId.setSelectionRange(0, documentId.value.length);
     expect(documentId.selectionStart).toBe(0);

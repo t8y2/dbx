@@ -9,7 +9,7 @@ use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::AppState,
-    db::{redis_driver::RedisCommandResult, ColumnInfo, IndexInfo, TableInfo},
+    db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
@@ -313,6 +313,32 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<Vec<ColumnInfo>, String> {
         let _ = (connection, database, schema, table);
         Err("Column metadata is not supported by this backend.".to_string())
+    }
+    /// List stored routines (procedures/functions) for a schema. `routine_types`
+    /// filters by object type ("PROCEDURE"/"FUNCTION"); `None` returns both.
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        let _ = (connection, database, schema, routine_types);
+        Err("Routine metadata is not supported by this backend.".to_string())
+    }
+    /// Fetch a stored routine's full source text. `object_type` is
+    /// `PROCEDURE` or `FUNCTION` (SCREAMING_SNAKE_CASE, as in the desktop API).
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let _ = (connection, database, schema, name, object_type, signature);
+        Err("Routine source is not supported by this backend.".to_string())
     }
     async fn execute_redis_command(
         &self,
@@ -630,6 +656,21 @@ fn local_plugin_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| data_dir.join("plugins"))
 }
 
+/// Whether an object listing entry is a stored routine (procedure or function).
+fn is_routine_object(object_type: &str) -> bool {
+    object_type.eq_ignore_ascii_case("PROCEDURE") || object_type.eq_ignore_ascii_case("FUNCTION")
+}
+
+/// Parse a routine type string ("PROCEDURE"/"FUNCTION", case-insensitive) into
+/// the core `ObjectSourceKind` used by `get_object_source_core`.
+fn parse_routine_kind(object_type: &str) -> Result<dbx_core::db::ObjectSourceKind, String> {
+    match object_type.trim().to_ascii_uppercase().as_str() {
+        "PROCEDURE" => Ok(dbx_core::db::ObjectSourceKind::Procedure),
+        "FUNCTION" => Ok(dbx_core::db::ObjectSourceKind::Function),
+        other => Err(format!("Unsupported routine type \"{other}\"; use PROCEDURE or FUNCTION.")),
+    }
+}
+
 fn local_agent_dir(settings: &DesktopSettings, data_dir: &Path) -> PathBuf {
     let legacy_driver_base =
         settings.driver_store_dir.as_ref().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
@@ -800,6 +841,53 @@ impl DbxBackend for LocalBackend {
         table: &str,
     ) -> Result<Vec<ColumnInfo>, String> {
         dbx_core::schema::get_columns_core(&self.state, &connection.id, database, schema, table).await
+    }
+
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        let default_types = ["PROCEDURE".to_string(), "FUNCTION".to_string()];
+        let object_types = routine_types.unwrap_or(default_types.as_slice());
+        let objects = dbx_core::schema::list_objects_core(
+            &self.state,
+            &connection.id,
+            database,
+            schema,
+            None,
+            None,
+            None,
+            Some(object_types),
+            None,
+        )
+        .await?;
+        Ok(objects.into_iter().filter(|object| is_routine_object(&object.object_type)).collect())
+    }
+
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let kind = parse_routine_kind(object_type)?;
+        dbx_core::schema::get_object_source_core(
+            &self.state,
+            &connection.id,
+            database,
+            schema,
+            name,
+            kind,
+            signature,
+            None,
+        )
+        .await
     }
 
     async fn collect_docs_snapshot(
@@ -1287,6 +1375,67 @@ impl DbxBackend for WebBackend {
         .map_err(|error| format!("Invalid column list response: {error}"))
     }
 
+    async fn list_routines(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        routine_types: Option<&[String]>,
+    ) -> Result<Vec<dbx_core::db::ObjectInfo>, String> {
+        self.ensure_connected(connection).await?;
+        let types = routine_types.map(|types| types.join(",")).unwrap_or_else(|| "PROCEDURE,FUNCTION".to_string());
+        self.request(
+            reqwest::Method::GET,
+            &format!(
+                "/api/schema/objects?connection_id={}&database={}&schema={}&object_types={}",
+                url_encode(&connection.id),
+                url_encode(database),
+                url_encode(schema),
+                url_encode(&types)
+            ),
+            None,
+        )
+        .await?
+        .json::<Vec<dbx_core::db::ObjectInfo>>()
+        .await
+        .map(|objects| objects.into_iter().filter(|object| is_routine_object(&object.object_type)).collect())
+        .map_err(|error| format!("Invalid routine list response: {error}"))
+    }
+
+    async fn get_routine_source(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: &str,
+        name: &str,
+        object_type: &str,
+        signature: Option<&str>,
+    ) -> Result<dbx_core::db::ObjectSource, String> {
+        let kind = parse_routine_kind(object_type)?;
+        let kind_name = match kind {
+            dbx_core::db::ObjectSourceKind::Procedure => "PROCEDURE",
+            dbx_core::db::ObjectSourceKind::Function => "FUNCTION",
+            _ => unreachable!("parse_routine_kind only yields routines"),
+        };
+        self.ensure_connected(connection).await?;
+        let mut query = format!(
+            "/api/schema/object-source?connection_id={}&database={}&schema={}&table={}&object_type={}",
+            url_encode(&connection.id),
+            url_encode(database),
+            url_encode(schema),
+            url_encode(name),
+            url_encode(kind_name),
+        );
+        if let Some(signature) = signature.filter(|value| !value.trim().is_empty()) {
+            query.push_str(&format!("&signature={}", url_encode(signature)));
+        }
+        self.request(reqwest::Method::GET, &query, None)
+            .await?
+            .json()
+            .await
+            .map_err(|error| format!("Invalid routine source response: {error}"))
+    }
+
     async fn collect_docs_snapshot(
         &self,
         connection: &ConnectionConfig,
@@ -1504,22 +1653,21 @@ impl DbxBackend for WebBackend {
                 Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::GetIndexes { collection } => {
-                let indexes = self
+                let specs = self
                     .request(
-                        reqwest::Method::GET,
-                        &format!(
-                            "/api/schema/indexes?connection_id={}&database={}&schema=&table={}",
-                            url_encode(connection_id),
-                            url_encode(database),
-                            url_encode(collection)
-                        ),
-                        None,
+                        reqwest::Method::POST,
+                        "/api/mongo/list-index-specs",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                        })),
                     )
                     .await?
-                    .json::<Vec<IndexInfo>>()
+                    .json::<Vec<MongoIndexSpec>>()
                     .await
-                    .map_err(|error| format!("Invalid MongoDB indexes response: {error}"))?;
-                Ok(dbx_core::mongo_ops::mongo_indexes_query_result(indexes, 100))
+                    .map_err(|error| format!("Invalid MongoDB index specs response: {error}"))?;
+                Ok(dbx_core::mongo_ops::mongo_indexes_query_result(specs, 100))
             }
             MongoCommand::CollectionStats { collection, metric, scale } => {
                 let value: Value = self
@@ -2507,7 +2655,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_mongo_get_indexes_uses_schema_indexes_endpoint() {
+    async fn web_mongo_get_indexes_uses_list_index_specs_endpoint() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (request_sender, request_receiver) = mpsc::channel();
@@ -2516,21 +2664,63 @@ mod tests {
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let mut request = Vec::new();
             let mut buffer = [0_u8; 1024];
-            loop {
+            let header_end = loop {
                 let count = stream.read(&mut buffer).unwrap();
                 request.extend_from_slice(&buffer[..count]);
-                if count == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+                if let Some(position) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let request_text = String::from_utf8_lossy(&request);
+            let request_line = request_text.lines().next().unwrap().to_string();
+            let content_length = request_text
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value.trim())
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                if count == 0 {
                     break;
                 }
+                request.extend_from_slice(&buffer[..count]);
             }
-            let request = String::from_utf8(request).unwrap();
-            let request_line = request.lines().next().unwrap().to_string();
-            request_sender.send(request_line.clone()).unwrap();
-            let body = if request_line.starts_with("GET /api/schema/indexes?") {
-                r#"[{"name":"email_1","columns":["email"],"is_unique":true,"is_primary":false,"filter":null,"index_type":"email: 1","included_columns":null,"comment":null}]"#
-            } else {
-                r#"{"documents":[{"name":"email_1","columns":["email"],"is_unique":true,"is_primary":false,"filter":null,"index_type":"email: 1"}]}"#
-            };
+            let request_body = String::from_utf8_lossy(&request[header_end..]).to_string();
+            request_sender.send((request_line.clone(), request_body)).unwrap();
+            let body = r#"[
+                {
+                    "name": "_id_",
+                    "keys": [{"field": "_id", "direction": "1"}],
+                    "is_unique": true,
+                    "is_primary": true,
+                    "is_sparse": false,
+                    "expire_after_seconds": null,
+                    "partial_filter_expression": null,
+                    "background": false,
+                    "bucket_size": null,
+                    "hidden": false,
+                    "properties_complete": true,
+                    "extra_options": null
+                },
+                {
+                    "name": "createdAt_1",
+                    "keys": [{"field": "createdAt", "direction": "1"}],
+                    "is_unique": false,
+                    "is_primary": false,
+                    "is_sparse": false,
+                    "expire_after_seconds": 3600,
+                    "partial_filter_expression": null,
+                    "background": false,
+                    "bucket_size": null,
+                    "hidden": false,
+                    "properties_complete": true,
+                    "extra_options": null
+                }
+            ]"#;
             write!(
                 stream,
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2563,23 +2753,35 @@ mod tests {
             .unwrap();
 
         server.join().unwrap();
-        assert_eq!(
-            request_receiver.recv().unwrap(),
-            "GET /api/schema/indexes?connection_id=legacy&database=app&schema=&table=im_msg HTTP/1.1"
-        );
-        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter"]);
+        let (request_line, request_body) = request_receiver.recv().unwrap();
+        assert_eq!(request_line, "POST /api/mongo/list-index-specs HTTP/1.1");
+        let request_json: Value = serde_json::from_str(&request_body).unwrap();
+        assert_eq!(request_json, json!({"connectionId": "legacy", "database": "app", "collection": "im_msg"}));
+        assert_eq!(result.columns, ["name", "columns", "unique", "primary", "type", "filter", "expireAfterSeconds"]);
         assert_eq!(
             result.rows,
-            [vec![
-                Value::String("email_1".to_string()),
-                Value::String("email".to_string()),
-                Value::Bool(true),
-                Value::Bool(false),
-                Value::String("email: 1".to_string()),
-                Value::Null,
-            ]]
+            [
+                vec![
+                    Value::String("_id_".to_string()),
+                    Value::String("_id".to_string()),
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::String("_id: 1".to_string()),
+                    Value::Null,
+                    Value::Null,
+                ],
+                vec![
+                    Value::String("createdAt_1".to_string()),
+                    Value::String("createdAt".to_string()),
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::String("createdAt: 1".to_string()),
+                    Value::Null,
+                    Value::from(3600),
+                ],
+            ]
         );
-        assert_eq!(result.affected_rows, 1);
+        assert_eq!(result.affected_rows, 2);
     }
 
     #[tokio::test]

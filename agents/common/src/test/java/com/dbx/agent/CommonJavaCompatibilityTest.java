@@ -726,6 +726,30 @@ class CommonJavaCompatibilityTest {
         );
     }
 
+    @Test
+    void buildsTableDdlWithNationalCharacterLength() {
+        String ddl = DdlBuilder.buildTableDdl(
+            "DBX_DEMO",
+            "CUSTOMERS",
+            Collections.singletonList(new ColumnInfo(
+                "NAME",
+                "NVARCHAR",
+                false,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                100
+            )),
+            Collections.emptyList(),
+            Collections.emptyList()
+        );
+
+        assertTrue(ddl.contains("\"NAME\" NVARCHAR(100) NOT NULL"));
+    }
+
     private static class MinimalAgent implements DatabaseAgent {
         @Override
         public void connect(ConnectParams params) {

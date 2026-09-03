@@ -347,6 +347,86 @@ jobs:
           name: rocketmq-native
           path: "release-native/dbx-agent-rocketmq-*"
 
+  build-etcd-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Test etcd native agent
+        working-directory: agents/drivers/etcd-go
+        run: go test ./...
+      - name: Cross-compile etcd native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/etcd-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-etcd-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etcd-native
+          path: "release-native/dbx-agent-etcd-*"
+
+  build-etcd2-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd2') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+      - name: Test etcd v2 native agent
+        working-directory: agents/drivers/etcd2-go
+        run: go test ./...
+      - name: Cross-compile etcd v2 native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/etcd2-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-etcd2-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etcd2-native
+          path: "release-native/dbx-agent-etcd2-*"
+
   build-zookeeper-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'zookeeper') }}
@@ -466,6 +546,46 @@ jobs:
         with:
           name: hive-native
           path: "release-native/dbx-agent-hive-*"
+
+  build-argo-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'argo') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Test Argo native agent
+        working-directory: agents/drivers/argo-go
+        run: go test ./...
+      - name: Cross-compile Argo native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/argo-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-argo-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argo-native
+          path: "release-native/dbx-agent-argo-*"
 
   build-kingbase-native:
     needs: [bump-versions]
@@ -1137,7 +1257,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -1269,9 +1389,12 @@ jobs:
               zookeeper) echo "Apache ZooKeeper" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
+              argo) echo "星环Argo" ;;
               neo4j) echo "Neo4j" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              etcd) echo "etcd" ;;
+              etcd2) echo "etcd 2.x (v2 API)" ;;
               *) echo "$name" ;;
             esac
           }
@@ -1335,7 +1458,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive tdengine; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine etcd etcd2; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1423,9 +1546,12 @@ jobs:
               zookeeper) echo "Apache ZooKeeper" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
+              argo) echo "星环Argo" ;;
               neo4j) echo "Neo4j" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              etcd) echo "etcd" ;;
+              etcd2) echo "etcd 2.x (v2 API)" ;;
               *) echo "$name" ;;
             esac
           }
@@ -1470,6 +1596,8 @@ jobs:
               LOG_PATH="agents/drivers/cassandra-go/"
             elif [ "$name" = "hive" ]; then
               LOG_PATH="agents/drivers/hive-go/"
+            elif [ "$name" = "argo" ]; then
+              LOG_PATH="agents/drivers/argo-go/"
             elif [ "$name" = "neo4j" ]; then
               LOG_PATH="agents/drivers/neo4j-go/"
             elif [ "$name" = "iotdb" ]; then
@@ -1483,6 +1611,12 @@ jobs:
             fi
             LOG_PATHS=("$LOG_PATH")
             if [ "$name" = "hive" ]; then
+              LOG_PATHS+=(
+                "agents/go-common/go-gssapi/"
+                "agents/go-common/gohive/"
+                "agents/go-common/gosasl/"
+              )
+            elif [ "$name" = "argo" ]; then
               LOG_PATHS+=(
                 "agents/go-common/go-gssapi/"
                 "agents/go-common/gohive/"

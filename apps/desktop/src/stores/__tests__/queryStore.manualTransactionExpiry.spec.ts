@@ -172,6 +172,45 @@ describe("queryStore manual transaction expiry recovery", () => {
     expect(tab.result?.execution_error).toBe(true);
   });
 
+  it("falls back to auto-commit for a read query when an old Oracle Agent lacks manual transactions", async () => {
+    mocks.beginManualTransaction.mockRejectedValue(new Error("BEGIN manual transaction failed: Agent RPC error (-1): unknown method: begin_manual_transaction"));
+    mocks.executeMulti.mockResolvedValue(successfulSelect());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "SELECT 1 FROM DUAL");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(true);
+    expect(tab.txnSessionId).toBeUndefined();
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).toHaveBeenCalledOnce();
+    expect(tab.result?.rows).toEqual([[1]]);
+  });
+
+  it("does not replay a write when an old Oracle Agent lacks manual transactions", async () => {
+    mocks.beginManualTransaction.mockRejectedValue(new Error("BEGIN manual transaction failed: Agent RPC error (-1): Method not found: begin_manual_transaction"));
+    mocks.executeMulti.mockResolvedValue(successfulUpdate());
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query", "query", "APP");
+    store.setAutoCommit(tabId, false);
+
+    await store.executeTabSql(tabId, "UPDATE USERS SET ACTIVE = 1");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.autoCommit).toBe(false);
+    expect(mocks.beginManualTransaction).toHaveBeenCalledOnce();
+    expect(mocks.executeInManualTransaction).not.toHaveBeenCalled();
+    expect(mocks.executeMulti).not.toHaveBeenCalled();
+    expect(tab.result?.execution_error).toBe(true);
+  });
+
   it("keeps raw JDBC connections in manual mode when their effective dialect is unsupported", async () => {
     mocks.getConnectionConfig.mockReturnValue({
       id: "jdbc-1",

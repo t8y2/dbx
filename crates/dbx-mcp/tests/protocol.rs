@@ -224,7 +224,7 @@ async fn execute_query_injects_and_omits_timeout_secs_from_policy() {
     let captured = captured_query_arguments(backend, json!({ "connection_id": "scoped", "sql": "SELECT 1" })).await;
     assert_eq!(captured.len(), 1, "expected one captured execute_query call");
     assert!(
-        !captured[0].get("timeout_secs").is_some(),
+        captured[0].get("timeout_secs").is_none(),
         "no timeout_secs must be injected when the policy inherits the connection: {}",
         captured[0]
     );
@@ -285,15 +285,17 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 18);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 15);
+    assert_eq!(names.len(), 17);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_execute_batch"));
+    assert!(names.contains(&"dbx_list_routines"));
+    assert!(names.contains(&"dbx_get_routine_source"));
     assert!(names.contains(&"dbx_open_session"));
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]

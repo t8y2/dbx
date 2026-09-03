@@ -56,6 +56,14 @@ export function formatAiInlineMarkdown(text: string): string {
   }
 }
 
+export function formatAiInlineMarkdownFragment(text: string): string {
+  try {
+    return markedInstance.parseInline(text) as string;
+  } catch {
+    return escapeHtml(text);
+  }
+}
+
 export function normalizeAiMarkdownLink(href: string): string | null {
   try {
     const url = new URL(href);

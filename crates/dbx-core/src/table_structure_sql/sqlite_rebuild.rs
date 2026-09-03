@@ -85,8 +85,8 @@ async fn native_sqlite_pool(
 ) -> Result<(String, db::sqlite::SqliteHandle), String> {
     let database = (!database.trim().is_empty()).then_some(database);
     let pool_key = state.get_or_create_pool(connection_id, database).await?;
-    let connections = state.connections.read().await;
-    match connections.get(&pool_key) {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::Sqlite(pool)) => Ok((pool_key, pool.clone())),
         Some(_) => Err("SQLite table rebuild is only available for native SQLite connections.".to_string()),
         None => Err("SQLite connection pool not found.".to_string()),

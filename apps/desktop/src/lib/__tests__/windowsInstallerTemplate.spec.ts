@@ -7,6 +7,7 @@ const template = readFileSync(resolve(process.cwd(), "src-tauri/windows/nsis/ins
 const win7Config = JSON.parse(readFileSync(resolve(process.cwd(), "src-tauri/tauri.webview2-win7-fixed.conf.json"), "utf8"));
 const win7RuntimeScript = readFileSync(resolve(process.cwd(), ".github/scripts/prepare-webview2-win7-runtime.ps1"), "utf8");
 const win7PeAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-pe-compat.ps1"), "utf8");
+const win7LoaderAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-webview2-win7-loader.ps1"), "utf8");
 const win7RuntimeProbeScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-webview2-win7-runtime.ps1"), "utf8");
 const win7InstallerAuditScript = readFileSync(resolve(process.cwd(), ".github/scripts/assert-win7-installer-content.ps1"), "utf8");
 const appCargoToml = readFileSync(resolve(process.cwd(), "src-tauri/Cargo.toml"), "utf8");
@@ -17,6 +18,25 @@ const ciWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/ci.yml
 const releaseWorkflow = readFileSync(resolve(process.cwd(), ".github/workflows/release.yml"), "utf8");
 
 describe("Windows offline installer template", () => {
+  it("routes supported legacy Windows users from generic installers to the fixed-runtime package", () => {
+    expect(template).toContain("ManifestSupportedOS all");
+    expect(template).toContain("!include WinVer.nsh");
+    expect(template).toContain('!if "${INSTALLWEBVIEW2MODE}" != "fixedRuntime"');
+    expect(template).toContain("${If} ${IsWin7}");
+    expect(template).toContain("${OrIf} ${IsWin2012R2}");
+    expect(template).toContain('MessageBox MB_ICONSTOP|MB_YESNO|MB_DEFBUTTON1 "$(dbxWin7InstallerRequired)" IDYES dbx_open_win7_installer');
+    expect(template).toContain("https://dl.dbxio.com/releases/v${VERSION}/DBX_${VERSION}_x64-win7-server2012r2-offline-setup.exe?v=${VERSION}");
+    expect(template).toContain("SetErrorLevel 1633");
+    expect(template).toContain("${OrIf} $PassiveMode = 1");
+  });
+
+  it("localizes the Windows 7 package guidance in every installer language", () => {
+    expect(template.match(/LangString dbxWin7InstallerRequired/g)).toHaveLength(3);
+    expect(template).toContain("This installer does not support Windows 7 or Windows Server 2012 R2.");
+    expect(template).toContain("此安装包不支持 Windows 7 或 Windows Server 2012 R2。");
+    expect(template).toContain("此安裝套件不支援 Windows 7 或 Windows Server 2012 R2。");
+  });
+
   it.each([
     {
       name: "continues after installer failure when a compatible Runtime remains",
@@ -106,6 +126,29 @@ describe("Windows 7 fixed WebView2 runtime bundle", () => {
     expect(win7PeAuditScript).toContain('"ucrtbase.dll"');
     expect(win7PeAuditScript).toContain('"api-ms-win-crt-"');
     expect(win7PeAuditScript).toContain("dumpbin.exe");
+  });
+
+  it("audits the linked WebView2 loader in the final Win7 binary", () => {
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the app exe path."');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find the WebView2 client dll at:"');
+    expect(win7LoaderAuditScript).toContain('"WebView2: Failed to find an installed WebView2 runtime or non-stable Microsoft Edge installation."');
+    expect(win7LoaderAuditScript).toContain("GetEncoding(28591)");
+    expect(ciWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
+    expect(releaseWorkflow).toContain("./.github/scripts/assert-webview2-win7-loader.ps1");
+  });
+
+  it("keeps compile caching away from the Win7 WebView2 loader patch", () => {
+    const releaseWin7Job = releaseWorkflow.slice(releaseWorkflow.indexOf("  build-windows-7-offline:"), releaseWorkflow.indexOf("  static-browser:"));
+    const ciWin7Job = ciWorkflow.slice(ciWorkflow.indexOf("  windows-win7-bundle:"), ciWorkflow.indexOf("  duckdb-windows-driver:"));
+
+    // The loader patch rewrites a file inside the cargo registry, which no
+    // compile cache can see. v0.6.0 linked a >= 1.0.1054.31 loader despite the
+    // patched 1.0.902.49 one being verified on disk, so neither Win7 job may
+    // route rustc through sccache until the loader is vendored into the tree.
+    expect(releaseWin7Job).not.toContain("RUSTC_WRAPPER");
+    expect(releaseWin7Job).not.toContain("sccache-action");
+    expect(ciWin7Job).not.toContain("RUSTC_WRAPPER");
+    expect(ciWin7Job).not.toContain("sccache-action");
   });
 
   it("probes the fixed runtime through the Win7-compatible loader", () => {

@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { closeOtherTabsDefaultShortcut, DEFAULT_SHORTCUT_SETTINGS, SHORTCUT_DEFINITIONS, findShortcutConflict, formatShortcut, normalizeModifierOnlyShortcut, normalizeShortcutSettings, shortcutToCodeMirrorKey, type ShortcutActionId } from "@/lib/editor/shortcutRegistry";
+import {
+  closeOtherTabsDefaultShortcut,
+  DEFAULT_SHORTCUT_SETTINGS,
+  SHORTCUT_DEFINITIONS,
+  findShortcutConflict,
+  formatShortcut,
+  normalizeModifierOnlyShortcut,
+  normalizeShortcutSettings,
+  selectionOccurrenceDefaultShortcut,
+  shortcutToCodeMirrorKey,
+  type ShortcutActionId,
+} from "@/lib/editor/shortcutRegistry";
 
 describe("shortcutRegistry editor actions", () => {
   const formatterEditorActionIds: ShortcutActionId[] = [
@@ -18,6 +29,8 @@ describe("shortcutRegistry editor actions", () => {
     "undo",
     "redo",
     "selectAll",
+    "addNextSelectionOccurrence",
+    "selectAllSelectionOccurrences",
     "uppercaseSelection",
     "lowercaseSelection",
     "exPasteSqlInCondition",
@@ -233,6 +246,9 @@ describe("shortcutRegistry editor actions", () => {
     expect(shortcuts.redo).toBe("Shift+Mod+Z");
     expect(shortcuts.selectAll).toBe("Mod+A");
     expect(shortcuts.extendSelection).toBe("Alt+W");
+    // 测试平台（Linux runner）解析为非 mac 默认键；mac 变体在下方单独断言。
+    expect(shortcuts.addNextSelectionOccurrence).toBe(selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence"));
+    expect(shortcuts.selectAllSelectionOccurrences).toBe(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences"));
     expect(shortcuts.uppercaseSelection).toBe("Shift+Alt+U");
     expect(shortcuts.lowercaseSelection).toBe("Shift+Alt+L");
     expect(shortcuts.exPasteSqlInCondition).toBe("");
@@ -244,6 +260,29 @@ describe("shortcutRegistry editor actions", () => {
 
     expect(definition).toMatchObject({ scope: "editor", defaultShortcut: "Alt+W" });
     expect(DEFAULT_SHORTCUT_SETTINGS.extendSelection).toBe("Alt+W");
+  });
+
+  it("registers occurrence selection shortcuts for query editor multi-selection", () => {
+    const next = SHORTCUT_DEFINITIONS.find((item) => item.id === "addNextSelectionOccurrence");
+    const all = SHORTCUT_DEFINITIONS.find((item) => item.id === "selectAllSelectionOccurrences");
+
+    expect(next).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+G" });
+    expect(all).toMatchObject({ scope: "editor", defaultShortcut: "Ctrl+Mod+G" });
+    expect(findShortcutConflict("selectAllSelectionOccurrences", DEFAULT_SHORTCUT_SETTINGS.selectAllSelectionOccurrences, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("resolves occurrence selection defaults per platform", () => {
+    expect(selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", "MacIntel")).toBe("Ctrl+G");
+    expect(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", "MacIntel")).toBe("Ctrl+Mod+G");
+    // Ctrl+Mod+G is unreachable on non-mac (CodeMirror expands Mod→Ctrl) and
+    // Ctrl+G there is find-next, so Windows/Linux use the JetBrains-style keys.
+    expect(selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", "Win32")).toBe("Alt+J");
+    expect(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", "Win32")).toBe("Ctrl+Alt+Shift+J");
+    expect(selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", "Linux x86_64")).toBe("Alt+J");
+    expect(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", "Linux x86_64")).toBe("Ctrl+Alt+Shift+J");
+    // Both platform defaults must survive the CodeMirror key conversion.
+    expect(shortcutToCodeMirrorKey(selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", "Win32"))).toBe("Ctrl-Alt-Shift-j");
+    expect(shortcutToCodeMirrorKey(selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", "Win32"))).toBe("Alt-j");
   });
 
   it("registers an IDEA/DataGrip-style Alt+/ shortcut for manually triggering completion", () => {

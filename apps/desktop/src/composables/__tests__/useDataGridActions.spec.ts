@@ -1,13 +1,15 @@
-import { computed } from "vue";
+import { computed, reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import type { QueryTab } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   buildTableSelectSql: vi.fn(),
   buildSortedQuerySql: vi.fn(),
   executeTabSql: vi.fn(),
+  sortTabResultLocally: vi.fn(),
   getConfig: vi.fn(),
   setExecuting: vi.fn(),
   updateSql: vi.fn(),
@@ -51,6 +53,7 @@ vi.mock("@/stores/connectionStore", () => ({
 vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     executeTabSql: mocks.executeTabSql,
+    sortTabResultLocally: mocks.sortTabResultLocally,
     activeResultExecutionTarget: mocks.activeResultExecutionTarget,
     setExecuting: mocks.setExecuting,
     updateSql: mocks.updateSql,
@@ -130,6 +133,7 @@ describe("useDataGridActions", () => {
   beforeEach(() => {
     clearTableMetadataCache();
     vi.clearAllMocks();
+    mocks.executeTabSql.mockReset();
     mocks.tabs.length = 0;
     mocks.tableOpenPageSize = 100;
     mocks.infiniteScroll = true;
@@ -161,6 +165,50 @@ describe("useDataGridActions", () => {
     );
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 250 OFFSET 0", expect.objectContaining({ pagination: { limit: 250, offset: 0 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
+  });
+
+  it("keeps the restored filter and sort when the no-data placeholder refresh runs (#7963)", async () => {
+    // 重启后恢复的数据标签页没有 result，刷新走的是 ContentArea 空态占位符那条
+    // 不带参数的入口；它必须回带标签页自身的 whereInput/orderByInput，
+    // 否则刷新会重新加载整张表。
+    const tab = tableDataTab({
+      result: undefined,
+      whereInput: "status = 'active'",
+      orderByInput: '"name" DESC',
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+          { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    const { whereInput, orderBy } = restoredDataTabReloadFilters(tab);
+    await actions.onReloadData(undefined, undefined, whereInput, orderBy);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: "status = 'active'", orderBy: '"name" DESC' }));
+    expect(tab.whereInput).toBe("status = 'active'");
+    expect(tab.orderByInput).toBe('"name" DESC');
+  });
+
+  it("still clears the stored filter when a mounted grid refreshes with an emptied WHERE input", async () => {
+    // 对照：DataGrid 的 currentWhereInput() 在用户清空筛选时返回 undefined，
+    // 所以 onReloadData 里不能无条件回退到 tab.whereInput。
+    const tab = tableDataTab({ whereInput: "status = 'active'" });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", undefined, undefined, undefined, undefined, "refresh");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: undefined, orderBy: undefined }));
+    expect(tab.whereInput).toBe("");
   });
 
   it("preserves the toolbar page segment and offset for table-data refresh", async () => {
@@ -543,6 +591,71 @@ describe("useDataGridActions", () => {
     );
   });
 
+  it("advances Elasticsearch cursors when jumping across pages", async () => {
+    mocks.infiniteScroll = false;
+    mocks.getConfig.mockReturnValue({ id: "elasticsearch-1", db_type: "elasticsearch" });
+    const tab = reactive({
+      id: "tab-1",
+      connectionId: "elasticsearch-1",
+      database: "",
+      title: "Query",
+      sql: "SELECT * FROM `dbx-app-logs-v1` AS dalv",
+      resultBaseSql: "SELECT * FROM `dbx-app-logs-v1` AS dalv",
+      resultPageLimit: 100,
+      resultPageOffset: 0,
+      resultSessionId: "cursor-1",
+      resultClientSessionId: "client-1",
+      result: {
+        columns: ["message"],
+        rows: [["page-1"]],
+        affected_rows: 100_000,
+        execution_time_ms: 1,
+        session_id: "cursor-1",
+        has_more: true,
+      },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as QueryTab);
+    mocks.executeTabSql.mockImplementation(async (_id, _sql, options) => {
+      const pagination = options.pagination as { offset: number };
+      expect(tab.resultPageJumpProgress).toEqual({
+        completedRequests: pagination.offset / 100 - 1,
+        totalRequests: 3,
+        targetPage: 4,
+      });
+      if (options.retainDisplayedResult) {
+        expect(tab.resultPageOffset).toBe(0);
+        tab.resultSessionId = `cursor-${pagination.offset / 100 + 1}`;
+        return;
+      }
+      tab.resultPageOffset = pagination.offset;
+      tab.resultSessionId = `cursor-${pagination.offset / 100 + 1}`;
+      tab.result = {
+        columns: ["message"],
+        rows: [[`page-${pagination.offset / 100 + 1}`]],
+        affected_rows: 100_000,
+        execution_time_ms: 1,
+        session_id: `cursor-${pagination.offset / 100 + 1}`,
+        has_more: true,
+      };
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(300, 100);
+
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].pagination)).toEqual([
+      { offset: 100, limit: 100, sessionId: "cursor-1", clientSessionId: "client-1" },
+      { offset: 200, limit: 100, sessionId: "cursor-2", clientSessionId: "client-1" },
+      { offset: 300, limit: 100, sessionId: "cursor-3", clientSessionId: "client-1" },
+    ]);
+    expect(mocks.executeTabSql.mock.calls.map((call) => call[2].retainDisplayedResult)).toEqual([true, true, undefined]);
+    expect(tab.resultPageOffset).toBe(300);
+    expect(tab.resultPageJumpProgress).toBeUndefined();
+  });
+
   it("uses the active multi-database result target for pagination", async () => {
     const tab = {
       id: "tab-1",
@@ -575,5 +688,182 @@ describe("useDataGridActions", () => {
         pagination: { offset: 100, limit: 100, sessionId: undefined },
       }),
     );
+  });
+
+  it("database-sorts a paginated table from the first page instead of reordering the current page", async () => {
+    const fullRows = [...Array.from({ length: 10 }, (_, index) => [50 + index]), ...Array.from({ length: 20 }, (_, index) => [index + 1])];
+    const tab = tableDataTab({
+      result: { columns: ["sort_value"], rows: fullRows.slice(0, 10), affected_rows: 30, execution_time_ms: 1 },
+      resultPageLimit: 10,
+      resultPageOffset: 10,
+      whereInput: "status = 'active'",
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    mocks.infiniteScroll = false;
+    mocks.buildTableSelectSql.mockImplementationOnce(async (options) => {
+      expect(options).toMatchObject({ orderBy: '"sort_value" ASC', whereInput: "status = 'active'", limit: 10, offset: 0 });
+      return 'SELECT "sort_value" FROM public.users WHERE (status = \'active\') ORDER BY "sort_value" ASC LIMIT 10 OFFSET 0';
+    });
+    mocks.executeTabSql.mockImplementationOnce(async (_id, _sql, options) => {
+      expect(options.pagination).toEqual({ limit: 10, offset: 0 });
+      const sortedRows = [...fullRows].sort((left, right) => Number(left[0]) - Number(right[0]));
+      tab.result = { ...tab.result!, rows: sortedRows.slice(0, 10) };
+      tab.resultPageLimit = options.pagination.limit;
+      tab.resultPageOffset = options.pagination.offset;
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort("sort_value", 0, "asc", "status = 'active'");
+
+    expect(tab.result?.rows.map((row) => row[0])).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(tab.orderByInput).toBe('"sort_value" ASC');
+    expect(mocks.sortTabResultLocally).not.toHaveBeenCalled();
+    expect(mocks.executeTabSql).toHaveBeenCalledWith(
+      "tab-1",
+      expect.any(String),
+      expect.objectContaining({
+        pagination: { limit: 10, offset: 0 },
+        preserveTotalRowCountDuringExecution: true,
+      }),
+    );
+  });
+
+  it.each([
+    ["asc", '"sort_value" ASC'],
+    ["desc", '"sort_value" DESC'],
+  ] as const)("immediately executes paginated table %s sorting with its page size", async (direction, orderBy) => {
+    const tab = tableDataTab({
+      resultPageLimit: 7,
+      resultPageOffset: 14,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    mocks.infiniteScroll = false;
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT sorted");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort("sort_value", 0, direction, "status = 'active'", "database");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy, whereInput: "status = 'active'", limit: 7, offset: 0 }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT sorted", expect.objectContaining({ pagination: { limit: 7, offset: 0 }, preserveTotalRowCountDuringExecution: true }));
+    expect(tab.resultSortMode).toBe("database");
+  });
+
+  it("clears paginated table sorting by querying the first page without the generated order", async () => {
+    const tab = tableDataTab({
+      resultSortColumn: "sort_value",
+      resultSortColumnIndex: 0,
+      resultSortDirection: "desc",
+      resultSortMode: "database",
+      orderByInput: '"sort_value" DESC',
+      resultPageLimit: 10,
+      resultPageOffset: 20,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    mocks.infiniteScroll = false;
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT unsorted");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort("sort_value", 0, null, "status = 'active'", "database");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: undefined, whereInput: "status = 'active'", limit: 10, offset: 0 }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT unsorted", expect.objectContaining({ pagination: { limit: 10, offset: 0 }, preserveTotalRowCountDuringExecution: true }));
+    expect(tab.resultSortColumn).toBeUndefined();
+    expect(tab.resultSortDirection).toBeUndefined();
+    expect(tab.resultSortMode).toBeUndefined();
+    expect(tab.orderByInput).toBeUndefined();
+  });
+
+  it("keeps the database order and WHERE clause when fetching the next page", async () => {
+    const tab = tableDataTab({
+      result: { columns: ["sort_value"], rows: Array.from({ length: 10 }, (_, index) => [index + 1]), affected_rows: 30, execution_time_ms: 1 },
+      resultSortColumn: "sort_value",
+      resultSortColumnIndex: 0,
+      resultSortDirection: "asc",
+      resultSortMode: "database",
+      orderByInput: '"sort_value" ASC',
+      resultPageLimit: 10,
+      resultPageOffset: 0,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    mocks.infiniteScroll = false;
+    mocks.buildTableSelectSql.mockResolvedValueOnce("SELECT sorted page 2");
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onPaginate(10, 10, "status = 'active'");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ orderBy: '"sort_value" ASC', whereInput: "status = 'active'", limit: 10, offset: 10 }));
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT sorted page 2", expect.objectContaining({ pagination: { offset: 10, limit: 10 }, preserveTotalRowCountDuringExecution: true }));
+  });
+
+  it("keeps explicit local sorting local without issuing a database request", async () => {
+    const tab = tableDataTab({
+      result: { columns: ["sort_value"], rows: [[50], [60], [70]], affected_rows: 30, execution_time_ms: 1 },
+      resultPageLimit: 10,
+      resultPageOffset: 10,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "sort_value", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: [],
+      },
+    });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort("sort_value", 0, "asc", "status = 'active'", "local");
+
+    expect(mocks.sortTabResultLocally).toHaveBeenCalledWith("tab-1", "sort_value", 0, "asc");
+    expect(mocks.buildTableSelectSql).not.toHaveBeenCalled();
+    expect(mocks.executeTabSql).not.toHaveBeenCalled();
+    expect(tab.orderByInput).toBeUndefined();
+  });
+
+  it("keeps SQL query result database sorting on the first page when the result is paginated", async () => {
+    const tab = {
+      id: "tab-1",
+      connectionId: "postgres-1",
+      database: "app",
+      title: "Query",
+      sql: "SELECT sort_value FROM users",
+      resultBaseSql: "SELECT sort_value FROM users",
+      resultPageLimit: 10,
+      resultPageOffset: 20,
+      result: { columns: ["sort_value"], rows: [[50]], affected_rows: 30, execution_time_ms: 1 },
+      mode: "query",
+      isDirty: false,
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+    } as QueryTab;
+    mocks.buildSortedQuerySql.mockResolvedValueOnce({ ok: true, sql: "SELECT sorted" });
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onSort("sort_value", 0, "desc", undefined, "database");
+
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT sorted", expect.objectContaining({ pagination: { limit: 10, offset: 0 }, preserveTotalRowCountDuringExecution: true }));
   });
 });

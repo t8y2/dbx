@@ -69,7 +69,7 @@ export function didDataGridInfiniteScrollContextChange(current: readonly string[
 
 export function isDataGridAtScrollBottom(metrics: DataGridScrollMetrics, tolerance = 1): boolean {
   const maxScrollTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight);
-  return maxScrollTop - metrics.scrollTop <= tolerance;
+  return maxScrollTop > tolerance && maxScrollTop - metrics.scrollTop <= tolerance;
 }
 
 export function dataGridBottomScrollTop(metrics: Pick<DataGridScrollMetrics, "scrollHeight" | "clientHeight">): number {

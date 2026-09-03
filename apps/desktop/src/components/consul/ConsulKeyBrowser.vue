@@ -15,6 +15,7 @@ import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { kvExportFilenameStem, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useConsulStore } from "@/stores/consulStore";
 import { isCurrentWatchEvent, nextWatchIndex } from "@/lib/consul/watchState";
 import type { ConsulDeletePrefixPreview, ConsulDeletePrefixReport, ConsulImportConflictPolicy, ConsulImportPreview, ConsulImportReport, ConsulKvBundle, ConsulSearchMatch, ConsulScope, ConsulWatchEvent } from "@/types/consul";
@@ -26,7 +27,7 @@ const connectionStore = useConnectionStore();
 const consulStore = useConsulStore();
 const browserRef = ref<InstanceType<typeof KvKeyBrowser> | null>(null);
 const fileInputRef = ref<HTMLInputElement>();
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const consulConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "consul"));
 const transferTargetConnections = computed(() => (transferMode.value === "migration" ? consulConnections.value.filter((connection) => connection.id !== props.connectionId) : consulConnections.value));
 
@@ -66,7 +67,7 @@ const transferReport = ref<ConsulImportReport | null>(null);
 const transferLoading = ref(false);
 const transferApplying = ref(false);
 const transferError = ref("");
-const transferTargetReadOnly = computed(() => Boolean(connectionStore.getConfig(transferTargetId.value)?.read_only));
+const transferTargetReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(transferTargetId.value)));
 
 const deleteOpen = ref(false);
 const deletePrefix = ref("");

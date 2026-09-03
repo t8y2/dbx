@@ -324,6 +324,12 @@ pub struct BuildDataGridCopyInsertStatementRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BuildDmlChangePreviewSqlRequest {
+    pub options: dbx_core::dml_preview_sql::DmlChangePreviewSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildDataGridContextFilterConditionRequest {
     pub options: dbx_core::data_grid_sql::DataGridContextFilterConditionOptions,
 }
@@ -388,15 +394,22 @@ pub async fn execute_query(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
 
@@ -405,7 +418,7 @@ pub async fn execute_query(
     let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.sql,
         req.schema.as_deref(),
         Some(cancel_token),
@@ -441,13 +454,20 @@ pub async fn execute_conditional_update(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
 
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let registered = state.app.running_queries.register_task_for_terminal_confirmation(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
     let response_timeout = dbx_core::query::query_timeout_duration(req.timeout_secs);
@@ -458,7 +478,7 @@ pub async fn execute_conditional_update(
         let result = dbx_core::query::execute_sql_statement_with_options_typed(
             &app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.sql,
             req.schema.as_deref(),
             Some(cancel_token),
@@ -518,15 +538,22 @@ pub async fn execute_multi(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Response, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
 
@@ -536,7 +563,7 @@ pub async fn execute_multi(
     let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.sql,
         req.schema.as_deref(),
         Some(cancel_token),
@@ -593,14 +620,15 @@ pub async fn execute_batch(
     headers: HeaderMap,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     for statement in &req.statements {
-        super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, statement, false).await?;
+        super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.statements,
         req.schema.as_deref(),
         req.timeout_secs,
@@ -725,7 +753,17 @@ pub async fn execute_script_with_2pc(
         req.destructive_confirmed.unwrap_or(false),
     )
     .await;
+    if schema_diff_deploy_may_have_changed_schema(&result) {
+        let prefix = super::schema::object_metadata_cache_prefix(&req.connection_id, &req.database);
+        if let Err(error) = state.app.storage.delete_schema_cache_prefix(&prefix).await {
+            tracing::warn!(connection_id = %req.connection_id, database = %req.database, %error, "failed to invalidate schema metadata cache after deploy");
+        }
+    }
     Ok(Json(result))
+}
+
+fn schema_diff_deploy_may_have_changed_schema(result: &dbx_core::query::SchemaDiffDeployResult) -> bool {
+    result.statement_count > 0 && matches!(result.status.as_str(), "committed" | "mixed")
 }
 
 pub async fn analyze_sql_references(
@@ -1058,6 +1096,14 @@ pub async fn build_data_grid_copy_insert_statement(
     Json(dbx_core::data_grid_sql::build_data_grid_copy_insert_statement(req.options))
 }
 
+pub async fn build_dml_change_preview_sql(
+    Json(req): Json<BuildDmlChangePreviewSqlRequest>,
+) -> Result<Json<dbx_core::dml_preview_sql::DmlChangePreviewSqlResult>, (axum::http::StatusCode, Json<String>)> {
+    dbx_core::dml_preview_sql::build_dml_change_preview_sql(req.options)
+        .map(Json)
+        .map_err(|message| (axum::http::StatusCode::BAD_REQUEST, Json(message)))
+}
+
 pub async fn build_data_grid_context_filter_condition(
     Json(req): Json<BuildDataGridContextFilterConditionRequest>,
 ) -> Json<Option<String>> {
@@ -1156,6 +1202,28 @@ mod tests {
         let app = Arc::new(AppState::new_with_plugin_dir(storage, dir.join("plugins")));
         let state = Arc::new(WebState::for_tests(app, dir.clone()));
         (state, dir)
+    }
+
+    fn deploy_result(status: &str, statement_count: usize) -> dbx_core::query::SchemaDiffDeployResult {
+        dbx_core::query::SchemaDiffDeployResult {
+            transaction_id: "deploy-test".to_string(),
+            status: status.to_string(),
+            participants: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            executed_count: 0,
+            statement_count,
+            error: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn schema_diff_cache_invalidation_covers_committed_and_partial_deploys() {
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 1)));
+        assert!(schema_diff_deploy_may_have_changed_schema(&deploy_result("mixed", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("rolled_back", 1)));
+        assert!(!schema_diff_deploy_may_have_changed_schema(&deploy_result("committed", 0)));
     }
 
     #[tokio::test]
@@ -1276,6 +1344,8 @@ mod tests {
                 "relation customer_orders does not exist",
             )),
             server_message: false,
+            manual_transaction_proven_read_only: false,
+            manual_transaction_no_statement: false,
         };
 
         let response = execute_multi_response(vec![result], 17).unwrap();

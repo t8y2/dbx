@@ -8,6 +8,7 @@ import {
   mongoCollectionKindFromNode,
   mongoCollectionTableTypeFromNode,
   mongoCloneCollectionPreview,
+  mongoCreateDatabasePreview,
   mongoCreateIndexFormFromRow,
   mongoCreateIndexRequestFromSpec,
   mongoCreateIndexPreview,
@@ -22,6 +23,7 @@ import {
   snapshotMongoIndexSpec,
   toMongoCollectionKind,
   toMongoIndexRow,
+  visibleMongoCollections,
   type MongoCreateIndexForm,
   type MongoIndexSpecSource,
 } from "../mongoCollectionMutation";
@@ -94,6 +96,20 @@ describe("toMongoCollectionKind", () => {
   });
 });
 
+describe("visibleMongoCollections", () => {
+  it("hides GridFS buckets and their backing collections", () => {
+    expect(
+      visibleMongoCollections([
+        { name: "users", kind: "collection" },
+        { name: "fs", kind: "bucket", bucketName: "fs" },
+        { name: "fs.files", kind: "collection" },
+        { name: "fs.chunks", kind: "collection" },
+        { name: "reports", kind: "view" },
+      ]).map((collection) => collection.name),
+    ).toEqual(["users", "reports"]);
+  });
+});
+
 describe("isProtectedMongoIndex", () => {
   it("protects the default index by name or primary metadata", () => {
     expect(isProtectedMongoIndex({ name: "_id_", is_primary: false })).toBe(true);
@@ -103,6 +119,10 @@ describe("isProtectedMongoIndex", () => {
 });
 
 describe("mongo shell previews", () => {
+  it("shows the initialization collection used to materialize a database", () => {
+    expect(mongoCreateDatabasePreview('app "primary"')).toBe('db.getSiblingDB("app \\"primary\\"").createCollection("dbx_init");');
+  });
+
   it("preserves identifier whitespace in rename preview", () => {
     expect(mongoRenameCollectionPreview("app", " users ", " renamed ")).toBe('db.getSiblingDB("app").getCollection(" users ").renameCollection(" renamed ")');
   });

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch, type CSSProperties } from "vue";
 import { ChevronDown, X } from "@lucide/vue";
 import { completeDataGridConditionQuote, useDataGridConditionEditor, type DataGridConditionColumnOption, type DataGridConditionSuggestion, type DataGridConditionSuggestionProvider } from "@/composables/useDataGridConditionEditor";
+import { tokenizeDataGridCondition, type DataGridConditionTokenType } from "@/lib/dataGrid/dataGridConditionHighlight";
 import { getDataGridConditionSuggestionPosition, getDataGridConditionSuggestionPreferredWidth } from "@/lib/dataGrid/dataGridConditionSuggestionPosition";
 import type { DataGridConditionHistoryKind, DataGridConditionHistoryScope } from "@/lib/dataGrid/dataGridConditionHistory";
 
@@ -54,6 +55,9 @@ const suggestionPosition = ref({ left: 0, top: 0, width: 180 });
 const historyPreview = ref<{ value: string; left: number; top: number; maxWidth: number; arrowTop: number; side: "left" | "right" } | null>(null);
 const pointerMovedSuggestionIndex = ref(-1);
 const editorFocused = ref(false);
+const conditionUndoStack = ref<string[]>([]);
+const conditionRedoStack = ref<string[]>([]);
+let conditionLastValue = modelValue.value;
 let collapseTimer: ReturnType<typeof setTimeout> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let expandAfterComposition = false;
@@ -73,6 +77,25 @@ const editor = useDataGridConditionEditor({
 
 const activeEditor = computed(() => overlayRef.value ?? inputRef.value);
 const hasValue = computed(() => modelValue.value.trim().length > 0);
+// Syntax highlight tokens rendered in a layer below the (transparent-text)
+// textarea, so keywords / fields / values are colored without losing caret
+// and selection behavior.
+const highlightTokens = computed(() => tokenizeDataGridCondition(modelValue.value));
+const highlightScrollLeft = ref(0);
+const highlightScrollTop = ref(0);
+const collapsedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translateX(${-highlightScrollLeft.value}px)` }));
+const expandedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translate(${-highlightScrollLeft.value}px, ${-highlightScrollTop.value}px)` }));
+
+function highlightTokenClass(type: DataGridConditionTokenType): string | undefined {
+  if (type === "plain") return undefined;
+  return `data-grid-condition-token--${type}`;
+}
+
+function onEditorScroll(event: Event) {
+  const target = event.currentTarget as HTMLTextAreaElement;
+  highlightScrollLeft.value = target.scrollLeft;
+  highlightScrollTop.value = target.scrollTop;
+}
 const emptyHistoryText = computed(() => (modelValue.value.trim() ? props.historyNoMatchesText : props.historyEmptyText));
 const activeSuggestionId = computed(() => (editor.highlightedIndex.value >= 0 ? `${suggestionListId}-${editor.highlightedIndex.value}` : undefined));
 const suggestionPreferredWidth = computed(() => getDataGridConditionSuggestionPreferredWidth(editor.suggestions.value));
@@ -97,13 +120,14 @@ const previewStyle = computed<CSSProperties>(() => {
 });
 const previewArrowStyle = computed<CSSProperties>(() => ({ top: `${historyPreview.value?.arrowTop ?? 0}px` }));
 
-function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { width?: number; textIndent?: number } = {}) {
+function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { width?: number; paddingLeft?: number; paddingRight?: number } = {}) {
   const probe = document.createElement(wrap ? "div" : "span");
   const style = window.getComputedStyle(input);
   const width = options.width ?? input.clientWidth;
-  const textIndent = options.textIndent !== undefined ? `${options.textIndent}px` : style.textIndent;
+  const paddingLeft = options.paddingLeft !== undefined ? `${options.paddingLeft}px` : style.paddingLeft;
+  const paddingRight = options.paddingRight !== undefined ? `${options.paddingRight}px` : style.paddingRight;
   probe.textContent = input.value || input.placeholder || "";
-  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${width}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};text-indent:${textIndent};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${width}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${paddingRight} ${style.paddingBottom} ${paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
   document.body.appendChild(probe);
   return probe;
 }
@@ -117,7 +141,11 @@ function shouldExpand(input: HTMLTextAreaElement) {
 }
 
 function measureExpandedHeight(input: HTMLTextAreaElement, rect: typeof expandedRect.value) {
-  const probe = createTextProbe(input, true, { width: Math.max(1, rect.width - 8), textIndent: rect.prefix });
+  const probe = createTextProbe(input, true, {
+    width: Math.max(1, rect.width - 8),
+    paddingLeft: rect.prefix + 2,
+    paddingRight: rect.suffix + 8,
+  });
   const style = window.getComputedStyle(input);
   const lineHeight = Number.parseFloat(style.lineHeight) || 24;
   const contentHeight = probe.scrollHeight;
@@ -350,6 +378,43 @@ function onInput(event: Event) {
   scheduleCaretIntoView();
 }
 
+function isConditionUndoRedoShortcut(event: KeyboardEvent) {
+  const key = event.key.toLowerCase();
+  return ((event.metaKey || event.ctrlKey) && !event.altKey && key === "z") || (event.ctrlKey && !event.metaKey && !event.altKey && key === "y");
+}
+
+function isConditionRedoShortcut(event: KeyboardEvent) {
+  return ((event.metaKey || event.ctrlKey) && !event.altKey && event.shiftKey && event.key.toLowerCase() === "z") || (event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === "y");
+}
+
+function applyConditionHistoryValue(value: string) {
+  conditionLastValue = value;
+  modelValue.value = value;
+  void nextTick(() => {
+    const target = activeEditor.value;
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    target.setSelectionRange(value.length, value.length);
+    syncSelection(target);
+  });
+}
+
+function handleConditionUndoRedo(event: KeyboardEvent) {
+  if (!isConditionUndoRedoShortcut(event)) return false;
+
+  event.preventDefault();
+  event.stopPropagation();
+  const source = isConditionRedoShortcut(event) ? conditionRedoStack.value : conditionUndoStack.value;
+  const targetValue = source.pop();
+  if (targetValue === undefined) return true;
+
+  const currentValue = modelValue.value;
+  const destination = isConditionRedoShortcut(event) ? conditionUndoStack.value : conditionRedoStack.value;
+  destination.push(currentValue);
+  applyConditionHistoryValue(targetValue);
+  return true;
+}
+
 async function applyCondition() {
   editor.dismiss();
   const applied = props.apply ? await props.apply(modelValue.value) : emit("apply", modelValue.value);
@@ -365,6 +430,7 @@ async function clearCondition() {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (handleConditionUndoRedo(event)) return;
   if (completeQuote(event)) return;
   const action = editor.handleKeydown(event);
   if (action === "apply") void applyCondition();
@@ -451,7 +517,14 @@ function hideHistoryPreview() {
   historyPreview.value = null;
 }
 
-watch(modelValue, () => resizeEditor());
+watch(modelValue, (value) => {
+  if (value !== conditionLastValue) {
+    conditionUndoStack.value.push(conditionLastValue);
+    conditionRedoStack.value = [];
+    conditionLastValue = value;
+  }
+  resizeEditor();
+});
 watch(suggestionPreferredWidth, () => {
   if (editor.dropdownOpen.value) updateSuggestionPosition();
 });
@@ -501,6 +574,9 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
         {{ props.kind === "where" ? "WHERE" : "ORDER BY" }}
       </span>
       <div class="relative h-6 min-w-0 flex-1 overflow-hidden">
+        <div v-if="!composing" aria-hidden="true" class="data-grid-condition-highlight pointer-events-none absolute left-0 top-0" :style="collapsedHighlightStyle">
+          <span v-for="(token, tokenIndex) in highlightTokens" :key="tokenIndex" :class="highlightTokenClass(token.type)">{{ token.text }}</span>
+        </div>
         <textarea
           ref="inputRef"
           v-model="modelValue"
@@ -518,7 +594,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           :aria-controls="suggestionListId"
           :aria-activedescendant="activeSuggestionId"
           class="data-grid-topbar-condition-input absolute inset-x-0 top-0 h-6 min-w-0 resize-none bg-transparent outline-none"
-          :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
+          :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact, 'data-grid-condition-input--transparent-text': !composing }]"
           style="height: 24px"
           @focus="onFocus"
           @blur="scheduleCollapse"
@@ -528,6 +604,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
+          @scroll="onEditorScroll"
+          @contextmenu.stop
           @keydown="onKeydown"
         />
       </div>
@@ -541,6 +619,9 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
 
     <Teleport to="body">
       <div v-if="expanded" class="data-grid-topbar-condition-pane--expanded fixed z-[80] flex min-w-0 items-start gap-1" :style="overlayStyle">
+        <div v-if="!composing" aria-hidden="true" class="data-grid-condition-highlight data-grid-condition-highlight--expanded pointer-events-none absolute" :style="expandedHighlightStyle">
+          <span v-for="(token, tokenIndex) in highlightTokens" :key="tokenIndex" :class="highlightTokenClass(token.type)">{{ token.text }}</span>
+        </div>
         <textarea
           ref="overlayRef"
           v-model="modelValue"
@@ -553,7 +634,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           :aria-controls="suggestionListId"
           :aria-activedescendant="activeSuggestionId"
           class="data-grid-topbar-condition-input data-grid-topbar-condition-input--expanded absolute resize-none outline-none"
-          :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact }]"
+          :class="[props.kind === 'where' ? 'data-grid-topbar-condition-input--where' : 'data-grid-topbar-condition-input--order', { 'data-grid-topbar-condition-input--compact': props.compact, 'data-grid-condition-input--transparent-text': !composing }]"
           @blur="scheduleCollapse"
           @focus="onFocus"
           @click="onSelectionChange"
@@ -562,6 +643,8 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
           @compositionstart="onCompositionStart"
           @compositionend="onCompositionEnd"
           @input="onInput"
+          @scroll="onEditorScroll"
+          @contextmenu.stop
           @keydown="onKeydown"
         />
         <div class="data-grid-topbar-condition-floating-controls pointer-events-none absolute inset-x-2 z-[2] flex h-6 min-w-0 items-center gap-1">
@@ -765,8 +848,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
   max-width: none;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0.125rem;
-  text-indent: var(--data-grid-condition-prefix-indent);
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -801,5 +883,67 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
 
 :global(.dark .data-grid-topbar-condition-input--order.data-grid-topbar-condition-input--compact::placeholder) {
   color: rgb(253 186 116 / 70%);
+}
+
+/* Syntax highlight layer: sits below the transparent-text textarea and colors
+   condition keywords / fields / values while the real caret and selection keep
+   working in the textarea above it. */
+.data-grid-condition-highlight {
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  height: 24px;
+  padding: 0 0.125rem;
+  font-family: var(--data-grid-condition-font-family, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.875rem;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    "liga" 0,
+    "calt" 0;
+  line-height: 1.5rem;
+  white-space: pre;
+}
+
+.data-grid-condition-highlight--expanded {
+  top: var(--data-grid-condition-input-top);
+  bottom: 0.125rem;
+  left: 0.5rem;
+  width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
+  min-width: 0;
+  height: auto;
+  margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.data-grid-condition-input--transparent-text {
+  color: transparent !important;
+  caret-color: var(--foreground);
+}
+
+.data-grid-condition-token--keyword {
+  color: rgb(37 99 235);
+  font-weight: 600;
+}
+
+.data-grid-condition-token--field {
+  color: rgb(225 29 72);
+}
+
+.data-grid-condition-token--value {
+  color: rgb(13 148 136);
+}
+
+:global(.dark .data-grid-condition-token--keyword) {
+  color: rgb(96 165 250);
+}
+
+:global(.dark .data-grid-condition-token--field) {
+  color: rgb(251 113 133);
+}
+
+:global(.dark .data-grid-condition-token--value) {
+  color: rgb(45 212 191);
 }
 </style>

@@ -20,7 +20,7 @@ export function refreshMysqlAutoIncrementCounterDraft(serverValue: string | null
 
 export function canEditMysqlAutoIncrementCounter(connection: Pick<ConnectionConfig, "db_type" | "driver_profile"> | undefined, isCreateMode: boolean, columns: readonly EditableStructureColumn[]): boolean {
   if (isCreateMode || !supportsNativeMysqlAutoIncrement(connection)) return false;
-  return columns.some((column) => !!column.original && !column.markedForDrop && column.extra.autoIncrement === true);
+  return columns.some((column) => !column.markedForDrop && column.extra.autoIncrement === true);
 }
 
 export interface BuildMysqlAutoIncrementCounterStatementOptions extends Omit<MysqlAutoIncrementSqlOptions, "databaseType" | "value"> {

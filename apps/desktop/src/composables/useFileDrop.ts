@@ -27,7 +27,7 @@ export function useFileDrop() {
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
     if (path) {
       const target = resolveExternalSqlFileTarget(path, (savedConnectionId) => !!connectionStore.getConfig(savedConnectionId), unassociatedExternalSqlFileTarget());
-      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog);
+      queryStore.openExternalSqlFile(target.connectionId, target.database, path, content, version, target.catalog, target.schema);
     } else {
       const connectionId = connectionStore.activeConnectionId || connectionStore.connections[0]?.id || "";
       const connection = connectionId ? connectionStore.getConfig(connectionId) : undefined;
@@ -109,10 +109,10 @@ export function useFileDrop() {
           };
           try {
             await connectionStore.addConnection(config);
-            void connectionStore.connect(config);
+            await connectionStore.connect(config);
             toast(t("welcome.fileOpened", { name }));
           } catch (e: any) {
-            toast(t("connection.saveFailed", { message: e?.message || String(e) }), 5000);
+            toast(t("welcome.fileOpenFailed", { name, message: e?.message || String(e) }), 5000);
           }
         }
       });

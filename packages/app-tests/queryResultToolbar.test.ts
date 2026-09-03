@@ -28,11 +28,11 @@ test("query result toolbar SFCs compile", () => {
   for (const path of [contentAreaPath, dataGridPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
 });
 
-test("ContentArea keeps DISTINCT inserts separate from result-row deletes", () => {
+test("ContentArea keeps query-result insert and delete capabilities separate", () => {
   const contentArea = source(contentAreaPath);
 
   assert.match(contentArea, /:allow-insert-rows="activeTab\.queryAnalysis\?\.allowInsert \?\? activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
-  assert.match(contentArea, /:allow-delete-rows="activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
+  assert.match(contentArea, /:allow-delete-rows="activeTab\.queryAnalysis\?\.allowDelete \?\? activeTab\.queryAnalysis\?\.allowInsertDelete !== false"/);
 });
 
 test("query result toolbar reuses the production icon contract", () => {
@@ -167,6 +167,32 @@ test("standalone result views use the same compact toolbar breakpoint", () => {
   assert.match(contentArea, /isDataGridToolbarCompact\(standaloneResultToolbarWidth\.value, standaloneResultToolbarViewportWidth\.value\)/);
   assert.equal((contentArea.match(/:compact="standaloneResultToolbarCompact"/g) ?? []).length, 2);
   assert.match(dataGrid, /isDataGridToolbarCompact\(dataGridTopbarWidth\.value, dataGridViewportWidth\.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH\)/);
+});
+
+test("embedded result toolbar compacts when editing actions overflow its available width", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /dataGridTopbarMutationObserver = new MutationObserver\(updateDataGridTopbarWidth\)/);
+  assert.match(dataGrid, /dataGridTopbarMutationObserver\.observe\(topbar, \{ childList: true, characterData: true, subtree: true \}\)/);
+  assert.match(dataGrid, /topbar\.scrollWidth > topbar\.clientWidth \+ 1/);
+  assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = true/);
+  assert.match(dataGrid, /dataGridTopbarWidth\.value >= dataGridTopbarExpandedRequiredWidth\.value/);
+});
+
+test("embedded result toolbar remeasures after the SQL preview action is removed", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /if \(previousVisible && !visible\) resetDataGridTopbarOverflowCompact\(\)/);
+  assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = false/);
+  assert.match(dataGrid, /dataGridTopbarRecheckTimer = setTimeout\(/);
+  assert.match(dataGrid, /clearDataGridTopbarRecheckTimer\(\)/);
+});
+
+test("embedded result toolbar remeasures after save and rollback actions are removed", () => {
+  const dataGrid = source(dataGridPath);
+
+  assert.match(dataGrid, /\(\) => saveToolbarState\.value\.showActions,/);
+  assert.match(dataGrid, /if \(previousShowActions && !showActions\) resetDataGridTopbarOverflowCompact\(\)/);
 });
 
 test("embedded and standalone result toolbars share the same fixed height", () => {

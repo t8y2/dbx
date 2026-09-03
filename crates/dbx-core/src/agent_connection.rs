@@ -661,7 +661,8 @@ fn append_agent_url_params(base: String, params: Option<&str>) -> String {
 }
 
 pub fn hive_uses_zookeeper_discovery(config: &ConnectionConfig) -> bool {
-    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala) {
+    if !matches!(config.db_type, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+    {
         return false;
     }
 
@@ -711,6 +712,7 @@ mod tests {
             database: database.map(str::to_string),
             default_schema: None,
             visible_databases: None,
+            visible_database_patterns: None,
             visible_schemas: None,
             show_system_schemas: false,
             attached_databases: Vec::new(),
@@ -738,6 +740,7 @@ mod tests {
             redis_key_separator: default_redis_key_separator(),
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
+            redis_key_templates: Vec::new(),
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -771,6 +774,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn oracle_form_connections_use_orcl_when_database_is_omitted() {
+        for (mode, expected_url) in [
+            ("service_name", "jdbc:oracle:thin:@//oracle.example.com:1521/ORCL"),
+            ("sid", "jdbc:oracle:thin:@oracle.example.com:1521:ORCL"),
+        ] {
+            let mut cfg = config(DatabaseType::Oracle, None);
+            cfg.oracle_connection_type = Some(mode.to_string());
+            let database = cfg.effective_database().unwrap_or("");
+
+            let params = agent_connect_params(&cfg, "oracle.example.com", 1521, database).unwrap();
+
+            assert_eq!(params["database"], "ORCL");
+            assert_eq!(params["connection_string"], expected_url);
+        }
     }
 
     #[test]
@@ -907,6 +927,26 @@ mod tests {
 
         assert_eq!(params["database"], "postgres");
         assert_eq!(params["connection_string"], "jdbc:vastbase://vastbase.example.com:5432/postgres");
+    }
+
+    #[test]
+    fn kingbase_agent_params_keep_legacy_postgres_default_when_database_is_empty() {
+        let cfg = config(DatabaseType::Kingbase, None);
+
+        let params = agent_connect_params(&cfg, "kingbase.example.com", 54321, "").unwrap();
+
+        assert_eq!(params["database"], "postgres");
+        assert_eq!(params["connection_string"], "jdbc:kingbase8://kingbase.example.com:54321/postgres");
+    }
+
+    #[test]
+    fn kingbase_agent_params_preserve_explicit_database() {
+        let cfg = config(DatabaseType::Kingbase, Some("application"));
+
+        let params = agent_connect_params(&cfg, "kingbase.example.com", 54321, "application").unwrap();
+
+        assert_eq!(params["database"], "application");
+        assert_eq!(params["connection_string"], "jdbc:kingbase8://kingbase.example.com:54321/application");
     }
 
     #[test]

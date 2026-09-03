@@ -30,7 +30,7 @@ function mountEditor(kind: DataGridConditionHistoryKind, initialValue: string, o
   );
   app.mount(host);
   mountedApps.push({ app, host });
-  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement };
+  return { value, input: host.querySelector("textarea") as HTMLTextAreaElement, host };
 }
 
 function mockTextareaMetrics(input: HTMLTextAreaElement, options: { clientWidth: number; scrollWidth?: number; clientHeight?: number; scrollHeight?: number }) {
@@ -121,6 +121,44 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it.each([
+    ["where", "z", { ctrlKey: true }],
+    ["orderBy", "z", { metaKey: true }],
+    ["where", "z", { ctrlKey: true, shiftKey: true }],
+    ["orderBy", "y", { ctrlKey: true }],
+  ] as const)("keeps %s undo/redo shortcuts in the condition editor", (kind, key, modifiers) => {
+    const { input, host } = mountEditor(kind, "id = 123");
+    let bubbled = 0;
+    host.addEventListener("keydown", () => bubbled++);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers });
+    input.dispatchEvent(event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(bubbled).toBe(0);
+  });
+
+  it("keeps WHERE and ORDER BY undo history independent", async () => {
+    const where = mountEditor("where", "id = 123");
+    const orderBy = mountEditor("orderBy", "id ASC");
+
+    where.input.value = "id = 456";
+    where.input.dispatchEvent(new Event("input", { bubbles: true }));
+    orderBy.input.value = "id DESC";
+    orderBy.input.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id ASC");
+
+    orderBy.input.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(where.value.value).toBe("id = 456");
+    expect(orderBy.value.value).toBe("id DESC");
+  });
+
   it("passes the textarea caret range through when accepting a suggestion", async () => {
     const { value, input } = mountEditor("where", "status = cus AND enabled = 1", { columns: ["customer_id"] });
     input.focus();
@@ -155,6 +193,21 @@ describe("DataGridConditionEditor quote completion", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await nextTick();
     expect(value.value).toBe("name");
+  });
+
+  it("selects the first WHERE field suggestion with Enter", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
+    input.focus();
+    input.value = "cus";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("customer_id");
   });
 
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
@@ -205,17 +258,22 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
-  it("keeps expanded input first-line indent and wraps long tokens", () => {
+  it("keeps the wrapped input caret aligned with its syntax highlight layer", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const expandedHighlightCss = source.match(/\.data-grid-condition-highlight--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const prefixPadding = "calc(var(--data-grid-condition-prefix-indent) + 0.125rem)";
 
     expect(expandedInputCss).toContain("padding:");
-    expect(expandedInputCss).toContain("0.0625rem 0.125rem");
-    expect(expandedInputCss).toContain("text-indent: var(--data-grid-condition-prefix-indent)");
+    expect(expandedInputCss).toContain(prefixPadding);
+    expect(expandedHighlightCss).toContain(prefixPadding);
+    expect(expandedInputCss).not.toContain("text-indent:");
+    expect(expandedHighlightCss).not.toContain("text-indent:");
     expect(expandedInputCss).toContain("overflow-wrap: anywhere");
     expect(source).toContain("white-space:pre-wrap;overflow-wrap:anywhere;");
-    expect(source).toContain("text-indent:${style.textIndent};");
-    expect(source).toContain("textIndent: rect.prefix");
+    expect(source).not.toContain("textIndent: rect.prefix");
+    expect(source).toContain("paddingLeft: rect.prefix + 2");
+    expect(source).toContain("paddingRight: rect.suffix + 8");
     expect(source).toContain("width: Math.max(1, rect.width - 8)");
     expect(source).toContain("function fitExpandedHeightToOverlay()");
     expect(source).toContain("expandedHeight.value + overflow");

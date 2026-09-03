@@ -34,6 +34,20 @@ test("bumps DuckDB after its initial release", () => {
   assert.equal(result.versions.duckdb, "0.1.1");
 });
 
+test("bumps the SQLite SSH worker from its crate path", () => {
+  const result = evaluateAgentVersionBump({
+    versions: { "sqlite-worker": "0.1.0" },
+    changedFiles: ["crates/dbx-sqlite-worker/src/runtime.rs"],
+    moduleExists: (path) => path === "crates/dbx-sqlite-worker",
+    readModuleFile: () => "",
+  });
+
+  assert.equal(result.versions["sqlite-worker"], "0.1.1");
+  assert.deepEqual(result.changedModules, ["sqlite-worker"]);
+  assert.deepEqual(result.javaModules, []);
+  assert.deepEqual(result.nativeModules, ["sqlite-worker"]);
+});
+
 test("classifies TDengine Rust changes as native-only", () => {
   const result = evaluateAgentVersionBump({
     versions: { tdengine: "0.1.39" },

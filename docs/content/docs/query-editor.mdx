@@ -56,6 +56,16 @@ For multi-statement execution, the result area shows the current statement, tota
 
 <Callout type="warn">Cancellation depends on the driver and database. After Stop is clicked, the server may still need time to interrupt the current statement.</Callout>
 
+### Preview DML changes before executing
+
+For an `UPDATE`, `INSERT`, or `DELETE` statement, the toolbar shows a **Preview changes** button (also available in the editor context menu). DBX rewrites the statement into an equivalent read-only `SELECT` and opens it in a new result tab. The preview re-evaluates the expressions being written, so expressions with side effects (advancing a sequence, volatile functions) still take effect during the preview, and values shown for non-deterministic functions (`uuid()`, `rand()`, `now()`) may differ from the actual execution:
+
+- `UPDATE` — the grid shows the affected rows plus one **`column (new)`** column per assigned column (expressions are evaluated, so `SET a = a + 1` shows the actual new value);
+- `INSERT` — the grid shows the rows that would be inserted (column names from the target columns, `VALUES` expanded);
+- `DELETE` — the grid shows the rows that would be removed.
+
+Statements DBX cannot rewrite safely (for example some dialect-specific forms, or `UPDATE ... FROM`) are reported as **Preview is not supported** and can still be executed normally.
+
 ## Execution Scope and Target Picker
 
 | Scope | How it is selected | Best for |

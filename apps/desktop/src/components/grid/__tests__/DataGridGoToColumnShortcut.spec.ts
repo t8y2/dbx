@@ -30,6 +30,7 @@ import DataGrid from "../DataGrid.vue";
 import { useSettingsStore } from "@/stores/settingsStore";
 
 const dataGridSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGrid.vue"), "utf8");
+const appSource = readFileSync(resolve(process.cwd(), "apps/desktop/src/App.vue"), "utf8");
 const mountedApps: Array<{ app: App; host: HTMLElement }> = [];
 
 const RecycleScroller = defineComponent({
@@ -49,7 +50,7 @@ const RecycleScroller = defineComponent({
   },
 });
 
-function mountGrid(options: { displayableColumns?: boolean } = {}) {
+function mountGrid(options: { displayableColumns?: boolean; columns?: string[] } = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -61,8 +62,8 @@ function mountGrid(options: { displayableColumns?: boolean } = {}) {
     },
   });
   const result = markRaw<QueryResult>({
-    columns: ["id"],
-    rows: [[1]],
+    columns: options.columns ?? ["id"],
+    rows: [Array.from({ length: (options.columns ?? ["id"]).length }, (_, index) => index + 1)],
     affected_rows: 0,
     execution_time_ms: 0,
     hidden_column_indexes: options.displayableColumns === false ? [0] : undefined,
@@ -115,6 +116,12 @@ function goToColumnButton(host: HTMLElement): HTMLButtonElement {
   return button;
 }
 
+function goToColumnItem(name: string, position: number): HTMLButtonElement {
+  const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.replaceAll(/\s/g, "") === `${name}#${position}`);
+  if (!button) throw new Error(`Go-to-column item ${name} not found`);
+  return button;
+}
+
 function goToColumnEvent(target: HTMLElement): KeyboardEvent {
   const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "g" });
   target.dispatchEvent(event);
@@ -151,6 +158,30 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(bubbled).not.toHaveBeenCalled();
     expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("true");
     expect(document.activeElement?.getAttribute("placeholder")).toBe("Search column/comment...");
+  });
+
+  it("moves the lookup selection with arrows and chooses it with Enter", async () => {
+    const { host } = mountGrid({ columns: ["id", "name"] });
+    await settle();
+    const root = gridRoot(host);
+    root.focus();
+    goToColumnEvent(root);
+    await settle();
+
+    const input = document.activeElement as HTMLInputElement;
+    const down = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "ArrowDown" });
+    input.dispatchEvent(down);
+    await settle();
+
+    expect(down.defaultPrevented).toBe(true);
+    expect(goToColumnItem("name", 2).classList).toContain("bg-accent");
+
+    const enter = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter" });
+    input.dispatchEvent(enter);
+    await settle();
+
+    expect(enter.defaultPrevented).toBe(true);
+    expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
   });
 
   it("does not consume the configured shortcut without a displayable column", async () => {
@@ -205,18 +236,20 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(goToColumnButton(host).getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("opens the existing popover only for a handled root shortcut", () => {
+  it("opens the existing popover through the shared grid action", () => {
     const keydown = functionBody("onGridKeydown", "copyDetailValue");
 
     expect(dataGridSource).toMatch(/<div\b(?=[^>]*\bdata-grid-root)(?=[^>]*\btabindex="0")(?=[^>]*@keydown="onGridKeydown")[^>]*>/);
     expect(keydown).toMatch(
-      /const targetAllowsNativeClipboard = eventTargetAllowsNativeClipboard\(event\);[\s\S]*?if \(!targetAllowsNativeClipboard && displayableColumnIndexes\.value\.length > 0 && isGoToColumnShortcut\(event, settingsStore\.editorSettings\.shortcuts\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?goToColumnOpen\.value = true;[\s\S]*?return;[\s\S]*?\}/,
+      /const targetAllowsNativeClipboard = eventTargetAllowsNativeClipboard\(event\);[\s\S]*?if \(!targetAllowsNativeClipboard && isGoToColumnShortcut\(event, settingsStore\.editorSettings\.shortcuts\) && openGoToColumn\(\)\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?return;[\s\S]*?\}/,
     );
+    expect(dataGridSource).toContain("function openGoToColumn(): boolean");
+    expect(dataGridSource).toContain("if (!displayableColumnIndexes.value.length) return false;");
   });
 
-  it("leaves editable targets and unhandled events untouched by the shortcut", () => {
+  it("keeps editable targets available for the application-level fallback", () => {
     const keydown = functionBody("onGridKeydown", "copyDetailValue");
-    const shortcutStart = keydown.indexOf("if (!targetAllowsNativeClipboard && displayableColumnIndexes.value.length > 0 && isGoToColumnShortcut");
+    const shortcutStart = keydown.indexOf("if (!targetAllowsNativeClipboard && isGoToColumnShortcut");
     const shortcutEnd = keydown.indexOf("if (isFocusSearchShortcut", shortcutStart);
     const shortcutBranch = keydown.slice(shortcutStart, shortcutEnd);
 
@@ -226,7 +259,16 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(shortcutBranch.match(/stopPropagation/g)).toHaveLength(1);
   });
 
-  it("keeps toolbar navigation and the existing search/filter/reveal path", () => {
+  it("gives the data-tab fallback priority over conflicting global shortcuts", () => {
+    const keydown = functionBody("onGridKeydown", "copyDetailValue");
+
+    expect(keydown).toMatch(/if \(isFocusSearchShortcut\(event\) && !isGoToColumnShortcut\(event, settingsStore\.editorSettings\.shortcuts\)\)/);
+    expect(appSource).toMatch(
+      /const shortcuts = settingsStore\.editorSettings\.shortcuts;[\s\S]*?if \(showTabSwitcher\.value\) return;[\s\S]*?if \(isGoToColumnShortcut\(e, shortcuts\) && contentAreaRef\.value\?\.openGoToColumn\(\)\) \{[\s\S]*?return;[\s\S]*?const tabSwitcherDirection = tabSwitcherDirectionFromShortcut\(e, shortcuts\);/,
+    );
+  });
+
+  it("keeps toolbar navigation and adds keyboard selection to the lookup", () => {
     const selectColumn = functionBody("scrollToColumn", "onGoToColumnKeydown");
     const escape = functionBody("onGoToColumnKeydown", "matchesTableInfoColumn");
     const scroll = functionBody("scrollToColumnIndex", "measureColumnHeaderText");
@@ -234,9 +276,15 @@ describe("DataGrid go-to-column shortcut", () => {
     expect(dataGridSource.match(/<Popover v-model:open="goToColumnOpen">/g)).toHaveLength(1);
     expect(dataGridSource).toContain('>{{ t("grid.goToColumn") }}</span');
     expect(dataGridSource).toContain('v-model="goToColumnSearch"');
+    expect(dataGridSource).toContain('ref="goToColumnSearchInput"');
+    expect(dataGridSource).toContain('ref="goToColumnListRef"');
     expect(dataGridSource).toContain("filterDataGridColumnLookupItems(goToColumnItems.value, goToColumnSearch.value)");
+    expect(dataGridSource).toContain("const goToColumnSelectedIndex = ref(0);");
     expect(selectColumn).toContain('goToColumnSearch.value = ""');
     expect(selectColumn).toContain("scrollToColumnIndex(columnIndex)");
+    expect(escape).toMatch(/event\.key === "ArrowDown"[\s\S]*?moveGoToColumnSelection\(1\)/);
+    expect(escape).toMatch(/event\.key === "ArrowUp"[\s\S]*?moveGoToColumnSelection\(-1\)/);
+    expect(escape).toMatch(/event\.key === "Enter"[\s\S]*?scrollToColumn\(selected\.index\)/);
     expect(escape).toMatch(/event\.key === "Escape"[\s\S]*?goToColumnOpen\.value = false;[\s\S]*?goToColumnSearch\.value = ""/);
     expect(scroll).toContain("if (hiddenColumnIndexes.value.has(columnIndex))");
     expect(scroll).toContain("showColumn(columnIndex)");

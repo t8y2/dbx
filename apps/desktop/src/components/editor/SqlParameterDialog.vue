@@ -86,6 +86,16 @@ function setAllParametersToRaw() {
   values.value = next;
 }
 
+function clearParameterValues() {
+  const next = { ...values.value };
+  for (const parameter of props.parameters) {
+    const current = next[parameter.key] ?? { kind: "string", value: "" };
+    next[parameter.key] = { ...current, value: "" };
+  }
+  activeHistoryName.value = "";
+  values.value = next;
+}
+
 function updateValue(name: string, value: string) {
   const matchedHistory = histories.value[name]?.find((entry) => entry.value === value);
   values.value[name] = { ...(values.value[name] ?? { kind: "string" }), ...(matchedHistory ? { kind: matchedHistory.kind } : {}), value };
@@ -146,6 +156,9 @@ async function copyResolvedSql() {
       <div class="grid max-h-[calc(86vh-8rem)] gap-4 overflow-y-auto pr-1">
         <div class="flex flex-wrap items-center gap-2">
           <p class="min-w-0 flex-1 text-sm text-muted-foreground">{{ t("sqlParameters.description") }}</p>
+          <Button type="button" size="sm" variant="outline" class="shrink-0" data-testid="sql-parameters-clear-values" @click="clearParameterValues">
+            {{ t("sqlParameters.clearValues") }}
+          </Button>
           <Button type="button" size="sm" variant="outline" class="ml-auto shrink-0" data-testid="sql-parameters-use-raw-all" @click="setAllParametersToRaw">
             {{ t("sqlParameters.useRawForAll") }}
           </Button>

@@ -123,6 +123,9 @@ fn preview_agent_offline_export_unlocked(am: &AgentManager) -> AgentOfflineExpor
     let mut candidates = Vec::new();
 
     for (db_type, label) in agent_catalog::driver_store_entries() {
+        if db_type == crate::agent_manager::SQLITE_WORKER_DRIVER_KEY {
+            continue;
+        }
         let has_artifact = am.driver_launch_config_path(db_type).exists()
             || am.driver_native_path(db_type).exists()
             || am.driver_jar_path(db_type).exists();
@@ -414,7 +417,7 @@ fn export_agents_offline_unlocked(
         let plan = inspect_offline_package(package)?;
         let expected = drivers.iter().map(|driver| driver.db_type.clone()).collect::<BTreeSet<_>>();
         let actual = plan.driver_keys.into_iter().collect::<BTreeSet<_>>();
-        if expected != actual || plan.includes_jre != !jres.is_empty() {
+        if expected != actual || plan.includes_jre == jres.is_empty() {
             return Err("Generated offline Agent package failed compatibility validation".to_string());
         }
         Ok(())

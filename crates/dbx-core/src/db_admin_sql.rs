@@ -538,6 +538,7 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
             DatabaseType::Cassandra
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
+            | DatabaseType::Argo
             | DatabaseType::Kylin
             | DatabaseType::Questdb,
         ) => {
@@ -717,7 +718,10 @@ pub fn build_create_schema_sql(options: SchemaNameSqlOptions) -> Result<String, 
 
 pub fn build_drop_schema_sql(options: SchemaNameSqlOptions) -> String {
     let schema = quote_table_identifier(options.database_type, &options.name);
-    if matches!(
+    if options.database_type == Some(DatabaseType::OceanbaseOracle) {
+        // OceanBase Oracle mode models schemas as users, so dropping one drops the user.
+        format!("DROP USER {schema} CASCADE;")
+    } else if matches!(
         options.database_type,
         Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb | DatabaseType::Dameng)
     ) {
@@ -736,20 +740,22 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     );
     let target =
         qualified_duplicate_target_name(options.database_type, options.schema.as_deref(), &options.target_name);
-    let structure_sql =
-        if matches!(options.database_type, Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala)) {
-            format!("CREATE TABLE {target} LIKE {source};")
-        } else if options.database_type == Some(DatabaseType::Questdb) {
-            format!("CREATE TABLE {target} (LIKE {source});")
-        } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
-            format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
-        } else if options.database_type == Some(DatabaseType::SqlServer) {
-            format!("SELECT TOP 0 * INTO {target} FROM {source};")
-        } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
-            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
-        } else {
-            format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
-        };
+    let structure_sql = if matches!(
+        options.database_type,
+        Some(DatabaseType::Mysql | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo)
+    ) {
+        format!("CREATE TABLE {target} LIKE {source};")
+    } else if options.database_type == Some(DatabaseType::Questdb) {
+        format!("CREATE TABLE {target} (LIKE {source});")
+    } else if options.database_type.is_some_and(is_postgres_like_structure_copy) {
+        format!("CREATE TABLE {target} (LIKE {source} INCLUDING ALL);")
+    } else if options.database_type == Some(DatabaseType::SqlServer) {
+        format!("SELECT TOP 0 * INTO {target} FROM {source};")
+    } else if options.database_type.is_some_and(uses_false_predicate_duplicate_structure) {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 1=0")
+    } else {
+        format!("CREATE TABLE {target} AS SELECT * FROM {source} WHERE 0;")
+    };
 
     let mut comment_sql = Vec::new();
     if let Some(database_type) =
@@ -797,11 +803,24 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     let Some(columns) = options.columns.filter(|columns| !columns.is_empty()) else {
         return format!("INSERT INTO {target} SELECT * FROM {source};");
     };
-    let column_list = columns
+    let source_column_list = columns
         .iter()
         .map(|column| quote_table_identifier(options.database_type, column))
         .collect::<Vec<_>>()
         .join(", ");
+    // The unquoted Oracle clone DDL creates the target columns case-folded while the source
+    // keeps its exact stored spelling, so the INSERT target list must reference the folded
+    // forms and the SELECT list keeps reading the source exactly.
+    let target_column_list = if options.normalize_new_target_name && options.database_type == Some(DatabaseType::Oracle)
+    {
+        columns
+            .iter()
+            .map(|column| crate::table_structure_sql::oracle_new_object_reference(column))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        source_column_list.clone()
+    };
     let postgres_override = if options.postgres_overriding_system_value
         && matches!(options.database_type, Some(DatabaseType::Postgres | DatabaseType::Gaussdb | DatabaseType::Kwdb))
     {
@@ -809,8 +828,9 @@ pub fn build_copy_table_data_sql(options: CopyTableDataSqlOptions) -> String {
     } else {
         ""
     };
-    let insert_sql =
-        format!("INSERT INTO {target} ({column_list}){postgres_override} SELECT {column_list} FROM {source};");
+    let insert_sql = format!(
+        "INSERT INTO {target} ({target_column_list}){postgres_override} SELECT {source_column_list} FROM {source};"
+    );
     if options.sqlserver_identity_insert && options.database_type == Some(DatabaseType::SqlServer) {
         return format!("SET IDENTITY_INSERT {target} ON;\n{insert_sql}\nSET IDENTITY_INSERT {target} OFF;");
     }
@@ -1073,10 +1093,14 @@ fn qualified_name_with_quote(
 }
 
 fn qualified_duplicate_target_name(database_type: Option<DatabaseType>, schema: Option<&str>, name: &str) -> String {
-    if database_type != Some(DatabaseType::Dameng) {
-        return qualified_name(database_type, schema, name);
-    }
-    let target = profile_for(DatabaseType::Dameng).quote_ident(name);
+    // Both duplicate-target normalizations emit the spelling a freshly created clone resolves
+    // to: Oracle's clone DDL creates plain identifiers unquoted (uppercase fold), and Dameng's
+    // clone keeps the same fold convention through its profile.  Every other type stays exact.
+    let target = match database_type {
+        Some(DatabaseType::Oracle) => crate::table_structure_sql::oracle_new_object_reference(name),
+        Some(DatabaseType::Dameng) => profile_for(DatabaseType::Dameng).quote_ident(name),
+        _ => return qualified_name(database_type, schema, name),
+    };
     if schema.is_some_and(|schema| !schema.is_empty()) {
         format!("{}.{}", quote_rename_identifier(database_type, schema.unwrap()), target)
     } else {
@@ -1895,6 +1919,34 @@ mod tests {
             }),
             "DROP SCHEMA \"analytics\" CASCADE;"
         );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Postgres),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::Mysql),
+                name: "analytics".to_string(),
+            }),
+            "DROP SCHEMA `analytics`;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "analytics".to_string(),
+            }),
+            "DROP USER \"analytics\" CASCADE;"
+        );
+        assert_eq!(
+            build_drop_schema_sql(SchemaNameSqlOptions {
+                database_type: Some(DatabaseType::OceanbaseOracle),
+                name: "ana\"lytics".to_string(),
+            }),
+            "DROP USER \"ana\"\"lytics\" CASCADE;"
+        );
     }
 
     #[test]
@@ -2086,7 +2138,7 @@ mod tests {
                 column_comments: vec![],
                 identifier_quote: None,
             }),
-            "CREATE TABLE \"HR\".\"USERS_COPY\" AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
+            "CREATE TABLE \"HR\".USERS_COPY AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
         );
         let dameng_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
             database_type: Some(DatabaseType::Dameng),
@@ -2285,6 +2337,93 @@ mod tests {
                 identifier_quote: None,
             }),
             "INSERT INTO \"APP\".\"users_copy\" SELECT * FROM \"APP\".\"users\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                columns: Some(vec!["user_id".to_string(), "userName".to_string(), "order total".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: true,
+                identifier_quote: None,
+            }),
+            "INSERT INTO \"APP\".orders_copy (user_id, userName, \"order total\") SELECT \"user_id\", \"userName\", \"order total\" FROM \"APP\".\"orders\";"
+        );
+        assert_eq!(
+            build_copy_table_data_sql(CopyTableDataSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                schema: Some("APP".to_string()),
+                source_name: "orders".to_string(),
+                target_name: "orders_copy".to_string(),
+                columns: Some(vec!["user_id".to_string()]),
+                postgres_overriding_system_value: false,
+                sqlserver_identity_insert: false,
+                normalize_new_target_name: false,
+                identifier_quote: None,
+            }),
+            "INSERT INTO \"APP\".\"orders_copy\" (\"user_id\") SELECT \"user_id\" FROM \"APP\".\"orders\";"
+        );
+    }
+
+    #[test]
+    fn oracle_clone_data_copy_matches_unquoted_create_identifiers() {
+        // Clone-with-data regression: a lowercase user-typed target and quoted-lowercase source
+        // columns. The clone DDL creates plain identifiers unquoted (Oracle stores them folded),
+        // so the data-copy INSERT must reference the created spellings while the SELECT keeps
+        // the exact quoted spelling of the existing source.
+        let column = |name: &str| crate::table_structure_sql::EditableStructureColumn {
+            id: name.to_string(),
+            name: name.to_string(),
+            data_type: "NUMBER".to_string(),
+            is_nullable: true,
+            default_value: String::new(),
+            comment: String::new(),
+            is_primary_key: false,
+            extra: None,
+            original: None,
+            original_position: None,
+            marked_for_drop: false,
+            character_set: String::new(),
+            collation: String::new(),
+        };
+        let create =
+            crate::table_structure_sql::build_create_table_sql(crate::table_structure_sql::TableStructureSqlOptions {
+                database_type: Some(DatabaseType::Oracle),
+                schema: Some("APP".to_string()),
+                table_name: "orders_copy".to_string(),
+                columns: vec![column("user_id"), column("userName")],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                table_comment: None,
+                original_table_comment: None,
+                mysql_engine: None,
+                partitioned: false,
+                is_gaussdb_m_mode: false,
+            });
+        assert_eq!(create.warnings, Vec::<String>::new());
+        assert_eq!(
+            create.statements[0],
+            "CREATE TABLE \"APP\".orders_copy (\n  user_id NUMBER,\n  userName NUMBER\n);"
+        );
+
+        let copy = build_copy_table_data_sql(CopyTableDataSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("APP".to_string()),
+            source_name: "orders".to_string(),
+            target_name: "orders_copy".to_string(),
+            columns: Some(vec!["user_id".to_string(), "userName".to_string()]),
+            postgres_overriding_system_value: false,
+            sqlserver_identity_insert: false,
+            normalize_new_target_name: true,
+            identifier_quote: None,
+        });
+        assert_eq!(
+            copy,
+            "INSERT INTO \"APP\".orders_copy (user_id, userName) SELECT \"user_id\", \"userName\" FROM \"APP\".\"orders\";"
         );
     }
 

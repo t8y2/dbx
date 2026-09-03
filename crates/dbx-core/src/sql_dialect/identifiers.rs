@@ -131,6 +131,7 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Databricks
             | DatabaseType::Databend
@@ -151,6 +152,24 @@ pub fn quote_table_identifier(database_type: Option<DatabaseType>, name: &str) -
         Some(DatabaseType::SqlServer) => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('"', "\"\"")),
     }
+}
+
+/// Quote an IRIS identifier only when its spelling requires a delimited name.
+///
+/// Caché/IRIS installations may disable delimited identifiers. The IRIS JDBC
+/// preparser turns quoted names into `:%qpar(...)` parameters in that mode,
+/// which is not valid in table references. Ordinary metadata names are
+/// case-insensitive and can be sent unquoted; names containing separators or
+/// other punctuation still need the identifier quote character.
+pub(crate) fn quote_iris_identifier(name: &str, identifier_quote: Option<&str>) -> String {
+    let mut chars = name.chars();
+    let ordinary = chars.next().is_some_and(|first| first == '_' || first == '%' || first.is_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_alphanumeric());
+    if ordinary {
+        return name.to_string();
+    }
+    let quote = identifier_quote.map(str::trim).filter(|quote| !quote.is_empty()).unwrap_or("\"");
+    format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
 }
 
 pub(crate) fn quote_gaussdb_jdbc_identifier(name: &str, identifier_quote: &str) -> String {
@@ -388,11 +407,37 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
         | DatabaseType::Hive
         | DatabaseType::Kyuubi
         | DatabaseType::Impala
+        | DatabaseType::Argo
         | DatabaseType::Spark
         | DatabaseType::Questdb => format!("`{}`", name.replace('`', "``")),
         DatabaseType::SqlServer => format!("[{}]", name.replace(']', "]]")),
         _ => format!("\"{}\"", name.replace('\"', "\"\"")),
     }
+}
+
+pub(crate) fn transfer_column_identifier(
+    name: &str,
+    database_type: &DatabaseType,
+    quote_target_column_names: bool,
+) -> String {
+    if quote_target_column_names
+        || !matches!(database_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss)
+        || !is_simple_unquoted_identifier(name)
+        || is_postgres_reserved_identifier(&name.to_ascii_lowercase())
+    {
+        quote_transfer_identifier(name, database_type)
+    } else {
+        name.to_string()
+    }
+}
+
+fn is_simple_unquoted_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 /// Qualified table name for transfer SQL.

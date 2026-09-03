@@ -51,6 +51,7 @@ describe("tableStructureEditorState", () => {
     expect(canEditStructuredTriggerDraft("oracle", existing)).toBe(false);
     expect(canEditStructuredTriggerDraft(undefined, existing)).toBe(false);
     expect(canEditStructuredTriggerDraft("mysql", existing)).toBe(true);
+    expect(canEditStructuredTriggerDraft("sqlserver", existing)).toBe(true);
     expect(
       canEditStructuredTriggerDraft("oracle", {
         id: "new:trigger",

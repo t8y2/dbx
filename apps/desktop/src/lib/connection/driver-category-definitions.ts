@@ -25,6 +25,7 @@ export const AGENT_DRIVER_CATEGORY_MAP: Readonly<Record<string, DriverCategoryKe
   databricks: "analytics",
   db2: "sql",
   duckdb: "lightweight",
+  "sqlite-worker": "lightweight",
   etcd: "registry_config",
   exasol: "analytics",
   firebird: "sql",

@@ -859,6 +859,7 @@ mod tests {
             model: "openai-codex/gpt-5.4".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,

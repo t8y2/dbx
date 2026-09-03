@@ -24,6 +24,8 @@ export type ShortcutActionId =
   | "redo"
   | "selectAll"
   | "extendSelection"
+  | "addNextSelectionOccurrence"
+  | "selectAllSelectionOccurrences"
   | "uppercaseSelection"
   | "lowercaseSelection"
   | "exPasteSqlInCondition"
@@ -66,6 +68,7 @@ export type ShortcutActionId =
   | "toggleTranspose"
   | "cancelSearch"
   | "toggleSidebar"
+  | "toggleZenMode"
   | "copySidebarSelection"
   | "pasteSidebarSelection"
   | "editSidebarConnection"
@@ -97,6 +100,17 @@ export function closeOtherTabsDefaultShortcut(platform = globalThis.navigator?.p
   return isMacShortcutPlatform(platform) ? "Alt+Mod+W" : "Shift+Alt+W";
 }
 
+// 同词项选择的平台相关默认键。Windows/Linux 上 Ctrl+Mod+G 经 CodeMirror 的
+// Mod→Ctrl 展开后成为不可达的 Ctrl-Ctrl-G，且 Ctrl+G 本身是编辑器内
+// find-next（Mod-G 的非 mac 展开），因此非 mac 平台改用 JetBrains 风格的
+// Alt+J / Ctrl+Alt+Shift+J；macOS 维持 Ctrl+G / Ctrl+Cmd+G。
+export function selectionOccurrenceDefaultShortcut(actionId: "addNextSelectionOccurrence" | "selectAllSelectionOccurrences", platform = globalThis.navigator?.platform || ""): string {
+  if (isMacShortcutPlatform(platform)) {
+    return actionId === "addNextSelectionOccurrence" ? "Ctrl+G" : "Ctrl+Mod+G";
+  }
+  return actionId === "addNextSelectionOccurrence" ? "Alt+J" : "Ctrl+Alt+Shift+J";
+}
+
 export function tabNavigationHistoryDefaultShortcut(direction: "back" | "forward", platform = globalThis.navigator?.platform || ""): string {
   const modifier = isMacShortcutPlatform(platform) ? "Ctrl" : "Mod";
   const key = direction === "back" ? "ArrowLeft" : "ArrowRight";
@@ -107,6 +121,8 @@ const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<s
   closeOtherTabs: new Set(["Alt+Mod+W", "Shift+Alt+W"]),
   navigateTabHistoryBack: new Set(["Ctrl+Alt+ArrowLeft", "Mod+Alt+ArrowLeft"]),
   navigateTabHistoryForward: new Set(["Ctrl+Alt+ArrowRight", "Mod+Alt+ArrowRight"]),
+  addNextSelectionOccurrence: new Set(["Ctrl+G", "Alt+J"]),
+  selectAllSelectionOccurrences: new Set(["Ctrl+Mod+G", "Ctrl+Alt+Shift+J"]),
 };
 const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 const LEGACY_COPY_CURRENT_ROW_DEFAULT = "Mod+D";
@@ -250,6 +266,18 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutExtendSelection",
     scope: "editor",
     defaultShortcut: "Alt+W",
+  },
+  {
+    id: "addNextSelectionOccurrence",
+    labelKey: "settings.shortcutAddNextSelectionOccurrence",
+    scope: "editor",
+    defaultShortcut: "Ctrl+G",
+  },
+  {
+    id: "selectAllSelectionOccurrences",
+    labelKey: "settings.shortcutSelectAllSelectionOccurrences",
+    scope: "editor",
+    defaultShortcut: "Ctrl+Mod+G",
   },
   {
     id: "uppercaseSelection",
@@ -504,6 +532,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "Mod+B",
   },
   {
+    id: "toggleZenMode",
+    labelKey: "settings.shortcutToggleZenMode",
+    scope: "global",
+    defaultShortcut: "Shift+Mod+F12",
+  },
+  {
     id: "copySidebarSelection",
     labelKey: "settings.shortcutCopySidebarSelection",
     scope: "sidebar",
@@ -567,6 +601,8 @@ function shortcutsUseSameKeys(first: string, second: string, platform = globalTh
 }
 
 function shortcutDefaultForPlatform(definition: ShortcutDefinition, platform: string): string {
+  if (definition.id === "addNextSelectionOccurrence") return selectionOccurrenceDefaultShortcut("addNextSelectionOccurrence", platform);
+  if (definition.id === "selectAllSelectionOccurrences") return selectionOccurrenceDefaultShortcut("selectAllSelectionOccurrences", platform);
   if (definition.id === "closeOtherTabs") return closeOtherTabsDefaultShortcut(platform);
   if (definition.id === "navigateTabHistoryBack") return tabNavigationHistoryDefaultShortcut("back", platform);
   if (definition.id === "navigateTabHistoryForward") return tabNavigationHistoryDefaultShortcut("forward", platform);

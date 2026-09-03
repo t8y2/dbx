@@ -5,6 +5,7 @@ import { test } from "vitest";
 import {
   BinaryCellImportTooLargeError,
   binaryCellDisplayText,
+  binaryCellClipboardText,
   binaryCellDownloadFileName,
   binaryCellDownloadPayload,
   canDownloadBinaryCellValue,
@@ -105,6 +106,44 @@ test("binaryCellUtf8Text only returns strict printable text", () => {
   assert.equal(binaryCellUtf8Text("0xfffe", "LONGBLOB", "mysql"), null);
   assert.equal(binaryCellUtf8Text("0x0061", "LONGBLOB", "mysql"), null);
   assert.equal(binaryCellUtf8Text("0x4869", "varchar", "mysql"), null);
+});
+
+// issue #7471：MySQL VARBINARY 的文本 payload 复制为原始字符串，任意二进制保持 0x/hex 无损。
+test("binaryCellClipboardText decodes textual MySQL varbinary and preserves arbitrary bytes", () => {
+  // Case 1: ASCII VARBINARY（issue 示例 abc → 0x616263）。
+  assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "mysql"), "abc");
+  // Case 2: 数字字符串。
+  assert.equal(binaryCellClipboardText("0x31", "VARBINARY(128)", "mysql"), "1");
+  assert.equal(binaryCellClipboardText("0x6b384a39784c326d51347650", "VARBINARY(128)", "mysql"), "k8J9xL2mQ4vP");
+  // Case 3: 较长 ASCII token 必须完整复制。
+  assert.equal(binaryCellClipboardText("0x75736572393832335f746f6b656e5f586b38396d4e32714c307750347652", "VARBINARY(128)", "mysql"), "user9823_token_Xk89mN2qL0wP4vR");
+  // Case 4: UTF-8 中文 lossless round-trip。
+  assert.equal(binaryCellClipboardText("0xe4b8ade69687", "VARBINARY(128)", "mysql"), "中文");
+  // emoji（多字节 UTF-8）。
+  assert.equal(binaryCellClipboardText("0xf09f9880", "VARBINARY(64)", "mysql"), "😀");
+  // 空字符串及允许的文本换行。
+  assert.equal(binaryCellClipboardText("0x", "VARBINARY(0)", "mysql"), "");
+  assert.equal(binaryCellClipboardText("0x68690a", "VARBINARY(3)", "mysql"), "hi\n");
+
+  // Case 5: arbitrary binary（非法 UTF-8 / 含 NUL / 含控制字符）保持 null → 复制端沿用 0x/hex，绝不产生 � 或丢字节。
+  assert.equal(binaryCellClipboardText("0xdeadbeef", "VARBINARY(4)", "mysql"), null);
+  assert.equal(binaryCellClipboardText("0xfffe", "VARBINARY(2)", "mysql"), null);
+  assert.equal(binaryCellClipboardText("0x0061", "VARBINARY(2)", "mysql"), null); // 含 NUL
+  assert.equal(binaryCellClipboardText("0x0102", "VARBINARY(2)", "mysql"), null); // 控制字符
+  assert.equal(binaryCellClipboardText("0xefbbbf616263", "VARBINARY(6)", "mysql"), null); // 解码会吞 BOM，无法 byte-for-byte 回编码
+
+  // Case 6: NULL 保持原行为（helper 只处理字符串形态的 hex 值）。
+  assert.equal(binaryCellClipboardText(null, "VARBINARY(128)", "mysql"), null);
+
+  // Case 7: 非目标类型 / 非 MySQL 一律不改写，回归保护。
+  assert.equal(binaryCellClipboardText("0x616263", "BLOB", "mysql"), null); // MySQL BLOB 不跟随
+  assert.equal(binaryCellClipboardText("0x616263", "LONGBLOB", "mysql"), null);
+  assert.equal(binaryCellClipboardText("0x616263", "BINARY(8)", "mysql"), null); // MySQL BINARY 不跟随
+  assert.equal(binaryCellClipboardText("0x616263", "VARBINARY(128)", "sqlserver"), null); // SQL Server varbinary 不改
+  assert.equal(binaryCellClipboardText("0x616263", "bytea", "postgres"), null); // Postgres bytea 不改
+  assert.equal(binaryCellClipboardText("0x616263", "BINARY(16)", "tdengine"), null); // 非 MySQL BINARY 不改
+  assert.equal(binaryCellClipboardText("0x616263", "varchar", "mysql"), null); // 非二进制列不改
+  assert.equal(binaryCellClipboardText("abcd", "VARBINARY(4)", "mysql"), null); // 普通文本不猜测为裸 hex
 });
 
 // 回归：SQLite/DuckDB 等库同样有 `blob` 列，文本预览必须与编辑写回路径一样仅对 mysql 开启，

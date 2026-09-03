@@ -1,5 +1,86 @@
 import { describe, expect, it } from "vitest";
-import { applyColumnFormatter, defaultIoTDBTimestampFormatter, formatIoTDBTimestampEditorValue, normalizeColumnFormatter, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, columnFormatterKeys, defaultIoTDBTimestampFormatter, formatIoTDBTimestampEditorValue, normalizeColumnFormatter, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
+
+describe("columnFormatterKeys", () => {
+  // MySQL query metadata mirrors the database into the schema slot, while the
+  // table view has always keyed formatters with an empty schema.
+  const mysqlQueryColumn = {
+    connectionId: "conn1",
+    database: "app",
+    databaseType: "mysql",
+    resultColumn: "created_at",
+    displaySource: { database: "app", schema: "app", tableName: "users", sourceColumn: "created_at" },
+  };
+  const mysqlTableColumn = {
+    connectionId: "conn1",
+    database: "app",
+    databaseType: "mysql",
+    resultColumn: "created_at",
+    tableMeta: { database: "app", tableName: "users" },
+  };
+
+  it("writes MySQL query-result saves under the table-view empty-schema key", () => {
+    const keys = columnFormatterKeys(mysqlQueryColumn);
+    expect(keys[0]).toBe("conn1::app::::users::created_at");
+    // The mirrored spelling stays readable so older saves keep applying.
+    expect(keys).toContain("conn1::app::app::users::created_at");
+  });
+
+  it("resolves a MySQL formatter saved from a query result in the table view", () => {
+    const queryKeys = columnFormatterKeys(mysqlQueryColumn);
+    const tableKeys = columnFormatterKeys(mysqlTableColumn);
+    // A save writes keys[0]; the table-view read list must include that key.
+    expect(tableKeys).toContain(queryKeys[0]!);
+    expect(tableKeys[0]).toBe(queryKeys[0]);
+    // Clearing from the table view removes the legacy mirrored save too.
+    expect(tableKeys).toContain("conn1::app::app::users::created_at");
+  });
+
+  it("keeps the physical schema as the write key for schema-aware dialects", () => {
+    const keys = columnFormatterKeys({
+      connectionId: "conn1",
+      database: "app",
+      databaseType: "postgres",
+      resultColumn: "created_at",
+      displaySource: { database: "app", schema: "public", tableName: "users", sourceColumn: "created_at" },
+    });
+    expect(keys).toEqual(["conn1::app::public::users::created_at"]);
+  });
+
+  it("returns no keys without a physical table identity", () => {
+    expect(columnFormatterKeys({ connectionId: "conn1", database: "app", databaseType: "mysql", resultColumn: "total" })).toEqual([]);
+    expect(
+      columnFormatterKeys({
+        connectionId: "conn1",
+        database: "app",
+        databaseType: "mysql",
+        resultColumn: "total",
+        // Cached legacy mapping without a resolvable physical table.
+        displaySource: { sourceColumn: "total" },
+      }),
+    ).toEqual([]);
+  });
+
+  it("keys writes by the physical source column, not an alias", () => {
+    const keys = columnFormatterKeys({ ...mysqlQueryColumn, resultColumn: "createdAt" });
+    expect(keys[0]).toBe("conn1::app::::users::created_at");
+    expect(keys.every((key) => key.endsWith("::created_at"))).toBe(true);
+  });
+
+  it("canonicalizes writes for unresolved query columns backed by mirrored tab metadata", () => {
+    // A query column without a per-ordinal source mapping still inherits the
+    // tab's tableMeta, whose MySQL schema slot mirrors the database.
+    const keys = columnFormatterKeys({
+      connectionId: "conn1",
+      database: "app",
+      databaseType: "mysql",
+      resultColumn: "created_at",
+      tableMeta: { database: "app", schema: "app", tableName: "users" },
+    });
+    expect(keys[0]).toBe("conn1::app::::users::created_at");
+    expect(keys).toContain("conn1::app::app::users::created_at");
+  });
+});
 
 describe("normalizeColumnFormatter", () => {
   it("preserves a structured manual reference filter", () => {
@@ -83,9 +164,14 @@ describe("defaultIoTDBTimestampFormatter", () => {
     expect(defaultIoTDBTimestampFormatter("iotdb", "INT64", "time_zone=Asia%2FShanghai")).toBeUndefined();
   });
 
-  it("uses UTC when the connection does not specify a time zone", () => {
+  it("uses the IoTDB client session default when the connection does not specify a time zone", () => {
     const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "");
-    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T00:00:00.001+00:00");
+    expect(applyColumnFormatter("1787759999000", formatter)).toBe("2026-08-26T23:59:59.000+08:00");
+  });
+
+  it("falls back to the IoTDB client session default for an invalid configured zone", () => {
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "time_zone=Not%2FAZone");
+    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T08:00:00.001+08:00");
   });
 
   it("round-trips a negative nanosecond timestamp without truncating toward zero", () => {

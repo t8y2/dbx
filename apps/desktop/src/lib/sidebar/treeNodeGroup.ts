@@ -17,10 +17,13 @@ const treeGroupNodeTypes = new Set<TreeNodeType>([
   "group-functions",
   "group-sequences",
   "group-synonyms",
+  "group-jobs",
   "group-packages",
   "group-types",
   "group-partitions",
   "group-extensions",
+  "group-tablespaces",
+  "group-datafiles",
   "type-attributes",
   "type-methods",
 ]);

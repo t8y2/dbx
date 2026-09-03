@@ -470,6 +470,15 @@ profiles:
     user: ""
     urlParams: auth=NONE
     category: analytics
+  - id: argo
+    dbType: argo
+    label: ArgoDB (Transwarp)
+    icon: hive
+    port: 10000
+    user: ""
+    urlParams: auth=noSasl
+    category: domestic
+    pickerLabel: ArgoDB
   - id: impala
     dbType: impala
     label: Apache Impala
@@ -613,6 +622,12 @@ profiles:
     port: 2379
     user: ""
     category: registry_config
+  - id: etcd-v2
+    dbType: etcd
+    label: etcd 2.x (v2 API)
+    icon: etcd
+    port: 2379
+    user: ""
   - id: zookeeper
     dbType: zookeeper
     label: Apache ZooKeeper
@@ -690,6 +705,14 @@ profiles:
     icon: InfluxDB
     pickerIcon: influxdb
     port: 8086
+    user: ""
+    category: timeseries
+  - id: influxdb3
+    dbType: influxdb3
+    label: InfluxDB 3.x
+    icon: InfluxDB
+    pickerIcon: influxdb
+    port: 8181
     user: ""
     category: timeseries
   - id: victoriametrics

@@ -188,6 +188,10 @@ pub struct TriggerInfo {
     pub timing: String,
     #[serde(default)]
     pub statement: Option<String>,
+    /// Carries the catalog-reported enabled state so SQL Server edits can
+    /// restore it after the DROP + CREATE rebuild (`DISABLE TRIGGER`).
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -210,6 +214,8 @@ pub struct TableStructureSqlOptions {
     pub table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_table_comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mysql_engine: Option<String>,
     /// Whether the target table is a partitioned parent table (PostgreSQL
     /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
     /// partitioned parents, so the builder refuses such a request up front

@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
@@ -14,6 +15,30 @@ use crate::{
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
+const DETACHED_TABS_STATE_KEY: &str = "detached_tabs";
+static DETACHED_TABS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static APPROVED_DETACHED_CLOSES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn detached_tabs_lock() -> &'static tokio::sync::Mutex<()> {
+    DETACHED_TABS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn approved_detached_closes() -> &'static Mutex<HashSet<String>> {
+    APPROVED_DETACHED_CLOSES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+pub(crate) fn take_approved_detached_window_close(label: &str) -> bool {
+    approved_detached_closes().lock().map(|mut labels| labels.remove(label)).unwrap_or(false)
+}
+
+async fn load_detached_tabs_map(state: &AppState) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    Ok(state
+        .storage
+        .load_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY)
+        .await?
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default())
+}
 
 fn open_tabs_state_key(debug_build: bool) -> &'static str {
     if debug_build {
@@ -87,6 +112,15 @@ pub async fn complete_app_close(app: AppHandle, window: Window, action: String) 
             if let Some(state) = app.try_state::<CloseBehaviorState>() {
                 state.allow_next_exit();
             }
+            #[cfg(target_os = "macos")]
+            {
+                // Take the whole app off-screen first so WKWebView teardown during
+                // process exit cannot flash the window red on macOS 12. `AppHandle::hide`
+                // is macOS-only, so this block is compiled per-platform.
+                let _ = window.hide();
+                let _ = app.hide();
+                tokio::time::sleep(std::time::Duration::from_millis(crate::EXIT_HIDE_GRACE_MS)).await;
+            }
             app.exit(0);
         }
         "hide" => {
@@ -102,7 +136,8 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
     let state =
         app.try_state::<CloseBehaviorState>().ok_or_else(|| "close behavior state is unavailable".to_string())?;
     state.set_frontend_ready(true);
-    clear_startup_probe_after_frontend_ready();
+    let main_window_visible = app.get_webview_window("main").is_some_and(|window| window.is_visible().unwrap_or(false));
+    clear_startup_probe_after_frontend_ready(main_window_visible);
     Ok(())
 }
 
@@ -171,6 +206,53 @@ pub async fn load_open_tabs_state(state: State<'_, Arc<AppState>>) -> Result<Opt
 #[tauri::command]
 pub async fn save_open_tabs_state(state: State<'_, Arc<AppState>>, payload: serde_json::Value) -> Result<(), String> {
     state.storage.save_open_tabs_state_with_key(open_tabs_state_key(cfg!(debug_assertions)), &payload).await
+}
+
+#[tauri::command]
+pub async fn save_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+    handoff: serde_json::Value,
+) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.insert(tab_id, handoff);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub async fn load_detached_tab_handoff(
+    state: State<'_, Arc<AppState>>,
+    tab_id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.remove(&tab_id))
+}
+
+#[tauri::command]
+pub async fn list_detached_tab_handoffs(state: State<'_, Arc<AppState>>) -> Result<Vec<serde_json::Value>, String> {
+    let _guard = detached_tabs_lock().lock().await;
+    Ok(load_detached_tabs_map(state.inner()).await?.into_values().collect())
+}
+
+#[tauri::command]
+pub async fn delete_detached_tab_handoff(state: State<'_, Arc<AppState>>, tab_id: String) -> Result<(), String> {
+    let _guard = detached_tabs_lock().lock().await;
+    let mut tabs = load_detached_tabs_map(state.inner()).await?;
+    tabs.remove(&tab_id);
+    state.storage.save_open_tabs_state_with_key(DETACHED_TABS_STATE_KEY, &serde_json::Value::Object(tabs)).await
+}
+
+#[tauri::command]
+pub fn approve_detached_window_close(window: Window) -> Result<(), String> {
+    if !window.label().starts_with("detached-tab-") {
+        return Err("current window is not a detached tab window".to_string());
+    }
+    approved_detached_closes()
+        .lock()
+        .map_err(|_| "detached window close state is unavailable".to_string())?
+        .insert(window.label().to_string());
+    Ok(())
 }
 
 #[tauri::command]

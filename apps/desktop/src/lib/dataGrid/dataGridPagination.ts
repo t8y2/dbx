@@ -33,6 +33,21 @@ export interface CanFetchNextDataGridSegmentOptions {
 
 export type DataGridInexactTotalRowCountMode = "at-least" | "estimated";
 
+export const ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS = 100;
+
+export function elasticsearchCursorPageJumpRequestCount(currentPage: number, targetPage: number): number {
+  if (!Number.isSafeInteger(currentPage) || !Number.isSafeInteger(targetPage) || currentPage < 1 || targetPage < 1 || currentPage === targetPage) {
+    return 0;
+  }
+  if (targetPage > currentPage) {
+    return targetPage - currentPage;
+  }
+
+  // search_after only moves forward. The current workaround rebuilds the
+  // cursor from page 1 when navigating backward, including the target request.
+  return targetPage;
+}
+
 export function dataGridTruncationHintKey(databaseType?: DatabaseType): "grid.truncatedHint" | "grid.victoriaMetricsTruncatedHint" {
   return databaseType === "victoriametrics" ? "grid.victoriaMetricsTruncatedHint" : "grid.truncatedHint";
 }
@@ -40,6 +55,11 @@ export function dataGridTruncationHintKey(databaseType?: DatabaseType): "grid.tr
 export function dataGridTotalRowCountLabelKey(totalRowCountIsExact: boolean, inexactMode: DataGridInexactTotalRowCountMode): "grid.totalRowCount" | "grid.totalRowCountAtLeast" | "grid.totalRowCountEstimated" {
   if (totalRowCountIsExact) return "grid.totalRowCount";
   return inexactMode === "estimated" ? "grid.totalRowCountEstimated" : "grid.totalRowCountAtLeast";
+}
+
+export function showDataGridRerunTotalCountAction(options: { canCalculateTotalRowCount: boolean; displayedTotalRowCount?: number; totalRowCountIsExact: boolean }): boolean {
+  if (!options.canCalculateTotalRowCount || options.totalRowCountIsExact !== true) return false;
+  return typeof options.displayedTotalRowCount === "number" && Number.isFinite(options.displayedTotalRowCount) && options.displayedTotalRowCount >= 0;
 }
 
 export function resolveDataGridPaginationTotal(options: { paginationTotalRowCount?: number; serverKnownTotalRowCount?: number; totalRowCountIsExact: boolean; maxRows?: number }): number | undefined {

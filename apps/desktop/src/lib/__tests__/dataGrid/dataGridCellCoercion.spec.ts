@@ -31,6 +31,36 @@ describe("dataGridCellDisplayText", () => {
       }),
     ).toBeUndefined();
   });
+
+  it.each([
+    ["2026-08-28 12:34:56.1", "2026-08-28 12:34:56.100"],
+    ["2026-08-28 12:34:56.12+08:00", "2026-08-28 12:34:56.120+08:00"],
+  ])("pads short timestamp fractions for display", (value, expected) => {
+    expect(
+      dataGridCellDisplayText({
+        value,
+        databaseType: "mysql",
+        columnInfo: { data_type: "timestamp" },
+      }),
+    ).toBe(expected);
+  });
+
+  it("leaves full-precision and non-timestamp values unchanged", () => {
+    expect(
+      dataGridCellDisplayText({
+        value: "2026-08-28 12:34:56.1234",
+        databaseType: "mysql",
+        columnInfo: { data_type: "timestamp(6)" },
+      }),
+    ).toBeUndefined();
+    expect(
+      dataGridCellDisplayText({
+        value: "2026-08-28 12:34:56.1",
+        databaseType: "mysql",
+        columnInfo: { data_type: "varchar(64)" },
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("coerceDataGridCellValue", () => {
@@ -220,15 +250,36 @@ describe("coerceDataGridCellValue", () => {
     ).toBe("9007199254740993");
   });
 
-  it("leaves ambiguous single-group values untouched", () => {
+  it("normalizes ambiguous single-comma values using the runtime number format", () => {
     expect(
       coerceDataGridCellValue({
         value: "10,000",
-        oldValue: 10000,
-        databaseType: "sqlserver",
-        columnInfo: { data_type: "int" },
+        oldValue: "0.0000",
+        databaseType: "mysql",
+        columnInfo: { data_type: "decimal(14,4)" },
+        numberFormat: { groupSeparator: ",", decimalSeparator: "." },
       }),
-    ).toBe("10,000");
+    ).toBe("10000");
+
+    expect(
+      coerceDataGridCellValue({
+        value: "114,870",
+        oldValue: "0.0000",
+        databaseType: "mysql",
+        columnInfo: { data_type: "decimal(14,4)" },
+        numberFormat: { groupSeparator: ",", decimalSeparator: "." },
+      }),
+    ).toBe("114870");
+
+    expect(
+      coerceDataGridCellValue({
+        value: "114,870",
+        oldValue: "0.0000",
+        databaseType: "mysql",
+        columnInfo: { data_type: "decimal(14,4)" },
+        numberFormat: { groupSeparator: ".", decimalSeparator: "," },
+      }),
+    ).toBe("114.870");
 
     expect(
       coerceDataGridCellValue({
@@ -236,8 +287,21 @@ describe("coerceDataGridCellValue", () => {
         oldValue: 1000000,
         databaseType: "sqlserver",
         columnInfo: { data_type: "float" },
+        numberFormat: { groupSeparator: ".", decimalSeparator: "," },
       }),
-    ).toBe("1,000e3");
+    ).toBe(1000);
+  });
+
+  it("leaves ambiguous comma values untouched when the runtime format uses neither comma token", () => {
+    expect(
+      coerceDataGridCellValue({
+        value: "10,000",
+        oldValue: 10000,
+        databaseType: "sqlserver",
+        columnInfo: { data_type: "int" },
+        numberFormat: { groupSeparator: "’", decimalSeparator: "." },
+      }),
+    ).toBe("10,000");
   });
 
   it("does not strip commas when the column is not numeric", () => {

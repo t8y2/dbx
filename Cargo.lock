@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dbx"
-version = "0.5.94"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2011,6 +2011,7 @@ dependencies = [
  "chrono",
  "csv",
  "dbx-core",
+ "dbx-mcp",
  "deadpool-postgres",
  "font-kit",
  "futures",
@@ -2024,6 +2025,7 @@ dependencies = [
  "percent-encoding",
  "portpicker",
  "redis",
+ "regex",
  "reqwest 0.12.28",
  "russh",
  "rust_decimal",
@@ -2058,11 +2060,12 @@ dependencies = [
 
 [[package]]
 name = "dbx-cli"
-version = "0.4.72"
+version = "0.4.79"
 dependencies = [
  "async-trait",
  "dbx-core",
  "dbx-mcp",
+ "rustls 0.23.43",
  "serde",
  "serde_json",
  "tempfile",
@@ -2086,6 +2089,7 @@ dependencies = [
  "cbc 0.1.2",
  "chrono",
  "csv",
+ "dbx-sqlite-worker",
  "deadpool-postgres",
  "encoding_rs",
  "flate2",
@@ -2096,11 +2100,13 @@ dependencies = [
  "insta",
  "json5",
  "jsonwebtoken",
+ "libsqlite3-hotbundle",
  "log",
  "minijinja",
  "mongodb",
  "mysql_async",
  "mysql_common",
+ "nix",
  "notify",
  "openssl",
  "pageant",
@@ -2150,11 +2156,13 @@ dependencies = [
 
 [[package]]
 name = "dbx-mcp"
-version = "0.4.72"
+version = "0.4.79"
 dependencies = [
  "async-trait",
+ "axum",
  "dbx-core",
  "dirs",
+ "log",
  "reqwest 0.12.28",
  "rmcp",
  "rustls 0.23.43",
@@ -2165,13 +2173,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-rustls 0.26.4",
+ "tokio-util",
+ "tower-http",
  "url",
  "uuid",
 ]
 
 [[package]]
+name = "dbx-sqlite-worker"
+version = "0.1.1"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlparser",
+]
+
+[[package]]
 name = "dbx-web"
-version = "0.5.94"
+version = "0.6.2"
 dependencies = [
  "aes-gcm 0.10.3",
  "argon2",
@@ -2180,6 +2200,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dbx-core",
+ "dbx-mcp",
  "futures",
  "log",
  "pbkdf2 0.12.2",
@@ -4611,6 +4632,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsqlite3-hotbundle"
+version = "1.510300.0"
+source = "git+https://github.com/zipg/libsqlite3-hotbundle.git?rev=7f12f203b4f4694a273410bd9b02d77f82b6114e#7f12f203b4f4694a273410bd9b02d77f82b6114e"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6976,19 +7005,27 @@ checksum = "14db48ee17a9ba61810ab1a9c1beb7d06d8136ae39ac25a1137f10d357af01af"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
  "pastey",
  "pin-project-lite",
+ "rand 0.10.2",
  "rmcp-macros",
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "sse-stream",
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -8184,6 +8221,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sse-stream"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body 1.1.0",
+ "http-body-util",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "ssfmt"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8948,7 +8998,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

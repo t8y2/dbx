@@ -12,7 +12,7 @@
     <a href="https://discord.gg/W7NyVDRt6a"><img src="https://dcbadge.limes.pink/api/server/W7NyVDRt6a" alt="加入 Discord" /></a>
   </p>
   <p>
-		<a href="https://trendshift.io/repositories/26775?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/26775/daily?language=Rust" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
+		<a href="https://trendshift.io/repositories/26775?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26775" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
     <a href="https://hellogithub.com/repository/t8y2/dbx" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=7f74ffda697241bf996e17e1b0900a21&claim_uid=p0UjnC1TLtyvWSx" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 	<a href="https://www.producthunt.com/products/dbx/launches/dbx?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-dbx" target="_blank" rel="noopener noreferrer"><img alt="DBX - Lightweight open-source database manager built with Rust | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136811&amp;theme=light&amp;t=1780979717555"></a>
 	  </p>
@@ -62,6 +62,88 @@
     <a href="https://dl.dbxio.com/assets/screenshot-grid.png"><img src="https://dl.dbxio.com/assets/screenshot-grid.png" width="395" /></a>
   </p>
 </div>
+
+## 赞助商与合作伙伴
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
+      </a>
+    </td>
+    <td>
+      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="docs/public/sponsors/qiniu-card.png" alt="七牛云" width="175" />
+      </a>
+    </td>
+    <td>
+      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
+      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
+      </a>
+    </td>
+    <td>
+      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
+        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Jalapeño Cloud 是 AI 基础设施与 Token 算力平台，通过 DBX 专属入口可享新用户免费额度与充值加赠。
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">访问 Jalapeño Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch-card.png" alt="Easysearch" width="175" />
+      </a>
+    </td>
+    <td>
+      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
+      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
+    </td>
+  </tr>
+</table>
 
 ## 为什么选择 DBX？
 
@@ -403,63 +485,6 @@ make package
 
 DBX 是免费开源项目，但持续维护、数据库兼容性测试、基础设施建设和版本发布都需要长期投入时间与资源。
 
-### 赞助商与合作伙伴
-
-<table>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
-      </a>
-    </td>
-    <td>
-      雨云是面向开发者和站长的云服务提供商，提供云服务器、物理服务器、游戏云和配套基础设施服务。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">访问雨云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
-      </a>
-    </td>
-    <td>
-      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://easysearch.cn" target="_blank">
-        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-      </a>
-    </td>
-    <td>
-      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
-    </td>
-    <td align="center" width="140">
-      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud 为开发者提供统一的多模态 AI API，可通过一个接口访问聊天、图像、视频和音频等 400+ 模型。
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">访问 Atlas Cloud</a>
-    </td>
-  </tr>
-</table>
-
 - [支持 DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) —— 通过微信或支付宝自愿捐助
 - [赞助商与合作伙伴](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) —— 支持基础设施、开发工具、服务或社区合作
 
@@ -499,7 +524,7 @@ MySQL、PostgreSQL、SQLite、Cloudflare D1、Redis、MongoDB、DuckDB、ClickHo
 ## 贡献者
 
 <a href="https://github.com/t8y2/dbx/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
+  <img src="https://contrib.rocks/image?repo=t8y2/dbx&max=300&columns=15" />
 </a>
 
 ## Star History

@@ -6,11 +6,12 @@ use serde_json::{json, Map, Value};
 const OPENAI_REASONING_DOCS: &str = "https://platform.openai.com/docs/guides/reasoning";
 const GEMINI_THINKING_DOCS: &str = "https://ai.google.dev/gemini-api/docs/thinking";
 const DEEPSEEK_THINKING_DOCS: &str = "https://api-docs.deepseek.com/guides/thinking_mode";
+const KIMI_REASONING_DOCS: &str = "https://platform.moonshot.cn/docs/guide/use-reasoning-effort";
 const QWEN_THINKING_DOCS: &str = "https://help.aliyun.com/en/model-studio/deep-thinking";
 const OLLAMA_THINKING_DOCS: &str = "https://docs.ollama.com/capabilities/thinking";
 const MINIMAX_THINKING_DOCS: &str = "https://platform.minimax.io/docs/api-reference/text-chat-openai";
 
-pub const EFFORT_REGISTRY_LAST_VERIFIED: &str = "2026-07-30";
+pub const EFFORT_REGISTRY_LAST_VERIFIED: &str = "2026-09-03";
 
 fn option(id: &str, label: &str, selection: AiEffortSelection) -> AiEffortOption {
     AiEffortOption { id: id.to_string(), label: label.to_string(), description: None, selection }
@@ -75,6 +76,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::Openai => openai_capability(&model, source),
         AiProvider::Gemini => gemini_capability(&model, source),
         AiProvider::Deepseek => deepseek_capability(&model, source),
+        AiProvider::Kimi => kimi_capability(&model, source),
         AiProvider::Qwen => qwen_capability(&model, source),
         AiProvider::Ollama => ollama_capability(&model, source),
         AiProvider::MiniMax if matches_family(&model, "minimax-m3") => Some(boolean_capability(source)),
@@ -156,6 +158,24 @@ fn deepseek_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffo
     None
 }
 
+fn is_kimi_k3_model(model: &str) -> bool {
+    model == "k3" || matches_family(model, "kimi-k3")
+}
+
+fn kimi_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffortCapability> {
+    if is_kimi_k3_model(model) {
+        let mut capability = enum_capability(&["low", "high", "max"], source);
+        if let AiEffortCapability::Enum { default, .. } = &mut capability {
+            *default = AiEffortSelection::Enum("max".to_string());
+        }
+        return Some(capability);
+    }
+    if matches_family(model, "kimi-k2.6") {
+        return Some(boolean_capability(source));
+    }
+    None
+}
+
 fn qwen_capability(model: &str, source: AiCapabilitySource) -> Option<AiEffortCapability> {
     if matches_family(model, "qwen3.8-max-preview") {
         return Some(enum_capability(&["low", "medium", "xhigh"], source));
@@ -186,6 +206,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         AiProvider::Openai => Some(OPENAI_REASONING_DOCS),
         AiProvider::Gemini => Some(GEMINI_THINKING_DOCS),
         AiProvider::Deepseek => Some(DEEPSEEK_THINKING_DOCS),
+        AiProvider::Kimi => Some(KIMI_REASONING_DOCS),
         AiProvider::Qwen => Some(QWEN_THINKING_DOCS),
         AiProvider::Ollama => Some(OLLAMA_THINKING_DOCS),
         AiProvider::MiniMax => Some(MINIMAX_THINKING_DOCS),
@@ -264,6 +285,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
         AiProvider::Claude | AiProvider::AnthropicCompatible => apply_claude_effort(object, selection),
         AiProvider::Gemini => apply_gemini_effort(object, &config.model, selection),
         AiProvider::Deepseek => apply_deepseek_effort(object, selection),
+        AiProvider::Kimi => apply_kimi_effort(object, &config.model, selection),
         AiProvider::Qwen => apply_qwen_effort(object, selection),
         AiProvider::Ollama => apply_openai_effort(object, &config.api_style, selection),
         AiProvider::MiniMax => apply_minimax_effort(object, selection),
@@ -299,6 +321,25 @@ fn apply_openai_effort(object: &mut Map<String, Value>, api_style: &AiApiStyle, 
         } else {
             object.insert("reasoning_effort".to_string(), Value::String(value));
         }
+    }
+}
+
+fn apply_kimi_effort(object: &mut Map<String, Value>, model_id: &str, selection: &AiEffortSelection) {
+    let model = normalized_model_id(model_id);
+    if is_kimi_k3_model(&model) {
+        if let AiEffortSelection::Enum(value) = selection {
+            object.insert("reasoning_effort".to_string(), Value::String(value.clone()));
+        }
+        return;
+    }
+
+    if matches_family(&model, "kimi-k2.6") {
+        let thinking_type = match selection {
+            AiEffortSelection::Boolean(true) => "enabled",
+            AiEffortSelection::Boolean(false) | AiEffortSelection::Disabled => "disabled",
+            _ => return,
+        };
+        object.insert("thinking".to_string(), json!({ "type": thinking_type }));
     }
 }
 
@@ -405,7 +446,7 @@ fn title_case_effort(value: &str) -> String {
 mod tests {
     use super::{
         apply_runtime_effort, dynamic_enum_capability, registry_source_url, static_effort_capability,
-        validate_runtime_effort, MINIMAX_THINKING_DOCS,
+        validate_runtime_effort, KIMI_REASONING_DOCS, MINIMAX_THINKING_DOCS,
     };
     use crate::ai::{
         AiApiStyle, AiAuthMethod, AiCapabilitySource, AiConfig, AiEffortCapability, AiEffortSelection, AiProvider,
@@ -423,6 +464,7 @@ mod tests {
             model: model.to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -492,6 +534,49 @@ mod tests {
         apply_runtime_effort(&mut body, &config);
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn kimi_uses_model_specific_reasoning_controls() {
+        let mut k3 = config(AiProvider::Kimi, "K3");
+        let capability = static_effort_capability(&k3, "K3").unwrap();
+        let AiEffortCapability::Enum { options, default, source } = capability else {
+            panic!("expected K3 enum capability");
+        };
+        assert_eq!(options.iter().map(|option| option.id.as_str()).collect::<Vec<_>>(), ["low", "high", "max"]);
+        assert_eq!(default, AiEffortSelection::Enum("max".to_string()));
+        assert_eq!(source, AiCapabilitySource::OfficialRegistry);
+        assert_eq!(registry_source_url(&AiProvider::Kimi), Some(KIMI_REASONING_DOCS));
+        assert!(matches!(static_effort_capability(&k3, "kimi-k3"), Some(AiEffortCapability::Enum { .. })));
+
+        k3.runtime_effort = Some(AiEffortSelection::Enum("high".to_string()));
+        assert!(validate_runtime_effort(&k3).is_ok());
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &k3);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_none());
+
+        k3.runtime_effort = Some(AiEffortSelection::Enum("medium".to_string()));
+        assert!(validate_runtime_effort(&k3).is_err());
+
+        let mut k26 = config(AiProvider::Kimi, "kimi-k2.6");
+        assert!(matches!(static_effort_capability(&k26, "kimi-k2.6"), Some(AiEffortCapability::Boolean { .. })));
+        k26.runtime_effort = Some(AiEffortSelection::Boolean(true));
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &k26);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body.get("reasoning_effort").is_none());
+
+        k26.runtime_effort = Some(AiEffortSelection::Disabled);
+        let mut body = json!({});
+        apply_runtime_effort(&mut body, &k26);
+        assert_eq!(body["thinking"]["type"], "disabled");
+
+        let mut k27 = config(AiProvider::Kimi, "kimi-k2.7-code-highspeed");
+        assert!(static_effort_capability(&k27, "kimi-k2.7-code").is_none());
+        assert!(static_effort_capability(&k27, "kimi-for-coding").is_none());
+        k27.runtime_effort = Some(AiEffortSelection::Enum("high".to_string()));
+        assert!(validate_runtime_effort(&k27).is_err());
     }
 
     #[test]

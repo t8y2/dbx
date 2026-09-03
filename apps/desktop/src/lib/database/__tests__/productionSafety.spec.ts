@@ -132,4 +132,16 @@ describe("production SQL safety", () => {
   it("does not require a production confirmation for reads", () => {
     expect(assessProductionSql("SELECT * FROM prod_app.orders", connection(), "staging")).toMatchObject({ active: false, isMutation: false });
   });
+
+  it("does not classify Mongo shell reads as production mutations", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "app")).toMatchObject({ active: true, isMutation: false });
+    expect(assessProductionSql('db.getCollection("demo").find({}).skip(0).limit(100)', mongo, "scratch")).toMatchObject({ active: false, isMutation: false });
+  });
+
+  it("keeps Mongo shell writes and aggregate output stages protected", () => {
+    const mongo = connection({ db_type: "mongodb", production_databases: ["app"] });
+    expect(assessProductionSql('db.getCollection("demo").updateOne({"_id": 1}, {$set: {"active": true}})', mongo, "app")).toMatchObject({ active: true, isMutation: true });
+    expect(assessProductionSql('db.getCollection("demo").aggregate([{$out: "archive"}])', mongo, "app")).toMatchObject({ active: true, isMutation: true });
+  });
 });

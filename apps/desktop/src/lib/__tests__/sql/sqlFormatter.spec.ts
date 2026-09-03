@@ -16,6 +16,30 @@ describe("sqlFormatter", () => {
     expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
   });
 
+  it("preserves source empty lines only when configured", async () => {
+    const sql = "-- tstt\n\nSELECT * FROM AUX_TABLE AS au LIMIT 100;";
+    const consecutiveEmptyLines = "-- section\n\n\nSELECT 1;";
+    const queriesWithEmptyLine = "SELECT 1;\n\nSELECT 2;";
+    const queriesWithTwoEmptyLines = "SELECT 1;\n\n\nSELECT 2;";
+
+    const defaultFormatted = await formatSqlForEditing(sql, "generic");
+    const preserved = await formatSqlForEditing(sql, "generic", { preserveEmptyLines: true });
+    const preservedConsecutive = await formatSqlForEditing(consecutiveEmptyLines, "generic", { preserveEmptyLines: true });
+    const preservedQueriesNoSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 0 });
+    const preservedQueries = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+    const preservedQueriesWideSpacing = await formatSqlForEditing(queriesWithEmptyLine, "generic", { preserveEmptyLines: true, linesBetweenQueries: 2 });
+    const preservedQueriesWithTwoEmptyLines = await formatSqlForEditing(queriesWithTwoEmptyLines, "generic", { preserveEmptyLines: true, linesBetweenQueries: 1 });
+
+    expect(defaultFormatted).toContain("-- tstt\nSELECT");
+    expect(preserved).toContain("-- tstt\n\nSELECT");
+    expect(preservedConsecutive).toContain("-- section\n\n\nSELECT");
+    expect(preservedQueriesNoSpacing).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueries).toBe("SELECT\n  1;\n\nSELECT\n  2;");
+    expect(preservedQueriesWideSpacing).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preservedQueriesWithTwoEmptyLines).toBe("SELECT\n  1;\n\n\nSELECT\n  2;");
+    expect(preserved).not.toContain("__DBX_PRESERVE_EMPTY_LINE_");
+  });
+
   it("maps PostgreSQL-compatible database types to the postgres formatter dialect", () => {
     for (const dbType of ["postgres", "kwdb", "gaussdb", "opengauss", "questdb", "kingbase", "highgo", "vastbase", "redshift"]) {
       expect(sqlFormatDialectForDbType(dbType)).toBe("postgres");
@@ -36,9 +60,63 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
 
-  it("maps only Oracle to the PL/SQL formatter dialect", () => {
+  it("maps Oracle and OceanBase Oracle mode to the PL/SQL formatter dialect", () => {
     expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
-    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("generic");
+    // OceanBase Oracle mode speaks Oracle SQL — issue #7540: it must reuse the
+    // Oracle dialect so view DDL previews are formatted instead of one line.
+    expect(sqlFormatDialectForDbType("oceanbase-oracle")).toBe("oracle");
+  });
+
+  it("formats an OceanBase Oracle single-line view DDL into readable multi-line SQL (issue #7540)", async () => {
+    const singleLine = `CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE'`;
+    const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).not.toBe(singleLine);
+    expect(formatted.split("\n").length).toBeGreaterThan(1);
+    expect(formatted).toContain("CREATE OR REPLACE VIEW");
+    expect(formatted).toMatch(/\bSELECT\b/);
+    expect(formatted).toMatch(/\bFROM\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
+    // String literals and quoted identifiers must survive formatting untouched.
+    expect(formatted).toContain("'ACTIVE'");
+    expect(formatted).toContain('"ACTIVE_USERS"');
+  });
+
+  it("formats a bare OceanBase Oracle view source wrapped as CREATE VIEW (issue #7540)", async () => {
+    // Mirrors the backend build_view_ddl_sql output for a fallback ALL_VIEWS.TEXT
+    // body: `CREATE VIEW <name> AS <single-line SELECT>`.
+    const wrapped = `CREATE VIEW "APP"."ACTIVE_USERS" AS
+SELECT ID, NAME FROM USERS WHERE STATUS = 'ACTIVE';`;
+    const formatted = await formatSqlForDisplay(wrapped, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted.split("\n").length).toBeGreaterThan(2);
+    expect(formatted).toMatch(/\bSELECT\b/);
+    expect(formatted).toMatch(/\bFROM\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
+    expect(formatted).toContain("'ACTIVE'");
+  });
+
+  it("does not split string literals when formatting an OceanBase Oracle view (issue #7540)", async () => {
+    const singleLine = `CREATE OR REPLACE VIEW "APP"."V" AS SELECT 'SELECT X FROM Y' AS TXT FROM DUAL`;
+    const formatted = await formatSqlForDisplay(singleLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).toContain("'SELECT X FROM Y'");
+  });
+
+  it("leaves an already multi-line OceanBase Oracle view DDL semantically intact (issue #7540)", async () => {
+    const multiLine = `CREATE OR REPLACE VIEW "APP"."ACTIVE_USERS" AS
+SELECT
+  ID,
+  NAME
+FROM USERS
+WHERE STATUS = 'ACTIVE';`;
+    const formatted = await formatSqlForDisplay(multiLine, sqlFormatDialectForDbType("oceanbase-oracle"));
+
+    expect(formatted).toContain('"ACTIVE_USERS"');
+    expect(formatted).toContain("'ACTIVE'");
+    expect(formatted).toMatch(/\bID\b/);
+    expect(formatted).toMatch(/\bNAME\b/);
+    expect(formatted).toMatch(/\bWHERE\b/);
   });
 
   it("keeps issue #7138 Oracle hierarchy clauses intact", async () => {

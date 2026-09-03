@@ -66,11 +66,23 @@ export function mongoCollectionTableTypeFromNode(node: Pick<TreeNode, "meta">): 
   return kind === "view" ? "VIEW" : kind === "timeseries" ? "TIMESERIES" : "TABLE";
 }
 
+/** MongoDB materializes a database when its initialization collection is created. */
+export function mongoCreateDatabasePreview(database: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).createCollection("dbx_init");`;
+}
+
 export function toMongoCollectionKind(kind?: string | null): MongoCollectionKind {
   const normalized = (kind || "collection").toLowerCase();
   if (normalized === "view") return "view";
   if (normalized === "timeseries") return "timeseries";
   return "collection";
+}
+
+/** Drop GridFS buckets and their backing `.files` / `.chunks` collections from object lists. */
+export function visibleMongoCollections<T extends { name: string; kind?: string | null; bucketName?: string }>(collections: readonly T[]): T[] {
+  const bucketNames = new Set(collections.filter((collection) => collection.kind === "bucket" && collection.bucketName).map((collection) => collection.bucketName as string));
+  const hiddenCollectionNames = new Set([...bucketNames].flatMap((bucketName) => [`${bucketName}.files`, `${bucketName}.chunks`]));
+  return collections.filter((collection) => collection.kind !== "bucket" && !hiddenCollectionNames.has(collection.name));
 }
 
 export function mongoRenameCollectionPreview(database: string, oldName: string, newName: string): string {

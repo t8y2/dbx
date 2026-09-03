@@ -49,6 +49,7 @@ export interface SqlFormatterOptionSettings {
   fromClauseLayout: SqlFormatterFromClauseLayout;
   expressionWidth: SqlFormatterExpressionWidth;
   linesBetweenQueries: SqlFormatterLinesBetweenQueries;
+  preserveEmptyLines: boolean;
   denseOperators: boolean;
   newlineBeforeSemicolon: boolean;
   paramTypes: SqlFormatterParamTypes | null;
@@ -76,6 +77,7 @@ export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
   fromClauseLayout: "newLine",
   expressionWidth: 50,
   linesBetweenQueries: 1,
+  preserveEmptyLines: false,
   denseOperators: false,
   newlineBeforeSemicolon: false,
   paramTypes: null,
@@ -93,6 +95,7 @@ const SQL_FORMATTER_OPTION_KEYS = new Set<keyof SqlFormatterOptionSettings>([
   "fromClauseLayout",
   "expressionWidth",
   "linesBetweenQueries",
+  "preserveEmptyLines",
   "denseOperators",
   "newlineBeforeSemicolon",
   "paramTypes",
@@ -110,6 +113,7 @@ const SQL_FORMATTER_OPTION_VALIDATORS: Record<keyof SqlFormatterOptionSettings, 
   fromClauseLayout: (value) => isStringChoice(value, FROM_CLAUSE_LAYOUT_VALUES),
   expressionWidth: (value) => isNumberChoice(value, EXPRESSION_WIDTH_VALUES),
   linesBetweenQueries: (value) => isNumberChoice(value, LINES_BETWEEN_QUERIES_VALUES),
+  preserveEmptyLines: (value) => typeof value === "boolean",
   denseOperators: (value) => typeof value === "boolean",
   newlineBeforeSemicolon: (value) => typeof value === "boolean",
   paramTypes: isSqlFormatterParamTypes,
@@ -191,6 +195,7 @@ export function sqlFormatterOptionSettings(settings: unknown): SqlFormatterOptio
     fromClauseLayout: normalizeChoice(input.fromClauseLayout, FROM_CLAUSE_LAYOUT_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.fromClauseLayout),
     expressionWidth: normalizeNumberChoice(input.expressionWidth, EXPRESSION_WIDTH_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.expressionWidth),
     linesBetweenQueries: normalizeNumberChoice(input.linesBetweenQueries, LINES_BETWEEN_QUERIES_VALUES, DEFAULT_SQL_FORMATTER_SETTINGS.linesBetweenQueries),
+    preserveEmptyLines: normalizeBoolean(input.preserveEmptyLines, DEFAULT_SQL_FORMATTER_SETTINGS.preserveEmptyLines),
     denseOperators: normalizeBoolean(input.denseOperators, DEFAULT_SQL_FORMATTER_SETTINGS.denseOperators),
     newlineBeforeSemicolon: normalizeBoolean(input.newlineBeforeSemicolon, DEFAULT_SQL_FORMATTER_SETTINGS.newlineBeforeSemicolon),
     paramTypes: normalizeParamTypes(input.paramTypes, DEFAULT_SQL_FORMATTER_SETTINGS.paramTypes),

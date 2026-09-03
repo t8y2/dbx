@@ -88,7 +88,7 @@ export function SponsorContactForm({ lang }: { lang: "en" | "cn" }) {
   }
 
   const fieldClassName =
-    "mt-2 min-h-11 w-full rounded-lg border border-landing-line bg-[#0d1422] px-3.5 text-sm text-landing-ink outline-none transition placeholder:text-[#65758b] focus:border-[#6ea8ff]/70 focus:ring-2 focus:ring-[#6ea8ff]/15";
+    "mt-2 min-h-11 w-full rounded-lg border border-landing-line bg-[#0e0f13] px-3.5 text-sm text-landing-ink outline-none transition placeholder:text-[#6b7078] focus:border-[#6ea8ff]/70 focus:ring-2 focus:ring-[#6ea8ff]/15";
 
   return (
     <form onSubmit={handleSubmit} className="grid gap-5" aria-label={t.subject}>
@@ -129,7 +129,7 @@ export function SponsorContactForm({ lang }: { lang: "en" | "cn" }) {
         <p className="max-w-[440px] text-xs leading-relaxed text-landing-muted">{t.privacy}</p>
         <button
           type="submit"
-          className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-[#f2f7ff] px-5 text-sm font-[720] text-[#0b1120] transition hover:-translate-y-0.5 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-landing-sky"
+          className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-lg bg-[#f0f1f4] px-5 text-sm font-[720] text-[#0a0b0e] transition hover:-translate-y-0.5 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-landing-sky"
         >
           <Send aria-hidden="true" size={16} strokeWidth={2.2} />
           {t.submit}

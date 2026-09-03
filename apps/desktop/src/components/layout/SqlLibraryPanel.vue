@@ -2,10 +2,11 @@
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDownWideNarrow, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
+import { ArrowDownWideNarrow, ChevronsDownUp, Download, FilePlus, FileText, FolderCog, FolderClosed, FolderOpen, FolderPlus, Library, LocateFixed, Pencil, Play, Search, Trash2, Upload, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import CustomContextMenu, { type ContextMenuItem as CtxMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import HelpTooltip from "@/components/ui/tooltip/HelpTooltip.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -345,7 +346,7 @@ const visibleFolderRows = computed<SqlLibraryRow[]>(() => {
   const appendFolder = (folder: SavedSqlFolder, depth: number) => {
     if (!folderBranchMatchesQuery(folder)) return;
     rows.push({ type: "folder", folder, depth, folderIndex: folderIndex++ });
-    if (!isFolderExpanded(folder.id)) return;
+    if (!isFolderExpanded(folder)) return;
     for (const child of childFolders(folder.id)) {
       appendFolder(child, depth + 1);
     }
@@ -374,16 +375,52 @@ const hasAnyVisibleItem = computed(() => visibleFolderRows.value.length > 0 || v
 
 const collapsedFolders = ref<Set<string>>(new Set());
 
+// Seed a default-collapsed state when the library first becomes non-empty so
+// opening the panel shows every directory collapsed instead of fully expanded.
+// Guarded so a later in-session folder add/delete does not re-collapse folders
+// the user has already expanded.
+const collapseDefaultsSeeded = ref(false);
+watch(
+  () => savedSqlStore.allFolders.map((folder) => folder.id),
+  (folderIds) => {
+    if (collapseDefaultsSeeded.value || folderIds.length === 0) return;
+    collapseDefaultsSeeded.value = true;
+    collapsedFolders.value = new Set(folderIds);
+  },
+  { immediate: true },
+);
+
+function collapseAllFolders() {
+  // Collapse the whole tree: every folder currently known, including nested
+  // children, is marked collapsed in one shot.
+  const folderIds = savedSqlStore.allFoldersTreeOrder.map((folder) => folder.id);
+  if (folderIds.length === 0) return;
+  collapsedFolders.value = new Set(folderIds);
+}
+
+function hasAnyFolder(): boolean {
+  return savedSqlStore.allFolders.length > 0;
+}
+
 function toggleFolder(folderId: string) {
   if (suppressNextRowClick.value) return;
+  // While a search is active, matched branches are force-expanded for
+  // visibility; toggling them would only mutate hidden state that surprises
+  // after the search is cleared, so treat the click as a no-op.
+  if (searchQuery.value) {
+    const folder = savedSqlStore.allFolders.find((candidate) => candidate.id === folderId);
+    if (folder && folderBranchMatchesQuery(folder)) return;
+  }
   const next = new Set(collapsedFolders.value);
   if (next.has(folderId)) next.delete(folderId);
   else next.add(folderId);
   collapsedFolders.value = next;
 }
 
-function isFolderExpanded(folderId: string) {
-  return !collapsedFolders.value.has(folderId);
+function isFolderExpanded(folder: SavedSqlFolder) {
+  // 搜索激活时,命中的分支自动展开以便直接看到匹配文件;否则遵循折叠状态。
+  if (searchQuery.value && folderBranchMatchesQuery(folder)) return true;
+  return !collapsedFolders.value.has(folder.id);
 }
 
 async function openNewFolderInput(parentFolderId?: string) {
@@ -1121,8 +1158,16 @@ function showDropInside(targetId: string) {
   <div class="h-full flex flex-col overflow-hidden border-l bg-background select-none">
     <div class="h-9 flex items-center gap-1 px-2 border-b shrink-0 bg-muted/20">
       <span class="text-[13px] font-medium">{{ t("sqlLibrary.title") }}</span>
+      <HelpTooltip :label="t('sqlLibrary.storageHelp')" side="bottom" :side-offset="4" trigger-class="h-4 w-4" content-class="max-w-[320px] whitespace-pre-line">
+        {{ t("sqlLibrary.storageHelp") }}
+      </HelpTooltip>
       <span v-if="hasSelection" class="text-[12px] text-muted-foreground ml-1">({{ selectedCount }})</span>
       <span class="flex-1" />
+      <LightTooltip :text="t('sqlLibrary.collapseAll')" side="bottom" :delay="0" :close-delay="0" nowrap :disabled="!hasAnyFolder()">
+        <Button variant="ghost" size="icon" class="h-5 w-5" :disabled="!hasAnyFolder() || sortMode === 'date'" @click="collapseAllFolders">
+          <ChevronsDownUp class="h-3 w-3" />
+        </Button>
+      </LightTooltip>
       <LightTooltip :text="sortMode === 'folder' ? t('sqlLibrary.sortByDate') : t('sqlLibrary.sortByFolder')" side="bottom" :delay="0" :close-delay="0" nowrap>
         <Button variant="ghost" size="icon" class="h-5 w-5" @click="sortMode = sortMode === 'folder' ? 'date' : 'folder'">
           <ArrowDownWideNarrow :class="['h-3 w-3', sortMode === 'date' ? 'text-primary' : '']" />
@@ -1272,7 +1317,7 @@ function showDropInside(targetId: string) {
                 >
                   <div v-if="showDropBefore(row.folder.id)" class="absolute left-2 right-2 top-0 border-t-2 border-primary" />
                   <div v-if="showDropAfter(row.folder.id)" class="absolute left-2 right-2 bottom-0 border-b-2 border-primary" />
-                  <component :is="isFolderExpanded(row.folder.id) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
+                  <component :is="isFolderExpanded(row.folder) ? FolderOpen : FolderClosed" class="h-4 w-4 text-amber-500 shrink-0" />
                   <template v-if="isRenamingFolder(row.folder.id)">
                     <input
                       :ref="setRenameInputRef"
@@ -1413,7 +1458,7 @@ function showDropInside(targetId: string) {
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" size="sm" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button variant="destructive" size="sm" @click="executeDelete">{{ t("dangerDialog.confirm") }}</Button>
+          <Button variant="destructive" size="sm" @click="executeDelete">{{ t("dangerDialog.deleteConfirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1429,7 +1474,7 @@ function showDropInside(targetId: string) {
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" size="sm" @click="showBatchDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-          <Button variant="destructive" size="sm" @click="executeBatchDelete">{{ t("dangerDialog.confirm") }}</Button>
+          <Button variant="destructive" size="sm" @click="executeBatchDelete">{{ t("dangerDialog.deleteConfirm") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

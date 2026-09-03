@@ -23,7 +23,7 @@ export function LandingFooter({ lang }: { lang: "en" | "cn" }) {
   const t = i18n[lang];
 
   return (
-    <footer className="border-t border-[var(--color-landing-line)] bg-[#0b1120]">
+    <footer className="border-t border-[var(--color-landing-line)] bg-[#08080a]">
       <div className="max-w-[1180px] mx-auto px-7 py-7 max-[760px]:px-[18px]">
         <div className="flex items-center justify-between gap-4 max-[760px]:flex-col max-[760px]:gap-3 max-[760px]:text-center">
           {/* Logo */}

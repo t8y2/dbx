@@ -170,7 +170,10 @@ func parseConnectionConfig(params connectParams) (connectionConfig, error) {
 			CanonicalHostname: true,
 		},
 	}
-	if strings.EqualFold(params.DatabaseType, "impala") {
+	if config.DatabaseType == "argo" {
+		config.Auth = "NOSASL"
+	}
+	if config.DatabaseType == "impala" {
 		config.Auth = "NOSASL"
 		config.Kerberos.Service = defaultImpalaService
 	}

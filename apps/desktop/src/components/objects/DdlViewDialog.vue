@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Clipboard, Loader2, RefreshCw } from "@lucide/vue";
 import { useToast } from "@/composables/useToast";
@@ -12,6 +12,8 @@ import { formatSqlForDisplay, type SqlFormatDialect } from "@/lib/sql/sqlFormatt
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { HelpTooltip } from "@/components/ui/tooltip";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import type { EditorView } from "@codemirror/view";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
@@ -51,9 +53,60 @@ const ddlEditorContainer = ref<HTMLDivElement>();
 const ddlSearchPanelRef = ref<InstanceType<typeof EditorSearchPanel>>();
 const ddlEditorView = shallowRef<EditorView | null>(null);
 
+// Keep the dialog movable for the duration of one open cycle. This mirrors the
+// existing draggable dialogs without persisting a potentially off-screen position.
+const dragOffset = ref({ x: 0, y: 0 });
+const isDragging = ref(false);
+const dragStartPosition = ref({ x: 0, y: 0 });
+const dragStartOffset = ref({ x: 0, y: 0 });
+const activePointerId = ref<number | null>(null);
+const dialogContentStyle = computed(() => {
+  if (isDragging.value || dragOffset.value.x !== 0 || dragOffset.value.y !== 0) {
+    return {
+      transform: `translate(${dragOffset.value.x}px, ${dragOffset.value.y}px)`,
+      transition: isDragging.value ? "none" : "transform 0.15s ease-out",
+    };
+  }
+  return {};
+});
+
 // The CodeMirror editor (if any) that was focused when this dialog opened, so focus can be
 // restored to it on close. Not a ref: read/written outside of render, never needs reactivity.
 let editorRootToRestoreFocus: HTMLElement | null = null;
+
+function resetDialogDragOffset() {
+  dragOffset.value = { x: 0, y: 0 };
+  isDragging.value = false;
+  activePointerId.value = null;
+}
+
+function startDialogDrag(event: PointerEvent) {
+  if (event.button !== undefined && event.button !== 0) return;
+  isDragging.value = true;
+  activePointerId.value = event.pointerId;
+  dragStartPosition.value = { x: event.clientX, y: event.clientY };
+  dragStartOffset.value = { ...dragOffset.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function moveDialogDrag(event: PointerEvent) {
+  if (!isDragging.value || event.pointerId !== activePointerId.value) return;
+  dragOffset.value = {
+    x: dragStartOffset.value.x + event.clientX - dragStartPosition.value.x,
+    y: dragStartOffset.value.y + event.clientY - dragStartPosition.value.y,
+  };
+}
+
+function endDialogDrag(event: PointerEvent) {
+  if (!isDragging.value || event.pointerId !== activePointerId.value) return;
+  isDragging.value = false;
+  activePointerId.value = null;
+  try {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture may already have been released by the browser.
+  }
+}
 
 async function loadDdl(force = false) {
   ddlError.value = "";
@@ -80,15 +133,16 @@ async function loadDdl(force = false) {
   }
 }
 
-/** Loads the persisted table DDL when the dialog opens. */
+/** Loads from the persisted snapshot by default; users can opt into a fresh database query on every open. */
 watch(
   () => props.open,
   async (open) => {
+    resetDialogDragOffset();
     if (!open) return;
     const active = document.activeElement;
     editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
     ddlContent.value = "";
-    await loadDdl();
+    await loadDdl(settingsStore.editorSettings.refreshDdlOnOpen);
   },
   { immediate: true },
 );
@@ -217,6 +271,11 @@ function retry() {
   void loadDdl(true);
 }
 
+function setRefreshDdlOnOpen(value: boolean) {
+  settingsStore.updateEditorSettings({ refreshDdlOnOpen: value });
+  if (value) void loadDdl(true);
+}
+
 function onClose() {
   emit("update:open", false);
 }
@@ -224,8 +283,8 @@ function onClose() {
 
 <template>
   <Dialog :open="props.open" @update:open="onClose">
-    <DialogContent class="sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
-      <DialogHeader>
+    <DialogContent :style="dialogContentStyle" class="dbx-ddl-view-dialog sm:max-w-190" @close-auto-focus="onDdlDialogCloseAutoFocus">
+      <DialogHeader class="cursor-move select-none" @pointerdown="startDialogDrag" @pointermove="moveDialogDrag" @pointerup="endDialogDrag" @pointercancel="endDialogDrag">
         <DialogTitle>DDL - {{ props.tableName }}</DialogTitle>
       </DialogHeader>
       <div class="grid gap-3">
@@ -246,6 +305,15 @@ function onClose() {
         </div>
       </div>
       <DialogFooter>
+        <div class="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
+          <Switch id="ddl-refresh-on-open" size="sm" :model-value="settingsStore.editorSettings.refreshDdlOnOpen" @update:model-value="setRefreshDdlOnOpen" />
+          <div class="flex items-center gap-1">
+            <label for="ddl-refresh-on-open" class="cursor-pointer">{{ t("contextMenu.refreshDdlOnOpen") }}</label>
+            <HelpTooltip :label="t('contextMenu.refreshDdlOnOpenHint')" trigger-class="[&_svg]:h-3 [&_svg]:w-3">
+              {{ t("contextMenu.refreshDdlOnOpenHint") }}
+            </HelpTooltip>
+          </div>
+        </div>
         <Button variant="outline" @click="onClose">{{ t("common.close") }}</Button>
         <Button variant="outline" :disabled="ddlLoading" :title="t('structureEditor.refresh')" @click="loadDdl(true)">
           <RefreshCw class="h-4 w-4" />

@@ -37,9 +37,10 @@ describe("MySQL table AUTO_INCREMENT counter", () => {
     });
   });
 
-  it("is editable only for existing native-MySQL tables with an active existing auto-increment column", () => {
+  it("is editable only for existing native-MySQL tables with an active auto-increment column draft", () => {
     const nativeMysql = { db_type: "mysql", driver_profile: "mysql" } as any;
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [existingColumn(true)])).toBe(true);
+    expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), original: undefined }])).toBe(true);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, true, [existingColumn(true)])).toBe(false);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [existingColumn(false)])).toBe(false);
     expect(canEditMysqlAutoIncrementCounter(nativeMysql, false, [{ ...existingColumn(true), markedForDrop: true }])).toBe(false);

@@ -115,7 +115,7 @@ describe("queryStore grouped-result column comments", () => {
     // Only the directly projected physical column carries its comment; the
     // aggregate expression resolves to nothing and must not guess.
     expect(tab.resultColumnComments).toEqual(["所属部门", undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "users:0", sourceColumn: "department" }, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "users:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" }, undefined]);
   });
 
   it("resolves aliased grouped columns back to their physical column (T2)", async () => {
@@ -139,7 +139,7 @@ describe("queryStore grouped-result column comments", () => {
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
     expect(tab.queryEditabilityReason).toBe("aggregation");
     expect(tab.resultColumnComments).toEqual(["所属部门", undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "users:0", sourceColumn: "department" }, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "users:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" }, undefined]);
   });
 
   it("keeps comments for HAVING queries (T3)", async () => {
@@ -186,7 +186,7 @@ describe("queryStore grouped-result column comments", () => {
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
     expect(tab.queryEditabilityReason).toBe("aggregation");
     expect(tab.resultColumnComments).toEqual(["所属部门", undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "department" }, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" }, undefined]);
   });
 
   it("maps multiple grouped physical columns (T5)", async () => {
@@ -236,7 +236,7 @@ describe("queryStore grouped-result column comments", () => {
     expect(tab.queryDisplaySourceColumns).toEqual([undefined, undefined]);
   });
 
-  it("keeps ordinary editable queries free of the new display fields (T10)", async () => {
+  it("stores physical source identities for ordinary editable queries (T10)", async () => {
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,
       analysis: {
@@ -268,7 +268,10 @@ describe("queryStore grouped-result column comments", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("users"));
     expect(tab.resultColumnComments).toBeUndefined();
-    expect(tab.queryDisplaySourceColumns).toBeUndefined();
+    expect(tab.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "users:0", sourceColumn: "id", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "users:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" },
+    ]);
     expect(tab.querySourceColumns).toEqual(["id", "department"]);
   });
 

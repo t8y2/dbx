@@ -100,7 +100,7 @@ export interface AiContext {
   connectionName: string;
   databaseType: DatabaseType;
   database: string;
-  /** Selected schema when it is distinct from the connection database (for example Dameng). */
+  /** Schema selected for metadata loading and agent tool execution. */
   schema?: string;
   currentSql: string;
   lastError?: string;
@@ -716,8 +716,19 @@ async function loadCandidateSchemas(tab: QueryTab, connection: ConnectionConfig)
   return [database];
 }
 
-function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType {
+export function aiDatabaseTypeForConnection(connection: ConnectionConfig): DatabaseType {
   return effectiveDatabaseTypeForConnection(connection) ?? connection.db_type;
+}
+
+/**
+ * Whether the AI target resolution honors a schema selection for this
+ * connection. Mirrors the `isSchemaAware(aiDatabaseTypeForConnection(...))`
+ * gate inside `resolveAiDatabaseTarget` so UI visibility cannot diverge from
+ * what the AI request actually consumes (e.g. gbase maps to a MySQL-like
+ * effective type that ignores schemas).
+ */
+export function aiSchemaSelectionSupported(connection: ConnectionConfig): boolean {
+  return isSchemaAware(aiDatabaseTypeForConnection(connection));
 }
 
 function aiDatabaseNamespace(tab: QueryTab, connection: ConnectionConfig): string {
@@ -751,7 +762,9 @@ export function resolveAiDatabaseTarget(tab: QueryTab, connection: ConnectionCon
       schema: resolveAiNamespaceSelection(tab, connection).value || undefined,
     };
   }
-  return { database: connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database };
+  const normalizedDatabase = connection.db_type === "sqlite" ? normalizeSqliteNamespace(database, connection) : database;
+  const schema = isSchemaAware(aiDatabaseTypeForConnection(connection)) ? tab.schema?.trim() || undefined : undefined;
+  return schema ? { database: normalizedDatabase, schema } : { database: normalizedDatabase };
 }
 
 function prioritizeSchemas(schemas: string[]): string[] {

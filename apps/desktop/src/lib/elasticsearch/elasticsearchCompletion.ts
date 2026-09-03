@@ -1,11 +1,19 @@
 export type ElasticsearchCompletionMode = "method" | "path" | "json";
 
+export type ElasticsearchJsonSlot = "key" | "value";
+
 export interface ElasticsearchCompletionItem {
   label: string;
   type: "keyword" | "property" | "text" | "snippet";
   detail?: string;
   info?: string;
   apply?: string;
+  filterText?: string;
+  // Set when `apply` carries snippet fields so the editor expands it instead of
+  // inserting the raw `${}` markers.
+  applyAsSnippet?: boolean;
+  // The auto-closed quote sitting at the cursor, which the applied text replaces.
+  replaceClosingQuote?: '"';
   boost: number;
 }
 
@@ -16,6 +24,10 @@ export interface ElasticsearchCompletionContext {
   method?: string;
   path?: string;
   segmentIndex?: number;
+  replaceClosingQuote?: '"';
+  jsonSlot?: ElasticsearchJsonSlot;
+  hasKeySeparator?: boolean;
+  jsonIndent?: string;
 }
 
 export interface ElasticsearchCompletionInput {
@@ -61,11 +73,31 @@ const INDEX_ENDPOINTS = [
 
 const JSON_KEYWORDS = ["query", "bool", "must", "should", "must_not", "filter", "match", "match_all", "term", "terms", "range", "exists", "sort", "aggs", "aggregations", "size", "from", "_source", "fields", "track_total_hits"];
 
+const JSON_ARRAY_KEYS = new Set(["must", "should", "must_not", "filter", "sort", "_source", "fields"]);
+const JSON_SCALAR_KEYS = new Set(["size", "from", "track_total_hits"]);
+
+// Value scaffold inserted after a completed key so the matching brackets come
+// along with it, with the cursor parked where the value goes.
+function jsonKeyValueTemplate(key: string): string {
+  if (JSON_SCALAR_KEYS.has(key)) return "${}";
+  return JSON_ARRAY_KEYS.has(key) ? "[${}]" : "{${}}";
+}
+
 const JSON_SNIPPETS = [
   {
     label: "match_all",
     apply: '"match_all": {}',
     detail: "Match all documents",
+  },
+  {
+    label: "match",
+    apply: '"match": {\n  "${field}": "${value}"\n}',
+    detail: "Match query",
+  },
+  {
+    label: "term",
+    apply: '"term": {\n  "${field}": "${value}"\n}',
+    detail: "Term query",
   },
   {
     label: "bool",
@@ -76,6 +108,11 @@ const JSON_SNIPPETS = [
     label: "range",
     apply: '"range": {\n  "${field}": {\n    "gte": "${value}"\n  }\n}',
     detail: "Range query",
+  },
+  {
+    label: "exists",
+    apply: '"exists": {\n  "field": "${field}"\n}',
+    detail: "Exists query",
   },
   {
     label: "terms",
@@ -96,7 +133,10 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
   // Check the current line before falling back to JSON mode so completion also
   // works after leading comments and on subsequent REST requests.
   const methodMatch = /^\s*([A-Za-z]*)$/.exec(beforeCursorOnLine);
-  if (methodMatch) {
+  // A bare word on a JSON body line is a DSL key, not another HTTP method.
+  // Without this guard, typing `term` after an opening `{` incorrectly enters
+  // method mode and produces no JSON suggestions until a quote is added.
+  if (methodMatch && (lineStart === 0 || !hasOpenJsonContainer(text, safeCursor))) {
     const leadingWhitespace = beforeCursorOnLine.length - beforeCursorOnLine.trimStart().length;
     return {
       mode: "method",
@@ -129,7 +169,16 @@ export function getElasticsearchCompletionContext(text: string, cursor: number):
 
   if (lineStart > 0 || safeCursor > firstLineLimit || looksLikeJsonBody(text, safeCursor)) {
     const jsonPrefix = readJsonPrefix(text, safeCursor);
-    return { mode: "json", prefix: jsonPrefix.prefix, from: jsonPrefix.from };
+    const replaceClosingQuote = jsonPrefix.prefix.startsWith('"') && text[safeCursor] === '"' ? ('"' as const) : undefined;
+    return {
+      mode: "json",
+      prefix: jsonPrefix.prefix,
+      from: jsonPrefix.from,
+      replaceClosingQuote,
+      jsonSlot: readJsonSlot(text, jsonPrefix.from),
+      hasKeySeparator: hasJsonKeySeparator(text, safeCursor),
+      jsonIndent: beforeCursorOnLine.match(/^\s*/)?.[0] ?? "",
+    };
   }
 
   const prefix = readWordPrefix(text, safeCursor);
@@ -143,7 +192,7 @@ export function buildElasticsearchCompletionItems(text: string, cursor: number, 
 
 export function buildElasticsearchCompletionItemsFromContext(context: ElasticsearchCompletionContext, input: ElasticsearchCompletionInput = {}): ElasticsearchCompletionItem[] {
   if (context.mode === "method") return methodItems(context.prefix);
-  if (context.mode === "json") return jsonItems(context.prefix);
+  if (context.mode === "json") return jsonItems(context);
   return pathItems(context, input.indices ?? []);
 }
 
@@ -225,23 +274,82 @@ function indexEndpointItems(prefix: string): ElasticsearchCompletionItem[] {
   }));
 }
 
-function jsonItems(prefix: string): ElasticsearchCompletionItem[] {
-  const normalizedPrefix = prefix.replace(/^"/, "");
+function jsonItems(context: ElasticsearchCompletionContext): ElasticsearchCompletionItem[] {
+  const quoted = context.prefix.startsWith('"');
+  const normalizedPrefix = context.prefix.replace(/^"/, "");
+  // Only an object key without its own `:` yet may pull the value scaffold in;
+  // anywhere else the extra `": {}"` would produce invalid JSON.
+  const withValueTemplate = context.jsonSlot === "key" && !context.hasKeySeparator;
   const keyItems = JSON_KEYWORDS.filter((key) => matchesFuzzyPrefix(key, normalizedPrefix)).map((key) => ({
     label: `"${key}"`,
     type: "property" as const,
     detail: "Query DSL field",
-    apply: `"${key}"`,
+    apply: withValueTemplate ? `"${key}": ${jsonKeyValueTemplate(key)}` : `"${key}"`,
+    applyAsSnippet: withValueTemplate,
+    replaceClosingQuote: context.replaceClosingQuote,
     boost: key.startsWith(normalizedPrefix) ? 95 : 70,
   }));
-  const snippetItems = JSON_SNIPPETS.filter((snippet) => matchesFuzzyPrefix(snippet.label, normalizedPrefix)).map((snippet) => ({
-    label: snippet.label,
-    type: "snippet" as const,
-    detail: snippet.detail,
-    apply: snippet.apply,
-    boost: 105,
-  }));
+  // Snippets already spell out `"key": value`, so they only fit a key slot.
+  const snippetItems = withValueTemplate
+    ? JSON_SNIPPETS.filter((snippet) => matchesFuzzyPrefix(snippet.label, normalizedPrefix)).map((snippet) => ({
+        label: snippet.label,
+        type: "snippet" as const,
+        detail: snippet.detail,
+        apply: indentJsonSnippet(snippet.apply, context.jsonIndent ?? ""),
+        // Bare snippet labels cannot match a typed opening quote, so let the
+        // editor filter them on the quoted form it sees in the document.
+        filterText: quoted ? `"${snippet.label}"` : undefined,
+        replaceClosingQuote: context.replaceClosingQuote,
+        boost: 105,
+      }))
+    : [];
   return dedupeAndSort([...snippetItems, ...keyItems]);
+}
+
+function indentJsonSnippet(snippet: string, baseIndent: string): string {
+  if (!baseIndent) return snippet;
+  return snippet.replace(/\n/g, `\n${baseIndent}`);
+}
+
+// Reads the body of the request the cursor sits in, with strings and comments
+// blanked out so their quotes and braces cannot be mistaken for structure.
+function readRequestBody(text: string, from: number): string {
+  const before = text.slice(0, from);
+  const requestLine = /[\s\S]*(?:^|\n)[ \t]*(?:GET|POST|PUT|DELETE|HEAD)[ \t][^\n]*/i.exec(before);
+  return before.slice(requestLine?.[0].length ?? 0).replace(/"(?:\\.|[^"\\])*"|(?:#|\/\/)[^\n]*/g, "");
+}
+
+function hasOpenJsonContainer(text: string, cursor: number): boolean {
+  const stack: string[] = [];
+  for (const char of readRequestBody(text, cursor)) {
+    if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") stack.pop();
+  }
+  return stack.length > 0;
+}
+
+// Tracks open brackets so an array element or a value after `:` is never
+// mistaken for an object key.
+function readJsonSlot(text: string, from: number): ElasticsearchJsonSlot {
+  const stack: string[] = [];
+  let last = "";
+  for (const char of readRequestBody(text, from)) {
+    if (/\s/.test(char)) continue;
+    if (char === "{" || char === "[") stack.push(char);
+    else if (char === "}" || char === "]") stack.pop();
+    last = char;
+  }
+  return stack[stack.length - 1] === "{" && (last === "{" || last === ",") ? "key" : "value";
+}
+
+function hasJsonKeySeparator(text: string, cursor: number): boolean {
+  let index = cursor;
+  // The caret may sit inside the key, so step over the rest of the token and
+  // its closing quote before looking for the separator.
+  while (index < text.length && /[\w_]/.test(text[index] ?? "")) index++;
+  if (text[index] === '"') index++;
+  while (text[index] === " " || text[index] === "\t") index++;
+  return text[index] === ":";
 }
 
 function looksLikeJsonBody(text: string, cursor: number): boolean {

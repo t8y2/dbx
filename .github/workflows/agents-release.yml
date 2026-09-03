@@ -147,7 +147,11 @@ jobs:
           for module in "${MODULES[@]}"; do
             TASKS+=(":${module}:shadowJar")
           done
-          ./gradlew "${TASKS[@]}" --parallel
+          # agents/common changes trigger a parallel mass rebuild of every
+          # packaged module; the Gradle daemon default heap is too small for
+          # ~25 shadowJar fat jars at once on a 16 GB runner.
+          ./gradlew "${TASKS[@]}" --parallel \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"
         working-directory: agents
       - run: python3 scripts/validate_agent_jars.py
         working-directory: agents
@@ -343,6 +347,86 @@ jobs:
           name: rocketmq-native
           path: "release-native/dbx-agent-rocketmq-*"
 
+  build-etcd-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+      - name: Test etcd native agent
+        working-directory: agents/drivers/etcd-go
+        run: go test ./...
+      - name: Cross-compile etcd native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/etcd-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-etcd-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etcd-native
+          path: "release-native/dbx-agent-etcd-*"
+
+  build-etcd2-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'etcd2') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.x"
+      - name: Test etcd v2 native agent
+        working-directory: agents/drivers/etcd2-go
+        run: go test ./...
+      - name: Cross-compile etcd v2 native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/etcd2-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-etcd2-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: etcd2-native
+          path: "release-native/dbx-agent-etcd2-*"
+
   build-zookeeper-native:
     needs: [bump-versions]
     if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'zookeeper') }}
@@ -462,6 +546,46 @@ jobs:
         with:
           name: hive-native
           path: "release-native/dbx-agent-hive-*"
+
+  build-argo-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'argo') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23.x"
+      - name: Test Argo native agent
+        working-directory: agents/drivers/argo-go
+        run: go test ./...
+      - name: Cross-compile Argo native agent
+        shell: bash
+        run: |
+          mkdir -p release-native
+          cd agents/drivers/argo-go
+          declare -A TARGETS=(
+            ["macos-aarch64"]="darwin/arm64"
+            ["macos-x64"]="darwin/amd64"
+            ["linux-aarch64"]="linux/arm64"
+            ["linux-x64"]="linux/amd64"
+            ["windows-aarch64"]="windows/arm64"
+            ["windows-x64"]="windows/amd64"
+          )
+          for platform in "${!TARGETS[@]}"; do
+            IFS=/ read -r goos goarch <<< "${TARGETS[$platform]}"
+            output="../../../release-native/dbx-agent-argo-${platform}"
+            if [[ "$goos" == "windows" ]]; then
+              output="${output}.exe"
+            fi
+            echo "Building $platform ($goos/$goarch)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$output" .
+          done
+          ls -lh ../../../release-native
+      - uses: actions/upload-artifact@v4
+        with:
+          name: argo-native
+          path: "release-native/dbx-agent-argo-*"
 
   build-kingbase-native:
     needs: [bump-versions]
@@ -662,6 +786,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/duckdb-driver
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -681,6 +806,36 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # libduckdb C++ compilation dominates this build. The manylinux
+            # legs build inside a container and enable CC/CXX wrapping there;
+            # MSVC stays unwrapped.
+            case "${RUNNER_OS}" in
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
       - name: Build DuckDB native driver
         shell: bash
         run: |
@@ -693,6 +848,15 @@ jobs:
               -e HOME=/tmp/dbx-rust-home \
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/duckdb-driver \
+              -e RUSTC_WRAPPER \
+              -e SCCACHE_BUCKET \
+              -e SCCACHE_ENDPOINT \
+              -e SCCACHE_REGION \
+              -e SCCACHE_S3_KEY_PREFIX \
+              -e SCCACHE_S3_USE_SSL \
+              -e AWS_ACCESS_KEY_ID \
+              -e AWS_SECRET_ACCESS_KEY \
+              -e SCCACHE_IDLE_TIMEOUT \
               -v "${{ github.workspace }}:/workspace" \
               -w /workspace/agents/drivers/duckdb \
               "${{ matrix.manylinux_image }}" \
@@ -700,12 +864,27 @@ jobs:
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  case "$(uname -m)" in
+                    x86_64) SCCACHE_ARCH=x86_64-unknown-linux-musl ;;
+                    aarch64) SCCACHE_ARCH=aarch64-unknown-linux-musl ;;
+                  esac
+                  curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-${SCCACHE_ARCH}.tar.gz" \
+                    | tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+                  export CC="sccache cc" CXX="sccache c++"
+                  sccache --version
+                else
+                  unset RUSTC_WRAPPER
+                fi
                 cargo build \
                   --manifest-path Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-duckdb-driver \
                   --target "${{ matrix.target }}"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  sccache --show-stats || true
+                fi
               '
           else
             BUILD_STD=()
@@ -737,10 +916,66 @@ jobs:
               "${{ matrix.manylinux_image }}" \
               "/driver/dbx-agent-duckdb-${{ matrix.platform }}" < /dev/null
           fi
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: duckdb-native-${{ matrix.platform }}
           path: "release-native/dbx-agent-duckdb-*"
+
+  build-sqlite-worker-native:
+    needs: [bump-versions]
+    if: ${{ contains(fromJSON(needs.bump-versions.outputs.native_modules), 'sqlite-worker') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            platform: linux-x64
+            rustflags: "-C target-feature=+crt-static"
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux-aarch64
+            rustflags: "-C target-feature=+crt-static -C link-arg=-z -C link-arg=max-page-size=65536"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./ -> target"
+          shared-key: sqlite-worker-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Build musl SQLite SSH worker
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo zigbuild --release -p dbx-sqlite-worker --target ${{ matrix.target }}
+
+      - name: Stage SQLite SSH worker
+        run: |
+          mkdir -p release-native
+          cp \
+            "target/${{ matrix.target }}/release/dbx-sqlite-worker" \
+            "release-native/dbx-agent-sqlite-worker-${{ matrix.platform }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-worker-native-${{ matrix.platform }}
+          path: "release-native/dbx-agent-sqlite-worker-*"
 
   build-tdengine-native:
     needs: [bump-versions]
@@ -784,6 +1019,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/tdengine-driver
       RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: ${{ secrets.SCCACHE_S3_BUCKET == '' && 'true' || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -799,6 +1035,36 @@ jobs:
       - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         with:
           version: "v0.10.0"
+      - name: Configure S3 sccache
+        if: env.SCCACHE_GHA_ENABLED != 'true'
+        shell: bash
+        env:
+          CACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+          CACHE_ENDPOINT: ${{ secrets.SCCACHE_S3_ENDPOINT }}
+          CACHE_REGION: ${{ secrets.SCCACHE_S3_REGION }}
+          CACHE_KEY_PREFIX: ${{ secrets.SCCACHE_S3_KEY_PREFIX }}
+          CACHE_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+          CACHE_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+        run: |
+          {
+            echo "SCCACHE_BUCKET=${CACHE_BUCKET}"
+            echo "SCCACHE_ENDPOINT=${CACHE_ENDPOINT}"
+            echo "SCCACHE_REGION=${CACHE_REGION}"
+            echo "SCCACHE_S3_KEY_PREFIX=${CACHE_KEY_PREFIX}"
+            echo "SCCACHE_S3_USE_SSL=true"
+            echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # taos client C/C++ compilation dominates this build. The manylinux
+            # legs build inside a container and enable CC/CXX wrapping there;
+            # MSVC stays unwrapped.
+            case "${RUNNER_OS}" in
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
+          } >> "$GITHUB_ENV"
       - name: Build TDengine native driver
         shell: bash
         run: |
@@ -808,6 +1074,15 @@ jobs:
               -e HOME=/tmp/dbx-rust-home \
               -e CARGO_INCREMENTAL=0 \
               -e CARGO_TARGET_DIR=/workspace/target/tdengine-driver \
+              -e RUSTC_WRAPPER \
+              -e SCCACHE_BUCKET \
+              -e SCCACHE_ENDPOINT \
+              -e SCCACHE_REGION \
+              -e SCCACHE_S3_KEY_PREFIX \
+              -e SCCACHE_S3_USE_SSL \
+              -e AWS_ACCESS_KEY_ID \
+              -e AWS_SECRET_ACCESS_KEY \
+              -e SCCACHE_IDLE_TIMEOUT \
               -v "${{ github.workspace }}:/workspace" \
               -w /workspace \
               "${{ matrix.manylinux_image }}" \
@@ -815,12 +1090,27 @@ jobs:
                 mkdir -p "$HOME"
                 curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
                 source "$HOME/.cargo/env"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  case "$(uname -m)" in
+                    x86_64) SCCACHE_ARCH=x86_64-unknown-linux-musl ;;
+                    aarch64) SCCACHE_ARCH=aarch64-unknown-linux-musl ;;
+                  esac
+                  curl -sSfL "https://github.com/mozilla/sccache/releases/download/v0.10.0/sccache-v0.10.0-${SCCACHE_ARCH}.tar.gz" \
+                    | tar -xz --strip-components=1 -C "$HOME/.cargo/bin"
+                  export CC="sccache cc" CXX="sccache c++"
+                  sccache --version
+                else
+                  unset RUSTC_WRAPPER
+                fi
                 cargo build \
                   --manifest-path agents/drivers/tdengine/Cargo.toml \
                   --locked \
                   --release \
                   --bin dbx-tdengine-driver \
                   --target "${{ matrix.target }}"
+                if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                  sccache --show-stats || true
+                fi
               '
           else
             BUILD_STD=()
@@ -848,6 +1138,11 @@ jobs:
           elif [ "${{ matrix.smoke }}" = "true" ]; then
             "release-native/dbx-agent-tdengine-${{ matrix.platform }}${{ matrix.extension }}" < /dev/null
           fi
+      - name: Show sccache stats
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
       - uses: actions/upload-artifact@v4
         with:
           name: tdengine-native-${{ matrix.platform }}
@@ -962,7 +1257,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-tdengine-native, build-jre, reuse-previous-assets]
+    needs: [bump-versions, commit-versions, build-agents, build-oracle-native, build-xugu-native, build-rabbitmq-native, build-rocketmq-native, build-etcd-native, build-etcd2-native, build-zookeeper-native, build-cassandra-native, build-hive-native, build-argo-native, build-kingbase-native, build-vastbase-native, build-neo4j-native, build-iotdb-native, build-duckdb-native, build-sqlite-worker-native, build-tdengine-native, build-jre, reuse-previous-assets]
     if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     steps:
@@ -1087,15 +1382,19 @@ jobs:
               kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
               rocketmq) echo "Apache RocketMQ" ;;
               zookeeper) echo "Apache ZooKeeper" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
+              argo) echo "星环Argo" ;;
               neo4j) echo "Neo4j" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              etcd) echo "etcd" ;;
+              etcd2) echo "etcd 2.x (v2 API)" ;;
               *) echo "$name" ;;
             esac
           }
@@ -1159,7 +1458,7 @@ jobs:
             [ -n "$DRIVERS" ] && DRIVERS="${DRIVERS},"$'\n'
             DRIVERS="${DRIVERS}$(generate_jar_entry "$name" "$label" "$f" "$jre_key" "$version" "$external_driver" "$native_json")"
           done
-          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb rabbitmq rocketmq zookeeper cassandra hive tdengine; do
+          for name in oracle xugu kingbase vastbase neo4j iotdb duckdb sqlite-worker rabbitmq rocketmq zookeeper cassandra hive argo tdengine etcd etcd2; do
             version=$(get_module_version "$name")
             [ -f "release/dbx-agent-${name}-${version}.jar" ] && continue
             native_json=$(generate_native_platforms "$name" "$version")
@@ -1239,6 +1538,7 @@ jobs:
               kingbase) echo "金仓KingbaseES" ;;
               vastbase) echo "Vastbase" ;;
               duckdb) echo "DuckDB" ;;
+              sqlite-worker) echo "SQLite SSH Worker" ;;
               oracle) echo "Oracle" ;;
               xugu) echo "虚谷 XuguDB" ;;
               rabbitmq) echo "RabbitMQ" ;;
@@ -1246,12 +1546,32 @@ jobs:
               zookeeper) echo "Apache ZooKeeper" ;;
               cassandra) echo "Apache Cassandra" ;;
               hive) echo "Apache Hive" ;;
+              argo) echo "星环Argo" ;;
               neo4j) echo "Neo4j" ;;
               iotdb) echo "Apache IoTDB" ;;
               tdengine) echo "TDengine" ;;
+              etcd) echo "etcd" ;;
+              etcd2) echo "etcd 2.x (v2 API)" ;;
               *) echo "$name" ;;
             esac
           }
+
+          # agents/common rebuilds every packaging driver; report common-only
+          # commits once in a shared section instead of duplicating them under
+          # every driver. Commits that also touch driver code stay attributed
+          # to that driver alone.
+          COMMON_NOTES=""
+          while IFS= read -r line; do
+            sha="${line%% *}"
+            subject="${line#* }"
+            if git diff-tree --no-commit-id --name-only -r "$sha" | grep -qv '^agents/common/'; then
+              continue
+            fi
+            COMMON_NOTES="${COMMON_NOTES}- ${subject}"$'\n'
+          done < <(git log --no-merges --format='%H %s' "$PREV_TAG"..HEAD -- agents/common/build.gradle agents/common/src/main/)
+          if [ -n "$COMMON_NOTES" ]; then
+            NOTES="${NOTES}### 公共组件 (agents/common)"$'\n'"${COMMON_NOTES}"$'\n'
+          fi
 
           for name in "${DRIVER_NAMES[@]}"; do
             old_ver=$(echo "$PREV_VERSIONS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('$name',''))")
@@ -1266,7 +1586,6 @@ jobs:
               label=$(native_only_label "$name")
             fi
 
-            NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'
             if [ "$name" = "oracle" ]; then
               LOG_PATH="agents/drivers/oracle-go/"
             elif [ "$name" = "kingbase" ]; then
@@ -1277,10 +1596,14 @@ jobs:
               LOG_PATH="agents/drivers/cassandra-go/"
             elif [ "$name" = "hive" ]; then
               LOG_PATH="agents/drivers/hive-go/"
+            elif [ "$name" = "argo" ]; then
+              LOG_PATH="agents/drivers/argo-go/"
             elif [ "$name" = "neo4j" ]; then
               LOG_PATH="agents/drivers/neo4j-go/"
             elif [ "$name" = "iotdb" ]; then
               LOG_PATH="agents/drivers/iotdb/"
+            elif [ "$name" = "sqlite-worker" ]; then
+              LOG_PATH="crates/dbx-sqlite-worker/"
             elif [ -d "agents/drivers/$name" ]; then
               LOG_PATH="agents/drivers/$name/"
             else
@@ -1293,21 +1616,26 @@ jobs:
                 "agents/go-common/gohive/"
                 "agents/go-common/gosasl/"
               )
+            elif [ "$name" = "argo" ]; then
+              LOG_PATHS+=(
+                "agents/go-common/go-gssapi/"
+                "agents/go-common/gohive/"
+                "agents/go-common/gosasl/"
+              )
             elif [ "$name" = "zookeeper" ]; then
               LOG_PATHS+=(
                 "agents/go-common/go-gssapi/"
                 "agents/go-common/gosasl/"
               )
             fi
+            DRIVER_NOTES=""
             while IFS= read -r line; do
-              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
+              [ -n "$line" ] && DRIVER_NOTES="${DRIVER_NOTES}- ${line}"$'\n'
             done < <(git log --oneline "$PREV_TAG"..HEAD -- "${LOG_PATHS[@]}" | sed 's/^[0-9a-f]* //')
-
-            # include common changes if any
-            while IFS= read -r line; do
-              [ -n "$line" ] && NOTES="${NOTES}- ${line}"$'\n'
-            done < <(git log --oneline "$PREV_TAG"..HEAD -- agents/common/ | sed 's/^[0-9a-f]* //')
-            NOTES="${NOTES}"$'\n'
+            if [ -z "$DRIVER_NOTES" ]; then
+              DRIVER_NOTES="- 无驱动专属变更"$'\n'
+            fi
+            NOTES="${NOTES}### ${label} (${old_ver} → ${new_ver})"$'\n'"${DRIVER_NOTES}"$'\n'
           done
 
           if [ -z "$NOTES" ]; then

@@ -21,8 +21,11 @@ export function createQueryEditorExecutionViewportOwnership() {
       pendingRequestId = nextRequestId;
       return nextRequestId;
     },
-    cancelPendingRequest() {
+    cancelPendingRequest(requestId?: number): boolean {
+      if (requestId !== undefined && pendingRequestId !== requestId) return false;
+      if (pendingRequestId === undefined) return false;
       pendingRequestId = undefined;
+      return true;
     },
     acceptRequest(requestId: number): boolean {
       if (pendingRequestId !== requestId) return false;

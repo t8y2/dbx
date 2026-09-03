@@ -14,10 +14,15 @@ const backend = vi.hoisted(() => ({
   documentUpdateDocument: vi.fn(),
   documentDeleteDocument: vi.fn(),
   documentSaveMeilisearchBatch: vi.fn(),
+  closeQuerySession: vi.fn(),
 }));
 
 const documentJsonEditor = vi.hoisted(() => ({
   openSearch: vi.fn().mockReturnValue(true),
+}));
+
+const clipboard = vi.hoisted(() => ({
+  copyToClipboard: vi.fn(),
 }));
 
 const dataGrid = vi.hoisted(() => ({
@@ -79,6 +84,7 @@ vi.mock("@/lib/backend/api", () => ({
   documentUpdateDocument: backend.documentUpdateDocument,
   documentDeleteDocument: backend.documentDeleteDocument,
   documentSaveMeilisearchBatch: backend.documentSaveMeilisearchBatch,
+  closeQuerySession: backend.closeQuerySession,
 }));
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -91,6 +97,10 @@ vi.mock("@/stores/settingsStore", () => ({
   TABLE_FONT_SIZE_MIN: 8,
   TABLE_FONT_SIZE_MAX: 16,
   useSettingsStore: () => settings,
+}));
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: clipboard.copyToClipboard,
 }));
 
 vi.mock("@/components/grid/DataGrid.vue", () => {
@@ -315,12 +325,15 @@ beforeEach(async () => {
   backend.documentUpdateDocument.mockReset();
   backend.documentDeleteDocument.mockReset();
   backend.documentSaveMeilisearchBatch.mockReset();
+  backend.closeQuerySession.mockReset();
   dataGrid.fullExportResult = undefined;
   dataGrid.customSaveHandler = undefined;
   dataGrid.countTotalRows = undefined;
   dataGrid.paginate = undefined;
   dataGrid.editable = true;
   documentJsonEditor.openSearch.mockClear();
+  clipboard.copyToClipboard.mockReset();
+  clipboard.copyToClipboard.mockResolvedValue(undefined);
   backend.documentDeleteDocument.mockResolvedValue(undefined);
   backend.documentInsertDocument.mockResolvedValue("created");
   backend.documentUpdateDocument.mockResolvedValue(1);
@@ -889,8 +902,39 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(progress).toHaveBeenLastCalledWith({ rowsExported: 1, totalRows: null });
   });
 
-  it("does not offer the MongoDB full export callback to Elasticsearch viewers", () => {
-    expect(dataGrid.fullExportResult).toBeUndefined();
+  it("exports Elasticsearch documents with cursor pagination", async () => {
+    settings.editorSettings.exportBatchSize = 2;
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments
+      .mockResolvedValueOnce({
+        documents: [
+          { _id: "one", title: "First" },
+          { _id: "two", title: "Second" },
+        ],
+        total: 3,
+        total_is_exact: true,
+        next_cursor: "cursor-1",
+      })
+      .mockResolvedValueOnce({
+        documents: [{ _id: "three", title: "Third" }],
+        total: 3,
+        total_is_exact: true,
+      });
+
+    expect(dataGrid.fullExportResult).toBeTypeOf("function");
+    const result = await dataGrid.fullExportResult!();
+    await flushUi();
+
+    expect(backend.documentFindDocuments.mock.calls.map((call) => [call[3], call[4], call[10], call[11]])).toEqual([
+      [0, 2, undefined, true],
+      [0, 2, "cursor-1", true],
+    ]);
+    expect(result?.rows).toEqual([
+      ["one", "First"],
+      ["two", "Second"],
+      ["three", "Third"],
+    ]);
+    expect(backend.closeQuerySession).toHaveBeenCalledWith("connection-1", "", "cursor-1");
   });
 
   it("identifies consistently numeric MongoDB columns for shared grid alignment", async () => {
@@ -1052,6 +1096,7 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     const jsonText = viewer.querySelector<HTMLElement>(".cm-line .json-string")!;
     const documentId = root!.querySelector<HTMLInputElement>('input[aria-label^="_id:"]')!;
     expect(root!.firstElementChild?.classList.contains("select-none")).toBe(true);
+    expect(viewer.classList.contains("select-text")).toBe(true);
     expect(documentId.readOnly).toBe(true);
     expect(documentId.value).toBe("document-1");
     expect(documentId.classList.contains("select-text")).toBe(true);
@@ -1062,6 +1107,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.readOnly).toBe("true");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.lineNumbers).toBe("false");
     expect(viewer.querySelector<HTMLElement>("[data-redis-json-editor-stub]")?.dataset.presentation).toBe("viewer");
+
+    buttonWithTitle("grid.copy").click();
+    await flushUi();
+    expect(clipboard.copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('"_id": "document-1"'));
 
     documentId.setSelectionRange(0, documentId.value.length);
     expect(documentId.selectionStart).toBe(0);

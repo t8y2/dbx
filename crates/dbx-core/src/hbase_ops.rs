@@ -3,8 +3,8 @@ use crate::db::hbase_driver::{self, HBasePutRowInput, HBaseRow, HBaseScanResult,
 
 async fn client(state: &AppState, connection_id: &str) -> Result<hbase_driver::HBaseClient, String> {
     let pool_key = state.get_or_create_pool(connection_id, None).await?;
-    let connections = state.connections.read().await;
-    match connections.get(&pool_key) {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    match pool_handle.as_ref() {
         Some(PoolKind::HBase(client)) => Ok(client.clone()),
         _ => Err("Not an HBase connection".to_string()),
     }

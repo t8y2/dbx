@@ -113,9 +113,18 @@ describe("EditorSettingsDialog choice card containment", () => {
   });
 
   it("preserves intentional single-line truncation for cards with tooltips", () => {
-    for (const key of ["appLayoutSeparatedDescription", "appLayoutClassicDescription", "iconThemeDefaultDescription"] as const) {
+    for (const key of ["appLayoutSeparatedDescription", "appLayoutClassicDescription"] as const) {
       expectClassTokens(classNameFromTag(elementTagForKey(key)), ["truncate"]);
     }
-    expect(dialogSource).toContain('class="text-xs text-muted-foreground truncate">\n                                {{ iconThemeBlackDescriptionText }}');
+  });
+
+  it("restores large icon theme choices below the debug log controls", () => {
+    expect(sourceIndexForKey("iconTheme")).toBeGreaterThan(sourceIndexForKey("debugLoggingEnabled"));
+    expect(templateSource).toContain("data-icon-theme-settings");
+    for (const key of ["iconThemeDefault", "iconThemeBlack"] as const) {
+      const block = buttonBlockForKey(key);
+      expectClassTokens(classNameFromTag(openingTag(block, "Button")), ["settings-choice-card", "h-auto", "min-w-0", "whitespace-normal", "overflow-hidden"]);
+      expect(block).toContain('class="h-12 w-12 shrink-0"');
+    }
   });
 });

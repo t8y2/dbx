@@ -6,6 +6,7 @@ use dbx_core::transfer::{
     transfer_table, TransferContent, TransferMode, TransferOwnershipPolicy, TransferRequest, TransferTableNameCase,
 };
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
 
 fn live_mysql_config(id: &str) -> ConnectionConfig {
@@ -88,6 +89,7 @@ fn transfer_request(
         objects: Vec::new(),
         mode,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 2,
     }
@@ -95,6 +97,330 @@ fn transfer_request(
 
 async fn query_text(pool: &mysql::MySqlPool, sql: &str) -> String {
     mysql::execute_query(pool, sql, false).await.unwrap().rows[0][0].as_str().unwrap().to_string()
+}
+
+#[test]
+#[ignore = "requires disposable MySQL 8.0.33 source and 8.0.45 target endpoints via DBX_LIVE_MYSQL_TRANSFER_SOURCE_*/TARGET_* variables"]
+fn live_mysql_cross_version_transfer_completes_on_small_stack() {
+    std::thread::Builder::new()
+        .name("live-mysql-transfer-small-stack".to_string())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(run_live_mysql_cross_version_transfer_completes_on_small_stack());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn run_live_mysql_cross_version_transfer_completes_on_small_stack() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_connection_id = format!("small-stack-source-{suffix}");
+    let target_connection_id = format!("small-stack-target-{suffix}");
+    let source_database = format!("dbx_stack_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_stack_dst_{}", &suffix[..12]);
+    let source_config = live_cross_version_mysql_config(&source_connection_id, "SOURCE");
+    let target_config = live_cross_version_mysql_config(&target_connection_id, "TARGET");
+    let source_setup_pool = mysql::connect(&mysql_url(&source_config), Duration::from_secs(10)).await.unwrap();
+    let target_setup_pool = mysql::connect(&mysql_url(&target_config), Duration::from_secs(10)).await.unwrap();
+
+    mysql::execute_query(
+        &source_setup_pool,
+        &format!(
+            "CREATE DATABASE {source_database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\
+             CREATE TABLE {source_database}.title_task (\
+               id VARCHAR(32) NOT NULL, deleted BIT(1) NOT NULL DEFAULT b'0', creator BIGINT NOT NULL,\
+               create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updater BIGINT DEFAULT NULL,\
+               update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,\
+               creator_name VARCHAR(255), updater_name VARCHAR(255), task_name VARCHAR(100),\
+               title_level VARCHAR(100), task_year INT, review_result VARCHAR(100),\
+               review_mode TINYINT NOT NULL DEFAULT 0, score_snapshot_json TEXT,\
+               task_start_time DATETIME, task_end_time DATETIME, task_status INT DEFAULT 0,\
+               is_remove_highest_score INT DEFAULT 0, is_remove_minimum_score INT DEFAULT 0,\
+               task_files TEXT, task_level VARCHAR(30), org_id BIGINT, org_code VARCHAR(255),\
+               org_name VARCHAR(255), school_id BIGINT, school_name VARCHAR(255),\
+               province_code VARCHAR(50), province_name VARCHAR(255), city_code VARCHAR(50),\
+               city_name VARCHAR(255), area_code VARCHAR(50), area_name VARCHAR(255),\
+               PRIMARY KEY (id), KEY idx_task_name (task_name), KEY idx_task_year (task_year),\
+               KEY idx_task_status (task_status), KEY idx_org_id (org_id), KEY idx_org_code (org_code)\
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;\
+             INSERT INTO {source_database}.title_task \
+               (id, deleted, creator, review_result, review_mode, score_snapshot_json) VALUES\
+               ('small-stack-default', b'0', 1, 'pending', 0, '{{\"score\":88}}'),\
+               ('small-stack-non-default', b'0', 2, 'approved', 2, '{{\"score\":95}}')"
+        ),
+        true,
+    )
+    .await
+    .unwrap();
+    mysql::execute_query(&target_setup_pool, &format!("CREATE DATABASE {target_database}"), false).await.unwrap();
+
+    let task_tmp = std::path::PathBuf::from(
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR").expect("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR"),
+    );
+    let dir = task_tmp.join(format!("small-stack-transfer-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(source_connection_id.clone(), source_config);
+    state.configs.write().await.insert(target_connection_id.clone(), target_config);
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
+    let request = TransferRequest {
+        transfer_id: format!("small-stack-transfer-{suffix}"),
+        source_connection_id,
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id,
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["title_task".to_string()],
+        create_table: true,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 100,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            "title_task",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 2);
+        assert_eq!(
+            query_text(
+                &target_setup_pool,
+                &format!(
+                    "SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.columns \
+                     WHERE table_schema = '{target_database}' AND table_name = 'title_task'"
+                ),
+            )
+            .await,
+            "32"
+        );
+        assert_eq!(
+            query_text(
+                &target_setup_pool,
+                &format!(
+                    "SELECT GROUP_CONCAT(CONCAT(id, ':', review_mode) ORDER BY id SEPARATOR ',') \
+                     FROM {target_database}.title_task"
+                ),
+            )
+            .await,
+            "small-stack-default:0,small-stack-non-default:2"
+        );
+        let review_mode = mysql::execute_query(
+            &target_setup_pool,
+            &format!(
+                "SELECT ordinal_position, column_type, is_nullable, column_default \
+                 FROM information_schema.columns WHERE table_schema = '{target_database}' \
+                 AND table_name = 'title_task' AND column_name = 'review_mode'"
+            ),
+            false,
+        )
+        .await?;
+        assert_eq!(review_mode.rows.len(), 1);
+        assert_eq!(review_mode.rows[0][0], json!("13"));
+        assert_eq!(review_mode.rows[0][1], json!("tinyint"));
+        assert_eq!(review_mode.rows[0][2], json!("NO"));
+        assert_eq!(review_mode.rows[0][3], json!("0"));
+        Ok::<_, String>(())
+    }
+    .await;
+
+    mysql::execute_query(&source_setup_pool, &format!("DROP DATABASE {source_database}"), false).await.unwrap();
+    mysql::execute_query(&target_setup_pool, &format!("DROP DATABASE {target_database}"), false).await.unwrap();
+    source_setup_pool.disconnect().await.unwrap();
+    target_setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    test_result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MySQL 8 endpoints via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_keeps_columns_whose_comment_mentions_foreign_key() {
+    // #7660: the deferred-FK DDL rewrite used to delete any `SHOW CREATE
+    // TABLE` line containing " FOREIGN KEY ", including column definitions
+    // whose COMMENT text merely mentions the words — silently dropping those
+    // columns from the created target table.
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_connection_id = format!("live-mysql8-transfer-{suffix}");
+    let target_connection_id = format!("live-mysql8-transfer-dst-{suffix}");
+    let source_database = format!("dbx_7660_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_7660_dst_{}", &suffix[..12]);
+    let source_config = live_mysql_config(&source_connection_id);
+    let target_config = live_mysql_config(&target_connection_id);
+    let source_setup_pool = mysql::connect(&mysql_url(&source_config), Duration::from_secs(10)).await.unwrap();
+    let target_setup_pool = mysql::connect(&mysql_url(&target_config), Duration::from_secs(10)).await.unwrap();
+
+    mysql::execute_query(
+        &source_setup_pool,
+        &format!(
+            "CREATE DATABASE `{source_database}` CHARACTER SET utf8mb4;\
+             CREATE TABLE `{source_database}`.`org` (\
+               id BIGINT NOT NULL,\
+               name VARCHAR(64) DEFAULT NULL,\
+               PRIMARY KEY (id)\
+             ) ENGINE=InnoDB;\
+             CREATE TABLE `{source_database}`.`title_task` (\
+               `id` varchar(32) NOT NULL,\
+               `review_result` varchar(100) DEFAULT NULL,\
+               `review_mode` tinyint NOT NULL DEFAULT '0' COMMENT 'foreign key of review flow',\
+               `score_snapshot_json` text COMMENT 'snapshot json, see foreign key docs',\
+               `task_status` int DEFAULT '0',\
+               `org_id` bigint DEFAULT NULL,\
+               PRIMARY KEY (`id`),\
+               KEY `idx_task_status` (`task_status`),\
+               KEY `fk_title_task_org` (`org_id`),\
+               CONSTRAINT `fk_title_task_org` FOREIGN KEY (`org_id`) REFERENCES `{source_database}`.`org` (`id`)\
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\
+             INSERT INTO `{source_database}`.`org` VALUES (1, 'hq'), (2, 'branch');\
+             INSERT INTO `{source_database}`.`title_task` VALUES \
+               ('t1', 'pass', 1, 'score=9', 0, 1),\
+               ('t2', NULL, 0, NULL, 1, 2)"
+        ),
+        true,
+    )
+    .await
+    .unwrap();
+    mysql::execute_query(
+        &target_setup_pool,
+        &format!("CREATE DATABASE `{target_database}` CHARACTER SET utf8mb4"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let task_tmp = std::path::PathBuf::from(
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR").expect("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR"),
+    );
+    let dir = task_tmp.join(format!("live-mysql-fk-comment-transfer-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(source_connection_id.clone(), source_config);
+    state.configs.write().await.insert(target_connection_id.clone(), target_config);
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
+    let request = TransferRequest {
+        transfer_id: format!("live-mysql-fk-comment-transfer-{suffix}"),
+        source_connection_id,
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id,
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["org".to_string(), "title_task".to_string()],
+        create_table: true,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10,
+    };
+
+    let test_result = async {
+        let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
+        assert_eq!(
+            transfer_table(
+                &state,
+                &request,
+                "org",
+                0,
+                &DatabaseType::Mysql,
+                &DatabaseType::Mysql,
+                &source_pool_key,
+                &target_pool_key,
+                &std::collections::HashMap::new(),
+                &mut pending_fk_alters,
+                |_| {},
+            )
+            .await?,
+            2
+        );
+        assert_eq!(
+            transfer_table(
+                &state,
+                &request,
+                "title_task",
+                1,
+                &DatabaseType::Mysql,
+                &DatabaseType::Mysql,
+                &source_pool_key,
+                &target_pool_key,
+                &std::collections::HashMap::new(),
+                &mut pending_fk_alters,
+                |_| {},
+            )
+            .await?,
+            2
+        );
+        assert_eq!(pending_fk_alters.len(), 1, "alters: {pending_fk_alters:?}");
+        for (_, statement) in &pending_fk_alters {
+            dbx_core::transfer::execute_on_pool_with_max_rows(&state, &target_pool_key, statement, None).await.unwrap();
+        }
+
+        let ddl_result = mysql::execute_query(
+            &target_setup_pool,
+            &format!("SHOW CREATE TABLE `{target_database}`.`title_task`"),
+            false,
+        )
+        .await?;
+        let target_ddl = ddl_result.rows[0][1].as_str().unwrap();
+        assert!(target_ddl.contains("`review_mode` tinyint NOT NULL DEFAULT '0'"), "ddl: {target_ddl}");
+        assert!(target_ddl.contains("`score_snapshot_json` text"), "ddl: {target_ddl}");
+        assert!(target_ddl.contains("COMMENT 'foreign key of review flow'"), "ddl: {target_ddl}");
+        assert!(target_ddl.contains("KEY `idx_task_status` (`task_status`)"), "ddl: {target_ddl}");
+        assert!(target_ddl.contains("CONSTRAINT `fk_title_task_org` FOREIGN KEY"), "ddl: {target_ddl}");
+        assert_eq!(
+            query_text(
+                &target_setup_pool,
+                &format!(
+                    "SELECT GROUP_CONCAT(CONCAT(id, ':', review_mode, ':', IFNULL(score_snapshot_json, 'N')) \
+                     ORDER BY id SEPARATOR '|') FROM `{target_database}`.`title_task`"
+                ),
+            )
+            .await,
+            "t1:1:score=9|t2:0:N"
+        );
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let source_cleanup =
+        mysql::execute_query(&source_setup_pool, &format!("DROP DATABASE `{source_database}`"), false).await;
+    let target_cleanup =
+        mysql::execute_query(&target_setup_pool, &format!("DROP DATABASE `{target_database}`"), false).await;
+    source_setup_pool.disconnect().await.unwrap();
+    target_setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    source_cleanup.unwrap();
+    target_cleanup.unwrap();
+    test_result.unwrap();
 }
 
 #[tokio::test]
@@ -144,7 +470,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
     let dir = task_tmp.join(format!("live-mysql-collation-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(source_connection_id.clone(), source_config);
     state.configs.write().await.insert(target_connection_id.clone(), target_config);
     let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
@@ -167,6 +493,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
         objects: Vec::new(),
         mode: TransferMode::Append,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 10,
     };
@@ -227,6 +554,7 @@ async fn live_mysql_transfer_downgrades_unsupported_source_collations() {
             objects: Vec::new(),
             mode: TransferMode::Append,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 10,
         };
@@ -323,7 +651,7 @@ async fn live_mysql_transfer_preserves_spatial_values_and_modes() {
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
@@ -503,7 +831,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
     let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-struct-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
-    let state = AppState::new(storage);
+    let state = Arc::new(AppState::new(storage));
     state.configs.write().await.insert(connection_id.clone(), config);
     let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
     let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
@@ -527,6 +855,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
         objects: Vec::new(),
         mode: TransferMode::Overwrite,
         target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
         ownership_policy: TransferOwnershipPolicy::Preserve,
         batch_size: 10,
     };
@@ -579,6 +908,7 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             objects: Vec::new(),
             mode: TransferMode::Overwrite,
             target_table_name_case: TransferTableNameCase::Preserve,
+            quote_target_column_names: true,
             ownership_policy: TransferOwnershipPolicy::Preserve,
             batch_size: 10,
         };
@@ -607,6 +937,93 @@ async fn live_mysql_transfer_structure_overwrite_rejects_incompatible_target_col
             "1",
             "target row was destroyed by TRUNCATE despite the required target column mismatch"
         );
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = mysql::execute_query(
+        &setup_pool,
+        &format!("DROP DATABASE `{source_database}`; DROP DATABASE `{target_database}`"),
+        true,
+    )
+    .await;
+    setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.unwrap();
+    test_result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable MySQL 5.7+ endpoint via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_transfer_structure_only_rejects_incompatible_target_columns() {
+    // #7660: structure-only transfers onto a preexisting target used to skip
+    // the incompatible-structure validation entirely and report success while
+    // the target quietly kept missing source columns.
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-mysql-transfer-structonly-{suffix}");
+    let source_database = format!("dbx_transfer_structonly_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_transfer_structonly_dst_{}", &suffix[..12]);
+    let config = live_mysql_config(&connection_id);
+    let setup_pool = mysql::connect(&mysql_url(&config), Duration::from_secs(10)).await.unwrap();
+
+    let setup = format!(
+        "CREATE DATABASE `{source_database}`;\
+         CREATE DATABASE `{target_database}`;\
+         CREATE TABLE `{source_database}`.`orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32), extra_col VARCHAR(32)\
+         );\
+         CREATE TABLE `{target_database}`.`orders` (\
+             id INT PRIMARY KEY, name VARCHAR(32)\
+         )"
+    );
+    mysql::execute_query(&setup_pool, &setup, true).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-mysql-transfer-structonly-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), config);
+    let source_pool_key = state.get_or_create_pool(&connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&connection_id, Some(&target_database)).await.unwrap();
+
+    let request = TransferRequest {
+        transfer_id: format!("live-mysql-transfer-structonly-{suffix}"),
+        source_connection_id: connection_id.clone(),
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id: connection_id.clone(),
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["orders".to_string()],
+        create_table: true,
+        content: TransferContent::StructureOnly,
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10,
+    };
+
+    let test_result = async {
+        let result = transfer_table(
+            &state,
+            &request,
+            "orders",
+            0,
+            &DatabaseType::Mysql,
+            &DatabaseType::Mysql,
+            &source_pool_key,
+            &target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
+            |_| {},
+        )
+        .await;
+        let error = result.expect_err("structure-only transfer onto an incompatible preexisting target should fail");
+        assert!(error.contains("missing column(s) extra_col"), "error should name the missing column: {error}");
         Ok::<_, String>(())
     }
     .await;

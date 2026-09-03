@@ -81,6 +81,14 @@
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
       "localFile": true,
+      "managedDrivers": [
+        {
+          "key": "sqlite-worker",
+          "label": "SQLite SSH Worker",
+          "storeVisible": true,
+          "storeOrder": 48
+        }
+      ],
       "traits": {
         "diagramSql": true
       },
@@ -373,7 +381,7 @@
       "capabilities": {
         "queryExecution": true,
         "metadataBrowse": false,
-        "objectBrowser": false,
+        "objectBrowser": true,
         "objectSource": false,
         "schemaSearch": false,
         "diagram": false,
@@ -1835,6 +1843,41 @@
       }
     },
     {
+      "dbType": "argo",
+      "label": "星环Argo",
+      "runtimeMode": "agent",
+      "mcpMode": "bridge",
+      "agentKey": "argo",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 50,
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 10000,
+      "traits": {
+        "schemaAware": true
+      },
+      "supportLevel": "operate",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": true,
+        "schemaSearch": true,
+        "diagram": false,
+        "tableDataEdit": true,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": true,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": true
+      }
+    },
+    {
       "dbType": "kyuubi",
       "label": "Apache Kyuubi",
       "runtimeMode": "agent",
@@ -2354,6 +2397,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "etcd",
+      "driverProfiles": [
+        {
+          "profile": "etcd-v2",
+          "agentKey": "etcd2",
+          "label": "etcd 2.x (v2 API)",
+          "storeVisible": true,
+          "storeOrder": 49
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 39,
       "singleConnectionPool": false,
@@ -2654,6 +2706,35 @@
         "dataTransfer": false,
         "sqlFileExecution": true,
         "databaseCreate": true,
+        "fieldLineage": false,
+        "sqlExplain": false,
+        "userAdmin": false,
+        "driverManagement": false
+      }
+    },
+    {
+      "dbType": "influxdb3",
+      "label": "InfluxDB 3.x",
+      "runtimeMode": "native",
+      "mcpMode": "bridge",
+      "singleConnectionPool": false,
+      "metadataConnectionScoped": false,
+      "skipTcpProbe": true,
+      "defaultPort": 8181,
+      "supportLevel": "connect",
+      "capabilities": {
+        "queryExecution": true,
+        "metadataBrowse": true,
+        "objectBrowser": true,
+        "objectSource": false,
+        "schemaSearch": false,
+        "diagram": false,
+        "tableDataEdit": false,
+        "tableStructureEdit": false,
+        "tableImport": false,
+        "dataTransfer": false,
+        "sqlFileExecution": true,
+        "databaseCreate": false,
         "fieldLineage": false,
         "sqlExplain": false,
         "userAdmin": false,

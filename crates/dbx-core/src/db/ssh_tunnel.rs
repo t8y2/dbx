@@ -48,7 +48,7 @@ const KEYBOARD_INTERACTIVE_PROMPT_TIMEOUT: Duration = Duration::from_secs(300);
 /// SSH client handler. Holds a host-key verifier so that
 /// [`client::Handler::check_server_key`] can reject untrusted/changed server
 /// keys *before* any credential is sent.
-struct SshClient {
+pub(crate) struct SshClient {
     host_key_verifier: Arc<HostKeyVerifier>,
     host: String,
     port: u16,
@@ -316,7 +316,7 @@ async fn authenticate_keyboard_interactive(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn connect_and_authenticate(
+pub(crate) async fn connect_and_authenticate(
     connect_host: &str,
     connect_port: u16,
     host_key_host: &str,
@@ -1278,6 +1278,10 @@ impl TunnelManager {
         Self { tunnels: Mutex::new(HashMap::new()), start_locks: Mutex::new(HashMap::new()), known_hosts_path }
     }
 
+    pub fn known_hosts_path(&self) -> &Path {
+        &self.known_hosts_path
+    }
+
     async fn start_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
         self.start_locks
             .lock()
@@ -1820,7 +1824,7 @@ async fn bind_tunnel_listener(
     Ok((listener, local_port))
 }
 
-fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
+pub(crate) fn effective_hop_timeout(hop: &SshTunnelConfig) -> u64 {
     if hop.connect_timeout_secs == 0 {
         crate::models::connection::default_ssh_connect_timeout_secs()
     } else {
@@ -1913,10 +1917,18 @@ mod tests {
         assert_eq!(resolve_ssh_agent_socket_path("/tmp/agent.sock"), "/tmp/agent.sock");
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "redox")))]
     #[test]
-    fn ssh_agent_socket_path_preserves_named_user_path() {
-        assert_eq!(resolve_ssh_agent_socket_path("~other/.ssh/agent.sock"), "~other/.ssh/agent.sock");
+    fn ssh_agent_socket_path_expands_named_user_home() {
+        let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+            .expect("current Unix user lookup should succeed")
+            .expect("current Unix user should exist in the account database");
+        let home = user.dir.into_os_string().into_string().expect("current Unix user home should be valid UTF-8");
+
+        assert_eq!(
+            resolve_ssh_agent_socket_path(&format!("~{}/.ssh/agent.sock", user.name)),
+            format!("{home}/.ssh/agent.sock")
+        );
     }
 
     #[test]

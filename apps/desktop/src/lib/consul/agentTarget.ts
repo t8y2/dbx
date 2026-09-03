@@ -1,4 +1,7 @@
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
+
 type AgentTargetConnection = {
+  id?: string;
   read_only?: boolean;
   transport_layers?: Array<{ enabled?: boolean }>;
   external_config?: unknown;
@@ -32,7 +35,7 @@ export function consulAgentAddressesMatch(left: string, right: string): boolean 
 }
 
 export function consulAgentWriteTargetSafe(connection: AgentTargetConnection | undefined, identityNode: string | undefined): boolean {
-  if (!connection || connection.read_only || connection.transport_layers?.some((layer) => layer.enabled !== false)) return false;
+  if (!connection || connectionIsEffectivelyReadOnly(connection) || connection.transport_layers?.some((layer) => layer.enabled !== false)) return false;
   const external = connection.external_config;
   if (!external || typeof external !== "object" || Array.isArray(external)) return false;
   const config = external as Record<string, unknown>;

@@ -21,6 +21,9 @@ const connectionStore = {
   loadObjectGroupChildren: vi.fn(async (node: TreeNode) => {
     node.isExpanded = true;
   }),
+  loadXuguTablespaces: vi.fn(async (node: TreeNode) => {
+    node.isExpanded = true;
+  }),
 };
 
 const queryStore = {
@@ -420,5 +423,63 @@ describe("SidebarTreeRuntimeHost expansion", () => {
 
     expect(packageFunctionGroup.isExpanded).toBe(true);
     expect(packageFunctionGroup.children).toHaveLength(401);
+  });
+
+  it("toggles Xugu tablespace and datafile group nodes locally", async () => {
+    const datafileGroup: TreeNode = {
+      id: "xugu:SHOP_DEMO:tablespace:SYSTEM:datafiles",
+      label: "tree.datafiles",
+      type: "group-datafiles",
+      parentType: "tablespace",
+      parentName: "SYSTEM",
+      connectionId: "xugu",
+      database: "SHOP_DEMO",
+      objectCount: 2,
+      isExpanded: false,
+      children: [
+        { id: "xugu:SHOP_DEMO:tablespace:SYSTEM:datafile:1", label: "system_01.dbf", type: "datafile", parentType: "tablespace", parentName: "SYSTEM", connectionId: "xugu", database: "SHOP_DEMO", objectName: "system_01.dbf" },
+        { id: "xugu:SHOP_DEMO:tablespace:SYSTEM:datafile:2", label: "system_02.dbf", type: "datafile", parentType: "tablespace", parentName: "SYSTEM", connectionId: "xugu", database: "SHOP_DEMO", objectName: "system_02.dbf" },
+      ],
+    };
+    const tablespaceNode: TreeNode = {
+      id: "xugu:SHOP_DEMO:tablespace:SYSTEM",
+      label: "SYSTEM",
+      type: "tablespace",
+      connectionId: "xugu",
+      database: "SHOP_DEMO",
+      objectName: "SYSTEM",
+      isExpanded: false,
+      children: [datafileGroup],
+    };
+    connectionStore.treeNodes = [tablespaceNode];
+    connectionStore.getConfig.mockReturnValue({ db_type: "xugu" });
+    connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(false);
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const toggled = vi.fn();
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: tablespaceNode, depth: 0, onNodeToggled: toggled }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(tablespaceNode);
+    await nextTick();
+
+    expect(tablespaceNode.isExpanded).toBe(true);
+    expect(connectionStore.loadXuguTablespaces).not.toHaveBeenCalled();
+    expect(toggled).toHaveBeenCalledWith(tablespaceNode, true);
+
+    host.value?.toggleNode(datafileGroup);
+    await nextTick();
+
+    expect(datafileGroup.isExpanded).toBe(true);
+    expect(connectionStore.loadXuguTablespaces).not.toHaveBeenCalled();
+    expect(toggled).toHaveBeenCalledWith(datafileGroup, true);
   });
 });

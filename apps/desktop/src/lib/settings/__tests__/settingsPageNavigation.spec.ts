@@ -29,6 +29,7 @@ describe("settings page navigation", () => {
     expect(appSource).toContain(':ai-config-draft="settingsAiConfigDraft"');
     expect(appSource).toContain(':ai-config-request-id="settingsAiConfigRequestId"');
     expect(settingsDialogSource).toContain("aiEnterEditMode();");
+    expect(handlerSource).toContain("aiEditProviderPresetId.value = getAiProviderPresetId(draft.provider, draft.endpoint);");
     expect(settingsDialogSource).toContain('aiEditApiKey.value = "";');
     expect(settingsDialogSource).toContain("importClipboardApiKeyAfterConfirmation");
     expect(handlerStart).toBeGreaterThanOrEqual(0);

@@ -114,6 +114,7 @@ const HEX_ESCAPE_RE = /^(?:\\x[0-9a-fA-F]{2}|\s)+$/;
 const BINARY_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|bytea|bytes|binary|varbinary|image|raw|long\s+raw)(?:\b|\()/i;
 const FIXED_BINARY_TYPE_RE = /^binary(?:\b|\()/i;
 const BINARY_STRING_TYPE_RE = /^(?:binary|varbinary)(?:\b|\()/i;
+const VARBINARY_TYPE_RE = /^varbinary(?:\b|\()/i;
 const BLOB_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob)(?:\b|\()/i;
 const MYSQL_FILE_IMPORT_TYPE_RE = /^(?:blob|tinyblob|mediumblob|longblob|binary|varbinary)(?:\b|\()/i;
 
@@ -218,6 +219,23 @@ export function binaryCellUtf8Text(value: unknown, columnType?: string, database
   const bytes = parseBinaryCellBytes(value, columnType, databaseType);
   if (!bytes) return null;
   return binaryCellUtf8TextBytes(bytes, columnType);
+}
+
+// 复制到剪贴板时，把「文本型」MySQL VARBINARY 单元格还原成其原始字符串。
+// DBX 后端为保留任意 bytes，把该值统一序列化成 `0x<hex>`；前端只有在严格 UTF-8 解码、
+// 无控制字符且重新编码后与原 bytes 完全一致时，才把 payload（如 token）复制为文本。
+// 其余情况返回 null，让调用方沿用无损 hex。范围严格限定 MySQL VARBINARY，避免改变
+// MySQL BINARY/BLOB、SQL Server VARBINARY、PostgreSQL BYTEA、Oracle RAW 等现有语义。
+export function binaryCellClipboardText(value: unknown, columnType?: string, databaseType?: DatabaseType): string | null {
+  if (databaseType !== "mysql" || !VARBINARY_TYPE_RE.test((columnType ?? "").trim())) return null;
+  // MySQL QueryResult 的 binary canonical form 是 `0x<hex>`；不要把普通的偶数长度
+  // 文本（例如 "abcd"）猜测成 hex bytes。
+  const bytes = typeof value === "string" ? parseBinaryCellHexValue(value) : null;
+  if (!bytes) return null;
+  const text = binaryCellUtf8TextBytes(bytes, columnType);
+  if (text === null) return null;
+  const encoded = new TextEncoder().encode(text);
+  return encoded.length === bytes.length && encoded.every((byte, index) => byte === bytes[index]) ? text : null;
 }
 
 // MySQL BLOB 的文本预览必须与编辑写回路径（coerceMysqlBlobTextValue，仅 mysql）走同一闸门：

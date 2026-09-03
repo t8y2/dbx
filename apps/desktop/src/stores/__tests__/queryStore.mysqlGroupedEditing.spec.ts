@@ -102,7 +102,7 @@ describe("queryStore MySQL grouped-result editing", () => {
     expect(tab.querySourceColumns).toEqual(["id", "department", undefined]);
     expect(tab.tableMeta).toMatchObject({ tableName: "users", primaryKeys: ["id"] });
     expect(tab.resultColumnComments).toEqual(["user id", "department", undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "id" }, { sourceKey: "u:0", sourceColumn: "department" }, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "id", database: "app", schema: "app", tableName: "users" }, { sourceKey: "u:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" }, undefined]);
     expect(listIndexes).not.toHaveBeenCalled();
   });
 
@@ -124,7 +124,12 @@ describe("queryStore MySQL grouped-result editing", () => {
 
     expect(tab.queryEditabilityReason).toBeUndefined();
     expect(tab.querySourceColumns).toEqual(["id", "department", undefined, undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "id" }, { sourceKey: "u:0", sourceColumn: "department" }, { sourceKey: "o:1", sourceColumn: "user_id" }, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "u:0", sourceColumn: "id", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "u:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "o:1", sourceColumn: "user_id", database: "app", schema: "app", tableName: "orders" },
+      undefined,
+    ]);
   });
 
   it("keeps a non-root source read-only even when its complete primary key is grouped", async () => {
@@ -199,7 +204,14 @@ describe("queryStore MySQL grouped-result editing", () => {
 
     expect(tab.queryEditabilityReason).toBeUndefined();
     expect(tab.querySourceColumns).toEqual(["id", "department", undefined, undefined, undefined, undefined]);
-    expect(tab.queryDisplaySourceColumns).toEqual([{ sourceKey: "u:0", sourceColumn: "id" }, { sourceKey: "u:0", sourceColumn: "department" }, { sourceKey: "u:0", sourceColumn: "display_label" }, { sourceKey: "u:0", sourceColumn: "stored_label" }, undefined, undefined]);
+    expect(tab.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "u:0", sourceColumn: "id", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "u:0", sourceColumn: "department", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "u:0", sourceColumn: "display_label", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "u:0", sourceColumn: "stored_label", database: "app", schema: "app", tableName: "users" },
+      undefined,
+      undefined,
+    ]);
   });
 
   it("accepts a complete composite primary key only when it is the exact grouping key", async () => {

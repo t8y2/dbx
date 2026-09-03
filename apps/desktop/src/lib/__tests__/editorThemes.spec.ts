@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
+import { buildEditorFontThemeRules, buildSqlCompletionThemeRules, editorDiagnosticColors, editorThemeAppearanceFor, resolveCustomThemeBackgrounds, resolveEditorTheme } from "@/lib/editor/editorThemes";
 import { DEFAULT_APP_CUSTOM_UI_COLORS, wcagContrastRatio, type AppThemePalette } from "@/lib/app/appTheme";
 import type { EditorTheme } from "@/stores/settingsStore";
 
@@ -161,5 +161,45 @@ describe("SQL completion theme", () => {
 
     expect(rules[".cm-completionLabel"]).toMatchObject({ flex: "0 1 auto" });
     expect(rules[".cm-completionDetail"]).toMatchObject({ flex: "1 1 0", minWidth: "0", textOverflow: "ellipsis" });
+  });
+
+  it("keeps the batch column insertion action fixed at the bottom of its menu", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    expect(rules[".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action"]).toMatchObject({
+      bottom: "0",
+      position: "sticky",
+      zIndex: "1",
+    });
+  });
+
+  it("pins the completion icon glyph to its box so engines cannot clip it", () => {
+    const rules = buildSqlCompletionThemeRules();
+
+    // With `left`/`top` auto, the absolutely positioned pseudo element relies on
+    // engine-specific static positions inside the flex icon, and WebKit places it
+    // far enough left for `overflow: hidden` to cut off the left half of the glyph.
+    expect(rules[".cm-completionIcon:before"]).toMatchObject({
+      left: "0",
+      top: "0",
+      width: "15px",
+      height: "15px",
+      maskSize: "14px 14px",
+      maskPosition: "center",
+    });
+    expect(rules[".cm-completionIcon"]).toMatchObject({ width: "15px", height: "15px", overflow: "hidden" });
+  });
+});
+
+describe("editor gutters", () => {
+  it("anchors line numbers to the first visual row of wrapped lines", () => {
+    const rules = buildEditorFontThemeRules();
+
+    expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
+      alignItems: "center",
+      display: "flex",
+      justifyContent: "flex-end",
+    });
+    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
   });
 });

@@ -112,6 +112,31 @@ describe("namespace options", () => {
     expect(options).toEqual(["ARCHIVE"]);
   });
 
+  it("uses schemas for native and inferred JDBC Oracle namespaces", async () => {
+    mocks.listSchemas.mockResolvedValue(["APP", "REPORTING", "SYS"]);
+
+    await expect(
+      fetchNamespaceOptionsForConnection("oracle-1", {
+        db_type: "oracle",
+        database: "XE",
+      }),
+    ).resolves.toEqual(["APP", "REPORTING"]);
+    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-1", "XE", true);
+
+    vi.clearAllMocks();
+    mocks.listSchemas.mockResolvedValue(["APP", "REPORTING", "SYS"]);
+
+    await expect(
+      fetchNamespaceOptionsForConnection("oracle-jdbc-1", {
+        db_type: "jdbc",
+        connection_string: "jdbc:oracle:thin:@//localhost:1521/XE",
+        jdbc_driver_class: "oracle.jdbc.OracleDriver",
+      }),
+    ).resolves.toEqual(["APP", "REPORTING"]);
+    expect(mocks.listSchemas).toHaveBeenCalledWith("oracle-jdbc-1", "", true);
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
+  });
+
   it("preserves listDatabases and visible database filtering for other databases", async () => {
     mocks.listDatabases.mockResolvedValue([{ name: "app" }, { name: "analytics" }, { name: "postgres" }]);
 
@@ -133,6 +158,22 @@ describe("namespace options", () => {
         visible_databases: ["analytics"],
       }),
     ).toEqual(["analytics"]);
+  });
+
+  it("falls back to the configured database when JDBC metadata returns no databases", () => {
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database: "gbase_demo",
+      }),
+    ).toEqual(["gbase_demo"]);
+
+    expect(
+      databaseOptionsForConnection([], {
+        db_type: "jdbc",
+        database_info: { currentDatabase: "gbase_from_metadata" },
+      }),
+    ).toEqual(["gbase_from_metadata"]);
   });
 
   it("preserves visible database filtering for catalog-scoped transfer options", async () => {
@@ -171,9 +212,15 @@ describe("namespace options", () => {
     ).resolves.toEqual(["APP_USER", "REPORTING"]);
   });
 
-  it("identifies only Dameng top-level options as schemas", () => {
+  it("identifies connection-root namespace options as schemas", () => {
     expect(namespaceOptionsAreSchemas({ db_type: "dameng" })).toBe(true);
-    expect(namespaceOptionsAreSchemas({ db_type: "oracle" })).toBe(false);
+    expect(namespaceOptionsAreSchemas({ db_type: "oracle" })).toBe(true);
+    expect(
+      namespaceOptionsAreSchemas({
+        db_type: "jdbc",
+        connection_string: "jdbc:oracle:thin:@//localhost:1521/XE",
+      }),
+    ).toBe(true);
     expect(namespaceOptionsAreSchemas({ db_type: "postgres" })).toBe(false);
   });
 

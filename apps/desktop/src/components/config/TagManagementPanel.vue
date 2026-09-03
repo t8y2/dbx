@@ -55,6 +55,9 @@ const importPreview = ref<BusinessTag[]>([]);
 const whitelistInput = ref("");
 
 const environments = ["", "development", "staging", "production"];
+// reka-ui Select throws on SelectItem value="" (and the leftover dismissable
+// layer then blocks all clicks), so "all environments" uses a sentinel value.
+const ALL_ENVIRONMENTS = "__all__";
 
 const filteredTags = computed(() => {
   return props.tags.filter((tag) => {
@@ -174,12 +177,14 @@ function handleExport() {
         <Input v-model="filter.search" :placeholder="t('common.search')" />
       </div>
       <div class="filter-controls">
-        <Select v-model="filter.environment">
+        <!-- reka-ui throws on SelectItem value="" and the leftover dismissable
+             layer then blocks every click, so the "all" entry uses a sentinel. -->
+        <Select :model-value="filter.environment || ALL_ENVIRONMENTS" @update:model-value="(value: any) => (filter.environment = value === ALL_ENVIRONMENTS ? '' : String(value))">
           <SelectTrigger class="w-[160px]">
             <SelectValue :placeholder="t('tag.environment')" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="">
+            <SelectItem :value="ALL_ENVIRONMENTS">
               {{ t("common.all") }}
             </SelectItem>
             <SelectItem v-for="env in environments.filter(Boolean)" :key="env" :value="env">

@@ -150,6 +150,17 @@ pub struct RedisHashRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RedisHashFieldUpdateRequest {
+    pub connection_id: String,
+    pub db: u32,
+    pub key_raw: String,
+    pub old_field: String,
+    pub new_field: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedisHashFieldTtlRequest {
     pub connection_id: String,
     pub db: u32,
@@ -538,6 +549,25 @@ pub async fn hash_del(
     dbx_core::redis_ops::redis_hash_del_in_db_core(&state.app, &req.connection_id, req.db, &req.key_raw, &req.field)
         .await
         .map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
+pub async fn hash_field_update(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<RedisHashFieldUpdateRequest>,
+) -> Result<Json<()>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Atomic hash field update").await?;
+    dbx_core::redis_ops::redis_hash_field_update_in_db_core(
+        &state.app,
+        &req.connection_id,
+        req.db,
+        &req.key_raw,
+        &req.old_field,
+        &req.new_field,
+        &req.value,
+    )
+    .await
+    .map_err(AppError::from)?;
     Ok(Json(()))
 }
 

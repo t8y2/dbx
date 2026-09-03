@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import { RecycleScroller } from "vue-virtual-scroller";
+import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import type { TransferObjectKind } from "@/lib/backend/api";
 import { Square, CheckSquare, MinusSquare, Search, ChevronRight } from "@lucide/vue";
 
@@ -11,6 +13,14 @@ export interface ObjectTreeGroup {
   label: string;
   items: string[];
 }
+
+// Keep large groups safe both before and after the user expands them. The
+// complete item arrays remain in the model; only their DOM representation is bounded.
+const VIRTUALIZED_GROUP_ITEM_LIMIT = 200;
+const OBJECT_ITEM_HEIGHT = 28;
+const OBJECT_LIST_HEIGHT = 200;
+const OBJECT_LIST_BUFFER = 160;
+const EMPTY_SELECTION = new Set<string>();
 
 const props = defineProps<{
   groups: ObjectTreeGroup[];
@@ -26,25 +36,6 @@ const emit = defineEmits<{
   "update:search": [value: string];
 }>();
 
-const expanded = ref<Set<string>>(new Set(props.groups.map((g) => g.kind)));
-
-// Groups may arrive after the tree mounts (async object loading); keep newly
-// appearing groups expanded so search results are visible without a manual tap.
-watch(
-  () => props.groups.map((g) => g.kind),
-  (kinds) => {
-    let changed = false;
-    const next = new Set(expanded.value);
-    for (const kind of kinds) {
-      if (!next.has(kind)) {
-        next.add(kind);
-        changed = true;
-      }
-    }
-    if (changed) expanded.value = next;
-  },
-);
-
 // Local search state: the input edits this ref directly and changes are
 // forwarded up via update:search (v-model:search on the parent).
 const localSearch = ref(props.search ?? "");
@@ -59,6 +50,17 @@ watch(localSearch, (v) => {
 });
 
 const searchQuery = computed(() => localSearch.value.trim().toLowerCase());
+
+function isVirtualizedGroup(group: ObjectTreeGroup): boolean {
+  return group.items.length > VIRTUALIZED_GROUP_ITEM_LIMIT;
+}
+
+function hasSearchMatch(items: string[]): boolean {
+  const query = searchQuery.value;
+  return query.length > 0 && items.some((name) => name.toLowerCase().includes(query));
+}
+
+const expanded = ref<Set<string>>(new Set(props.groups.filter((group) => !isVirtualizedGroup(group) || hasSearchMatch(group.items)).map((group) => group.kind)));
 
 function toggleGroup(kind: string) {
   const next = new Set(expanded.value);
@@ -78,6 +80,18 @@ function selectedNames(kind: string): string[] {
   return props.modelValue[kind] ?? [];
 }
 
+const selectedSets = computed<Record<string, Set<string>>>(() => {
+  const next: Record<string, Set<string>> = {};
+  for (const [kind, names] of Object.entries(props.modelValue)) {
+    if (names.length > 0) next[kind] = new Set(names);
+  }
+  return next;
+});
+
+function selectedSet(kind: string): Set<string> {
+  return selectedSets.value[kind] ?? EMPTY_SELECTION;
+}
+
 function updateSelection(kind: string, names: string[]) {
   const next: Record<string, string[]> = { ...props.modelValue };
   if (names.length === 0) {
@@ -90,18 +104,20 @@ function updateSelection(kind: string, names: string[]) {
 
 function toggleItem(kind: string, item: string) {
   const current = selectedNames(kind);
-  const next = current.includes(item) ? current.filter((n) => n !== item) : [...current, item];
+  const next = selectedSet(kind).has(item) ? current.filter((n) => n !== item) : [...current, item];
   updateSelection(kind, next);
 }
 
 function toggleGroupAll(kind: TransferObjectKind, items: string[]) {
   const current = selectedNames(kind);
-  const allVisibleSelected = items.length > 0 && items.every((n) => current.includes(n));
+  const selected = selectedSet(kind);
+  const visibleItems = new Set(items);
+  const allVisibleSelected = items.length > 0 && items.every((n) => selected.has(n));
   if (allVisibleSelected) {
     // uncheck only the visible items, keep selections hidden by the search
     updateSelection(
       kind,
-      current.filter((n) => !items.includes(n)),
+      current.filter((n) => !visibleItems.has(n)),
     );
   } else {
     // check the visible items, merging with existing (possibly hidden) ones
@@ -129,6 +145,49 @@ const filteredGroups = computed<ObjectTreeGroup[]>(() => {
   });
 });
 
+function shouldAutoExpandGroup(group: ObjectTreeGroup): boolean {
+  if (!isVirtualizedGroup(group)) return true;
+  const visibleGroup = filteredGroups.value.find((candidate) => candidate.kind === group.kind);
+  return searchQuery.value.length > 0 && (visibleGroup?.items.length ?? 0) > 0;
+}
+
+// Groups arrive after the tree mounts because object metadata is loaded
+// asynchronously. New small groups keep the existing expanded behavior, while
+// large groups stay collapsed unless search has a visible match.
+watch(
+  () => props.groups,
+  (groups, previousGroups) => {
+    const previousByKind = new Map((previousGroups ?? []).map((group) => [group.kind, group]));
+    const currentKinds = new Set<string>(groups.map((group) => group.kind));
+    const next = new Set([...expanded.value].filter((kind) => currentKinds.has(kind)));
+
+    for (const group of groups) {
+      const previousGroup = previousByKind.get(group.kind);
+      const becameVirtualized = isVirtualizedGroup(group) && (!previousGroup || !isVirtualizedGroup(previousGroup));
+      if (becameVirtualized && searchQuery.value.length === 0) {
+        next.delete(group.kind);
+      } else if (!next.has(group.kind) && shouldAutoExpandGroup(group)) {
+        next.add(group.kind);
+      }
+    }
+
+    const unchanged = next.size === expanded.value.size && [...next].every((kind) => expanded.value.has(kind));
+    if (!unchanged) expanded.value = next;
+  },
+);
+
+// Searching must reveal matching groups even when a large group starts
+// collapsed. The virtualized branch still bounds the resulting DOM.
+watch(searchQuery, (query) => {
+  if (!query) return;
+  const next = new Set(expanded.value);
+  for (const group of filteredGroups.value) {
+    if (group.items.length > 0) next.add(group.kind);
+  }
+  const unchanged = next.size === expanded.value.size && [...next].every((kind) => expanded.value.has(kind));
+  if (!unchanged) expanded.value = next;
+});
+
 function selectAllEnabled() {
   const next: Record<string, string[]> = { ...props.modelValue };
   for (const group of filteredGroups.value) {
@@ -145,7 +204,8 @@ function deselectAll() {
   const next: Record<string, string[]> = { ...props.modelValue };
   for (const group of filteredGroups.value) {
     if (isGroupDisabled(group.kind)) continue;
-    const kept = (next[group.kind] ?? []).filter((n) => !group.items.includes(n));
+    const visibleItems = new Set(group.items);
+    const kept = (next[group.kind] ?? []).filter((n) => !visibleItems.has(n));
     if (kept.length === 0) {
       delete next[group.kind];
     } else {
@@ -162,7 +222,13 @@ function deselectAll() {
 // (fully filtered out by the search) and disabled groups are ignored.
 const allVisibleEnabledSelected = computed(() => {
   const visibleEnabled = filteredGroups.value.filter((g) => !isGroupDisabled(g.kind) && g.items.length > 0);
-  return visibleEnabled.length > 0 && visibleEnabled.every((g) => g.items.every((item) => (props.modelValue[g.kind] ?? []).includes(item)));
+  return (
+    visibleEnabled.length > 0 &&
+    visibleEnabled.every((g) => {
+      const selected = selectedSet(g.kind);
+      return g.items.every((item) => selected.has(item));
+    })
+  );
 });
 
 // Tri-state header checkbox: "all" when every visible item of the group is
@@ -170,8 +236,8 @@ const allVisibleEnabledSelected = computed(() => {
 // toggleGroupAll, which only ever touches the visible items.
 function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" | "partial" | "all" {
   if (items.length === 0) return "none";
-  const selected = props.modelValue[kind] ?? [];
-  const visibleSelected = items.filter((item) => selected.includes(item)).length;
+  const selected = selectedSet(kind);
+  const visibleSelected = items.filter((item) => selected.has(item)).length;
   if (visibleSelected === 0) return "none";
   if (visibleSelected === items.length) return "all";
   return "partial";
@@ -229,18 +295,28 @@ function groupSelectionState(kind: TransferObjectKind, items: string[]): "none" 
           <span v-if="disabledHints[group.kind]" class="rounded bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-700 font-medium shrink-0">
             {{ disabledHints[group.kind] }}
           </span>
-          <button type="button" class="text-muted-foreground hover:text-foreground shrink-0 p-0.5" @click="toggleGroup(group.kind)">
+          <button data-test="group-expand" type="button" class="text-muted-foreground hover:text-foreground shrink-0 p-0.5" :aria-expanded="expanded.has(group.kind)" @click="toggleGroup(group.kind)">
             <ChevronRight class="h-3.5 w-3.5 text-muted-foreground/80 transition-transform duration-200" :class="{ 'rotate-90': expanded.has(group.kind) }" />
           </button>
         </div>
 
-        <div v-if="expanded.has(group.kind)" class="flex flex-col gap-0.5 pl-6 pr-1 mt-1">
-          <label v-for="item in group.items" :key="item" class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
-            <input type="checkbox" class="h-3.5 w-3.5" :checked="(modelValue[group.kind] ?? []).includes(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
-            <span class="truncate text-foreground/80">{{ item }}</span>
-          </label>
-          <div v-if="group.items.length === 0" class="px-1 py-1 text-xs text-muted-foreground">无匹配</div>
-        </div>
+        <template v-if="expanded.has(group.kind)">
+          <div v-if="!isVirtualizedGroup(group)" class="flex flex-col gap-0.5 pl-6 pr-1 mt-1">
+            <label v-for="item in group.items" :key="item" class="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
+              <input type="checkbox" class="h-3.5 w-3.5" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
+              <span class="truncate text-foreground/80">{{ item }}</span>
+            </label>
+            <div v-if="group.items.length === 0" class="px-1 py-1 text-xs text-muted-foreground">无匹配</div>
+          </div>
+          <div v-else class="pl-6 pr-1 mt-1" :style="{ height: `${OBJECT_LIST_HEIGHT}px` }">
+            <RecycleScroller v-slot="{ item }" class="h-full" :items="group.items" :item-size="OBJECT_ITEM_HEIGHT" :buffer="OBJECT_LIST_BUFFER">
+              <label class="flex h-7 cursor-pointer items-center gap-2 rounded px-1.5 text-xs hover:bg-muted/70 transition-colors" :class="{ 'pointer-events-none opacity-50': isGroupDisabled(group.kind) }" :data-test="`item-${group.kind}-${item}`">
+                <input type="checkbox" class="h-3.5 w-3.5" :checked="selectedSet(group.kind).has(item)" :disabled="isGroupDisabled(group.kind)" @change="toggleItem(group.kind, item)" />
+                <span class="truncate text-foreground/80">{{ item }}</span>
+              </label>
+            </RecycleScroller>
+          </div>
+        </template>
       </div>
     </div>
   </div>

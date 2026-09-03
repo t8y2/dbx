@@ -2,6 +2,7 @@ import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { rememberExportPassphrase } from "@/lib/backend/exportPassphraseSession";
 import { hasSidebarLayoutEntries } from "@/lib/sidebar/sidebarLayout";
 import type { ConnectionConfigBundle } from "@/lib/connection/connectionConfigTransfer";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
@@ -55,6 +56,7 @@ const diagramPrefillConnectionId = ref("");
 const diagramPrefillDatabase = ref("");
 const diagramPrefillSchema = ref("");
 const diagramFocusTableName = ref("");
+const diagramFocusTableNames = ref<string[]>([]);
 const docsPrefillConnectionId = ref("");
 const docsPrefillDatabase = ref("");
 const docsPrefillSchema = ref("");
@@ -182,6 +184,7 @@ export function useDialogSources() {
           diagramPrefillDatabase.value = v.database;
           diagramPrefillSchema.value = v.schema ?? "";
           diagramFocusTableName.value = v.tableName ?? "";
+          diagramFocusTableNames.value = v.tableNames ?? (v.tableName ? [v.tableName] : []);
           showDiagramDialog.value = true;
           connectionStore.diagramSource = null;
         }
@@ -337,6 +340,8 @@ export function useDialogSources() {
     try {
       const result = await connectionStore.exportConnectionsToFile({ mode: "encrypted", passphrase }, pendingExportConnectionIds.value);
       if (result === "cancelled") return;
+      // 仅在文件写入成功后才记住密码短语，供同一会话内下次导出对话框回显（仅内存，不落盘）
+      rememberExportPassphrase(passphrase);
       showConfigPassphraseDialog.value = false;
       clearPendingExportState();
       toast(t("configExport.exportSuccess"), 2000);
@@ -508,6 +513,7 @@ export function useDialogSources() {
     diagramPrefillDatabase,
     diagramPrefillSchema,
     diagramFocusTableName,
+    diagramFocusTableNames,
     docsPrefillConnectionId,
     docsPrefillDatabase,
     docsPrefillSchema,

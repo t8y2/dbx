@@ -137,12 +137,13 @@ describe("queryStore multi-source result column comments", () => {
     // keeps its own comment instead of first-source-wins on the name.
     expect(tab.resultColumnComments).toEqual(["订单ID", "下单用户", "用户ID", "用户名"]);
 
-    // The display mapping carries source identity per ordinal.
+    // The display mapping carries both source identity and physical table
+    // identity per ordinal, so display-only features can share table settings.
     expect(tab.queryDisplaySourceColumns).toEqual([
-      { sourceKey: "a", sourceColumn: "id" },
-      { sourceKey: "a", sourceColumn: "user_id" },
-      { sourceKey: "b", sourceColumn: "id" },
-      { sourceKey: "b", sourceColumn: "name" },
+      { sourceKey: "a", sourceColumn: "id", database: "app", schema: "app", tableName: "orders" },
+      { sourceKey: "a", sourceColumn: "user_id", database: "app", schema: "app", tableName: "orders" },
+      { sourceKey: "b", sourceColumn: "id", database: "app", schema: "app", tableName: "users" },
+      { sourceKey: "b", sourceColumn: "name", database: "app", schema: "app", tableName: "users" },
     ]);
   });
 
@@ -187,8 +188,8 @@ describe("queryStore multi-source result column comments", () => {
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
     expect(tab.resultColumnComments).toEqual(["订单ID", "用户名"]);
     expect(tab.queryDisplaySourceColumns).toEqual([
-      { sourceKey: "a", sourceColumn: "id" },
-      { sourceKey: "b", sourceColumn: "name" },
+      { sourceKey: "a", sourceColumn: "id", database: "app", schema: "app", tableName: "orders" },
+      { sourceKey: "b", sourceColumn: "name", database: "app", schema: "app", tableName: "users" },
     ]);
   });
 
@@ -279,9 +280,9 @@ describe("queryStore multi-source result column comments", () => {
     // of the previous map would have collapsed them.
     expect(tab.resultColumnComments).toEqual(["订单ID", "大写ID", "大写Name"]);
     expect(tab.queryDisplaySourceColumns).toEqual([
-      { sourceKey: "a", sourceColumn: "id" },
-      { sourceKey: "a", sourceColumn: "ID" },
-      { sourceKey: "b", sourceColumn: "Name" },
+      { sourceKey: "a", sourceColumn: "id", database: "app", schema: undefined, tableName: "orders" },
+      { sourceKey: "a", sourceColumn: "ID", database: "app", schema: undefined, tableName: "orders" },
+      { sourceKey: "b", sourceColumn: "Name", database: "app", schema: undefined, tableName: "users" },
     ]);
   });
 
@@ -326,12 +327,12 @@ describe("queryStore multi-source result column comments", () => {
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
     expect(tab.resultColumnComments).toEqual(["订单ID", "用户ID"]);
     expect(tab.queryDisplaySourceColumns).toEqual([
-      { sourceKey: "a", sourceColumn: "id" },
-      { sourceKey: "b", sourceColumn: "id" },
+      { sourceKey: "a", sourceColumn: "id", database: "app", schema: "app", tableName: "orders" },
+      { sourceKey: "b", sourceColumn: "id", database: "app", schema: "app", tableName: "users" },
     ]);
   });
 
-  it("keeps single-source results free of multi-source comment fields", async () => {
+  it("stores physical source identities for single-source result columns", async () => {
     analyzeEditableQueryEditability.mockResolvedValue({
       editable: true,
       analysis: {
@@ -363,7 +364,10 @@ describe("queryStore multi-source result column comments", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.tableMeta?.tableName).toBe("orders"));
     expect(tab.resultColumnComments).toBeUndefined();
-    expect(tab.queryDisplaySourceColumns).toBeUndefined();
+    expect(tab.queryDisplaySourceColumns).toEqual([
+      { sourceKey: "orders:0", sourceColumn: "id", database: "app", schema: "app", tableName: "orders" },
+      { sourceKey: "orders:0", sourceColumn: "amount", database: "app", schema: "app", tableName: "orders" },
+    ]);
     expect(tab.querySourceColumns).toEqual(["id", "amount"]);
   });
 

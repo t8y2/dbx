@@ -59,9 +59,54 @@ fn structure_change_options(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     }
+}
+
+#[test]
+fn mysql_table_engine_change_generates_alter_table() {
+    let mut options = structure_change_options(DatabaseType::Mysql, Some("dbx_test"), "remote_orders", Vec::new());
+    options.mysql_engine = Some("FEDERATED".to_string());
+
+    let result = build_table_structure_change_sql(options);
+
+    assert!(result.warnings.is_empty());
+    assert_eq!(result.statements, vec!["ALTER TABLE `remote_orders` ENGINE = FEDERATED;"]);
+}
+
+#[test]
+fn mysql_create_table_includes_engine_before_comment() {
+    let mut options = structure_change_options(DatabaseType::Mysql, Some("dbx_test"), "archive", vec![column("id")]);
+    options.mysql_engine = Some("MyISAM".to_string());
+    options.table_comment = Some("remote archive".to_string());
+
+    let result = build_create_table_sql(options);
+
+    assert!(result.warnings.is_empty());
+    assert_eq!(
+        result.statements[0],
+        "CREATE TABLE `archive` (\n  `id` varchar(255)\n) ENGINE = MyISAM COMMENT = 'remote archive';"
+    );
+}
+
+#[test]
+fn mysql_table_engine_rejects_non_mysql_and_unsafe_values() {
+    let mut postgres = structure_change_options(DatabaseType::Postgres, Some("public"), "users", Vec::new());
+    postgres.mysql_engine = Some("InnoDB".to_string());
+    let postgres_result = build_table_structure_change_sql(postgres);
+    assert!(postgres_result.statements.is_empty());
+    assert_eq!(
+        postgres_result.warnings,
+        vec!["Changing the table engine is supported only for native MySQL connections."]
+    );
+
+    let mut mysql = structure_change_options(DatabaseType::Mysql, None, "users", Vec::new());
+    mysql.mysql_engine = Some("InnoDB; DROP TABLE users".to_string());
+    let mysql_result = build_table_structure_change_sql(mysql);
+    assert!(mysql_result.statements.is_empty());
+    assert_eq!(mysql_result.warnings, vec!["MySQL table engine contains invalid characters."]);
 }
 
 fn index(name: &str, columns: &[&str]) -> EditableStructureIndex {
@@ -120,6 +165,7 @@ fn index_change_options(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     }
@@ -197,6 +243,7 @@ fn builds_mysql_column_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -412,6 +459,7 @@ fn builds_xugu_type_change_with_native_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -621,6 +669,7 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -655,6 +704,7 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -713,6 +763,7 @@ fn dameng_integer_column_omits_mysql_display_width() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -721,8 +772,8 @@ fn dameng_integer_column_omits_mysql_display_width() {
     assert_eq!(
         result.statements,
         vec![
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" integer);",
-            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" number(10,0));",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"age\" INTEGER);",
+            "ALTER TABLE \"SYSDBA\".\"users\" ADD (\"amount\" NUMBER(10,0));",
         ]
     );
 }
@@ -754,6 +805,7 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -824,6 +876,7 @@ fn builds_informix_column_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -879,6 +932,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -939,12 +993,231 @@ fn oracle_create_table_preserves_character_length_units() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
 
-    assert!(result.statements[0].contains("\"BYTE_COL\" VARCHAR2(12 BYTE)"));
-    assert!(result.statements[0].contains("\"CHAR_COL\" VARCHAR2(12 CHAR)"));
+    assert!(result.statements[0].contains("BYTE_COL VARCHAR2(12 BYTE)"));
+    assert!(result.statements[0].contains("CHAR_COL VARCHAR2(12 CHAR)"));
+}
+
+#[test]
+fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
+    let mut user_id = column("user_id");
+    user_id.data_type = "NUMBER".to_string();
+    user_id.is_primary_key = true;
+    user_id.comment = "identifier".to_string();
+    let mut user_name = column("userName");
+    user_name.data_type = "VARCHAR2(100)".to_string();
+    let mut upper_id = column("USER_CODE");
+    upper_id.data_type = "NUMBER".to_string();
+    let mut dollar_id = column("ABC$01");
+    dollar_id.data_type = "NUMBER".to_string();
+    let mut hash_id = column("ABC#01");
+    hash_id.data_type = "NUMBER".to_string();
+    let idx = index("idx_user_id", &["user_id"]);
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![user_id, user_name, upper_id, dollar_id, hash_id],
+        indexes: vec![idx],
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: Some("user table".to_string()),
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements[0],
+        "CREATE TABLE \"APP\".orders (\n  user_id NUMBER,\n  userName VARCHAR2(100),\n  USER_CODE NUMBER,\n  ABC$01 NUMBER,\n  ABC#01 NUMBER,\n  PRIMARY KEY (user_id)\n);"
+    );
+    assert!(result.statements.iter().any(|statement| statement == "COMMENT ON TABLE \"APP\".orders IS 'user table';"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "COMMENT ON COLUMN \"APP\".orders.user_id IS 'identifier';"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "CREATE INDEX idx_user_id ON \"APP\".orders (user_id);"));
+}
+
+#[test]
+fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
+    let mut user_id = column("USER_ID");
+    user_id.data_type = "NUMBER".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: None,
+        table_name: "USERS".to_string(),
+        columns: vec![user_id],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["CREATE TABLE USERS (\n  USER_ID NUMBER\n);".to_string()]);
+}
+
+#[test]
+fn oracle_create_table_quotes_special_and_reserved_identifiers() {
+    let mut special = column("user name");
+    special.data_type = "VARCHAR2(100)".to_string();
+    special.comment = "special".to_string();
+    let mut escaped = column(r#"a"b"#);
+    escaped.data_type = "VARCHAR2(100)".to_string();
+    let mut select = column("SELECT");
+    select.data_type = "VARCHAR2(100)".to_string();
+    let mut from = column("FROM");
+    from.data_type = "VARCHAR2(100)".to_string();
+    let mut table = column("TABLE");
+    table.data_type = "VARCHAR2(100)".to_string();
+    let mut leading_digit = column("123column");
+    leading_digit.data_type = "VARCHAR2(100)".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "order detail".to_string(),
+        columns: vec![special, escaped, select, from, table, leading_digit],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    let ddl = &result.statements[0];
+    assert!(ddl.starts_with("CREATE TABLE \"APP\".\"order detail\" ("));
+    assert!(ddl.contains("\"user name\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"a\"\"b\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"SELECT\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"FROM\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"TABLE\" VARCHAR2(100)"));
+    assert!(ddl.contains("\"123column\" VARCHAR2(100)"));
+    assert!(result
+        .statements
+        .iter()
+        .any(|statement| statement == "COMMENT ON COLUMN \"APP\".\"order detail\".\"user name\" IS 'special';"));
+}
+
+#[test]
+fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers() {
+    let mut user_id = column("user_id");
+    user_id.data_type = "NUMBER".to_string();
+    let mut customer_fk = foreign_key("fk_orders_user", "user_id", "CamelCase", "UserName");
+    customer_fk.ref_schema = "CaseSchema".to_string();
+    let audit_trigger = trigger("auditTrigger", "BEFORE", "INSERT", "BEGIN\n  NULL;\nEND");
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("APP".to_string()),
+        table_name: "orders".to_string(),
+        columns: vec![user_id],
+        indexes: Vec::new(),
+        foreign_keys: vec![customer_fk],
+        triggers: vec![audit_trigger],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE \"APP\".orders (\n  user_id NUMBER\n);",
+            "ALTER TABLE \"APP\".orders ADD CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES \"CaseSchema\".\"CamelCase\" (\"UserName\");",
+            "CREATE OR REPLACE TRIGGER \"APP\".auditTrigger BEFORE INSERT ON \"APP\".orders\nFOR EACH ROW\nBEGIN\n  NULL;\nEND;",
+        ]
+    );
+}
+
+#[test]
+fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
+    let mut column = column("CamelCase");
+    column.data_type = "NUMBER".to_string();
+    column.original = Some(ColumnInfo {
+        name: "CamelCase".to_string(),
+        data_type: "VARCHAR2(100)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        ..Default::default()
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Oracle),
+        schema: Some("CaseSchema".to_string()),
+        table_name: "CaseTable".to_string(),
+        columns: vec![column],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE \"CaseSchema\".\"CaseTable\" MODIFY (\"CamelCase\" NUMBER);".to_string()]
+    );
+}
+
+#[test]
+fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
+    for (database_type, expected) in [
+        (DatabaseType::Postgres, "CREATE TABLE \"users\" (\n  \"user_id\" INTEGER\n);"),
+        (DatabaseType::Mysql, "CREATE TABLE `users` (\n  `user_id` INTEGER\n);"),
+        (DatabaseType::SqlServer, "CREATE TABLE [users] (\n  [user_id] INTEGER\n);"),
+        (DatabaseType::Dameng, "CREATE TABLE \"users\" (\n  \"user_id\" INTEGER\n);"),
+    ] {
+        let mut user_id = column("user_id");
+        user_id.data_type = "INTEGER".to_string();
+        let result = build_create_table_sql(TableStructureSqlOptions {
+            database_type: Some(database_type),
+            schema: None,
+            table_name: "users".to_string(),
+            columns: vec![user_id],
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            triggers: Vec::new(),
+            table_comment: None,
+            original_table_comment: None,
+            mysql_engine: None,
+            partitioned: false,
+            is_gaussdb_m_mode: false,
+        });
+
+        assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
+        assert_eq!(result.statements, vec![expected.to_string()], "{database_type:?}");
+    }
 }
 
 #[test]
@@ -1027,6 +1300,7 @@ fn iris_drop_index_includes_table_name() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1067,6 +1341,7 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         triggers: Vec::new(),
         table_comment: Some("new table description".to_string()),
         original_table_comment: Some("old table description".to_string()),
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1147,6 +1422,7 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             triggers: Vec::new(),
             table_comment: Some("new table description".to_string()),
             original_table_comment: Some("old table description".to_string()),
+            mysql_engine: None,
             partitioned: false,
             is_gaussdb_m_mode: false,
         });
@@ -1180,6 +1456,7 @@ fn mysql_create_index_with_comment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1212,6 +1489,7 @@ fn manticoresearch_builds_create_table_sql_only() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1254,6 +1532,7 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1319,6 +1598,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1388,6 +1668,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1422,6 +1703,7 @@ fn manticoresearch_does_not_drop_id_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1489,6 +1771,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1523,6 +1806,7 @@ fn manticoresearch_ignores_mysql_column_options() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1560,6 +1844,7 @@ fn manticoresearch_builds_text_column_properties() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1589,6 +1874,7 @@ fn manticoresearch_builds_json_secondary_index_property() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1614,6 +1900,7 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1641,6 +1928,7 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1668,6 +1956,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1675,7 +1964,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp DEFAULT CURRENT_TIMESTAMP;"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP;"]
     );
 }
 
@@ -1695,6 +1984,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1702,7 +1992,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) DEFAULT CURRENT_TIMESTAMP(3);"]
+        vec!["ALTER TABLE `users` ADD COLUMN `created_at` timestamp(3) NULL DEFAULT CURRENT_TIMESTAMP(3);"]
     );
 }
 
@@ -1729,6 +2019,7 @@ fn builds_postgres_create_table_with_comments_and_index() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1760,6 +2051,7 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1831,6 +2123,7 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1867,6 +2160,7 @@ fn warns_for_sqlite_unsafe_column_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1907,6 +2201,7 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -1975,6 +2270,7 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2004,6 +2300,7 @@ fn builds_kingbase_add_column_without_column_keyword() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2068,6 +2365,7 @@ fn builds_mysql_column_reorder_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2123,6 +2421,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2185,6 +2484,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2259,6 +2559,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2283,6 +2584,7 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2313,6 +2615,7 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2337,6 +2640,7 @@ fn sqlserver_strips_scale_from_float() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2361,6 +2665,7 @@ fn sqlserver_preserves_float_mantissa_bits() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2410,6 +2715,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2437,7 +2743,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
 
     assert_eq!(
         result.statements[1],
-        "ALTER TABLE [core].[products] ADD CONSTRAINT [DF_products_sku] DEFAULT 'new sku' FOR [sku];"
+        "ALTER TABLE [core].[products] ADD CONSTRAINT [DF_products_sku] DEFAULT N'new sku' FOR [sku];"
     );
     assert_eq!(
         result.statements[3],
@@ -2508,6 +2814,35 @@ fn sqlserver_type_and_default_change_drops_before_alter_and_adds_new_default() {
     assert_eq!(
         result.statements[2],
         "ALTER TABLE [dbo].[inventory] ADD CONSTRAINT [DF_inventory_quantity] DEFAULT 1.5 FOR [quantity];"
+    );
+}
+
+#[test]
+fn sqlserver_generated_default_constraint_escapes_identifiers_and_unicode_values() {
+    let mut owner = column("owner]id");
+    owner.data_type = "nvarchar(40)".to_string();
+    owner.default_value = "中文'值".to_string();
+    owner.original = Some(ColumnInfo {
+        name: "owner]id".to_string(),
+        data_type: "nvarchar(40)".to_string(),
+        is_nullable: true,
+        column_default: Some("N'旧值'".to_string()),
+        ..Default::default()
+    });
+
+    let result = build_single_column_alter_sql(SingleColumnAlterSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "order]s".to_string(),
+        column: owner,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements.len(), 2);
+    assert!(result.statements[0].contains("OBJECT_ID(N'[dbo].[order]]s]')"));
+    assert_eq!(
+        result.statements[1],
+        "ALTER TABLE [dbo].[order]]s] ADD CONSTRAINT [DF_order]]s_owner]]id] DEFAULT N'中文''值' FOR [owner]]id];"
     );
 }
 
@@ -2592,6 +2927,7 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2621,6 +2957,7 @@ fn sqlserver_add_column_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2650,12 +2987,39 @@ fn dameng_add_column_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"ID\" INT IDENTITY(10, 2));"]);
+}
+
+#[test]
+fn dameng_uppercases_lowercase_column_type() {
+    let mut status = column("STATUS");
+    status.data_type = "varchar(50)".to_string();
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Dameng),
+        schema: Some("SYSDBA".to_string()),
+        table_name: "TEST".to_string(),
+        columns: vec![status],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // A lower-case type keyword must not reach the DDL: Dameng would store it
+    // as a USER-DEFINED type instead of the built-in VARCHAR (issue #7343).
+    assert_eq!(result.statements, vec!["ALTER TABLE \"SYSDBA\".\"TEST\" ADD (\"STATUS\" VARCHAR(50));"]);
 }
 
 #[test]
@@ -2678,6 +3042,7 @@ fn dameng_rejects_identity_on_incompatible_type() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2710,6 +3075,7 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2745,6 +3111,7 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2785,6 +3152,7 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -2825,6 +3193,7 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3078,6 +3447,7 @@ fn dameng_rejects_adding_second_identity_column() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3130,6 +3500,7 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3161,6 +3532,7 @@ fn builds_duckdb_create_table_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3206,6 +3578,7 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3252,6 +3625,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -3869,7 +4243,138 @@ fn mysql_coalesces_migration_away_from_existing_auto_increment_primary_key() {
     ));
 
     assert_eq!(result.warnings, Vec::<String>::new());
+    // The old key column keeps its AUTO_INCREMENT checkbox in the draft, but MySQL refuses an
+    // auto column that no longer leads a key, so the flag is cleared in the same statement.
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);"
+        ]
+    );
+}
+
+/// Regression for #7973: swapping the primary key onto another column left the previous
+/// AUTO_INCREMENT key column untouched, so the coalesced ALTER failed with
+/// `ERROR 1075 Incorrect table definition; there can be only one auto column ...`.
+#[test]
+fn mysql_clears_auto_increment_on_column_replaced_by_new_auto_increment_primary_key() {
+    let mut old_pk = existing_pk_column("ID", "bigint unsigned", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.comment = "自增ID".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    let old_original = old_pk.original.as_mut().unwrap();
+    old_original.extra = Some("auto_increment".to_string());
+    old_original.comment = Some("自增ID".to_string());
+
+    let mut new_pk = existing_pk_column("ProjectID", "bigint", false, true);
+    new_pk.id = "project_id".to_string();
+    new_pk.comment = "对应project表的主键ID".to_string();
+    new_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    new_pk.original.as_mut().unwrap().comment = Some("对应project表的主键ID".to_string());
+
+    let result = build_table_structure_change_sql(structure_change_options(
+        DatabaseType::Mysql,
+        None,
+        "issue7973_repro",
+        vec![old_pk, new_pk],
+    ));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `issue7973_repro` DROP PRIMARY KEY, MODIFY COLUMN `ID` bigint unsigned NOT NULL COMMENT '自增ID', MODIFY COLUMN `ProjectID` bigint NOT NULL AUTO_INCREMENT COMMENT '对应project表的主键ID', ADD PRIMARY KEY (`ProjectID`);"
+        ]
+    );
+}
+
+/// A surviving secondary index still keys the column, so AUTO_INCREMENT stays legal there
+/// and must not be stripped just because the primary key moved elsewhere.
+#[test]
+fn mysql_keeps_auto_increment_when_a_kept_index_still_leads_with_the_column() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, new_pk]);
+    options.indexes = vec![existing_index("idx_users_id", &["id"], false)];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements, vec!["ALTER TABLE `users` DROP PRIMARY KEY, ADD PRIMARY KEY (`external_id`);"]);
+}
+
+/// An index the same draft edits is rebuilt as DROP + CREATE *after* the column DDL, so it
+/// cannot excuse the AUTO_INCREMENT flag: the DROP INDEX would hit ERROR 1075 itself.
+#[test]
+fn mysql_clears_auto_increment_when_the_only_covering_index_is_rebuilt_by_the_same_draft() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut rebuilt_index = existing_index("idx_users_id", &["id"], false);
+    rebuilt_index.is_unique = true;
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, new_pk]);
+    options.indexes = vec![rebuilt_index];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` DROP PRIMARY KEY, MODIFY COLUMN `id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);",
+            "DROP INDEX `idx_users_id` ON `users`;",
+            "CREATE UNIQUE INDEX `idx_users_id` ON `users` (`id`);",
+        ]
+    );
+}
+
+/// The covering index is matched by persisted names on both sides, so a draft that swaps two
+/// column names cannot credit one column's index to the other.
+#[test]
+fn mysql_index_cover_does_not_follow_a_column_name_swap() {
+    let mut old_pk = existing_pk_column("id", "bigint", true, false);
+    old_pk.id = "old_id".to_string();
+    old_pk.name = "legacy_id".to_string();
+    old_pk.extra = Some(ColumnExtra { auto_increment: Some(true), ..Default::default() });
+    old_pk.original.as_mut().unwrap().extra = Some("auto_increment".to_string());
+
+    // Takes over the name the surviving index was built on, but not the index itself.
+    let mut renamed = existing_pk_column("tenant_id", "bigint", false, false);
+    renamed.id = "tenant".to_string();
+    renamed.name = "id".to_string();
+
+    let mut new_pk = existing_pk_column("external_id", "varchar(64)", false, true);
+    new_pk.id = "new_external_id".to_string();
+
+    let mut options = structure_change_options(DatabaseType::Mysql, None, "users", vec![old_pk, renamed, new_pk]);
+    options.indexes = vec![existing_index("idx_users_tenant_id", &["tenant_id"], false)];
+
+    let result = build_table_structure_change_sql(options);
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    // Only the second statement is what this test is about: the auto column lost AUTO_INCREMENT
+    // even though `idx_users_tenant_id` leads with a column *named* `id` in the draft. The
+    // separate rename statement, and the order the two renames run in, are pre-existing
+    // name-swap behavior unrelated to this fix.
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` CHANGE COLUMN `tenant_id` `id` bigint NOT NULL;",
+            "ALTER TABLE `users` DROP PRIMARY KEY, CHANGE COLUMN `id` `legacy_id` bigint NOT NULL, ADD PRIMARY KEY (`external_id`);",
+        ]
+    );
 }
 
 #[test]
@@ -4060,6 +4565,7 @@ fn mysql_create_table_with_auto_increment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4087,6 +4593,7 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         triggers: Vec::new(),
         table_comment: Some("User accounts".to_string()),
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4118,6 +4625,7 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             triggers: Vec::new(),
             table_comment: None,
             original_table_comment: None,
+            mysql_engine: None,
             partitioned: false,
             is_gaussdb_m_mode: false,
         });
@@ -4146,6 +4654,7 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4174,6 +4683,7 @@ fn postgres_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4204,6 +4714,7 @@ fn dameng_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4230,6 +4741,7 @@ fn dameng_create_table_preserves_character_length_units() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4264,6 +4776,7 @@ fn dameng_alter_column_preserves_character_length_unit() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4299,6 +4812,7 @@ fn dameng_rejects_multiple_identity_columns() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4327,6 +4841,7 @@ fn dameng_rejects_zero_identity_increment() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4356,6 +4871,7 @@ fn sqlserver_create_table_with_identity() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4380,6 +4896,7 @@ fn mysql_quotes_datetime_literal_default() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4404,6 +4921,7 @@ fn mysql_does_not_quote_current_timestamp() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4429,6 +4947,7 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4453,6 +4972,7 @@ fn mysql_date_literal_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4477,6 +4997,7 @@ fn mysql_time_literal_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4501,6 +5022,7 @@ fn non_temporal_types_are_not_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4626,6 +5148,7 @@ fn builds_mysql_foreign_key_changes() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4655,6 +5178,7 @@ fn builds_mysql_composite_foreign_key() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4687,6 +5211,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4694,7 +5219,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements[1],
-        "ALTER TABLE \"HR\".\"ORDERS_COPY\" ADD CONSTRAINT \"ORDERS_COPY_FK1\" FOREIGN KEY (\"CUSTOMER_ID\") REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
+        "ALTER TABLE \"HR\".ORDERS_COPY ADD CONSTRAINT ORDERS_COPY_FK1 FOREIGN KEY (CUSTOMER_ID) REFERENCES \"CRM\".\"CUSTOMERS\" (\"ID\") ON DELETE CASCADE;"
     );
 }
 
@@ -4723,6 +5248,7 @@ fn builds_oracle_foreign_key_replacement() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4745,6 +5271,7 @@ fn builds_mysql_trigger_changes() {
         event: "UPDATE".to_string(),
         timing: "BEFORE".to_string(),
         statement: Some("SET NEW.updated_at = CURRENT_TIMESTAMP".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4757,6 +5284,7 @@ fn builds_mysql_trigger_changes() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4768,6 +5296,109 @@ fn builds_mysql_trigger_changes() {
             "DROP TRIGGER `orders_bu`;",
             "CREATE TRIGGER `orders_bu` BEFORE UPDATE ON `orders` FOR EACH ROW\nBEGIN\n  SET NEW.updated_at = NOW();\nEND;",
         ]
+    );
+}
+
+#[test]
+fn builds_sqlserver_trigger_with_multiple_events() {
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![trigger("orders_audit", "AFTER", "INSERT, UPDATE", "BEGIN\n  SET NOCOUNT ON;\nEND")],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN\n  SET NOCOUNT ON;\nEND;"
+        ]
+    );
+}
+
+#[test]
+fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
+    let mut existing = trigger(
+        "orders_audit",
+        "AFTER",
+        "INSERT, UPDATE",
+        "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END",
+    );
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT, UPDATE".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some(
+            "CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT, UPDATE AS BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (0); END"
+                .to_string(),
+        ),
+        enabled: None,
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "DROP TRIGGER [dbo].[orders_audit];",
+            "CREATE TRIGGER [dbo].[orders_audit] ON [dbo].[orders] AFTER INSERT, UPDATE AS\nBEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END;"
+        ]
+    );
+}
+
+#[test]
+fn sqlserver_trigger_edit_restores_disabled_state() {
+    let mut existing =
+        trigger("orders_audit", "AFTER", "INSERT", "BEGIN SET NOCOUNT ON; INSERT INTO audit_log VALUES (1); END");
+    existing.original = Some(TriggerInfo {
+        name: "orders_audit".to_string(),
+        event: "INSERT".to_string(),
+        timing: "AFTER".to_string(),
+        statement: Some("CREATE TRIGGER dbo.orders_audit ON dbo.orders AFTER INSERT AS PRINT 'old'".to_string()),
+        enabled: Some(false),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::SqlServer),
+        schema: Some("dbo".to_string()),
+        table_name: "orders".to_string(),
+        columns: Vec::new(),
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: vec![existing],
+        table_comment: None,
+        original_table_comment: None,
+        partitioned: false,
+        mysql_engine: None,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(
+        result.statements.last().map(String::as_str),
+        Some("DISABLE TRIGGER [dbo].[orders_audit] ON [dbo].[orders];")
     );
 }
 
@@ -4790,6 +5421,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4802,6 +5434,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4818,6 +5451,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         event: "UPDATE".to_string(),
         timing: "AFTER".to_string(),
         statement: Some("EXECUTE FUNCTION audit_users()".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4830,6 +5464,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4851,6 +5486,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         event: "INSERT OR UPDATE OR DELETE".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -4863,6 +5499,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4886,6 +5523,7 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         triggers: vec![trigger("ORDERS_AUDIT", "BEFORE STATEMENT", "UPDATE OF STATUS", "BEGIN\n  NULL;\nEND;\n/")],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4907,6 +5545,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         event: "INSERT".to_string(),
         timing: "AFTER EACH ROW".to_string(),
         statement: Some("BEGIN\n  NULL;\nEND;".to_string()),
+        enabled: None,
     });
     existing.marked_for_drop = true;
 
@@ -4920,6 +5559,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         triggers: vec![existing],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4940,6 +5580,7 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         triggers: vec![trigger("ORDERS_CT", "COMPOUND", "UPDATE", "BEGIN\n  NULL;\nEND;")],
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4964,6 +5605,7 @@ fn mysql_varchar_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -4989,6 +5631,7 @@ fn mysql_char_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5013,6 +5656,7 @@ fn mysql_text_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5037,6 +5681,7 @@ fn mysql_enum_default_is_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5061,6 +5706,7 @@ fn mysql_int_default_is_not_quoted() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5191,6 +5837,7 @@ fn mysql_character_column_add_with_charset_collation() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5223,6 +5870,7 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5265,6 +5913,7 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5302,6 +5951,7 @@ fn mysql_character_column_detects_charset_collation_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5344,6 +5994,7 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5491,6 +6142,7 @@ fn oscar_create_table_with_primary_key_and_comments() {
         triggers: Vec::new(),
         table_comment: Some("user table".to_string()),
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5683,6 +6335,7 @@ fn oscar_drop_index_with_schema_qualifier() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5703,6 +6356,7 @@ fn oscar_table_comment_uses_comment_on_table() {
         triggers: Vec::new(),
         table_comment: Some("new comment".to_string()),
         original_table_comment: Some("old comment".to_string()),
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -5785,6 +6439,7 @@ fn postgres_partitioned_parent_concurrent_request_rejected() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
     });
@@ -5815,6 +6470,7 @@ fn postgres_partitioned_parent_plain_index_unchanged() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
     });
@@ -5857,6 +6513,7 @@ fn postgres_create_table_partitioned_concurrent_request_rejected() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
     });
@@ -5983,6 +6640,7 @@ fn postgres_create_table_concurrent_index() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
     });
@@ -6098,6 +6756,7 @@ fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSql
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: true,
     }
@@ -6328,6 +6987,7 @@ fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
         triggers: Vec::new(),
         table_comment: None,
         original_table_comment: None,
+        mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: true,
     };
@@ -6347,4 +7007,121 @@ fn gaussdb_m_create_table_with_primary_key() {
     assert!(result.warnings.is_empty());
     let sql = result.statements.join("\n");
     assert!(sql.contains("PRIMARY KEY (`id`)"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
+    // A second (or later) MySQL TIMESTAMP column that is nullable but has no
+    // DEFAULT must carry an explicit NULL keyword — otherwise MySQL either
+    // silently rewrites it to NOT NULL or, with the still-common
+    // explicit_defaults_for_timestamp=OFF server default, rejects it outright
+    // with ERROR 1067 (42000): Invalid default value. See issue #7416.
+    let mut created_at = column("created_at");
+    created_at.data_type = "timestamp".to_string();
+    created_at.is_nullable = false;
+
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![created_at, updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL"));
+    assert!(!result.statements[0].contains("`updated_at` timestamp NULL DEFAULT"));
+}
+
+#[test]
+fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null() {
+    // Even with an explicit DEFAULT, MySQL still needs the NULL keyword to
+    // keep the column nullable — omitting it silently produces NOT NULL.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+    updated_at.default_value = "CURRENT_TIMESTAMP".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(result.statements[0].contains("`updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP"));
+}
+
+#[test]
+fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
+    // DATETIME is not subject to MySQL's TIMESTAMP-specific implicit-default
+    // quirk; the fix must not touch it.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "datetime".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "events".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert!(!result.statements[0].contains("NULL"));
+}
+
+#[test]
+fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
+    // The ADD COLUMN / MODIFY COLUMN / CHANGE COLUMN path shares
+    // column_definition() with CREATE TABLE and must carry the same fix.
+    let mut updated_at = column("updated_at");
+    updated_at.data_type = "timestamp".to_string();
+    updated_at.is_nullable = true;
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "u7_game_order_step".to_string(),
+        columns: vec![updated_at],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `u7_game_order_step` ADD COLUMN `updated_at` timestamp NULL;"]);
 }

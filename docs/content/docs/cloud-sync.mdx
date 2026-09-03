@@ -38,10 +38,26 @@ A GitHub **fine-grained personal access token** is recommended:
 [Open the GitHub fine-grained token creation page](https://github.com/settings/personal-access-tokens/new)
 
 <Steps>
-  <Step>### Open token settings Sign in to GitHub and open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**.</Step>
-  <Step>### Create a token Select **Generate new token**, then set a name and expiration.</Step>
-  <Step>### Grant permission Under **Account permissions**, set **Gists** to **Read and write**. Repository permissions are not required.</Step>
-  <Step>### Save the token Copy the token immediately. GitHub only displays the complete token once.</Step>
+<Step>
+    ### Open token settings
+
+    Sign in to GitHub and open **Settings → Developer settings → Personal access tokens → Fine-grained tokens**.
+  </Step>
+<Step>
+    ### Create a token
+
+    Select **Generate new token**, then set a name and expiration.
+  </Step>
+<Step>
+    ### Grant permission
+
+    Under **Account permissions**, set **Gists** to **Read and write**. Repository permissions are not required.
+  </Step>
+<Step>
+    ### Save the token
+
+    Copy the token immediately. GitHub only displays the complete token once.
+  </Step>
 </Steps>
 
 A classic token also works, but grant only the `gist` scope.
@@ -49,9 +65,21 @@ A classic token also works, but grant only the `gist` scope.
 ### First Upload
 
 <Steps>
-  <Step>### Select GitHub Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.</Step>
-  <Step>### Enter the token Paste the access token. Enabling **Store encrypted on this device** is recommended.</Step>
-  <Step>### Create the Gist Leave **Snippet ID** empty and select **Upload**. DBX creates a private Gist and stores the returned ID.</Step>
+<Step>
+    ### Select GitHub
+
+    Open **Settings → Sync → GitHub / Gitee** and select **GitHub Gist**.
+  </Step>
+<Step>
+    ### Enter the token
+
+    Paste the access token. Enabling **Store encrypted on this device** is recommended.
+  </Step>
+<Step>
+    ### Create the Gist
+
+    Leave **Snippet ID** empty and select **Upload**. DBX creates a private Gist and stores the returned ID.
+  </Step>
 </Steps>
 
 DBX stores an encrypted `dbx-sync.json` file in the Gist. The snippet encryption password protects the complete snapshot, so the URL does not expose connection details, SQL, or settings. Existing plain-text snippets can still be downloaded once for migration.
@@ -74,10 +102,26 @@ Plain-text snippets created by older versions cannot be safely migrated in place
 [Open the Gitee personal access token page](https://gitee.com/profile/personal_access_tokens)
 
 <Steps>
-  <Step>### Open token settings Sign in to Gitee and open **Settings → Personal Access Tokens**.</Step>
-  <Step>### Create a token Select **Generate new token** and enter a description.</Step>
-  <Step>### Grant permission Select only the code snippet (`gists`) permission. If permissions are grouped, choose the smallest permission that allows reading and writing snippets.</Step>
-  <Step>### Save the token Copy the generated token immediately and store it in a password manager.</Step>
+<Step>
+    ### Open token settings
+
+    Sign in to Gitee and open **Settings → Personal Access Tokens**.
+  </Step>
+<Step>
+    ### Create a token
+
+    Select **Generate new token** and enter a description.
+  </Step>
+<Step>
+    ### Grant permission
+
+    Select only the code snippet (`gists`) permission. If permissions are grouped, choose the smallest permission that allows reading and writing snippets.
+  </Step>
+<Step>
+    ### Save the token
+
+    Copy the generated token immediately and store it in a password manager.
+  </Step>
 </Steps>
 
 ### Upload and Restore

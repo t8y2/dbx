@@ -6,13 +6,14 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useI18n } from "vue-i18n";
 import type { ConsulCapabilities, ConsulEnterpriseKind, ConsulEnterpriseWrite, ConsulScopeImpact } from "@/types/consul";
 
 const props = defineProps<{ connectionId: string; capabilities: ConsulCapabilities | null }>();
 const { t } = useI18n();
 const store = useConnectionStore();
-const readOnly = computed(() => Boolean(store.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(store.getConfig(props.connectionId)));
 const active = ref<ConsulEnterpriseKind>("namespace");
 const items = ref<Record<string, unknown>[]>([]);
 const loading = ref(false);

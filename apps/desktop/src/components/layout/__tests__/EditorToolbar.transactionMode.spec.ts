@@ -31,4 +31,13 @@ describe("EditorToolbar transaction mode control", () => {
     expect(rollbackIndex).toBeGreaterThan(commitIndex);
     expect(actionGroupEndIndex).toBeGreaterThan(rollbackIndex);
   });
+
+  it("hides Commit/Rollback for a clean Oracle manual session only", () => {
+    expect(toolbarSource).toContain("const showTxnActions = computed(() => {");
+    expect(toolbarSource).toContain("if (props.isOracleManualTransaction) return isTransactionActive.value && props.oracleTxnPossiblyDirty === true;");
+    expect(toolbarSource).toContain("return isTransactionActive.value;");
+    // Both buttons are driven by the combined condition.
+    expect(toolbarSource).toContain('<Tooltip v-if="showTxnActions">');
+    expect(toolbarSource.match(/<Tooltip v-if="showTxnActions">/g)).toHaveLength(2);
+  });
 });

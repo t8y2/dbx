@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
@@ -18,7 +18,6 @@ import { inferCompareKeyColumns } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
 
@@ -118,6 +117,7 @@ const showRemoved = ref(true);
 const showModified = ref(true);
 
 let syncPlanRequestId = 0;
+let initializingPrefill = false;
 
 const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
@@ -205,11 +205,6 @@ function emptySyncPlan(): DataCompareSyncPlan {
     syncStatements: [],
     syncSql: "",
   };
-}
-
-function connectionIconType(connectionId: string) {
-  const config = store.getConfig(connectionId);
-  return config?.driver_profile || config?.db_type || "mysql";
 }
 
 function targetDatabaseType(): DatabaseType | undefined {
@@ -318,13 +313,12 @@ async function loadDatabases(connectionId: string, side: "source" | "target") {
   if (!connectionId) return;
   await store.ensureConnected(connectionId);
   const config = store.getConfig(connectionId);
-  const names =
-    config?.db_type === "dameng"
-      ? await fetchNamespaceOptionsForConnection(connectionId, config)
-      : databaseOptionsForConnection(
-          (await api.listDatabases(connectionId)).map((database) => database.name),
-          config,
-        );
+  const names = config
+    ? await fetchNamespaceOptionsForConnection(connectionId, config)
+    : databaseOptionsForConnection(
+        (await api.listDatabases(connectionId)).map((database) => database.name),
+        config,
+      );
   if (side === "source") {
     sourceDatabases.value = names;
     sourceDatabase.value = names.length === 1 ? names[0] : "";
@@ -780,6 +774,7 @@ function formatModifiedSummary(row: SelectableDataCompareModifiedRow): string {
 }
 
 watch(sourceConnectionId, (id) => {
+  if (initializingPrefill) return;
   clearResult();
   sourceDatabase.value = "";
   sourceSchema.value = "";
@@ -799,6 +794,7 @@ watch(targetConnectionId, (id) => {
   loadDatabases(id, "target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceDatabase, () => {
+  if (initializingPrefill) return;
   clearResult();
   sourceSchema.value = "";
   sourceSchemas.value = [];
@@ -816,6 +812,7 @@ watch(targetDatabase, () => {
   loadSchemas("target").catch((e) => toast(String(e), 5000));
 });
 watch(sourceSchema, () => {
+  if (initializingPrefill) return;
   clearResult();
   sourceTables.value = [];
   sourceTable.value = "";
@@ -853,16 +850,21 @@ watch(
     if (!value) return;
     clearResult();
     if (props.prefillConnectionId) {
-      sourceConnectionId.value = props.prefillConnectionId;
-      await loadDatabases(props.prefillConnectionId, "source");
-      if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
-      if (props.prefillDatabase) await loadSchemas("source", props.prefillSchema);
-      if (props.prefillTable) {
-        await loadTables("source");
-        if (sourceTables.value.includes(props.prefillTable)) {
-          resetSelectedSourceTables([props.prefillTable]);
-          sourceTable.value = props.prefillTable;
+      initializingPrefill = true;
+      try {
+        sourceConnectionId.value = props.prefillConnectionId;
+        await loadDatabases(props.prefillConnectionId, "source");
+        if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+        if (props.prefillDatabase) await loadSchemas("source", props.prefillSchema);
+        if (props.prefillTable) {
+          await loadTables("source");
+          if (sourceTables.value.includes(props.prefillTable)) {
+            resetSelectedSourceTables([props.prefillTable]);
+            sourceTable.value = props.prefillTable;
+          }
         }
+      } finally {
+        initializingPrefill = false;
       }
     }
   },
@@ -884,25 +886,16 @@ watch(
         <div class="grid grid-cols-[1fr_auto_1fr] gap-4 items-start">
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
-            <SearchableSelect
+            <ConnectionTreeSelect
               v-model="sourceConnectionId"
-              :options="sqlConnections.map((c) => c.id)"
+              :connections="sqlConnections"
+              :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
               :search-placeholder="t('diff.searchConnection')"
               :empty-text="t('common.noResults')"
-              :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            >
-              <template #option-label="{ option, label }">
-                <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
-                  <ConnectionGroupBadge :connection-id="option" />
-                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-                </div>
-              </template>
-            </SearchableSelect>
+              trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+              list-class="w-[var(--reka-popover-trigger-width)]"
+            />
             <SearchableSelect
               v-model="sourceDatabase"
               :options="sourceDatabases"
@@ -943,25 +936,16 @@ watch(
 
           <div class="space-y-2">
             <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
-            <SearchableSelect
+            <ConnectionTreeSelect
               v-model="targetConnectionId"
-              :options="sqlConnections.map((c) => c.id)"
+              :connections="sqlConnections"
+              :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
               :search-placeholder="t('diff.searchConnection')"
               :empty-text="t('common.noResults')"
-              :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-              trigger-variant="outline"
-              trigger-class="h-8 w-full justify-between text-xs"
-              content-class="w-[var(--reka-popover-trigger-width)]"
-            >
-              <template #option-label="{ option, label }">
-                <div class="flex min-w-0 items-center gap-2">
-                  <DatabaseIcon :db-type="connectionIconType(option)" class="h-3.5 w-3.5 shrink-0" />
-                  <ConnectionGroupBadge :connection-id="option" />
-                  <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-                </div>
-              </template>
-            </SearchableSelect>
+              trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+              list-class="w-[var(--reka-popover-trigger-width)]"
+            />
             <SearchableSelect
               v-model="targetDatabase"
               :options="targetDatabases"

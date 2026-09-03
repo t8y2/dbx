@@ -43,6 +43,21 @@ export function missingLegacyWebViewCapabilities(): string[] {
   return MODERN_CSS_FEATURES.filter((feature) => !supports(feature)).map((feature) => feature.name);
 }
 
+/**
+ * Old WebKit (Safari < 16.4) throws SyntaxError when compiling regular
+ * expressions with lookbehind or the named-group shapes Shiki's JavaScript
+ * engine generates from TextMate grammars. Callers use this to pick a regex
+ * engine (e.g. Shiki's Oniguruma WASM engine) that old WebKit can run.
+ */
+export function supportsRegExpLookbehind(): boolean {
+  try {
+    new RegExp("(?<=a)b");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function isLegacyWebView(): boolean {
   return missingLegacyWebViewCapabilities().length > 0;
 }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, watchEffect } from "vue";
 import { useI18n } from "vue-i18n";
-import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2 } from "@lucide/vue";
+import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, GitBranch, Save, FolderOpen, X, Shield, Download, RotateCcw, AlertTriangle, ClipboardPaste, Minimize2, SpellCheck2, BetweenVerticalStart, Eye } from "@lucide/vue";
+import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -21,12 +22,15 @@ import { connectionIsDorisFamilyCatalogCapable } from "@/lib/database/databaseFe
 import { hexToRgba } from "@/lib/common/color";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
+import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
   executableSql: string;
+  /** 来自 QueryEditor 的实时“当前语句是否为可预览 DML”信号；未提供时退回可编辑文档启发式。 */
+  canPreviewChanges?: boolean;
   explainMode?: string;
   blockDangerousRedisCommands?: boolean;
   sqlKeywordCase: "preserve" | "upper" | "lower";
@@ -34,11 +38,19 @@ const props = defineProps<{
   autoCommit?: boolean;
   txnSessionId?: string;
   txnAutoRolledBack?: boolean;
+  /** Oracle-only: whether the current manual Oracle session executed a statement
+   *  DBX cannot prove read-only. Commit/Rollback are hidden while false. */
+  oracleTxnPossiblyDirty?: boolean;
+  /** Oracle manual mode derived from the resolved database type (not raw
+   *  db_type, which can be the agent transport). */
+  isOracleManualTransaction?: boolean;
 }>();
 
 const emit = defineEmits<{
-  execute: [];
+  execute: [source: "pointer" | "keyboard"];
+  executePointerDown: [];
   cancel: [];
+  previewChanges: [];
   explain: [];
   "update:explainMode": [mode: "explain" | "autotrace"];
   formatSql: [];
@@ -121,9 +133,18 @@ const supportsExPaste = computed(() => supportsSqlInListPaste(props.activeConnec
 const supportsTransaction = computed(() => supportsTransactionFeature(props.activeConnection?.db_type));
 const hasDefaultDatabaseOption = computed(() => activeDatabaseOptions.value.includes(""));
 const schemaDatabaseKey = computed(() => props.activeTab.database || (isSingleDb.value ? "_" : ""));
-const saveTooltip = computed(() => (props.activeTab.objectSource ? t("objects.saveSource") : t("toolbar.saveSql")));
+const saveTooltip = computed(() => {
+  if (props.activeTab.objectSource) return t("objects.saveSource");
+  if (props.activeTab.externalSqlPath) return t("toolbar.saveSqlFile");
+  return t("toolbar.saveSql");
+});
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
+// executableSql 在无选区时可能是整篇文档；只要有 DML 语句出现就显示预览按钮，
+// 具体"当前语句"由编辑器（QueryEditor）按执行模式解析。
+const DML_KEYWORD_RE = /(^|\s)(update|insert|delete)\s/i;
+const canPreviewDml = computed(() => looksLikeDmlStatement(props.executableSql) || DML_KEYWORD_RE.test(props.executableSql));
+const previewButtonVisible = computed(() => props.canPreviewChanges ?? canPreviewDml.value);
 // DM calls it autotrace, Postgres EXPLAIN ANALYZE, SQL Server the actual execution
 // plan (SET STATISTICS XML); all three execute the statement.
 const supportsExplainAnalyze = computed(() => {
@@ -150,9 +171,21 @@ function toggleSqlSemanticDiagnostics() {
     sqlSemanticDiagnosticsMode: sqlSemanticDiagnosticsEnabled.value ? "disabled" : "enabled",
   });
 }
+const insertValueHintsEnabled = computed(() => settingsStore.editorSettings.showInsertValueHints);
+const insertValueHintsToggleTooltip = computed(() => (insertValueHintsEnabled.value ? t("toolbar.insertValueHintsToggleOn") : t("toolbar.insertValueHintsToggleOff")));
+const supportsInsertValueHintsToggle = computed(() => supportsInsertValueHints(props.activeConnection?.db_type));
+function toggleInsertValueHints() {
+  settingsStore.updateEditorSettings({ showInsertValueHints: !insertValueHintsEnabled.value });
+}
 const isTransactionActive = computed(() => !!props.txnSessionId);
 const isManualTransactionMode = computed(() => props.autoCommit === false || isTransactionActive.value);
 const transactionModeBadge = computed(() => (isManualTransactionMode.value ? "M" : "A"));
+// Oracle manual mode hides Commit/Rollback while the session is clean (no
+// unproven statement executed). Every other database keeps the existing rule.
+const showTxnActions = computed(() => {
+  if (props.isOracleManualTransaction) return isTransactionActive.value && props.oracleTxnPossiblyDirty === true;
+  return isTransactionActive.value;
+});
 const transactionTooltip = computed(() => {
   const isAgent = (props.activeConnection?.db_type as string) === "agent";
   const isManual = isManualTransactionMode.value;
@@ -239,6 +272,20 @@ function databaseOptionIsProduction(database: string): boolean {
   if (!database || props.activeConnection?.is_production) return false;
   return productionContextForDatabase(props.activeConnection, database).reason === "database";
 }
+
+function onExecutePointerDown(event: MouseEvent) {
+  if (props.activeTab.isExecuting || event.button !== 0) return;
+  emit("executePointerDown");
+}
+
+function onExecuteClick(event: MouseEvent) {
+  if (props.activeTab.isExecuting) {
+    emit("cancel");
+    return;
+  }
+  emit("execute", event.detail > 0 ? "pointer" : "keyboard");
+}
+
 async function changeCatalog(selectedCatalog: string) {
   const connection = props.activeConnection;
   if (!connection) return;
@@ -264,8 +311,8 @@ async function changeCatalog(selectedCatalog: string) {
             class="h-6 w-6"
             :class="executeButtonClass"
             :disabled="activeTab.isCancelling || activeTab.isExplaining || (!activeTab.isExecuting && !executableSql.trim())"
-            @mousedown.prevent
-            @click="activeTab.isExecuting ? emit('cancel') : emit('execute')"
+            @mousedown.prevent="onExecutePointerDown"
+            @click="onExecuteClick"
           >
             <Loader2 v-if="activeTab.isCancelling" class="h-3.5 w-3.5 animate-spin" />
             <Square v-else-if="activeTab.isExecuting" class="h-3.5 w-3.5 fill-current" />
@@ -273,6 +320,14 @@ async function changeCatalog(selectedCatalog: string) {
           </Button>
         </TooltipTrigger>
         <TooltipContent>{{ activeTab.isExecuting ? t("toolbar.stopQuery") : executeShortcutTooltip }}</TooltipContent>
+      </Tooltip>
+      <Tooltip v-if="previewButtonVisible">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700" :disabled="activeTab.isExecuting || activeTab.isCancelling" :aria-label="t('editor.previewChanges')" @mousedown.prevent @click="emit('previewChanges')">
+            <Eye class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("editor.previewChanges") }}</TooltipContent>
       </Tooltip>
       <Tooltip v-if="supportsExplain">
         <TooltipTrigger as-child>
@@ -354,6 +409,22 @@ async function changeCatalog(selectedCatalog: string) {
         </TooltipTrigger>
         <TooltipContent>{{ sqlSemanticDiagnosticsToggleTooltip }}</TooltipContent>
       </Tooltip>
+      <Tooltip v-if="supportsInsertValueHintsToggle">
+        <TooltipTrigger as-child>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="h-6 w-6"
+            :class="insertValueHintsEnabled ? 'text-sky-600 bg-sky-500/10 hover:bg-sky-500/20 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200' : 'text-muted-foreground/50 hover:bg-muted hover:text-muted-foreground'"
+            :aria-label="insertValueHintsToggleTooltip"
+            :aria-pressed="insertValueHintsEnabled"
+            @click="toggleInsertValueHints"
+          >
+            <BetweenVerticalStart class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ insertValueHintsToggleTooltip }}</TooltipContent>
+      </Tooltip>
       <Tooltip v-if="activeConnection?.db_type === 'redis'">
         <TooltipTrigger as-child>
           <Button
@@ -430,8 +501,8 @@ async function changeCatalog(selectedCatalog: string) {
           </TooltipTrigger>
           <TooltipContent>{{ transactionTooltip }}</TooltipContent>
         </Tooltip>
-        <!-- Commit button (only when transaction is active) -->
-        <Tooltip v-if="isTransactionActive">
+        <!-- Commit button (only when a transaction action is warranted) -->
+        <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-green-600 hover:bg-green-500/10 hover:text-green-700 dark:text-green-300 dark:hover:text-green-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.commit')" @click="emit('commit')">
               <Check class="h-3.5 w-3.5" />
@@ -440,8 +511,8 @@ async function changeCatalog(selectedCatalog: string) {
           <TooltipContent>{{ t("toolbar.commit") }}</TooltipContent>
         </Tooltip>
 
-        <!-- Rollback button (only when transaction is active) -->
-        <Tooltip v-if="isTransactionActive">
+        <!-- Rollback button (only when a transaction action is warranted) -->
+        <Tooltip v-if="showTxnActions">
           <TooltipTrigger as-child>
             <Button variant="ghost" size="icon" class="h-6 w-6 text-red-600 hover:bg-red-500/10 hover:text-red-700 dark:text-red-300 dark:hover:text-red-200" :disabled="activeTab.isExecuting" :aria-label="t('toolbar.rollback')" @click="emit('rollback')">
               <RotateCcw class="h-3.5 w-3.5" />

@@ -30,6 +30,33 @@ function readQuoted(input: string, start: number, open: string, close: string): 
   return { end: input.length, closed: false };
 }
 
+// Same doubled-quote escaping as readQuoted, plus (when allowBackslashEscape) MySQL-style `\x`
+// escaping inside '...' strings. Backslash-escape recognition is NOT safe to apply
+// unconditionally: a string that merely *ends* in a literal backslash right before the closing
+// quote (e.g. a Windows path literal `'C:\Program Files\'` under Postgres, whose default
+// standard_conforming_strings=on gives backslash no special meaning) would have its real closing
+// quote misread as escaped, swallowing the rest of the query as a phantom string. So this is
+// gated per-dialect by the caller (see tokenizeSqlSemantic's `mysqlBackslashEscape` option) rather
+// than applied everywhere.
+function readQuotedString(input: string, start: number, quote: string, allowBackslashEscape: boolean): { end: number; closed: boolean } {
+  let index = start + 1;
+  while (index < input.length) {
+    if (allowBackslashEscape && input[index] === "\\" && index + 1 < input.length) {
+      index += 2;
+      continue;
+    }
+    if (input[index] === quote) {
+      if (input[index + 1] === quote) {
+        index += 2;
+        continue;
+      }
+      return { end: index + 1, closed: true };
+    }
+    index += 1;
+  }
+  return { end: input.length, closed: false };
+}
+
 const DOLLAR_QUOTE_TAG_PATTERN = /\$[A-Za-z_0-9]*\$/y;
 
 /**
@@ -43,8 +70,39 @@ export function matchDollarQuoteTag(input: string, index: number): string | unde
   return DOLLAR_QUOTE_TAG_PATTERN.exec(input)?.[0];
 }
 
-export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSemanticToken[] {
+/**
+ * options.mysqlDashCommentRequiresWhitespace opts into MySQL's rule that a bare "--" only starts
+ * a line comment when followed by whitespace/EOL, since MySQL reserves unspaced "--" for
+ * double-negation (e.g. `SELECT 1--1`). Defaults to false so every existing caller keeps today's
+ * dialect-generic "-- always starts a comment" behavior; only callers targeting a confirmed
+ * MySQL-family grammar should opt in.
+ *
+ * options.mysqlBackslashEscape opts into MySQL-style `\x` escaping inside '...' strings. Also
+ * dialect-gated (not a global default -- see readQuotedString's doc comment for why an
+ * unconditional default is unsafe): only dialects confirmed to actually use backslash escaping by
+ * convention (MySQL and its close wire-protocol/grammar clones) should opt in.
+ *
+ * By default "..." is always identifier quoting (never a string literal), matching MySQL's own
+ * dialect adapter (see semantic/dialect.ts), which lists '"' as one of its valid identifierQuotes
+ * -- this is correct for every dialect where "..." unconditionally means identifier (Postgres,
+ * SQL Server's ANSI mode, MySQL running with the ANSI_QUOTES sql_mode) and is what every existing
+ * caller other than sqlCompletion.ts's literal-masking layer wants.
+ *
+ * options.mysqlDoubleQuoteIsString flips the emitted *kind* of a "..." span to "string" instead of
+ * "quoted_identifier" -- it does not affect how the span itself is scanned (see readQuotedString's
+ * call below, gated only by mysqlBackslashEscape). Whether ANSI_QUOTES is actually enabled on the
+ * connected server is runtime state this tokenizer can't see, so callers that want to model MySQL's
+ * default (non-ANSI_QUOTES) sql_mode can opt in per call site instead of this being a global
+ * default; leaving it off keeps modeling the ANSI_QUOTES (identifier) interpretation. As of
+ * sqlCompletion.ts's maskSqlLiteralsAndComments, no caller passes this true anymore -- masking now
+ * decides string-vs-identifier per token position instead of per dialect (see that function's doc
+ * comment) -- but the option stays available as a general tokenizer capability.
+ */
+export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?: { mysqlDashCommentRequiresWhitespace?: boolean; mysqlBackslashEscape?: boolean; mysqlDoubleQuoteIsString?: boolean }): SqlSemanticToken[] {
   const tokens: SqlSemanticToken[] = [];
+  const mysqlDashCommentRequiresWhitespace = !!options?.mysqlDashCommentRequiresWhitespace;
+  const mysqlBackslashEscape = !!options?.mysqlBackslashEscape;
+  const mysqlDoubleQuoteIsString = !!options?.mysqlDoubleQuoteIsString;
   let index = 0;
   let depth = 0;
 
@@ -58,7 +116,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
       continue;
     }
 
-    if (ch === "-" && next === "-") {
+    if (ch === "-" && next === "-" && (!mysqlDashCommentRequiresWhitespace || index + 2 >= input.length || /\s/.test(input[index + 2] ?? ""))) {
       index += 2;
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));
@@ -87,7 +145,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
     }
 
     if (ch === "'") {
-      const quoted = readQuoted(input, start, "'", "'");
+      const quoted = readQuotedString(input, start, "'", mysqlBackslashEscape);
       index = quoted.end;
       tokens.push(token("string", input.slice(start, index), start, index, depth, "'", quoted.closed));
       continue;
@@ -104,9 +162,16 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql"): SqlSema
     }
 
     if (ch === '"') {
-      const quoted = readQuoted(input, start, '"', '"');
+      // readQuotedString(...,false) is byte-for-byte identical to readQuoted for this quote pair
+      // (both use doubled-quote-only escaping), so routing every dialect through readQuotedString
+      // here is a no-op unless mysqlBackslashEscape is set -- which now matters independently of
+      // mysqlDoubleQuoteIsString: a MySQL-family "..." kept as a quoted_identifier (see that
+      // option's doc comment above) can still contain a backslash-escaped quote and must be read
+      // the same way a "..." string would be, or it desyncs the rest of the token stream.
+      const quoted = readQuotedString(input, start, '"', mysqlBackslashEscape);
       index = quoted.end;
-      tokens.push(token("quoted_identifier", input.slice(start, index), start, index, depth, '"', quoted.closed));
+      const kind = mysqlDoubleQuoteIsString ? "string" : "quoted_identifier";
+      tokens.push(token(kind, input.slice(start, index), start, index, depth, '"', quoted.closed));
       continue;
     }
 

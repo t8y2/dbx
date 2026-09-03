@@ -55,6 +55,7 @@ pub fn is_schema_aware(database_type: DatabaseType) -> bool {
             | DatabaseType::Hive
             | DatabaseType::Kyuubi
             | DatabaseType::Impala
+            | DatabaseType::Argo
             | DatabaseType::Spark
             | DatabaseType::Db2
             | DatabaseType::Informix
@@ -91,8 +92,11 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
         Some(DatabaseType::Oracle) if matches!(context, PaginationContext::TablePreview) => {
             TablePaginationStrategy::Rownum
         }
+        // Oracle's row-limiting clause (`FETCH FIRST`/`OFFSET ... FETCH`) was
+        // introduced in 12c. ROWNUM remains compatible with the supported 11g
+        // baseline while still providing a bounded read for newer servers.
         Some(DatabaseType::Oracle) if matches!(context, PaginationContext::BoundedRead) => {
-            TablePaginationStrategy::FetchFirst
+            TablePaginationStrategy::Rownum
         }
         Some(DatabaseType::Oracle) => TablePaginationStrategy::Unbounded,
         Some(DatabaseType::Oscar)
@@ -101,7 +105,7 @@ pub fn pagination_strategy(database_type: Option<DatabaseType>, context: Paginat
             TablePaginationStrategy::Rownum
         }
         Some(DatabaseType::Oscar) => TablePaginationStrategy::Unbounded,
-        Some(DatabaseType::Dameng) => TablePaginationStrategy::FetchFirst,
+        Some(DatabaseType::Dameng) => TablePaginationStrategy::Rownum,
         Some(DatabaseType::Db2) => TablePaginationStrategy::Db2FetchFirst,
         Some(DatabaseType::SqlServer) => TablePaginationStrategy::SqlServerTop,
         Some(DatabaseType::Iris) => TablePaginationStrategy::IrisTop,

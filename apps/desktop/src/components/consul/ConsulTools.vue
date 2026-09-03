@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import * as api from "@/lib/backend/api";
 import type { ConsulCapabilities, ConsulCoordinate, ConsulEvent, ConsulPreparedQuery, ConsulPreparedQueryExecuteResponse, ConsulPreparedQueryNode } from "@/types/consul";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useI18n } from "vue-i18n";
 
 type ToolTab = "queries" | "events" | "coordinates";
@@ -21,7 +22,7 @@ function capabilityLabel(value?: string) {
   return t("consul.ui.capabilityUnknown");
 }
 const connectionStore = useConnectionStore();
-const readOnly = computed(() => Boolean(connectionStore.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
 const canWriteQueries = computed(() => !readOnly.value && props.capabilities?.preparedQueries === "supported");
 const canFireEvents = computed(() => !readOnly.value && props.capabilities?.events === "supported");
 const queryAvailable = computed(() => !["unsupported", "disabled", "forbidden"].includes(props.capabilities?.preparedQueries || ""));

@@ -13,6 +13,7 @@ import { useToast } from "@/composables/useToast";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
 import { createTunnelProfile, createTunnelProfileTestGuard, tunnelProfileSummary, type TunnelProfileType } from "@/lib/connection/tunnelProfiles";
 import { applySshConfigHostAliasPrefill as prefillSshConfigHostAlias } from "@/lib/connection/sshConfigHosts";
+import { applySshAuthMethod } from "@/lib/connection/sshAuthMethod";
 import * as api from "@/lib/backend/api";
 import type { SshConfigHostEntry, TunnelProfile } from "@/types/database";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -118,15 +119,12 @@ function removeSelected() {
   selectedId.value = draft.value[0]?.id || null;
 }
 
+// Shared with the connection editor so both SSH entry points keep one single
+// auth-method <-> credential mapping (see sshAuthMethod.ts).
 function updateSshAuthMethod(value: unknown) {
   const profile = selectedSsh.value;
   if (!profile) return;
-  profile.auth_method = value === "key" ? "key" : value === "key+password" ? "key+password" : value === "none" ? "none" : "password";
-  if (profile.auth_method !== "password" && profile.auth_method !== "key+password") profile.password = "";
-  if (profile.auth_method !== "key" && profile.auth_method !== "key+password") {
-    profile.key_path = "";
-    profile.key_passphrase = "";
-  }
+  applySshAuthMethod(profile, value);
 }
 
 function updateProxyType(value: unknown) {
@@ -252,6 +250,7 @@ async function testSelected() {
               <SelectItem value="password">{{ t("connection.sshAuthMethodPassword") }}</SelectItem>
               <SelectItem value="key">{{ t("connection.sshAuthMethodKey") }}</SelectItem>
               <SelectItem value="key+password">{{ t("connection.sshAuthMethodKeyPassword") }}</SelectItem>
+              <SelectItem value="agent">{{ t("connection.sshUseAgent") }}</SelectItem>
               <SelectItem value="none">{{ t("connection.sshAuthMethodNone") }}</SelectItem>
             </SelectContent>
           </Select>
@@ -281,6 +280,10 @@ async function testSelected() {
         <div v-if="selectedSsh.auth_method === 'none'" class="grid grid-cols-4 items-center gap-4">
           <span />
           <p class="col-span-3 text-xs text-muted-foreground">{{ t("connection.sshAuthMethodNoneHint") }}</p>
+        </div>
+        <div v-if="selectedSsh.auth_method === 'agent'" class="grid grid-cols-4 items-center gap-4">
+          <Label class="text-xs">{{ t("connection.sshAgentSockPath") }}</Label>
+          <Input v-model="selectedSsh.ssh_agent_sock_path" class="col-span-3" :placeholder="t('connection.sshAgentSockPathPlaceholder')" />
         </div>
         <div class="grid grid-cols-4 items-center gap-4">
           <span />

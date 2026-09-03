@@ -1,8 +1,10 @@
 use super::dialect::StructureDialect;
 use super::types::EditableStructureColumn;
+use crate::models::connection::DatabaseType;
 
-pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, table_name: &str) -> String {
-    if matches!(
+/// Dialects whose qualified names use `schema.table` when a non-empty schema is present.
+fn is_schema_qualifying_dialect(dialect: StructureDialect) -> bool {
+    matches!(
         dialect,
         StructureDialect::Postgres
             | StructureDialect::Oracle
@@ -12,11 +14,35 @@ pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, t
             | StructureDialect::H2
             | StructureDialect::Informix
             | StructureDialect::Sqlite
-    ) && schema.is_some_and(|schema| !schema.trim().is_empty())
-    {
+    )
+}
+
+pub(super) fn qualified_table(dialect: StructureDialect, schema: Option<&str>, table_name: &str) -> String {
+    if is_schema_qualifying_dialect(dialect) && schema.is_some_and(|schema| !schema.trim().is_empty()) {
         return format!("{}.{}", quote_ident(dialect, schema.unwrap()), quote_ident(dialect, table_name));
     }
     quote_ident(dialect, table_name)
+}
+
+/// Qualify a table being created while preserving the schema as an existing object.
+///
+/// Oracle's ordinary identifiers are case-insensitive and are folded to uppercase.  The
+/// regular `qualified_table`/`quote_ident` pair must remain exact because it is also used
+/// for tables already loaded from metadata, including quoted mixed-case names.
+pub(super) fn qualified_new_table(
+    database_type: Option<DatabaseType>,
+    dialect: StructureDialect,
+    schema: Option<&str>,
+    table_name: &str,
+) -> String {
+    if is_schema_qualifying_dialect(dialect) && schema.is_some_and(|schema| !schema.trim().is_empty()) {
+        return format!(
+            "{}.{}",
+            quote_ident(dialect, schema.unwrap()),
+            quote_new_ident(database_type, dialect, table_name)
+        );
+    }
+    quote_new_ident(database_type, dialect, table_name)
 }
 
 pub(super) fn quote_ident(dialect: StructureDialect, name: &str) -> String {
@@ -43,6 +69,53 @@ fn is_simple_informix_identifier(name: &str) -> bool {
         && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
+/// Format an identifier that will be created by a CREATE/ADD statement.
+///
+/// This is deliberately separate from `quote_ident`: metadata-backed DDL must preserve the
+/// exact spelling of an existing quoted Oracle object, while a newly entered ordinary name
+/// should use Oracle's normal case-insensitive identifier semantics.
+pub(super) fn quote_new_ident(database_type: Option<DatabaseType>, dialect: StructureDialect, name: &str) -> String {
+    if database_type == Some(DatabaseType::Oracle) && dialect == StructureDialect::Oracle {
+        oracle_new_object_reference(name)
+    } else {
+        quote_ident(dialect, name)
+    }
+}
+
+/// Reference spelling that resolves to an object created through [`quote_new_ident`]'s Oracle path.
+///
+/// Plain Oracle identifiers are created unquoted and are therefore stored uppercase-folded; a
+/// later reference with the same unquoted spelling folds to the same object.  Names that had to
+/// stay quoted at creation (special characters, reserved words) keep exact quoting here too, so
+/// generated references always line up with the created object.
+pub(crate) fn oracle_new_object_reference(name: &str) -> String {
+    if is_simple_oracle_identifier(name) && !is_oracle_reserved_identifier(name) {
+        name.to_string()
+    } else {
+        quote_ident(StructureDialect::Oracle, name)
+    }
+}
+
+fn is_simple_oracle_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic() && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$' || ch == '#')
+}
+
+// sqlparser maintains the shared SQL keyword vocabulary used by this crate. It intentionally
+// includes more than Oracle's reserved words, so the conservative check is supplemented only
+// with Oracle-specific legacy words missing from that maintained list instead of copying a
+// separate several-hundred-entry keyword table here.
+const ORACLE_RESERVED_WORDS_MISSING_FROM_SQLPARSER: &[&str] =
+    &["MAXEXTENTS", "NOAUDIT", "ROWID", "ROWNUM", "SUCCESSFUL", "UID"];
+
+fn is_oracle_reserved_identifier(name: &str) -> bool {
+    sqlparser::keywords::ALL_KEYWORDS.iter().any(|keyword| keyword.eq_ignore_ascii_case(name))
+        || ORACLE_RESERVED_WORDS_MISSING_FROM_SQLPARSER.iter().any(|keyword| keyword.eq_ignore_ascii_case(name))
+}
+
 pub(super) fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -60,6 +133,26 @@ fn is_sql_string_literal(value: &str) -> bool {
         }
     }
     true
+}
+
+pub(crate) fn sqlserver_unicode_string_literal(value: &str) -> Option<String> {
+    let mut candidate = value.trim();
+    let mut parenthesis_depth = 0usize;
+
+    loop {
+        if let Some(literal) = candidate.strip_prefix('N').or_else(|| candidate.strip_prefix('n')) {
+            if is_sql_string_literal(literal) {
+                return Some(format!("{}N{}{}", "(".repeat(parenthesis_depth), literal, ")".repeat(parenthesis_depth)));
+            }
+        }
+        if is_sql_string_literal(candidate) {
+            return Some(format!("{}N{}{}", "(".repeat(parenthesis_depth), candidate, ")".repeat(parenthesis_depth)));
+        }
+
+        let inner = candidate.strip_prefix('(')?.strip_suffix(')')?;
+        parenthesis_depth += 1;
+        candidate = inner.trim();
+    }
 }
 
 fn postgres_string_default_literal(value: &str) -> Option<&str> {
@@ -284,6 +377,17 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
         return quote_string(default_value);
     }
     if is_string_type_for_default(dialect, base_type) {
+        if dialect == StructureDialect::SqlServer
+            && matches!(base_type.to_ascii_lowercase().as_str(), "nchar" | "nvarchar" | "ntext" | "sysname")
+        {
+            if let Some(literal) = sqlserver_unicode_string_literal(default_value) {
+                return literal;
+            }
+            if default_value.contains('(') || default_value.contains(')') {
+                return default_value.to_string();
+            }
+            return format!("N{}", quote_string(default_value));
+        }
         // Only skip quoting for function-call expressions like `gen_random_uuid()`.
         // Simple identifiers like `CURRENT_TIMESTAMP` are not valid defaults for string columns.
         if is_sql_string_literal(default_value)
@@ -315,4 +419,23 @@ pub(super) fn original_default(column: &EditableStructureColumn) -> String {
 
 pub(super) fn original_comment(column: &EditableStructureColumn) -> String {
     clean(column.original.as_ref().and_then(|original| original.comment.as_deref()).unwrap_or(""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_unicode_defaults_use_unicode_literals_without_double_quoting() {
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "中文"), "N'中文'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nchar(5)", "'中文'"), "N'中文'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "sysname", "n'guest'"), "N'guest'");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "('中文')"), "(N'中文')");
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "nvarchar(50)", "((N'中文'))"), "((N'中文'))");
+        assert_eq!(
+            format_default_for_sql(StructureDialect::SqlServer, "nvarchar(max)", "CONCAT(N'a', N'b')"),
+            "CONCAT(N'a', N'b')"
+        );
+        assert_eq!(format_default_for_sql(StructureDialect::SqlServer, "varchar(50)", "中文"), "'中文'");
+    }
 }

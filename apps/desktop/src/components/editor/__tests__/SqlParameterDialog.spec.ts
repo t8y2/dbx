@@ -36,7 +36,15 @@ const MIXED_VALUES: Record<string, SqlParameterInput> = {
   empty_value: { kind: "boolean", value: "" },
 };
 const RAW_VALUES = Object.fromEntries(Object.entries(MIXED_VALUES).map(([key, input]) => [key, { ...input, kind: "raw" as const }]));
-const RAW_SQL = "SELECT alpha beta, 42, NULL, current_date, NULL, alpha beta";
+const RAW_SQL = "SELECT alpha beta, 42, NULL, current_date, ${empty_value}, alpha beta";
+const CLEARED_VALUES: Record<string, SqlParameterInput> = {
+  text_value: { kind: "string", value: "" },
+  numeric_value: { kind: "number", value: "" },
+  null_value: { kind: "null", value: "" },
+  raw_value: { kind: "raw", value: "" },
+  empty_value: { kind: "boolean", value: "" },
+};
+const CLEARED_SQL = "SELECT '', NULL, NULL, ${raw_value}, '', ''";
 
 const mountedApps: App[] = [];
 
@@ -74,8 +82,18 @@ function actionButton(): HTMLButtonElement | null {
   return document.body.querySelector('[data-testid="sql-parameters-use-raw-all"]');
 }
 
+function clearActionButton(): HTMLButtonElement | null {
+  return document.body.querySelector('[data-testid="sql-parameters-clear-values"]');
+}
+
 function clickRawAction() {
   const button = actionButton();
+  expect(button).not.toBeNull();
+  button!.click();
+}
+
+function clickClearAction() {
+  const button = clearActionButton();
   expect(button).not.toBeNull();
   button!.click();
 }
@@ -162,5 +180,89 @@ describe("SqlParameterDialog raw parameter action", () => {
     expect(onExecute).toHaveBeenCalledOnce();
     expect(onExecute).toHaveBeenCalledWith(RAW_SQL);
     expect(state.open).toBe(false);
+  });
+});
+
+describe("SqlParameterDialog clear parameter values action", () => {
+  it("clears every displayed value while preserving kinds and updating the preview", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    clickClearAction();
+    await nextTick();
+
+    expect(parameterInputs().map((input) => input.value)).toEqual(Array(PARAMETERS.length).fill(""));
+    expect(Array.from(document.body.querySelectorAll('[role="combobox"]')).map((trigger) => trigger.textContent?.trim())).toEqual(["String", "Number", "NULL", "Raw SQL", "Boolean"]);
+    expect(parameterInputs()[2]?.disabled).toBe(true);
+    expect(document.body.querySelector("pre")?.textContent).toBe(CLEARED_SQL);
+    expect(state.open).toBe(true);
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(historyMocks.remember).not.toHaveBeenCalled();
+  });
+
+  it("preserves parameter history after clearing current values", async () => {
+    const { onExecute } = await mountDialog();
+
+    clickClearAction();
+    await nextTick();
+
+    const input = parameterInputs()[0];
+    expect(input).not.toBeUndefined();
+    input?.focus();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const historyEntry = Array.from(document.body.querySelectorAll("button")).find((button) => button.textContent?.includes("alpha beta"));
+    expect(historyEntry).toBeDefined();
+    historyEntry?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await nextTick();
+
+    expect(parameterInputs()[0]?.value).toBe("alpha beta");
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(historyMocks.remember).not.toHaveBeenCalled();
+  });
+
+  it("keeps cancel side-effect free after clearing values", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    clickClearAction();
+    await nextTick();
+    buttonWithText("Cancel")?.click();
+    await nextTick();
+
+    expect(state.open).toBe(false);
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(historyMocks.remember).not.toHaveBeenCalled();
+  });
+
+  it("remembers and emits cleared values only when Execute is clicked", async () => {
+    const { state, onExecute } = await mountDialog();
+
+    clickClearAction();
+    await nextTick();
+    expect(historyMocks.remember).not.toHaveBeenCalled();
+
+    buttonWithText("Execute")?.click();
+    await nextTick();
+
+    expect(historyMocks.remember).toHaveBeenCalledOnce();
+    expect(historyMocks.remember).toHaveBeenCalledWith(CLEARED_VALUES);
+    expect(onExecute).toHaveBeenCalledOnce();
+    expect(onExecute).toHaveBeenCalledWith(CLEARED_SQL);
+    expect(state.open).toBe(false);
+  });
+
+  it("is idempotent when the current parameter values are already empty", async () => {
+    const { state, onExecute } = await mountDialog(CLEARED_VALUES);
+    const beforePreview = document.body.querySelector("pre")?.textContent;
+
+    clickClearAction();
+    await nextTick();
+
+    expect(parameterInputs().map((input) => input.value)).toEqual(Array(PARAMETERS.length).fill(""));
+    expect(Array.from(document.body.querySelectorAll('[role="combobox"]')).map((trigger) => trigger.textContent?.trim())).toEqual(["String", "Number", "NULL", "Raw SQL", "Boolean"]);
+    expect(document.body.querySelector("pre")?.textContent).toBe(beforePreview);
+    expect(state.open).toBe(true);
+    expect(onExecute).not.toHaveBeenCalled();
+    expect(historyMocks.remember).not.toHaveBeenCalled();
   });
 });

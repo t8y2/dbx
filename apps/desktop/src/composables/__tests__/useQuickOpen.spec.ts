@@ -2,7 +2,7 @@ import { nextTick } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { matchQuickOpenText, useQuickOpen } from "@/composables/useQuickOpen";
 import * as api from "@/lib/backend/api";
-import { getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 
@@ -22,6 +22,7 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/lib/sqlFile/sqlFileFolders", async () => {
   const { ref } = await import("vue");
   return {
+    getSqlFileFilter: vi.fn(() => "*.sql"),
     getSqlFileFolderPaths: vi.fn(),
     sqlFileFoldersVersion: ref(0),
   };
@@ -68,7 +69,7 @@ describe("useQuickOpen", () => {
 
       const { filteredItems, loadExternalSqlFiles, setQuery } = useQuickOpen();
       const initialLoad = loadExternalSqlFiles();
-      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old");
+      expect(api.listSqlFilesInFolder).toHaveBeenCalledWith("/old", getSqlFileFilter());
 
       sqlFileFoldersVersion.value++;
       await nextTick();
@@ -76,7 +77,7 @@ describe("useQuickOpen", () => {
       await initialLoad;
 
       expect(api.listSqlFilesInFolder).toHaveBeenCalledTimes(2);
-      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new");
+      expect(api.listSqlFilesInFolder).toHaveBeenLastCalledWith("/new", getSqlFileFilter());
       setQuery(".sql");
       expect(filteredItems.value.map((item) => item.label)).toContain("new.sql");
       expect(filteredItems.value.map((item) => item.label)).not.toContain("old.sql");

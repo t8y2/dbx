@@ -11,7 +11,7 @@ test("recognizes Oracle-compatible NUMBER column types as numeric", () => {
   assert.equal(findGeneratorKey("value", "NUMBER CODE"), "text");
 });
 
-test("enables default values for columns with schema defaults", () => {
+test("keeps schema defaults optional for generated columns", () => {
   const params = defaultGeneratorParams(
     "status",
     {
@@ -21,8 +21,16 @@ test("enables default values for columns with schema defaults", () => {
     "text",
   );
 
-  assert.equal(params.includeDefault, true);
+  assert.equal(params.includeDefault, false);
   assert.equal(params.defaultPercent, 100);
+});
+
+test("does not let schema defaults override generated values unless enabled", () => {
+  const generated = generateValue("age", "bigint", "sequence", 4, { startValue: 1, increment: 1 }, "0");
+  const explicitDefault = generateValue("age", "bigint", "sequence", 4, { includeDefault: true, defaultPercent: 100 }, "0");
+
+  assert.equal(generated, 5);
+  assert.equal(explicitDefault, 0);
 });
 
 test("uses string column defaults instead of random generated values", () => {

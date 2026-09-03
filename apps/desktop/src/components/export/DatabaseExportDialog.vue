@@ -305,6 +305,8 @@ async function startExport() {
       });
       if (!path) return;
       filePath = path;
+      const { dirname } = await import("@tauri-apps/api/path");
+      await api.recordDatabaseExportDestination(await dirname(path));
     } catch (e: any) {
       toast(e?.message || String(e), 5000);
       return;
@@ -415,6 +417,7 @@ async function startAllDatabasesExport() {
       });
       if (!path || Array.isArray(path)) return;
       directoryPath = path;
+      await api.recordDatabaseExportDestination(path);
     } catch (e: any) {
       toast(e?.message || String(e), 5000);
       return;

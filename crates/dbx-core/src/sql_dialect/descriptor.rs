@@ -68,7 +68,7 @@ impl DialectKind {
             // DuckDB
             "duckdb" => Some(DialectKind::DuckDb),
             // SQL Server family
-            "sqlserver" | "mssql" | "sql server" | "access" => Some(DialectKind::SqlServer),
+            "sqlserver" | "sql_server" | "mssql" | "sql server" | "access" => Some(DialectKind::SqlServer),
             // Oracle family
             "oracle" | "dameng" | "oceanbaseoracle" | "oceanbase" | "iris" | "yashandb" | "xugu" => {
                 Some(DialectKind::Oracle)
@@ -402,7 +402,6 @@ impl DialectCapabilityDescriptor {
                     | CAP_DROP_SEQUENCE
                     | CAP_ALTER_OWNER
                     | CAP_GRANT_REVOKE
-                    | CAP_IF_NOT_EXISTS
                     | CAP_TEMPORARY_TABLE
                     | CAP_TRANSACTIONAL_DDL
                     | CAP_IDENTITY_COLUMNS,
@@ -981,6 +980,11 @@ mod tests {
         for (db_type, expected) in test_cases {
             assert_eq!(DialectKind::from_database_type(db_type), expected, "Mismatch for {db_type:?}");
         }
+    }
+
+    #[test]
+    fn dialect_kind_accepts_serde_sql_server_label() {
+        assert_eq!(DialectKind::from_label("sql_server"), Some(DialectKind::SqlServer));
     }
 
     #[test]

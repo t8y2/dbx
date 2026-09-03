@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { AlertTriangle, Check, Copy, Loader2, TextWrap } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,11 @@ const suppressFuturePrompts = defineModel<boolean>("suppressFuturePrompts", { de
 const wrap = ref(true);
 const copied = ref(false);
 
+// The CodeMirror editor (if any) that was focused when this dialog opened, so
+// its internal selection can be restored without letting the browser move the caret.
+let editorRootToRestoreFocus: HTMLElement | null = null;
+let focusRestoreGeneration = 0;
+
 const props = withDefaults(
   defineProps<{
     sql?: string;
@@ -35,6 +40,8 @@ const props = withDefaults(
     closeOnConfirm?: boolean;
     cancelable?: boolean;
     cancelRunningLoading?: boolean;
+    /** Holds the confirm button back until the caller's own precondition is met (e.g. the operator typed the target name). */
+    confirmDisabled?: boolean;
   }>(),
   {
     sql: "",
@@ -49,6 +56,7 @@ const props = withDefaults(
     closeOnConfirm: true,
     cancelable: false,
     cancelRunningLoading: false,
+    confirmDisabled: false,
   },
 );
 
@@ -70,8 +78,49 @@ const dialogOpen = computed({
   },
 });
 
+watch(
+  () => open.value,
+  (isOpen) => {
+    if (!isOpen) return;
+    focusRestoreGeneration += 1;
+    // Keep the original editor while a prior close animation is still pending.
+    if (editorRootToRestoreFocus) return;
+    const active = document.activeElement;
+    editorRootToRestoreFocus = active instanceof HTMLElement ? active.closest(".cm-editor") : null;
+  },
+  { immediate: true },
+);
+
+/**
+ * Restores focus through CodeMirror's own `EditorView.focus()` instead of the browser default.
+ *
+ * Reka UI's default close-auto-focus calls plain DOM `.focus()` on the element that was active
+ * before the dialog opened. In WebKit, refocusing a CodeMirror contenteditable this way can reset
+ * its caret to the start of the document, which makes the editor scroll to the top (#7692).
+ * `EditorView.focus()` restores CodeMirror's internal selection without creating that false change.
+ */
+function onDangerDialogCloseAutoFocus(event: Event) {
+  const target = editorRootToRestoreFocus;
+  if (!target || !target.isConnected) {
+    editorRootToRestoreFocus = null;
+    return;
+  }
+  event.preventDefault();
+  // An interrupted close may emit after the dialog has reopened. Suppress the stale native
+  // restoration, but retain the editor for the next completed close.
+  if (dialogOpen.value) return;
+  const generation = focusRestoreGeneration;
+  void import("@codemirror/view").then(({ EditorView }) => {
+    if (dialogOpen.value || generation !== focusRestoreGeneration || editorRootToRestoreFocus !== target) return;
+    editorRootToRestoreFocus = null;
+    EditorView.findFromDOM(target)?.focus();
+  });
+}
+
 function onConfirm() {
-  if (props.loading) return;
+  // Guard here as well as on the button: a disabled button still fires on some
+  // synthetic/keyboard paths, and this one gates a destructive operation.
+  if (props.loading || props.confirmDisabled) return;
   if (props.closeOnConfirm) open.value = false;
   emit("confirm");
 }
@@ -87,7 +136,7 @@ async function copyFullCode() {
 
 <template>
   <Dialog v-model:open="dialogOpen">
-    <DialogContent class="sm:max-w-[480px]">
+    <DialogContent class="sm:max-w-[480px]" @close-auto-focus="onDangerDialogCloseAutoFocus">
       <DialogHeader>
         <DialogTitle class="flex items-center gap-2 text-destructive">
           <AlertTriangle class="h-5 w-5" />
@@ -129,7 +178,7 @@ async function copyFullCode() {
           {{ t("dangerDialog.cancelRunning") }}
         </Button>
         <Button v-else variant="outline" :disabled="loading" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button variant="destructive" class="gap-1.5" :disabled="loading" @click="onConfirm">
+        <Button variant="destructive" class="gap-1.5" :disabled="loading || confirmDisabled" @click="onConfirm">
           <Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />
           {{ confirmLabel || t("dangerDialog.confirm") }}
         </Button>

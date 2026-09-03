@@ -90,14 +90,26 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return unchecked(() -> {
             loadDriver(params);
             try (Connection conn = openTestConnection(params)) {
-                boolean valid = conn != null && conn.isValid(5);
+                String validationQuery = connectionValidationQuery();
+                boolean valid = isConnectionValid(conn, 5);
                 Map<String, Object> result = new LinkedHashMap<>();
                 result.put("ok", valid);
+                result.put(
+                    "validation",
+                    validationQuery == null || validationQuery.isBlank() ? "jdbc_connection_isValid" : validationQuery
+                );
                 if (valid) {
                     Map<String, String> databaseInfo = JdbcDatabaseInfo.from(conn);
                     if (!databaseInfo.isEmpty()) {
                         result.put("databaseInfo", databaseInfo);
                     }
+                } else {
+                    result.put(
+                        "error",
+                        "Connection opened, but validation failed (method: "
+                            + (validationQuery == null || validationQuery.isBlank() ? "Connection.isValid" : validationQuery)
+                            + ")"
+                    );
                 }
                 return result;
             }
@@ -184,7 +196,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             options.getMaxRows(),
             options.getFetchSize(),
             options.getTimeoutSecs(),
-            resultValueReader()
+            resultValueReader(),
+            JdbcExecutor.StatementMessageReader.NONE,
+            advancePastUpdateCounts()
         );
     }
 
@@ -199,7 +213,8 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
             this::setSchemaSQL,
             this::resetSchemaSQL,
             options,
-            resultValueReader()
+            resultValueReader(),
+            advancePastUpdateCounts()
         );
     }
 
@@ -273,6 +288,31 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
 
     public boolean supportsConnectionPooling() {
         return true;
+    }
+
+    final boolean isConnectionValid(Connection connection, int timeoutSecs) {
+        if (connection == null) {
+            return false;
+        }
+        try {
+            if (connection.isClosed()) {
+                return false;
+            }
+            String validationQuery = connectionValidationQuery();
+            if (validationQuery == null || validationQuery.isBlank()) {
+                return connection.isValid(timeoutSecs);
+            }
+            try (Statement statement = connection.createStatement()) {
+                try {
+                    statement.setQueryTimeout(timeoutSecs);
+                } catch (Exception | AbstractMethodError ignored) {
+                }
+                statement.execute(validationQuery);
+                return true;
+            }
+        } catch (Exception | AbstractMethodError ignored) {
+            return false;
+        }
     }
 
     final synchronized boolean usesConnectionPool() {
@@ -485,7 +525,15 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
     protected void afterDisconnect() throws Exception {
     }
 
+    protected String connectionValidationQuery() {
+        return null;
+    }
+
     protected void beforeQueryExecution(Connection connection, int timeoutSecs) throws Exception {
+    }
+
+    protected boolean advancePastUpdateCounts() {
+        return false;
     }
 
     protected void beforePooledConnectionReturn(Connection connection) throws Exception {
@@ -586,6 +634,7 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return registry.borrow(
             identity,
             JdbcSessionRole.from(params.getSessionRole()),
+            connectionValidationQuery(),
             () -> openInitializedConnection(params)
         );
     }

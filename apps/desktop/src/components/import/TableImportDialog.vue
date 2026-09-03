@@ -7,9 +7,11 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent } 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { ensureReadOnlyWriteAccess } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import {
@@ -27,7 +29,7 @@ import {
   type TableImportWizardStep,
 } from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
-import { tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
@@ -63,6 +65,9 @@ interface BatchImportTask {
 
 const SKIP_VALUE = "__skip__";
 const targetColumns = ref<ColumnInfo[]>([]);
+const loadedTargetTableName = ref("");
+const existingTableNames = ref<string[]>([]);
+const selectedExistingTable = ref(props.prefillTable || "");
 const targetMode = ref<ImportTargetMode>(props.prefillTable ? "existing" : "create");
 const newTableName = ref("");
 const selectedSource = ref<string | File | null>(null);
@@ -74,6 +79,7 @@ const columnMapping = ref<Record<string, string>>({});
 const columnDataTypes = ref<Record<string, string>>({});
 const dynamicDataTypeOptions = ref<string[]>([]);
 const loadingDataTypeOptions = ref(false);
+const loadingExistingTables = ref(false);
 const loadingTarget = ref(false);
 const loadingPreview = ref(false);
 const importMode = ref<api.TableImportMode>("append");
@@ -100,6 +106,8 @@ let previewReloadTimer: ReturnType<typeof setTimeout> | null = null;
 let importElapsedTimer: ReturnType<typeof setInterval> | null = null;
 let importStartedAt = 0;
 let dataTypeOptionsRequestId = 0;
+let existingTablesRequestId = 0;
+let targetColumnsRequestId = 0;
 let previewRequestId = 0;
 let batchEncodingRequestId = 0;
 
@@ -109,6 +117,7 @@ const formatOptions: Array<{ value: api.TableImportSourceFormat; icon: any; labe
   { value: "delimited", icon: FileText, labelKey: "tableImport.formatDelimited", descriptionKey: "tableImport.formatDelimitedDescription" },
   { value: "json", icon: FileJson, labelKey: "tableImport.formatJson", descriptionKey: "tableImport.formatJsonDescription" },
   { value: "excel", icon: FileSpreadsheet, labelKey: "tableImport.formatExcel", descriptionKey: "tableImport.formatExcelDescription" },
+  { value: "sql", icon: FileCode, labelKey: "tableImport.formatSql", descriptionKey: "tableImport.formatSqlDescription" },
 ];
 
 const encodingOptions: Array<{ value: api.TableImportTextEncoding; labelKey: string }> = [
@@ -129,9 +138,11 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
+const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
-const hasExistingTarget = computed(() => !!props.prefillTable);
-const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : props.prefillTable || ""));
+const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
+const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : selectedExistingTable.value));
+const existingTargetMetadataReady = computed(() => targetMode.value !== "existing" || (!loadingTarget.value && !!selectedExistingTable.value && loadedTargetTableName.value === selectedExistingTable.value));
 const targetColumnNames = computed(() => targetColumns.value.map((column) => column.name));
 const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
   const currentPreview = preview.value;
@@ -157,7 +168,7 @@ const requiredUnmappedColumns = computed(() =>
 );
 const isBatchImport = computed(() => targetMode.value === "create" && batchTasks.value.length > 1);
 const canImport = computed(() => {
-  if (running.value || !props.prefillConnectionId) return false;
+  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
   if (new Set(tableNames).size !== tableNames.length) return false;
@@ -169,8 +180,8 @@ const canImport = computed(() => {
 const canGoBack = computed(() => wizardStep.value !== "source" && wizardStep.value !== "execution" && !running.value);
 const canGoNext = computed(() => {
   if (wizardStep.value === "source") return !!selectedSource.value && !!sourceFormat.value;
-  if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value;
-  if (wizardStep.value === "mapping") return mappingValidation.value.valid;
+  if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
+  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
 });
 const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
@@ -234,11 +245,16 @@ function resetState() {
   liveElapsedMs.value = 0;
   previewRequestId++;
   batchEncodingRequestId++;
+  existingTablesRequestId++;
+  targetColumnsRequestId++;
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
     previewReloadTimer = null;
   }
   targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  existingTableNames.value = [];
+  selectedExistingTable.value = props.prefillTable || "";
   targetMode.value = props.prefillTable ? "existing" : "create";
   newTableName.value = "";
   selectedSource.value = null;
@@ -261,6 +277,8 @@ function resetState() {
   importMode.value = "append";
   batchSize.value = 500;
   loadingPreview.value = false;
+  loadingExistingTables.value = false;
+  loadingTarget.value = false;
   running.value = false;
   cancelling.value = false;
   importId.value = "";
@@ -275,6 +293,7 @@ function detectFormat(name: string): api.TableImportSourceFormat {
   if (lower.endsWith(".txt")) return "delimited";
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".xls") || lower.endsWith(".xlsx") || lower.endsWith(".xlsm")) return "excel";
+  if (lower.endsWith(".sql")) return "sql";
   return "csv";
 }
 
@@ -317,12 +336,14 @@ function taskParseOptions(format: api.TableImportSourceFormat, sheetName = ""): 
     emptyStringAsNull: emptyStringAsNull.value,
     sheetName,
     jsonShape: jsonShape.value,
+    databaseType: structureDatabaseType.value,
   });
 }
 
 function importParseOptions(format: api.TableImportSourceFormat, currentPreview: api.TableImportPreview, sheetName = ""): api.TableImportParseOptions {
   const options = taskParseOptions(format, sheetName);
-  if (isDelimitedFormat(format) && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
+  // SQL 脚本与分隔文本一样依赖文本编码检测，导入时沿用预览阶段确定的编码避免二次检测结果不一致
+  if ((isDelimitedFormat(format) || format === "sql") && currentPreview.totalRowsExact !== false && options.encoding === "auto" && currentPreview.effectiveEncoding) {
     options.encoding = currentPreview.effectiveEncoding;
   }
   return options;
@@ -460,18 +481,58 @@ async function loadDataTypeOptions() {
   }
 }
 
+async function loadExistingTables() {
+  if (props.prefillTable || loadingExistingTables.value || existingTableNames.value.length || !props.prefillConnectionId || !props.prefillDatabase) return;
+  const requestId = ++existingTablesRequestId;
+  loadingExistingTables.value = true;
+  errorMessage.value = "";
+  try {
+    await store.ensureConnected(props.prefillConnectionId);
+    const tables = await api.listTables(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, undefined, undefined, undefined, ["TABLE"]);
+    if (requestId !== existingTablesRequestId) return;
+    existingTableNames.value = tables.map((table) => table.name);
+  } catch (e: any) {
+    if (requestId === existingTablesRequestId) {
+      existingTableNames.value = [];
+      errorMessage.value = String(e?.message || e);
+    }
+  } finally {
+    if (requestId === existingTablesRequestId) loadingExistingTables.value = false;
+  }
+}
+
 async function loadTargetColumns() {
-  if (targetMode.value !== "existing" || !props.prefillConnectionId || !props.prefillDatabase || !props.prefillTable) return;
+  const tableName = selectedExistingTable.value;
+  if (targetMode.value !== "existing" || !props.prefillConnectionId || !props.prefillDatabase || !tableName) {
+    targetColumnsRequestId++;
+    targetColumns.value = [];
+    loadedTargetTableName.value = "";
+    columnMapping.value = {};
+    loadingTarget.value = false;
+    return;
+  }
+  const requestId = ++targetColumnsRequestId;
+  targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  columnMapping.value = {};
   loadingTarget.value = true;
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    targetColumns.value = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, props.prefillSchema || props.prefillDatabase, props.prefillTable);
+    const columns = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName);
+    if (requestId !== targetColumnsRequestId) return;
+    targetColumns.value = columns;
+    loadedTargetTableName.value = tableName;
     applyAutoMapping();
   } catch (e: any) {
-    errorMessage.value = String(e?.message || e);
+    if (requestId === targetColumnsRequestId) {
+      targetColumns.value = [];
+      loadedTargetTableName.value = "";
+      columnMapping.value = {};
+      errorMessage.value = String(e?.message || e);
+    }
   } finally {
-    loadingTarget.value = false;
+    if (requestId === targetColumnsRequestId) loadingTarget.value = false;
   }
 }
 
@@ -615,10 +676,11 @@ async function selectFile() {
   const selected = await open({
     multiple: targetMode.value === "create",
     filters: [
-      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls"] },
+      { name: "Data files", extensions: ["csv", "tsv", "txt", "json", "xlsx", "xlsm", "xls", "sql"] },
       { name: "Text", extensions: ["csv", "tsv", "txt"] },
       { name: "JSON", extensions: ["json"] },
       { name: "Excel", extensions: ["xlsx", "xlsm", "xls"] },
+      { name: "SQL", extensions: ["sql"] },
     ],
   });
   if (!selected) return;
@@ -665,8 +727,8 @@ function canOpenStep(step: TableImportWizardStep) {
   if (running.value || step === "execution") return false;
   if (step === "source") return true;
   if (step === "options") return !!selectedSource.value;
-  if (step === "mapping") return !!preview.value;
-  if (step === "review") return !!preview.value && mappingValidation.value.valid;
+  if (step === "mapping") return !!preview.value && existingTargetMetadataReady.value;
+  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
 }
 
@@ -708,6 +770,9 @@ async function goNext() {
 
 async function startImport() {
   saveActiveBatchTask();
+  if (!(await ensureReadOnlyWriteAccess({ connection: store.getConfig(props.prefillConnectionId ?? ""), source: t("readOnlyUnlock.sourceImport"), treatAsMutation: true }))) {
+    return;
+  }
   if (isBatchImport.value) {
     await startBatchImport();
     return;
@@ -740,7 +805,7 @@ async function startImport() {
         importId: importId.value,
         connectionId: props.prefillConnectionId,
         database: props.prefillDatabase || "",
-        schema: props.prefillSchema || "",
+        schema: targetSchema.value,
         table: tableName,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
@@ -826,7 +891,7 @@ async function startBatchImport() {
           importId: importId.value,
           connectionId: props.prefillConnectionId,
           database: props.prefillDatabase || "",
-          schema: props.prefillSchema || "",
+          schema: targetSchema.value,
           table: task.tableName,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
@@ -939,7 +1004,8 @@ async function reloadBatchPreviewsForEncoding() {
   errorMessage.value = "";
   try {
     for (const task of batchTasks.value) {
-      if (!isDelimitedFormat(task.format)) continue;
+      // SQL 脚本同样是文本源，编码变化时需要重新预览
+      if (!isDelimitedFormat(task.format) && task.format !== "sql") continue;
       const reusableSource = task.preview.sourceRef ? task.preview.filePath : task.source;
       const nextPreview = await api.previewTableImportFile(reusableSource, {
         sourceRef: task.preview.sourceRef || null,
@@ -982,6 +1048,7 @@ watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
+  if (step === "options") void loadExistingTables();
 });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
@@ -989,12 +1056,18 @@ watch(targetMode, (mode) => {
     dynamicDataTypeOptions.value = [];
     void loadTargetColumns();
   } else {
+    targetColumnsRequestId++;
     targetColumns.value = [];
+    loadedTargetTableName.value = "";
+    loadingTarget.value = false;
     importMode.value = "append";
     applyAutoMapping();
     applySuggestedColumnDataTypes();
     void loadDataTypeOptions();
   }
+});
+watch(selectedExistingTable, () => {
+  if (targetMode.value === "existing") void loadTargetColumns();
 });
 
 watch(rawProgressPercent, (percent) => {
@@ -1018,7 +1091,7 @@ watch(rawProgressPercent, (percent) => {
 
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto py-2 pr-1">
         <div class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
-          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
+          <input ref="fileInput" type="file" accept=".csv,.tsv,.txt,.json,.xlsx,.xlsm,.xls,.sql" :multiple="targetMode === 'create'" class="hidden" @change="handleFileInputChange" />
           <div class="flex h-10 min-w-0 items-center gap-2 rounded-md border bg-muted/20 px-3">
             <span class="shrink-0 text-xs text-muted-foreground">{{ t("tableImport.target") }}</span>
             <span class="min-w-0 truncate text-sm font-medium">
@@ -1092,7 +1165,7 @@ watch(rawProgressPercent, (percent) => {
               {{ t("tableImport.selectFile") }}
             </Button>
           </div>
-          <div class="grid grid-cols-5 gap-2">
+          <div class="grid grid-cols-6 gap-2">
             <button v-for="format in formatOptions" :key="format.value" type="button" class="min-h-20 rounded-md border px-3 py-2 text-left" :class="sourceFormat === format.value ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="sourceFormat = format.value">
               <component :is="format.icon" class="mb-2 h-4 w-4 text-muted-foreground" />
               <div class="text-xs font-medium">{{ t(format.labelKey) }}</div>
@@ -1134,7 +1207,7 @@ watch(rawProgressPercent, (percent) => {
               <div class="grid grid-cols-2 gap-2">
                 <button type="button" class="rounded-md border px-3 py-2 text-left text-xs" :class="targetMode === 'existing' ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" :disabled="!hasExistingTarget" @click="targetMode = 'existing'">
                   <div class="font-medium">{{ t("tableImport.existingTable") }}</div>
-                  <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ props.prefillTable || t("tableImport.noExistingTarget") }}</div>
+                  <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ selectedExistingTable || t("tableImport.noExistingTarget") }}</div>
                 </button>
                 <button type="button" class="rounded-md border px-3 py-2 text-left text-xs" :class="targetMode === 'create' ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="targetMode = 'create'">
                   <div class="font-medium">{{ t("tableImport.createTable") }}</div>
@@ -1145,9 +1218,22 @@ watch(rawProgressPercent, (percent) => {
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetTableName") }}</Label>
               <Input v-if="targetMode === 'create'" v-model="newTableName" class="h-8 text-xs font-mono" />
-              <div v-else class="flex h-8 items-center rounded-md border px-2 text-xs">
+              <div v-else-if="props.prefillTable" class="flex h-8 items-center rounded-md border px-2 text-xs">
                 <span class="truncate">{{ props.prefillTable }}</span>
               </div>
+              <SearchableSelect
+                v-else
+                :model-value="selectedExistingTable"
+                :options="existingTableNames"
+                :placeholder="t('tableImport.noExistingTarget')"
+                :search-placeholder="t('tableImport.searchExistingTables')"
+                :empty-text="t('tableImport.noTables')"
+                :loading-text="t('tableImport.loadingTables')"
+                :loading="loadingExistingTables"
+                :disabled="loadingExistingTables || !existingTableNames.length"
+                trigger-class="h-8 font-mono text-xs"
+                @update:model-value="(value) => (selectedExistingTable = value)"
+              />
             </div>
           </div>
 
@@ -1192,6 +1278,25 @@ watch(rawProgressPercent, (percent) => {
               <input v-model="emptyStringAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" />
               {{ t("tableImport.emptyStringAsNull") }}
             </label>
+          </div>
+
+          <div v-else-if="sourceFormat === 'sql'" class="grid grid-cols-5 gap-3 rounded-md border p-3">
+            <div class="space-y-1.5">
+              <Label class="text-xs">{{ t("tableImport.encoding") }}</Label>
+              <Select :model-value="textEncoding" @update:model-value="(value: any) => (textEncoding = value)">
+                <SelectTrigger class="h-8 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem v-for="option in encodingOptions" :key="option.value" :value="option.value">
+                    {{ t(option.labelKey) }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <div v-if="textEncoding === 'auto' && preview?.effectiveEncoding" class="truncate text-[11px] text-muted-foreground" :title="t('tableImport.encodingDetected', { encoding: encodingLabel(preview.effectiveEncoding) })">
+                {{ t("tableImport.encodingDetected", { encoding: encodingLabel(preview.effectiveEncoding) }) }}
+              </div>
+            </div>
           </div>
 
           <div v-else-if="sourceFormat === 'json'" class="grid grid-cols-2 gap-3 rounded-md border p-3">

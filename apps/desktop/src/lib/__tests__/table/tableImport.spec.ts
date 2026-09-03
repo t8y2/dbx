@@ -115,6 +115,26 @@ describe("tableImport", () => {
     expect(buildTableImportParseOptions({ ...baseSettings, format: "csv", sheetName: "Second" }).sheetName).toBeNull();
   });
 
+  it("passes the text encoding for SQL script sources like delimited text", () => {
+    const settings = {
+      delimiter: ",",
+      textEncoding: "gbk" as const,
+      titleRow: 1,
+      dataStartRow: 2,
+      lastDataRow: 0,
+      trimValues: false,
+      emptyStringAsNull: true,
+      jsonShape: "auto" as const,
+      databaseType: "mysql" as const,
+    };
+
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "sql" }).sqlDialect).toBe("mysql");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).encoding).toBe("gbk");
+    expect(buildTableImportParseOptions({ ...settings, format: "delimited" }).sqlDialect).toBeNull();
+    expect(buildTableImportParseOptions({ ...settings, format: "excel" }).encoding).toBeNull();
+  });
+
   it("suggests create-table data types from preview rows", () => {
     expect(
       suggestImportTargetDataTypes(

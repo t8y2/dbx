@@ -88,6 +88,7 @@ type metadataListConstraints struct {
 type columnInfo struct {
 	Name                   string  `json:"name"`
 	DataType               string  `json:"data_type"`
+	ResolvedSchema         *string `json:"resolved_schema,omitempty"`
 	FullDataType           string  `json:"-"`
 	IsNullable             bool    `json:"is_nullable"`
 	ColumnDefault          *string `json:"column_default"`
@@ -127,6 +128,23 @@ type foreignKeyInfo struct {
 	Column    string `json:"column"`
 	RefTable  string `json:"ref_table"`
 	RefColumn string `json:"ref_column"`
+}
+
+type constraintInfo struct {
+	Name              string   `json:"name"`
+	ConstraintType    string   `json:"constraint_type"`
+	Definition        string   `json:"definition"`
+	Columns           []string `json:"columns"`
+	RefSchema         *string  `json:"ref_schema,omitempty"`
+	RefTable          *string  `json:"ref_table,omitempty"`
+	RefColumns        []string `json:"ref_columns"`
+	MatchType         *string  `json:"match_type,omitempty"`
+	OnUpdate          *string  `json:"on_update,omitempty"`
+	OnDelete          *string  `json:"on_delete,omitempty"`
+	Deferrable        bool     `json:"deferrable"`
+	InitiallyDeferred bool     `json:"initially_deferred"`
+	Enabled           bool     `json:"enabled"`
+	Valid             bool     `json:"valid"`
 }
 
 type triggerInfo struct {
@@ -204,10 +222,7 @@ func (s *server) identifierQuote() string {
 // schema/table names containing hyphens or other special characters render as
 // valid SQL instead of being parsed as operators or bare tokens.
 func (s *server) quoteDDLIdentifier(value string) string {
-	if s.mode.mysqlCompat {
-		return "`" + strings.ReplaceAll(value, "`", "``") + "`"
-	}
-	return quoteIdentifier(value)
+	return s.quoteIdentifier(value)
 }
 
 func (s *server) connectionInfo() (map[string]any, error) {
@@ -1279,43 +1294,66 @@ func completionNameMatches(name string, request completionAssistantRequest) bool
 }
 
 func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
-	effective, err := s.effectiveSchema(schema)
-	if err != nil {
-		return nil, err
-	}
-	primary, _ := s.primaryKeys(effective, table)
 	if s.mode.mysqlCompat {
+		effective, err := s.effectiveSchema(schema)
+		if err != nil {
+			return nil, err
+		}
+		primary, _ := s.primaryKeys(effective, table)
 		return s.informationSchemaColumns(effective, table, primary)
 	}
 	catalog, prefix := "sys_catalog", "sys"
 	if s.mode.postgresCatalog {
 		catalog, prefix = "pg_catalog", "pg"
-		return s.queryCatalogColumns(effective, table, primary, catalog, prefix, "pg_get_expr")
+		result, err := s.queryCatalogColumns(schema, table, catalog, prefix, "pg_get_expr")
+		return s.finishCatalogColumns(schema, table, result, err)
 	}
 	expression := "sys_get_expr"
 	if s.usePgDefaultExpression {
 		expression = "pg_get_expr"
 	}
-	result, err := s.queryCatalogColumns(effective, table, primary, catalog, prefix, expression)
+	result, err := s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	if err != nil && expression == "sys_get_expr" && isUndefinedFunction(err, expression) {
 		// Some V8R6 PostgreSQL-mode databases keep sys_catalog while adbin is
 		// pg_node_tree. Cache the compatible function after the exact failure.
 		s.usePgDefaultExpression = true
-		return s.queryCatalogColumns(effective, table, primary, catalog, prefix, "pg_get_expr")
+		result, err = s.queryCatalogColumns(schema, table, catalog, prefix, "pg_get_expr")
 	}
-	return result, err
+	return s.finishCatalogColumns(schema, table, result, err)
+}
+
+func (s *server) finishCatalogColumns(schema, table string, result []columnInfo, err error) ([]columnInfo, error) {
+	if err != nil || len(result) == 0 {
+		return result, err
+	}
+	resolvedSchema := strings.TrimSpace(schema)
+	if result[0].ResolvedSchema != nil {
+		resolvedSchema = *result[0].ResolvedSchema
+	}
+	primary, _ := s.primaryKeys(resolvedSchema, table)
+	for index := range result {
+		result[index].IsPrimaryKey = primary[strings.ToLower(result[index].Name)]
+	}
+	if s.mode.sqlServerIdentity {
+		s.applyIdentityMetadata(resolvedSchema, table, result)
+	}
+	return result, nil
 }
 
 func (s *server) queryCatalogColumns(
 	schema, table string,
-	primary map[string]bool,
 	catalog, prefix, expression string,
 ) ([]columnInfo, error) {
 	identityExpression := "a.attidentity"
 	if s.catalogIdentityUnsupported {
 		identityExpression = "CAST(NULL AS varchar(1)) AS attidentity"
 	}
-	query := fmt.Sprintf(`SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
+	relationPredicate := fmt.Sprintf("n.nspname = %s AND c.relname = %s", quoteLiteral(schema), quoteLiteral(table))
+	if strings.TrimSpace(schema) == "" {
+		visibilityFunction := kingbaseCatalogFunction(catalog, "sys_table_is_visible", "pg_table_is_visible")
+		relationPredicate = fmt.Sprintf("c.relname = %s AND %s(c.oid)", quoteLiteral(table), visibilityFunction)
+	}
+	query := fmt.Sprintf(`SELECT n.nspname, a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
 	%s(ad.adbin, ad.adrelid), col_description(a.attrelid, a.attnum),
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN ((a.atttypmod - 4) >> 16) & 65535 END,
 	CASE WHEN t.typname = 'numeric' AND a.atttypmod > 0 THEN (a.atttypmod - 4) & 65535 END,
@@ -1324,11 +1362,11 @@ func (s *server) queryCatalogColumns(
 	FROM %s.%s_attribute a JOIN %s.%s_type t ON t.oid = a.atttypid
 	JOIN %s.%s_class c ON c.oid = a.attrelid JOIN %s.%s_namespace n ON n.oid = c.relnamespace
 	LEFT JOIN %s.%s_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
-WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+WHERE %s AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum`, expression, identityExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, relationPredicate)
 	rows, err := s.metadataQuery(query)
 	if err != nil && !s.catalogIdentityUnsupported && isUndefinedColumn(err, "attidentity") {
 		s.catalogIdentityUnsupported = true
-		return s.queryCatalogColumns(schema, table, primary, catalog, prefix, expression)
+		return s.queryCatalogColumns(schema, table, catalog, prefix, expression)
 	}
 	if err != nil {
 		return nil, err
@@ -1336,20 +1374,17 @@ WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped 
 	defer rows.Close()
 	result := []columnInfo{}
 	for rows.Next() {
-		var name, dataType string
+		var resolvedSchema, name, dataType string
 		var nullable bool
 		var defaultValue, comment, identity sql.NullString
 		var precision, scale, length sql.NullInt64
-		if err := rows.Scan(&name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
+		if err := rows.Scan(&resolvedSchema, &name, &dataType, &nullable, &defaultValue, &comment, &precision, &scale, &length, &identity); err != nil {
 			return nil, err
 		}
-		result = append(result, columnInfo{Name: name, DataType: dataType, IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Extra: kingbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		result = append(result, columnInfo{Name: name, DataType: dataType, ResolvedSchema: stringPtr(resolvedSchema), IsNullable: nullable, ColumnDefault: nullStringPtr(defaultValue), Extra: kingbaseIdentityClause(identity.String), Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	if s.mode.sqlServerIdentity {
-		s.applyIdentityMetadata(schema, table, result)
 	}
 	return result, nil
 }
@@ -1432,10 +1467,14 @@ func (s *server) queryInformationSchemaColumns(schema, table string, primary map
 		if err := rows.Scan(&name, &dataType, &fullDataType, &nullable, &defaultValue, &comment, &precision, &scale, &length); err != nil {
 			return nil, err
 		}
-		if parsed := boundedVarcharLength(dataType); parsed != nil && !length.Valid {
-			length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
+		if !length.Valid || length.Int64 < 0 {
+			if parsed := boundedVarcharLength(dataType); parsed != nil {
+				length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
+			} else if parsed := boundedVarcharLength(fullDataType.String); parsed != nil {
+				length = sql.NullInt64{Int64: int64(*parsed), Valid: true}
+			}
 		}
-		result = append(result, columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
+		result = append(result, columnInfo{Name: name, DataType: resolvedInformationSchemaDataType(dataType, fullDataType.String), ResolvedSchema: stringPtr(schema), FullDataType: fullDataType.String, IsNullable: strings.EqualFold(nullable, "YES"), ColumnDefault: nullStringPtr(defaultValue), IsPrimaryKey: primary[strings.ToLower(name)], Comment: nullStringPtr(comment), NumericPrecision: nullIntPtr(precision), NumericScale: nullIntPtr(scale), CharacterMaximumLength: nullIntPtr(length)})
 	}
 	return result, rows.Err()
 }
@@ -1579,7 +1618,7 @@ func parseCatalogAttributeNumbers(raw any) ([]int, error) {
 	default:
 		value = fmt.Sprint(typed)
 	}
-	value = strings.TrimSpace(strings.Trim(value, "{}"))
+	value = strings.TrimSpace(strings.Trim(value, "{}[]"))
 	if value == "" {
 		return []int{}, nil
 	}
@@ -1738,6 +1777,248 @@ WHERE c.contype = 'f' AND n.nspname = %s AND t.relname = %s ORDER BY c.conname`,
 		}
 	}
 	return result, nil
+}
+
+func kingbaseConstraintFunctionName(catalog string) string {
+	if catalog == "pg_catalog" {
+		return "pg_get_constraintdef"
+	}
+	return "sys_get_constraintdef"
+}
+
+func kingbaseConstraintsQuery(catalog, prefix, schema, table string, definitionUnsupported, validatedUnsupported, statusUnsupported bool) string {
+	definitionExpression := fmt.Sprintf("COALESCE(%s(c.oid, true), '')", kingbaseCatalogFunction(catalog, "sys_get_constraintdef", "pg_get_constraintdef"))
+	validExpression := "COALESCE(CAST(c.convalidated AS text), 'T')"
+	statusExpression := "COALESCE(CAST(c.constatus AS text), 'E')"
+	if definitionUnsupported {
+		definitionExpression = "''"
+	}
+	if validatedUnsupported {
+		validExpression = "true"
+	}
+	if statusUnsupported {
+		statusExpression = "'E'"
+	}
+	return fmt.Sprintf(`SELECT COALESCE(c.conname, ''), c.contype::text, %s, c.conkey,
+	rn.nspname, rt.relname, c.confkey, c.confmatchtype::text, c.confupdtype::text, c.confdeltype::text,
+	c.condeferrable, c.condeferred, %s, %s
+FROM %s.%s_constraint c
+JOIN %s.%s_class t ON t.oid = c.conrelid
+JOIN %s.%s_namespace n ON n.oid = t.relnamespace
+LEFT JOIN %s.%s_class rt ON rt.oid = c.confrelid
+LEFT JOIN %s.%s_namespace rn ON rn.oid = rt.relnamespace
+WHERE n.nspname = %s AND t.relname = %s AND t.relkind IN ('r', 'p', 'f')
+ORDER BY COALESCE(c.conname, '')`, definitionExpression, validExpression, statusExpression, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, catalog, prefix, quoteLiteral(schema), quoteLiteral(table))
+}
+
+func (s *server) listConstraints(schema, table string) ([]constraintInfo, error) {
+	effective, err := s.effectiveSchema(schema)
+	if err != nil {
+		return nil, err
+	}
+	catalog, prefix := "sys_catalog", "sys"
+	if s.mode.postgresCatalog {
+		catalog, prefix = "pg_catalog", "pg"
+	}
+	definitionUnsupported := s.constraintDefinitionUnsupported
+	validatedUnsupported := s.mode.legacyV7 || s.constraintValidatedUnsupported
+	statusUnsupported := s.mode.legacyV7 || s.constraintStatusUnsupported
+	var rows *sql.Rows
+	for {
+		query := kingbaseConstraintsQuery(catalog, prefix, effective, table, definitionUnsupported, validatedUnsupported, statusUnsupported)
+		rows, err = s.metadataQuery(query)
+		if err == nil {
+			break
+		}
+		changed := false
+		if !definitionUnsupported && isUndefinedFunction(err, kingbaseConstraintFunctionName(catalog)) {
+			definitionUnsupported = true
+			s.constraintDefinitionUnsupported = true
+			changed = true
+		}
+		if !validatedUnsupported && isUndefinedColumn(err, "convalidated") {
+			validatedUnsupported = true
+			s.constraintValidatedUnsupported = true
+			changed = true
+		}
+		if !statusUnsupported && isUndefinedColumn(err, "constatus") {
+			statusUnsupported = true
+			s.constraintStatusUnsupported = true
+			changed = true
+		}
+		if !changed {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	type rawConstraint struct {
+		name, kind, definition        string
+		columns, refColumns           []int
+		refSchema, refTable           sql.NullString
+		matchType, onUpdate, onDelete sql.NullString
+		deferrable, initiallyDeferred bool
+		valid, enabled                bool
+	}
+	raw := []rawConstraint{}
+	for rows.Next() {
+		var item rawConstraint
+		var columnsRaw, refColumnsRaw, validRaw, statusRaw any
+		if err := rows.Scan(&item.name, &item.kind, &item.definition, &columnsRaw, &item.refSchema, &item.refTable, &refColumnsRaw, &item.matchType, &item.onUpdate, &item.onDelete, &item.deferrable, &item.initiallyDeferred, &validRaw, &statusRaw); err != nil {
+			return nil, err
+		}
+		item.valid = parseConstraintEnabled(validRaw)
+		item.enabled = parseConstraintEnabled(statusRaw)
+		item.columns, err = parseCatalogAttributeNumbers(columnsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint %s columns: %w", item.name, err)
+		}
+		item.refColumns, err = parseCatalogAttributeNumbers(refColumnsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse constraint %s referenced columns: %w", item.name, err)
+		}
+		raw = append(raw, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	attributes, err := s.relationAttributesByNumber(catalog, prefix, effective, table)
+	if err != nil {
+		return nil, err
+	}
+	refAttributes := map[string]map[int]string{}
+	result := make([]constraintInfo, 0, len(raw))
+	for _, item := range raw {
+		constraint := constraintInfo{
+			Name: item.name, ConstraintType: kingbaseConstraintTypeName(item.kind), Definition: item.definition,
+			Columns: []string{}, RefColumns: []string{}, Deferrable: item.deferrable,
+			// FK details are retained for API completeness and future unified
+			// constraint/FK presentations. The current UI renders FK rows through
+			// list_foreign_keys, so these fields are not currently displayed in the
+			// Constraints tab.
+			InitiallyDeferred: item.initiallyDeferred, Enabled: item.enabled, Valid: item.valid,
+		}
+		for _, number := range item.columns {
+			if name := attributes[number]; name != "" {
+				constraint.Columns = append(constraint.Columns, name)
+			}
+		}
+		if item.refSchema.Valid {
+			constraint.RefSchema = stringPtr(item.refSchema.String)
+		}
+		if item.refTable.Valid {
+			constraint.RefTable = stringPtr(item.refTable.String)
+		}
+		if strings.EqualFold(strings.TrimSpace(item.kind), "f") && item.refSchema.Valid && item.refTable.Valid {
+			key := item.refSchema.String + "\x00" + item.refTable.String
+			ref := refAttributes[key]
+			if ref == nil {
+				ref, err = s.relationAttributesByNumber(catalog, prefix, item.refSchema.String, item.refTable.String)
+				if err != nil {
+					return nil, err
+				}
+				refAttributes[key] = ref
+			}
+			for _, number := range item.refColumns {
+				if name := ref[number]; name != "" {
+					constraint.RefColumns = append(constraint.RefColumns, name)
+				}
+			}
+			constraint.MatchType = kingbaseConstraintMatchType(item.matchType)
+			constraint.OnUpdate = kingbaseConstraintAction(item.onUpdate)
+			constraint.OnDelete = kingbaseConstraintAction(item.onDelete)
+		}
+		result = append(result, constraint)
+	}
+	return result, nil
+}
+
+func parseConstraintEnabled(raw any) bool {
+	if raw == nil {
+		return true
+	}
+	if enabled, ok := raw.(bool); ok {
+		return enabled
+	}
+	if bytes, ok := raw.([]byte); ok {
+		raw = string(bytes)
+	}
+
+	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(raw)))
+	if value == "" {
+		return true
+	}
+	switch value {
+	case "1", "t", "true", "y", "yes", "e", "enabled", "enable", "on":
+		return true
+	case "0", "f", "false", "d", "disabled", "disable", "off":
+		return false
+	default:
+		// Unknown catalog states should not make the whole metadata request fail.
+		return true
+	}
+}
+
+func kingbaseConstraintTypeName(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "p":
+		return "PRIMARY KEY"
+	case "f":
+		return "FOREIGN KEY"
+	case "u":
+		return "UNIQUE"
+	case "c":
+		return "CHECK"
+	case "t":
+		return "CONSTRAINT TRIGGER"
+	case "x":
+		return "EXCLUDE"
+	case "n":
+		return "NOT NULL"
+	default:
+		return strings.TrimSpace(value)
+	}
+}
+
+func kingbaseConstraintMatchType(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	var result string
+	switch strings.ToLower(strings.TrimSpace(value.String)) {
+	case "f":
+		result = "FULL"
+	case "p":
+		result = "PARTIAL"
+	case "s":
+		result = "SIMPLE"
+	default:
+		return nil
+	}
+	return &result
+}
+
+func kingbaseConstraintAction(value sql.NullString) *string {
+	if !value.Valid {
+		return nil
+	}
+	var result string
+	switch strings.ToLower(strings.TrimSpace(value.String)) {
+	case "a":
+		result = "NO ACTION"
+	case "r":
+		result = "RESTRICT"
+	case "c":
+		result = "CASCADE"
+	case "n":
+		result = "SET NULL"
+	case "d":
+		result = "SET DEFAULT"
+	default:
+		return nil
+	}
+	return &result
 }
 
 func (s *server) listTriggers(schema, table string) ([]triggerInfo, error) {
@@ -2294,12 +2575,15 @@ func decodeTriggerTiming(triggerType int) string {
 
 func boundedVarcharLength(dataType string) *int {
 	lower := strings.ToLower(strings.TrimSpace(dataType))
-	for _, prefix := range []string{"varchar", "character varying"} {
+	for _, prefix := range []string{"character varying", "varchar", "bpchar", "character", "char"} {
 		if strings.HasPrefix(lower, prefix) {
 			value := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(lower, prefix), ")"))
 			value = strings.TrimPrefix(value, "(")
-			if number, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && number >= 0 {
-				return &number
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				if number, err := strconv.Atoi(fields[0]); err == nil && number >= 0 {
+					return &number
+				}
 			}
 		}
 	}

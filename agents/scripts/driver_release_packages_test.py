@@ -30,6 +30,10 @@ class DriverReleasePackagesTest(unittest.TestCase):
             cassandra_source.write_bytes(b"\x7fELFtest-cassandra-agent")
             tdengine_source = release_dir / "dbx-agent-tdengine-windows-aarch64.exe"
             tdengine_source.write_bytes(b"MZtest-tdengine-agent")
+            etcd_source = release_dir / "dbx-agent-etcd-linux-x64"
+            etcd_source.write_bytes(b"\x7fELFtest-etcd-agent")
+            etcd2_source = release_dir / "dbx-agent-etcd2-macos-aarch64"
+            etcd2_source.write_bytes(b"test-etcd2-agent")
             java_source = release_dir / "dbx-agent-h2.jar"
             java_source.write_bytes(b"test-jar")
             versions = {
@@ -46,7 +50,11 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 "zookeeper": "0.1.0",
                 "cassandra": "0.1.37",
                 "hive": "0.1.43",
+                "argo": "0.1.0",
                 "tdengine": "0.1.0",
+                "etcd": "0.1.40",
+                "etcd2": "0.1.0",
+                "sqlite-worker": "0.1.0",
             }
 
             renamed = version_agent_artifacts(release_dir, versions)
@@ -58,6 +66,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
             versioned_rocketmq = release_dir / "dbx-agent-rocketmq-0.1.0-windows-x64.exe"
             versioned_cassandra = release_dir / "dbx-agent-cassandra-0.1.37-linux-x64"
             versioned_tdengine = release_dir / "dbx-agent-tdengine-0.1.0-windows-aarch64.exe"
+            versioned_etcd = release_dir / "dbx-agent-etcd-0.1.40-linux-x64"
+            versioned_etcd2 = release_dir / "dbx-agent-etcd2-0.1.0-macos-aarch64"
             self.assertEqual(
                 renamed,
                 [
@@ -69,6 +79,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
                     versioned_rabbitmq,
                     versioned_rocketmq,
                     versioned_tdengine,
+                    versioned_etcd,
+                    versioned_etcd2,
                 ],
             )
 
@@ -245,6 +257,8 @@ class DriverReleasePackagesTest(unittest.TestCase):
                 [
                     versioned_cassandra,
                     versioned_duckdb,
+                    versioned_etcd,
+                    versioned_etcd2,
                     versioned_java,
                     versioned_native,
                     versioned_rabbitmq,
@@ -314,6 +328,25 @@ class DriverReleasePackagesTest(unittest.TestCase):
             self.assertEqual(renamed, [versioned])
             self.assertFalse(source.exists())
             self.assertEqual(versioned.read_bytes(), b"\x7fELFtest-zookeeper-agent")
+
+    def test_versions_sqlite_worker_native_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_dir = Path(temp_dir)
+            x64 = release_dir / "dbx-agent-sqlite-worker-linux-x64"
+            arm = release_dir / "dbx-agent-sqlite-worker-linux-aarch64"
+            x64.write_bytes(b"\x7fELFtest-sqlite-worker-x64")
+            arm.write_bytes(b"\x7fELFtest-sqlite-worker-arm")
+            versions = {driver: "0.1.0" for driver in NATIVE_DRIVERS}
+
+            renamed = version_agent_artifacts(release_dir, versions)
+            versioned_x64 = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-x64"
+            versioned_arm = release_dir / "dbx-agent-sqlite-worker-0.1.0-linux-aarch64"
+
+            self.assertEqual(renamed, [versioned_arm, versioned_x64])
+            self.assertFalse(x64.exists())
+            self.assertFalse(arm.exists())
+            self.assertEqual(versioned_x64.read_bytes(), b"\x7fELFtest-sqlite-worker-x64")
+            self.assertEqual(versioned_arm.read_bytes(), b"\x7fELFtest-sqlite-worker-arm")
 
     def test_full_offline_bundle_includes_supported_windows_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

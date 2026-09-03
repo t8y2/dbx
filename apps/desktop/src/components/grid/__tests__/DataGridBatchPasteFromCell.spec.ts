@@ -7,6 +7,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { QueryResult } from "@/types/database";
+import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
+import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
@@ -57,7 +59,16 @@ function defaultResult(): QueryResult {
   };
 }
 
-function mountGrid(options: { result?: QueryResult; quickEntry?: boolean; hideNullColumns?: boolean; readonlyColumnIndexes?: number[] } = {}) {
+interface MountGridOptions {
+  result?: QueryResult;
+  quickEntry?: boolean;
+  hideNullColumns?: boolean;
+  readonlyColumnIndexes?: number[];
+  databaseType?: "dameng" | "mongodb";
+  customSaveHandler?: CustomSaveHandler;
+}
+
+function mountGrid(options: MountGridOptions = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -76,9 +87,10 @@ function mountGrid(options: { result?: QueryResult; quickEntry?: boolean; hideNu
             default: () =>
               h(DataGrid, {
                 result: gridResult,
-                databaseType: "dameng",
+                databaseType: options.databaseType ?? "dameng",
                 context: "table-data",
                 editable: true,
+                customSaveHandler: options.customSaveHandler,
                 readonlyColumnIndexes: options.readonlyColumnIndexes,
                 tableMeta: {
                   tableName: "paste_target",
@@ -180,6 +192,90 @@ afterEach(() => {
 });
 
 describe("DataGrid multi-row paste from a blank cell", () => {
+  it("expands beyond pre-added blank rows when pasted rows exceed them", async () => {
+    const { host } = mountGrid();
+    await settle();
+    for (let index = 0; index < 5; index++) await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    expect(blankRows).toHaveLength(5);
+    await selectCell(visibleCells(blankRows[0]!)[0]!);
+    await selectCell(visibleCells(blankRows[4]!)[0]!, { shiftKey: true });
+    await paste(host, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(10);
+    expect(rows.map((row) => visibleCellTexts(row)[0])).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+    expect(visibleCellTexts(rows.at(-1)!)[0]).toBe("10");
+  });
+
+  it("reuses exactly enough pre-added blank rows without adding an extra row", async () => {
+    const { host } = mountGrid();
+    await settle();
+    for (let index = 0; index < 10; index++) await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    expect(blankRows).toHaveLength(10);
+    await selectCell(visibleCells(blankRows[0]!)[0]!);
+    await selectCell(visibleCells(blankRows[9]!)[0]!, { shiftKey: true });
+    await paste(host, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(10);
+    expect(rows.map((row) => visibleCellTexts(row)[0])).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+    expect(visibleCellTexts(rows.at(-1)!)[0]).toBe("10");
+  });
+
+  it("keeps extra pre-added blank rows when the clipboard has fewer rows", async () => {
+    const { host } = mountGrid();
+    await settle();
+    for (let index = 0; index < 10; index++) await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    await selectCell(visibleCells(blankRows[0]!)[0]!);
+    await selectCell(visibleCells(blankRows[9]!)[0]!, { shiftKey: true });
+    await paste(host, "1\n2\n3\n4\n5");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(10);
+    expect(visibleCellTexts(rows[0]!)[0]).toBe("1");
+    expect(visibleCellTexts(rows[4]!)[0]).toBe("5");
+    expect(visibleCellTexts(rows[5]!)[0]).toBe("NULL");
+    expect(visibleCellTexts(rows[9]!)[0]).toBe("NULL");
+  });
+
+  it("keeps single-cell auto expansion with pre-added blank rows", async () => {
+    const { host } = mountGrid();
+    await settle();
+    for (let index = 0; index < 5; index++) await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    await selectCell(visibleCells(blankRows[0]!)[0]!);
+    await paste(host, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(10);
+    expect(rows.map((row) => visibleCellTexts(row)[0])).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+    expect(visibleCellTexts(rows.at(-1)!)[0]).toBe("10");
+  });
+
+  it("preserves visible column mapping for a multi-row selection", async () => {
+    const { host } = mountGrid({ hideNullColumns: true });
+    await settle();
+    for (let index = 0; index < 5; index++) await addBlankRow(host);
+
+    const blankRows = pendingRows(host);
+    await selectCell(visibleCells(blankRows[0]!)[1]!);
+    await selectCell(visibleCells(blankRows[4]!)[1]!, { shiftKey: true });
+    const clipboardRows = Array.from({ length: 10 }, (_, index) => `value-${index + 1}\tnote-${index + 1}`).join("\n");
+    await paste(host, clipboardRows);
+
+    const rows = pendingRows(host);
+    expect(rows).toHaveLength(10);
+    expect(visibleCellTexts(rows[0]!)).toEqual(["NULL", "value-1", "note-1"]);
+    expect(visibleCellTexts(rows.at(-1)!)).toEqual(["NULL", "value-10", "note-10"]);
+  });
+
   it("starts at the selected visible column, skips hidden columns, and appends rows", async () => {
     const { host } = mountGrid({ hideNullColumns: true });
     await settle();
@@ -218,17 +314,18 @@ describe("DataGrid multi-row paste from a blank cell", () => {
   it("keeps row-number paste priority and starts from the first visible column", async () => {
     const { host } = mountGrid({ hideNullColumns: true });
     await settle();
-    await addBlankRow(host);
+    for (let index = 0; index < 5; index++) await addBlankRow(host);
 
-    const [blankRow] = pendingRows(host);
-    expect(blankRow).toBeDefined();
-    await selectRowNumber(blankRow!);
-    await paste(host, "10\t20\n30\t40");
+    const blankRows = pendingRows(host);
+    expect(blankRows).toHaveLength(5);
+    await selectRowNumber(blankRows[0]!);
+    const clipboardRows = Array.from({ length: 10 }, (_, index) => `${index + 10}\t${index + 20}`).join("\n");
+    await paste(host, clipboardRows);
 
     const rows = pendingRows(host);
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(10);
     expect(visibleCellTexts(rows[0]!)).toEqual(["10", "20", "NULL"]);
-    expect(visibleCellTexts(rows[1]!)).toEqual(["30", "40", "NULL"]);
+    expect(visibleCellTexts(rows.at(-1)!)).toEqual(["19", "29", "NULL"]);
   });
 
   it("keeps nonblank new rows on the ordinary bounded paste path", async () => {
@@ -246,6 +343,24 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     const rows = pendingRows(host);
     expect(rows).toHaveLength(1);
     expect(visibleCellTexts(rows[0]!)[2]).toBe("first");
+  });
+
+  it("does not expand a multi-row selection containing a nonblank new row", async () => {
+    const { host } = mountGrid();
+    await settle();
+    for (let index = 0; index < 5; index++) await addBlankRow(host);
+
+    let rows = pendingRows(host);
+    await selectCell(visibleCells(rows[0]!)[2]!);
+    await paste(host, "occupied");
+    rows = pendingRows(host);
+    await selectCell(visibleCells(rows[0]!)[2]!);
+    await selectCell(visibleCells(rows[4]!)[2]!, { shiftKey: true });
+    await paste(host, "1\n2\n3\n4\n5\n6\n7\n8\n9\n10");
+
+    rows = pendingRows(host);
+    expect(rows).toHaveLength(5);
+    expect(visibleCellTexts(rows.at(-1)!)[2]).toBe("5");
   });
 
   it("keeps existing rows on the ordinary bounded paste path", async () => {
@@ -314,6 +429,69 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     await paste(host, "");
 
     expect(pendingRows(host)).toHaveLength(1);
+  });
+
+  it("preserves an ordinary string when a Mongo column selection is pasted and saved", async () => {
+    const result: QueryResult = {
+      columns: ["_id", "status"],
+      rows: [
+        ["1", "pending"],
+        ["2", "queued"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const originals = [
+      { _id: "1", status: "pending" },
+      { _id: "2", status: "queued" },
+    ];
+    const updates: Array<Record<string, unknown>> = [];
+    const customSaveHandler: CustomSaveHandler = {
+      supportsInsert: false,
+      save: async ({ dirtyRows, columns }) => {
+        for (const [rowIndex, changes] of dirtyRows) {
+          updates.push(buildMongoUpdateDocument(changes, columns, originals[rowIndex]));
+        }
+      },
+    };
+    const { host } = mountGrid({ result, databaseType: "mongodb", customSaveHandler });
+    await settle();
+    await selectColumnHeader(host, 1);
+    await paste(host, "Y");
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "s" }));
+    await settle();
+
+    expect(updates).toEqual([{ $set: { status: "Y" } }, { $set: { status: "Y" } }]);
+  });
+
+  it("keeps JSON-looking plain text when a Mongo column paste reaches a missing field", async () => {
+    const result: QueryResult = {
+      columns: ["_id", "status"],
+      rows: [
+        ["1", null],
+        ["2", null],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const originals = [{ _id: "1" }, { _id: "2" }];
+    const updates: Array<Record<string, unknown>> = [];
+    const customSaveHandler: CustomSaveHandler = {
+      supportsInsert: false,
+      save: async ({ dirtyRows, columns }) => {
+        for (const [rowIndex, changes] of dirtyRows) {
+          updates.push(buildMongoUpdateDocument(changes, columns, originals[rowIndex]));
+        }
+      },
+    };
+    const { host } = mountGrid({ result, databaseType: "mongodb", customSaveHandler });
+    await settle();
+    await selectColumnHeader(host, 1);
+    await paste(host, "{plain text");
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "s" }));
+    await settle();
+
+    expect(updates).toEqual([{ $set: { status: "{plain text" } }, { $set: { status: "{plain text" } }]);
   });
 
   it("routes DOM and canvas cell gestures through the same selection preparation", () => {

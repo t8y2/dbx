@@ -179,6 +179,38 @@ describe("queryStore switchTab", () => {
     expect(tab.result.local_column_filters).toBeUndefined();
   });
 
+  it("keeps local filters isolated across result-run switches and clearing", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const queryStore = useQueryStore();
+    const tabId = queryStore.createTab("pg-1", "app", "Query", "query");
+    const tab = queryStore.tabs.find((item) => item.id === tabId)!;
+    const result = (filters?: Record<string, string[]>) => ({
+      columns: ["id", "status"],
+      rows: [[1, "active"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      local_column_filters: filters,
+    });
+    tab.resultRuns = [
+      { id: "run-a", title: "Run A", sequence: 1, sql: "select 1", createdAt: 1, result: result() },
+      { id: "run-b", title: "Run B", sequence: 2, sql: "select 2", createdAt: 2, result: result({ "1": ["str:pending"] }) },
+    ];
+
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    queryStore.updateDataGridLocalColumnFilters(tabId, { "1": ["str:active"] });
+    expect(tab.resultRuns?.[0]?.result?.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    expect(await queryStore.setActiveResultRun(tabId, "run-b")).toBe(true);
+    expect(tab.result?.local_column_filters).toEqual({ "1": ["str:pending"] });
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    expect(tab.result?.local_column_filters).toEqual({ "1": ["str:active"] });
+
+    queryStore.updateDataGridLocalColumnFilters(tabId, {});
+    expect(await queryStore.setActiveResultRun(tabId, "run-b")).toBe(true);
+    expect(await queryStore.setActiveResultRun(tabId, "run-a")).toBe(true);
+    expect(tab.result?.local_column_filters).toBeUndefined();
+  });
+
   it("stores hidden data-grid column keys on the tab result", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const queryStore = useQueryStore();
@@ -208,5 +240,34 @@ describe("queryStore switchTab", () => {
     expect(reopenedTabId).toBe(tabId);
     expect(queryStore.tabs.filter((tab) => tab.mode === "nacos-dashboard")).toHaveLength(1);
     expect(queryStore.activeTabId).toBe(tabId);
+  });
+
+  it("keeps the active Nacos configuration editor viewport on its matching tab", () => {
+    const queryStore = useQueryStore();
+    const tabId = queryStore.openNacosAdmin("nacos-1", { namespace: "team-a" });
+
+    queryStore.updateNacosConfigEditorViewport("nacos-1", "team-a", {
+      namespace: "team-a",
+      dataId: "application.yaml",
+      group: "DEFAULT_GROUP",
+      scrollTop: 82.6,
+      scrollLeft: -8,
+    });
+    queryStore.updateNacosConfigEditorViewport("nacos-1", "team-b", {
+      namespace: "team-b",
+      dataId: "ignored.yaml",
+      group: "DEFAULT_GROUP",
+      scrollTop: 12,
+      scrollLeft: 4,
+    });
+
+    const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    expect(tab?.nacosConfigEditorViewport).toEqual({
+      namespace: "team-a",
+      dataId: "application.yaml",
+      group: "DEFAULT_GROUP",
+      scrollTop: 83,
+      scrollLeft: 0,
+    });
   });
 });

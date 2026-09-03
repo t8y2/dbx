@@ -343,6 +343,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -458,11 +474,13 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          # npm CDN visibility after publish has been observed to lag past
+          # three minutes; the window must exceed that by a wide margin.
           wait_for_package() {
             package="$1"
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 60); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then return 0; fi
-              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/60)."
               sleep 10
             done
             return 1
@@ -561,6 +579,22 @@ jobs:
             echo "SCCACHE_S3_USE_SSL=true"
             echo "AWS_ACCESS_KEY_ID=${CACHE_ACCESS_KEY_ID}"
             echo "AWS_SECRET_ACCESS_KEY=${CACHE_SECRET_ACCESS_KEY}"
+            # Keep the server alive through the post-compile packaging tail so
+            # "Show sccache stats" reflects the real counters.
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            # Also cache the C/C++ compilation of -sys crates. All matrix legs
+            # are native builds, so plain CC/CXX select the target compiler;
+            # MSVC stays unwrapped. SCCACHE_PATH avoids depending on PATH.
+            case "${RUNNER_OS}" in
+              Linux)
+                echo "CC=${SCCACHE_PATH} cc"
+                echo "CXX=${SCCACHE_PATH} c++"
+                ;;
+              macOS)
+                echo "CC=${SCCACHE_PATH} clang"
+                echo "CXX=${SCCACHE_PATH} clang++"
+                ;;
+            esac
           } >> "$GITHUB_ENV"
 
       - name: Rust cache
@@ -685,11 +719,11 @@ jobs:
         run: |
           wait_for_package() {
             package="$1"
-            for attempt in $(seq 1 18); do
+            for attempt in $(seq 1 60); do
               if npm view "${package}@${VERSION}" version >/dev/null 2>&1; then
                 return 0
               fi
-              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/18)."
+              echo "Waiting for ${package}@${VERSION} to become visible on npm (${attempt}/60)."
               sleep 10
             done
             return 1

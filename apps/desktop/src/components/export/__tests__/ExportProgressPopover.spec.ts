@@ -145,6 +145,29 @@ describe("ExportProgressPopover task duration", () => {
     expect(document.body.textContent).toContain("Preparing: t_0001");
   });
 
+  it("keeps a cancelling backup visible as cancelling until its terminal event arrives", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addDatabaseExportTask("cancelling-backup", "Nightly", "/tmp/backups", "scheduled");
+    tracker.markDatabaseExportTaskCancelling(task.exportId);
+    tracker.updateDatabaseExportTask(task.exportId, {
+      exportId: task.exportId,
+      currentObject: "app.users",
+      objectIndex: 8,
+      totalObjects: 27,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      error: null,
+      preparing: false,
+    });
+
+    await mountPopover();
+
+    expect(tracker.tasks.value.find((item) => item.exportId === task.exportId)?.status).toBe("Cancelling");
+    expect(document.body.textContent).toContain("Cancelling…");
+    expect(document.body.querySelector<HTMLButtonElement>("button[disabled]")).not.toBeNull();
+  });
+
   it.each(["Done", "Error", "Cancelled"] as const)("hides stale database object text after the task reaches %s", async (status) => {
     const tracker = useExportTracker();
     const task = tracker.addDatabaseExportTask(`terminal-${status}`, "Nightly", "/tmp/backups", "scheduled");
@@ -257,6 +280,45 @@ describe("ExportProgressPopover task duration", () => {
 
     expect(document.body.textContent).toContain("1 additional failure detail(s) not shown");
     expect(document.body.textContent).not.toContain("failure 100");
+  });
+
+  it("keeps SQL-file statement failures inspectable after a successful continue-on-error run", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-failure-details", "migration.sql", "/tmp/migration.sql");
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "statementFailed",
+      statementIndex: 7,
+      successCount: 6,
+      failureCount: 1,
+      affectedRows: 6,
+      elapsedMs: 10,
+      statementSummary: "ALTER TABLE users ADD missing_type",
+      error: "type missing_type does not exist",
+    });
+    tracker.updateSqlFileTask(task.exportId, {
+      executionId: task.exportId,
+      status: "done",
+      statementIndex: 8,
+      successCount: 7,
+      failureCount: 1,
+      affectedRows: 7,
+      elapsedMs: 12,
+      statementSummary: "INSERT INTO users VALUES (1)",
+      error: null,
+    });
+
+    await mountPopover();
+
+    expect(document.body.textContent).toContain("7 succeeded, 1 failed");
+    const detailsButton = document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+    expect(detailsButton?.textContent).toContain("Failure details (1)");
+    detailsButton?.click();
+    await nextTick();
+
+    expect(document.body.textContent).toContain("#7");
+    expect(document.body.textContent).toContain("ALTER TABLE users ADD missing_type");
+    expect(document.body.textContent).toContain("type missing_type does not exist");
   });
 });
 

@@ -98,3 +98,70 @@ describe("QueryEditor context menu lifecycle", () => {
     container.remove();
   });
 });
+
+describe("QueryEditor batch column selection", () => {
+  it("keeps the confirmation action visible during pinyin filtering and supports keyboard toggling", () => {
+    const bypassFilterStart = source.indexOf("function completionItemsForBypassedFilter");
+    const bypassFilterEnd = source.indexOf("\n}\n\nfunction localCompletionDatabaseNames", bypassFilterStart);
+    const bypassFilterSource = source.slice(bypassFilterStart, bypassFilterEnd);
+
+    expect(bypassFilterStart).toBeGreaterThanOrEqual(0);
+    expect(bypassFilterEnd).toBeGreaterThan(bypassFilterStart);
+    expect(bypassFilterSource).toContain("if (isBatchColumnSelectionAction(item)) return true;");
+    expect(source).toContain('key: "Space"');
+    expect(source).toContain("run: toggleSelectedBatchColumnSelection");
+    expect(source).toContain("codeMirrorSelectedCompletion?.(view.state)");
+  });
+
+  it("applies checked columns directly through Enter and the completion Tab shortcut", () => {
+    const handleEnterStart = source.indexOf("function handleEnter");
+    const handleEnterEnd = source.indexOf("\n}\n\nfunction clearPendingCompletionEnter", handleEnterStart);
+    const tabStart = source.indexOf("function acceptCompletionOrNextSnippetField");
+    const tabEnd = source.indexOf("\n}\n\nfunction clearPendingCompletionTab", tabStart);
+
+    expect(source).toContain("function applySelectedBatchColumnSelection");
+    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;");
+    expect(source.slice(handleEnterStart, handleEnterEnd)).toContain("if (codeMirrorAcceptCompletion?.(view)) return true;");
+    expect(source.slice(tabStart, tabEnd)).toContain("if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;");
+    expect(source).toContain("defaultKeymap: false");
+    expect(source).toContain('{ key: "ArrowDown", run: (view) => moveCompletion(view, true) }');
+    expect(source).toContain('{ key: "ArrowUp", run: (view) => moveCompletion(view, false) }');
+  });
+
+  it("marks the insertion action so the completion menu can keep it sticky", () => {
+    expect(source).toContain("dbxBatchColumnSelectionAction: { sessionKey: item.sessionKey }");
+    expect(source).toContain('optionClass: (completion) => ((completion as QueryCompletionOption).dbxBatchColumnSelectionAction ? "cm-batch-column-selection-action" : "")');
+  });
+
+  it("updates the insertion count while a mouse selection is still in progress", () => {
+    const dragUpdateStart = source.indexOf("function updateBatchColumnSelectionAtPoint");
+    const dragUpdateEnd = source.indexOf("\n}\n\nconst BATCH_COLUMN_SELECTION_AUTO_SCROLL_EDGE_PX", dragUpdateStart);
+
+    expect(source).toContain("function updateBatchColumnSelectionActionLabel");
+    expect(source.slice(dragUpdateStart, dragUpdateEnd)).toContain("updateBatchColumnSelectionActionLabel(state.view, state.sessionKey);");
+    expect(source).toContain("const batchColumnSelectionTooltipParents = new WeakMap<EditorViewType, HTMLElement>();");
+    expect(source).toContain("batchColumnSelectionTooltipParents.set(view.value, tooltipParent);");
+    expect(source).toContain("const batchColumnSelectionActionMarkers = new WeakMap<HTMLElement, string>();");
+    expect(source).toContain("batchColumnSelectionActionMarkers.get(marker) !== sessionKey");
+    expect(source).toContain("renderBatchColumnSelectionActionMarker");
+  });
+
+  it("cancels stale scroll restoration before a new drag can begin", () => {
+    const refreshStart = source.indexOf("function scheduleBatchColumnSelectionRefresh");
+    const refreshEnd = source.indexOf("\n}\n\nfunction finishBatchColumnSelectionDrag", refreshStart);
+    const dragStart = source.indexOf("function startBatchColumnSelectionDrag");
+    const dragEnd = source.indexOf("\n}\n\nfunction renderBatchColumnSelectionCheckbox", dragStart);
+
+    expect(source).toContain("let batchColumnSelectionRefreshCleanup: (() => void) | null = null;");
+    expect(source.slice(refreshStart, refreshEnd)).toContain("cancelBatchColumnSelectionRefresh();");
+    expect(source.slice(dragStart, dragEnd)).toContain("cancelBatchColumnSelectionRefresh();");
+    expect(source).toContain("if (restoreStartTimer) window.clearTimeout(restoreStartTimer);");
+  });
+
+  it("only expands rendering for batch field selection", () => {
+    expect(source).toContain("function setBatchColumnSelectionExpandedRendering");
+    expect(source).toContain("setBatchColumnSelectionExpandedRendering(true);");
+    expect(source).toContain("setBatchColumnSelectionExpandedRendering(false);");
+    expect(source).toContain("maxRenderedOptions: batchColumnSelectionExpandedRendering ? Number.MAX_SAFE_INTEGER : 100,");
+  });
+});

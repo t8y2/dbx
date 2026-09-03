@@ -11,6 +11,7 @@ import { clampConsulPage, CONSUL_LIST_PAGE_SIZE, paginateConsulItems } from "@/l
 import { consulSessionRenewDelayMs, parseConsulDurationMs } from "@/lib/consul/sessionRenew";
 import { normalizeConsulSession } from "@/lib/consul/sessionModel";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useConsulStore } from "@/stores/consulStore";
 import { useI18n } from "vue-i18n";
 import type { ConsulResponseMetadata, ConsulSession, ConsulSessionKeysResponse, ConsulSessionServiceCheck } from "@/types/consul";
@@ -19,7 +20,7 @@ const props = defineProps<{ connectionId: string }>();
 const { t } = useI18n();
 const store = useConnectionStore();
 const consulStore = useConsulStore();
-const readOnly = computed(() => Boolean(store.getConfig(props.connectionId)?.read_only));
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(store.getConfig(props.connectionId)));
 function behaviorLabel(behavior: string) {
   if (behavior === "delete") return t("consul.ui.behaviorDelete");
   if (behavior === "release") return t("consul.ui.behaviorRelease");

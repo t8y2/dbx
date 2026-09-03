@@ -7,5 +7,6 @@ export function savedSqlImportTarget(sourceTarget: ExternalSqlFileTarget, folder
     connectionId: folder.connectionId,
     database: sourceTarget.connectionId === folder.connectionId ? sourceTarget.database : "",
     catalog: sourceTarget.connectionId === folder.connectionId ? sourceTarget.catalog : undefined,
+    schema: sourceTarget.connectionId === folder.connectionId ? sourceTarget.schema : undefined,
   };
 }

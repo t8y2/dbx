@@ -25,6 +25,37 @@ pub struct DatabaseStorageInfo {
     pub size_bytes: Option<i64>,
 }
 
+/// XuguDB storage metadata exposed by the read-only schema browser.
+///
+/// Xugu stores tablespaces and their data files inside the selected database,
+/// so these types intentionally remain driver-specific instead of widening
+/// the common database model used by other engines.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XuguDatafileInfo {
+    pub node_id: String,
+    pub space_id: i64,
+    pub path: String,
+    pub file_no: i64,
+    pub max_size: Option<i64>,
+    pub step_size: Option<i64>,
+    pub curr_size: Option<i64>,
+    pub reserved1: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct XuguTablespaceInfo {
+    pub node_id: String,
+    pub space_id: i64,
+    pub space_name: String,
+    pub datafile_num: i64,
+    pub space_type: String,
+    pub media_error: Option<String>,
+    pub total_chunk_num: Option<i64>,
+    pub free_chunk_num: Option<i64>,
+    #[serde(default)]
+    pub datafiles: Vec<XuguDatafileInfo>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaInfo {
     pub name: String,
@@ -127,6 +158,7 @@ pub enum ObjectSourceKind {
     Event,
     Sequence,
     Synonym,
+    Job,
     Package,
     PackageBody,
     Type,
@@ -202,14 +234,23 @@ impl CompletionAssistantObjectKind {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CompletionAssistantCandidateKind {
+    #[serde(alias = "DATABASE")]
     Database,
+    #[serde(alias = "SCHEMA")]
     Schema,
+    #[serde(alias = "TABLE")]
     Table,
+    #[serde(alias = "VIEW")]
     View,
+    #[serde(alias = "PROCEDURE")]
     Procedure,
+    #[serde(alias = "FUNCTION")]
     Function,
+    #[serde(alias = "COLUMN")]
     Column,
+    #[serde(alias = "SEQUENCE")]
     Sequence,
+    #[serde(alias = "OBJECT")]
     Object,
 }
 
@@ -661,7 +702,10 @@ pub struct CustomTypeDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectInfo, ObjectSourceKind, QueryMessage, SpatialColumn, SpatialColumnBuilder};
+    use super::{
+        CompletionAssistantCandidate, CompletionAssistantCandidateKind, ObjectInfo, ObjectSourceKind, QueryMessage,
+        SpatialColumn, SpatialColumnBuilder,
+    };
 
     #[test]
     fn query_message_format_line_uppercases_severity() {
@@ -805,5 +849,44 @@ mod tests {
 
         assert_eq!(kind, ObjectSourceKind::Synonym);
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"SYNONYM\"");
+    }
+
+    #[test]
+    fn object_source_kind_accepts_job_wire_value() {
+        let kind: ObjectSourceKind = serde_json::from_str("\"JOB\"").unwrap();
+
+        assert_eq!(kind, ObjectSourceKind::Job);
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"JOB\"");
+    }
+
+    #[test]
+    fn completion_candidate_kind_accepts_uppercase_agent_wire_values() {
+        for (wire_value, expected) in [
+            ("DATABASE", CompletionAssistantCandidateKind::Database),
+            ("SCHEMA", CompletionAssistantCandidateKind::Schema),
+            ("TABLE", CompletionAssistantCandidateKind::Table),
+            ("VIEW", CompletionAssistantCandidateKind::View),
+            ("PROCEDURE", CompletionAssistantCandidateKind::Procedure),
+            ("FUNCTION", CompletionAssistantCandidateKind::Function),
+            ("COLUMN", CompletionAssistantCandidateKind::Column),
+            ("SEQUENCE", CompletionAssistantCandidateKind::Sequence),
+            ("OBJECT", CompletionAssistantCandidateKind::Object),
+        ] {
+            let payload = serde_json::json!({
+                "name": "id",
+                "kind": wire_value,
+                "database": null,
+                "schema": "public",
+                "parent_schema": "public",
+                "parent_name": "users",
+                "comment": null,
+                "data_type": "integer",
+                "signature": null,
+            });
+            let candidate: CompletionAssistantCandidate = serde_json::from_value(payload).unwrap();
+
+            assert_eq!(candidate.kind, expected);
+            assert_eq!(serde_json::to_value(candidate.kind).unwrap(), wire_value.to_ascii_lowercase());
+        }
     }
 }

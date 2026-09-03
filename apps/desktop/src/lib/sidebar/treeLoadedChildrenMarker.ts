@@ -13,7 +13,7 @@ export function treeNodeLoadedChildrenContentPresent(node: TreeNode, sidebarObje
     // Grouped mode always materializes object-group placeholders; empty means a stale shell.
     return sidebarObjectDisplay === "simple";
   }
-  if (objectTypesForGroupNode(node.type) || TABLE_STRUCTURE_GROUP_TYPES.has(node.type) || node.type === "group-extensions") {
+  if (objectTypesForGroupNode(node.type) || TABLE_STRUCTURE_GROUP_TYPES.has(node.type) || node.type === "group-extensions" || node.type === "group-tablespaces" || node.type === "group-datafiles") {
     return true;
   }
   return childCount > 0;

@@ -119,6 +119,7 @@ struct SqlDialectProfile {
     keeps_sqlserver_module_batch_at_cursor: bool,
     preserves_tdsql_leading_directives: bool,
     requires_whitespace_after_line_comment_dashes: bool,
+    supports_psql_control_commands: bool,
 }
 
 impl Default for SqlDialectProfile {
@@ -136,6 +137,7 @@ impl Default for SqlDialectProfile {
             keeps_sqlserver_module_batch_at_cursor: false,
             preserves_tdsql_leading_directives: false,
             requires_whitespace_after_line_comment_dashes: false,
+            supports_psql_control_commands: false,
         }
     }
 }
@@ -187,7 +189,11 @@ impl SqlDialectProfile {
     }
 
     fn gaussdb() -> Self {
-        Self { supports_postgres_dollar_quoted_routines: true, ..Self::oracle_like() }
+        Self {
+            supports_postgres_dollar_quoted_routines: true,
+            supports_psql_control_commands: true,
+            ..Self::oracle_like()
+        }
     }
 
     fn sql_server() -> Self {
@@ -219,6 +225,11 @@ impl SqlDialectProfile {
                 | DatabaseType::Oscar
                 | DatabaseType::OceanbaseOracle
                 | DatabaseType::Xugu
+                // ArgoDB (Transwarp fork of Hive/Inceptor) ships a PL/SQL-compatible procedure
+                // language: `CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`. Treat it like
+                // Oracle for statement splitting so semicolons inside the procedure body are not
+                // misinterpreted as client-side statement terminators.
+                | DatabaseType::Argo
         )
     }
 }
@@ -320,7 +331,14 @@ pub struct SqlStatementSplitter {
     previous: Option<char>,
     pending_mysql_line_comment_dashes: bool,
     custom_delimiter: Option<String>,
+    stop_on_error: bool,
     options: SqlParsingOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SqlStatementWithControl {
+    pub sql: String,
+    pub stop_on_error: bool,
 }
 
 impl SqlStatementSplitter {
@@ -329,6 +347,10 @@ impl SqlStatementSplitter {
     }
 
     pub fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
+        self.push_chunk_with_control(chunk).into_iter().map(|statement| statement.sql).collect()
+    }
+
+    pub(crate) fn push_chunk_with_control(&mut self, chunk: &str) -> Vec<SqlStatementWithControl> {
         let mut statements = Vec::new();
         let chars = chunk.chars().collect::<Vec<_>>();
         let mut i = 0;
@@ -501,10 +523,24 @@ impl SqlStatementSplitter {
                     let buf_end = self.buffer.len() - 1;
                     let last_line_start = self.buffer[..buf_end].rfind('\n').map_or(0, |p| p + 1);
                     let last_line = self.buffer[last_line_start..buf_end].trim();
+                    if self.options.profile.supports_psql_control_commands {
+                        if let Some(command) = parse_ignorable_psql_control_command(last_line) {
+                            if command == PsqlControlCommand::OnErrorStop {
+                                self.stop_on_error = true;
+                            }
+                            self.buffer.truncate(last_line_start);
+                            self.previous = self.buffer.chars().next_back();
+                            i += 1;
+                            continue;
+                        }
+                    }
                     if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
                         let before = self.buffer[..last_line_start].trim();
                         if has_executable_sql_with_options(before, self.options) {
-                            statements.push(before.to_string());
+                            statements.push(SqlStatementWithControl {
+                                sql: before.to_string(),
+                                stop_on_error: self.stop_on_error,
+                            });
                         }
                         self.buffer.clear();
                         self.postgres_dollar_quoted_routine = false;
@@ -516,14 +552,21 @@ impl SqlStatementSplitter {
                         .options
                         .profile
                         .supports_custom_delimiter_commands
-                        .then(|| parse_delimiter_command(last_line))
+                        .then(|| {
+                            parse_delimiter_command(last_line).filter(|_| {
+                                !has_executable_sql_with_options(&self.buffer[..last_line_start], self.options)
+                            })
+                        })
                         .flatten()
                     {
                         self.custom_delimiter = if new_delim == ";" { None } else { Some(new_delim.to_string()) };
                         if last_line_start > 0 {
                             let before = self.buffer[..last_line_start].trim();
                             if has_executable_sql_with_options(before, self.options) {
-                                statements.push(before.to_string());
+                                statements.push(SqlStatementWithControl {
+                                    sql: before.to_string(),
+                                    stop_on_error: self.stop_on_error,
+                                });
                             }
                         }
                         self.buffer.clear();
@@ -548,7 +591,11 @@ impl SqlStatementSplitter {
         statements
     }
 
-    pub fn finish(mut self) -> Vec<String> {
+    pub fn finish(self) -> Vec<String> {
+        self.finish_with_control().into_iter().map(|statement| statement.sql).collect()
+    }
+
+    pub(crate) fn finish_with_control(mut self) -> Vec<SqlStatementWithControl> {
         let mut statements = Vec::new();
         if self.pending_mysql_line_comment_dashes {
             self.in_line_comment = true;
@@ -556,16 +603,31 @@ impl SqlStatementSplitter {
         }
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-        if self.options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+        if self.options.profile.supports_psql_control_commands {
+            if let Some(command) = parse_ignorable_psql_control_command(last_line) {
+                if command == PsqlControlCommand::OnErrorStop {
+                    self.stop_on_error = true;
+                }
+                let line_start = self.buffer.rfind('\n').map_or(0, |pos| pos + 1);
+                self.buffer.truncate(line_start);
+            }
+        }
+        let trimmed = self.buffer.trim();
+        let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
+        let before_last_line = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
+        if self.options.profile.supports_custom_delimiter_commands
+            && parse_delimiter_command(last_line)
+                .is_some_and(|_| !has_executable_sql_with_options(before_last_line, self.options))
+        {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
-                statements.push(before.to_string());
+                statements.push(SqlStatementWithControl { sql: before.to_string(), stop_on_error: self.stop_on_error });
             }
             self.buffer.clear();
         } else if self.options.profile.supports_slash_line_block_delimiter && last_line == "/" {
             let before = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
             if has_executable_sql_with_options(before, self.options) {
-                statements.push(before.to_string());
+                statements.push(SqlStatementWithControl { sql: before.to_string(), stop_on_error: self.stop_on_error });
             }
             self.buffer.clear();
         } else if let Some(ref delim) = self.custom_delimiter {
@@ -577,10 +639,14 @@ impl SqlStatementSplitter {
         statements
     }
 
-    fn push_current_statement(&mut self, statements: &mut Vec<String>) {
+    pub fn stop_on_error(&self) -> bool {
+        self.stop_on_error
+    }
+
+    fn push_current_statement(&mut self, statements: &mut Vec<SqlStatementWithControl>) {
         let statement = self.buffer.trim();
         if has_executable_sql_with_options(statement, self.options) {
-            statements.push(statement.to_string());
+            statements.push(SqlStatementWithControl { sql: statement.to_string(), stop_on_error: self.stop_on_error });
         }
         self.buffer.clear();
         self.postgres_dollar_quoted_routine = false;
@@ -591,7 +657,9 @@ impl SqlStatementSplitter {
     fn on_delimiter_line(&self) -> bool {
         let start = self.buffer.rfind('\n').map_or(0, |p| p + 1);
         let line = self.buffer[start..].trim_start().as_bytes();
-        line.len() >= 9 && line[..9].eq_ignore_ascii_case(b"delimiter")
+        line.len() >= 9
+            && line[..9].eq_ignore_ascii_case(b"delimiter")
+            && !has_executable_sql_with_options(self.buffer[..start].trim(), self.options)
     }
 }
 
@@ -604,7 +672,25 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
 }
 
 pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Vec<String> {
-    split_sql_statements_with_options(sql, SqlParsingOptions::for_database_type(db_type))
+    sql_execution_plan_for_database(sql, db_type).statements
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqlExecutionPlan {
+    pub statements: Vec<String>,
+    pub stop_on_error: bool,
+}
+
+pub fn sql_execution_plan_for_database(sql: &str, db_type: DatabaseType) -> SqlExecutionPlan {
+    let options = SqlParsingOptions::for_database_type(db_type);
+    if !options.profile.supports_psql_control_commands {
+        return SqlExecutionPlan { statements: split_sql_statements_with_options(sql, options), stop_on_error: false };
+    }
+
+    let (sql, stop_on_error) = preprocess_psql_control_commands(sql, options.profile);
+    let mut parsing_options = options;
+    parsing_options.profile.supports_psql_control_commands = false;
+    SqlExecutionPlan { statements: split_sql_statements_with_options(&sql, parsing_options), stop_on_error }
 }
 
 pub fn split_sql_statements_with_options(sql: &str, options: SqlParsingOptions) -> Vec<String> {
@@ -629,7 +715,13 @@ pub fn find_statement_at_cursor_for_database(sql: &str, cursor_pos: usize, db_ty
     if db_type == DatabaseType::SqlServer {
         return find_sqlserver_statement_at_cursor(sql, cursor_pos);
     }
-    find_statement_at_cursor_with_options(sql, cursor_pos, SqlParsingOptions::for_database_type(db_type))
+    let mut options = SqlParsingOptions::for_database_type(db_type);
+    if options.profile.supports_psql_control_commands {
+        let (sql, _) = preprocess_psql_control_commands(sql, options.profile);
+        options.profile.supports_psql_control_commands = false;
+        return find_statement_at_cursor_with_options(&sql, cursor_pos, options);
+    }
+    find_statement_at_cursor_with_options(sql, cursor_pos, options)
 }
 
 pub fn find_statement_at_cursor_with_options(sql: &str, cursor_pos: usize, options: SqlParsingOptions) -> String {
@@ -849,7 +941,7 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
             if let Some(tag) =
                 options.profile.supports_dollar_quoted_strings.then(|| dollar_quote_tag_at_str(sql, i)).flatten()
             {
-                if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i) {
+                if custom_delimiter.is_none() && !is_on_delimiter_line(sql, start, i, options) {
                     if options.profile.supports_postgres_dollar_quoted_routines
                         && starts_with_postgres_dollar_quoted_routine_prefix(&sql[start..i])
                     {
@@ -870,8 +962,14 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                     i = start;
                     continue;
                 }
-                if let Some(new_delimiter) =
-                    options.profile.supports_custom_delimiter_commands.then(|| parse_delimiter_command(line)).flatten()
+                if let Some(new_delimiter) = options
+                    .profile
+                    .supports_custom_delimiter_commands
+                    .then(|| {
+                        parse_delimiter_command(line)
+                            .filter(|_| !has_executable_sql_with_options(&sql[start..line_start], options))
+                    })
+                    .flatten()
                 {
                     let before = sql[start..line_start].trim();
                     if has_executable_sql_with_options(before, options) {
@@ -903,7 +1001,8 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
                 || in_double_quote
                 || in_backtick
                 || custom_delimiter.is_some()
-                || (options.profile.supports_custom_delimiter_commands && is_on_delimiter_line(sql, start, i))) =>
+                || (options.profile.supports_custom_delimiter_commands
+                    && is_on_delimiter_line(sql, start, i, options))) =>
             {
                 let is_mysql_routine =
                     options.profile.supports_mysql_routine_blocks && starts_with_mysql_routine_block(&sql[start..i]);
@@ -955,7 +1054,11 @@ fn split_sql_statement_ranges_with_options(sql: &str, options: SqlParsingOptions
 
     let trimmed = sql[start..].trim();
     let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
-    if options.profile.supports_custom_delimiter_commands && parse_delimiter_command(last_line).is_some() {
+    let before_last_line = trimmed.rsplit_once('\n').map(|x| x.0).unwrap_or("").trim();
+    if options.profile.supports_custom_delimiter_commands
+        && parse_delimiter_command(last_line)
+            .is_some_and(|_| !has_executable_sql_with_options(before_last_line, options))
+    {
         if let Some(line_start) = sql[start..].rfind('\n').map(|pos| start + pos + 1) {
             push_statement_range(&mut ranges, sql, start, line_start, options);
         }
@@ -1022,13 +1125,12 @@ fn is_escaped_single_quote(sql: &str, index: usize) -> bool {
     index > 0 && sql.as_bytes().get(index - 1) == Some(&b'\\')
 }
 
-fn is_on_delimiter_line(sql: &str, range_start: usize, index: usize) -> bool {
+fn is_on_delimiter_line(sql: &str, range_start: usize, index: usize, options: SqlParsingOptions) -> bool {
     let line_start = sql[range_start..index].rfind('\n').map_or(range_start, |pos| range_start + pos + 1);
-    sql[line_start..index]
-        .trim_start()
-        .as_bytes()
-        .get(..9)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"delimiter"))
+    sql[line_start..index].trim_start().as_bytes().get(..9).is_some_and(|prefix| {
+        prefix.eq_ignore_ascii_case(b"delimiter")
+            && !has_executable_sql_with_options(sql[range_start..line_start].trim(), options)
+    })
 }
 
 fn dollar_quote_tag_at_str(sql: &str, index: usize) -> Option<String> {
@@ -1417,6 +1519,70 @@ fn parse_delimiter_command(line: &str) -> Option<&str> {
     rest.map(|r| r.trim()).filter(|r| !r.is_empty())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PsqlControlCommand {
+    OnErrorStop,
+    ClientDisplay,
+}
+
+fn parse_ignorable_psql_control_command(line: &str) -> Option<PsqlControlCommand> {
+    let mut parts = line.split_whitespace();
+    let command = parts.next()?;
+
+    if command.eq_ignore_ascii_case("\\timing") {
+        let valid =
+            parts.next().is_none_or(|value| value.eq_ignore_ascii_case("on") || value.eq_ignore_ascii_case("off"));
+        return (valid && parts.next().is_none()).then_some(PsqlControlCommand::ClientDisplay);
+    }
+
+    if !command.eq_ignore_ascii_case("\\set") {
+        return None;
+    }
+    let variable = parts.next()?;
+    let value = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    match variable.to_ascii_uppercase().as_str() {
+        "ON_ERROR_STOP" if matches!(value.to_ascii_lowercase().as_str(), "on" | "true" | "1") => {
+            Some(PsqlControlCommand::OnErrorStop)
+        }
+        "VERBOSITY" if matches!(value.to_ascii_lowercase().as_str(), "default" | "verbose" | "terse" | "sqlstate") => {
+            Some(PsqlControlCommand::ClientDisplay)
+        }
+        _ => None,
+    }
+}
+
+fn preprocess_psql_control_commands(sql: &str, profile: SqlDialectProfile) -> (String, bool) {
+    let mut output = String::with_capacity(sql.len());
+    let mut scanner = SqlScanner::with_profile(profile);
+    let mut offset = 0usize;
+    let mut stop_on_error = false;
+
+    for segment in sql.split_inclusive('\n') {
+        let line = segment.strip_suffix('\n').unwrap_or(segment);
+        let command = (!scanner.is_masked()).then(|| parse_ignorable_psql_control_command(line.trim())).flatten();
+        if let Some(command) = command {
+            stop_on_error |= command == PsqlControlCommand::OnErrorStop;
+            output.extend(line.chars().map(|ch| if ch.is_whitespace() { ch } else { ' ' }));
+            if segment.ends_with('\n') {
+                output.push('\n');
+                scanner.step(sql, offset + line.len(), '\n');
+            }
+        } else {
+            output.push_str(segment);
+            for (relative_idx, ch) in segment.char_indices() {
+                scanner.step(sql, offset + relative_idx, ch);
+            }
+        }
+        offset += segment.len();
+    }
+
+    (output, stop_on_error)
+}
+
 pub fn statement_summary(statement: &str) -> String {
     const MAX_LEN: usize = 120;
 
@@ -1510,6 +1676,8 @@ pub fn optimize_sql_file_import_statements(
 ) -> Vec<SqlFileImportStatement> {
     let mut optimized = Vec::new();
     let mut pending_insert: Option<PendingInsertBatch> = None;
+    let merge_adjacent_inserts =
+        db_type.as_ref().is_none_or(|db_type| !is_mysql_compatible_import_target(db_type, driver_profile));
 
     for statement in statements {
         let action = db_type
@@ -1528,8 +1696,16 @@ pub fn optimize_sql_file_import_statements(
                 });
             }
             SqlFileStatementAction::Execute(sql) => {
-                let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
-                if let Some(insert) = parse_mergeable_insert(&sql, options) {
+                // Combining separate MySQL INSERT statements changes session
+                // semantics such as LAST_INSERT_ID(), so execute them with the
+                // same statement boundaries as the source file.
+                let mergeable_insert = merge_adjacent_inserts
+                    .then(|| {
+                        let options = db_type.map(SqlParsingOptions::for_database_type).unwrap_or_default();
+                        parse_mergeable_insert(&sql, options)
+                    })
+                    .flatten();
+                if let Some(insert) = mergeable_insert {
                     match pending_insert.as_mut() {
                         Some(batch) if batch.can_accept(&insert) => batch.push(insert),
                         Some(_) => {
@@ -1915,7 +2091,7 @@ pub(crate) fn supports_connection_level_database_bootstrap_target(
             .is_some_and(|profile| is_mysql_compatible_import_profile(&profile) && profile != "manticoresearch")
 }
 
-fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
+pub(crate) fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
     matches!(
         db_type,
         DatabaseType::Mysql
@@ -2659,6 +2835,66 @@ mod tests {
     }
 
     #[test]
+    fn keeps_postgres_e_string_newlines_inside_batch_statement() {
+        let sql = "SELECT version();\n\nCREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n);";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec![
+                "SELECT version()".to_string(),
+                "CREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n)".to_string(),
+            ]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec![
+                "SELECT version()".to_string(),
+                "CREATE TABLE dbx_test (\n    delimiter VARCHAR(32) DEFAULT E'\\n\\n'\n)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn delimiter_line_after_unterminated_statement_merges() {
+        // A DELIMITER line is only honored as a client directive when no executable
+        // SQL is pending, so an unterminated statement swallows the line instead of
+        // splitting off and switching the delimiter.
+        let sql = "SELECT 1\nDELIMITER $$";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec!["SELECT 1\nDELIMITER $$".to_string()]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec!["SELECT 1\nDELIMITER $$".to_string()]
+        );
+
+        let sql = "SELECT 1\nDELIMITER $$\nSELECT 2$$";
+
+        assert_eq!(
+            split_sql_statements_for_database(sql, DatabaseType::Postgres),
+            vec!["SELECT 1\nDELIMITER $$\nSELECT 2$$".to_string()]
+        );
+
+        assert_eq!(
+            split_sql_statement_ranges_with_options(sql, SqlParsingOptions::for_database_type(DatabaseType::Postgres))
+                .into_iter()
+                .map(|range| range.text)
+                .collect::<Vec<_>>(),
+            vec!["SELECT 1\nDELIMITER $$\nSELECT 2$$".to_string()]
+        );
+    }
+
+    #[test]
     fn mysql_split_skips_comment_only_statement() {
         assert!(split_sql_statements_for_database("-- DBX SQL preview crash reproducer\n\n;", DatabaseType::Mysql)
             .is_empty());
@@ -3050,19 +3286,56 @@ mod tests {
     }
 
     #[test]
-    fn optimizes_adjacent_single_row_inserts_into_multi_row_insert() {
+    fn optimizes_adjacent_postgres_single_row_inserts_into_multi_row_insert() {
         let statements = vec![
             "INSERT INTO users (id, name) VALUES (1, 'Ada')".to_string(),
             "insert into users (id, name) values (2, 'Linus')".to_string(),
             "SELECT 1".to_string(),
         ];
 
-        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
+        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Postgres), None);
 
         assert_eq!(optimized.len(), 2);
         assert_eq!(optimized[0].source_statement_count, 2);
         assert_eq!(optimized[0].sql, "INSERT INTO users (id, name) VALUES\n(1, 'Ada'),\n(2, 'Linus')");
         assert_eq!(optimized[1].sql, "SELECT 1");
+    }
+
+    #[test]
+    fn keeps_mysql_insert_statements_separate_to_preserve_session_semantics() {
+        let statements = vec![
+            "INSERT INTO parents (name) VALUES ('first')".to_string(),
+            "INSERT INTO parents (name) VALUES ('second')".to_string(),
+            "INSERT INTO children (parent_id) VALUES (LAST_INSERT_ID())".to_string(),
+        ];
+
+        for (db_type, driver_profile) in
+            [(DatabaseType::Mysql, None), (DatabaseType::Jdbc, Some("mariadb")), (DatabaseType::Doris, None)]
+        {
+            let optimized = optimize_sql_file_import_statements(&statements, Some(db_type), driver_profile);
+
+            assert_eq!(optimized.len(), 3, "{db_type:?}/{driver_profile:?}");
+            assert!(
+                optimized.iter().all(|statement| statement.source_statement_count == 1),
+                "{db_type:?}/{driver_profile:?}"
+            );
+            assert_eq!(
+                optimized.iter().map(|statement| statement.sql.as_str()).collect::<Vec<_>>(),
+                statements,
+                "{db_type:?}/{driver_profile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_existing_mysql_multi_row_insert_unchanged() {
+        let statements = vec!["INSERT INTO users (id) VALUES (1), (2)".to_string()];
+
+        let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
+
+        assert_eq!(optimized.len(), 1);
+        assert_eq!(optimized[0].source_statement_count, 1);
+        assert_eq!(optimized[0].sql, statements[0]);
     }
 
     #[test]
@@ -3080,7 +3353,7 @@ mod tests {
     }
 
     #[test]
-    fn optimized_sql_file_import_keeps_skipped_mysql_dump_statements() {
+    fn mysql_dump_import_keeps_skips_and_insert_statement_boundaries() {
         let statements = vec![
             "LOCK TABLES `users` WRITE".to_string(),
             "INSERT INTO `users` VALUES (1)".to_string(),
@@ -3090,10 +3363,11 @@ mod tests {
 
         let optimized = optimize_sql_file_import_statements(&statements, Some(DatabaseType::Mysql), None);
 
-        assert_eq!(optimized.len(), 3);
+        assert_eq!(optimized.len(), 4);
         assert_eq!(optimized[0].kind, super::SqlFileImportStatementKind::Skip);
-        assert_eq!(optimized[1].source_statement_count, 2);
-        assert_eq!(optimized[2].kind, super::SqlFileImportStatementKind::Skip);
+        assert_eq!(optimized[1].source_statement_count, 1);
+        assert_eq!(optimized[2].source_statement_count, 1);
+        assert_eq!(optimized[3].kind, super::SqlFileImportStatementKind::Skip);
     }
 
     #[test]
@@ -3480,6 +3754,262 @@ END;";
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Dameng), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Gaussdb), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Xugu), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn argo_split_keeps_create_procedure_body_together() {
+        // ArgoDB (Transwarp) accepts PL/SQL-style procedure definitions whose body contains
+        // semicolons. The statement splitter must keep those semicolons inside the body rather
+        // than emitting one fragment per statement — otherwise the agent sends only the first
+        // `CREATE ... IS BEGIN INSERT INTO ...` fragment and the server responds with
+        // 42000 + vendorCode 1101 (see screenshots from the 2026-09-01 session).
+        let sql = "\
+CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT,
+  IV_SCHEMA_NAME   IN STRING,
+  IV_PROCEDURE_NAME IN STRING,
+  II_STEP_ID       IN INT,
+  IV_STEP_DESC     IN STRING,
+  II_STEP_FLAG     IN INT,
+  II_START_TIME    IN TIMESTAMP
+)
+/****************************************
+@AUTHOR:xiangxu
+@CREATE-DATE:2015-09-06
+@DESCRIPTION:处理执行信息插入日志表(ETL_LOG)
+@MODIFICATION HISTORY:
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME,
+    PROCEDURE_NAME,
+    STEP_ID,
+    STEP_DESC,
+    STEP_FLAG,
+    START_TIME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME,
+    IV_PROCEDURE_NAME,
+    II_STEP_ID,
+    IV_STEP_DESC,
+    II_STEP_FLAG,
+    II_START_TIME
+  );
+END;";
+
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn argo_split_keeps_procedure_with_dash_line_comments() {
+        // Mirrors the SP_ETL_LOG definition in the 2026-09-01 screenshot where each
+        // parameter row carries a trailing `--中文` line comment. The PL/SQL tokenizer must
+        // still recognise the procedure as a block; otherwise the splitter emits the
+        // parameter list, "COMMIT", and "END" as three separate statements (the failure
+        // mode shown in the 21:22:59 screenshot).
+        let sql = "\
+CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING, --模式名
+  IV_PROCEDURE_NAME IN STRING, --存储过程名称
+  II_STEP_ID       IN INT, --任务号
+  IV_STEP_DESC     IN STRING, --任务描述
+  II_STEP_FLAG     IN INT, --执行状态
+  II_START_TIME    IN TIMESTAMP --起始时间
+);
+END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements, vec![sql.to_string()], "splitter produced: {statements:#?}");
+    }
+
+    #[test]
+    fn argo_split_handles_full_user_procedure_with_block_comment_and_at_meta() {
+        // Mirrors the EXACT procedure text shown in the 2026-09-01 21:22:59 screenshot:
+        // - parameter list with trailing `--中文` comments
+        // - block comment `/********...********/` containing `@AUTHOR:` and `#0.20150906-...`
+        //   which are NOT standard SQL comment markers (ArgoDB/Hive ignores them, but the
+        //   splitter must still treat them as part of the surrounding block comment)
+        // - `IS BEGIN INSERT INTO ... ; END;`
+        // The result panel showed three split fragments; if this test passes, the splitter
+        // is fine and the issue is on the DBX.app side.
+        let sql = "CREATE OR REPLACE PROCEDURE SP_ETL_LOG\n\
+(\n\
+  II_DATDATE       IN INT, --数据日期\n\
+  IV_SCHEMA_NAME   IN STRING, --模式名\n\
+  IV_PROCEDURE_NAME IN STRING, --存储过程名称\n\
+  II_STEP_ID       IN INT, --任务号\n\
+  IV_STEP_DESC     IN STRING, --任务描述\n\
+  II_STEP_FLAG     IN INT, --执行状态\n\
+  II_START_TIME    IN TIMESTAMP --起始时间\n\
+)\n\
+/****************************************\n\
+@AUTHOR:xiangxu\n\
+@CREATE-DATE:2015-09-06\n\
+@DESCRIPTION:处理执行信息插入日志表(ETL_LOG)\n\
+@MODIFICATION HISTORY:\n\
+#0.20150906-xiangxu-处理执行信息插入日志表\n\
+*****************************************/\n\
+IS\n\
+BEGIN INSERT INTO dws.ETL_LOG\n\
+  (\n\
+    DATA_DATE,           --数据日期\n\
+    SCHEMA_NAME,           --模式名\n\
+    PROCEDURE_NAME,           --存储过程名称\n\
+    STEP_ID,           --任务号\n\
+    STEP_DESC,           --任务描述\n\
+    STEP_FLAG,           --执行状态\n\
+    START_TIME            --起始时间\n\
+  )\n\
+  ;\n\
+END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements.len(), 1, "splitter produced {statements:#?}");
+        assert_eq!(statements[0], sql);
+    }
+
+    #[test]
+    fn argo_split_handles_minimal_user_procedure_no_body_semicolon() {
+        // Mirrors the user's 2026-09-02 10:09 procedure: simple CREATE OR REPLACE PROCEDURE
+        // body with no semicolon after INSERT INTO ... SELECT, only after the SELECT expression.
+        let sql = "CREATE OR REPLACE PROCEDURE SP_TEST_PART_A\n\
+ (\n\
+   II_DATADATE IN INT\n\
+ )\n\
+ IS\n\
+   I_DATADATE INT;\n\
+ BEGIN\n\
+   I_DATADATE := II_DATADATE;\n\
+   INSERT INTO dws.TEST_PART_PROC\n\
+   SELECT 1, 'testA1', I_DATADATE;\n\
+ END;";
+
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Argo);
+        assert_eq!(statements.len(), 1, "splitter produced {statements:#?}");
+        assert_eq!(statements[0], sql);
+    }
+
+    #[test]
+    fn gaussdb_split_ignores_psql_controls_before_anonymous_block_per_issue_6468() {
+        let block = "\
+/* 将逻辑放到匿名块中，便于捕获异常 pl/pgsql */
+DECLARE
+  v_date_str VARCHAR(20) := '20240824';
+  v_date_dt DATE := TO_DATE(v_date_str, 'YYYYMMDD');
+  v_eff_num NUMERIC := 0;
+  v_start_time TIMESTAMP := CURRENT_TIMESTAMP;
+  v_step TEXT := '';
+  v_job_name VARCHAR := 'F_XY_DG_IBDISCOUNT_DET';
+BEGIN
+  RAISE NOTICE 'issue 6468';
+END;";
+        let sql = format!("\\set ON_ERROR_STOP on\n\\set VERBOSITY verbose\n\\timing\n\n{block}\n/");
+
+        assert_eq!(split_sql_statements_for_database(&sql, DatabaseType::Gaussdb), vec![block]);
+
+        let cursor = sql[..sql.find("RAISE NOTICE").unwrap()].encode_utf16().count();
+        let executable_block = &block[block.find("DECLARE").unwrap()..];
+        assert_eq!(find_statement_at_cursor_for_database(&sql, cursor, DatabaseType::Gaussdb), executable_block);
+    }
+
+    #[test]
+    fn gaussdb_streaming_split_ignores_chunked_psql_controls() {
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+
+        assert!(splitter.push_chunk("\\set ON_ERROR_").is_empty());
+        assert!(splitter.push_chunk("STOP on\n\\tim").is_empty());
+        assert!(splitter.stop_on_error());
+        assert_eq!(
+            splitter.push_chunk("ing\nDECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;\n/\n"),
+            vec!["DECLARE\n  value NUMBER := 1;\nBEGIN\n  value := value + 1;\nEND;"]
+        );
+        assert!(splitter.finish().is_empty());
+    }
+
+    #[test]
+    fn gaussdb_streaming_split_tracks_on_error_stop_by_statement_position() {
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+
+        let mut statements = splitter.push_chunk_with_control("SELECT 0;\nSELECT\n\\set ON_ERROR_");
+        statements.extend(splitter.push_chunk_with_control("STOP on\n  1;\nSELECT 2;"));
+        statements.extend(splitter.finish_with_control());
+
+        assert_eq!(
+            statements,
+            vec![
+                super::SqlStatementWithControl { sql: "SELECT 0".to_string(), stop_on_error: false },
+                super::SqlStatementWithControl { sql: "SELECT\n  1".to_string(), stop_on_error: true },
+                super::SqlStatementWithControl { sql: "SELECT 2".to_string(), stop_on_error: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn gaussdb_psql_control_does_not_submit_unfinished_query_buffer() {
+        let sql = "SELECT\n\\timing\n  1;\nSELECT 2;";
+        let statements = split_sql_statements_for_database(sql, DatabaseType::Gaussdb);
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].split_whitespace().collect::<Vec<_>>(), vec!["SELECT", "1"]);
+        assert_eq!(statements[1], "SELECT 2");
+
+        let mut splitter =
+            SqlStatementSplitter::with_options(SqlParsingOptions::for_database_type(DatabaseType::Gaussdb));
+        assert!(splitter.push_chunk("SELECT\n\\tim").is_empty());
+        assert_eq!(splitter.push_chunk("ing\n  1;"), vec!["SELECT\n  1"]);
+    }
+
+    #[test]
+    fn gaussdb_split_does_not_ignore_psql_variable_assignment() {
+        for control in ["\\set tx_date 20240824", "\\set MY_ON_ERROR_STOP on", "\\set ON_ERROR_STOP_EXTRA on"] {
+            let sql = format!("{control}\nDECLARE\n  value TEXT := '$tx_date';\nBEGIN\n  NULL;\nEND;\n/");
+            let statements = split_sql_statements_for_database(&sql, DatabaseType::Gaussdb);
+            assert!(statements[0].starts_with(control));
+        }
+    }
+
+    #[test]
+    fn gaussdb_ignores_only_safe_psql_controls() {
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP on"),
+            Some(super::PsqlControlCommand::OnErrorStop)
+        );
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\set VERBOSITY verbose"),
+            Some(super::PsqlControlCommand::ClientDisplay)
+        );
+        assert_eq!(
+            super::parse_ignorable_psql_control_command("\\timing"),
+            Some(super::PsqlControlCommand::ClientDisplay)
+        );
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP off"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set tx_date 20240824"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set MY_ON_ERROR_STOP on"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP_EXTRA on"), None);
+        assert_eq!(super::parse_ignorable_psql_control_command("\\set ON_ERROR_STOP sometimes"), None);
+    }
+
+    #[test]
+    fn gaussdb_execution_plan_preserves_on_error_stop() {
+        let plan = super::sql_execution_plan_for_database(
+            "\\set ON_ERROR_STOP on\nSELECT 1;\nSELECT 2;",
+            DatabaseType::Gaussdb,
+        );
+
+        assert!(plan.stop_on_error);
+        assert_eq!(plan.statements, vec!["SELECT 1", "SELECT 2"]);
     }
 
     #[test]

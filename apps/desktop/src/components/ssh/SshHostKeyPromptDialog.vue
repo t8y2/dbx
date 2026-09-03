@@ -11,7 +11,7 @@ import { apiUrl } from "@/lib/common/webPath";
 
 interface SshPromptRequest {
   id: string;
-  kind: "HostKeyVerify" | "SecretInput";
+  kind: "HostKeyVerify" | "SecretInput" | "WorkerUploadConsent";
   host: string;
   port: number;
   key_type?: string | null;
@@ -37,6 +37,7 @@ const { toast } = useToast();
 const queue = ref<SshPromptRequest[]>([]);
 const current = computed<SshPromptRequest | null>(() => queue.value[0] ?? null);
 const isSecretPrompt = computed(() => current.value?.kind === "SecretInput");
+const isWorkerUploadPrompt = computed(() => current.value?.kind === "WorkerUploadConsent");
 const visible = ref(false);
 
 const remember = ref(true);
@@ -247,31 +248,31 @@ function submitSecret() {
     is a blocking prompt, so keep it above every other layer in the app (the
     tallest today are the image preview at 80/81 and the sidebar overlays at
     100). -->
-    <DialogContent class="sm:max-w-[460px]" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
-      <DialogHeader>
+    <DialogContent class="flex max-h-[min(36rem,calc(var(--dbx-viewport-height)-2rem))] w-full max-w-[32rem] flex-col gap-4 overflow-hidden" overlay-class="z-[200]" portal-class="z-[200]" :show-close-button="false" @interact-outside.prevent @escape-key-down.prevent>
+      <DialogHeader class="shrink-0">
         <DialogTitle>
-          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : "connection.sshHostKeyVerifyTitle") }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveTitle" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentTitle" : "connection.sshHostKeyVerifyTitle") }}
         </DialogTitle>
         <DialogDescription class="text-muted-foreground">
-          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveMessage" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentMessage" : "connection.sshHostKeyVerifyMessage", { host: current?.host ?? "", port: current?.port ?? "" }) }}
         </DialogDescription>
       </DialogHeader>
 
-      <div v-if="current" class="space-y-3 py-1">
-        <div v-if="current.kind === 'HostKeyVerify'" class="rounded-md border border-border bg-muted/40 p-3 text-sm">
-          <div class="flex items-center justify-between gap-3">
-            <span class="text-muted-foreground">{{ t("connection.sshHostKeyVerifyKeyType") }}</span>
-            <span class="font-medium">{{ current.key_type || "—" }}</span>
+      <div v-if="current" class="min-h-0 flex-1 space-y-3 overflow-y-auto py-1">
+        <div v-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="space-y-3 rounded-md border border-border bg-muted/40 p-3 text-sm">
+          <div class="space-y-1">
+            <div class="text-muted-foreground">{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentDigest") : t("connection.sshHostKeyVerifyKeyType") }}</div>
+            <div class="break-all font-mono text-xs font-medium leading-5">{{ current.kind === "WorkerUploadConsent" ? current.fingerprint || "—" : current.key_type || "—" }}</div>
           </div>
-          <div class="mt-2 flex items-start justify-between gap-3">
-            <span class="shrink-0 text-muted-foreground">{{ t("connection.sshHostKeyVerifyFingerprint") }}</span>
-            <span class="break-all text-right font-mono text-xs font-medium">{{ current.fingerprint || "—" }}</span>
+          <div class="space-y-1">
+            <div class="text-muted-foreground">{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentPath") : t("connection.sshHostKeyVerifyFingerprint") }}</div>
+            <div class="break-all font-mono text-xs font-medium leading-5">{{ current.kind === "WorkerUploadConsent" ? current.prompt || "—" : current.fingerprint || "—" }}</div>
           </div>
         </div>
 
-        <label v-if="current.kind === 'HostKeyVerify'" class="flex items-center gap-2 text-sm">
+        <label v-if="current.kind === 'HostKeyVerify' || current.kind === 'WorkerUploadConsent'" class="flex items-center gap-2 text-sm">
           <input type="checkbox" v-model="remember" class="h-4 w-4 rounded border-border accent-primary" />
-          <span>{{ t("connection.sshHostKeyVerifyRemember") }}</span>
+          <span>{{ current.kind === "WorkerUploadConsent" ? t("connection.sshWorkerUploadConsentRemember") : t("connection.sshHostKeyVerifyRemember") }}</span>
         </label>
 
         <div v-else-if="current.kind === 'SecretInput'" class="space-y-2">
@@ -289,12 +290,12 @@ function submitSecret() {
         </div>
       </div>
 
-      <DialogFooter>
+      <DialogFooter class="shrink-0">
         <Button variant="outline" :disabled="resolving" @click="reject">
-          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : "connection.sshHostKeyVerifyReject") }}
+          {{ t(isSecretPrompt ? "connection.sshInteractiveCancel" : isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentReject" : "connection.sshHostKeyVerifyReject") }}
         </Button>
         <Button v-if="current?.kind !== 'SecretInput'" :disabled="resolving" @click="accept">
-          {{ t("connection.sshHostKeyVerifyAccept") }}
+          {{ t(isWorkerUploadPrompt ? "connection.sshWorkerUploadConsentAccept" : "connection.sshHostKeyVerifyAccept") }}
         </Button>
         <Button v-else :disabled="resolving || !secretCode" @click="submitSecret">
           {{ t("connection.sshInteractiveSubmit") }}

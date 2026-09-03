@@ -38,10 +38,26 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。�
 [打开 GitHub Fine-grained token 创建页面](https://github.com/settings/personal-access-tokens/new)
 
 <Steps>
-  <Step>### 打开令牌设置 登录 GitHub，进入 **Settings → Developer settings → Personal access tokens → Fine-grained tokens**。</Step>
-  <Step>### 创建令牌 点击 **Generate new token**，设置名称和有效期。</Step>
-  <Step>### 设置权限 在 **Account permissions** 中找到 **Gists**，选择 **Read and write**。不需要授予仓库权限。</Step>
-  <Step>### 保存令牌 创建后立即复制令牌。GitHub 只会完整显示一次。</Step>
+<Step>
+    ### 打开令牌设置
+
+    登录 GitHub，进入 **Settings → Developer settings → Personal access tokens → Fine-grained tokens**。
+  </Step>
+<Step>
+    ### 创建令牌
+
+    点击 **Generate new token**，设置名称和有效期。
+  </Step>
+<Step>
+    ### 设置权限
+
+    在 **Account permissions** 中找到 **Gists**，选择 **Read and write**。不需要授予仓库权限。
+  </Step>
+<Step>
+    ### 保存令牌
+
+    创建后立即复制令牌。GitHub 只会完整显示一次。
+  </Step>
 </Steps>
 
 也可以使用 Classic token，但只应勾选 `gist` scope，不要授予无关权限。
@@ -49,9 +65,21 @@ DBX 可以把连接配置、界面设置和保存的 SQL 组成一个快照。�
 ### 首次上传
 
 <Steps>
-  <Step>### 选择平台 打开 **设置 → 同步 → GitHub / Gitee**，平台选择 **GitHub Gist**。</Step>
-  <Step>### 填写令牌 将访问令牌粘贴到 **访问令牌**。建议勾选 **加密保存在本机**。</Step>
-  <Step>### 创建 Gist 将 **代码片段 ID** 留空，点击 **上传**。DBX 会创建私有 Gist，并自动保存返回的 ID。</Step>
+<Step>
+    ### 选择平台
+
+    打开 **设置 → 同步 → GitHub / Gitee**，平台选择 **GitHub Gist**。
+  </Step>
+<Step>
+    ### 填写令牌
+
+    将访问令牌粘贴到 **访问令牌**。建议勾选 **加密保存在本机**。
+  </Step>
+<Step>
+    ### 创建 Gist
+
+    将 **代码片段 ID** 留空，点击 **上传**。DBX 会创建私有 Gist，并自动保存返回的 ID。
+  </Step>
 </Steps>
 
 DBX 会在 Gist 中保存一个经过**代码片段加密密码**加密的 `dbx-sync.json` 文件。该密码保护完整快照，片段链接本身不会暴露连接信息、SQL 或设置；历史明文片段仍可下载一次以便迁移。
@@ -74,10 +102,26 @@ DBX 会在 Gist 中保存一个经过**代码片段加密密码**加密的 `dbx-
 [打开 Gitee 私人令牌页面](https://gitee.com/profile/personal_access_tokens)
 
 <Steps>
-  <Step>### 打开私人令牌页面 登录 Gitee，进入 **设置 → 私人令牌**。</Step>
-  <Step>### 生成新令牌 点击 **生成新令牌**，填写描述。</Step>
-  <Step>### 设置权限 只勾选代码片段（`gists`）相关权限。如果界面只提供合并权限，选择能够读写代码片段的最小权限。</Step>
-  <Step>### 保存令牌 生成后立即复制令牌，并存放在密码管理器中。</Step>
+<Step>
+    ### 打开私人令牌页面
+
+    登录 Gitee，进入 **设置 → 私人令牌**。
+  </Step>
+<Step>
+    ### 生成新令牌
+
+    点击 **生成新令牌**，填写描述。
+  </Step>
+<Step>
+    ### 设置权限
+
+    只勾选代码片段（`gists`）相关权限。如果界面只提供合并权限，选择能够读写代码片段的最小权限。
+  </Step>
+<Step>
+    ### 保存令牌
+
+    生成后立即复制令牌，并存放在密码管理器中。
+  </Step>
 </Steps>
 
 ### 上传与恢复

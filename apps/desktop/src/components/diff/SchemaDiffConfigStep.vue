@@ -5,7 +5,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
-import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { buildSameNameTableMatches } from "@/lib/diff/sameNameTableMatch";
 import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
@@ -394,26 +394,17 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <SearchableSelect
+          <ConnectionTreeSelect
             :model-value="sourceConnectionId"
             @update:model-value="(v: string) => $emit('update:sourceConnectionId', v)"
-            :options="sqlConnections.map((c) => c.id)"
+            :connections="sqlConnections"
+            :layout="store.sidebarLayout"
             :placeholder="t('diff.selectConnection')"
             :search-placeholder="t('diff.searchConnection')"
             :empty-text="t('common.noResults')"
-            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-            trigger-variant="outline"
-            trigger-class="h-8 w-full justify-between text-xs"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-          >
-            <template #option-label="{ option, label }">
-              <div class="flex min-w-0 items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
-                <ConnectionGroupBadge :connection-id="option" />
-                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-              </div>
-            </template>
-          </SearchableSelect>
+            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+            list-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div class="space-y-1.5">
@@ -479,26 +470,17 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
 
         <div class="space-y-1.5">
           <Label class="text-xs">{{ t("diff.connection") }}</Label>
-          <SearchableSelect
+          <ConnectionTreeSelect
             :model-value="targetConnectionId"
             @update:model-value="(v: string) => $emit('update:targetConnectionId', v)"
-            :options="sqlConnections.map((c) => c.id)"
+            :connections="sqlConnections"
+            :layout="store.sidebarLayout"
             :placeholder="t('diff.selectConnection')"
             :search-placeholder="t('diff.searchConnection')"
             :empty-text="t('common.noResults')"
-            :display-name="(id) => sqlConnections.find((c) => c.id === id)?.name ?? id"
-            trigger-variant="outline"
-            trigger-class="h-8 w-full justify-between text-xs"
-            content-class="w-[var(--reka-popover-trigger-width)]"
-          >
-            <template #option-label="{ option, label }">
-              <div class="flex min-w-0 items-center gap-2">
-                <DatabaseIcon :db-type="sqlConnections.find((c) => c.id === option)?.driver_profile || sqlConnections.find((c) => c.id === option)?.db_type || 'mysql'" class="h-3.5 w-3.5 shrink-0" />
-                <ConnectionGroupBadge :connection-id="option" />
-                <span class="min-w-0 flex-1 truncate">{{ label }}</span>
-              </div>
-            </template>
-          </SearchableSelect>
+            trigger-class="dbx-diff-connection-trigger h-8 w-full max-w-none justify-between gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs shadow-none hover:bg-muted/40 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30 dark:hover:bg-input/50"
+            list-class="w-[var(--reka-popover-trigger-width)]"
+          />
         </div>
 
         <div class="space-y-1.5">

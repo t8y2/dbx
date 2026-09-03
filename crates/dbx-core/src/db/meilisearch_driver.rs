@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::{http_client_builder, ColumnInfo};
 use crate::db::document_result::DocumentQueryResult;
+use crate::models::connection::DatabaseConnectionInfo;
 use crate::types::QueryResult;
 
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -176,6 +177,22 @@ pub async fn test_connection(client: &MeilisearchClient, _timeout: Duration) -> 
         .map_err(|error| format!("Meilisearch request failed: {error}"))?;
     response_json(indexes, "index access check").await?;
     Ok(())
+}
+
+pub async fn database_connection_info(client: &MeilisearchClient) -> Result<DatabaseConnectionInfo, String> {
+    let response =
+        client.get("/version").send().await.map_err(|error| format!("Meilisearch request failed: {error}"))?;
+    let value = response_json(response, "version lookup").await?;
+    Ok(DatabaseConnectionInfo {
+        product_name: Some("Meilisearch".to_string()),
+        product_version: value
+            .get("pkgVersion")
+            .or_else(|| value.get("version"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        driver_name: Some("Meilisearch HTTP API".to_string()),
+        ..Default::default()
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]

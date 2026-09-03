@@ -9,6 +9,7 @@ export interface XlsxWorksheetData {
   columnComments?: readonly (string | null)[] | undefined;
   rows: readonly (readonly XlsxCellValue[])[];
   numericColumnRightAlign?: boolean;
+  autoFilter?: boolean;
 }
 
 interface XlsxWorksheetSegment {
@@ -174,14 +175,15 @@ function worksheetXml(segment: XlsxWorksheetSegment): string {
     return `<row r="${excelRowIndex}">${cells}</row>`;
   }).join("");
 
+  const autoFilterXml = data.autoFilter === false ? "" : `\n  <autoFilter ref="${range}"/>`;
+
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="${range}"/>
   <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="15"/>
   <cols>${colsXml}</cols>
-  <sheetData>${headerXml}${bodyXml}</sheetData>
-  <autoFilter ref="${range}"/>
+  <sheetData>${headerXml}${bodyXml}</sheetData>${autoFilterXml}
 </worksheet>`;
 }
 

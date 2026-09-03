@@ -14,6 +14,11 @@ const props = defineProps<{
   tone?: "app" | "editor";
 }>();
 
+const emit = defineEmits<{
+  open: [];
+  close: [];
+}>();
+
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
 
@@ -271,6 +276,7 @@ function scheduleDocumentSearchUpdate() {
 
 function openSearch(): boolean {
   searchVisible.value = true;
+  emit("open");
   const v = props.view;
   if (v) {
     cmOpenSearchPanel(v);
@@ -322,6 +328,7 @@ function closeSearch() {
     clearSearchQuery();
     v.focus();
   }
+  if (wasVisible) emit("close");
   return wasVisible;
 }
 

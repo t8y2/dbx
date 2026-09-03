@@ -48,4 +48,29 @@ describe("sqlSemanticTokens", () => {
 
     expect(sql.slice(span.start, span.end)).toBe("select * from orders where id = 1");
   });
+
+  it('treats "..." as identifier quoting by default, modeling MySQL\'s ANSI_QUOTES sql_mode', () => {
+    const sql = 'SELECT "col" FROM "orders"';
+    const tokens = tokenizeSqlSemantic(sql, "mysql");
+
+    expect(tokens.some((token) => token.kind === "quoted_identifier" && unquoteSqlSemanticIdentifier(token) === "col")).toBe(true);
+    expect(tokens.some((token) => token.kind === "quoted_identifier" && unquoteSqlSemanticIdentifier(token) === "orders")).toBe(true);
+    expect(tokens.some((token) => token.kind === "string")).toBe(false);
+  });
+
+  it('opts into treating "..." as a string literal, modeling MySQL\'s default (non-ANSI_QUOTES) sql_mode', () => {
+    const sql = 'SELECT "col" FROM "orders"';
+    const tokens = tokenizeSqlSemantic(sql, "mysql", { mysqlDoubleQuoteIsString: true });
+
+    expect(tokens.some((token) => token.kind === "string" && token.text === '"col"')).toBe(true);
+    expect(tokens.some((token) => token.kind === "string" && token.text === '"orders"')).toBe(true);
+    expect(tokens.some((token) => token.kind === "quoted_identifier")).toBe(false);
+  });
+
+  it('applies MySQL backslash escaping inside a mysqlDoubleQuoteIsString "..." string when opted in', () => {
+    const sql = 'SELECT "it\\"s ok"';
+    const tokens = tokenizeSqlSemantic(sql, "mysql", { mysqlDoubleQuoteIsString: true, mysqlBackslashEscape: true });
+
+    expect(tokens.some((token) => token.kind === "string" && token.text === '"it\\"s ok"')).toBe(true);
+  });
 });

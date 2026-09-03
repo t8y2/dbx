@@ -1,0 +1,34 @@
+schemaVersion: 1
+order: 515
+dbType: argo
+rustVariant: Argo
+label: 星环Argo
+runtimeMode: agent
+mcpMode: bridge
+agentKey: argo
+driverStoreVisible: true
+driverStoreOrder: 50
+singleConnectionPool: false
+metadataConnectionScoped: false
+skipTcpProbe: true
+defaultPort: 10000
+traits:
+  schemaAware: true
+supportLevel: operate
+capabilities:
+  queryExecution: true
+  metadataBrowse: true
+  objectBrowser: true
+  objectSource: true
+  schemaSearch: true
+  diagram: false
+  tableDataEdit: true
+  tableStructureEdit: false
+  tableImport: false
+  dataTransfer: true
+  sqlFileExecution: true
+  databaseCreate: false
+  fieldLineage: false
+  sqlExplain: false
+  userAdmin: false
+  driverManagement: true

@@ -63,4 +63,13 @@ describe("sqlFormatterConfig shortcut storage", () => {
     if (result.ok) expect(result.settings.fromClauseLayout).toBe("sameLine");
     expect(JSON.parse(serializeSqlFormatterConfig({ fromClauseLayout: "sameLine" })).options.fromClauseLayout).toBe("sameLine");
   });
+
+  it("defaults empty-line preservation off and serializes an explicit opt-in", () => {
+    const defaultConfig = JSON.parse(serializeSqlFormatterConfig({}));
+    const optIn = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { preserveEmptyLines: true } }));
+
+    expect(defaultConfig.options.preserveEmptyLines).toBe(false);
+    expect(optIn).toEqual(expect.objectContaining({ ok: true }));
+    if (optIn.ok) expect(optIn.settings.preserveEmptyLines).toBe(true);
+  });
 });

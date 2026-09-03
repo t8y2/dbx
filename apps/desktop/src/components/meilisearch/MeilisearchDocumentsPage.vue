@@ -780,7 +780,7 @@ onBeforeUnmount(() => {
           </DialogTitle>
         </DialogHeader>
         <div class="min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20">
-          <JsonTree v-if="cellDetailJson !== undefined" :value="cellDetailJson" :highlight-json="renderMarkHtml" class="p-3 font-mono text-xs" />
+          <JsonTree v-if="cellDetailJson !== undefined" :value="cellDetailJson" :highlight-json="renderMarkHtml" class="p-3 font-mono text-xs" virtualized />
           <div v-else class="whitespace-pre-wrap break-words p-3 font-mono text-xs">{{ cellDetailText }}</div>
         </div>
       </DialogContent>

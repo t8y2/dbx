@@ -37,10 +37,17 @@ function shortcutKeyName(key: string): string | null {
   return key;
 }
 
+function shortcutKeyNameFromEvent(event: ShortcutLikeEvent, platform: string): string | null {
+  if (event.altKey && isMacShortcutPlatform(platform) && /^Key[A-Z]$/.test(event.code ?? "")) {
+    return event.code!.slice(3);
+  }
+  return shortcutKeyName(event.key);
+}
+
 export function eventToShortcut(event: ShortcutLikeEvent, platform = globalThis.navigator?.platform || ""): string | null {
   if (event.isComposing) return null;
 
-  const key = shortcutKeyName(event.key);
+  const key = shortcutKeyNameFromEvent(event, platform);
   if (!key) return null;
 
   const hasModifier = !!event.metaKey || !!event.ctrlKey || !!event.altKey || !!event.shiftKey;
@@ -237,6 +244,10 @@ export function isCancelSearchShortcut(event: ShortcutLikeEvent, shortcuts?: Par
 
 export function isToggleSidebarShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
   return matchesShortcut(event, actionShortcut("toggleSidebar", shortcuts));
+}
+
+export function isToggleZenModeShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {
+  return matchesShortcut(event, actionShortcut("toggleZenMode", shortcuts));
 }
 
 export function isCopySidebarSelectionShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>): boolean {

@@ -1,9 +1,9 @@
 use crate::token_usage::TokenUsage;
 use futures::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
@@ -68,6 +68,7 @@ pub enum AiProvider {
     Openai,
     Gemini,
     Deepseek,
+    Kimi,
     Qwen,
     MiniMax,
     Ollama,
@@ -100,6 +101,7 @@ impl AiProvider {
             AiProvider::Openai => "openai",
             AiProvider::Gemini => "gemini",
             AiProvider::Deepseek => "deepseek",
+            AiProvider::Kimi => "kimi",
             AiProvider::Qwen => "qwen",
             AiProvider::MiniMax => "minimax",
             AiProvider::Ollama => "ollama",
@@ -311,6 +313,14 @@ pub struct AiChatSelectionState {
     pub effort_preferences: Vec<AiModelEffortPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<AiAssistantMode>,
+    /// Prompt template ids auto-applied when the AI panel opens, keyed by
+    /// connection db_type. BTreeMap keeps serialized key order stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_templates_by_db_type: BTreeMap<String, Vec<String>>,
+    /// Prompt template ids from the most recent send, keyed by connection
+    /// db_type; used as fallback when no defaults are configured.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_used_templates_by_db_type: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AiChatSelectionState {
@@ -320,6 +330,8 @@ impl Default for AiChatSelectionState {
             active: None,
             effort_preferences: Vec::new(),
             default_mode: None,
+            default_templates_by_db_type: BTreeMap::new(),
+            last_used_templates_by_db_type: BTreeMap::new(),
         }
     }
 }
@@ -371,6 +383,10 @@ pub struct AiConfig {
     pub models: Vec<AiModelListItem>,
     #[serde(default)]
     pub api_style: AiApiStyle,
+    /// Additional headers attached to every API-backed AI request. Values can
+    /// contain gateway credentials, so callers must never log this map.
+    #[serde(default)]
+    pub custom_headers: HashMap<String, String>,
     #[serde(default)]
     pub proxy_enabled: bool,
     #[serde(default)]
@@ -558,6 +574,131 @@ pub struct AiConversation {
     pub connection_name: String,
     pub database: String,
     pub messages: Vec<AiChatMessage>,
+    /// One editable "send later" input saved while an active run occupies the
+    /// conversation (parent PRD §5). Persisted with the conversation so it
+    /// survives a restart and is restored when the conversation reopens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued_input: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunStatus {
+    Preparing,
+    Queued,
+    Running,
+    AwaitingWriteConfirmation,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+    /// A normal-send FIFO item recovered after a process restart. The user's
+    /// input was never actually submitted, so the run is surfaced as an
+    /// editable, unsent pending draft — never as a failure/interruption.
+    /// (Parent PRD §7: "恢复为其会话中可编辑、未发送的待发输入".)
+    PendingRecoverable,
+}
+
+impl AiRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::AwaitingWriteConfirmation => "awaiting_write_confirmation",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::PendingRecoverable => "pending_recoverable",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "preparing" => Ok(Self::Preparing),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "awaiting_write_confirmation" => Ok(Self::AwaitingWriteConfirmation),
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
+            "pending_recoverable" => Ok(Self::PendingRecoverable),
+            other => Err(format!("Unknown AI run status: {other}")),
+        }
+    }
+
+    pub fn protects_conversation(self) -> bool {
+        matches!(
+            self,
+            Self::Preparing | Self::Queued | Self::Running | Self::AwaitingWriteConfirmation | Self::PendingRecoverable
+        )
+    }
+}
+
+/// Why a run occupies the global FIFO queue. Normal sends and accepted
+/// write-confirmation resumes recover differently after a restart (parent
+/// PRD §3 line 58), so the category must be persisted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiRunFifoCategory {
+    /// A user-sent message waiting for a global concurrency slot.
+    NormalSend,
+    /// An accepted write confirmation whose resume segment is queued.
+    WriteConfirmationResume,
+}
+
+impl AiRunFifoCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NormalSend => "normal_send",
+            Self::WriteConfirmationResume => "write_confirmation_resume",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "normal_send" => Ok(Self::NormalSend),
+            "write_confirmation_resume" => Ok(Self::WriteConfirmationResume),
+            other => Err(format!("Unknown AI run FIFO category: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiRun {
+    pub run_id: String,
+    pub conversation_id: String,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+    pub status: AiRunStatus,
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(default)]
+    pub database: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_confirmation: Option<serde_json::Value>,
+    /// Which queue category this run occupied. Persisted so restart recovery
+    /// can distinguish a normal send (→ editable pending input) from an
+    /// accepted write-confirmation resume (→ back to awaiting confirmation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo_category: Option<AiRunFifoCategory>,
+    /// The user's input text for a normal-send FIFO item, recovered after
+    /// restart as an editable, unsent pending draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<String>,
+    /// Highest event `seq` ever assigned to this run, across all its sessions
+    /// (parent PRD §8). Strictly increasing from 1; the run manager persists it
+    /// to drive event dedup, the unread baseline, and the "updates while you
+    /// were away" separator anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_seq: Option<u64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -665,6 +806,7 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
     match config.provider {
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -1129,11 +1271,13 @@ fn decorate_chat_completion_body(body: &mut serde_json::Value, config: &AiConfig
 /// Kimi K2.5+ models (including K2.7-Code) handle thinking flags differently
 /// and reject the OpenAI-compatible `extra_body.chat_template_kwargs` toggle.
 ///
-/// Matches `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, K3+, and future versions,
-/// while excluding older K2 variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
-/// Regex equivalent: /kimi-k(?:2\.[5-9]\d*|[3-9]\d*)/
+/// Matches current Kimi IDs and legacy catalog aliases while excluding older K2
+/// variants (`kimi-k2`, `kimi-k2-thinking`, etc.).
 fn is_kimi_model(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
+    if matches!(model.as_str(), "k3" | "kimi-for-coding" | "kimi-for-coding-highspeed") {
+        return true;
+    }
     if let Some(rest) = model.strip_prefix("kimi-k") {
         if rest.starts_with("2.") && rest.len() > 2 {
             // K2.x — the digit after "2." must be >= 5 (so K2.5+)
@@ -1419,6 +1563,7 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
             | AiProvider::Openai
             | AiProvider::Gemini
             | AiProvider::Deepseek
+            | AiProvider::Kimi
             | AiProvider::Qwen
             | AiProvider::MiniMax
     )
@@ -1426,6 +1571,16 @@ fn provider_requires_api_key(provider: &AiProvider) -> bool {
 
 fn normalized_api_key(config: &AiConfig) -> &str {
     config.api_key.trim()
+}
+
+fn is_jalapeno_config(config: &AiConfig) -> bool {
+    if !matches!(config.provider, AiProvider::OpenaiCompatible) {
+        return false;
+    }
+    reqwest::Url::parse(config.endpoint.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("api.jalapeno-cloud.ai")))
+        .unwrap_or(false)
 }
 
 fn validate_config(config: &AiConfig) -> Result<(), String> {
@@ -1462,10 +1617,14 @@ fn validate_model_list_config(config: &AiConfig) -> Result<(), String> {
 pub fn maybe_bearer_headers(config: &AiConfig) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if is_jalapeno_config(config) {
+        headers.insert("HTTP-Referer", HeaderValue::from_static("https://dbxio.com"));
+    }
     let api_key = normalized_api_key(config);
     if !api_key.is_empty() {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| e.to_string())?);
     }
+    append_custom_headers(&mut headers, config)?;
     Ok(headers)
 }
 
@@ -1487,6 +1646,36 @@ pub fn claude_headers(config: &AiConfig) -> Result<HeaderMap, String> {
         }
     }
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+    append_custom_headers(&mut headers, config)?;
+    Ok(headers)
+}
+
+/// Adds user-supplied gateway headers after DBX's provider headers. This
+/// intentionally lets an explicit `Authorization` value replace the provider
+/// default, while protecting HTTP framing and JSON content semantics.
+fn append_custom_headers(headers: &mut HeaderMap, config: &AiConfig) -> Result<(), String> {
+    const RESERVED: &[&str] =
+        &["host", "content-length", "content-type", "connection", "transfer-encoding", "proxy-authorization"];
+    let mut seen = HashSet::new();
+    for (raw_name, raw_value) in &config.custom_headers {
+        let name = HeaderName::from_bytes(raw_name.trim().as_bytes())
+            .map_err(|_| format!("Invalid AI custom header name: {raw_name}"))?;
+        if RESERVED.iter().any(|reserved| name.as_str().eq_ignore_ascii_case(reserved)) {
+            return Err(format!("Invalid AI custom header name: {raw_name} (reserved by DBX)"));
+        }
+        if !seen.insert(name.clone()) {
+            return Err(format!("Duplicate AI custom header name: {raw_name}"));
+        }
+        let value = HeaderValue::from_str(raw_value)
+            .map_err(|error| format!("Invalid AI custom header value for {raw_name}: {error}"))?;
+        headers.insert(name, value);
+    }
+    Ok(())
+}
+
+fn custom_headers(config: &AiConfig) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    append_custom_headers(&mut headers, config)?;
     Ok(headers)
 }
 
@@ -1687,7 +1876,10 @@ async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Resu
     let mut models = Vec::new();
 
     loop {
-        let mut request = client.get(&endpoint).query(&[("key", config.api_key.as_str()), ("pageSize", "1000")]);
+        let mut request = client
+            .get(&endpoint)
+            .query(&[("key", config.api_key.as_str()), ("pageSize", "1000")])
+            .headers(custom_headers(config)?);
         if let Some(token) = page_token.as_deref() {
             request = request.query(&[("pageToken", token)]);
         }
@@ -1846,6 +2038,7 @@ pub async fn list_models_core(config: &AiConfig) -> Result<Vec<AiModelInfo>, Str
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::OpenaiCompatible => list_openai_compatible_models(&client, config).await?,
@@ -2084,6 +2277,7 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         .post(resolve_endpoint(&request.config))
         .query(&[("key", normalized_api_key(&request.config))])
         .header(CONTENT_TYPE, "application/json")
+        .headers(custom_headers(&request.config)?)
         .json(&body)
         .send()
         .await
@@ -2563,6 +2757,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                         let res = client
                             .post(&gemini_ep)
                             .header(CONTENT_TYPE, "application/json")
+                            .headers(custom_headers(&config_inner)?)
                             .query(&[("key", api_key.as_str()), ("alt", "sse")])
                             .json(&json!({
                                 "contents": [{ "parts": [{ "text": TEST_PROMPT }], "role": "user" }],
@@ -2879,6 +3074,7 @@ pub async fn complete(request: &AiCompletionRequest) -> Result<String, String> {
                 }
                 AiProvider::Openai
                 | AiProvider::Deepseek
+                | AiProvider::Kimi
                 | AiProvider::Qwen
                 | AiProvider::MiniMax
                 | AiProvider::Ollama
@@ -2940,6 +3136,7 @@ pub async fn stream(
         }
         AiProvider::Openai
         | AiProvider::Deepseek
+        | AiProvider::Kimi
         | AiProvider::Qwen
         | AiProvider::MiniMax
         | AiProvider::Ollama
@@ -3308,6 +3505,7 @@ async fn stream_gemini(
 
     let endpoint = resolve_gemini_stream_endpoint(&request.config);
     let api_key = normalized_api_key(&request.config).to_string();
+    let headers = custom_headers(&request.config)?;
     let config = request.config.clone();
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -3315,6 +3513,7 @@ async fn stream_gemini(
         let body = body.clone();
         let endpoint = endpoint.clone();
         let api_key = api_key.clone();
+        let headers = headers.clone();
         let session_id = session_id.to_string();
         let emitted = emitted.clone();
         async move {
@@ -3322,6 +3521,7 @@ async fn stream_gemini(
                 .post(&endpoint)
                 .query(&[("key", api_key.as_str()), ("alt", "sse")])
                 .header(CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .json(&body)
                 .send()
                 .await
@@ -4153,6 +4353,7 @@ async fn stream_gemini_with_tools(
 
     let endpoint = resolve_gemini_stream_endpoint(&request.config);
     let api_key = normalized_api_key(&request.config).to_string();
+    let headers = custom_headers(&request.config)?;
     let config = request.config.clone();
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
@@ -4160,6 +4361,7 @@ async fn stream_gemini_with_tools(
         let body = body.clone();
         let endpoint = endpoint.clone();
         let api_key = api_key.clone();
+        let headers = headers.clone();
         let session_id = session_id.to_string();
         let emitted = emitted.clone();
         async move {
@@ -4167,6 +4369,7 @@ async fn stream_gemini_with_tools(
                 .post(&endpoint)
                 .query(&[("key", api_key.as_str()), ("alt", "sse")])
                 .header(CONTENT_TYPE, "application/json")
+                .headers(headers)
                 .json(&body)
                 .send()
                 .await
@@ -4365,7 +4568,8 @@ mod tests {
         AiAuthMethod, AiCapabilitySource, AiChatSelectionState, AiCompletionRequest, AiConfig, AiEffortCapability,
         AiEffortOption, AiEffortSelection, AiInlineImage, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel,
         MiniMaxStreamDelta, MiniMaxStreamState, MiniMaxTextAccumulator, StreamToolEvent, StreamingToolCallAccumulator,
-        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
+        ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, CONTENT_TYPE, MINIMAX_REASONING_DETAILS_PAYLOAD_KEY,
+        TEST_PROMPT,
     };
 
     #[test]
@@ -4633,6 +4837,7 @@ mod tests {
                 model: "claude-sonnet-4-6[1m]".to_string(),
                 models: Vec::new(),
                 api_style: AiApiStyle::Completions,
+                custom_headers: Default::default(),
                 proxy_enabled: false,
                 proxy_url: String::new(),
                 enable_thinking: true,
@@ -5295,6 +5500,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
@@ -5335,6 +5541,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "127.0.0.1:7890".to_string(),
             enable_thinking: true,
@@ -5373,6 +5580,7 @@ mod tests {
             model: "gpt-4o".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
             enable_thinking: true,
@@ -5411,6 +5619,7 @@ mod tests {
             model: "gemini-1.5-pro".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5453,6 +5662,7 @@ mod tests {
             model: "llama3.1".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5492,6 +5702,7 @@ mod tests {
             model: "local-model".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5550,6 +5761,7 @@ mod tests {
             model: String::new(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5584,6 +5796,7 @@ mod tests {
             model: String::new(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5621,6 +5834,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::AnthropicMessages,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5710,6 +5924,7 @@ mod tests {
             model: "MiniMax-M3".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5759,6 +5974,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_provider_uses_openai_compatible_endpoints_and_requires_an_api_key() {
+        let config = AiConfig {
+            provider: AiProvider::Kimi,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.moonshot.cn/v1".to_string(),
+            model: "kimi-k2.5".to_string(),
+            ..test_config(AiProvider::Kimi)
+        };
+
+        assert_eq!(resolve_endpoint(&config), "https://api.moonshot.cn/v1/chat/completions");
+        assert_eq!(resolve_model_list_endpoint(&config).unwrap(), "https://api.moonshot.cn/v1/models");
+        assert!(provider_requires_api_key(&config.provider));
+        assert_eq!(
+            validate_config(&AiConfig { api_key: String::new(), ..config.clone() }).unwrap_err(),
+            "API key is required"
+        );
+
+        let provider_json = serde_json::to_string(&AiProvider::Kimi).unwrap();
+        assert_eq!(provider_json, r#""kimi""#);
+        assert!(matches!(serde_json::from_str::<AiProvider>(&provider_json).unwrap(), AiProvider::Kimi));
+    }
+
+    #[test]
     fn auto_adds_v1_to_openai_compatible_endpoints() {
         // Endpoint without /v1 — auto add
         let config = AiConfig {
@@ -5769,6 +6008,7 @@ mod tests {
             model: "test-model".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5842,6 +6082,7 @@ mod tests {
             model: "gpt-5.6-luna".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Responses,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5872,6 +6113,7 @@ mod tests {
         let completions = AiConfig {
             endpoint: "https://api.openai.com/v1/responses".to_string(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             ..config
         };
         assert_eq!(resolve_endpoint(&completions), "https://api.openai.com/v1/chat/completions");
@@ -5887,6 +6129,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -5931,6 +6174,50 @@ mod tests {
         assert!(unauthenticated_headers.get(AUTHORIZATION).is_none());
         assert!(unauthenticated_headers.get("x-api-key").is_none());
         assert_eq!(unauthenticated_headers.get("anthropic-version").unwrap(), "2023-06-01");
+    }
+
+    #[test]
+    fn custom_ai_headers_are_merged_and_protect_http_framing() {
+        let mut config = test_config(AiProvider::OpenaiCompatible);
+        config.api_key = "provider-key".to_string();
+        config.custom_headers = HashMap::from([
+            ("X-GoModel-User-Path".to_string(), "/dbx-assistant".to_string()),
+            ("Authorization".to_string(), "Bearer gateway-token".to_string()),
+        ]);
+
+        let headers = maybe_bearer_headers(&config).unwrap();
+        assert_eq!(headers.get("x-gomodel-user-path").unwrap(), "/dbx-assistant");
+        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer gateway-token");
+        assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+
+        config.custom_headers = HashMap::from([("Content-Length".to_string(), "0".to_string())]);
+        assert!(maybe_bearer_headers(&config).unwrap_err().contains("reserved by DBX"));
+
+        config.custom_headers =
+            HashMap::from([("X-Tenant".to_string(), "one".to_string()), ("x-tenant".to_string(), "two".to_string())]);
+        assert!(maybe_bearer_headers(&config).unwrap_err().contains("Duplicate AI custom header name"));
+
+        config.custom_headers = HashMap::from([("bad header".to_string(), "value".to_string())]);
+        assert!(maybe_bearer_headers(&config).unwrap_err().contains("Invalid AI custom header name"));
+
+        config.custom_headers = HashMap::from([("X-Test".to_string(), "bad\r\nvalue".to_string())]);
+        assert!(maybe_bearer_headers(&config).unwrap_err().contains("Invalid AI custom header value"));
+    }
+
+    #[test]
+    fn jalapeno_requests_include_dbx_referer() {
+        let mut config = test_config(AiProvider::OpenaiCompatible);
+        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
+
+        let headers = maybe_bearer_headers(&config).unwrap();
+        assert_eq!(headers.get("HTTP-Referer").unwrap(), "https://dbxio.com");
+
+        config.endpoint = "https://api.jalapeno-cloud.ai.example.com/v1".to_string();
+        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
+
+        config.endpoint = "https://api.jalapeno-cloud.ai/v1".to_string();
+        config.provider = AiProvider::Custom;
+        assert!(maybe_bearer_headers(&config).unwrap().get("HTTP-Referer").is_none());
     }
 
     #[test]
@@ -6012,6 +6299,7 @@ mod tests {
             model: String::new(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6054,6 +6342,7 @@ mod tests {
             model: "qwen3:0.6b".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6145,6 +6434,7 @@ mod tests {
             model: String::new(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6401,6 +6691,9 @@ mod tests {
         assert!(is_kimi_model("kimi-k2.6"));
         assert!(is_kimi_model("kimi-k2.5"));
         assert!(is_kimi_model("kimi-k3"));
+        assert!(is_kimi_model("K3"));
+        assert!(is_kimi_model("kimi-for-coding"));
+        assert!(is_kimi_model("kimi-for-coding-highspeed"));
 
         // Older K2 variants should not skip OpenAI-compatible thinking toggles.
         assert!(!is_kimi_model("kimi-k2"));
@@ -6419,6 +6712,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -6631,8 +6925,8 @@ mod tests {
     }
 
     #[test]
-    fn omits_extra_body_for_kimi_test_connection_body() {
-        let config = AiConfig {
+    fn omits_extra_body_for_kimi_model_aliases() {
+        let mut config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
             api_key: "key".to_string(),
             auth_method: AiAuthMethod::Bearer,
@@ -6640,6 +6934,7 @@ mod tests {
             model: "kimi-k2.5".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6664,17 +6959,20 @@ mod tests {
             qoder_cli_path: None,
             qoder_cli_env: Default::default(),
         };
-        let mut body = serde_json::json!({
-            "model": &config.model,
-            "messages": [{ "role": "user", "content": TEST_PROMPT }],
-            "max_tokens": 16,
-            "stream": true,
-        });
+        for model in ["kimi-k2.5", "K3", "kimi-for-coding", "kimi-for-coding-highspeed"] {
+            config.model = model.to_string();
+            let mut body = serde_json::json!({
+                "model": &config.model,
+                "messages": [{ "role": "user", "content": TEST_PROMPT }],
+                "max_tokens": 16,
+                "stream": true,
+            });
 
-        apply_chat_completion_thinking_toggle(&mut body, &config);
+            apply_chat_completion_thinking_toggle(&mut body, &config);
 
-        assert!(body.get("extra_body").is_none());
-        assert!(body.get("reasoning_effort").is_none());
+            assert!(body.get("extra_body").is_none(), "{model}");
+            assert!(body.get("reasoning_effort").is_none(), "{model}");
+        }
     }
 
     #[test]
@@ -6687,6 +6985,7 @@ mod tests {
             model: "gpt-5".to_string(),
             models: vec![],
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6740,6 +7039,7 @@ mod tests {
             model: "qwen3".to_string(),
             models: vec![],
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -6787,6 +7087,7 @@ mod tests {
             model: "MiniMax-M3".to_string(),
             models: vec![],
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -7178,6 +7479,7 @@ mod tests {
             model: "qwen3".to_string(),
             models: vec![],
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -7252,6 +7554,7 @@ mod tests {
             model: "local-model".to_string(),
             models: Vec::new(),
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: true,
@@ -7321,6 +7624,7 @@ mod tests {
             model: "deepseek-r1:14b".to_string(),
             models: vec![],
             api_style: AiApiStyle::Completions,
+            custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
             enable_thinking: false,
@@ -7857,6 +8161,7 @@ mod tests {
             AiProvider::Custom,
             AiProvider::Gemini,
             AiProvider::Deepseek,
+            AiProvider::Kimi,
             AiProvider::Qwen,
             AiProvider::Ollama,
             AiProvider::MiniMax,

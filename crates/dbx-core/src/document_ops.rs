@@ -27,6 +27,15 @@ pub struct MongoGridFsBucketInfo {
     pub total_bytes: i64,
 }
 
+/// 侧边栏「查看索引 Mapping / 索引配置 / 索引统计」请求的只读元数据端点。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ElasticsearchIndexMetadataKind {
+    Mapping,
+    Settings,
+    Stats,
+}
+
 fn cmp_names(left: &str, right: &str) -> std::cmp::Ordering {
     let left_lower = left.to_lowercase();
     let right_lower = right.to_lowercase();
@@ -45,8 +54,8 @@ async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(
 pub async fn list_databases_core(state: &AppState, connection_id: &str) -> Result<Vec<String>, String> {
     ensure_document_pool(state, connection_id).await?;
     let fallback_database = configured_mongo_database(state, connection_id).await;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => match mongo_driver::list_databases(client).await {
             Ok(databases) => Ok(sort_names(databases)),
             Err(error) if mongo_list_databases_unauthorized(&error) => {
@@ -238,8 +247,8 @@ pub async fn list_collections_core(
     database: &str,
 ) -> Result<Vec<CollectionInfo>, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             let specs = sort_mongo_collection_specs(mongo_driver::list_collection_specs(client, database).await?);
             let names: Vec<String> = specs.iter().map(|spec| spec.name.clone()).collect();
@@ -249,7 +258,6 @@ pub async fn list_collections_core(
         }
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             let names = dynamodb_driver::list_tables(&client).await?;
             Ok(names
                 .into_iter()
@@ -297,8 +305,8 @@ pub async fn list_gridfs_files_core(
     sort: Option<&str>,
 ) -> Result<Vec<MongoGridFsFileInfo>, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::list_gridfs_files(client, database, bucket, filter, sort).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file browsing".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -313,8 +321,8 @@ pub async fn list_gridfs_buckets_core(
     sort: Option<&str>,
 ) -> Result<Vec<MongoGridFsBucketInfo>, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             let names = sort_names(mongo_driver::list_collections(client, database).await?);
             let bucket_names = mongo_gridfs_bucket_names(&names);
@@ -336,8 +344,8 @@ pub async fn create_gridfs_bucket_core(
     bucket: &str,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::create_gridfs_bucket(client, database, bucket).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket creation".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -351,8 +359,8 @@ pub async fn delete_gridfs_bucket_core(
     bucket: &str,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_bucket(client, database, bucket).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS bucket deletion".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -367,8 +375,8 @@ pub async fn download_gridfs_file_core(
     file_id: &str,
 ) -> Result<Vec<u8>, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::download_gridfs_file(client, database, bucket, file_id).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS download".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -385,8 +393,8 @@ pub async fn upload_gridfs_file_core(
     content_type: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::upload_gridfs_file(client, database, bucket, file_name, data, content_type).await
         }
@@ -403,8 +411,8 @@ pub async fn delete_gridfs_file_core(
     file_id: &str,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_gridfs_file(client, database, bucket, file_id).await,
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support GridFS file deletion".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
@@ -424,10 +432,11 @@ pub async fn find_documents_core(
     sort: Option<&str>,
     collation: Option<&str>,
     cursor: Option<&str>,
+    cursor_pagination: bool,
 ) -> Result<DocumentQueryResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             // Document browser responses must retain BSON type metadata so nested filters
             // can round-trip ObjectId, Date, and int64 values through Extended JSON.
@@ -438,28 +447,31 @@ pub async fn find_documents_core(
         }
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             let _ = (database, skip, projection, collation);
             dynamodb_driver::find_items(&client, collection, limit, filter, sort, cursor).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
-            elasticsearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+            if cursor_pagination {
+                elasticsearch_driver::find_documents_with_cursor(&client, collection, limit, filter, sort, cursor).await
+            } else {
+                elasticsearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+            }
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
-            easysearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+            if cursor_pagination {
+                easysearch_driver::find_documents_with_cursor(&client, collection, limit, filter, sort, cursor).await
+            } else {
+                easysearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
+            }
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::find_documents(&client, collection, skip, limit, filter, sort).await
         }
         PoolKind::VectorDb(client) => {
             let client = client.clone();
-            drop(connections);
             let _ = (filter, sort);
             vector_driver::find_documents(&client, database, collection, skip, limit).await
         }
@@ -498,21 +510,18 @@ pub async fn count_document_store_documents_core(
     filter: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             dynamodb_driver::count_items(&client, collection, filter).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             elasticsearch_driver::count_documents(&client, collection, filter).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             easysearch_driver::count_documents(&client, collection, filter).await
         }
         _ => Err("Document count is not supported for this connection".to_string()),
@@ -525,11 +534,10 @@ pub async fn describe_dynamodb_table_core(
     table: &str,
 ) -> Result<dynamodb_driver::DynamoDbTableDescription, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             dynamodb_driver::describe_table(&client, table).await
         }
         _ => Err("Not a DynamoDB connection".to_string()),
@@ -543,17 +551,71 @@ pub async fn count_elasticsearch_documents_core(
     filter: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             elasticsearch_driver::count_documents(&client, index, filter).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             easysearch_driver::count_documents(&client, index, filter).await
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
+    }
+}
+
+/// Elasticsearch/Easysearch 索引的只读元数据端点。`kind` 选择 `_mapping`
+/// （字段映射）、`_settings`（索引配置）或 `_stats`（索引统计）。
+pub async fn elasticsearch_get_index_metadata_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+    kind: ElasticsearchIndexMetadataKind,
+) -> Result<serde_json::Value, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            match kind {
+                ElasticsearchIndexMetadataKind::Mapping => {
+                    elasticsearch_driver::get_index_mapping(&client, index).await
+                }
+                ElasticsearchIndexMetadataKind::Settings => {
+                    elasticsearch_driver::get_index_settings(&client, index).await
+                }
+                ElasticsearchIndexMetadataKind::Stats => elasticsearch_driver::get_index_stats(&client, index).await,
+            }
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            match kind {
+                ElasticsearchIndexMetadataKind::Mapping => easysearch_driver::get_index_mapping(&client, index).await,
+                ElasticsearchIndexMetadataKind::Settings => easysearch_driver::get_index_settings(&client, index).await,
+                ElasticsearchIndexMetadataKind::Stats => easysearch_driver::get_index_stats(&client, index).await,
+            }
+        }
+        _ => Err("Not an Elasticsearch connection".to_string()),
+    }
+}
+
+/// 清空索引数据：删除全部文档，保留 mapping、settings 与别名。
+pub async fn elasticsearch_delete_all_documents_core(
+    state: &AppState,
+    connection_id: &str,
+    index: &str,
+) -> Result<elasticsearch_driver::ElasticsearchDeleteByQueryResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
+        PoolKind::Elasticsearch(client) => {
+            let client = client.clone();
+            elasticsearch_driver::delete_all_documents(&client, index).await
+        }
+        PoolKind::Easysearch(client) => {
+            let client = client.clone();
+            easysearch_driver::delete_all_documents(&client, index).await
         }
         _ => Err("Not an Elasticsearch connection".to_string()),
     }
@@ -573,27 +635,23 @@ pub async fn insert_document_core(
     routing: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::insert_document(client, database, collection, doc_json).await,
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             dynamodb_driver::insert_item(&client, collection, doc_json).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             elasticsearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             easysearch_driver::insert_document(&client, collection, doc_json, routing).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::insert_document(&client, collection, doc_json).await
         }
         PoolKind::Agent(client) => {
@@ -620,15 +678,12 @@ pub async fn insert_document_preserving_bson_types_core(
     routing: Option<&str>,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => {
             mongo_driver::insert_document_extended_json(client, database, collection, doc_json).await
         }
-        _ => {
-            drop(connections);
-            insert_document_core(state, connection_id, database, collection, doc_json, routing).await
-        }
+        _ => insert_document_core(state, connection_id, database, collection, doc_json, routing).await,
     }
 }
 
@@ -642,29 +697,25 @@ pub async fn update_document_core(
     routing: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::update_document(client, database, collection, id, doc_json).await,
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             dynamodb_driver::update_item(&client, collection, id, doc_json).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             // Elasticsearch requires the same custom routing value for writes
             // as was used to index the document.
             elasticsearch_driver::update_document(&client, collection, id, doc_json, routing).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             easysearch_driver::update_document(&client, collection, id, doc_json, routing).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::update_document(&client, collection, id, doc_json).await
         }
         PoolKind::Agent(client) => {
@@ -704,29 +755,25 @@ pub async fn delete_document_core_with_type(
     document_type: Option<&str>,
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::MongoDb(client) => mongo_driver::delete_document(client, database, collection, id).await,
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
-            drop(connections);
             dynamodb_driver::delete_item(&client, collection, id).await
         }
         PoolKind::Elasticsearch(client) => {
             let client = client.clone();
-            drop(connections);
             // Elasticsearch requires the same custom routing value for writes
             // as was used to index the document.
             elasticsearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Easysearch(client) => {
             let client = client.clone();
-            drop(connections);
             easysearch_driver::delete_document(&client, collection, id, document_type, routing).await
         }
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::delete_document(&client, collection, id).await
         }
         PoolKind::Agent(client) => {
@@ -748,11 +795,10 @@ pub async fn save_meilisearch_document_batch_core(
     inserts: &[String],
 ) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::save_document_batch(&client, collection, updates, delete_ids, inserts).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -775,11 +821,10 @@ pub async fn meilisearch_search_documents_core(
     ranking_score_threshold: Option<f64>,
 ) -> Result<crate::db::meilisearch_driver::MeilisearchSearchResult, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             let hybrid = hybrid_embedder.map(|embedder| crate::db::meilisearch_driver::MeilisearchHybrid {
                 embedder: embedder.to_string(),
                 semantic_ratio: hybrid_semantic_ratio.unwrap_or(0.5),
@@ -812,11 +857,10 @@ pub async fn meilisearch_fetch_document_page_core(
     offset: u64,
 ) -> Result<crate::db::meilisearch_driver::MeilisearchDocumentPage, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::fetch_document_page(&client, index, offset, limit, filter, sort).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -829,11 +873,10 @@ pub async fn meilisearch_get_index_settings_core(
     index: &str,
 ) -> Result<serde_json::Value, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::get_index_settings(&client, index).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -847,11 +890,10 @@ pub async fn meilisearch_get_document_core(
     id: &str,
 ) -> Result<String, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::get_document(&client, index, id).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -865,11 +907,10 @@ pub async fn meilisearch_update_index_settings_core(
     settings: &serde_json::Value,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::update_index_settings(&client, index, settings).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -882,11 +923,10 @@ pub async fn meilisearch_get_index_stats_core(
     index: &str,
 ) -> Result<serde_json::Value, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::get_index_stats(&client, index).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -899,11 +939,10 @@ pub async fn meilisearch_get_index_overview_core(
     index: &str,
 ) -> Result<crate::db::meilisearch_driver::MeilisearchIndexOverview, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::get_index_overview(&client, index).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -912,11 +951,10 @@ pub async fn meilisearch_get_index_overview_core(
 
 pub async fn meilisearch_delete_index_core(state: &AppState, connection_id: &str, index: &str) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::delete_index(&client, index).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -929,11 +967,10 @@ pub async fn meilisearch_delete_all_documents_core(
     index: &str,
 ) -> Result<(), String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => {
             let client = client.clone();
-            drop(connections);
             crate::db::meilisearch_driver::delete_all_documents(&client, index).await
         }
         _ => Err("Not a Meilisearch connection".to_string()),
@@ -945,8 +982,8 @@ async fn meilisearch_client_core(
     connection_id: &str,
 ) -> Result<crate::db::meilisearch_driver::MeilisearchClient, String> {
     ensure_document_pool(state, connection_id).await?;
-    let connections = state.connections.read().await;
-    match connections.get(connection_id).ok_or("Not found")? {
+    let pool = state.pool_handle(connection_id).await.ok_or("Not found")?;
+    match &pool {
         PoolKind::Meilisearch(client) => Ok(client.clone()),
         _ => Err("Not a Meilisearch connection".to_string()),
     }
@@ -1160,5 +1197,25 @@ mod tests {
         let error = parse_gridfs_bucket_sort(Some(r#"{"createdAt":-1}"#)).unwrap_err();
 
         assert!(error.contains("Unsupported GridFS bucket sort field"));
+    }
+
+    /// The desktop and web frontends send these three literals for the index
+    /// metadata menu items. A rename on either side silently breaks all three
+    /// actions, so pin the wire strings here.
+    #[test]
+    fn elasticsearch_index_metadata_kind_matches_the_frontend_wire_strings() {
+        use super::ElasticsearchIndexMetadataKind;
+
+        for (kind, wire) in [
+            (ElasticsearchIndexMetadataKind::Mapping, "mapping"),
+            (ElasticsearchIndexMetadataKind::Settings, "settings"),
+            (ElasticsearchIndexMetadataKind::Stats, "stats"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<ElasticsearchIndexMetadataKind>(serde_json::json!(wire)).unwrap(),
+                kind
+            );
+        }
     }
 }

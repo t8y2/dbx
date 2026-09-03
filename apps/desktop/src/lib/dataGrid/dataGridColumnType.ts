@@ -34,6 +34,27 @@ export function compactHeaderColumnType(dataType: string): string {
   return /^enum\s*\(/i.test(dataType.trim()) ? "enum" : dataType;
 }
 
+const CHARACTER_LENGTH_TYPE_PATTERN = /^(?:char|varchar|nchar|nvarchar|varchar2|nvarchar2|character|character\s+varying|national\s+character|national\s+character\s+varying)$/i;
+
+export interface MetadataColumnTypeLabel {
+  dataType: string;
+  characterMaximumLength?: number | null;
+  numericPrecision?: number | null;
+  numericScale?: number | null;
+}
+
+export function formatMetadataColumnTypeLabel({ dataType, characterMaximumLength, numericPrecision, numericScale }: MetadataColumnTypeLabel): string {
+  const typeName = dataType.trim();
+  if (!typeName || /\([^)]*\)\s*$/.test(typeName)) return typeName;
+  if (characterMaximumLength != null && characterMaximumLength > 0 && CHARACTER_LENGTH_TYPE_PATTERN.test(typeName)) {
+    return `${typeName}(${characterMaximumLength})`;
+  }
+  if (numericPrecision != null && /^(?:numeric|decimal)$/i.test(typeName)) {
+    return `${typeName}(${numericPrecision},${numericScale ?? 0})`;
+  }
+  return typeName;
+}
+
 /**
  * Resolve the data type used to drive per-column alignment and other
  * type-driven rendering in the query-result grid.

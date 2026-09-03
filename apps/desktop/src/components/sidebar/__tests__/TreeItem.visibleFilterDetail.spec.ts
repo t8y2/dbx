@@ -69,6 +69,7 @@ vi.mock("@/stores/settingsStore", () => ({
       sidebarAllowHorizontalScroll: false,
       sidebarHiddenTablePrefixes: [],
       sidebarObjectInfoMode: "none",
+      sidebarShowTooltips: true,
     },
   }),
 }));

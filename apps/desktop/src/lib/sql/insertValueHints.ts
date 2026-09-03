@@ -173,6 +173,14 @@ function findWordIndexAtDepth(tokens: readonly SqlSemanticToken[], word: string,
   return -1;
 }
 
+/** INSERT ... (SELECT ...) wraps the source query in an extra paren pair at sourceDepth. */
+function findInsertSourceSelectIndex(tokens: readonly SqlSemanticToken[], from: number, sourceDepth: number): number {
+  if (tokens[from]?.text === "(" && tokens[from + 1]?.depth === sourceDepth + 1 && tokens[from + 1]?.kind === "word" && tokens[from + 1]?.normalized === "select") {
+    return from + 1;
+  }
+  return findWordIndexAtDepth(tokens, "select", from, sourceDepth);
+}
+
 function findClosingParenIndex(tokens: readonly SqlSemanticToken[], openIndex: number): number {
   const open = tokens[openIndex];
   if (!open || open.text !== "(") return -1;
@@ -203,8 +211,16 @@ function selectProjectionStarts(tokens: readonly SqlSemanticToken[], selectIndex
   const depth = select.depth;
   let index = selectIndex + 1;
 
-  if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && (tokens[index]?.normalized === "all" || tokens[index]?.normalized === "distinct")) {
+  if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "all") {
     index += 1;
+  } else if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "distinct") {
+    index += 1;
+    // PostgreSQL DISTINCT ON (cols) — skip the ON (...) clause before splitting projections.
+    if (tokens[index]?.depth === depth && tokens[index]?.kind === "word" && tokens[index]?.normalized === "on" && tokens[index + 1]?.text === "(") {
+      const closeIndex = findClosingParenIndex(tokens, index + 1);
+      if (closeIndex < 0) return [];
+      index = closeIndex + 1;
+    }
   }
 
   const maybeTop = tokens[index];
@@ -278,7 +294,7 @@ function parseInsertClause(tokens: readonly SqlSemanticToken[], span: SqlSemanti
 
   const sourceDepth = tokens[insertIndex]?.depth ?? 0;
   const valuesIndex = findWordIndexAtDepth(tokens, "values", index, sourceDepth);
-  const selectIndex = findWordIndexAtDepth(tokens, "select", index, sourceDepth);
+  const selectIndex = findInsertSourceSelectIndex(tokens, index, sourceDepth);
   if (valuesIndex < 0 && selectIndex < 0) return null;
 
   const rows = selectIndex >= 0 && (valuesIndex < 0 || selectIndex < valuesIndex) ? [selectProjectionStarts(tokens, selectIndex)] : parseValuesRows(tokens, valuesIndex);
@@ -539,6 +555,60 @@ interface StatementWindowMemo {
 // String equality here is content equality (JS `===` on strings), so this is safe for a pure
 // function -- a cache hit is guaranteed to be the same answer, not a staleness risk.
 let statementWindowMemo: StatementWindowMemo | null = null;
+
+export interface SqlTextSlice {
+  readonly length: number;
+  sliceString(from: number, to: number): string;
+}
+
+/**
+ * When `position` sits inside an unclosed PostgreSQL dollar-quoted body (`$tag$ ...`), return the
+ * opening tag offset; otherwise `null`. Scans from document start so callers can advance a bounded
+ * editor slice to start just past the opening delimiter (not include it) before statement-window
+ * heuristics run.
+ */
+export function findEnclosingDollarQuoteStart(sql: string, position: number): number | null {
+  return findEnclosingDollarQuoteStartInText({ length: sql.length, sliceString: (from, to) => sql.slice(from, to) }, position);
+}
+
+const DOLLAR_QUOTE_SLICE_SCAN_CHUNK = 64 * 1024;
+/** When a chunk ends on `$`, extend the read so a `$tag$` marker split across chunks is still visible. */
+const DOLLAR_QUOTE_CHUNK_TAIL_EXTENSION = 128;
+
+export function findEnclosingDollarQuoteStartInText(doc: SqlTextSlice, position: number): number | null {
+  let openTag: string | null = null;
+  let openPos = -1;
+  const end = Math.max(0, Math.min(position, doc.length));
+  let scanned = 0;
+  while (scanned < end) {
+    let chunkEnd = Math.min(scanned + DOLLAR_QUOTE_SLICE_SCAN_CHUNK, end);
+    if (chunkEnd < end && chunkEnd > scanned && doc.sliceString(chunkEnd - 1, chunkEnd) === "$") {
+      chunkEnd = Math.min(chunkEnd + DOLLAR_QUOTE_CHUNK_TAIL_EXTENSION, end);
+    }
+    const chunk = doc.sliceString(scanned, chunkEnd);
+    for (let local = 0; local < chunk.length; ) {
+      const index = scanned + local;
+      if (index >= end) break;
+      if (chunk[local] === "$") {
+        const marker = matchDollarQuoteTag(chunk, local);
+        if (marker) {
+          if (openTag === null) {
+            openTag = marker;
+            openPos = index;
+          } else if (marker === openTag) {
+            openTag = null;
+            openPos = -1;
+          }
+          local += marker.length;
+          continue;
+        }
+      }
+      local += 1;
+    }
+    scanned = chunkEnd;
+  }
+  return openTag !== null ? openPos : null;
+}
 
 export function expandToSqlStatementWindow(sql: string, from: number, to: number, dialectId = "mysql"): TextRange {
   if (statementWindowMemo && statementWindowMemo.sql === sql && statementWindowMemo.from === from && statementWindowMemo.to === to && statementWindowMemo.dialectId === dialectId) {

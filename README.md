@@ -12,7 +12,7 @@
     <a href="https://discord.gg/W7NyVDRt6a"><img src="https://dcbadge.limes.pink/api/server/W7NyVDRt6a" alt="Join Discord" /></a>
 	  </p>
   <p>
-		<a href="https://trendshift.io/repositories/26775?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/26775/daily?language=Rust" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
+		<a href="https://trendshift.io/repositories/26775?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-26775" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/26775" alt="t8y2%2Fdbx | Trendshift" width="250" height="55"/></a>
     <a href="https://hellogithub.com/repository/t8y2/dbx" target="_blank"><img src="https://api.hellogithub.com/v1/widgets/recommend.svg?rid=7f74ffda697241bf996e17e1b0900a21&claim_uid=p0UjnC1TLtyvWSx" alt="Featured｜HelloGitHub" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 	<a href="https://www.producthunt.com/products/dbx/launches/dbx?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-dbx" target="_blank" rel="noopener noreferrer"><img alt="DBX - Lightweight open-source database manager built with Rust | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136811&amp;theme=light&amp;t=1780979717555"></a>
 	  </p>
@@ -62,6 +62,88 @@
     <a href="https://dl.dbxio.com/assets/screenshot-grid.png"><img src="https://dl.dbxio.com/assets/screenshot-grid.png" width="395" /></a>
   </p>
 </div>
+
+## Sponsors & Partners
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
+        <img src="docs/public/sponsors/rainyun-card.png" alt="RainYun" width="175" />
+      </a>
+    </td>
+    <td>
+      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
+      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="docs/public/sponsors/qiniu-card.png" alt="Qiniu Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
+      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
+      </a>
+    </td>
+    <td>
+      TrustAsia provides cloud-based code signing service for DBX, enabling trusted software through automated CI/CD builds.
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">Visit TrustAsia</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
+        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Jalapeño Cloud is an AI infrastructure and token compute platform, with an exclusive DBX entry offering free credits and top-up bonuses.
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">Visit Jalapeño Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch-card.png" alt="Easysearch" width="175" />
+      </a>
+    </td>
+    <td>
+      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
+      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
+    </td>
+  </tr>
+</table>
 
 ## Why DBX?
 
@@ -394,70 +476,13 @@ The installer will be in `src-tauri/target/release/bundle/`.
 
 DBX is free and open source, but ongoing maintenance, database compatibility testing, infrastructure, and release work require sustained time and resources.
 
-### Sponsors & Partners
-
-<table>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="RainYun" height="48" />
-      </a>
-    </td>
-    <td>
-      RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="Qiniu Cloud" height="64" />
-      </a>
-    </td>
-    <td>
-      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://easysearch.cn" target="_blank">
-        <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-      </a>
-    </td>
-    <td>
-      Easysearch is an enterprise-grade distributed search engine compatible with Elasticsearch APIs, combining full-text, vector, geospatial search, real-time analytics, and AI capabilities in one platform.
-    </td>
-    <td align="center" width="140">
-      <a href="https://easysearch.cn" target="_blank">Visit Easysearch</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="180">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-    </td>
-    <td align="center" width="140">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
-    </td>
-  </tr>
-</table>
-
 - [Support DBX](https://my.feishu.cn/wiki/WMTkwdATDiiu4rk14JMcoyhTnoh) — voluntary donations via WeChat or Alipay
 - [Sponsors & Partners](https://my.feishu.cn/wiki/CgOWwwTzzify79k9Oq8cXpUNn6e) — sponsorship, infrastructure, tools, and community collaboration
 
 ## Contributors
 
 <a href="https://github.com/t8y2/dbx/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=t8y2/dbx" />
+  <img src="https://contrib.rocks/image?repo=t8y2/dbx&max=300&columns=15" />
 </a>
 
 ## Community

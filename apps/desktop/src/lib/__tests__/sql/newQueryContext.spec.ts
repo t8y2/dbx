@@ -212,6 +212,20 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix")).toBe('SELECT * FROM "APP"."USERS"');
   });
 
+  it("scopes InfluxDB 1.x / 2.x prefill to a rolling InfluxQL window", () => {
+    // Without a time predicate the InfluxQL query would scan every shard
+    // for the measurement before LIMIT clips the tail; the 5-minute
+    // window matches the sidebar quick-open default so users can run
+    // the prefill safely.
+    expect(buildSelectAllSql("influxdb", { tableName: "cpu" })).toBe('SELECT * FROM "cpu" WHERE time > now() - 5m ORDER BY time DESC LIMIT 100');
+  });
+
+  it("scopes InfluxDB 3.x prefill to a rolling DataFusion INTERVAL window", () => {
+    // v3 goes through DataFusion SQL and needs an ANSI INTERVAL literal
+    // rather than the InfluxQL Go-duration form used by v1 / v2.
+    expect(buildSelectAllSql("influxdb3", { tableName: "cpu" })).toBe(`SELECT * FROM "cpu" WHERE time > now() - INTERVAL '5 minutes' ORDER BY time DESC LIMIT 100`);
+  });
+
   it("bracket-quotes a SQL Server table", () => {
     expect(buildSelectAllSql("sqlserver", { schema: "dbo", tableName: "users" })).toBe("SELECT * FROM [dbo].[users]");
     expect(buildSelectAllSql("sqlserver", { tableName: "users" })).toBe("SELECT * FROM [users]");

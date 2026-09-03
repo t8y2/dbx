@@ -1,4 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
+import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -172,6 +174,42 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.batchSqlExecution?.items[1]?.errorDetails).toEqual(structuredError);
     expect(tab.batchSqlExecution?.items[1]?.error).not.toBe(structuredError.code);
     expect(tab.batchSqlExecution?.items[1]?.error).not.toBe("[object Object]");
+    expect(tab.batchSqlExecution?.items[1]?.error).toContain("no such table: missing");
+  });
+
+  it("preserves the original message when a top-level structured error omits detail", async () => {
+    const structuredError = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend" as const,
+      operationOutcome: "unknown" as const,
+    };
+    const originalMessage = "ClickHouse error: table iceberg_backend.missing_table does not exist";
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "clickhouse-1",
+      name: "ClickHouse",
+      db_type: "clickhouse",
+      database: "iceberg_backend",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockRejectedValue(
+      new BackendErrorException({
+        backendError: structuredError,
+        message: originalMessage,
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("clickhouse-1", "iceberg_backend", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM missing_table");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.result?.rows[0]?.[0]).toContain(originalMessage);
+    expect(tab.batchSqlExecution?.items[0]?.error).toContain(originalMessage);
   });
 
   it("updates live per-statement progress before the batch promise resolves", async () => {
@@ -978,8 +1016,7 @@ describe("queryStore multi-statement errors", () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
     const tabId = store.createTab("mysql-1", "app", "Query");
-    await store.executeCurrentSql("SELECT 1 AS value");
-    store.toggleResultAutoSave(tabId);
+    await store.executeCurrentSql("SELECT 1 AS value", { openInNewResultTab: true });
     const tab = store.tabs.find((item) => item.id === tabId)!;
     const retainedRunId = tab.activeResultRunId!;
     const retainedRunCacheKey = tab.resultRuns?.find((run) => run.id === retainedRunId)?.resultCacheKey;
@@ -987,11 +1024,16 @@ describe("queryStore multi-statement errors", () => {
 
     const execution = store.executeCurrentSql("SELECT 2 AS value", { openInNewResultTab: true });
     await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+    expect(tab.executingResultRunId).toBeNull();
+    expect(isActiveResultLoading(tab)).toBe(true);
     expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
     expect(tab.batchSqlExecution?.submittedSql).toBe("SELECT 1 AS value");
+    expect(isActiveResultLoading(tab)).toBe(false);
     pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
     await execution;
 
+    expect(tab.executingResultRunId).toBeUndefined();
+    expect(isActiveResultLoading(tab)).toBe(false);
     expect(tab.resultRuns).toHaveLength(2);
     expect(tab.activeResultRunId).not.toBe(retainedRunId);
     expect(tab.result).toMatchObject({ rows: [[2]] });
@@ -1014,6 +1056,28 @@ describe("queryStore multi-statement errors", () => {
     expect(await store.setActiveResultRun(tabId, retainedRunId)).toBe(true);
     expect(tab.result).toMatchObject({ rows: [[1]] });
     expect(tab.batchSqlExecution?.submittedSql).toBe("SELECT 1 AS value");
+  });
+
+  it("keeps loading scoped to the result run being rerun", async () => {
+    const pendingExecution = deferred<Array<{ columns: string[]; rows: number[][]; affected_rows: number; execution_time_ms: number }>>();
+    mocks.executeMulti.mockResolvedValueOnce([{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 }]).mockImplementationOnce(() => pendingExecution.promise);
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("mysql-1", "app", "Query");
+    await store.executeCurrentSql("SELECT 1 AS value", { openInNewResultTab: true });
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    const executingRunId = tab.activeResultRunId!;
+
+    const execution = store.executeCurrentSql("SELECT 2 AS value");
+    await vi.waitFor(() => expect(mocks.executeMulti).toHaveBeenCalledTimes(2));
+
+    expect(tab.executingResultRunId).toBe(executingRunId);
+    expect(isActiveResultLoading(tab)).toBe(true);
+    pendingExecution.resolve([{ columns: ["value"], rows: [[2]], affected_rows: 0, execution_time_ms: 1 }]);
+    await execution;
+
+    expect(tab.executingResultRunId).toBeUndefined();
+    expect(isActiveResultLoading(tab)).toBe(false);
   });
 
   it("restores the retained result when a new-result execution returns no result", async () => {

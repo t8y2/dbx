@@ -498,6 +498,63 @@ test("empty root metadata does not replace existing databases with only user adm
   }
 });
 
+test("dropping the last visible database removes the stale node instead of preserving it", async () => {
+  const restoreStorage = installMemoryStorage();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/schema/cache?")) {
+      return jsonResponse(null);
+    }
+    if (url.startsWith("/api/schema/databases?")) {
+      // The backend still reports its own system databases; only the
+      // previously-visible user database ("app") is gone after the drop.
+      return jsonResponse([{ name: "information_schema" }, { name: "mysql" }, { name: "performance_schema" }, { name: "sys" }]);
+    }
+    if (url === "/api/schema/cache" && init?.method === "POST") {
+      return jsonResponse(null);
+    }
+    return new Response("unexpected request", { status: 500 });
+  }) as typeof fetch;
+
+  try {
+    setActivePinia(createPinia());
+    const store = useConnectionStore();
+    store.addEphemeralConnection({ ...conn("conn-1"), db_type: "mysql", port: 3306, visible_databases: ["app"] });
+    store.treeNodes.push({
+      id: "conn-1",
+      label: "conn-1",
+      type: "connection",
+      connectionId: "conn-1",
+      children: [
+        {
+          id: "conn-1:app",
+          label: "app",
+          type: "database",
+          connectionId: "conn-1",
+          database: "app",
+          children: [],
+        },
+      ],
+    });
+
+    await store.loadDatabases("conn-1");
+
+    assert.deepEqual(
+      store.treeNodes[0].children?.map((child) => child.type),
+      ["user-admin"],
+    );
+    assert.equal(
+      store.treeNodes[0].children?.some((child) => child.id === "conn-1:app"),
+      false,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test.each([
   ["redis", "loadRedisDatabases", "/api/redis/list-databases", "Redis databases"],
   ["mq", "loadMqTenants", "/api/mq/tenants/list", "message queue tenants"],

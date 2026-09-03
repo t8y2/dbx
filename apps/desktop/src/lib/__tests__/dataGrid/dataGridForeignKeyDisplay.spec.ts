@@ -10,6 +10,7 @@ import {
   manualReferenceColumnValidation,
   manualReferenceKeyColumnIsUnique,
   manualReferenceKeyColumns,
+  manualReferenceKeySupportsColumn,
   reconcileManualReferenceColumn,
   singleColumnForeignKey,
   splitForeignKeyDisplayValues,
@@ -69,10 +70,46 @@ describe("dataGridForeignKeyDisplay", () => {
       { name: "Code", is_primary_key: false },
     ].map((column) => ({ data_type: "varchar", is_nullable: false, column_default: null, extra: null, ...column })) as ColumnInfo[];
 
-    expect(manualReferenceKeyColumns(columns, ["code"]).map((column) => column.name)).toEqual(["code"]);
-    expect(manualReferenceKeyColumnIsUnique(columns, ["code"], "code")).toBe(true);
-    expect(manualReferenceKeyColumnIsUnique(columns, ["code"], "Code")).toBe(false);
+    const referenceKeys = [{ columns: ["code"] }];
+    expect(manualReferenceKeyColumns(columns, referenceKeys).map((column) => column.name)).toEqual(["code"]);
+    expect(manualReferenceKeyColumnIsUnique(columns, referenceKeys, "code")).toBe(true);
+    expect(manualReferenceKeyColumnIsUnique(columns, referenceKeys, "Code")).toBe(false);
     expect(manualReferenceKeyColumnIsUnique(columns, [], "tenant_id")).toBe(false);
+  });
+
+  it("supports one column of a two-column unique key only when the other column is fixed", () => {
+    const columns = ["dict_key", "dict_value", "label"].map((name) => ({ name, data_type: "varchar", is_nullable: false, column_default: null, is_primary_key: false, extra: null })) as ColumnInfo[];
+    const referenceKeys = [{ columns: ["dict_key", "dict_value"] }];
+    const statusFilter = { column: "dict_key", mode: "equals" as const, value: "status" };
+
+    expect(manualReferenceKeyColumns(columns, referenceKeys, statusFilter).map((column) => column.name)).toEqual(["dict_value"]);
+    expect(manualReferenceKeyColumnIsUnique(columns, referenceKeys, "dict_value", statusFilter)).toBe(true);
+    expect(manualReferenceKeyColumnIsUnique(columns, referenceKeys, "dict_key", statusFilter)).toBe(false);
+  });
+
+  it("requires an exact non-empty equals filter for composite reference keys", () => {
+    const referenceKeys = [{ columns: ["DictKey", "dict_value"] }];
+
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "DictKey", mode: "equals", value: "status" })).toBe(true);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "dictkey", mode: "equals", value: "status" })).toBe(false);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "DictKey", mode: "equals", value: "  " })).toBe(false);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "DictKey", mode: "like", value: "status" })).toBe(false);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "DictKey", mode: "in", value: "status,gender" })).toBe(false);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "dict_value", { column: "DictKey", mode: "between", value: "a", endValue: "z" })).toBe(false);
+  });
+
+  it("does not infer uniqueness from a partially fixed three-column key", () => {
+    const threeColumnKey = [{ columns: ["tenant_id", "dict_key", "dict_value"] }];
+    const filter = { column: "dict_key", mode: "equals" as const, value: "status" };
+
+    expect(manualReferenceKeySupportsColumn(threeColumnKey, "dict_value", filter)).toBe(false);
+  });
+
+  it("accepts a column when any current key proves it unique", () => {
+    const referenceKeys = [{ columns: ["tenant_id", "code"] }, { columns: ["external_id"] }];
+
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "code", { column: "tenant_id", mode: "equals", value: "acme" })).toBe(true);
+    expect(manualReferenceKeySupportsColumn(referenceKeys, "external_id")).toBe(true);
   });
 
   it("preserves saved reference columns when metadata is invalid or unavailable", () => {
@@ -84,6 +121,7 @@ describe("dataGridForeignKeyDisplay", () => {
     expect(reconcileManualReferenceColumn("", columns, "unavailable")).toBe("");
     expect(manualReferenceColumnValidation(columns, [], "legacy_code", "available")).toBe("invalid");
     expect(manualReferenceColumnValidation(columns, [], "legacy_code", "unavailable")).toBe("unavailable");
+    expect(manualReferenceColumnValidation(columns, [{ columns: ["tenant_id", "legacy_code"] }], "legacy_code", "available", { column: "tenant_id", mode: "equals", value: "" })).toBe("invalid");
   });
 
   it("deduplicates current-page keys with type-safe identities and bounded batches", () => {

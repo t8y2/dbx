@@ -6,7 +6,8 @@ use dbx_core::path_utils::expand_tilde;
 /// Reveal a file in the platform's file manager.
 ///
 /// - macOS: `open -R <path>` highlights the file in Finder.
-/// - Windows: `explorer.exe /select,<path>` opens Explorer with the file selected.
+/// - Windows: selects the file in Explorer via the opener plugin (COM
+///   `SHOpenFolderAndSelectItems`, the same approach Electron uses).
 /// - Linux: opens the parent directory with `xdg-open`. (DBus
 ///   `org.freedesktop.FileManager1.ShowItems` would be a higher-fidelity
 ///   alternative; deferred to a follow-up to avoid a new dependency.)
@@ -26,15 +27,13 @@ pub fn reveal_in_file_manager(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        // `/select,<path>` must be passed as a single argument with no space
-        // after the comma. `Command::arg` does not invoke a shell, so the path
-        // is forwarded as-is — spaces and non-ASCII characters survive.
-        let arg = format!("/select,{}", path.display());
-        dbx_core::process::new_std_command("explorer")
-            .arg(arg)
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("failed to launch Explorer: {e}"))
+        // Explorer does not parse its command line with the usual MSVC rules:
+        // passing `explorer /select,<path>` through `Command::arg` wraps the
+        // whole argument in quotes as soon as the path contains a space, and
+        // Explorer then silently falls back to opening the default shell
+        // folder (Documents). The opener plugin selects the item via COM
+        // instead, which has no command-line parsing involved.
+        tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| format!("failed to reveal in Explorer: {e}"))
     }
 
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
@@ -93,12 +92,11 @@ fn validate_database_backup_file(raw: &str) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err(format!("backup file path is not absolute: {expanded}"));
     }
-    if path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("sql"))
-        != Some(true)
-    {
-        return Err(format!("backup file must use the .sql extension: {expanded}"));
-    }
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let lower_file_name = file_name.to_ascii_lowercase();
+    if !(lower_file_name.ends_with(".sql") || lower_file_name.ends_with(".sql.gz")) {
+        return Err(format!("backup file must use the .sql or .sql.gz extension: {expanded}"));
+    }
     if !file_name.starts_with("dbx-backup__") {
         return Err(format!("backup file name is not managed by DBX: {expanded}"));
     }
@@ -165,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn database_backup_file_requires_absolute_sql_path() {
+    fn database_backup_file_requires_absolute_managed_sql_path() {
         assert!(validate_database_backup_file("relative/backup.sql").is_err());
         let invalid_extension = if cfg!(windows) { "C:/tmp/backup.txt" } else { "/tmp/backup.txt" };
         assert!(validate_database_backup_file(invalid_extension).is_err());
@@ -173,6 +171,20 @@ mod tests {
         assert!(validate_database_backup_file(unmanaged).is_err());
         let valid = if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL" } else { "/tmp/dbx-backup__nightly.SQL" };
         assert!(validate_database_backup_file(valid).is_ok());
+        let valid_gzip =
+            if cfg!(windows) { "C:/tmp/dbx-backup__nightly.SQL.GZ" } else { "/tmp/dbx-backup__nightly.SQL.GZ" };
+        assert!(validate_database_backup_file(valid_gzip).is_ok());
+    }
+
+    #[tokio::test]
+    async fn managed_gzip_backup_file_can_be_deleted() {
+        let path = std::env::temp_dir().join(format!("dbx-backup__delete-test-{}.sql.gz", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"gzip placeholder").unwrap();
+
+        let deleted = delete_database_backup_files(vec![path.to_string_lossy().to_string()]).await.unwrap();
+
+        assert_eq!(deleted, 1);
+        assert!(!path.exists());
     }
 
     #[test]

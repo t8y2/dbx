@@ -8,6 +8,7 @@ node_modules
 .trellis/
 .worktrees/
 openspec/
+.zcode/
 .mcp.json
 AGENTS.md
 CLAUDE.md
@@ -22,6 +23,9 @@ src-tauri/webview2-fixed-runtime/
 plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar
+agents/drivers/duckdb/target/
+agents/drivers/etcd-go/etcd-go
+agents/drivers/etcd2-go/etcd2-go
 plugins/jdbc/.gradle/
 plugins/jdbc/build/
 plugins/jdbc/dist/
@@ -61,6 +65,11 @@ Thumbs.db
 
 # Temp
 tmp/
+
+# AI background-run dev artifacts (never commit)
+.dlp-quarantine/
+outputs/
+target-ai-write-confirmation/
 
 # Code review tool artifacts
 review_diff.json

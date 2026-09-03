@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getSqlCompletionContext } from "@/lib/sql/sqlCompletion";
 import type { ConnectionConfig } from "@/types/database";
 
 function installLocalStorage() {
@@ -713,6 +714,40 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oceanbase-oracle-1", "OBORCL", "APP", "ORDERS_ALIAS", undefined, undefined);
     expect(lower).toEqual([expect.objectContaining({ name: "ORDER_ID", table: "ORDERS_ALIAS", schema: "APP" })]);
     expect(upper).toEqual(lower);
+  });
+
+  it("uses the OceanBase Oracle session schema for an unqualified aliased table", async () => {
+    const completionAssistantSearch = vi.fn();
+    const getColumns = vi.fn().mockResolvedValue([{ name: "PARAM_VALUE", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const sql = "select a. from tbparam a";
+    const completion = getSqlCompletionContext(sql, sql.indexOf("a.") + 2, { databaseType: "oceanbase-oracle" });
+    const reference = completion.referencedTables[0];
+    expect(reference).toEqual(expect.objectContaining({ name: "tbparam", alias: "a", schema: undefined, nameQuoted: false }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [oceanBaseOracleConnection()];
+    store.connectedIds.add("oceanbase-oracle-1");
+
+    const columns = await store.listCompletionColumns("oceanbase-oracle-1", "OBORCL", reference!.name, reference!.schema, {
+      clientSessionId: "tab-a",
+      version: 0,
+      tableQuoted: reference!.nameQuoted,
+      schemaQuoted: reference!.schemaQuoted,
+    });
+
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(getColumns).toHaveBeenCalledWith("oceanbase-oracle-1", "OBORCL", "", "TBPARAM", undefined, "tab-a");
+    expect(columns).toEqual([expect.objectContaining({ name: "PARAM_VALUE", table: "TBPARAM", schema: undefined, dataType: "VARCHAR2(100)" })]);
+    expect(store.lookupLocalCompletionColumns("oceanbase-oracle-1", "OBORCL", "TBPARAM")).toEqual([]);
   });
 
   it("keeps quoted OceanBase Oracle identifiers exact and isolated from unquoted cache entries", async () => {

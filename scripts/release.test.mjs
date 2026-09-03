@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { isDesktopVersionOnlyCargoLockChange } from "./release-lock.mjs";
 
 const repoRoot = new URL("..", import.meta.url).pathname;
 const releaseScript = join(repoRoot, "scripts/release.mjs");
+const releaseWorkflow = join(repoRoot, ".github/workflows/release.yml");
 const packagesWorkflow = join(repoRoot, ".github/workflows/mcp-release.yml");
+const vsignConfigPath = join(repoRoot, "src-tauri/tauri.vsign.conf.json");
 
 function runRelease(args, env = {}) {
   return spawnSync(process.execPath, [releaseScript, ...args], {
@@ -38,7 +41,7 @@ function createMockGh() {
       "  const version = tagName.slice(1);",
       "  const assets = [",
       '    "latest.json",',
-      '    "DBX_" + version + "_aarch64.dmg",',
+      '    "DBX_" + version + "_" + (process.env.MOCK_ARM64_DMG_ARCH || "arm64") + ".dmg",',
       '    "DBX_" + version + "_x64.dmg",',
       '    "DBX_" + version + "_x64-setup.exe",',
       '    "DBX_" + version + "_arm64-setup.exe",',
@@ -97,6 +100,33 @@ test("rollback rejects a target that is not older than latest", () => {
   assert.match(result.stderr, /must be older than the current latest release v0\.5\.64/);
 });
 
+test("rollback accepts pre-rename releases that ship the aarch64 dmg asset", () => {
+  const mockBin = createMockGh();
+  const logPath = join(mockBin, "gh.log");
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    GH_LOG: logPath,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "aarch64",
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const commands = readFileSync(logPath, "utf8").trim().split("\n");
+  assert.equal(commands.length, 3);
+});
+
+test("rollback rejects a release missing both arm64 dmg asset names", () => {
+  const mockBin = createMockGh();
+  const result = runRelease(["rollback", "v0.5.63", "--yes", "--skip-fetch"], {
+    PATH: `${mockBin}:${process.env.PATH}`,
+    MOCK_LATEST_TAG: "v0.5.64",
+    MOCK_ARM64_DMG_ARCH: "armv7",
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing required distribution assets: DBX_0\.5\.63_arm64\.dmg or DBX_0\.5\.63_aarch64\.dmg/);
+});
+
 test("rollback rejects prerelease tag syntax", () => {
   const result = runRelease(["rollback", "v0.5.63-rc.1", "--dry-run", "--skip-fetch"]);
 
@@ -110,4 +140,65 @@ test("launcher packages bypass filtered publishing for provenance", () => {
   assert.match(workflow, /pnpm publish "\.\/packages\/cli" --access public --provenance --no-git-checks/);
   assert.match(workflow, /pnpm publish "\.\/packages\/mcp-server" --access public --provenance --no-git-checks/);
   assert.doesNotMatch(workflow, /pnpm --filter "@dbx-app\/(?:cli|mcp-server)" publish/);
+});
+
+test("Tauri VSign script resolves from the src-tauri working directory", () => {
+  const config = JSON.parse(readFileSync(vsignConfigPath, "utf8"));
+  const args = config.bundle.windows.signCommand.args;
+  const fileArgumentIndex = args.indexOf("-File");
+
+  assert.notEqual(fileArgumentIndex, -1);
+  const scriptPath = args[fileArgumentIndex + 1];
+  assert.equal(typeof scriptPath, "string");
+  assert.equal(existsSync(resolve(repoRoot, "src-tauri", scriptPath)), true);
+});
+
+test("Windows 7 release build does not use sccache", () => {
+  const workflow = readFileSync(releaseWorkflow, "utf8");
+  const start = workflow.indexOf("  build-windows-7-offline:");
+  const end = workflow.indexOf("\n  static-browser:", start);
+
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const win7Job = workflow
+    .slice(start, end)
+    // Ignore comments; the job itself documents why sccache is absent.
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
+  assert.doesNotMatch(win7Job, /RUSTC_WRAPPER|SCCACHE_|sccache/i);
+});
+
+test("desktop-only Cargo.lock version refresh does not count as a Node package change", () => {
+  const before = `
+[[package]]
+name = "dbx"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+
+[[package]]
+name = "dbx-web"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+
+[[package]]
+name = "dbx-mcp"
+version = "0.4.73"
+dependencies = ["dbx-core"]
+`;
+  const after = before.replaceAll('version = "0.5.95"', 'version = "0.5.96"');
+
+  assert.equal(isDesktopVersionOnlyCargoLockChange(before, after), true);
+});
+
+test("Cargo.lock dependency changes still count as a Node package change", () => {
+  const before = `
+[[package]]
+name = "dbx"
+version = "0.5.95"
+dependencies = ["dbx-core"]
+`;
+  const after = before.replace('dependencies = ["dbx-core"]', 'dependencies = ["dbx-core", "dbx-mcp"]');
+
+  assert.equal(isDesktopVersionOnlyCargoLockChange(before, after), false);
 });

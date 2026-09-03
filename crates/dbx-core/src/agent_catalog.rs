@@ -87,10 +87,29 @@ mod tests {
     }
 
     #[test]
+    fn etcd_v2_profile_uses_dedicated_agent() {
+        assert_eq!(agent_key(&DatabaseType::Etcd, None), Some("etcd"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd")), Some("etcd"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd-v2")), Some("etcd2"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd-custom")), Some("etcd"));
+        assert_eq!(label_for_key("etcd2"), Some("etcd 2.x (v2 API)"));
+        // etcd2 ships its own binary, version, and registry entry, so it must
+        // stay visible in the driver store for install/upgrade/uninstall.
+        assert!(driver_store_entries().any(|(key, label)| key == "etcd2" && label == "etcd 2.x (v2 API)"));
+    }
+
+    #[test]
     fn duckdb_is_available_in_driver_store_without_using_agent_runtime() {
         assert!(driver_store_entries().any(|(key, label)| key == "duckdb" && label == "DuckDB"));
         assert_eq!(label_for_key("duckdb"), Some("DuckDB"));
         assert!(!is_agent_type(&DatabaseType::DuckDb));
+    }
+
+    #[test]
+    fn sqlite_ssh_worker_is_available_in_driver_store_without_using_agent_runtime() {
+        assert!(driver_store_entries().any(|(key, label)| key == "sqlite-worker" && label == "SQLite SSH Worker"));
+        assert_eq!(label_for_key("sqlite-worker"), Some("SQLite SSH Worker"));
+        assert!(!is_agent_type(&DatabaseType::Sqlite));
     }
 
     #[test]

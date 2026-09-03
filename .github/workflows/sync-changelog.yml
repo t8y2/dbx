@@ -31,11 +31,29 @@ jobs:
           pip install awscli --quiet
           aws s3 cp releases-cn.json "s3://${R2_BUCKET_NAME}/changelog/releases-cn.json" \
             --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-            --content-type application/json
+            --content-type application/json \
+            --cache-control "public, max-age=300, stale-while-revalidate=86400"
+          aws s3 cp index-cn.json "s3://${R2_BUCKET_NAME}/changelog/index-cn.json" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --content-type application/json \
+            --cache-control "public, max-age=300, stale-while-revalidate=86400"
+          aws s3 sync releases-cn/ "s3://${R2_BUCKET_NAME}/changelog/releases-cn/" \
+            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            --delete --content-type application/json \
+            --cache-control "public, max-age=86400, stale-while-revalidate=604800"
           if [ -f releases-en.json ]; then
             aws s3 cp releases-en.json "s3://${R2_BUCKET_NAME}/changelog/releases-en.json" \
               --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-              --content-type application/json
+              --content-type application/json \
+              --cache-control "public, max-age=300, stale-while-revalidate=86400"
+            aws s3 cp index-en.json "s3://${R2_BUCKET_NAME}/changelog/index-en.json" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --content-type application/json \
+              --cache-control "public, max-age=300, stale-while-revalidate=86400"
+            aws s3 sync releases-en/ "s3://${R2_BUCKET_NAME}/changelog/releases-en/" \
+              --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+              --delete --content-type application/json \
+              --cache-control "public, max-age=86400, stale-while-revalidate=604800"
           fi
           if [ -f latest-en.json ]; then
             aws s3 cp latest-en.json "s3://${R2_BUCKET_NAME}/changelog/latest-en.json" \

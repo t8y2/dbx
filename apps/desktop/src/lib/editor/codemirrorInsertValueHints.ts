@@ -1,8 +1,14 @@
-import { StateEffect, type Extension } from "@codemirror/state";
+import { EditorSelection, StateEffect, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
-import { buildInsertValueHints, expandToSqlStatementWindow, insertValueHintsNeedTableColumns, parseInsertValuesClauses, type InsertValueHint, type InsertValuesClause, type TextRange } from "@/lib/sql/insertValueHints";
+import { matchDollarQuoteTag } from "@/lib/sql/semantic/tokens";
+import { buildInsertValueHints, expandToSqlStatementWindow, findEnclosingDollarQuoteStartInText, insertValueHintsNeedTableColumns, parseInsertValuesClauses, type InsertValueHint, type InsertValuesClause, type TextRange } from "@/lib/sql/insertValueHints";
 
 export const refreshInsertValueHintsEffect = StateEffect.define<null>();
+
+/** Shared dispatch options so hint refreshes never scroll the viewport. */
+export const insertValueHintsRefreshDispatchSpec = {
+  scrollIntoView: false as const,
+};
 
 /** Debounce hint reparse while the user is typing / holding a key. */
 const INSERT_HINT_REPARSE_DELAY_MS = 80;
@@ -57,6 +63,30 @@ function decorationsForHints(hints: readonly InsertValueHint[]): DecorationSet {
   return Decoration.set(ranges);
 }
 
+/** @internal Exported for unit tests. */
+/**
+ * Whether a database type runs SQL-family statements, where INSERT column
+ * hints (and their SELECT extension) apply. NoSQL/document stores are excluded;
+ * keep this list in sync instead of re-inlining it at call sites.
+ */
+export function supportsInsertValueHints(databaseType: string | undefined | null): boolean {
+  return databaseType !== "redis" && databaseType !== "mongodb" && databaseType !== "elasticsearch" && databaseType !== "easysearch" && databaseType !== "meilisearch" && databaseType !== "victoriametrics";
+}
+
+export function buildInsertValueHintDecorations(hints: readonly InsertValueHint[]): DecorationSet {
+  return decorationsForHints(hints);
+}
+
+/** True when `pos` sits on an insert-value-hint widget anchor (value expression start). */
+export function isInsertValueHintDecorationAt(decorations: DecorationSet, pos: number): boolean {
+  let found = false;
+  decorations.between(Math.max(0, pos - 1), pos + 1, (_from, _to, decoration) => {
+    const widget = decoration.spec?.widget;
+    if (widget instanceof InsertValueHintWidget) found = true;
+  });
+  return found;
+}
+
 function interestRanges(view: EditorView): TextRange[] {
   const ranges: TextRange[] = view.visibleRanges.map((range) => ({ from: range.from, to: range.to }));
   const cursor = view.state.selection.main.head;
@@ -82,8 +112,20 @@ function parseClausesNearView(view: EditorView, dialectId: string): InsertValues
   for (const range of interestRanges(view)) {
     // Pull a bounded neighborhood from the doc instead of materializing the whole script.
     const pad = 32 * 1024;
-    const sliceFrom = Math.max(0, range.from - pad);
+    let sliceFrom = Math.max(0, range.from - pad);
+    // When the cursor sits inside a PostgreSQL dollar-quoted routine body, a slice that still
+    // includes the opening $tag$ makes expandToSqlStatementWindow treat the whole body as one
+    // opaque literal. Advance sliceFrom past the opening delimiter instead.
     const sliceTo = Math.min(doc.length, range.to + pad);
+    let dollarQuoteStart: number | null = null;
+    if (sliceTo > sliceFrom && doc.sliceString(sliceFrom, sliceTo).includes("$")) {
+      const probePos = Math.min(doc.length, Math.max(range.from, range.to));
+      dollarQuoteStart = findEnclosingDollarQuoteStartInText(doc, probePos) ?? findEnclosingDollarQuoteStartInText(doc, range.from);
+    }
+    if (dollarQuoteStart !== null) {
+      const openingTag = matchDollarQuoteTag(doc.sliceString(dollarQuoteStart, Math.min(doc.length, dollarQuoteStart + 64)), 0);
+      if (openingTag) sliceFrom = Math.max(sliceFrom, dollarQuoteStart + openingTag.length);
+    }
     if (sliceTo <= sliceFrom) continue;
     const slice = doc.sliceString(sliceFrom, sliceTo);
     const window = expandToSqlStatementWindow(slice, range.from - sliceFrom, range.to - sliceFrom, dialectId);
@@ -185,7 +227,10 @@ export function createInsertValueHintsExtension(options: InsertValueHintsExtensi
         this.reparseTimer = setTimeout(() => {
           this.reparseTimer = null;
           // Trigger a lightweight transaction so update() runs compute once typing pauses.
-          view.dispatch({ effects: refreshInsertValueHintsEffect.of(null) });
+          view.dispatch({
+            effects: refreshInsertValueHintsEffect.of(null),
+            ...insertValueHintsRefreshDispatchSpec,
+          });
         }, INSERT_HINT_REPARSE_DELAY_MS);
       }
 
@@ -204,11 +249,31 @@ export function createInsertValueHintsExtension(options: InsertValueHintsExtensi
     { decorations: (value) => value.decorations },
   );
 
-  return [insertValueHintsTheme, plugin];
+  const clickWithoutScroll = EditorView.domEventHandlers({
+    mousedown(event, view) {
+      if (!(options.isEnabled?.() ?? true)) return false;
+      const pluginState = view.plugin(plugin);
+      if (!pluginState) return false;
+      const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+      if (pos == null || !isInsertValueHintDecorationAt(pluginState.decorations, pos)) return false;
+      event.preventDefault();
+      view.dispatch({
+        selection: EditorSelection.cursor(pos),
+        ...insertValueHintsRefreshDispatchSpec,
+      });
+      view.focus();
+      return true;
+    },
+  });
+
+  return [insertValueHintsTheme, plugin, clickWithoutScroll];
 }
 
 export function requestInsertValueHintsRefresh(view: EditorView) {
-  view.dispatch({ effects: refreshInsertValueHintsEffect.of(null) });
+  view.dispatch({
+    effects: refreshInsertValueHintsEffect.of(null),
+    ...insertValueHintsRefreshDispatchSpec,
+  });
 }
 
 export { insertValueHintsNeedTableColumns };

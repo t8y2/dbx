@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.5.94",
+  "version": "0.6.2",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",

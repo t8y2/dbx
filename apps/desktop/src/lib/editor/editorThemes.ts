@@ -811,9 +811,15 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       zIndex: "10",
     },
     ".cm-lineNumbers .cm-gutterElement": {
+      alignItems: "center",
       cursor: "pointer",
+      display: "flex",
+      justifyContent: "flex-end",
       paddingRight: "8px",
       userSelect: "none",
+    },
+    ".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number": {
+      alignItems: "flex-start",
     },
     ".cm-run-statement-gutter": {
       minWidth: "28px",
@@ -967,6 +973,15 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: "var(--popover-foreground) !important",
       outline: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--primary) 22%, transparent)"),
     },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action": {
+      background: "var(--popover)",
+      borderRadius: "0",
+      borderTop: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
+      bottom: "0",
+      boxShadow: "0 -6px 12px rgb(0 0 0 / 0.06)",
+      position: "sticky",
+      zIndex: "1",
+    },
     ".cm-completionIcon": {
       alignItems: "center",
       display: "inline-flex",
@@ -983,7 +998,13 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       backgroundColor: "currentColor",
       content: "''",
       display: "block",
-      height: "14px",
+      height: "15px",
+      // The pseudo element must be pinned to the icon box: with `left`/`top`
+      // left auto, engines disagree on the static position of an absolutely
+      // positioned child of a flex container, and WebKit places it far enough
+      // left for `overflow: hidden` to cut off half the glyph.
+      left: "0",
+      top: "0",
       position: "absolute",
       WebkitMaskImage: "var(--dbx-completion-icon-mask)",
       WebkitMaskPosition: "center",
@@ -993,7 +1014,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       maskPosition: "center",
       maskRepeat: "no-repeat",
       maskSize: "14px 14px",
-      width: "14px",
+      width: "15px",
     },
     ".cm-completionIcon:after": {
       content: "'none'",

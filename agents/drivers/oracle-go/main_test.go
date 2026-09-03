@@ -2274,6 +2274,93 @@ func TestRewriteOracleXMLTypeNestedRownumQuery(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleSTGeometrySelectStar(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM TEST_GEOM`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"},
+				{Name: "NOTE", DataType: "VARCHAR2"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "ID", SDE.ST_AsText("GEOM") AS "GEOM", "NOTE" FROM TEST_GEOM`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSTGeometryExplicitColumn(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.GEOM AS shape FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "sde"}}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT SDE.ST_AsText(t."GEOM") AS shape FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSTGeometryAsDeferredValue(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.GEOM FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"},
+			}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."GEOM" IS NULL THEN NULL ELSE '<ST_GEOMETRY>' END AS "GEOM", CASE WHEN t."GEOM" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1" FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestOracleSTGeometryRequiresSDEOwner(t *testing.T) {
+	if !isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY", DataTypeOwner: "sDe"}) {
+		t.Fatal("expected SDE.ST_GEOMETRY to be recognized")
+	}
+	if isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY", DataTypeOwner: "OTHER"}) {
+		t.Fatal("unexpected rewrite for an unrelated ST_GEOMETRY type")
+	}
+	if isOracleSTGeometry(oracleColumnMeta{DataType: "ST_GEOMETRY"}) {
+		t.Fatal("unexpected rewrite when the type owner is unknown")
+	}
+}
+
+func TestRewriteOracleSTGeometrySkipsSetQueries(t *testing.T) {
+	input := `SELECT GEOM FROM TEST_GEOM UNION ALL SELECT GEOM FROM TEST_GEOM`
+	sqlText, err := rewriteOracleSelectSQL(
+		input,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{{Name: "GEOM", DataType: "ST_GEOMETRY", DataTypeOwner: "SDE"}}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sqlText != input {
+		t.Fatalf("set query should remain unchanged, got: %s", sqlText)
+	}
+}
+
 func TestRewriteOracleXMLTypeSkipsJoins(t *testing.T) {
 	called := false
 	sqlText, err := rewriteOracleXMLTypeSelectSQL(
@@ -2528,6 +2615,130 @@ func TestGetObjectSourceUsesDBMSMetadataForSequence(t *testing.T) {
 	}
 	if result["source"] != ddl || result["object_type"] != "SEQUENCE" {
 		t.Fatalf("unexpected sequence source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourceUsesDBMSMetadataForMaterializedView(t *testing.T) {
+	const ddl = `CREATE MATERIALIZED VIEW "HR"."SALES_MV" AS SELECT * FROM "HR"."SALES"`
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"MATERIALIZED_VIEW", "SALES_MV", "HR"},
+			rows:          [][]driver.Value{{ddl}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("HR", "SALES_MV", "MATERIALIZED_VIEW")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != ddl || result["object_type"] != "MATERIALIZED_VIEW" {
+		t.Fatalf("unexpected materialized view source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourcePropagatesMaterializedViewMetadataError(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_METADATA.GET_DDL(:1, :2, :3)",
+			args:          []driver.Value{"MATERIALIZED_VIEW", "SALES_MV", "HR"},
+			err:           errors.New("ORA-31603: object not found"),
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("HR", "SALES_MV", "MATERIALIZED_VIEW")
+	if err == nil || !strings.Contains(err.Error(), "ORA-31603") {
+		t.Fatalf("expected DBMS_METADATA error, got result=%#v error=%v", result, err)
+	}
+	if result != nil {
+		t.Fatalf("metadata error must not return a successful source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourceAggregatesProcedureSourceInOracle(t *testing.T) {
+	const source = "PROCEDURE DBX_LARGE_SOURCE AS\nBEGIN\n  -- preserve <xml> & special characters\n  NULL;\nEND;"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_XMLGEN.CONVERT",
+			args:          []driver.Value{"DBX_TEST", "DBX_LARGE_SOURCE", "PROCEDURE"},
+			rows:          [][]driver.Value{{source}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("DBX_TEST", "DBX_LARGE_SOURCE", "PROCEDURE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != source || result["object_type"] != "PROCEDURE" {
+		t.Fatalf("unexpected procedure source: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourceReturnsEmptyWhenAggregatedSourceIsNull(t *testing.T) {
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_XMLGEN.CONVERT",
+			args:          []driver.Value{"DBX_TEST", "MISSING_PROC", "PROCEDURE"},
+			rows:          [][]driver.Value{{nil}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("DBX_TEST", "MISSING_PROC", "PROCEDURE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != "" {
+		t.Fatalf("missing procedure source should be empty: %#v", result)
+	}
+	if scripted.next != len(scripted.steps) {
+		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
+	}
+}
+
+func TestGetObjectSourceFallsBackWhenOracleAggregationFails(t *testing.T) {
+	const firstLine = "PROCEDURE DBX_SOURCE_FALLBACK AS\n"
+	const secondLine = "BEGIN NULL; END;"
+	db, scripted := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{
+		{
+			queryContains: "DBMS_XMLGEN.CONVERT",
+			args:          []driver.Value{"DBX_TEST", "DBX_SOURCE_FALLBACK", "PROCEDURE"},
+			err:           errors.New("ORA-19011: Character string buffer too small"),
+		},
+		{
+			queryContains: "SELECT TEXT",
+			args:          []driver.Value{"DBX_TEST", "DBX_SOURCE_FALLBACK", "PROCEDURE"},
+			rows:          [][]driver.Value{{firstLine}, {secondLine}},
+		},
+	})
+	s := newServer()
+	s.db = db
+
+	result, err := s.getObjectSource("DBX_TEST", "DBX_SOURCE_FALLBACK", "PROCEDURE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["source"] != firstLine+secondLine {
+		t.Fatalf("unexpected fallback procedure source: %#v", result)
 	}
 	if scripted.next != len(scripted.steps) {
 		t.Fatalf("expected %d queries, got %d", len(scripted.steps), scripted.next)
@@ -2843,6 +3054,24 @@ func (r *oracleFastRows) Next(dest []driver.Value) error {
 	return nil
 }
 
+type oraclePanicDriver struct{}
+
+func (d *oraclePanicDriver) Open(string) (driver.Conn, error) {
+	return &oraclePanicConn{}, nil
+}
+
+type oraclePanicConn struct{}
+
+func (c *oraclePanicConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("use QueryContext directly")
+}
+func (c *oraclePanicConn) Close() error              { return nil }
+func (c *oraclePanicConn) Begin() (driver.Tx, error) { return nil, errors.New("not supported") }
+
+func (c *oraclePanicConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	panic("simulated go-ora panic")
+}
+
 // -- timeout tests --
 
 func TestOracleDMLCancelInterruptsExecContext(t *testing.T) {
@@ -2914,6 +3143,32 @@ func TestOracleCursorSurvivesDeadlineWindow(t *testing.T) {
 	}
 	if rowCount != 3 {
 		t.Fatalf("expected 3 rows, got %d", rowCount)
+	}
+}
+
+func TestOracleQueryRowsRecoversDriverPanic(t *testing.T) {
+	driverName := "oracle-test-panic-" + strings.ReplaceAll(t.Name(), "/", "-")
+	sql.Register(driverName, &oraclePanicDriver{})
+	db, err := sql.Open(driverName, "dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := newServer()
+	s.db = db
+	rows, err := s.queryRowsWithTimeout("SELECT geom FROM test", nil, 1)
+	if rows != nil {
+		t.Fatal("panic path must not return rows")
+	}
+	var panicErr oracleDriverPanicError
+	if !errors.As(err, &panicErr) {
+		t.Fatalf("expected oracle driver panic error, got %v", err)
+	}
+	s.activeCancelMu.Lock()
+	defer s.activeCancelMu.Unlock()
+	if s.activeCancel != nil || s.activeTimer != nil || len(s.activeRows) != 0 {
+		t.Fatalf("panic cleanup left active query state: cancel=%v timer=%v rows=%d", s.activeCancel != nil, s.activeTimer != nil, len(s.activeRows))
 	}
 }
 

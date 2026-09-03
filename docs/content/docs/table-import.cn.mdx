@@ -1,6 +1,6 @@
 ---
 title: 表数据导入
-description: 通过向导将 CSV、TSV、文本、JSON 或 Excel 数据导入现有表，或按文件批量创建新表。
+description: 通过向导将 CSV、TSV、文本、JSON、Excel 或 SQL 数据导入现有表，或按文件批量创建新表。
 ---
 
 表数据导入用于把文件数据写入数据库表。DBX 会先解析和预览文件，再让你确认解析选项、目标表、字段映射和执行方式，而不是选中文件后立即写入。
@@ -25,6 +25,11 @@ description: 通过向导将 CSV、TSV、文本、JSON 或 Excel 数据导入现
 | 分隔文本 | `.txt` 等文本文件，可自定义分隔符 |
 | JSON | 支持单个对象、对象数组或数组行；可以指定对象或数组结构 |
 | Excel | 支持 `.xlsx`、`.xlsm` 和 `.xls`，可选择工作表 |
+| SQL | 包含字面量 `INSERT INTO ... VALUES` 语句的 `.sql` 脚本，每个文件对应一张表 |
+
+SQL 导入只接受字面量 `INSERT INTO ... VALUES` 行；表达式、`REPLACE`、`INSERT IGNORE`、`INSERT ... SELECT` 等无法无损改写的内容会被拒绝，以保留数据和语句语义。
+
+SQL 导入通过非流式路径读取整个脚本，单个 `.sql` 文件不能超过 100 MB，超出上限会显式报错。`TO_DATE`、`TO_TIMESTAMP` 等日期函数的值会按第一个参数的文本导入，目标字段必须能解析该格式。
 
 Desktop 直接读取所选本地文件；Docker/Web 会先把浏览器选择的文件上传到服务器临时目录，预览和导入结束后释放临时源文件。
 
@@ -67,7 +72,7 @@ Desktop 直接读取所选本地文件；Docker/Web 会先把浏览器选择的�
 
 ### 文本编码
 
-CSV、TSV 和分隔文本支持自动检测、UTF-8、GBK、UTF-16 LE 和 UTF-16 BE。自动检测不正确时，请手动选择编码后重新检查预览。
+CSV、TSV、分隔文本和 SQL 脚本支持自动检测、UTF-8、GBK、UTF-16 LE 和 UTF-16 BE。自动检测不正确时，请手动选择编码后重新检查预览。
 
 ### 行范围
 

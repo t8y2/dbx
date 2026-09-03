@@ -79,6 +79,19 @@ describe("AppTabBar locate-in-sidebar action", () => {
   });
 });
 
+describe("AppTabBar Zen mode interaction", () => {
+  it("switches Zen mode for data tabs while preserving query-tab renaming", () => {
+    const handler = sourceBetween("function handleTabDoubleClick", "function handleTabMouseDown");
+
+    expect(tabBarSource).toContain('"toggle-zen-mode": [];');
+    expect(handler).toContain('if (tab.mode === "data") {');
+    expect(handler).toContain('emit("toggle-zen-mode");');
+    expect(handler).toContain("startRenameTab(tab);");
+    expect(handler).toContain("event.target instanceof Element && event.target.closest(\"button, input, [role='button']\")");
+    expect(tabBarSource.match(/@dblclick="handleTabDoubleClick\(tab, \$event\)"/g)).toHaveLength(2);
+  });
+});
+
 describe("AppTabBar right-side close action", () => {
   it("places the action after close-other and disables it when the target has no tabs to its right", () => {
     expect(tabBarSource).toContain('label: t("contextMenu.closeRightTabs")');
@@ -98,13 +111,34 @@ describe("AppTabBar right-side close action", () => {
   });
 
   it("waits for query tab confirmation before closing special surfaces", () => {
-    expect(tabBarSource).toMatch(/queryStore\.closeRightTabs\(tab\.id, \(\) => \{[\s\S]*closeSpecialRegularSurfaces\(\);/);
+    expect(tabBarSource).toMatch(/queryStore\.closeTabsByIds\(tabsToClose, finalActiveTabId, \(\) => \{[\s\S]*closeSpecialRegularSurfaces\(\);/);
     expect(tabBarSource).toContain("if (shouldActivateTarget) activateTab(tab.id)");
   });
 
   it("reactivates settings after closing an active driver store to its right", () => {
     expect(tabBarSource).toContain("const shouldActivateSettings = !!props.driverStoreActive");
     expect(tabBarSource).toMatch(/emit\("close-driver-store"\);\s*if \(shouldActivateSettings\) emit\("activate-settings-page"\);/);
+  });
+});
+
+describe("AppTabBar left-side close action", () => {
+  it("places the action after close-other, before close-right, and disables it when the target has no tabs to its left", () => {
+    expect(tabBarSource).toContain('label: t("contextMenu.closeLeftTabs")');
+    expect(tabBarSource).toContain("action: () => closeTabsToLeftFromTab(tab)");
+    expect(tabBarSource).toContain("disabled: !hasTabsToLeft(tab)");
+
+    const closeOtherPositions = [...tabBarSource.matchAll(/label: closeOtherLabel,/g)].map((match) => match.index);
+    const closeLeftPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeLeftTabs"\),/g)].map((match) => match.index);
+    const closeRightPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeRightTabs"\),/g)].map((match) => match.index);
+    expect(closeOtherPositions).toHaveLength(2);
+    // The special-surface menu has no left-side action: settings and the
+    // driver store sit at the rightmost end of the tab bar, so nothing can be
+    // to the left of them. Only the regular/pinned tab menu gets the item.
+    expect(closeLeftPositions).toHaveLength(1);
+    expect(closeRightPositions).toHaveLength(2);
+    const closeLeftPosition = closeLeftPositions[0];
+    expect(closeLeftPosition).toBeGreaterThan(closeOtherPositions[1]);
+    expect(closeLeftPosition).toBeLessThan(closeRightPositions[1]);
   });
 });
 
@@ -121,7 +155,8 @@ describe("AppTabBar overflow search", () => {
   it("filters every open tab by its display and source titles", () => {
     expect(tabBarSource).toContain('const tabSearchQuery = ref("");');
     expect(tabBarSource).toContain("const filteredOpenTabs = computed(() => {");
-    expect(tabBarSource).toContain("return queryStore.tabs.filter((tab) => tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query));");
+    expect(tabBarSource).toContain("return displayedTabs.value.filter((tab) => tabMatchesSearch(tab, query));");
+    expect(tabBarSource).toContain("return tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query) || connectionName.toLocaleLowerCase().includes(query);");
   });
 
   it("provides the same focused search control and empty state in both overflow menus", () => {

@@ -260,6 +260,10 @@ describe("DocumentBrowser infinite scroll (issue #6455)", () => {
     await mountBrowser(databaseType);
 
     expect(backend.documentFindDocuments.mock.calls[0]!.slice(0, 5)).toEqual(["mongo-1", "test", "docs", 0, 5]);
+    if (databaseType === "elasticsearch") {
+      expect(backend.documentFindDocuments.mock.calls[0]![10]).toBeUndefined();
+      expect(backend.documentFindDocuments.mock.calls[0]![11]).toBe(true);
+    }
     expect(dataGrid.pageLimit).toBe(5);
     expect(dataGrid.pageSizePreference).toBe("table-open");
   });

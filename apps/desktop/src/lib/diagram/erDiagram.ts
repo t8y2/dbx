@@ -183,6 +183,13 @@ export function normalizeCustomDiagramRelationship(input: Omit<CustomDiagramRela
 
 export function buildDiagramRelationships(tables: DiagramTable[], customRelationships: CustomDiagramRelationship[] = [], isMultiSchema = false): DiagramRelationship[] {
   const tableIdMap = new Map(tables.map((table) => [diagramTableId(table, isMultiSchema), table]));
+  const tableBySchemaAndName = new Map<string, DiagramTable>();
+  const tableByName = new Map<string, DiagramTable>();
+  for (const table of tables) {
+    const schemaAndNameKey = `${table.schema ?? ""}\0${table.name}`;
+    if (!tableBySchemaAndName.has(schemaAndNameKey)) tableBySchemaAndName.set(schemaAndNameKey, table);
+    if (!tableByName.has(table.name)) tableByName.set(table.name, table);
+  }
 
   const foreignKeyRelationships = tables.flatMap((table) => {
     const sourceId = diagramTableId(table, isMultiSchema);
@@ -190,13 +197,15 @@ export function buildDiagramRelationships(tables: DiagramTable[], customRelation
       .map((fk): DiagramRelationship | null => {
         let targetTable: DiagramTable | undefined;
         if (fk.ref_schema) {
-          targetTable = tables.find((t) => t.name === fk.ref_table && t.schema === fk.ref_schema);
-        }
-        if (!targetTable && table.schema) {
-          targetTable = tables.find((t) => t.name === fk.ref_table && t.schema === table.schema);
-        }
-        if (!targetTable) {
-          targetTable = tables.find((t) => t.name === fk.ref_table);
+          // Specified ref_schema: only match target within that schema
+          targetTable = tableBySchemaAndName.get(`${fk.ref_schema}\0${fk.ref_table}`);
+        } else if (table.schema) {
+          // No ref_schema but source table has schema: only match target in the same schema
+          targetTable = tableBySchemaAndName.get(`${table.schema}\0${fk.ref_table}`);
+          // In multi-schema mode, do not blindly fall back across other schemas
+        } else if (!isMultiSchema) {
+          // Single-schema mode without schema qualification: fall back to bare table name
+          targetTable = tableByName.get(fk.ref_table);
         }
         if (!targetTable) return null;
 

@@ -123,7 +123,10 @@ function handleEdgesChange(changes: EdgeChange[]) {
 function tableHeightsMap(): Record<string, number> {
   const heights: Record<string, number> = {};
   for (const table of tables.value) {
-    heights[table.name] = tableHeight(table);
+    const h = tableHeight(table);
+    heights[table.name] = h;
+    const key = getTableKey(table);
+    heights[key] = h;
   }
   return heights;
 }
@@ -739,15 +742,16 @@ function handleCreateDraftTable(payload: { name: string; layerId: string | null;
     y = MARGIN + Math.floor(Object.keys(positions.value).length / 3) * 200;
   }
 
-  positions.value = { ...positions.value, [draft.name]: { x, y } };
+  const draftKey = getTableKey(draft);
+  positions.value = { ...positions.value, [draftKey]: { x, y }, [draft.name]: { x, y } };
   if (targetLayerId) {
-    layerStore.addTableToLayer(targetLayerId, draft.name);
+    layerStore.addTableToLayer(targetLayerId, draftKey);
     const layer = layerStore.layers.find((l) => l.id === targetLayerId);
     if (layer) sizeLayerToFit(layer, positions.value, tableHeightsMap());
   }
   persistDraftAndLayers();
   syncVueFlowNodes();
-  openInspectorForTable(draft.name);
+  openInspectorForTable(draftKey);
 }
 
 function handleInspectorUpdateTable(next: DiagramTable) {
@@ -755,56 +759,108 @@ function handleInspectorUpdateTable(next: DiagramTable) {
   const targetName = inspectorTarget.value?.kind === "table" ? inspectorTarget.value.tableName : next.name;
   // inspectorTarget may hold the composite canvas node id (`schema.table`) in multi-schema mode
   const oldTable = tables.value.find((t) => t.name === targetName || getTableKey(t) === targetName);
-  const oldName = oldTable?.name;
-  if (!oldName) return;
-  tables.value = tables.value.map((t) => (t.name === oldName ? next : t));
+  if (!oldTable) return;
+  const oldKey = getTableKey(oldTable);
+  const oldName = oldTable.name;
+
+  // Accurately update ONLY the matched table instance, avoiding unintentional overwrite of same-name tables in other schemas
+  tables.value = tables.value.map((t) => (t === oldTable || getTableKey(t) === oldKey ? next : t));
   if (oldName !== next.name) {
-    const pos = positions.value[oldName];
-    const { [oldName]: _removed, ...rest } = positions.value;
-    positions.value = pos ? { ...rest, [next.name]: pos } : rest;
-    for (const layer of layerStore.layers) {
-      const idx = layer.tableNames.indexOf(oldName);
-      if (idx >= 0) layer.tableNames[idx] = next.name;
+    const newKey = getTableKey(next);
+    const pos = positions.value[oldKey] || positions.value[oldName];
+    const nextPositions = { ...positions.value };
+    delete nextPositions[oldKey];
+    delete nextPositions[oldName];
+    if (pos) {
+      nextPositions[newKey] = pos;
+      nextPositions[next.name] = pos;
     }
-    const oldQualified = oldTable && isMultiSchema.value && oldTable.schema ? `${oldTable.schema}.${oldName}` : oldName;
-    const newQualified = isMultiSchema.value && next.schema ? `${next.schema}.${next.name}` : next.name;
+    positions.value = nextPositions;
+    for (const layer of layerStore.layers) {
+      let modified = false;
+      for (const key of [oldKey, oldName]) {
+        const idx = layer.tableNames.indexOf(key);
+        if (idx >= 0) {
+          layer.tableNames[idx] = newKey;
+          modified = true;
+        }
+      }
+      if (modified) {
+        sizeLayerToFit(layer, positions.value, tableHeightsMap());
+      }
+    }
+    const oldCandidateNames = new Set([oldName, oldKey]);
     customRelationships.value = customRelationships.value.map((r) => ({
       ...r,
-      sourceTable: r.sourceTable === oldName || r.sourceTable === oldQualified ? newQualified : r.sourceTable,
-      targetTable: r.targetTable === oldName || r.targetTable === oldQualified ? newQualified : r.targetTable,
+      sourceTable: oldCandidateNames.has(r.sourceTable) ? newKey : r.sourceTable,
+      targetTable: oldCandidateNames.has(r.targetTable) ? newKey : r.targetTable,
     }));
     saveCustomRelationships();
-    inspectorTarget.value = { kind: "table", tableName: next.name };
+    inspectorTarget.value = { kind: "table", tableName: newKey };
   }
   persistDraftAndLayers();
-  const layer = layerStore.getLayerByTable(next.name);
+  const layer = layerStore.getLayerByTable(next.name) || layerStore.getLayerByTable(getTableKey(next));
   if (layer) sizeLayerToFit(layer, positions.value, tableHeightsMap());
   syncVueFlowNodes();
 }
 
 function handleDeleteDraftTable(tableName: string) {
   recordHistory();
-  tables.value = tables.value.filter((t) => t.name !== tableName && getTableKey(t) !== tableName);
-  const { [tableName]: _removed, ...rest } = positions.value;
-  positions.value = rest;
-  const layer = layerStore.getLayerByTable(tableName);
-  if (layer) {
-    layerStore.removeTableFromLayer(layer.id, tableName);
-    sizeLayerToFit(layer, positions.value, tableHeightsMap());
+  const deletedTable = tables.value.find((table) => getTableKey(table) === tableName || table.name === tableName);
+  if (!deletedTable) return;
+  const targetKey = getTableKey(deletedTable);
+  const rawName = deletedTable.name;
+  const isUniqueName = tables.value.filter((t) => t.name === rawName).length === 1;
+
+  // Accurately filter out ONLY the deleted table by reference or canonical composite key
+  tables.value = tables.value.filter((t) => t !== deletedTable && getTableKey(t) !== targetKey);
+
+  const nextPositions = { ...positions.value };
+  delete nextPositions[targetKey];
+  delete nextPositions[tableName];
+  if (!isMultiSchema.value || isUniqueName) {
+    delete nextPositions[rawName];
   }
-  customRelationships.value = customRelationships.value.filter((r) => r.sourceTable !== tableName && r.targetTable !== tableName);
+  positions.value = nextPositions;
+
+  const targetNamesToClean = (!isMultiSchema.value || isUniqueName) && rawName !== targetKey ? [targetKey, rawName] : [targetKey];
+
+  for (const layer of layerStore.layers) {
+    let modified = false;
+    for (const name of targetNamesToClean) {
+      if (layer.tableNames.includes(name)) {
+        layerStore.removeTableFromLayer(layer.id, name);
+        modified = true;
+      }
+    }
+    if (modified) {
+      sizeLayerToFit(layer, positions.value, tableHeightsMap());
+    }
+  }
+
+  const removeRelSet = new Set(targetNamesToClean);
+  customRelationships.value = customRelationships.value.filter((r) => !removeRelSet.has(r.sourceTable) && !removeRelSet.has(r.targetTable));
   saveCustomRelationships();
-  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === tableName || inspectorTarget.value.tableName === tableName)) {
+
+  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === targetKey || inspectorTarget.value.tableName === tableName)) {
     inspectorTarget.value = null;
   }
+
   persistDraftAndLayers();
   syncVueFlowNodes();
 }
 
 function handleDeleteLiveTable(tableName: string) {
   recordHistory();
+  const deletedTable = tables.value.find((table) => getTableKey(table) === tableName || table.name === tableName);
+  if (!deletedTable) return;
+  const targetKey = getTableKey(deletedTable);
+  const rawName = deletedTable.name;
+  const isUniqueName = tables.value.filter((t) => t.name === rawName).length === 1;
+
+  // Mark strictly the matched table as pendingDrop
   tables.value = tables.value.map((table) => {
-    if ((table.name !== tableName && getTableKey(table) !== tableName) || isDraftTable(table)) return table;
+    if ((table !== deletedTable && getTableKey(table) !== targetKey) || isDraftTable(table)) return table;
     return {
       ...table,
       pendingDrop: true,
@@ -812,16 +868,30 @@ function handleDeleteLiveTable(tableName: string) {
       droppedColumnNames: undefined,
     };
   });
-  const layer = layerStore.getLayerByTable(tableName);
-  if (layer) {
-    layerStore.removeTableFromLayer(layer.id, tableName);
-    sizeLayerToFit(layer, positions.value, tableHeightsMap());
+
+  const targetNamesToClean = (!isMultiSchema.value || isUniqueName) && rawName !== targetKey ? [targetKey, rawName] : [targetKey];
+
+  for (const layer of layerStore.layers) {
+    let modified = false;
+    for (const name of targetNamesToClean) {
+      if (layer.tableNames.includes(name)) {
+        layerStore.removeTableFromLayer(layer.id, name);
+        modified = true;
+      }
+    }
+    if (modified) {
+      sizeLayerToFit(layer, positions.value, tableHeightsMap());
+    }
   }
-  customRelationships.value = customRelationships.value.filter((r) => r.sourceTable !== tableName && r.targetTable !== tableName);
+
+  const removeRelSet = new Set(targetNamesToClean);
+  customRelationships.value = customRelationships.value.filter((r) => !removeRelSet.has(r.sourceTable) && !removeRelSet.has(r.targetTable));
   saveCustomRelationships();
-  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === tableName || inspectorTarget.value.tableName === tableName)) {
+
+  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === targetKey || inspectorTarget.value.tableName === tableName)) {
     inspectorTarget.value = null;
   }
+
   persistDraftAndLayers();
   syncVueFlowNodes();
 }
@@ -1208,8 +1278,9 @@ async function loadSchemas() {
       schema.value = props.prefillSchema;
       selectedSchemas.value = [props.prefillSchema];
     } else {
-      selectedSchemas.value = [...names];
-      schema.value = names.includes("public") ? "public" : (names[0] ?? "");
+      const defaultSchema = names.includes("public") ? "public" : (names[0] ?? "");
+      schema.value = defaultSchema;
+      selectedSchemas.value = defaultSchema ? [defaultSchema] : [];
     }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
@@ -1358,6 +1429,23 @@ async function loadDiagram() {
     const savedLayers = loadPersistedLayers(connectionId.value, database.value, schemaKey);
     if (savedLayers.length) {
       layerStore.loadLayers(savedLayers);
+      if (isMultiSchema.value) {
+        const rawNameCounts = new Map<string, number>();
+        for (const table of tables.value) {
+          rawNameCounts.set(table.name, (rawNameCounts.get(table.name) ?? 0) + 1);
+        }
+        for (const layer of layerStore.layers) {
+          layer.tableNames = layer.tableNames.map((name) => {
+            if (!name.includes(".")) {
+              const matchedTable = tables.value.find((t) => t.name === name);
+              if (matchedTable && rawNameCounts.get(name) === 1 && matchedTable.schema) {
+                return `${matchedTable.schema}.${matchedTable.name}`;
+              }
+            }
+            return name;
+          });
+        }
+      }
     }
     loadCustomRelationships();
     loadMatchData();
@@ -2028,6 +2116,7 @@ onUnmounted(() => {
             <LayerPanel
               :tables="tables"
               :record-history="recordHistory"
+              :is-multi-schema="isMultiSchema"
               class="h-full overflow-y-auto"
               @add-layer="handleAddLayer"
               @layer-changed="handleLayerChanged"

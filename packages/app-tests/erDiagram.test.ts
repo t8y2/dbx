@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildDiagramJoinSql, buildDiagramRelationships, diagramTableId, filterDiagramTables, layoutDiagramTables, normalizeCustomDiagramRelationship } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
+import { isTableCanvasVisible } from "../../apps/desktop/src/lib/diagram/vue-flow-adapter.ts";
 
 test("builds relationships only between tables in the diagram", () => {
   const relationships = buildDiagramRelationships([
@@ -501,5 +502,81 @@ test("layoutDiagramTables populates schema-qualified keys in multi-schema mode",
   assert.ok(positions["iam.users"]);
   assert.ok(positions["users"]);
   assert.deepEqual(positions["audit.logs"], positions["logs"]);
+});
+
+test("buildDiagramRelationships applies strict schema-scoped foreign key resolution", () => {
+  const iamUserRoles = {
+    name: "user_roles",
+    schema: "iam",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "role_id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+    ],
+    foreignKeys: [
+      {
+        name: "fk_user_roles_role_id",
+        column: "role_id",
+        // no ref_schema: should strictly look in "iam"
+        ref_table: "roles",
+        ref_column: "id",
+      },
+    ],
+  };
+
+  const publicRoles = {
+    name: "roles",
+    schema: "public",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+    ],
+    foreignKeys: [],
+  };
+
+  const iamRoles = {
+    name: "roles",
+    schema: "iam",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+    ],
+    foreignKeys: [],
+  };
+
+  // In multi-schema mode: without ref_schema, matches iam.roles, never public.roles
+  const relsWithIam = buildDiagramRelationships([iamUserRoles, publicRoles, iamRoles], [], true);
+  assert.equal(relsWithIam.length, 1);
+  assert.equal(relsWithIam[0].sourceTable, "iam.user_roles");
+  assert.equal(relsWithIam[0].targetTable, "iam.roles");
+
+  // In multi-schema mode: if iam.roles does NOT exist, do NOT fall back across schemas
+  const relsWithoutIam = buildDiagramRelationships([iamUserRoles, publicRoles], [], true);
+  assert.equal(relsWithoutIam.length, 0);
+
+  // In single-schema mode: falls back to matching table by bare name
+  const singleSchemaUserRoles = { ...iamUserRoles, schema: undefined };
+  const singleSchemaRoles = { ...publicRoles, schema: undefined };
+  const singleSchemaRels = buildDiagramRelationships([singleSchemaUserRoles, singleSchemaRoles], [], false);
+  assert.equal(singleSchemaRels.length, 1);
+  assert.equal(singleSchemaRels[0].sourceTable, "user_roles");
+  assert.equal(singleSchemaRels[0].targetTable, "roles");
+});
+
+test("isTableCanvasVisible respects schema qualification and raw fallback when unambiguous", () => {
+  const layer = {
+    id: "layer-1",
+    name: "Layer 1",
+    color: "#ff0000",
+    tableNames: ["iam.users", "legacy_orders"],
+    collapsed: false,
+    visible: false,
+  };
+
+  // iam.users is hidden by the layer
+  assert.equal(isTableCanvasVisible("iam.users", [layer], "users"), false);
+
+  // public.users is NOT in layer-1, and since rawName "users" is NOT in layer.tableNames, it stays visible
+  assert.equal(isTableCanvasVisible("public.users", [layer], undefined), true);
+
+  // legacy_orders using bare name fallback when unambiguous
+  assert.equal(isTableCanvasVisible("public.legacy_orders", [layer], "legacy_orders"), false);
 });
 

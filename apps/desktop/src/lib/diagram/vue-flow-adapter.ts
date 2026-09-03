@@ -1,4 +1,4 @@
-import type { DiagramTable, DiagramRelationship } from "./erDiagram";
+import { diagramTableId, type DiagramTable, type DiagramRelationship } from "./erDiagram";
 import type { InferredRelationship, DiagramNode, DiagramEdge, DiagramLayer } from "@/types/diagram";
 import type { Node, Edge } from "@vue-flow/core";
 import { useLayerStore } from "./layer-store";
@@ -21,27 +21,28 @@ export function isTableCanvasVisible(tableName: string, layers: DiagramLayer[]):
 }
 
 /** positions are absolute canvas coordinates; converted to relative when parented to a visible layer */
-export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>): Node<{ table: DiagramTable }>[] {
+export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>, isMultiSchema = false): Node<{ table: DiagramTable; isMultiSchema?: boolean }>[] {
   const layerStore = useLayerStore();
   const layers = layerStore.layers;
 
   return tables
-    .filter((table) => !table.pendingDrop && isTableCanvasVisible(table.name, layers))
+    .filter((table) => !table.pendingDrop && isTableCanvasVisible(diagramTableId(table, isMultiSchema), layers))
     .map((table) => {
-      const layer = layerStore.getLayerByTable(table.name);
-      const absolute = positions?.[table.name] || { x: 0, y: 0 };
+      const tableId = diagramTableId(table, isMultiSchema);
+      const layer = layerStore.getLayerByTable(tableId);
+      const absolute = positions?.[tableId] || positions?.[table.name] || { x: 0, y: 0 };
       const visibleParent = layer?.visible ? layer : undefined;
       const layerPos = visibleParent?.position || { x: 0, y: 0 };
       const relative = visibleParent ? { x: absolute.x - layerPos.x, y: absolute.y - layerPos.y } : absolute;
 
       return {
-        id: table.name,
+        id: tableId,
         type: "table",
         position: relative,
         parentNode: visibleParent?.id,
         expandParent: false,
         zIndex: TABLE_Z_INDEX,
-        data: { table },
+        data: { table, isMultiSchema },
       };
     });
 }

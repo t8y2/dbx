@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import { buildDiagramJoinSql, buildDiagramRelationships, filterDiagramTables, layoutDiagramTables, normalizeCustomDiagramRelationship } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
+import { buildDiagramJoinSql, buildDiagramRelationships, diagramTableId, filterDiagramTables, layoutDiagramTables, normalizeCustomDiagramRelationship } from "../../apps/desktop/src/lib/diagram/erDiagram.ts";
 
 test("builds relationships only between tables in the diagram", () => {
   const relationships = buildDiagramRelationships([
@@ -390,3 +390,116 @@ test("E7: custom relationship cardinalities are preserved", () => {
   assert.equal(relationships[0].sourceCardinality, "N");
   assert.equal(relationships[0].targetCardinality, "N");
 });
+
+test("diagramTableId formats identifier based on isMultiSchema flag", () => {
+  const table = { name: "users", schema: "iam" };
+  assert.equal(diagramTableId(table, false), "users");
+  assert.equal(diagramTableId(table, true), "iam.users");
+  assert.equal(diagramTableId({ name: "orders" }, true), "orders");
+});
+
+test("buildDiagramRelationships resolves cross-schema foreign keys in multi-schema mode", () => {
+  const iamUserRoles = {
+    name: "user_roles",
+    schema: "iam",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "user_id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+    ],
+    foreignKeys: [
+      {
+        name: "fk_iam_user_roles_user_id",
+        column: "user_id",
+        ref_schema: "public",
+        ref_table: "users",
+        ref_column: "id",
+      },
+    ],
+  };
+
+  const publicUsers = {
+    name: "users",
+    schema: "public",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+    ],
+    foreignKeys: [],
+  };
+
+  const rels = buildDiagramRelationships([iamUserRoles, publicUsers], [], true);
+  assert.equal(rels.length, 1);
+  assert.equal(rels[0].sourceTable, "iam.user_roles");
+  assert.equal(rels[0].sourceColumn, "user_id");
+  assert.equal(rels[0].targetTable, "public.users");
+  assert.equal(rels[0].targetColumn, "id");
+});
+
+test("buildDiagramRelationships normalizes custom relationship tables to composite ids in multi-schema mode", () => {
+  const publicUsers = {
+    name: "users",
+    schema: "public",
+    columns: [
+      { name: "id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+    ],
+    foreignKeys: [],
+  };
+
+  const auditLogs = {
+    name: "audit_log",
+    schema: "audit",
+    columns: [
+      { name: "actor_id", data_type: "uuid", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+    ],
+    foreignKeys: [],
+  };
+
+  // mixed references: match panel stores composite ids, promoted inferred relationships store plain names
+  const custom = normalizeCustomDiagramRelationship({
+    name: "user_audit",
+    sourceTable: "public.users",
+    sourceColumn: "id",
+    targetTable: "audit_log",
+    targetColumn: "actor_id",
+    sourceCardinality: "1",
+    targetCardinality: "N",
+  });
+
+  const rels = buildDiagramRelationships([publicUsers, auditLogs], [custom], true);
+  assert.equal(rels.length, 1);
+  assert.equal(rels[0].kind, "custom");
+  assert.equal(rels[0].sourceTable, "public.users");
+  assert.equal(rels[0].targetTable, "audit.audit_log");
+  assert.equal(rels[0].sourceColumn, "id");
+  assert.equal(rels[0].targetColumn, "actor_id");
+});
+
+test("filterDiagramTables matches schema name in search query", () => {
+  const tables = [
+    { name: "logs", schema: "audit", columns: [], foreignKeys: [] },
+    { name: "users", schema: "iam", columns: [], foreignKeys: [] },
+    { name: "products", schema: "public", columns: [], foreignKeys: [] },
+  ];
+
+  const auditMatch = filterDiagramTables(tables, "audit");
+  assert.equal(auditMatch.length, 1);
+  assert.equal(auditMatch[0].name, "logs");
+
+  const qualifiedMatch = filterDiagramTables(tables, "iam.users");
+  assert.equal(qualifiedMatch.length, 1);
+  assert.equal(qualifiedMatch[0].name, "users");
+});
+
+test("layoutDiagramTables populates schema-qualified keys in multi-schema mode", () => {
+  const tables = [
+    { name: "logs", schema: "audit", columns: [] },
+    { name: "users", schema: "iam", columns: [] },
+  ];
+
+  const positions = layoutDiagramTables(tables, { columnsPerRow: 2 }, true);
+  assert.ok(positions["audit.logs"]);
+  assert.ok(positions["logs"]);
+  assert.ok(positions["iam.users"]);
+  assert.ok(positions["users"]);
+  assert.deepEqual(positions["audit.logs"], positions["logs"]);
+});
+

@@ -61,7 +61,7 @@ const structureCapabilities = computed(() => getTableStructureCapabilities(props
 const selectedTable = computed(() => {
   const target = props.target;
   if (target?.kind !== "table") return null;
-  return props.tables.find((t) => t.name === target.tableName) ?? null;
+  return props.tables.find((t) => t.name === target.tableName || (t.schema && `${t.schema}.${t.name}` === target.tableName)) ?? null;
 });
 
 const selectedEdge = computed(() => {

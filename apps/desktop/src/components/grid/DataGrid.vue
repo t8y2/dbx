@@ -354,7 +354,9 @@ import { resolveGridFocusRestoreTarget } from "@/lib/dataGrid/dataGridFocusResto
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
+  DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
   dataGridDeleteRowToolbarState,
+  dataGridToolbarActionCollapseCount,
   isDataGridToolbarCompact,
   type DataGridReloadIntent,
   type DataGridToolbarActionCapability,
@@ -711,6 +713,7 @@ const columnCommentMap = computed(() => {
 const dataGridTopbarWidth = ref(0);
 const dataGridViewportWidth = ref(0);
 const dataGridTopbarOverflowCompact = ref(false);
+const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
@@ -732,6 +735,8 @@ const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.c
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const responsiveDataGridToolbarActionCount = computed(() => dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
@@ -2560,6 +2565,8 @@ let gridScrollbarsRuntime: DataGridScrollbarsRuntime;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarMutationObserver: MutationObserver | null = null;
 let dataGridTopbarRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+const DATA_GRID_TOPBAR_RECHECK_DELAY_MS = 360;
+const DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX = 16;
 let cellEditResizeObserver: ResizeObserver | null = null;
 // vue-virtual-scroller's @resize only fires in pageMode (it observes window),
 // so in container-scroll mode (transpose uses RecycleScroller without pageMode)
@@ -3209,43 +3216,57 @@ function observeGridHorizontalScrollbarScroller() {
 
 function updateDataGridTopbarWidth() {
   const topbar = dataGridTopbarRef.value;
+  const previousActionCount = compactDataGridToolbarActionCount.value;
   dataGridTopbarWidth.value = topbar?.clientWidth ?? 0;
   dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
 
   if (!topbar) return;
 
-  const fixedBreakpointCompact = isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH);
-  if (fixedBreakpointCompact) return;
-
-  if (dataGridTopbarOverflowCompact.value) {
-    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
-      dataGridTopbarOverflowCompact.value = false;
-      dataGridTopbarExpandedRequiredWidth.value = 0;
-    }
+  if (compactDataGridToolbarActionCount.value !== previousActionCount) {
+    scheduleDataGridTopbarRecheck();
     return;
   }
 
+  if (dataGridTopbarOverflowCompact.value || dataGridTopbarOverflowActionCount.value > 0) {
+    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
+      dataGridTopbarOverflowCompact.value = false;
+      dataGridTopbarOverflowActionCount.value = 0;
+      dataGridTopbarExpandedRequiredWidth.value = 0;
+      scheduleDataGridTopbarRecheck();
+      return;
+    }
+  }
+
   // The action list gains preview/save/rollback controls in editable grids. The
-  // fixed breakpoint cannot see that extra width, so capture the full layout
-  // width before the overflow-clip wrapper can hide the trailing action.
+  // responsive breakpoint cannot see that extra width, so progressively
+  // compact the leftmost controls before overflow-clip hides a trailing action.
   if (topbar.scrollWidth > topbar.clientWidth + 1) {
-    dataGridTopbarExpandedRequiredWidth.value = topbar.scrollWidth;
-    dataGridTopbarOverflowCompact.value = true;
+    dataGridTopbarExpandedRequiredWidth.value = Math.max(dataGridTopbarExpandedRequiredWidth.value, topbar.scrollWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX);
+    if (!compactDataGridToolbar.value) {
+      dataGridTopbarOverflowCompact.value = true;
+    } else if (compactDataGridToolbarActionCount.value < DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length) {
+      dataGridTopbarOverflowActionCount.value = compactDataGridToolbarActionCount.value + 1;
+    } else {
+      return;
+    }
+    scheduleDataGridTopbarRecheck();
   }
 }
 
 function resetDataGridTopbarOverflowCompact() {
-  if (!dataGridTopbarOverflowCompact.value) return;
+  if (!dataGridTopbarOverflowCompact.value && dataGridTopbarOverflowActionCount.value === 0) return;
   dataGridTopbarOverflowCompact.value = false;
+  dataGridTopbarOverflowActionCount.value = 0;
   dataGridTopbarExpandedRequiredWidth.value = 0;
+  scheduleDataGridTopbarRecheck();
+}
+
+function scheduleDataGridTopbarRecheck() {
   if (dataGridTopbarRecheckTimer) clearTimeout(dataGridTopbarRecheckTimer);
-  // Wait for the label-width transition to finish before measuring the newly
-  // shortened action list. If it still overflows, updateDataGridTopbarWidth
-  // captures its new, smaller expanded width.
   dataGridTopbarRecheckTimer = setTimeout(() => {
     dataGridTopbarRecheckTimer = null;
     updateDataGridTopbarWidth();
-  }, 360);
+  }, DATA_GRID_TOPBAR_RECHECK_DELAY_MS);
 }
 
 function clearDataGridTopbarRecheckTimer() {
@@ -12638,7 +12659,8 @@ function openGridSnapshot() {
 
           <DataGridToolbar
             class="ml-auto"
-            :compact="compactDataGridToolbar"
+            :compact-action-count="compactDataGridToolbarActionCount"
+            :navigation-visible="props.result.columns.length > 0"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -12695,17 +12717,17 @@ function openGridSnapshot() {
               </Tooltip>
             </template>
 
-            <template #navigation>
+            <template #navigation="{ compact }">
               <Tooltip v-if="props.result.columns.length">
                 <TooltipTrigger as-child>
                   <Popover v-model:open="goToColumnOpen">
                     <PopoverTrigger as-child>
-                      <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
+                      <Button data-toolbar-action="navigation" variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compact ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
                         <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
                         <span
                           class="data-grid-topbar-action-label"
                           :class="{
-                            'data-grid-topbar-action-label--compact': compactDataGridToolbar,
+                            'data-grid-topbar-action-label--compact': compact,
                           }"
                           >{{ t("grid.goToColumn") }}</span
                         >

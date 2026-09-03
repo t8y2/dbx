@@ -1446,7 +1446,7 @@ export default withEnglishFallback({
     startAutoRefresh: "開始自動重新整理",
     stopAutoRefresh: "停止自動重新整理",
     missingResultRun: "此結果已不再可用",
-    exportResultArchive: "儲存結果封存",
+    exportResultArchive: "儲存結果",
     importResultArchive: "匯入結果封存",
     importedResultArchive: "已匯入的結果",
     resultArchiveExported: "結果已匯出",

@@ -1351,7 +1351,7 @@ export default withEnglishFallback({
     startAutoRefresh: "자동 새로고침 시작",
     stopAutoRefresh: "자동 새로고침 중지",
     missingResultRun: "이 결과는 더 이상 사용할 수 없습니다",
-    exportResultArchive: "결과 아카이브 저장",
+    exportResultArchive: "결과 저장",
     importResultArchive: "결과 아카이브 가져오기",
     importedResultArchive: "결과를 가져왔습니다",
     resultArchiveExported: "결과를 내보냈습니다",

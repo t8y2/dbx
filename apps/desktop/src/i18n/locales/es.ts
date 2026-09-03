@@ -1447,7 +1447,7 @@ export default withEnglishFallback({
     startAutoRefresh: "Iniciar actualización automática",
     stopAutoRefresh: "Detener actualización automática",
     missingResultRun: "Este resultado ya no está disponible",
-    exportResultArchive: "Guardar archivo de resultados",
+    exportResultArchive: "Guardar resultados",
     importResultArchive: "Importar archivo de resultados",
     importedResultArchive: "Resultados importados",
     resultArchiveExported: "Resultados exportados",

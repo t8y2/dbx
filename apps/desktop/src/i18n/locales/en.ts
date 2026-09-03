@@ -1470,7 +1470,7 @@ export default {
     startAutoRefresh: "Start auto-refresh",
     stopAutoRefresh: "Stop auto-refresh",
     missingResultRun: "This result is no longer available",
-    exportResultArchive: "Save Result Archive",
+    exportResultArchive: "Save Results",
     importResultArchive: "Import Result Archive",
     importedResultArchive: "Imported results",
     resultArchiveExported: "Results exported",

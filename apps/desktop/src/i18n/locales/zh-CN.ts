@@ -1394,7 +1394,7 @@ export default withEnglishFallback({
     startAutoRefresh: "开始自动刷新",
     stopAutoRefresh: "停止自动刷新",
     missingResultRun: "此结果已不可用",
-    exportResultArchive: "保存结果归档",
+    exportResultArchive: "保存结果",
     importResultArchive: "导入结果归档",
     importedResultArchive: "导入的结果",
     resultArchiveExported: "结果已导出",

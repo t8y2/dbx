@@ -5313,6 +5313,7 @@ export default {
     execute: "Execute",
     clearValues: "Clear Values",
     useRawForAll: "Use Raw SQL for All",
+    ignore: "Ignore",
     kind: {
       string: "String",
       number: "Number",

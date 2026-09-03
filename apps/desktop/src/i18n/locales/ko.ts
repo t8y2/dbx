@@ -4743,6 +4743,7 @@ export default withEnglishFallback({
     execute: "실행",
     clearValues: "값 지우기",
     useRawForAll: "모두 원시 SQL로 설정",
+    ignore: "무시",
     kind: {
       string: "문자열",
       number: "숫자",

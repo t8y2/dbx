@@ -5297,6 +5297,7 @@ export default withEnglishFallback({
     execute: "执行",
     clearValues: "清空参数值",
     useRawForAll: "全部使用原始 SQL",
+    ignore: "忽略",
     kind: {
       string: "字符串",
       number: "数字",

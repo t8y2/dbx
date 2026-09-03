@@ -5049,6 +5049,7 @@ export default withEnglishFallback({
     execute: "Esegui",
     clearValues: "Cancella valori",
     useRawForAll: "Usa SQL non elaborato per tutti",
+    ignore: "Ignora",
     kind: {
       string: "Stringa",
       number: "Numero",

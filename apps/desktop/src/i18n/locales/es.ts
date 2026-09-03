@@ -5051,6 +5051,7 @@ export default withEnglishFallback({
     execute: "Ejecutar",
     clearValues: "Borrar valores",
     useRawForAll: "Usar SQL sin procesar para todos",
+    ignore: "Ignorar",
     kind: {
       string: "Cadena",
       number: "Número",

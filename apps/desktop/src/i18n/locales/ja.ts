@@ -5078,6 +5078,7 @@ export default withEnglishFallback({
     execute: "実行",
     clearValues: "値をクリア",
     useRawForAll: "すべてを生の SQL に設定",
+    ignore: "無視",
     kind: {
       string: "文字列",
       number: "数値",

@@ -722,7 +722,7 @@ function handleTabMouseDown(event: PointerEvent, tabId: string) {
     // Don't preventDefault touch pointerdowns: that would cancel the tab
     // strip's native horizontal scroll, which is how touch users browse an
     // overflowing tab bar.
-    if (event.pointerType !== "touch") event.preventDefault();
+    if (event.pointerType !== "touch" && (event.buttons & 1) === 1) event.preventDefault();
   }
   if (isManualTabOrder.value) tabDrag.startDrag(event, tabId);
 }

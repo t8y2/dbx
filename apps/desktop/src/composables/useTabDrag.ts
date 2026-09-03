@@ -32,6 +32,7 @@ let pending: {
   id: string;
   x: number;
   y: number;
+  pointerId: number;
   sourceEl: HTMLElement | null;
 } | null = null;
 let onDropCallback: ((draggedId: string, targetId: string, position: TabDropPosition) => boolean) | null = null;
@@ -81,22 +82,39 @@ function removeGhost() {
   }
 }
 
+function activateDrag(x: number, y: number) {
+  if (!pending) return;
+
+  activePointerId = pending.pointerId;
+  state.active = true;
+  state.draggedId = pending.id;
+  state.startX = pending.x;
+  state.startY = pending.y;
+  if (pending.sourceEl) {
+    ghostEl = createGhost(pending.sourceEl, x, y);
+  }
+  pending = null;
+  document.body.style.cursor = "grabbing";
+  document.body.style.userSelect = "none";
+}
+
 function onPointerMove(event: PointerEvent) {
   if (!pending && !state.active) return;
+
+  const trackedPointerId = pending?.pointerId ?? activePointerId;
+  if (trackedPointerId !== null && trackedPointerId !== undefined && event.pointerId !== trackedPointerId) return;
+
+  // macOS reports a trackpad tap as a mouse pointer with button=0, but
+  // buttons=0. It is a click gesture, not a held primary-button drag.
+  if ((event.buttons & 1) !== 1) {
+    reset();
+    return;
+  }
 
   if (pending && !state.active) {
     const delta = dragAxis() === "vertical" ? event.clientY - pending.y : event.clientX - pending.x;
     if (Math.abs(delta) < TAB_DRAG_HORIZONTAL_THRESHOLD) return;
-    state.active = true;
-    state.draggedId = pending.id;
-    state.startX = pending.x;
-    state.startY = pending.y;
-    if (pending.sourceEl) {
-      ghostEl = createGhost(pending.sourceEl, event.clientX, event.clientY);
-    }
-    pending = null;
-    document.body.style.cursor = "grabbing";
-    document.body.style.userSelect = "none";
+    activateDrag(event.clientX, event.clientY);
   }
 
   if (state.active) {
@@ -105,6 +123,9 @@ function onPointerMove(event: PointerEvent) {
 }
 
 function onMouseUp(event: PointerEvent) {
+  const trackedPointerId = pending?.pointerId ?? activePointerId;
+  if (trackedPointerId !== null && trackedPointerId !== undefined && event.pointerId !== trackedPointerId) return;
+
   state.suppressClick = false;
   if (state.active && state.draggedId && onDetachCallback && isOutsideDetachBounds(event.clientX, event.clientY)) {
     const scale = typeof window !== "undefined" && Number.isFinite(window.devicePixelRatio) && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
@@ -115,7 +136,10 @@ function onMouseUp(event: PointerEvent) {
   reset();
 }
 
-function onPointerCancel() {
+function onPointerCancel(event?: Event) {
+  const trackedPointerId = pending?.pointerId ?? activePointerId;
+  if (event && "pointerId" in event && trackedPointerId !== null && trackedPointerId !== undefined && (event as PointerEvent).pointerId !== trackedPointerId) return;
+
   state.suppressClick = false;
   reset();
 }
@@ -132,6 +156,7 @@ function reset() {
   state.dropPosition = null;
   state.startX = 0;
   state.startY = 0;
+  activePointerId = null;
   pending = null;
   removeGhost();
   document.body.style.cursor = "";
@@ -139,6 +164,7 @@ function reset() {
 }
 
 let listenersAttached = false;
+let activePointerId: number | null = null;
 
 function ensureListeners() {
   if (listenersAttached) return;
@@ -161,6 +187,10 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
 
   function startDrag(event: PointerEvent, tabId: string) {
     if (event.button !== 0) return;
+    // Consume click suppression on the next primary-button gesture even when
+    // macOS reports a trackpad tap with buttons=0 and no drag can be armed.
+    state.suppressClick = false;
+    if ((event.buttons & 1) !== 1) return;
     // Touch input has no reliable equivalent of mouse jitter: a real finger's
     // contact point commonly drifts well past TAB_DRAG_HORIZONTAL_THRESHOLD
     // during an ordinary tap, which would misread the tap as a drag. Skip
@@ -169,9 +199,14 @@ export function useTabDrag(onDrop: (draggedId: string, targetId: string, positio
     if (event.pointerType === "touch") return;
     const target = event.target as HTMLElement;
     if (target.closest("button, input, [data-tab-title-input]")) return;
-    state.suppressClick = false;
     const el = (event.currentTarget as HTMLElement) || null;
-    pending = { id: tabId, x: event.clientX, y: event.clientY, sourceEl: el };
+    pending = {
+      id: tabId,
+      x: event.clientX,
+      y: event.clientY,
+      pointerId: event.pointerId,
+      sourceEl: el,
+    };
   }
 
   function updateTarget(event: MouseEvent, tabId: string) {

@@ -983,6 +983,25 @@ function onRefreshActiveKvBrowser(event: Event) {
   void nextTick(() => refreshData());
 }
 
+function openPluginResultView(pluginId: string, contributionId: string, label: string) {
+  const result = props.activeTab.result;
+  if (!result) return;
+  // Plugin workbenches receive a bounded snapshot; plugins re-query through
+  // their backend when they need the full or streamed result set.
+  const cappedRows = result.rows.slice(0, 500);
+  queryStore.openPluginWorkbench(pluginId, contributionId, {
+    title: label,
+    connectionId: props.activeTab.connectionId || "",
+    database: props.activeTab.database || "",
+    context: {
+      connectionId: props.activeTab.connectionId || "",
+      database: props.activeTab.database || "",
+      sql: props.activeTab.sql,
+      result: { columns: result.columns, rows: cappedRows, truncated: result.rows.length > cappedRows.length },
+    },
+  });
+}
+
 async function exportResultArchive() {
   if (resultArchiveExporting.value) return;
   resultArchiveExporting.value = true;
@@ -1714,9 +1733,11 @@ defineExpose({
                 :can-export-archive="canExportResultArchive"
                 :archive-exporting="resultArchiveExporting"
                 :compact="standaloneResultToolbarCompact"
+                :has-result="!!activeTab.result"
                 @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
                 @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
                 @export-archive="exportResultArchive"
+                @open-result-view="openPluginResultView"
               />
             </div>
 
@@ -1955,9 +1976,11 @@ defineExpose({
                     :can-export-archive="canExportResultArchive"
                     :archive-exporting="resultArchiveExporting"
                     :compact="compact"
+                    :has-result="!!activeTab.result"
                     @select-explain="emit('update:activeOutputView', activeTab.id, 'explain')"
                     @select-profile="emit('update:activeOutputView', activeTab.id, 'profile')"
                     @export-archive="exportResultArchive"
+                    @open-result-view="openPluginResultView"
                   />
                 </template>
                 <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">

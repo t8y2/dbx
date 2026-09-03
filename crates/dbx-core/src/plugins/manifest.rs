@@ -210,6 +210,7 @@ pub enum PluginContribution {
     Workbench(PluginWorkbenchContribution),
     FilesystemProvider(PluginFilesystemProviderContribution),
     ContextMenu(PluginContextMenuContribution),
+    ResultView(PluginResultViewContribution),
 }
 
 impl PluginContribution {
@@ -219,6 +220,7 @@ impl PluginContribution {
             Self::Workbench(contribution) => &contribution.id,
             Self::FilesystemProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
+            Self::ResultView(contribution) => &contribution.id,
         }
     }
 }
@@ -397,6 +399,19 @@ pub struct PluginContextMenuContribution {
     /// Menu surface the item belongs to; currently only `connection`.
     #[serde(default)]
     pub menu: String,
+}
+
+/// Plugin-rendered visualization surface for query results. Selecting the view
+/// opens the plugin workbench with the current result set as its context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginResultViewContribution {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -826,6 +841,18 @@ fn validate_contributions(
                 }
                 if !has_ui {
                     errors.push(format!("Workbench contribution '{id}' requires a UI entrypoint"));
+                }
+            }
+            PluginContribution::ResultView(result_view) => {
+                validate_required_text(&result_view.label, &format!("Result view '{id}' label"), errors);
+                validate_declared_icon(
+                    plugin_dir,
+                    &format!("Result view '{id}' icon"),
+                    result_view.icon.as_deref(),
+                    errors,
+                );
+                if !has_ui {
+                    errors.push(format!("Result view contribution '{id}' requires a UI entrypoint"));
                 }
             }
             PluginContribution::ContextMenu(menu) => {

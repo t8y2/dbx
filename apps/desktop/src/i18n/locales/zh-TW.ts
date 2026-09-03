@@ -167,6 +167,7 @@ export default withEnglishFallback({
   },
   docs,
   pluginPlatform: {
+    openResultView: "用 {label} 開啟",
     centerTitle: "外掛中心",
     centerDescription: "在統一商店中探索選用的 DBX 能力，並分別管理已安裝外掛與外掛倉庫。",
     marketplace: "外掛商店",

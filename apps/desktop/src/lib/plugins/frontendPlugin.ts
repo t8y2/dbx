@@ -6,6 +6,7 @@ import type {
   PluginContribution,
   PluginContributionLocalization,
   PluginContextMenuContribution,
+  PluginResultViewContribution,
   PluginFilesystemProviderContribution,
   PluginFormField,
   PluginFormFieldLocalization,
@@ -58,6 +59,11 @@ export class FrontendPluginRegistry {
   /** Native context-menu entries declared for a specific menu surface such as `connection`. */
   listContextMenuItems(menu: string): PluginContributionEntry<PluginContextMenuContribution>[] {
     return this.listContributions("context-menu").filter((entry) => entry.contribution.menu === menu);
+  }
+
+  /** Plugin-rendered query-result views offered from the results toolbar. */
+  listResultViews(): PluginContributionEntry<PluginResultViewContribution>[] {
+    return this.listContributions("result-view");
   }
 
   findWorkbench(pluginId: string, contributionId: string): PluginContributionEntry<PluginWorkbenchContribution> | undefined {

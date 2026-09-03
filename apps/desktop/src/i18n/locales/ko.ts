@@ -166,6 +166,7 @@ export default withEnglishFallback({
   },
   docs,
   pluginPlatform: {
+    openResultView: "{label}(으)로 열기",
     centerTitle: "플러그인 센터",
     centerDescription: "하나의 마켓플레이스에서 선택적 DBX 기능을 찾고, 설치된 플러그인과 저장소를 별도로 관리하세요.",
     marketplace: "마켓플레이스",

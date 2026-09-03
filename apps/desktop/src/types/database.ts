@@ -380,7 +380,15 @@ export interface PluginContextMenuContribution {
   menu: string;
 }
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution;
+export interface PluginResultViewContribution {
+  type: "result-view";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+}
+
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution;
 
 export interface PluginEngines {
   dbx: string;

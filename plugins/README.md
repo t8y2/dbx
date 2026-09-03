@@ -323,6 +323,20 @@ Plugin-authored names, descriptions, contribution labels, form-field text, and s
 }
 ```
 
+### `result-view`
+
+A result view contributes a plugin-rendered visualization for query results. DBX shows one toolbar button per installed view next to the result grid; clicking it opens the plugin workbench with the current result as context:
+
+```json
+{
+  "type": "result-view",
+  "id": "vendor.example.graph",
+  "label": "Graph"
+}
+```
+
+The workbench `context.result` is a bounded snapshot — `{ columns, rows (<= 500), truncated }` plus `sql`, `connectionId`, and `database`. Plugins that need the full or streamed result set should re-execute through their backend using the SQL and connection reference. Requires a UI entrypoint.
+
 ### `context-menu`
 
 A context-menu entry is rendered **natively** by DBX (no sandbox iframe, native theme and keyboard behavior) in the declared menu surface. v1 supports the saved-connection sidebar menu:

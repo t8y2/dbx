@@ -51,6 +51,65 @@ pub struct CloseBehaviorState {
     frontend_ready: AtomicBool,
 }
 
+struct WindowOwnership {
+    logical_primary: String,
+    last_active: std::collections::HashMap<String, u64>,
+    activity_sequence: u64,
+}
+
+/// Tracks the business-level primary workspace independently from Tauri's fixed
+/// `main` label. The label remains a bootstrap detail; ownership may move to a
+/// detached tab window when the current logical primary closes.
+pub struct WindowOwnershipState {
+    inner: std::sync::Mutex<WindowOwnership>,
+}
+
+impl WindowOwnershipState {
+    fn new() -> Self {
+        let mut last_active = std::collections::HashMap::new();
+        last_active.insert("main".to_string(), 1);
+        Self {
+            inner: std::sync::Mutex::new(WindowOwnership {
+                logical_primary: "main".to_string(),
+                last_active,
+                activity_sequence: 1,
+            }),
+        }
+    }
+
+    fn logical_primary(&self) -> String {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).logical_primary.clone()
+    }
+
+    fn record_activity(&self, label: &str) {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.activity_sequence = ownership.activity_sequence.saturating_add(1);
+        let activity_sequence = ownership.activity_sequence;
+        ownership.last_active.insert(label.to_string(), activity_sequence);
+    }
+
+    /// Removes a closed workspace and transfers logical ownership only when the
+    /// closed workspace owned it. The most recently active remaining window wins.
+    fn complete_close(&self, label: &str, remaining_labels: &[String]) -> Option<String> {
+        let mut ownership = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ownership.last_active.remove(label);
+        for remaining_label in remaining_labels {
+            ownership.last_active.entry(remaining_label.clone()).or_insert(0);
+        }
+        if ownership.logical_primary != label {
+            return None;
+        }
+        let next_primary = remaining_labels
+            .iter()
+            .max_by_key(|candidate| ownership.last_active.get(*candidate).copied().unwrap_or(0))
+            .cloned();
+        if let Some(next_primary) = &next_primary {
+            ownership.logical_primary = next_primary.clone();
+        }
+        next_primary
+    }
+}
+
 impl CloseBehaviorState {
     fn new() -> Self {
         Self { confirmed_exit: AtomicBool::new(false), frontend_ready: AtomicBool::new(false) }
@@ -594,7 +653,42 @@ fn apply_linux_webkit_rendering_workarounds() {
     }
 }
 
-/// Brings the main window to the foreground, reporting whether it ended up visible.
+pub(crate) fn is_workspace_window_label(label: &str) -> bool {
+    label == "main" || (label.starts_with("dbx-tab-") && !label.starts_with("dbx-tab-drag-preview"))
+}
+
+pub(crate) fn other_workspace_window_labels<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    current_label: &str,
+) -> Vec<String> {
+    app.webview_windows()
+        .into_keys()
+        .filter(|label| label != current_label && is_workspace_window_label(label))
+        .collect()
+}
+
+fn logical_primary_window_label<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    if let Some(state) = app.try_state::<WindowOwnershipState>() {
+        let label = state.logical_primary();
+        if app.get_webview_window(&label).is_some() {
+            return Some(label);
+        }
+    }
+    if app.get_webview_window("main").is_some() {
+        return Some("main".to_string());
+    }
+    app.webview_windows().into_keys().find(|label| is_workspace_window_label(label))
+}
+
+pub(crate) fn emit_workspace_close_request<R: tauri::Runtime>(window: &tauri::Window<R>, target: &str) {
+    let _ = window.emit_to(
+        EventTarget::webview_window(window.label()),
+        APP_CLOSE_REQUESTED_EVENT,
+        serde_json::json!({ "target": target, "windowLabel": window.label() }),
+    );
+}
+
+/// Brings the active logical primary window to the foreground, reporting whether it ended up visible.
 ///
 /// The individual calls used to be discarded with `let _ =`, which made a failed
 /// reveal completely silent. That matters on macOS: an instance that has lost its
@@ -603,8 +697,12 @@ fn apply_linux_webkit_rendering_workarounds() {
 /// so the app looks like it simply does not start. Logging here is what makes that
 /// state diagnosable at all.
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[WINDOW] show_main_window: no \"main\" webview window to reveal");
+    let Some(label) = logical_primary_window_label(app) else {
+        eprintln!("[WINDOW] show_main_window: no workspace window to reveal");
+        return false;
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        eprintln!("[WINDOW] show_main_window: logical primary window \"{label}\" is missing");
         return false;
     };
     if let Err(err) = window.show() {
@@ -626,8 +724,11 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> bool {
 }
 
 fn main_window_probe_state<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
-    let Some(window) = app.get_webview_window("main") else {
-        return "main_window=missing".to_string();
+    let Some(label) = logical_primary_window_label(app) else {
+        return "workspace_window=missing".to_string();
+    };
+    let Some(window) = app.get_webview_window(&label) else {
+        return format!("workspace_window={label}:missing");
     };
     format!(
         "main_window visible={:?} minimized={:?} maximized={:?} fullscreen={:?} position={:?} size={:?}",
@@ -650,9 +751,10 @@ fn prepare_main_window_for_display<R: tauri::Runtime>(app: &tauri::AppHandle<R>)
 }
 
 fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.eval(
-            r#"
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.eval(
+                r#"
             (() => {
               const active = document.activeElement;
               if (active instanceof HTMLElement) active.blur();
@@ -664,7 +766,8 @@ fn clear_main_webview_focus<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
               }
             })();
             "#,
-        );
+            );
+        }
     }
 }
 
@@ -717,10 +820,13 @@ pub(crate) fn request_app_close<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ta
         return;
     }
     show_main_window(app);
+    let Some(window_label) = logical_primary_window_label(app) else {
+        return;
+    };
     let _ = app.emit_to(
-        EventTarget::webview_window("main"),
+        EventTarget::webview_window(window_label.as_str()),
         APP_CLOSE_REQUESTED_EVENT,
-        serde_json::json!({ "target": target, "windowLabel": "main" }),
+        serde_json::json!({ "target": target, "windowLabel": window_label }),
     );
 }
 
@@ -948,14 +1054,16 @@ fn apply_desktop_icon_theme(app: &tauri::AppHandle, icon_theme: DesktopIconTheme
     }
 
     #[cfg(not(target_os = "macos"))]
-    if let Some(window) = app.get_webview_window("main") {
-        match icon_theme {
-            DesktopIconTheme::Default => {
-                if let Some(icon) = app.default_window_icon().cloned() {
-                    window.set_icon(icon)?;
+    if let Some(label) = logical_primary_window_label(app) {
+        if let Some(window) = app.get_webview_window(&label) {
+            match icon_theme {
+                DesktopIconTheme::Default => {
+                    if let Some(icon) = app.default_window_icon().cloned() {
+                        window.set_icon(icon)?;
+                    }
                 }
+                DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
             }
-            DesktopIconTheme::Black => window.set_icon(BLACK_APP_ICON)?,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -1015,13 +1123,35 @@ mod tests {
         should_enable_single_instance, should_fallback_to_native_quit, should_hide_window_on_close,
         should_setup_desktop_tray, should_show_main_window_after_setup, should_show_main_window_before_setup_tasks,
         startup_data_dir_mode, tray_menu_labels_for_locale, uses_application_level_icon, LinuxDrmRenderDevice,
-        LinuxNvidiaDriver,
+        LinuxNvidiaDriver, WindowOwnershipState,
     };
     use crate::data_dir::DataDirMode;
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     const TEST_GTK3_IMMODULES_CACHE: &str = "/usr/lib/test/gtk-3.0/3.0.0/immodules.cache";
+
+    #[test]
+    fn transfers_logical_primary_to_most_recent_remaining_workspace() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+        state.record_activity("dbx-tab-b");
+
+        assert_eq!(
+            state.complete_close("main", &["dbx-tab-a".to_string(), "dbx-tab-b".to_string()]),
+            Some("dbx-tab-b".to_string())
+        );
+        assert_eq!(state.logical_primary(), "dbx-tab-b");
+    }
+
+    #[test]
+    fn closing_a_non_primary_workspace_keeps_existing_owner() {
+        let state = WindowOwnershipState::new();
+        state.record_activity("dbx-tab-a");
+
+        assert_eq!(state.complete_close("dbx-tab-a", &["main".to_string()]), None);
+        assert_eq!(state.logical_primary(), "main");
+    }
 
     #[test]
     fn tray_menu_labels_follow_locale() {
@@ -1595,6 +1725,7 @@ pub fn run() {
 
     builder
         .manage(CloseBehaviorState::new())
+        .manage(WindowOwnershipState::new())
         .manage(AppLocaleState::new())
         .manage(commands::tab_drag_preview::TabDragPreviewState::default())
         .on_page_load(|webview, payload| {
@@ -1778,29 +1909,26 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() != "main" {
-                    // A detached workspace owns its own unsaved tabs. Ask that
-                    // window's frontend to resolve them before destroying it.
-                    api.prevent_close();
-                    let _ = window.emit_to(
-                        EventTarget::webview_window(window.label()),
-                        APP_CLOSE_REQUESTED_EVENT,
-                        serde_json::json!({ "target": "window", "windowLabel": window.label() }),
-                    );
-                    return;
+            if let tauri::WindowEvent::Focused(true) = event {
+                if is_workspace_window_label(window.label()) {
+                    if let Some(state) = window.app_handle().try_state::<WindowOwnershipState>() {
+                        state.record_activity(window.label());
+                    }
                 }
-                if !should_hide_window_on_close(std::env::consts::OS) {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !is_workspace_window_label(window.label()) {
                     return;
                 }
                 let app = window.app_handle();
                 if app.try_state::<CloseBehaviorState>().is_none() {
-                    api.prevent_close();
-                    hide_main_window_for_close(app, window);
                     return;
                 }
                 api.prevent_close();
-                request_app_close(app, "settings");
+                let target =
+                    if other_workspace_window_labels(app, window.label()).is_empty() { "settings" } else { "window" };
+                emit_workspace_close_request(window, target);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2665,10 +2793,7 @@ pub fn run() {
                         state.push(paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-sql-files", paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
 
                 let db_paths: Vec<String> = urls
@@ -2682,10 +2807,7 @@ pub fn run() {
                         state.push(db_paths.clone());
                     }
                     let _ = app_handle.emit("dbx-open-db-files", db_paths);
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
             }
 

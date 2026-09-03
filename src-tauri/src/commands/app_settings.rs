@@ -4,12 +4,13 @@ use std::{
 };
 
 use dbx_core::storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState};
-use tauri::{AppHandle, Emitter, EventTarget, Manager, State, Window};
+use tauri::{AppHandle, Manager, State, Window};
 
 use super::connection::AppState;
 use crate::{
     apply_debug_log_level, apply_desktop_settings, clear_startup_probe_after_frontend_ready,
-    hide_main_window_for_close, refresh_native_menus, request_app_close, AppLocaleState, CloseBehaviorState,
+    emit_workspace_close_request, hide_main_window_for_close, other_workspace_window_labels, refresh_native_menus,
+    AppLocaleState, CloseBehaviorState, WindowOwnershipState,
 };
 
 const DEVELOPMENT_OPEN_TABS_STATE_KEY: &str = "development_open_tabs";
@@ -107,27 +108,29 @@ pub fn mark_frontend_ready(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn request_app_close_from_window_controls(app: AppHandle, window: Window) -> Result<(), String> {
-    if window.label() != "main" {
-        return window
-            .emit_to(
-                EventTarget::webview_window(window.label()),
-                "dbx-app-close-requested",
-                serde_json::json!({ "target": "window", "windowLabel": window.label() }),
-            )
-            .map_err(|err| format!("failed to request detached window close: {err}"));
-    }
-    request_app_close(&app, "settings");
+    let target = if other_workspace_window_labels(&app, window.label()).is_empty() { "settings" } else { "window" };
+    emit_workspace_close_request(&window, target);
     Ok(())
 }
 
 #[tauri::command]
-pub async fn complete_window_close(window: Window) -> Result<(), String> {
-    if window.label() == "main" {
-        return Err("main window must use the app close flow".to_string());
+pub async fn complete_window_close(app: AppHandle, window: Window) -> Result<(), String> {
+    let remaining_labels = other_workspace_window_labels(&app, window.label());
+    if remaining_labels.is_empty() {
+        return Err("last workspace window must use the app close flow".to_string());
+    }
+    if let Some(state) = app.try_state::<WindowOwnershipState>() {
+        if let Some(next_primary) = state.complete_close(window.label(), &remaining_labels) {
+            log::info!("[WINDOW] logical primary transferred: {} -> {}", window.label(), next_primary);
+        }
     }
     // `close` emits CloseRequested again. The close has already been confirmed
     // by this window's frontend, so destroy it without re-entering that flow.
-    window.destroy().map_err(|err| format!("failed to close detached window: {err}"))
+    window.destroy().map_err(|err| format!("failed to close workspace window: {err}"))?;
+    if window.label() != "main" {
+        log::info!("[WINDOW] child workspace window destroyed: {}", window.label());
+    }
+    Ok(())
 }
 
 #[tauri::command]

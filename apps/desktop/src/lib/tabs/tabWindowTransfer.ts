@@ -505,8 +505,14 @@ export async function createDetachedTabWindow(payload: TabWindowTransferPayload,
       if (!created) clearTabWindowTransfer(payload.transferId);
       resolve(created);
     };
-    void child.once("tauri://created", () => settle(true));
-    void child.once("tauri://error", () => settle(false));
+    void child.once("tauri://created", () => {
+      console.info(`[WINDOW] child workspace window created: ${label}`);
+      settle(true);
+    });
+    void child.once("tauri://error", () => {
+      console.warn(`[WINDOW] child workspace window creation failed: ${label}`);
+      settle(false);
+    });
     window.setTimeout(() => settle(false), 5000);
   });
 }

@@ -190,7 +190,7 @@ DBX connection storage defaults to:
 
 Override the directory with `DBX_DATA_DIR`.
 
-Local file imports additionally require `DBX_MCP_IMPORT_ROOTS`. Preview accepts Excel/JSON/CSV/TSV and reports whether row/range counts are exact. V1 governed import streams XLSX/XLSM and CSV/TSV with explicit `utf-8`; legacy `.xls`, JSON, `auto`, GBK, and UTF-16 remain preview-only. Inspection, ZIP expansion, shared strings, worksheets, cells, row batches, normalized output, and task disk all have hard budgets. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start performs cancellable copy+SHA into a private snapshot, hashes the complete source record with its absolute row number, and opens the database only after normalization succeeds. Semantic VARCHAR lengths are fully prevalidated, Milvus's single-search outer result array is flattened, and v1 batch deletion is disabled. Vector search requires both an exact `semantic_version` and an `Asia/Shanghai` business date `active_at` in `YYYY-MM-DD`; approved status, effective dates, and version are always enforced together. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
+Local file imports and `dbx_vector_upsert_file` additionally require `DBX_MCP_IMPORT_ROOTS` and are unavailable in Web mode. Preview accepts Excel/JSON/CSV/TSV and reports whether row/range counts are exact. V1 governed import streams XLSX/XLSM and CSV/TSV with explicit `utf-8`; legacy `.xls`, JSON, `auto`, GBK, and UTF-16 remain preview-only. Inspection, ZIP expansion, shared strings, worksheets, cells, row batches, normalized output, and task disk all have hard budgets. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start performs cancellable copy+SHA into a private snapshot, hashes the complete source record with its absolute row number, and opens the database only after normalization succeeds. Semantic VARCHAR lengths are fully prevalidated, Milvus's single-search outer result array is flattened, and v1 batch deletion is disabled. Vector search requires both an exact `semantic_version` and an `Asia/Shanghai` business date `active_at` in `YYYY-MM-DD`; approved status, effective dates, and version are always enforced together. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -353,6 +353,7 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | Required free task-disk reserve (default 2 GiB) |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
+| `DBX_MCP_VECTOR_DIMENSION` | Positive Milvus vector dimension (default `1024`) |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K (default `20`, hard cap 50) |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 | `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
@@ -572,7 +573,7 @@ MCP 配置：
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
 
-连接管理默认关闭；仅无作用域安装维护进程临时设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`，任何 `DBX_MCP_SCOPE_*` 都继续禁用新增、复制和删除。本地文件导入还必须配置 `DBX_MCP_IMPORT_ROOTS`。preview 支持 Excel/JSON/CSV/TSV 并标明行数/范围是否精确；v1 治理入库流式支持 XLSX/XLSM 和显式 `utf-8` 的 CSV/TSV，旧版 `.xls`、JSON、`auto`、GBK 与 UTF-16 暂为 preview-only。inspection、ZIP 解压、sharedStrings、worksheet、单元格、批次、规范化输出与任务磁盘均有硬预算。start 以可取消复制+SHA 生成任务私有快照，保留绝对行号和完整源记录哈希，规范化成功后才打开数据库。语义 VARCHAR 会整文件预校验，Milvus 单查询 search 会展开外层数组，v1 批次删除禁用。向量检索必须同时提供精确 `semantic_version` 与 `Asia/Shanghai` 的 `YYYY-MM-DD` 业务日期 `active_at`，服务端始终组合 approved、有效期和版本过滤。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
+连接管理默认关闭；仅无作用域安装维护进程临时设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`，任何 `DBX_MCP_SCOPE_*` 都继续禁用新增、复制和删除。本地文件导入和 `dbx_vector_upsert_file` 还必须配置 `DBX_MCP_IMPORT_ROOTS`，且不支持 Web 模式。preview 支持 Excel/JSON/CSV/TSV 并标明行数/范围是否精确；v1 治理入库流式支持 XLSX/XLSM 和显式 `utf-8` 的 CSV/TSV，旧版 `.xls`、JSON、`auto`、GBK 与 UTF-16 暂为 preview-only。inspection、ZIP 解压、sharedStrings、worksheet、单元格、批次、规范化输出与任务磁盘均有硬预算。start 以可取消复制+SHA 生成任务私有快照，保留绝对行号和完整源记录哈希，规范化成功后才打开数据库。语义 VARCHAR 会整文件预校验，Milvus 单查询 search 会展开外层数组，v1 批次删除禁用。向量检索必须同时提供精确 `semantic_version` 与 `Asia/Shanghai` 的 `YYYY-MM-DD` 业务日期 `active_at`，服务端始终组合 approved、有效期和版本过滤。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 
@@ -712,6 +713,7 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | 任务磁盘必须额外保留的空间，默认 2 GiB |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
+| `DBX_MCP_VECTOR_DIMENSION` | Milvus 向量维度，必须为正整数，默认 `1024` |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
 | `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
 | `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |

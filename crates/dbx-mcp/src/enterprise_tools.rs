@@ -1900,7 +1900,7 @@ pub fn vector_top_k(top_k: Option<usize>) -> Result<usize, EnterpriseToolError> 
 }
 
 pub fn validate_embedding(embedding: &[f32]) -> Result<(), EnterpriseToolError> {
-    let dimension = DEFAULT_VECTOR_DIMENSION;
+    let dimension = configured_vector_dimension()?;
     if embedding.len() != dimension {
         return Err(EnterpriseToolError::new(
             "VECTOR_DIMENSION_MISMATCH",
@@ -1911,6 +1911,25 @@ pub fn validate_embedding(embedding: &[f32]) -> Result<(), EnterpriseToolError> 
         return Err(EnterpriseToolError::new("VECTOR_VALUE_INVALID", "向量包含 NaN 或无穷值。"));
     }
     Ok(())
+}
+
+fn configured_vector_dimension() -> Result<usize, EnterpriseToolError> {
+    match std::env::var("DBX_MCP_VECTOR_DIMENSION") {
+        Ok(value) => parse_vector_dimension(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_vector_dimension(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(EnterpriseToolError::new("VECTOR_DIMENSION_CONFIG_INVALID", "DBX_MCP_VECTOR_DIMENSION 必须是正整数。"))
+        }
+    }
+}
+
+fn parse_vector_dimension(value: Option<&str>) -> Result<usize, EnterpriseToolError> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_VECTOR_DIMENSION);
+    };
+    value.trim().parse::<usize>().ok().filter(|dimension| *dimension > 0).ok_or_else(|| {
+        EnterpriseToolError::new("VECTOR_DIMENSION_CONFIG_INVALID", "DBX_MCP_VECTOR_DIMENSION 必须是正整数。")
+    })
 }
 
 pub fn vector_output_fields(requested: Option<Vec<String>>) -> Result<Vec<String>, EnterpriseToolError> {
@@ -1995,7 +2014,7 @@ pub fn read_semantic_jsonl(path: &Path, semantic_batch_id: &str) -> Result<Vec<V
     }
     let source = std::fs::read_to_string(path)
         .map_err(|error| EnterpriseToolError::new("VECTOR_JSONL_READ_FAILED", format!("读取 JSONL 失败：{error}")))?;
-    let expected_dimension = DEFAULT_VECTOR_DIMENSION;
+    let expected_dimension = configured_vector_dimension()?;
     let mut records = Vec::new();
     let mut card_ids = HashSet::new();
     let mut file_semantic_version: Option<String> = None;
@@ -2532,7 +2551,7 @@ mod tests {
             std::fs::canonicalize(&source).unwrap()
         );
         assert_eq!(
-            validate_import_file_with_roots(source.to_str().unwrap(), &[source.clone()], false, 1024,)
+            validate_import_file_with_roots(source.to_str().unwrap(), std::slice::from_ref(&source), false, 1024,)
                 .unwrap_err()
                 .code,
             "IMPORT_PATH_OUTSIDE_ROOTS"
@@ -2689,6 +2708,16 @@ mod tests {
             build_milvus_filter("2026-08-25T00:00:00+08:00", "semantic-v3", &BTreeMap::new()).unwrap_err().code,
             "VECTOR_ACTIVE_AT_INVALID"
         );
+    }
+
+    #[test]
+    fn vector_dimension_defaults_to_1024_and_accepts_common_overrides() {
+        assert_eq!(parse_vector_dimension(None).unwrap(), 1_024);
+        assert_eq!(parse_vector_dimension(Some("768")).unwrap(), 768);
+        assert_eq!(parse_vector_dimension(Some(" 1536 ")).unwrap(), 1_536);
+        for invalid in ["", "0", "-1", "not-a-number"] {
+            assert_eq!(parse_vector_dimension(Some(invalid)).unwrap_err().code, "VECTOR_DIMENSION_CONFIG_INVALID");
+        }
     }
 
     #[test]

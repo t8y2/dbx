@@ -608,6 +608,9 @@ impl DbxMcpServer {
         )
     )]
     async fn preview_import_file(&self, Parameters(request): Parameters<PreviewImportFileRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_preview_import_file").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -705,6 +708,9 @@ impl DbxMcpServer {
         )
     )]
     async fn prepare_table_import(&self, Parameters(request): Parameters<PrepareTableImportRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_prepare_table_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -715,7 +721,7 @@ impl DbxMcpServer {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
-        let database = match self.resolve_database(request.database.clone(), &resolved.connection) {
+        let database = match self.resolve_database(request.database.clone(), &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -815,6 +821,9 @@ impl DbxMcpServer {
         )
     )]
     async fn start_table_import(&self, Parameters(request): Parameters<StartTableImportRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_start_table_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -923,6 +932,9 @@ impl DbxMcpServer {
         )
     )]
     async fn get_import_status(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_get_import_status").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -951,6 +963,9 @@ impl DbxMcpServer {
         )
     )]
     async fn cancel_import(&self, Parameters(request): Parameters<ImportStatusRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_cancel_import").await {
+            return error;
+        }
         if self.web_mode {
             return enterprise_error(EnterpriseToolError::new(
                 "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
@@ -988,6 +1003,9 @@ impl DbxMcpServer {
         )
     )]
     async fn vector_search(&self, Parameters(request): Parameters<VectorSearchRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_search").await {
+            return error;
+        }
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -1017,7 +1035,7 @@ impl DbxMcpServer {
             Ok(filter) => filter,
             Err(error) => return enterprise_error(error),
         };
-        let database = match self.resolve_database(request.database, &resolved.connection) {
+        let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -1054,6 +1072,15 @@ impl DbxMcpServer {
         )
     )]
     async fn vector_upsert_file(&self, Parameters(request): Parameters<VectorUpsertFileRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_upsert_file").await {
+            return error;
+        }
+        if self.web_mode {
+            return enterprise_error(EnterpriseToolError::new(
+                "IMPORT_UNSUPPORTED_IN_WEB_MODE_V1",
+                "v1 文件导入仅支持本地 DBX Desktop/MCP 模式。",
+            ));
+        }
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -1064,7 +1091,7 @@ impl DbxMcpServer {
                 "dbx_vector_upsert_file 只接受 Milvus 连接。",
             ));
         }
-        let database = match self.resolve_database(request.database, &resolved.connection) {
+        let database = match self.resolve_database(request.database, &resolved) {
             Ok(database) => database,
             Err(error) => return error,
         };
@@ -1181,6 +1208,9 @@ impl DbxMcpServer {
         &self,
         Parameters(_request): Parameters<VectorDeleteByBatchRequest>,
     ) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_vector_delete_by_batch").await {
+            return error;
+        }
         enterprise_error(EnterpriseToolError::new(
             "VECTOR_DELETE_DISABLED_V1",
             "v1 禁用 MCP 语义批次删除：服务端无法权威证明该批次尚未发布。请使用受审计的管理员恢复流程。",
@@ -1741,18 +1771,13 @@ impl DbxMcpServer {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
-        let allowed = connections
-            .iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
-            .cloned()
-            .collect::<Vec<_>>();
         let target = if let Some(id) = request.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
-            allowed.iter().find(|connection| connection.id == id).cloned()
+            connections.iter().find(|connection| connection.id == id).cloned()
         } else {
             let Some(name) = request.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
                 return tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required.");
             };
-            let matching = allowed
+            let matching = connections
                 .iter()
                 .filter(|connection| connection.name.eq_ignore_ascii_case(name))
                 .cloned()
@@ -2057,7 +2082,7 @@ impl DbxMcpServer {
         if let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
             if let Some(exact_id) = connections.iter().find(|connection| connection.id == name) {
                 if allowed.iter().any(|connection| connection.id == exact_id.id) {
-                    return Ok(ResolvedConnection { connection: exact_id.clone(), policy });
+                    return Ok(resolved_connection(policy, exact_id.clone()));
                 }
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
@@ -2071,7 +2096,7 @@ impl DbxMcpServer {
                 .cloned()
                 .collect::<Vec<_>>();
             return match matching.as_slice() {
-                [connection] => Ok(ResolvedConnection { connection: connection.clone(), policy }),
+                [connection] => Ok(resolved_connection(policy, connection.clone())),
                 [_, _, ..] => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &matching))),
                 [] => {
                     let exists = connections
@@ -2091,7 +2116,7 @@ impl DbxMcpServer {
 
         if self.scope.connection_scope_enabled() {
             return match allowed.as_slice() {
-                [connection] => Ok(ResolvedConnection { connection: (*connection).clone(), policy }),
+                [connection] => Ok(resolved_connection(policy, (*connection).clone())),
                 [] if scoped.is_empty() => {
                     Err(tool_error("CONNECTION_NOT_FOUND", "Scoped DBX connection was not found."))
                 }
@@ -2716,7 +2741,7 @@ mod tests {
     use dbx_core::models::connection::ConnectionConfig;
     use std::collections::HashSet;
 
-    static IMPORT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static IMPORT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
@@ -3020,7 +3045,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_plan_rejects_source_changed_after_prepare() {
-        let _environment_guard = IMPORT_ENV_LOCK.lock().unwrap();
+        let _environment_guard = IMPORT_ENV_LOCK.lock().await;
         let previous_roots = std::env::var_os("DBX_MCP_IMPORT_ROOTS");
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("orders.csv");
@@ -3452,7 +3477,7 @@ mod tests {
             .await;
         let remove = server
             .remove_connection(Parameters(RemoveConnectionRequest {
-                connection_name: "运营组数据管理".to_string(),
+                connection_name: Some("运营组数据管理".to_string()),
                 connection_id: Some("management".to_string()),
             }))
             .await;
@@ -3471,6 +3496,7 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec!["daily".to_string()]),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3482,11 +3508,11 @@ mod tests {
         );
         let result = server
             .remove_connection(Parameters(RemoveConnectionRequest {
-                connection_name: "运营组数据管理".to_string(),
+                connection_name: Some("运营组数据管理".to_string()),
                 connection_id: Some("management".to_string()),
             }))
             .await;
-        assert!(result_text(&result).contains("CONNECTION_NOT_FOUND"));
+        assert!(result_text(&result).contains("CONNECTION_OUT_OF_SCOPE"));
     }
 
     #[tokio::test]
@@ -3506,6 +3532,7 @@ mod tests {
                 "trace-id".to_string(),
                 "outside".to_string(),
             ]),
+            ..Default::default()
         };
         let server = DbxMcpServer::with_runtime_options(
             Arc::new(FakeBackend { connections: connections.clone(), policy: policy.clone(), ..Default::default() }),

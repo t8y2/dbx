@@ -123,7 +123,7 @@ DBX MCP 定义 25 个工具；日常默认注册 22 个，只有显式无作用�
 
 ## 本地文件导入与 Milvus 工具
 
-导入工具只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV，并明确返回 `usedRangeExact` 与 `totalRowsExact`；受限预览不会把已扫描行数伪装成全文件总行数。v1 治理入库使用有界流式处理支持 XLSX/XLSM 和显式指定 `utf-8` 的 CSV/TSV。旧版 `.xls`、JSON、`auto`、GBK 和 UTF-16 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。
+五个导入工具以及读取本地 JSONL 的 `dbx_vector_upsert_file` 只支持本地 DBX Desktop/MCP 模式；在 Web 模式中会稳定返回 `IMPORT_UNSUPPORTED_IN_WEB_MODE_V1`。必须用平台路径分隔符在 `DBX_MCP_IMPORT_ROOTS` 中配置一个或多个真实目录。文件路径必须是绝对路径，解析后仍位于允许目录内，是普通且非符号链接的文件，扩展名受支持，并且没有超过大小限制。preview 支持 Excel、JSON、CSV 和 TSV，并明确返回 `usedRangeExact` 与 `totalRowsExact`；受限预览不会把已扫描行数伪装成全文件总行数。v1 治理入库使用有界流式处理支持 XLSX/XLSM 和显式指定 `utf-8` 的 CSV/TSV。旧版 `.xls`、JSON、`auto`、GBK 和 UTF-16 分隔文件会在创建计划和访问数据库之前返回稳定的不支持错误。
 
 `dbx_preview_import_file` 与 `dbx_prepare_table_import` 共用受控 inspection semaphore 和超时。XLSX 会在解析前核验 ZIP 条目数、总解压大小、元数据、sharedStrings 与 worksheet 解压预算；完整治理流继续限制工作表行数、单元格数、单元格字节数和批次内存。`dbx_prepare_table_import` 会把连接、调用方已批准模板版本、规范路径、大小、修改时间、SHA-256、解析参数和字段映射固化为不可变摘要。preview 对每列返回 1 基 `source_position`、原始 `raw_source_name`、稳定 `canonical_source_name`（重复表头统一为 `名称__1`、`名称__2`）以及兼容旧 DBX 的名称；映射必须复核位置、raw、canonical，并提供 `target_column`。batch 行数上限根据列数和内存预算动态计算。目标不能由调用方指定：服务端生成唯一 `staging.mcp_<uuid>`，强制创建新表，所有业务列固定为 `TEXT`。计划 30 分钟后过期，且只能启动一次。
 
@@ -140,14 +140,14 @@ Milvus 工具只接受 allowlist 中的集合、过滤字段和输出字段。�
   "collection": "semantic_cards",
   "active_at": "2026-08-25",
   "semantic_version": "semantic-v3",
-  "embedding": [/* 必须恰好包含 1024 个有限浮点数 */],
+  "embedding": [/* 必须恰好包含配置维度的有限浮点数，默认 1024 */],
   "top_k": 12,
   "filters": { "business_domain": "交易" },
   "output_fields": ["card_id", "card_type", "title", "content", "source_uri"]
 }
 ```
 
-`semantic_version` 与 `active_at` 均为必填，不能只依赖生效日期选择版本；调用方应先从已发布的新鲜度目录取得活动 `dataset_id + semantic_version`，再逐对检索。`active_at` 只接受 `Asia/Shanghai` 业务日期 `YYYY-MM-DD`，不接受带时区 datetime。v1 的 `embedding` 必须恰好包含 1024 个有限数值；上面数组内的注释只是文档缩写，不是可直接提交的工具参数。
+`semantic_version` 与 `active_at` 均为必填，不能只依赖生效日期选择版本；调用方应先从已发布的新鲜度目录取得活动 `dataset_id + semantic_version`，再逐对检索。`active_at` 只接受 `Asia/Shanghai` 业务日期 `YYYY-MM-DD`，不接受带时区 datetime。`embedding` 必须恰好包含 `DBX_MCP_VECTOR_DIMENSION` 配置的有限数值，默认 1024；上面数组内的注释只是文档缩写，不是可直接提交的工具参数。
 
 ## 有状态查询会话
 
@@ -311,6 +311,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_MCP_IMPORT_TERMINAL_LIMIT` | 24 小时 TTL 内终态任务保留上限，默认 `128` |
 | `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
 | `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
+| `DBX_MCP_VECTOR_DIMENSION` | Milvus 向量维度，必须为正整数，默认 `1024` |
 | `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
 | `DBX_MCP_VECTOR_FILTER_FIELDS` | 允许用于安全等值过滤的附加字段，逗号分隔 |
 | `DBX_MCP_VECTOR_OUTPUT_FIELDS` | 向量检索允许返回的标量字段，逗号分隔 |

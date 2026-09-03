@@ -3096,19 +3096,21 @@ impl XlsxStreamRowsState {
         }
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
-        let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
-        if row_bytes > self.max_batch_bytes {
-            return Err(format!(
-                "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
-                self.max_batch_bytes
-            ));
-        }
-        if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
-            self.emit_rows(progress)?;
+        if self.max_batch_bytes != usize::MAX {
+            let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
+            if row_bytes > self.max_batch_bytes {
+                return Err(format!(
+                    "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
+                    self.max_batch_bytes
+                ));
+            }
+            if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
+                self.emit_rows(progress)?;
+            }
+            self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
         }
         self.pending_rows.push(values);
         self.pending_source_row_numbers.push(absolute_row);
-        self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
             self.emit_rows(progress)?;
@@ -9301,6 +9303,22 @@ mod tests {
     }
 
     #[test]
+    fn unlimited_xlsx_batches_skip_json_byte_accounting() {
+        let row_range = ImportRowRange { title_row: None, data_start_row: 1, last_data_row: None };
+        let columns = Some(vec!["value".to_string()]);
+
+        let (unlimited_sender, _unlimited_receiver) = tokio::sync::mpsc::channel(2);
+        let mut unlimited = XlsxStreamRowsState::new(unlimited_sender, row_range, None, columns.clone(), 2, usize::MAX);
+        unlimited.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert_eq!(unlimited.pending_bytes, 0);
+
+        let (bounded_sender, _bounded_receiver) = tokio::sync::mpsc::channel(2);
+        let mut bounded = XlsxStreamRowsState::new(bounded_sender, row_range, None, columns, 2, 1_024);
+        bounded.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert!(bounded.pending_bytes > 0);
+    }
+
+    #[test]
     fn streaming_excel_rows_preserve_custom_title_and_data_range() {
         let path = std::env::temp_dir().join(format!("dbx-table-import-stream-range-{}.xlsx", uuid::Uuid::new_v4()));
         let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
@@ -10775,7 +10793,7 @@ mod tests {
         )
         .await;
 
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
     }
 
     #[test]

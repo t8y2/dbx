@@ -323,6 +323,71 @@ async fn initializes_lists_tools_and_calls_a_tool() {
 }
 
 #[tokio::test]
+async fn enterprise_tools_are_hidden_and_rejected_by_the_global_tool_allowlist() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_list_connections".to_string()]),
+            ..Default::default()
+        },
+        connections: Vec::new(),
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let tools = client.peer().list_tools(None).await.expect("list policy-filtered tools");
+    let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["dbx_list_connections"]);
+
+    for (tool_name, arguments) in [
+        ("dbx_preview_import_file", json!({ "file_path": "/not-read/input.xlsx" })),
+        (
+            "dbx_prepare_table_import",
+            json!({ "template_version": "v1", "file_path": "/not-read/input.xlsx", "mappings": [] }),
+        ),
+        ("dbx_start_table_import", json!({ "plan_id": "not-consumed" })),
+        ("dbx_get_import_status", json!({ "import_id": "not-read" })),
+        ("dbx_cancel_import", json!({ "import_id": "not-cancelled" })),
+        (
+            "dbx_vector_search",
+            json!({
+                "collection": "semantic_cards",
+                "active_at": "2026-09-03",
+                "semantic_version": "v1",
+                "embedding": []
+            }),
+        ),
+        (
+            "dbx_vector_upsert_file",
+            json!({
+                "collection": "semantic_cards",
+                "semantic_batch_id": "not-written",
+                "file_path": "/not-read/cards.jsonl"
+            }),
+        ),
+        ("dbx_vector_delete_by_batch", json!({ "collection": "semantic_cards", "semantic_batch_id": "not-deleted" })),
+    ] {
+        let result = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool_name)
+                    .with_arguments(arguments.as_object().cloned().unwrap_or_else(Map::new)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("call denied tool {tool_name}: {error}"));
+        assert_eq!(result.is_error, Some(true), "{tool_name} must be rejected");
+        let response = result.content[0].as_text().expect("policy error text");
+        assert!(response.text.contains("TOOL_OUT_OF_SCOPE"), "unexpected {tool_name} result: {}", response.text);
+        assert!(response.text.contains(tool_name), "policy error must identify {tool_name}");
+    }
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn remove_connection_respects_global_connection_scope() {
     let backend = PolicyBackend {
         policy: McpGlobalPolicy {
@@ -335,7 +400,12 @@ async fn remove_connection_respects_global_connection_scope() {
         group_paths: Ok(HashMap::new()),
     };
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server = DbxMcpServer::with_runtime_options_and_connection_management(
+        Arc::new(backend),
+        McpScope::default(),
+        false,
+        true,
+    );
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize MCP client");
 
@@ -355,25 +425,37 @@ async fn remove_connection_respects_global_connection_scope() {
 }
 
 #[tokio::test]
-async fn web_import_tool_returns_versioned_structured_error() {
+async fn web_file_tools_return_versioned_structured_error() {
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
     let server = DbxMcpServer::with_runtime_options(Arc::new(EmptyBackend), McpScope::default(), true);
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize MCP client");
 
-    let result = client
-        .peer()
-        .call_tool(
-            CallToolRequestParams::new("dbx_preview_import_file")
-                .with_arguments(Map::from_iter([("file_path".to_string(), json!("/tmp/input.xlsx"))])),
-        )
-        .await
-        .expect("call import preview tool");
+    for (tool_name, arguments) in [
+        ("dbx_preview_import_file", json!({ "file_path": "/tmp/input.xlsx" })),
+        (
+            "dbx_vector_upsert_file",
+            json!({
+                "collection": "semantic_cards",
+                "semantic_batch_id": "not-written",
+                "file_path": "/tmp/cards.jsonl"
+            }),
+        ),
+    ] {
+        let result = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool_name)
+                    .with_arguments(arguments.as_object().cloned().unwrap_or_else(Map::new)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("call Web file tool {tool_name}: {error}"));
 
-    assert_eq!(result.is_error, Some(true));
-    let structured = result.structured_content.expect("structured error");
-    assert_eq!(structured.get("formatVersion"), Some(&json!(1)));
-    assert_eq!(structured.pointer("/error/code"), Some(&json!("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1")));
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured error");
+        assert_eq!(structured.get("formatVersion"), Some(&json!(1)));
+        assert_eq!(structured.pointer("/error/code"), Some(&json!("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1")));
+    }
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -624,6 +706,7 @@ async fn multi_connection_runtime_scope_routes_each_name_and_requires_selector()
                 "trace-id".to_string(),
                 "outside".to_string(),
             ]),
+            ..Default::default()
         },
         connections: vec![
             test_connection("query-id", "Operations Query"),

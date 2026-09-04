@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use async_trait::async_trait;
@@ -12,6 +15,7 @@ use dbx_core::{
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
+    table_import::{TableImportProgress, TableImportRequest, TableImportSummary},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -20,6 +24,36 @@ use tokio::sync::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::mongo::MongoCommand;
+
+struct ImportSnapshotCleanup {
+    directory: PathBuf,
+    active: bool,
+}
+
+impl ImportSnapshotCleanup {
+    fn new(directory: PathBuf) -> Self {
+        Self { directory, active: true }
+    }
+
+    fn cleanup(&mut self) -> std::io::Result<()> {
+        if self.active {
+            match std::fs::remove_dir_all(&self.directory) {
+                Ok(()) => self.active = false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.active = false,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ImportSnapshotCleanup {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConnectionSummary {
@@ -295,6 +329,19 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<dbx_core::docs::SchemaSnapshot, String> {
         let _ = (connection, database, options);
         Err("Documentation snapshots are not supported by this backend.".to_string())
+    }
+
+    /// 执行已经由 MCP prepare 固化并复验的本地文件导入。
+    async fn import_table_file_for_mcp(
+        &self,
+        connection: &ConnectionConfig,
+        request: TableImportRequest,
+        plan_id: String,
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
+    ) -> Result<TableImportSummary, String> {
+        let _ = (connection, request, plan_id, cancelled, progress);
+        Err("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1: v1 文件导入仅支持本地 DBX Desktop/MCP 模式。".to_string())
     }
 }
 
@@ -799,6 +846,90 @@ impl DbxBackend for LocalBackend {
             &std::sync::atomic::AtomicBool::new(false),
         )
         .await
+    }
+
+    async fn import_table_file_for_mcp(
+        &self,
+        connection: &ConnectionConfig,
+        mut request: TableImportRequest,
+        plan_id: String,
+        cancelled: Arc<AtomicBool>,
+        progress: Arc<dyn Fn(TableImportProgress) + Send + Sync>,
+    ) -> Result<TableImportSummary, String> {
+        // prepare/start 复验后再复制到任务私有快照，避免源文件在后台读取期间被替换。
+        let expected_sha256 = request
+            .source_ref
+            .as_deref()
+            .filter(|value| value.len() == 64)
+            .ok_or_else(|| "IMPORT_SOURCE_HASH_REQUIRED: 导入计划缺少源文件 SHA-256。".to_string())?
+            .to_string();
+        let snapshot_root = self.data_dir.join("tmp").join("mcp_import");
+        tokio::fs::create_dir_all(&snapshot_root).await.map_err(|error| format!("创建导入快照目录失败：{error}"))?;
+        let source_size =
+            std::fs::metadata(&request.file_path).map_err(|error| format!("读取导入源大小失败：{error}"))?.len();
+        crate::enterprise_tools::ensure_import_disk_budget(&snapshot_root, source_size)
+            .map_err(|error| error.to_string())?;
+        let snapshot_dir = snapshot_root.join(&request.import_id);
+        tokio::fs::create_dir(&snapshot_dir).await.map_err(|error| format!("创建任务快照目录失败：{error}"))?;
+        let mut cleanup_guard = ImportSnapshotCleanup::new(snapshot_dir.clone());
+        let extension = Path::new(&request.file_path).extension().and_then(|value| value.to_str()).unwrap_or("data");
+        let snapshot_path = snapshot_dir.join(format!("source.{extension}"));
+        let normalized_path = snapshot_dir.join("normalized.csv");
+        let snapshot_result = async {
+            crate::enterprise_tools::copy_verified_import_source(
+                PathBuf::from(&request.file_path),
+                snapshot_path.clone(),
+                expected_sha256.clone(),
+                cancelled.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            request.file_path = snapshot_path.to_string_lossy().to_string();
+            request = crate::enterprise_tools::build_governed_import_snapshot(
+                request,
+                &plan_id,
+                &expected_sha256,
+                &normalized_path,
+                cancelled.clone(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let database = (!request.database.trim().is_empty()).then_some(request.database.as_str());
+            let client_session_id = dbx_core::table_import::table_import_client_session_id(&request.import_id);
+            let pool_key = self
+                .state
+                .get_or_create_pool_for_session(&request.connection_id, database, Some(&client_session_id))
+                .await?;
+            let cancellation = cancelled.clone();
+            let result = dbx_core::table_import::import_table_file_core(
+                &self.state,
+                &request,
+                &connection.db_type,
+                &pool_key,
+                move |_| {
+                    let cancellation = cancellation.clone();
+                    Box::pin(async move { cancellation.load(Ordering::Acquire) })
+                },
+                move |update| progress(update),
+            )
+            .await;
+            let cleanup =
+                self.state.detach_client_session_pool(&request.connection_id, database, &client_session_id).await;
+            if let Err(error) = cleanup {
+                return Err(format!("导入连接清理失败：{error}"));
+            }
+            result
+        }
+        .await;
+        let cleanup_result = cleanup_guard.cleanup();
+        match (snapshot_result, cleanup_result) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => {
+                Err(format!("IMPORT_SNAPSHOT_CLEANUP_FAILED: staging 已完成，但清理任务快照失败：{error}"))
+            }
+            (Err(error), Err(cleanup)) => Err(format!("{error}; IMPORT_SNAPSHOT_CLEANUP_FAILED: {cleanup}")),
+        }
     }
 
     async fn execute_redis_command(
@@ -3283,6 +3414,18 @@ mod tests {
 
         assert_eq!(local_agent_dir(&explicit, data_dir), PathBuf::from("D:/DBX/agents-custom"));
         assert_eq!(local_agent_dir(&legacy, data_dir), PathBuf::from("D:/DBX/drivers/agents"));
+    }
+
+    #[test]
+    fn snapshot_cleanup_guard_removes_directory_during_unwind_or_early_return() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let snapshot = data_dir.path().join("mcp-import-test");
+        std::fs::create_dir(&snapshot).unwrap();
+        std::fs::write(snapshot.join("normalized.csv"), b"partial").unwrap();
+        {
+            let _guard = ImportSnapshotCleanup::new(snapshot.clone());
+        }
+        assert!(!snapshot.exists());
     }
 
     struct StubBackend;

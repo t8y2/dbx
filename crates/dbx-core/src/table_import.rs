@@ -39,6 +39,7 @@ pub const MAX_LEGACY_XLS_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
 const IMPORT_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 // Keep preview parsing bounded even when an XLSX dimension declares a huge sparse range.
 const MAX_FAST_PREVIEW_CELLS: usize = 100_000;
+const MAX_XLSX_PREVIEW_CELL_BYTES: usize = 1024 * 1024;
 // Shared strings stay in memory for small workbooks and spill to an indexed temp file for large ones.
 const MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_XLSX_SHARED_STRINGS_BYTES: u64 = 1024 * 1024 * 1024;
@@ -65,6 +66,8 @@ pub fn table_import_client_session_id(import_id: &str) -> String {
 pub struct ParsedImportFile {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    /// 每个已解析数据行在源文件中的 1 基行号；JSON 使用 1 基记录序号。
+    pub source_row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub effective_encoding: Option<TableImportTextEncoding>,
 }
@@ -282,6 +285,7 @@ pub struct TableImportPreview {
     pub size_bytes: u64,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    pub source_row_numbers: Vec<usize>,
     pub total_rows: usize,
     pub total_rows_exact: bool,
     pub source_fingerprint: String,
@@ -926,6 +930,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     count_all_rows: bool,
 ) -> Result<ParsedImportFile, String> {
     let mut rows = Vec::new();
+    let mut source_row_numbers = Vec::new();
     let mut total_rows = 0;
     let mut columns = Vec::new();
     let mut record = csv::StringRecord::new();
@@ -954,6 +959,7 @@ fn parse_csv_reader_inner<R: IoRead>(
         total_rows += 1;
         if rows.len() < preview_limit {
             rows.push(delimited_record_to_row(&record, columns.len(), config));
+            source_row_numbers.push(row_number);
         }
         if !count_all_rows && rows.len() >= preview_limit {
             break;
@@ -965,7 +971,7 @@ fn parse_csv_reader_inner<R: IoRead>(
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: Some(effective_encoding) })
+    Ok(ParsedImportFile { columns, rows, source_row_numbers, total_rows, effective_encoding: Some(effective_encoding) })
 }
 
 fn parse_delimited_preview_file_with_options(
@@ -1073,7 +1079,14 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        let source_row_numbers = (1..=rows.len()).collect();
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            source_row_numbers,
+            total_rows: items.len(),
+            effective_encoding: None,
+        });
     }
 
     if all_arrays {
@@ -1092,7 +1105,14 @@ pub fn parse_json_bytes_with_options(
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len(), effective_encoding: None });
+        let source_row_numbers = (1..=rows.len()).collect();
+        return Ok(ParsedImportFile {
+            columns,
+            rows,
+            source_row_numbers,
+            total_rows: items.len(),
+            effective_encoding: None,
+        });
     }
 
     Err("JSON rows must all be objects or all be arrays; mixed row shapes are not supported".to_string())
@@ -1568,7 +1588,14 @@ pub fn parse_sql_bytes_with_options(
     }
 
     let target = target.ok_or_else(|| "No INSERT statements found in SQL file".to_string())?;
-    Ok(ParsedImportFile { columns: target.columns, rows, total_rows, effective_encoding: Some(encoding) })
+    let source_row_numbers = (1..=rows.len()).collect();
+    Ok(ParsedImportFile {
+        columns: target.columns,
+        rows,
+        source_row_numbers,
+        total_rows,
+        effective_encoding: Some(encoding),
+    })
 }
 
 pub fn parse_sql_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -2014,10 +2041,10 @@ fn xlsx_cell_ref_position(reference: &str) -> Option<(usize, usize)> {
         }
         if ch.is_ascii_alphabetic() && !saw_row {
             saw_column = true;
-            column = column * 26 + (ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize;
+            column = column.checked_mul(26)?.checked_add((ch.to_ascii_uppercase() as u8 - b'A' + 1) as usize)?;
         } else if ch.is_ascii_digit() {
             saw_row = true;
-            row = row * 10 + ch.to_digit(10)? as usize;
+            row = row.checked_mul(10)?.checked_add(ch.to_digit(10)? as usize)?;
         } else {
             return None;
         }
@@ -2122,6 +2149,11 @@ fn read_xlsx_shared_strings(
             }
             Ok(Event::Text(text)) if in_item && in_text => {
                 current.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                    return Err(format!(
+                        "Excel shared string exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview cell limit"
+                    ));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
                 in_text = false;
@@ -2238,7 +2270,14 @@ fn create_xlsx_spill_file() -> std::io::Result<File> {
 
 #[cfg(test)]
 fn open_xlsx_shared_strings(zip: &mut zip::ZipArchive<File>, memory_limit: u64) -> Result<XlsxSharedStrings, String> {
-    open_xlsx_shared_strings_with_control(zip, memory_limit, &|| false, &mut |_| Ok(()))
+    open_xlsx_shared_strings_with_control(
+        zip,
+        memory_limit,
+        MAX_XLSX_SHARED_STRINGS_BYTES,
+        usize::MAX,
+        &|| false,
+        &mut |_| Ok(()),
+    )
 }
 
 struct XlsxCancellableReader<'a, R> {
@@ -2264,6 +2303,8 @@ impl<R: IoRead> IoRead for XlsxCancellableReader<'_, R> {
 fn open_xlsx_shared_strings_with_control(
     zip: &mut zip::ZipArchive<File>,
     memory_limit: u64,
+    max_uncompressed_bytes: u64,
+    max_cell_bytes: usize,
     is_cancelled: &dyn Fn() -> bool,
     on_progress: &mut dyn FnMut(u64) -> std::io::Result<()>,
 ) -> Result<XlsxSharedStrings, String> {
@@ -2272,9 +2313,9 @@ fn open_xlsx_shared_strings_with_control(
         Err(zip::result::ZipError::FileNotFound) => return Ok(XlsxSharedStrings::Memory(Vec::new())),
         Err(error) => return Err(error.to_string()),
     };
-    if uncompressed_size > MAX_XLSX_SHARED_STRINGS_BYTES {
+    if uncompressed_size > max_uncompressed_bytes {
         return Err(format!(
-            "Excel shared strings are too large: {uncompressed_size} bytes (max {MAX_XLSX_SHARED_STRINGS_BYTES} bytes)"
+            "Excel shared strings are too large: {uncompressed_size} bytes (max {max_uncompressed_bytes} bytes)"
         ));
     }
     // A fixed-width offset/length index lets cell parsing seek individual strings without
@@ -2315,6 +2356,9 @@ fn open_xlsx_shared_strings_with_control(
             }
             Ok(Event::Text(text)) if in_item && in_text => {
                 current.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current.len() > max_cell_bytes {
+                    return Err(format!("Excel shared string exceeds the {max_cell_bytes} byte cell limit"));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
                 in_text = false;
@@ -2512,9 +2556,15 @@ fn parse_xlsx_preview_file_with_options(
                 }
                 Ok(Event::Text(text)) if in_value => {
                     current_cell.value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                    if current_cell.value.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                        return Err(format!("Excel cell exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview limit"));
+                    }
                 }
                 Ok(Event::Text(text)) if in_inline_text => {
                     current_cell.inline_value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                    if current_cell.inline_value.len() > MAX_XLSX_PREVIEW_CELL_BYTES {
+                        return Err(format!("Excel cell exceeds the {MAX_XLSX_PREVIEW_CELL_BYTES} byte preview limit"));
+                    }
                 }
                 Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
                     in_value = false;
@@ -2559,8 +2609,14 @@ fn parse_xlsx_preview_file_with_options(
         return Err("Import file has no data rows in the selected row range".to_string());
     }
     let start_row = observed_min_row;
-    let start_column = observed_min_column;
-    let observed_end_column = observed_max_column.max(start_column);
+    let title_column_bounds = row_range.title_row.and_then(|title_row| {
+        let absolute_title_row = start_row.saturating_add(title_row.saturating_sub(1));
+        let mut columns = raw_cells.keys().filter_map(|(row, column)| (*row == absolute_title_row).then_some(*column));
+        let first = columns.next()?;
+        Some(columns.fold((first, first), |(min, max), column| (min.min(column), max.max(column))))
+    });
+    let start_column = title_column_bounds.map_or(observed_min_column, |(start, _)| start);
+    let observed_end_column = title_column_bounds.map_or(observed_max_column.max(start_column), |(_, end)| end);
     let observed_column_count = observed_end_column.saturating_sub(start_column).saturating_add(1);
     let preview_row_count = requested_last_row
         .saturating_sub(row_range.data_start_row)
@@ -2608,6 +2664,9 @@ fn parse_xlsx_preview_file_with_options(
     if last_preview_row < row_range.data_start_row {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
+    let source_row_numbers = (row_range.data_start_row..=last_preview_row)
+        .map(|relative_row| start_row + relative_row - 1)
+        .collect::<Vec<_>>();
     let rows = (row_range.data_start_row..=last_preview_row)
         .map(|relative_row| {
             let absolute_row = start_row + relative_row - 1;
@@ -2626,7 +2685,10 @@ fn parse_xlsx_preview_file_with_options(
     if rows.is_empty() {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok((ParsedImportFile { columns, total_rows: rows.len(), rows, effective_encoding: None }, sheets))
+    Ok((
+        ParsedImportFile { columns, total_rows: rows.len(), rows, source_row_numbers, effective_encoding: None },
+        sheets,
+    ))
 }
 
 fn xlsx_cell_styles(
@@ -2768,11 +2830,46 @@ fn parse_xlsx_file_with_options_and_text_columns(
 }
 
 #[derive(Debug)]
-enum XlsxStreamMessage {
+/// XLSX/XLSM 有界流式读取消息，供导入与治理快照复用。
+pub enum XlsxStreamMessage {
+    /// 已解析并去重的兼容 DBX 表头。
     Header(Vec<String>),
-    Rows(Vec<Vec<serde_json::Value>>),
+    /// 数据批次及每行对应的工作表绝对 1 基行号。
+    Rows { rows: Vec<Vec<serde_json::Value>>, source_row_numbers: Vec<usize> },
+    /// 已读取的近似字节进度。
     Progress(u64),
+    /// 工作表已完整解析。
     Done,
+}
+
+/// XLSX/XLSM 流式读取的资源上限；企业治理入口使用严格值，普通导入保持兼容默认值。
+#[derive(Debug, Clone, Copy)]
+pub struct XlsxStreamLimits {
+    /// sharedStrings.xml 最大解压字节数。
+    pub max_shared_strings_bytes: u64,
+    /// 选中工作表 XML 最大解压字节数。
+    pub max_worksheet_bytes: u64,
+    /// 工作表最多允许的 row 元素数量。
+    pub max_worksheet_rows: usize,
+    /// 工作表最多允许的 cell 元素数量。
+    pub max_worksheet_cells: usize,
+    /// 单个源单元格解码后的最大 UTF-8 字节数。
+    pub max_cell_bytes: usize,
+    /// 单个待发送行批次的近似 JSON 字节上限。
+    pub max_batch_bytes: usize,
+}
+
+impl Default for XlsxStreamLimits {
+    fn default() -> Self {
+        Self {
+            max_shared_strings_bytes: MAX_XLSX_SHARED_STRINGS_BYTES,
+            max_worksheet_bytes: u64::MAX,
+            max_worksheet_rows: usize::MAX,
+            max_worksheet_cells: usize::MAX,
+            max_cell_bytes: usize::MAX,
+            max_batch_bytes: usize::MAX,
+        }
+    }
 }
 
 fn xlsx_stream_cell_value(
@@ -2831,10 +2928,13 @@ struct XlsxStreamRowsState {
     columns: Vec<String>,
     header_sent: bool,
     pending_rows: Vec<Vec<serde_json::Value>>,
+    pending_source_row_numbers: Vec<usize>,
     rows_seen: usize,
     current_row: Option<usize>,
     current_values: Vec<serde_json::Value>,
     batch_size: usize,
+    pending_bytes: usize,
+    max_batch_bytes: usize,
 }
 
 impl XlsxStreamRowsState {
@@ -2844,6 +2944,7 @@ impl XlsxStreamRowsState {
         dimension: Option<((usize, usize), (usize, usize))>,
         expected_columns: Option<Vec<String>>,
         batch_size: usize,
+        max_batch_bytes: usize,
     ) -> Self {
         let batch_size = batch_size.max(1);
         Self {
@@ -2856,15 +2957,21 @@ impl XlsxStreamRowsState {
             columns: expected_columns.unwrap_or_default(),
             header_sent: false,
             pending_rows: Vec::with_capacity(batch_size),
+            pending_source_row_numbers: Vec::with_capacity(batch_size),
             rows_seen: 0,
             current_row: None,
             current_values: Vec::new(),
             batch_size,
+            pending_bytes: 0,
+            max_batch_bytes: max_batch_bytes.max(1),
         }
     }
 
     fn initialize_range(&mut self, first_row: usize, first_column: usize) {
-        if self.start_row.is_some() {
+        let start_row = *self.start_row.get_or_insert(first_row);
+        let relative_row = first_row.saturating_sub(start_row).saturating_add(1);
+        let selected_first_row = self.row_range.title_row.unwrap_or(self.row_range.data_start_row);
+        if relative_row < selected_first_row || self.start_column > 0 {
             return;
         }
         let expected_column_count = (!self.columns.is_empty()).then_some(self.columns.len());
@@ -2879,7 +2986,6 @@ impl XlsxStreamRowsState {
                         expected == column_count
                     })
         });
-        self.start_row = Some(first_row);
         self.start_column = first_column;
         self.declared_column_count = dimension
             .map(|((_, start_column), (_, end_column))| end_column.saturating_sub(start_column).saturating_add(1));
@@ -2898,7 +3004,13 @@ impl XlsxStreamRowsState {
         absolute_column: usize,
         text_source_columns: &HashSet<String>,
     ) -> bool {
+        if text_source_columns.contains("*") {
+            return true;
+        }
         self.initialize_range(absolute_row, absolute_column);
+        if self.start_column == 0 {
+            return false;
+        }
         absolute_column
             .checked_sub(self.start_column)
             .and_then(|offset| self.columns.get(offset))
@@ -2913,6 +3025,9 @@ impl XlsxStreamRowsState {
         progress: u64,
     ) -> Result<(), String> {
         self.initialize_range(absolute_row, absolute_column);
+        if self.start_column == 0 {
+            return Ok(());
+        }
         if self.current_row != Some(absolute_row) {
             self.flush_current_row(progress)?;
             self.current_row = Some(absolute_row);
@@ -2981,7 +3096,21 @@ impl XlsxStreamRowsState {
         }
         values.resize(self.columns.len(), serde_json::Value::Null);
         values.truncate(self.columns.len());
+        if self.max_batch_bytes != usize::MAX {
+            let row_bytes = serde_json::to_vec(&values).map_err(|error| error.to_string())?.len();
+            if row_bytes > self.max_batch_bytes {
+                return Err(format!(
+                    "Excel row {absolute_row} is {row_bytes} bytes after normalization, exceeding the {} byte batch budget",
+                    self.max_batch_bytes
+                ));
+            }
+            if !self.pending_rows.is_empty() && self.pending_bytes.saturating_add(row_bytes) > self.max_batch_bytes {
+                self.emit_rows(progress)?;
+            }
+            self.pending_bytes = self.pending_bytes.saturating_add(row_bytes);
+        }
         self.pending_rows.push(values);
+        self.pending_source_row_numbers.push(absolute_row);
         self.rows_seen = self.rows_seen.saturating_add(1);
         if self.pending_rows.len() >= self.batch_size {
             self.emit_rows(progress)?;
@@ -2994,12 +3123,17 @@ impl XlsxStreamRowsState {
             return Ok(());
         }
         self.sender
-            .blocking_send(Ok(XlsxStreamMessage::Rows(std::mem::take(&mut self.pending_rows))))
+            .blocking_send(Ok(XlsxStreamMessage::Rows {
+                rows: std::mem::take(&mut self.pending_rows),
+                source_row_numbers: std::mem::take(&mut self.pending_source_row_numbers),
+            }))
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.sender
             .blocking_send(Ok(XlsxStreamMessage::Progress(progress)))
             .map_err(|_| "Excel import consumer closed before the stream finished".to_string())?;
         self.pending_rows = Vec::with_capacity(self.batch_size);
+        self.pending_source_row_numbers = Vec::with_capacity(self.batch_size);
+        self.pending_bytes = 0;
         Ok(())
     }
 
@@ -3038,7 +3172,9 @@ fn stream_xlsx_rows_to_channel(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stream_xlsx_rows_to_channel_with_control(
+/// 以有界批次流式读取 XLSX/XLSM，保留绝对源行号并支持外部取消。
+/// 调用方必须消费有界通道；函数不会把整个工作表加载到内存。
+pub fn stream_xlsx_rows_to_channel_with_control(
     path: &str,
     options: &TableImportParseOptions,
     batch_size: usize,
@@ -3047,6 +3183,32 @@ fn stream_xlsx_rows_to_channel_with_control(
     scan_full_worksheet: bool,
     sender: tokio::sync::mpsc::Sender<Result<XlsxStreamMessage, String>>,
     cancelled: Arc<AtomicBool>,
+) -> Result<(), String> {
+    stream_xlsx_rows_to_channel_with_limits(
+        path,
+        options,
+        batch_size,
+        expected_columns,
+        text_source_columns,
+        scan_full_worksheet,
+        sender,
+        cancelled,
+        XlsxStreamLimits::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// 以调用方提供的资源预算流式读取 XLSX/XLSM；任何预算不足都会在消费者写入前失败。
+pub fn stream_xlsx_rows_to_channel_with_limits(
+    path: &str,
+    options: &TableImportParseOptions,
+    batch_size: usize,
+    expected_columns: Option<Vec<String>>,
+    text_source_columns: HashSet<String>,
+    scan_full_worksheet: bool,
+    sender: tokio::sync::mpsc::Sender<Result<XlsxStreamMessage, String>>,
+    cancelled: Arc<AtomicBool>,
+    limits: XlsxStreamLimits,
 ) -> Result<(), String> {
     // This producer runs on a blocking thread and communicates in bounded batches. The small
     // channel capacity applies backpressure when database writes are slower than XML parsing.
@@ -3098,16 +3260,26 @@ fn stream_xlsx_rows_to_channel_with_control(
     let is_cancelled = || cancelled.load(Ordering::Acquire);
     let mut shared_strings = open_xlsx_shared_strings_with_control(
         &mut zip,
-        MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES,
+        MAX_IN_MEMORY_XLSX_SHARED_STRINGS_BYTES.min(limits.max_shared_strings_bytes),
+        limits.max_shared_strings_bytes,
+        limits.max_cell_bytes,
         &is_cancelled,
         &mut on_shared_progress,
     )?;
     let row_range = effective_import_row_range(options)?;
     let sheet = zip.by_name(&sheet_path).map_err(|error| error.to_string())?;
+    if sheet.size() > limits.max_worksheet_bytes {
+        return Err(format!(
+            "Excel worksheet is too large: {} bytes (max {} bytes)",
+            sheet.size(),
+            limits.max_worksheet_bytes
+        ));
+    }
     let uncompressed_sheet_bytes = sheet.size().max(1);
     let mut reader = XmlReader::from_reader(BufReader::new(sheet));
     reader.config_mut().trim_text(false);
-    let mut rows = XlsxStreamRowsState::new(sender, row_range, None, expected_columns, batch_size);
+    let mut rows =
+        XlsxStreamRowsState::new(sender, row_range, None, expected_columns, batch_size, limits.max_batch_bytes);
     let mut buffer = Vec::new();
     let mut current_row = 0usize;
     let mut current_column = 0usize;
@@ -3116,6 +3288,8 @@ fn stream_xlsx_rows_to_channel_with_control(
     let mut in_value = false;
     let mut in_inline_text = false;
     let mut inline_phonetic_depth = 0usize;
+    let mut worksheet_rows = 0usize;
+    let mut worksheet_cells = 0usize;
     loop {
         // Convert the uncompressed worksheet offset into an approximate archive-byte offset so
         // progress remains monotonic without scanning the ZIP twice.
@@ -3137,6 +3311,13 @@ fn stream_xlsx_rows_to_channel_with_control(
                 rows.dimension = xml_attr_value(&reader, &element, b"ref").as_deref().and_then(xlsx_dimension_bounds);
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"row") => {
+                worksheet_rows = worksheet_rows.saturating_add(1);
+                if worksheet_rows > limits.max_worksheet_rows {
+                    return Err(format!(
+                        "Excel worksheet row count exceeds the {} row limit",
+                        limits.max_worksheet_rows
+                    ));
+                }
                 current_row = xml_attr_value(&reader, &element, b"r")
                     .and_then(|value| value.parse::<usize>().ok())
                     .filter(|row| *row > 0)
@@ -3147,6 +3328,13 @@ fn stream_xlsx_rows_to_channel_with_control(
                 }
             }
             Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
+                worksheet_cells = worksheet_cells.saturating_add(1);
+                if worksheet_cells > limits.max_worksheet_cells {
+                    return Err(format!(
+                        "Excel worksheet cell count exceeds the {} cell limit",
+                        limits.max_worksheet_cells
+                    ));
+                }
                 let position = xml_attr_value(&reader, &element, b"r")
                     .as_deref()
                     .and_then(xlsx_cell_ref_position)
@@ -3156,6 +3344,13 @@ fn stream_xlsx_rows_to_channel_with_control(
                 rows.push_cell(position.0, position.1, serde_json::Value::Null, progress)?;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
+                worksheet_cells = worksheet_cells.saturating_add(1);
+                if worksheet_cells > limits.max_worksheet_cells {
+                    return Err(format!(
+                        "Excel worksheet cell count exceeds the {} cell limit",
+                        limits.max_worksheet_cells
+                    ));
+                }
                 let position = xml_attr_value(&reader, &element, b"r")
                     .as_deref()
                     .and_then(xlsx_cell_ref_position)
@@ -3188,9 +3383,15 @@ fn stream_xlsx_rows_to_channel_with_control(
             }
             Ok(Event::Text(text)) if in_value => {
                 current_cell.value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current_cell.value.len() > limits.max_cell_bytes {
+                    return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                }
             }
             Ok(Event::Text(text)) if in_inline_text => {
                 current_cell.inline_value.push_str(&text.unescape().map_err(|error| error.to_string())?);
+                if current_cell.inline_value.len() > limits.max_cell_bytes {
+                    return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                }
             }
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => in_value = false,
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => in_inline_text = false,
@@ -3208,6 +3409,9 @@ fn stream_xlsx_rows_to_channel_with_control(
                         format_as_text,
                         empty_string_as_null,
                     )?;
+                    if value.as_str().is_some_and(|value| value.len() > limits.max_cell_bytes) {
+                        return Err(format!("Excel cell exceeds the {} byte limit", limits.max_cell_bytes));
+                    }
                     rows.push_cell(row, column, value, progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
@@ -3296,7 +3500,7 @@ async fn validate_xlsx_worksheet_for_import(
         match message {
             Ok(XlsxStreamMessage::Header(header)) => columns = Some(header),
             Ok(XlsxStreamMessage::Progress(bytes_read)) => on_progress(bytes_read),
-            Ok(XlsxStreamMessage::Rows(_) | XlsxStreamMessage::Done) => {}
+            Ok(XlsxStreamMessage::Rows { .. } | XlsxStreamMessage::Done) => {}
             Err(error) => {
                 producer_cancelled.store(true, Ordering::Release);
                 drop(receiver);
@@ -3335,6 +3539,7 @@ where
     let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
+    let mut source_row_numbers = Vec::new();
     let mut total_rows = 0;
     for (index, source_row) in range.rows().enumerate() {
         let row_number = index + 1;
@@ -3386,6 +3591,7 @@ where
             row.push(value);
         }
         rows.push(row);
+        source_row_numbers.push(range_start_row + row_number);
     }
     if columns.is_empty() {
         return Err("Import file has no columns in the selected row range".to_string());
@@ -3393,7 +3599,7 @@ where
     if total_rows == 0 {
         return Err("Import file has no data rows in the selected row range".to_string());
     }
-    Ok(ParsedImportFile { columns, rows, total_rows, effective_encoding: None })
+    Ok(ParsedImportFile { columns, rows, source_row_numbers, total_rows, effective_encoding: None })
 }
 
 pub fn parse_xlsx_file(path: &str, preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -5278,6 +5484,8 @@ fn validated_prepared_import_source(
     Some(ParsedImportFile {
         columns: prepared.columns.clone(),
         rows: prepared.rows.clone(),
+        // 已准备预览不保存绝对源行位置；宁可明确缺失，也不伪造行号。治理导入不走此路径。
+        source_row_numbers: Vec::new(),
         total_rows: prepared.total_rows,
         effective_encoding: prepared.effective_encoding,
     })
@@ -5309,6 +5517,7 @@ pub async fn preview_table_import_file_with_request(
         size_bytes: metadata.len(),
         columns: parsed.columns,
         rows: parsed.rows,
+        source_row_numbers: parsed.source_row_numbers,
         total_rows: parsed.total_rows,
         total_rows_exact,
         source_fingerprint,
@@ -6646,7 +6855,7 @@ where
             };
             match message {
                 Ok(XlsxStreamMessage::Header(_)) => {}
-                Ok(XlsxStreamMessage::Rows(rows)) => {
+                Ok(XlsxStreamMessage::Rows { rows, .. }) => {
                     if is_cancelled(&request.import_id).await {
                         producer_cancelled.store(true, Ordering::Release);
                         drop(receiver);
@@ -7446,7 +7655,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(columns) => streamed_columns = columns,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows { rows, .. } => streamed_rows.extend(rows),
                 _ => {}
             }
         }
@@ -7547,7 +7756,7 @@ mod tests {
             .unwrap();
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -7980,6 +8189,7 @@ mod tests {
         assert_eq!(preview.total_rows, 2);
         assert!(!preview.total_rows_exact);
         assert_eq!(preview.rows[0], vec![serde_json::json!("1"), serde_json::json!("北京")]);
+        assert_eq!(preview.source_row_numbers, vec![2, 3]);
     }
 
     #[test]
@@ -7996,6 +8206,7 @@ mod tests {
         assert_eq!(preview.columns, vec!["id", "name"]);
         assert_eq!(preview.rows, vec![vec![serde_json::json!("1"), serde_json::json!("Ada")]]);
         assert_eq!(preview.total_rows, 1);
+        assert_eq!(preview.source_row_numbers, vec![2]);
     }
 
     #[test]
@@ -8202,6 +8413,7 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 3);
+        assert_eq!(parsed.source_row_numbers, vec![1, 2, 3]);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
         assert_eq!(parsed.rows[2], vec![serde_json::json!(3), serde_json::json!("Cathy")]);
     }
@@ -8375,6 +8587,7 @@ mod tests {
 
         assert_eq!(parsed.total_rows, 5);
         assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.source_row_numbers, vec![1, 2]);
     }
 
     #[test]
@@ -8709,7 +8922,7 @@ mod tests {
         let streamed_rows = messages
             .into_iter()
             .filter_map(|message| match message {
-                XlsxStreamMessage::Rows(rows) => Some(rows),
+                XlsxStreamMessage::Rows { rows, .. } => Some(rows),
                 _ => None,
             })
             .flatten()
@@ -9000,7 +9213,7 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -9031,12 +9244,78 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
         assert_eq!(streamed_rows, vec![vec![serde_json::json!("10.0")]]);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_excel_rows_honor_preexisting_cancellation() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-cancel-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+        let (sender, _receiver) = tokio::sync::mpsc::channel(2);
+        let error = stream_xlsx_rows_to_channel_with_control(
+            &path.to_string_lossy(),
+            &options,
+            1,
+            None,
+            HashSet::from(["*".to_string()]),
+            true,
+            sender,
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap_err();
+        assert_eq!(error, "Import cancelled");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_excel_rows_enforce_row_cell_and_batch_budgets() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-stream-budget-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_styled_test_xlsx(false, &[("A1", 5, 10.0)])).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        for (limits, expected) in [
+            (XlsxStreamLimits { max_worksheet_rows: 0, ..Default::default() }, "row count"),
+            (XlsxStreamLimits { max_worksheet_cells: 0, ..Default::default() }, "cell count"),
+            (XlsxStreamLimits { max_batch_bytes: 1, ..Default::default() }, "batch budget"),
+        ] {
+            let (sender, _receiver) = tokio::sync::mpsc::channel(2);
+            let error = stream_xlsx_rows_to_channel_with_limits(
+                &path.to_string_lossy(),
+                &options,
+                1,
+                None,
+                HashSet::from(["*".to_string()]),
+                true,
+                sender,
+                Arc::new(AtomicBool::new(false)),
+                limits,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unlimited_xlsx_batches_skip_json_byte_accounting() {
+        let row_range = ImportRowRange { title_row: None, data_start_row: 1, last_data_row: None };
+        let columns = Some(vec!["value".to_string()]);
+
+        let (unlimited_sender, _unlimited_receiver) = tokio::sync::mpsc::channel(2);
+        let mut unlimited = XlsxStreamRowsState::new(unlimited_sender, row_range, None, columns.clone(), 2, usize::MAX);
+        unlimited.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert_eq!(unlimited.pending_bytes, 0);
+
+        let (bounded_sender, _bounded_receiver) = tokio::sync::mpsc::channel(2);
+        let mut bounded = XlsxStreamRowsState::new(bounded_sender, row_range, None, columns, 2, 1_024);
+        bounded.flush_row(1, vec![serde_json::json!("value")], 0).unwrap();
+        assert!(bounded.pending_bytes > 0);
     }
 
     #[test]
@@ -9073,7 +9352,7 @@ mod tests {
         while let Some(message) = receiver.blocking_recv() {
             match message.unwrap() {
                 XlsxStreamMessage::Header(header) => columns = header,
-                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                XlsxStreamMessage::Rows { rows, .. } => streamed_rows.extend(rows),
                 _ => {}
             }
         }
@@ -9144,7 +9423,7 @@ mod tests {
 
         let mut streamed_rows = Vec::new();
         while let Some(message) = receiver.blocking_recv() {
-            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+            if let XlsxStreamMessage::Rows { rows, .. } = message.unwrap() {
                 streamed_rows.extend(rows);
             }
         }
@@ -9304,6 +9583,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: target_types.iter().map(|(column, _)| column.to_string()).collect(),
             rows,
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9713,6 +9993,8 @@ mod tests {
         assert_eq!(parsed.total_rows, 2);
         assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
         assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
+        assert_eq!(parsed.source_row_numbers, vec![3, 4]);
+        assert_eq!(preview.source_row_numbers, vec![3, 4]);
         assert_eq!(preview.rows, parsed.rows);
         let _ = std::fs::remove_file(path);
     }
@@ -9746,6 +10028,7 @@ mod tests {
                     serde_json::json!({ "source": "json" }),
                 ],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 2,
             effective_encoding: None,
         };
@@ -9784,6 +10067,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["id".to_string()],
             rows: vec![vec![serde_json::json!(1)]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9803,6 +10087,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["notes".to_string()],
             rows: vec![vec![serde_json::json!("long text")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9834,6 +10119,7 @@ mod tests {
                 serde_json::json!("2026-07-07 08:15:00"),
                 serde_json::json!("invoice"),
             ]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9865,6 +10151,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["code".to_string(), "amount".to_string()],
             rows: vec![vec![serde_json::json!("1001"), serde_json::json!("12.5")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9898,6 +10185,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Ada")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9930,6 +10218,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Ada")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -9965,6 +10254,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("O'Hara"), serde_json::json!("y")],
                 vec![serde_json::json!(3), serde_json::Value::Null, serde_json::json!("z")],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 3,
             effective_encoding: None,
         };
@@ -9994,6 +10284,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["id".to_string()],
             rows: vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]],
+            source_row_numbers: Vec::new(),
             total_rows: 2,
             effective_encoding: None,
         };
@@ -10502,7 +10793,7 @@ mod tests {
         )
         .await;
 
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
     }
 
     #[test]
@@ -10985,6 +11276,7 @@ mod tests {
                 vec![serde_json::json!(2), serde_json::json!("Grace")],
                 vec![serde_json::json!(3), serde_json::Value::Null],
             ],
+            source_row_numbers: Vec::new(),
             total_rows: 3,
             effective_encoding: None,
         };
@@ -11008,6 +11300,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["payload".to_string()],
             rows: (0..4).map(|index| vec![serde_json::json!(format!("{index}{}", "x".repeat(180 * 1024)))]).collect(),
+            source_row_numbers: Vec::new(),
             total_rows: 4,
             effective_encoding: None,
         };
@@ -11041,6 +11334,7 @@ mod tests {
                 serde_json::json!("2026-05-12T00:00:00+00:00"),
                 serde_json::json!("2026-05-12T00:00:00+00:00"),
             ]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11075,6 +11369,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],
             rows: vec![vec![serde_json::json!("2024/2/25 13:02:15")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11110,6 +11405,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],
             rows: vec![vec![imported_value]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };
@@ -11204,6 +11500,7 @@ mod tests {
         let data = ParsedImportFile {
             columns: vec!["name".to_string()],
             rows: vec![vec![serde_json::json!("Tiếng Việt")]],
+            source_row_numbers: Vec::new(),
             total_rows: 1,
             effective_encoding: None,
         };

@@ -285,22 +285,103 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 22);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 21);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
-    assert!(names.contains(&"dbx_duplicate_connection"));
+    assert!(!names.contains(&"dbx_add_connection"));
+    assert!(!names.contains(&"dbx_duplicate_connection"));
+    assert!(!names.contains(&"dbx_remove_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
     assert!(names.contains(&"dbx_open_session"));
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]
     assert!(names.contains(&"dbx_send_message"));
+    assert!(names.contains(&"dbx_preview_import_file"));
+    assert!(names.contains(&"dbx_prepare_table_import"));
+    assert!(names.contains(&"dbx_start_table_import"));
+    assert!(names.contains(&"dbx_get_import_status"));
+    assert!(names.contains(&"dbx_cancel_import"));
+    assert!(names.contains(&"dbx_vector_search"));
+    assert!(names.contains(&"dbx_vector_upsert_file"));
+    assert!(names.contains(&"dbx_vector_delete_by_batch"));
+    let vector_search =
+        tools.tools.iter().find(|tool| tool.name == "dbx_vector_search").expect("vector search tool schema");
+    let required =
+        vector_search.input_schema.get("required").and_then(Value::as_array).expect("vector search required fields");
+    assert!(required.iter().any(|field| field == "active_at"));
+    assert!(required.iter().any(|field| field == "semantic_version"));
 
     let result = client.peer().call_tool(CallToolRequestParams::new("dbx_list_connections")).await.expect("call tool");
     let response = result.content[0].as_text().expect("text response");
     assert_eq!(response.text, "No connections configured in DBX.");
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn enterprise_tools_are_hidden_and_rejected_by_the_global_tool_allowlist() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            allowed_tool_names: Some(vec!["dbx_list_connections".to_string()]),
+            ..Default::default()
+        },
+        connections: Vec::new(),
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    let tools = client.peer().list_tools(None).await.expect("list policy-filtered tools");
+    let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+    assert_eq!(names, vec!["dbx_list_connections"]);
+
+    for (tool_name, arguments) in [
+        ("dbx_preview_import_file", json!({ "file_path": "/not-read/input.xlsx" })),
+        (
+            "dbx_prepare_table_import",
+            json!({ "template_version": "v1", "file_path": "/not-read/input.xlsx", "mappings": [] }),
+        ),
+        ("dbx_start_table_import", json!({ "plan_id": "not-consumed" })),
+        ("dbx_get_import_status", json!({ "import_id": "not-read" })),
+        ("dbx_cancel_import", json!({ "import_id": "not-cancelled" })),
+        (
+            "dbx_vector_search",
+            json!({
+                "collection": "semantic_cards",
+                "active_at": "2026-09-03",
+                "semantic_version": "v1",
+                "embedding": []
+            }),
+        ),
+        (
+            "dbx_vector_upsert_file",
+            json!({
+                "collection": "semantic_cards",
+                "semantic_batch_id": "not-written",
+                "file_path": "/not-read/cards.jsonl"
+            }),
+        ),
+        ("dbx_vector_delete_by_batch", json!({ "collection": "semantic_cards", "semantic_batch_id": "not-deleted" })),
+    ] {
+        let result = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool_name)
+                    .with_arguments(arguments.as_object().cloned().unwrap_or_else(Map::new)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("call denied tool {tool_name}: {error}"));
+        assert_eq!(result.is_error, Some(true), "{tool_name} must be rejected");
+        let response = result.content[0].as_text().expect("policy error text");
+        assert!(response.text.contains("TOOL_OUT_OF_SCOPE"), "unexpected {tool_name} result: {}", response.text);
+        assert!(response.text.contains(tool_name), "policy error must identify {tool_name}");
+    }
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -319,7 +400,12 @@ async fn remove_connection_respects_global_connection_scope() {
         group_paths: Ok(HashMap::new()),
     };
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server = DbxMcpServer::with_runtime_options_and_connection_management(
+        Arc::new(backend),
+        McpScope::default(),
+        false,
+        true,
+    );
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize MCP client");
 
@@ -333,6 +419,43 @@ async fn remove_connection_respects_global_connection_scope() {
         .expect("call blocked connection removal");
     assert_eq!(result.is_error, Some(true));
     assert!(result.content[0].as_text().expect("blocked removal result").text.contains("CONNECTION_OUT_OF_SCOPE"));
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn web_file_tools_return_versioned_structured_error() {
+    let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
+    let server = DbxMcpServer::with_runtime_options(Arc::new(EmptyBackend), McpScope::default(), true);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    for (tool_name, arguments) in [
+        ("dbx_preview_import_file", json!({ "file_path": "/tmp/input.xlsx" })),
+        (
+            "dbx_vector_upsert_file",
+            json!({
+                "collection": "semantic_cards",
+                "semantic_batch_id": "not-written",
+                "file_path": "/tmp/cards.jsonl"
+            }),
+        ),
+    ] {
+        let result = client
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(tool_name)
+                    .with_arguments(arguments.as_object().cloned().unwrap_or_else(Map::new)),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("call Web file tool {tool_name}: {error}"));
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured error");
+        assert_eq!(structured.get("formatVersion"), Some(&json!(1)));
+        assert_eq!(structured.pointer("/error/code"), Some(&json!("IMPORT_UNSUPPORTED_IN_WEB_MODE_V1")));
+    }
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();
@@ -497,7 +620,12 @@ async fn duplicate_connection_rejects_ambiguous_source_names() {
         group_paths: Ok(HashMap::new()),
     };
     let (server_transport, client_transport) = tokio::io::duplex(16 * 1024);
-    let server = DbxMcpServer::with_runtime_options(Arc::new(backend), McpScope::default(), false);
+    let server = DbxMcpServer::with_runtime_options_and_connection_management(
+        Arc::new(backend),
+        McpScope::default(),
+        false,
+        true,
+    );
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await.expect("initialize MCP client");
     let result = client
@@ -561,6 +689,88 @@ async fn runtime_connection_scope_preserves_group_paths() {
     assert!(listed_text.contains("| scoped | shared-db | Project / Production |"));
     assert!(!listed_text.contains("outside"));
     assert!(!listed_text.contains("Project / Staging"));
+
+    client.cancel().await.expect("close MCP client");
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn multi_connection_runtime_scope_routes_each_name_and_requires_selector() {
+    let backend = PolicyBackend {
+        policy: McpGlobalPolicy {
+            read_only: false,
+            allow_dangerous_sql: false,
+            allowed_connection_ids: Some(vec![
+                "query-id".to_string(),
+                "semantic-id".to_string(),
+                "trace-id".to_string(),
+                "outside".to_string(),
+            ]),
+            ..Default::default()
+        },
+        connections: vec![
+            test_connection("query-id", "Operations Query"),
+            test_connection("semantic-id", "Operations Semantics"),
+            test_connection("trace-id", "Operations Trace"),
+            test_connection("scope-only", "Scope Only"),
+            test_connection("outside", "Outside"),
+        ],
+        group_paths: Ok(HashMap::new()),
+    };
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server = DbxMcpServer::with_runtime_options(
+        Arc::new(backend),
+        McpScope {
+            connection_ids: vec![
+                "query-id".to_string(),
+                "semantic-id".to_string(),
+                "trace-id".to_string(),
+                "scope-only".to_string(),
+            ],
+            ..Default::default()
+        },
+        false,
+    );
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await.expect("initialize MCP client");
+
+    for name in ["operations query", "OPERATIONS SEMANTICS", "Operations Trace"] {
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_name": name, "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("route scoped connection by name");
+        let text = result.content[0].as_text().expect("query result").text.as_str();
+        assert!(text.contains("query should have been blocked"), "{name} did not reach selected backend: {text}");
+        assert!(!text.contains("CONNECTION_OUT_OF_SCOPE"));
+    }
+
+    let no_selector = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("dbx_execute_query")
+                .with_arguments(json!({ "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new)),
+        )
+        .await
+        .expect("reject missing selector");
+    assert!(no_selector.content[0]
+        .as_text()
+        .expect("missing selector result")
+        .text
+        .contains("CONNECTION_SELECTOR_REQUIRED"));
+
+    for name in ["Scope Only", "Outside"] {
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParams::new("dbx_execute_query").with_arguments(
+                json!({ "connection_name": name, "sql": "SELECT 1" }).as_object().cloned().unwrap_or_else(Map::new),
+            ))
+            .await
+            .expect("reject out-of-scope selector");
+        assert!(result.content[0].as_text().expect("out-of-scope result").text.contains("CONNECTION_OUT_OF_SCOPE"));
+    }
 
     client.cancel().await.expect("close MCP client");
     server_task.abort();

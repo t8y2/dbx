@@ -17,7 +17,7 @@ The MCP protocol, connection loading, SQL safety, schema access, Redis support, 
 
 ## Features
 
-- **17 MCP tools** for connection and database discovery, schemas, SQL, Redis, sessions, messages, and DBX UI integration
+- **25 MCP tools** for connections, schemas, SQL, sessions, bounded local imports, Milvus semantics, Redis, messages, and DBX UI integration
 - **Precompiled native binaries** with no local Rust, Cargo, Python, or C/C++ build requirement
 - **No `better-sqlite3` runtime dependency** and no Node native-addon ABI coupling
 - **Local, Web, and Docker modes** using the same tool interface
@@ -159,8 +159,16 @@ Ask the MCP client to:
 | `dbx_send_message` | Send a message to a supported message queue topic |
 | `dbx_open_table` | Open a table in the running DBX desktop application |
 | `dbx_execute_and_show` | Execute a query and display the result in the DBX desktop application |
+| `dbx_preview_import_file` | Preview and fingerprint an allowed local Excel/CSV/TSV/JSON file |
+| `dbx_prepare_table_import` | Create an immutable, 30-minute, single-use PostgreSQL staging import plan |
+| `dbx_start_table_import` | Start an already prepared staging import |
+| `dbx_get_import_status` | Read background import progress and final summary |
+| `dbx_cancel_import` | Request cancellation of a staging import |
+| `dbx_vector_search` | Search approved, active semantic cards in an allowed Milvus collection |
+| `dbx_vector_upsert_file` | Upsert approved semantic cards from an allowed JSONL file |
+| `dbx_vector_delete_by_batch` | Return `VECTOR_DELETE_DISABLED_V1`; v1 performs no MCP deletion |
 
-When connection scoping is enabled, mutating connection tools and desktop UI tools are hidden.
+Connection management is default-closed. An unscoped installation/maintenance process must temporarily set `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`; any `DBX_MCP_SCOPE_*` setting still disables add, duplicate, and remove. Remove also enforces the global connection allowlist. Scoped sessions hide desktop UI tools too.
 
 `dbx_list_databases` returns only database names allowed by the selected connection's MCP database scope. `dbx_send_message` is available when message-queue support is included in the server build.
 
@@ -181,6 +189,8 @@ DBX connection storage defaults to:
 - Windows: `%APPDATA%\com.dbx.app\dbx.db`
 
 Override the directory with `DBX_DATA_DIR`.
+
+Local file imports and `dbx_vector_upsert_file` additionally require `DBX_MCP_IMPORT_ROOTS` and are unavailable in Web mode. Preview accepts Excel/JSON/CSV/TSV and reports whether row/range counts are exact. V1 governed import streams XLSX/XLSM and CSV/TSV with explicit `utf-8`; legacy `.xls`, JSON, `auto`, GBK, and UTF-16 remain preview-only. Inspection, ZIP expansion, shared strings, worksheets, cells, row batches, normalized output, and task disk all have hard budgets. Prepare accepts position+raw+canonical-name mappings and generates a unique `staging.mcp_<uuid>` relation; callers cannot append to an existing table. Start performs cancellable copy+SHA into a private snapshot, hashes the complete source record with its absolute row number, and opens the database only after normalization succeeds. Semantic VARCHAR lengths are fully prevalidated, Milvus's single-search outer result array is flattened, and v1 batch deletion is disabled. Vector search requires both an exact `semantic_version` and an `Asia/Shanghai` business date `active_at` in `YYYY-MM-DD`; approved status, effective dates, and version are always enforced together. See the [MCP documentation](../../docs/content/docs/mcp.mdx#local-file-imports-and-milvus-tools) for the full contract.
 
 ### Agent/JDBC databases
 
@@ -293,7 +303,7 @@ Legacy connection scope variables can still narrow the DBX allowlist for existin
 }
 ```
 
-Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS`, or `DBX_MCP_SCOPE_CONNECTION_NAME`. ID scopes take precedence over the name scope. The scoped database is optional.
+Use `DBX_MCP_SCOPE_CONNECTION_ID`, comma-separated `DBX_MCP_SCOPE_CONNECTION_IDS`, or `DBX_MCP_SCOPE_CONNECTION_NAME`. ID scopes take precedence over the name scope. The scoped database is optional. Resolution uses the intersection with the global connection allowlist. An exact `connection_id`, exact ID passed through `connection_name`, or case-insensitive name can select any effective candidate. Omit the selector only when exactly one candidate remains; multiple scoped IDs return `CONNECTION_SELECTOR_REQUIRED`.
 
 ## Safety
 
@@ -333,6 +343,18 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | Compatibility scope for multiple connection IDs |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | Restrict tools to one connection name |
 | `DBX_MCP_SCOPE_DATABASE` | Restrict tools to one database |
+| `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT` | Set to `1` only for an unscoped installation/maintenance process; default disabled |
+| `DBX_MCP_IMPORT_ROOTS` | Platform-separated allowlist of local import/semantic-file directories |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | Comma-separated PostgreSQL staging schema allowlist (default `staging`) |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | Maximum tabular import source size (default 512 MiB) |
+| `DBX_MCP_IMPORT_INSPECTION_CONCURRENCY` | Concurrent preview/prepare inspections (default `2`) |
+| `DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS` | Inspection wait timeout (default `30`) |
+| `DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES` | Maximum normalized governed CSV size (default 2 GiB) |
+| `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | Required free task-disk reserve (default 2 GiB) |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | Maximum semantic JSONL size (default 64 MiB) |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Comma-separated Milvus collection allowlist (default `semantic_cards`) |
+| `DBX_MCP_VECTOR_DIMENSION` | Positive Milvus vector dimension (default `1024`) |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Maximum Milvus Top K (default `20`, hard cap 50) |
 | `DBX_MCP_DEBUG_SQL` | Include SQL in temporary diagnostics |
 | `DBX_MCP_BINARY` | Override the native binary used by the npm launcher |
 
@@ -435,7 +457,7 @@ MCP 协议、连接读取、SQL 安全检查、Schema、Redis、MongoDB、Web �
 
 ### 主要能力
 
-- 17 个 MCP 工具，涵盖连接和数据库发现、Schema、SQL、Redis、会话、消息队列和 DBX 桌面集成
+- 定义 25 个 MCP 工具；日常默认注册 22 个，显式无作用域维护模式再开放 3 个连接管理工具
 - 不依赖 `better-sqlite3`，没有 Node 原生模块 ABI 问题
 - 支持本地 DBX、DBX Web 和 Docker
 - 可选 Streamable HTTP 传输，使用 Bearer Token 保护；stdio 仍为默认方式
@@ -532,6 +554,14 @@ MCP 配置：
 | `dbx_send_message` | 向支持的消息队列 Topic 发送消息 |
 | `dbx_open_table` | 在 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 桌面端展示结果 |
+| `dbx_preview_import_file` | 预览并计算允许目录内 Excel/CSV/TSV/JSON 的指纹 |
+| `dbx_prepare_table_import` | 创建有效 30 分钟、不可变且只能使用一次的 PostgreSQL staging 导入计划 |
+| `dbx_start_table_import` | 启动已经准备并复验的 staging 导入 |
+| `dbx_get_import_status` | 查看后台导入进度和最终摘要 |
+| `dbx_cancel_import` | 请求取消 staging 导入 |
+| `dbx_vector_search` | 在允许的 Milvus 集合中检索已批准且生效的语义卡 |
+| `dbx_vector_upsert_file` | 从允许目录中的 JSONL upsert 已批准语义卡 |
+| `dbx_vector_delete_by_batch` | v1 返回 `VECTOR_DELETE_DISABLED_V1`，不执行 MCP 删除 |
 
 `dbx_list_databases` 只返回该连接 MCP 数据库范围内允许访问的名称。`dbx_send_message` 仅在 Server 构建时包含消息队列支持时可用。
 
@@ -542,6 +572,8 @@ MCP 配置：
 - Windows：`%APPDATA%\com.dbx.app\dbx.db`
 
 通过 `DBX_DATA_DIR` 覆盖默认目录。Windows 便携版应指向 `DBX.exe` 同级、包含 `dbx.db` 的 `data` 文件夹。
+
+连接管理默认关闭；仅无作用域安装维护进程临时设置 `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT=1`，任何 `DBX_MCP_SCOPE_*` 都继续禁用新增、复制和删除。本地文件导入和 `dbx_vector_upsert_file` 还必须配置 `DBX_MCP_IMPORT_ROOTS`，且不支持 Web 模式。preview 支持 Excel/JSON/CSV/TSV 并标明行数/范围是否精确；v1 治理入库流式支持 XLSX/XLSM 和显式 `utf-8` 的 CSV/TSV，旧版 `.xls`、JSON、`auto`、GBK 与 UTF-16 暂为 preview-only。inspection、ZIP 解压、sharedStrings、worksheet、单元格、批次、规范化输出与任务磁盘均有硬预算。start 以可取消复制+SHA 生成任务私有快照，保留绝对行号和完整源记录哈希，规范化成功后才打开数据库。语义 VARCHAR 会整文件预校验，Milvus 单查询 search 会展开外层数组，v1 批次删除禁用。向量检索必须同时提供精确 `semantic_version` 与 `Asia/Shanghai` 的 `YYYY-MM-DD` 业务日期 `active_at`，服务端始终组合 approved、有效期和版本过滤。完整契约见 [MCP 中文文档](../../docs/content/docs/mcp.cn.mdx#本地文件导入与-milvus-工具)。
 
 ### DBX Web / Docker
 
@@ -633,7 +665,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 }
 ```
 
-可使用 `DBX_MCP_SCOPE_CONNECTION_ID`、逗号分隔的 `DBX_MCP_SCOPE_CONNECTION_IDS` 或 `DBX_MCP_SCOPE_CONNECTION_NAME`。ID scope 优先于名称 scope；作用域模式会隐藏连接增删和桌面 UI 工具。
+可使用 `DBX_MCP_SCOPE_CONNECTION_ID`、逗号分隔的 `DBX_MCP_SCOPE_CONNECTION_IDS` 或 `DBX_MCP_SCOPE_CONNECTION_NAME`。ID scope 优先于名称 scope；作用域模式会隐藏连接增删和桌面 UI 工具。连接候选取 scope 与全局 allowlist 的交集，可按精确 ID 或大小写不敏感名称选择；只有唯一候选时才能省略 selector，多个 scoped ID 会返回 `CONNECTION_SELECTOR_REQUIRED`。
 
 ### SQL 和命令安全
 
@@ -671,6 +703,18 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_MCP_SCOPE_CONNECTION_IDS` | 兼容旧配置：限制到多个连接 ID |
 | `DBX_MCP_SCOPE_CONNECTION_NAME` | 限制到指定连接名称 |
 | `DBX_MCP_SCOPE_DATABASE` | 限制到指定数据库 |
+| `DBX_MCP_ENABLE_CONNECTION_MANAGEMENT` | 仅无作用域安装维护进程临时设为 `1`；默认禁用 |
+| `DBX_MCP_IMPORT_ROOTS` | 本地导入/语义文件目录 allowlist，使用平台路径分隔符 |
+| `DBX_MCP_IMPORT_STAGING_SCHEMAS` | PostgreSQL staging Schema allowlist，逗号分隔，默认 `staging` |
+| `DBX_MCP_IMPORT_FILE_MAX_BYTES` | 表格导入源最大字节数，默认 512 MiB |
+| `DBX_MCP_IMPORT_INSPECTION_CONCURRENCY` | preview/prepare 剖析并发，默认 `2` |
+| `DBX_MCP_IMPORT_INSPECTION_TIMEOUT_SECS` | 文件剖析等待上限，默认 `30` 秒 |
+| `DBX_MCP_IMPORT_NORMALIZED_MAX_BYTES` | 单个规范化治理 CSV 上限，默认 2 GiB |
+| `DBX_MCP_IMPORT_DISK_RESERVE_BYTES` | 任务磁盘必须额外保留的空间，默认 2 GiB |
+| `DBX_MCP_SEMANTIC_FILE_MAX_BYTES` | 语义 JSONL 最大字节数，默认 64 MiB |
+| `DBX_MCP_VECTOR_COLLECTIONS` | Milvus 集合 allowlist，逗号分隔，默认 `semantic_cards` |
+| `DBX_MCP_VECTOR_DIMENSION` | Milvus 向量维度，必须为正整数，默认 `1024` |
+| `DBX_MCP_VECTOR_TOP_K_MAX` | Milvus Top K 上限，默认 `20`，硬上限 50 |
 | `DBX_MCP_DEBUG_SQL` | 临时输出 SQL 诊断信息 |
 | `DBX_MCP_BINARY` | 覆盖 npm 启动器使用的原生文件 |
 

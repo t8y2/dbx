@@ -3759,6 +3759,12 @@ defineExpose({ focusSearch });
   -webkit-appearance: none;
 }
 
+.redis-format-tabs-scroll::-webkit-scrollbar:hover,
+.redis-format-tabs-scroll::-webkit-scrollbar:active {
+  width: 5px !important;
+  height: 5px !important;
+}
+
 .redis-format-tabs-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
@@ -3778,10 +3784,11 @@ defineExpose({ focusSearch });
 
 /* WebKit uses the native scrollbar dimensions when scrollbar-color is set. Keep
  * the custom 5px scrollbar active in the desktop WebView as well. */
-@supports selector(::-webkit-scrollbar) {
+@supports (-webkit-appearance: none) {
   .redis-format-tabs-scroll,
   .redis-format-tabs-scroll--active {
-    scrollbar-color: auto;
+    scrollbar-width: auto;
+    scrollbar-color: auto !important;
   }
 }
 </style>

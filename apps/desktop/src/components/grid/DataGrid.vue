@@ -11138,7 +11138,8 @@ watch(cellDetailPanelLayout, (layout) => {
 watch([showCellDetail, activeCellDetail, cellDetailPanelIsBottom, detailPanelHeight], scheduleActiveCellEditTextareaResize);
 
 const ddlDrawerStyle = computed(() => ({
-  width: `${ddlWidth.value}px`,
+  width: `min(${ddlWidth.value}px, 100%)`,
+  maxWidth: "100%",
 }));
 
 const detailPanelStyle = computed(() =>
@@ -11153,17 +11154,24 @@ const mongoJsonPreviewStyle = computed(() => ({
   width: `${mongoJsonPreviewWidth.value}px`,
 }));
 
-const contentGridStyle = computed(() =>
-  cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value
-    ? {
-        gridTemplateColumns: "minmax(0, 1fr) auto",
-        gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
-      }
-    : {
-        gridTemplateColumns: "minmax(0, 1fr) auto auto",
-        gridTemplateRows: "minmax(0, 1fr)",
-      },
-);
+const contentGridStyle = computed(() => {
+  const hasRightCellDetail = !cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value;
+  const tableInfoAvailableWidth = hasRightCellDetail ? `max(0px, calc(100% - ${detailPanelHeight.value}px))` : "100%";
+  const tableInfoTrack = showTableInfo.value ? `minmax(0, min(${ddlWidth.value}px, ${tableInfoAvailableWidth}))` : "0px";
+  const detailTrack = hasRightCellDetail ? `minmax(0, min(${detailPanelHeight.value}px, 100%))` : "0px";
+
+  if (cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value) {
+    return {
+      gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack}`,
+      gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
+    };
+  }
+
+  return {
+    gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack} ${detailTrack}`,
+    gridTemplateRows: "minmax(0, 1fr)",
+  };
+});
 
 function toggleCellDetailPanelLayout() {
   const nextLayout = cellDetailPanelIsBottom.value ? "right" : "bottom";
@@ -14188,7 +14196,7 @@ function openGridSnapshot() {
           <div
             v-if="showTableInfo"
             data-native-clipboard
-            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0"
+            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0 max-w-full"
             :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
             :style="ddlDrawerStyle"
             @contextmenu="onDrawerContextMenu"

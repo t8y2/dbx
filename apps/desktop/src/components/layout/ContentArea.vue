@@ -776,23 +776,25 @@ watch(
 // Table toolbox handlers
 function handleTableImport() {
   const tab = props.activeTab;
-  if (!tab.tableMeta || !tab.connectionId) return;
+  const tableMeta = activeDataTabTableMeta.value;
+  if (!tableMeta || !tab.connectionId) return;
   connectionStore.tableImportSource = {
     connectionId: tab.connectionId,
     database: tab.database,
-    schema: tab.tableMeta.schema,
-    tableName: tab.tableMeta.tableName,
+    schema: tableMeta.schema,
+    tableName: tableMeta.tableName,
   };
 }
 
 function handleTableDataGenerate() {
   const tab = props.activeTab;
-  if (!tab.tableMeta || !tab.connectionId) return;
+  const tableMeta = activeDataTabTableMeta.value;
+  if (!tableMeta || !tab.connectionId) return;
   connectionStore.tableDataGenerateSource = {
     connectionId: tab.connectionId,
     database: tab.database,
-    schema: tab.tableMeta.schema,
-    tableName: tab.tableMeta.tableName,
+    schema: tableMeta.schema,
+    tableName: tableMeta.tableName,
   };
 }
 
@@ -1936,18 +1938,16 @@ defineExpose({
             {{ activeConnection.name }}
           </span>
           <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium" :title="activeTab.tableMeta?.tableName || activeTab.title">
-            {{ activeTab.tableMeta?.tableName || activeTab.title }}
+            {{ activeDataTabTableMeta?.tableName || activeTab.title }}
           </span>
-          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground" :title="[activeTab.tableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')">
-            <template v-if="activeTab.tableMeta?.schema">{{ activeTab.tableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
+          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground" :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')">
+            <template v-if="activeDataTabTableMeta?.schema">{{ activeDataTabTableMeta.schema }}@</template>{{ databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t) }}
           </span>
-          <span v-if="showDataColumnsChip && activeTab.mode === 'data' && activeTab.tableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums">
-            {{ activeTab.tableMeta.columns.length }} {{ t("tree.columns") }}
-          </span>
+          <span v-if="showDataColumnsChip && activeDataTabTableMeta" class="inline-flex shrink-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 font-medium text-muted-foreground tabular-nums"> {{ activeDataTabTableMeta.columns.length }} {{ t("tree.columns") }} </span>
           <span class="ml-auto" />
           <DataGridColumnLayoutPopover v-if="activeTab.result?.columns.length" :grid="dataGridRef" trigger-class="px-1.5" />
           <Button
-            v-if="showDataTableInfoButton && activeTab.result && activeTab.tableMeta && activeTab.connectionId"
+            v-if="showDataTableInfoButton && activeTab.result && activeDataTabTableMeta && activeTab.connectionId"
             variant="ghost"
             size="sm"
             class="h-5 text-xs px-1.5 shrink-0"
@@ -1956,7 +1956,7 @@ defineExpose({
             @click="dataGridRef?.toggleDdl()"
             ><TableProperties class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("grid.tableInfo") }}</span></Button
           >
-          <DropdownMenu v-if="activeTab.result && activeTab.tableMeta && activeTab.connectionId">
+          <DropdownMenu v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId">
             <DropdownMenuTrigger as-child>
               <Button variant="ghost" size="sm" class="h-5 text-xs px-1.5 shrink-0" :title="t('tableToolbox.title')"
                 ><Toolbox class="h-3.5 w-3.5" /><span v-if="!dataToolbarCompact">{{ t("tableToolbox.title") }}</span></Button
@@ -2199,7 +2199,7 @@ defineExpose({
             </PopoverContent>
           </Popover>
           <ToolbarOverflowMenu v-if="showDataToolbarOverflow" :label="t('toolbar.moreActions')">
-            <DropdownMenuItem v-if="activeTab.result && activeTab.tableMeta && activeTab.connectionId" @select="dataGridRef?.toggleDdl()">
+            <DropdownMenuItem v-if="activeTab.result && activeDataTabTableMeta && activeTab.connectionId" @select="dataGridRef?.toggleDdl()">
               <TableProperties class="h-3.5 w-3.5" />
               {{ t("grid.tableInfo") }}
             </DropdownMenuItem>

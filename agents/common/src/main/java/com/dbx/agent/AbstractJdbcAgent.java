@@ -377,7 +377,9 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         JdbcExecutor executor,
         boolean succeeded,
         boolean requiresSessionAffinity,
-        boolean evictAfterRequest
+        boolean evictAfterRequest,
+        boolean endsSessionAffinity,
+        boolean preservesSchemaContext
     ) {
         if (poolRegistry == null) {
             return;
@@ -389,7 +391,12 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         }
         if (succeeded && requiresSessionAffinity) {
             sessionAffinity = true;
-            JdbcSchemaSwitcher.forget(connection);
+            if (!preservesSchemaContext) {
+                JdbcSchemaSwitcher.forget(connection);
+            }
+        }
+        if (succeeded && endsSessionAffinity) {
+            sessionAffinity = false;
         }
         if (pooledLease == null) {
             connection = null;

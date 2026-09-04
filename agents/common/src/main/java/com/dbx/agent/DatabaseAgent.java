@@ -224,13 +224,71 @@ public interface DatabaseAgent {
         if (conn == null) {
             throw new IllegalStateException("Not connected");
         }
-        return TransactionExecutor.executeUpdateStatements(
-            conn,
-            statements,
-            schema,
-            this::setSchemaSQL,
-            this::resetSchemaSQL
-        );
+        return unchecked(() -> {
+            if (!conn.getAutoCommit()) {
+                throw new IllegalStateException("Cannot start a one-shot transaction while a manual transaction is open");
+            }
+            return TransactionExecutor.executeUpdateStatements(
+                conn,
+                statements,
+                schema,
+                this::setSchemaSQL,
+                this::resetSchemaSQL
+            );
+        });
+    }
+
+    /** Starts an interactive transaction on the current JDBC connection. */
+    default Map<String, Object> beginManualTransaction(String schema) {
+        Connection conn = getConnection();
+        if (conn == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        return unchecked(() -> {
+            if (!conn.getAutoCommit()) {
+                throw new IllegalStateException("Manual transaction already open");
+            }
+            if (schema != null && !schema.trim().isEmpty()) {
+                JdbcSchemaSwitcher.apply(conn, schema, this::setSchemaSQL, this::resetSchemaSQL);
+            }
+            conn.setAutoCommit(false);
+            JdbcSchemaSwitcher.preserve(conn);
+            return Collections.singletonMap("ok", (Object) true);
+        });
+    }
+
+    /** Commits an interactive transaction on the current JDBC connection. */
+    default Map<String, Object> commitManualTransaction() {
+        Connection conn = getConnection();
+        if (conn == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        return unchecked(() -> {
+            if (conn.getAutoCommit()) {
+                throw new IllegalStateException("No manual transaction open");
+            }
+            conn.commit();
+            conn.setAutoCommit(true);
+            JdbcSchemaSwitcher.releasePreserved(conn);
+            return Collections.singletonMap("ok", (Object) true);
+        });
+    }
+
+    /** Rolls back an interactive transaction on the current JDBC connection. */
+    default Map<String, Object> rollbackManualTransaction() {
+        Connection conn = getConnection();
+        if (conn == null) {
+            throw new IllegalStateException("Not connected");
+        }
+        return unchecked(() -> {
+            if (conn.getAutoCommit()) {
+                throw new IllegalStateException("No manual transaction open");
+            }
+            conn.rollback();
+            conn.setAutoCommit(true);
+            JdbcSchemaSwitcher.releasePreserved(conn);
+            return Collections.singletonMap("ok", (Object) true);
+        });
     }
 
     default QueryResult executeBatch(List<String> statements, String schema) {

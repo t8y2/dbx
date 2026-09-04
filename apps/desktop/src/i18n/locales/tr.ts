@@ -4944,7 +4944,7 @@ export default withEnglishFallback({
     codecNone: "Yok",
     codecRowLabel: "Çöz",
     viewRowLabel: "Görünüm",
-    codecBase64: "Base64 Çöz",
+    codecBase64: "Base64",
     unicodeJsonView: "Unicode JSON",
     codecMismatch: "Seçili kodekle çözülemedi; özgün içerik gösteriliyor",
     decompressedView: "Sıkıştırma açıldı",

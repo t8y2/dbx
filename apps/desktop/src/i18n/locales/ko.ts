@@ -4368,7 +4368,7 @@ export default withEnglishFallback({
     codecNone: "없음",
     codecRowLabel: "디코딩",
     viewRowLabel: "보기",
-    codecBase64: "Base64 디코딩",
+    codecBase64: "Base64",
     codecMismatch: "선택한 디코딩 방식으로 복원할 수 없어 원본 내용을 표시합니다",
     unicodeJsonView: "Unicode JSON",
     decompressedView: "압축 해제 보기",

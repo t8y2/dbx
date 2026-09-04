@@ -4947,7 +4947,7 @@ export default {
     codecNone: "None",
     codecRowLabel: "Decode",
     viewRowLabel: "View",
-    codecBase64: "Base64 Decode",
+    codecBase64: "Base64",
     unicodeJsonView: "Unicode JSON",
     codecMismatch: "Unable to decode with the selected codec; showing the original content",
     decompressedView: "Decompressed",

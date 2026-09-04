@@ -4742,7 +4742,7 @@ export default withEnglishFallback({
     codecNone: "Nessuno",
     codecRowLabel: "Decodifica",
     viewRowLabel: "Vista",
-    codecBase64: "Decodifica Base64",
+    codecBase64: "Base64",
     codecMismatch: "Impossibile decodificare con il codec selezionato; viene mostrato il contenuto originale",
     unicodeJsonView: "JSON Unicode",
     decompressedView: "Decompresso",

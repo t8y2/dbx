@@ -4771,7 +4771,7 @@ export default withEnglishFallback({
     codecNone: "なし",
     codecRowLabel: "デコード",
     viewRowLabel: "表示",
-    codecBase64: "Base64 デコード",
+    codecBase64: "Base64",
     codecMismatch: "選択したデコード方式では復元できません。元の内容を表示しています",
     unicodeJsonView: "Unicode JSON",
     decompressedView: "解凍ビュー",

@@ -4931,7 +4931,7 @@ export default withEnglishFallback({
     codecNone: "无",
     codecRowLabel: "解码",
     viewRowLabel: "视图",
-    codecBase64: "Base64 解码",
+    codecBase64: "Base64",
     unicodeJsonView: "Unicode JSON",
     codecMismatch: "无法按所选解码方式还原，已显示原始内容",
     decompressedView: "解压视图",

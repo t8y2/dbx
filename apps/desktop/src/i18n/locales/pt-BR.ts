@@ -4744,7 +4744,7 @@ export default withEnglishFallback({
     codecNone: "Nenhum",
     codecRowLabel: "Decodificação",
     viewRowLabel: "Visualização",
-    codecBase64: "Decodificação Base64",
+    codecBase64: "Base64",
     codecMismatch: "Não foi possível decodificar com o codec selecionado; exibindo o conteúdo original",
     unicodeJsonView: "JSON Unicode",
     decompressedView: "Descomprimido",

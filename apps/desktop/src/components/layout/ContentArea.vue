@@ -541,7 +541,7 @@ const canShowResultOutput = computed(() => hasTabularResult.value || props.activ
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
 const resultMessageCount = computed(() => props.activeTab.result?.messages?.length ?? 0);
 const canShowMessagesOutput = computed(() => resultMessageCount.value > 0);
-const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView === "profile" || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
+const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => isDataGridToolbarCompact(standaloneResultToolbarWidth.value, standaloneResultToolbarViewportWidth.value));
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
 
@@ -1894,7 +1894,7 @@ defineExpose({
                       class="inline-flex h-5 shrink-0 items-center gap-1 rounded-sm border border-transparent px-2 text-xs leading-none transition-colors"
                       :class="activeOutputView === 'profile' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'"
                       :aria-pressed="activeOutputView === 'profile'"
-                      @click="emit('update:activeOutputView', activeOutputView === 'profile' ? 'result' : 'profile')"
+                      @click="emit('update:activeOutputView', activeTab.id, activeOutputView === 'profile' ? 'result' : 'profile')"
                     >
                       <Gauge class="h-3.5 w-3.5" />
                       {{ t("profile.title") }}

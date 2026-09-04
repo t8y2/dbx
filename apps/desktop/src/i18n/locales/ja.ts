@@ -2350,10 +2350,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "プロファイラ",
-    tag: "プロファイラ",
     emptyShards: "シャードのプロファイルデータがありません",
     emptyProfile: 'このレスポンスに `profile` セクションがありません。検索ボディに "profile": true を追加して再実行してください。',
-    emptySearch: "このシャードにプロファイルされたクエリはありません",
     collapseAll: "すべて折りたたむ",
     expandAll: "すべて展開",
     selfTime: "自身",

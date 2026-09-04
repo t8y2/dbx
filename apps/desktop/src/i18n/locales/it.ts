@@ -2323,10 +2323,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "Profilo",
-    tag: "Profilo",
     emptyShards: "Nessun dato di profilo degli shard",
     emptyProfile: 'Questa risposta non contiene una sezione `profile`. Aggiungi "profile": true al corpo della ricerca ed esegui di nuovo la query.',
-    emptySearch: "Questo shard non ha query profilate",
     collapseAll: "Comprimi tutto",
     expandAll: "Espandi tutto",
     selfTime: "Proprio",

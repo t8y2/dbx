@@ -2322,10 +2322,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "查询剖析",
-    tag: "剖析",
     emptyShards: "没有分片剖析数据",
     emptyProfile: '响应中没有 `profile` 字段。请在搜索请求体中加入 "profile": true 后重新执行。',
-    emptySearch: "该分片没有已剖析的查询",
     collapseAll: "全部折叠",
     expandAll: "全部展开",
     selfTime: "自身耗时",

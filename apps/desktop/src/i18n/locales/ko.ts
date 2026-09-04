@@ -2224,10 +2224,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "프로파일러",
-    tag: "프로파일러",
     emptyShards: "샤드 프로파일 데이터가 없습니다",
     emptyProfile: '이 응답에 `profile` 섹션이 없습니다. 검색 본문에 "profile": true를 추가하고 다시 실행하세요.',
-    emptySearch: "이 샤드에는 프로파일된 쿼리가 없습니다",
     collapseAll: "모두 접기",
     expandAll: "모두 펼치기",
     selfTime: "자체",

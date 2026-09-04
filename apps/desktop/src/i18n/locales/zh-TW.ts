@@ -2323,10 +2323,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "查詢剖析",
-    tag: "剖析",
     emptyShards: "沒有分片剖析資料",
     emptyProfile: '回應中沒有 `profile` 欄位。請在搜尋請求體中加入 "profile": true 後重新執行。',
-    emptySearch: "該分片沒有已剖析的查詢",
     collapseAll: "全部摺疊",
     expandAll: "全部展開",
     selfTime: "自身耗時",

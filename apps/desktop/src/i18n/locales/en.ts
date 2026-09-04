@@ -2399,10 +2399,8 @@ export default {
   },
   profile: {
     title: "Profile",
-    tag: "Profile",
     emptyShards: "No shard profile data",
     emptyProfile: 'This response does not contain a `profile` section. Add `"profile": true` to the search body and re-run the query.',
-    emptySearch: "This shard has no profiled queries",
     collapseAll: "Collapse all",
     expandAll: "Expand all",
     selfTime: "Self",

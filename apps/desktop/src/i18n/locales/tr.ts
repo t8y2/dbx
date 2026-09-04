@@ -2399,10 +2399,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "Profil",
-    tag: "Profil",
     emptyShards: "Parça profil verisi yok",
     emptyProfile: 'Bu yanıtta `profile` bölümü yok. Arama gövdesine "profile": true ekleyip sorguyu yeniden çalıştırın.',
-    emptySearch: "Bu parçada profillenmiş sorgu yok",
     collapseAll: "Tümünü daralt",
     expandAll: "Tümünü genişlet",
     selfTime: "Kendi",

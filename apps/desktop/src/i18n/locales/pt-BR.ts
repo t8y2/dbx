@@ -2325,10 +2325,8 @@ export default withEnglishFallback({
   },
   profile: {
     title: "Perfil",
-    tag: "Perfil",
     emptyShards: "Sem dados de perfil de shards",
     emptyProfile: 'Esta resposta não contém uma seção `profile`. Adicione "profile": true ao corpo da pesquisa e execute novamente a consulta.',
-    emptySearch: "Este shard não tem consultas perfiladas",
     collapseAll: "Recolher tudo",
     expandAll: "Expandir tudo",
     selfTime: "Próprio",

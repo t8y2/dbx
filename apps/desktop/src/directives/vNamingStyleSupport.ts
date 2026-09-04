@@ -1,34 +1,39 @@
 import type { Directive } from "vue";
+import { isConvertNamingStyleShortcut } from "@/lib/editor/keyboardShortcuts";
 import { convertToNextNamingStyle } from "@/lib/naming/namingStyleConverter";
+import { useSettingsStore } from "@/stores/settingsStore";
 
 function handleKeydown(event: KeyboardEvent): void {
-  // Check for Shift+Alt+C
-  if (!event.shiftKey || !event.altKey || event.key.toLowerCase() !== "c") {
-    return;
-  }
+  if (event.isComposing) return;
+
+  // Match against the user-configured shortcut so settings changes apply
+  // immediately; matchesShortcut uses the physical-key (event.code) fallback
+  // so macOS Option+letter composed keys (⌥⇧C → "Ç") still match, and its
+  // strict modifier check rejects combos with extra Ctrl/Meta held.
+  const shortcuts = useSettingsStore().editorSettings.shortcuts;
+  if (!isConvertNamingStyleShortcut(event, shortcuts)) return;
 
   const target = event.target as HTMLInputElement | HTMLTextAreaElement;
-
-  // Prevent default behavior
-  event.preventDefault();
-  event.stopPropagation();
-
   const value = target.value;
   const start = target.selectionStart ?? 0;
   const end = target.selectionEnd ?? 0;
+  const source = start === end ? value : value.slice(start, end);
+  const result = convertToNextNamingStyle(source);
+
+  // No identifier-like content to convert: leave the keystroke to the
+  // browser instead of swallowing it.
+  if (result.text === source) return;
+
+  event.preventDefault();
+  event.stopPropagation();
 
   if (start === end) {
     // No selection - convert entire content
-    const result = convertToNextNamingStyle(value);
     target.value = result.text;
     target.setSelectionRange(0, result.text.length);
   } else {
     // Convert selected text
-    const selectedText = value.slice(start, end);
-    const result = convertToNextNamingStyle(selectedText);
-
-    const newValue = value.slice(0, start) + result.text + value.slice(end);
-    target.value = newValue;
+    target.value = value.slice(0, start) + result.text + value.slice(end);
     target.setSelectionRange(start + result.text.length, start + result.text.length);
   }
 

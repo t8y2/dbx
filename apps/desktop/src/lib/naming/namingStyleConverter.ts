@@ -1,5 +1,5 @@
 import { detectNamingStyle, type NamingStyle } from "./namingStyleDetector";
-import { convertToNamingStyle } from "./namingStyleTransformers";
+import { convertToNamingStyle, SINGLE_IDENTIFIER_PATTERN } from "./namingStyleTransformers";
 
 export interface NamingStyleConversionResult {
   text: string;
@@ -14,22 +14,22 @@ function getNextStyle(currentStyle: NamingStyle): NamingStyle {
   return STYLE_CYCLE[nextIndex];
 }
 
+/**
+ * Convert to the next naming style in the cycle:
+ * camelCase → PascalCase → snake_case → SCREAMING_SNAKE_CASE → kebab-case.
+ *
+ * Returns the original text unchanged (no-op) when the trimmed content is not
+ * a single identifier — e.g. selections containing whitespace, operators,
+ * comments, CJK/Cyrillic letters, or line breaks. Whitespace surrounding the
+ * identifier is preserved.
+ */
 export function convertToNextNamingStyle(text: string, currentStyle?: NamingStyle): NamingStyleConversionResult {
-  const trimmed = text.trim();
-  if (!trimmed || !/[a-zA-Z]/.test(trimmed)) {
-    return { text, style: currentStyle || "camelCase" };
-  }
-
-  const detectedStyle = currentStyle || detectNamingStyle(trimmed);
-  if (!detectedStyle) {
-    return { text, style: "camelCase" };
+  const core = text.trim();
+  const detectedStyle = currentStyle ?? detectNamingStyle(core);
+  if (!detectedStyle || !SINGLE_IDENTIFIER_PATTERN.test(core)) {
+    return { text, style: detectedStyle ?? "camelCase" };
   }
 
   const nextStyle = getNextStyle(detectedStyle);
-  const convertedText = convertToNamingStyle(trimmed, nextStyle);
-
-  return {
-    text: convertedText,
-    style: nextStyle,
-  };
+  return { text: convertToNamingStyle(text, nextStyle), style: nextStyle };
 }

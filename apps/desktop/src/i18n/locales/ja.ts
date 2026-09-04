@@ -1374,6 +1374,7 @@ export default withEnglishFallback({
       cutSelection: "選択内容を切り取る",
       pasteFromClipboard: "貼り付け",
       pasteClipboardReadFailed: "クリップボードの読み取りに失敗しました：{message}",
+      convertNamingStyle: "命名スタイルの切り替え",
     },
     search: {
       find: "検索",
@@ -7000,6 +7001,7 @@ export default withEnglishFallback({
     customUiPrimary: "プライマリカラー",
     customUiBorder: "枠線",
     customUiSidebar: "サイドバー",
+    shortcutConvertNamingStyle: "命名スタイルの切り替え",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

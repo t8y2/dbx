@@ -1354,6 +1354,7 @@ export default withEnglishFallback({
       cutSelection: "剪下選取內容",
       pasteFromClipboard: "貼上",
       pasteClipboardReadFailed: "讀取剪貼簿失敗：{message}",
+      convertNamingStyle: "切換命名風格",
     },
     search: {
       find: "尋找",
@@ -6268,6 +6269,7 @@ export default withEnglishFallback({
     customUiPrimary: "主色",
     customUiBorder: "邊框",
     customUiSidebar: "側邊欄",
+    shortcutConvertNamingStyle: "切換命名風格",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

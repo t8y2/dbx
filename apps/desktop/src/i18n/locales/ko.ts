@@ -1265,6 +1265,7 @@ export default withEnglishFallback({
       findReplace: "찾기/바꾸기",
       deleteEmptyLines: "빈 줄 삭제",
       selectAll: "모두 선택",
+      convertNamingStyle: "네이밍 스타일 전환",
     },
     delimitedList: {
       title: "구분자 목록으로 변환",
@@ -6655,6 +6656,7 @@ export default withEnglishFallback({
     csvQuoteModeDescription: "CSV 내보내기 시 필드에 큰따옴표를 사용하는 방식을 선택합니다.",
     csvQuoteModeAll: "모든 필드",
     csvQuoteModeNecessary: "필수 필드만",
+    shortcutConvertNamingStyle: "네이밍 스타일 전환",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

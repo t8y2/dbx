@@ -1355,6 +1355,7 @@ export default withEnglishFallback({
       cutSelection: "Recortar seleção",
       pasteFromClipboard: "Colar",
       pasteClipboardReadFailed: "Falha ao ler a área de transferência: {message}",
+      convertNamingStyle: "Alternar estilo de nomenclatura",
     },
     search: {
       find: "Localizar",
@@ -6950,6 +6951,7 @@ export default withEnglishFallback({
     customUiPrimary: "Cor primária",
     customUiBorder: "Borda",
     customUiSidebar: "Barra lateral",
+    shortcutConvertNamingStyle: "Alternar estilo de nomenclatura",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

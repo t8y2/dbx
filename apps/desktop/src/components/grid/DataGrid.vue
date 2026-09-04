@@ -7012,6 +7012,7 @@ async function applyWhereFilter() {
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
+      injectDefaultTimeSeriesWhere: true,
       whereInput,
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });

@@ -789,7 +789,8 @@ async function loadKeys() {
       hasMore.value = false;
       return;
     }
-    const applied = await scanNextPage(requestId);
+    const initialScanBudget = isFuzzyKeySearch.value ? autoLoadBudget : undefined;
+    const applied = await scanNextPage(requestId, undefined, initialScanBudget);
     if (applied && isValueSearchMode.value) {
       await streamValueSearch(requestId);
     }

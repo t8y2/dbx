@@ -404,7 +404,9 @@ function getTableKey(table: { name: string; schema?: string }): string {
 }
 
 const effectiveSchemaKey = computed(() => {
-  if (!isSchemaAware.value) return "";
+  // Non-schema-aware drivers historically persisted with the database name
+  // in this slot (loadSchemas assigned schema = database); keep legacy keys.
+  if (!isSchemaAware.value) return database.value;
   if (isAllSchemasSelected.value) return "__all__";
   if (selectedSchemas.value.length === 1) return selectedSchemas.value[0];
   if (selectedSchemas.value.length > 1) return selectedSchemas.value.slice().sort().join(",");

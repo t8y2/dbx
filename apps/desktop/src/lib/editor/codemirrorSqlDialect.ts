@@ -10,7 +10,11 @@ const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris",
 const POSTGRES_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "questdb"]);
 const ORACLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"]);
 const SQLITE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "cloudflare-d1"]);
-const BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["hive", "argo", "impala", "spark"]);
+// Non-MySQL-wire dialects whose servers still interpret backslash escapes in string
+// literals; the mysql-family types are covered by isMysql at the define() site. Mirrors
+// BACKSLASH_ESCAPE_STRING_DIALECTS in lib/sql/sqlStatementRanges.ts so the editor
+// tokenizer and the statement splitter agree on escape semantics per dialect.
+const BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["hive", "argo", "impala", "spark", "databend"]);
 
 const CODEMIRROR_SQLITE_EXTENSION_KEYWORDS = new Set("abort analyze attach autoincrement conflict database detach exclusive fail glob ignore index indexed instead isnull notnull offset plan pragma query raise regexp reindex rename replace temp vacuum virtual".split(" "));
 const STANDARD_SQL_TYPES = "array binary bit boolean char character clob date decimal double float int integer interval large national nchar nclob numeric object precision real smallint time timestamp varchar varying";

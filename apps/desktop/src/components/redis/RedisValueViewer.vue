@@ -60,6 +60,7 @@ import {
 import { decompressRedisValue, decodeBase64RedisValue, decodePickle, decodeProtobuf, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/codec";
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
+import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollbar.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
 import { applyRedisExpiryPolicy, type RedisExpiryMode, redisExpiryModeForTtl, validateRedisExpiry } from "@/lib/redis/redisExpiry";
@@ -97,8 +98,6 @@ const REDIS_AUTO_REFRESH_INTERVAL_STORAGE_KEY = "dbx-redis-auto-refresh-interval
 const REDIS_AUTO_REFRESH_INTERVAL_OPTIONS = [1, 3, 5, 10] as const;
 const REDIS_COLLECTION_ROW_HEIGHT = 32;
 const REDIS_STREAM_MIN_ROW_HEIGHT = 96;
-const REDIS_FORMAT_SCROLLBAR_HIDE_DELAY = 800;
-
 const data = ref<RedisValue | null>(null);
 const loading = ref(false);
 const loadingMore = ref(false);
@@ -767,7 +766,6 @@ const canHighlightMemberSurface = computed(() => canHighlightContentSearch.value
 
 let collectionSearchTimer: ReturnType<typeof setTimeout> | null = null;
 let collectionSearchRequestId = 0;
-const redisFormatScrollbarTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 let hashResizeStartX = 0;
 let hashResizeStartWidth = 0;
 let zsetResizeStartX = 0;
@@ -777,31 +775,6 @@ function shouldPauseAutoValueRefresh(): boolean {
   const loadedPageSize = data.value ? redisValueCollectionItems(data.value).length : 0;
   const hasExpandedCollectionPage = collectionItems.value.length > loadedPageSize;
   return showMemberDetail.value || editingZsetMemberKey.value !== null || showHashFieldTtlDialog.value || valueSearchOpen.value || Boolean(collectionSearchQuery.value.trim()) || Boolean(activeCollectionSearchQuery.value) || searchLoading.value || loadingMore.value || hasExpandedCollectionPage;
-}
-
-function hideRedisFormatScrollbar(element: HTMLElement) {
-  const timer = redisFormatScrollbarTimers.get(element);
-  if (timer) clearTimeout(timer);
-  redisFormatScrollbarTimers.delete(element);
-  element.classList.remove("redis-format-tabs-scroll--active");
-}
-
-function scheduleHideRedisFormatScrollbar(element: HTMLElement) {
-  const timer = redisFormatScrollbarTimers.get(element);
-  if (timer) clearTimeout(timer);
-  redisFormatScrollbarTimers.set(
-    element,
-    setTimeout(() => hideRedisFormatScrollbar(element), REDIS_FORMAT_SCROLLBAR_HIDE_DELAY),
-  );
-}
-
-function showRedisFormatScrollbar(event: Event) {
-  const element = event.currentTarget;
-  if (!(element instanceof HTMLElement)) return;
-  const timer = redisFormatScrollbarTimers.get(element);
-  if (timer) clearTimeout(timer);
-  element.classList.add("redis-format-tabs-scroll--active");
-  scheduleHideRedisFormatScrollbar(element);
 }
 
 type PendingDelete = { kind: "key" } | { kind: "hash"; field: string } | { kind: "list"; index: number } | { kind: "set"; member: string } | { kind: "zset"; member: string };
@@ -2725,8 +2698,6 @@ onBeforeUnmount(() => {
   stopResizeHashColumns();
   stopResizeZsetColumns();
   if (collectionSearchTimer) clearTimeout(collectionSearchTimer);
-  for (const timer of redisFormatScrollbarTimers.values()) clearTimeout(timer);
-  redisFormatScrollbarTimers.clear();
 });
 
 defineExpose({ focusSearch });
@@ -2833,7 +2804,7 @@ defineExpose({ focusSearch });
       <div v-if="isStringLikeKind && stringValueDetail" class="flex-1 flex flex-col overflow-hidden">
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
-          <div class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="showRedisFormatScrollbar" @pointerleave="scheduleHideRedisFormatScrollbar($event.currentTarget as HTMLElement)">
+          <RedisHorizontalScrollbar>
             <Button
               v-for="codec in REDIS_VALUE_CODEC_ORDER"
               :key="codec"
@@ -2847,7 +2818,7 @@ defineExpose({ focusSearch });
             >
               {{ redisCodecLabel(codec) }}
             </Button>
-          </div>
+          </RedisHorizontalScrollbar>
           <FileArchive v-if="!isStringValueTruncated && stringGzipBadge && stringValueCodec === 'none'" class="h-3.5 w-3.5 shrink-0 text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')" />
           <span class="flex-1" />
           <label v-if="isTextRedisFormat(stringValueView) || activeStructuredStringDetail || isDecompressCodec(stringValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
@@ -2858,7 +2829,7 @@ defineExpose({ focusSearch });
         </div>
         <div class="flex h-9 items-center gap-2 border-b px-4 text-xs shrink-0">
           <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
-          <div class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="showRedisFormatScrollbar" @pointerleave="scheduleHideRedisFormatScrollbar($event.currentTarget as HTMLElement)">
+          <RedisHorizontalScrollbar>
             <Button
               v-for="format in REDIS_VALUE_FORMAT_DISPLAY_ORDER"
               :key="format"
@@ -2871,7 +2842,7 @@ defineExpose({ focusSearch });
             >
               {{ redisFormatLabel(format, stringValueDetail.rawLabel) }}
             </Button>
-          </div>
+          </RedisHorizontalScrollbar>
           <span class="flex-1" />
           <div v-if="stringValueView === 'json' && stringValueDetail.json && stringValueCodec === 'none'" class="flex shrink-0 overflow-hidden rounded-md border bg-muted/20 p-0.5">
             <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
@@ -3613,11 +3584,11 @@ defineExpose({ focusSearch });
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.codecRowLabel") }}</span>
-            <div class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="showRedisFormatScrollbar" @pointerleave="scheduleHideRedisFormatScrollbar($event.currentTarget as HTMLElement)">
+            <RedisHorizontalScrollbar>
               <Button v-for="codec in REDIS_VALUE_CODEC_ORDER" :key="codec" variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': memberValueCodec === codec }" @click="setMemberValueCodec(codec)">
                 {{ redisCodecLabel(codec) }}
               </Button>
-            </div>
+            </RedisHorizontalScrollbar>
             <span class="flex-1" />
             <label v-if="isTextRedisFormat(memberValueView) || activeStructuredMemberDetail || isDecompressCodec(memberValueCodec)" class="flex items-center gap-1.5 text-muted-foreground">
               <WrapText class="h-3.5 w-3.5" />
@@ -3627,7 +3598,7 @@ defineExpose({ focusSearch });
           </div>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
             <span class="shrink-0 text-muted-foreground">{{ t("redis.viewRowLabel") }}</span>
-            <div class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="showRedisFormatScrollbar" @pointerleave="scheduleHideRedisFormatScrollbar($event.currentTarget as HTMLElement)">
+            <RedisHorizontalScrollbar>
               <Button
                 v-for="format in REDIS_VALUE_FORMAT_DISPLAY_ORDER"
                 :key="format"
@@ -3640,7 +3611,7 @@ defineExpose({ focusSearch });
               >
                 {{ redisFormatLabel(format, selectedMemberDetail.rawLabel) }}
               </Button>
-            </div>
+            </RedisHorizontalScrollbar>
             <span class="flex-1" />
             <div v-if="memberValueView === 'json' && selectedMemberDetail.json && memberValueCodec === 'none'" class="flex shrink-0 overflow-hidden rounded-md border bg-muted/20 p-0.5">
               <Button variant="ghost" size="sm" class="h-6 shrink-0 rounded-[5px] px-2 text-xs" :class="{ 'bg-background shadow-sm': !redisJsonDecoded }" @click="setRedisJsonUnicodeMode('raw')">{{ t("redis.jsonViewRaw") }}</Button>
@@ -3744,54 +3715,6 @@ defineExpose({ focusSearch });
     </Dialog>
   </div>
 </template>
-
-<style scoped>
-.redis-format-tabs-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-.redis-format-tabs-scroll::-webkit-scrollbar {
-  width: 5px !important;
-  height: 5px !important;
-  -webkit-appearance: none;
-}
-
-.redis-format-tabs-scroll::-webkit-scrollbar:hover,
-.redis-format-tabs-scroll::-webkit-scrollbar:active {
-  width: 5px !important;
-  height: 5px !important;
-}
-
-.redis-format-tabs-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.redis-format-tabs-scroll::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 999px;
-}
-
-.redis-format-tabs-scroll--active {
-  scrollbar-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent) transparent;
-}
-
-.redis-format-tabs-scroll--active::-webkit-scrollbar-thumb {
-  background: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
-}
-
-/* WebKit uses the native scrollbar dimensions when scrollbar-color is set. Keep
- * the custom 5px scrollbar active in the desktop WebView as well. */
-@supports (-webkit-appearance: none) {
-  .redis-format-tabs-scroll,
-  .redis-format-tabs-scroll--active {
-    scrollbar-width: auto;
-    scrollbar-color: auto !important;
-  }
-}
-</style>
 
 <style scoped>
 :deep(.document-search-match),

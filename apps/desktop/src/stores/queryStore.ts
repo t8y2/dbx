@@ -35,7 +35,7 @@ import { redisCommandResultToQueryResult } from "@/lib/redis/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
-import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
+import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction, usesOracleStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
@@ -3433,7 +3433,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((item) => item.id === id);
     if (!tab?.txnSessionId) return;
     const dbType = effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId));
-    if (dbType === "oracle") tab.oracleTxnPossiblyDirty = true;
+    if (usesOracleStickyTransactionState(dbType)) tab.oracleTxnPossiblyDirty = true;
   }
 
   /** Reset only the Oracle sticky-dirty bit. Used when a session continues but
@@ -5620,7 +5620,7 @@ export const useQueryStore = defineStore("query", () => {
           executionDispatched = true;
           // Only an initial manual execution classifies the user SQL (Oracle-only).
           // A later cursor-page fetch must neither set nor clear the sticky bit.
-          const isInitialOracleManualExecution = effectiveDbType === "oracle" && !options?.pagination?.sessionId;
+          const isInitialOracleManualExecution = usesOracleStickyTransactionState(effectiveDbType) && !options?.pagination?.sessionId;
           const classificationSql = isInitialOracleManualExecution ? queryBaseSql : undefined;
           let manualTransactionRecoveryAttempted = false;
           executionPromise = (async () => {
@@ -5659,7 +5659,7 @@ export const useQueryStore = defineStore("query", () => {
       // must neither set nor clear the bit, and the Core no-op (empty script)
       // must neither set nor clear it. Otherwise any result that is not proven
       // read-only dirties the session monotonically.
-      if (tab.autoCommit === false && effectiveDbType === "oracle" && !options?.pagination?.sessionId && tab.txnSessionId) {
+      if (tab.autoCommit === false && usesOracleStickyTransactionState(effectiveDbType) && !options?.pagination?.sessionId && tab.txnSessionId) {
         const rawResults = annotatedResults.results;
         const isCoreNoOp = rawResults.length > 0 && rawResults.every((result) => result.manual_transaction_no_statement === true);
         if (!isCoreNoOp && rawResults.some((result) => result.manual_transaction_proven_read_only !== true)) {
@@ -5894,7 +5894,7 @@ export const useQueryStore = defineStore("query", () => {
           clearOracleTxnPossiblyDirty(tab);
           tab.txnSessionId = undefined;
           tab.txnAutoRolledBack = false;
-        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)) === "oracle") {
+        } else if (tab.txnSessionId && executionDispatched && !options?.pagination?.sessionId && usesOracleStickyTransactionState(effectiveDatabaseTypeForConnection(useConnectionStore().getConfig(tab.connectionId)))) {
           // Frontend timeout/cancel or mid-script failure: the statement may still
           // have executed server-side while the manual session survives, so keep
           // the sticky dirty state fail-closed instead of a clean toolbar on a

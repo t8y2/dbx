@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { AlignLeft, Camera, CaseLower, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { Completion, CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -32,6 +32,8 @@ import { createSqlSignatureTooltipDom } from "@/lib/editor/sqlSignatureTooltip";
 import { buildSqlInConditionFromPasteSource, insertTextForSqlInCondition } from "@/lib/sql/sqlInListPaste";
 import { resolveSqlSingleQuoteKeyAction } from "@/lib/sql/sqlQuoteCaret";
 import { convertSqlSelectionCase, type SqlSelectionCaseMode } from "@/lib/sql/sqlSelectionCase";
+import { convertToNextNamingStyle } from "@/lib/naming/namingStyleConverter";
+import { createQueryEditorNamingStyleShortcutBindings } from "@/lib/editor/queryEditorNamingStyleShortcut";
 import { formatMongoShellText } from "@/lib/mongo/mongoFormatter";
 import { detectAndFormatElasticsearchRequests } from "@/lib/elasticsearch/elasticsearchFormatter";
 import { useConnectionStore, COMPLETION_METADATA_CONCURRENCY } from "@/stores/connectionStore";
@@ -1593,6 +1595,35 @@ function convertSelectedSqlCase(mode: SqlSelectionCaseMode): boolean {
   return false;
 }
 
+function convertSelectedNamingStyle(): boolean {
+  const currentView = view.value;
+  const EditorSelection = codeMirrorEditorSelection;
+  if (!currentView || !EditorSelection) return false;
+
+  const state = currentView.state;
+  const transaction = state.changeByRange((range) => {
+    if (range.empty) return { range };
+
+    const selectedText = state.doc.sliceString(range.from, range.to);
+    const result = convertToNextNamingStyle(selectedText);
+    return {
+      changes: { from: range.from, to: range.to, insert: result.text },
+      range: EditorSelection.range(range.from, range.from + result.text.length),
+    };
+  });
+
+  if (!transaction.changes.empty) {
+    currentView.dispatch({
+      ...transaction,
+      scrollIntoView: true,
+      userEvent: "input",
+    });
+    focusEditor();
+    return true;
+  }
+  return false;
+}
+
 async function pasteClipboardAsSqlInCondition(): Promise<boolean> {
   if (!supportsSqlInListPaste(props.databaseType)) return false;
   if (props.readOnly) return false;
@@ -1946,6 +1977,13 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       shortcut: shortcuts.lowercaseSelection,
     },
     {
+      label: t("editor.contextMenu.convertNamingStyle"),
+      action: convertSelectedNamingStyle,
+      disabled: !canCopySelectedSql.value,
+      icon: CaseSensitive,
+      shortcut: shortcuts.convertNamingStyle,
+    },
+    {
       label: t("editor.contextMenu.delimitedList"),
       action: openDelimitedListDialog,
       disabled: props.readOnly || !canCopySelectedSql.value,
@@ -2131,6 +2169,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...binding(shortcuts.selectAllSelectionOccurrences, selectAllQueryEditorSelectionOccurrences),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.uppercaseSelection, () => convertSelectedSqlCase("upper")),
         ...createQueryEditorSelectionCaseShortcutBindings(shortcuts.lowercaseSelection, () => convertSelectedSqlCase("lower")),
+        ...createQueryEditorNamingStyleShortcutBindings(shortcuts.convertNamingStyle, () => convertSelectedNamingStyle()),
         ...binding(shortcuts.toggleLineComment, (view) => codeMirrorToggleLineComment?.(view) ?? false),
         ...binding(shortcuts.toggleBlockComment, (view) => {
           if (!supportsQueryEditorBlockComments(props.databaseType)) return false;

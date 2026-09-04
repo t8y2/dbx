@@ -777,6 +777,17 @@ fn ensure_anthropic_version_prefix(endpoint: &str) -> String {
     }
 }
 
+/// Temporary Agens compatibility workaround. Agens' OpenAI-compatible gateway
+/// currently uses a strict Responses input deserializer for agent follow-up
+/// requests. Keep these tweaks scoped to that endpoint so other providers
+/// retain the standard request shape.
+///
+/// TODO(Agens): Remove `is_agens_endpoint` and all Agens-specific branches
+/// below if api.agnes-ai.cn is discontinued or no longer needs this workaround.
+fn is_agens_endpoint(config: &AiConfig) -> bool {
+    config.endpoint.to_ascii_lowercase().contains("agnes-ai.cn")
+}
+
 pub fn resolve_endpoint(config: &AiConfig) -> String {
     let ep = config.endpoint.trim().trim_end_matches('/');
     if matches!(config.provider, AiProvider::Gemini) {
@@ -1455,7 +1466,16 @@ pub fn build_responses_input(system_prompt: &str, messages: &[AiMessage]) -> ser
     json!(input)
 }
 
+#[cfg(test)]
 fn build_responses_input_with_tools(system_prompt: &str, messages: &[AiMessage]) -> serde_json::Value {
+    build_responses_input_with_tools_variant(system_prompt, messages, false)
+}
+
+fn build_responses_input_with_tools_variant(
+    system_prompt: &str,
+    messages: &[AiMessage],
+    include_function_call_metadata: bool,
+) -> serde_json::Value {
     let mut input = Vec::new();
     if !system_prompt.is_empty() {
         input.push(json!({
@@ -1482,12 +1502,20 @@ fn build_responses_input_with_tools(system_prompt: &str, messages: &[AiMessage])
                 }));
             }
             for tool_call in &message.tool_calls {
-                input.push(json!({
+                let mut item = json!({
                     "type": "function_call",
                     "call_id": tool_call.id,
                     "name": tool_call.name,
                     "arguments": tool_call.arguments.to_string(),
-                }));
+                });
+                if include_function_call_metadata {
+                    // OpenAI commonly returns these fields on output items;
+                    // Agens' strict input enum requires them when replaying a
+                    // function call in the next turn.
+                    item["id"] = json!(format!("fc_{}", tool_call.id));
+                    item["status"] = json!("completed");
+                }
+                input.push(item);
             }
             continue;
         }
@@ -2179,9 +2207,17 @@ fn build_openai_chat_messages(
     system_prompt: &str,
     messages: &[AiMessage],
 ) -> Vec<serde_json::Value> {
+    let agens_endpoint = is_agens_endpoint(config);
     let mut output = vec![json!({ "role": "system", "content": system_prompt })];
     output.extend(messages.iter().map(|message| {
-        let mut item = json!({ "role": message.role, "content": openai_message_content(message) });
+        let content = if agens_endpoint && message.role == "assistant" && !message.tool_calls.is_empty() {
+            // The canonical Chat Completions representation uses null content
+            // for an assistant turn that only contains tool calls.
+            serde_json::Value::Null
+        } else {
+            openai_message_content(message)
+        };
+        let mut item = json!({ "role": message.role, "content": content });
         if message.role == "tool" {
             if let Some(tool_call_id) = message.tool_call_id.as_ref() {
                 item["tool_call_id"] = json!(tool_call_id);
@@ -4101,7 +4137,11 @@ async fn stream_responses_with_tools(
 
     let mut body = json!({
         "model": request.config.model,
-        "input": build_responses_input_with_tools(&request.system_prompt, &request.messages),
+        "input": build_responses_input_with_tools_variant(
+            &request.system_prompt,
+            &request.messages,
+            is_agens_endpoint(&request.config),
+        ),
         "max_output_tokens": responses_max_output_tokens(request.max_tokens, &request.config),
         "tools": tool_json,
         "tool_choice": "auto",
@@ -4559,10 +4599,12 @@ mod tests {
 
     use super::{
         append_gemini_model_parts, apply_chat_completion_thinking_toggle, build_ai_http_client, build_gemini_contents,
-        build_openai_chat_messages, build_responses_input_with_tools, call_claude, call_openai_compatible,
+        build_openai_chat_messages, build_responses_input_with_tools, build_responses_input_with_tools_variant,
+        call_claude, call_openai_compatible,
         classify_error, claude_headers, claude_system_prompt, complete, decorate_chat_completion_body,
         drain_next_stream_line, emit_gemini_tool_call_parts, emit_responses_function_call_item, format_transport_error,
-        gemini_text, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after,
+        gemini_text, is_agens_endpoint, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers,
+        maybe_tag_retry_after,
         measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
         ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
         openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
@@ -6653,6 +6695,46 @@ mod tests {
         assert_eq!(tool_json["type"], "function");
         assert_eq!(tool_json["name"], "list_tables");
         assert!(tool_json.get("function").is_none());
+    }
+
+    #[test]
+    fn agens_responses_variant_adds_replay_metadata_without_changing_default() {
+        let messages = [AiMessage {
+            role: "assistant".to_string(),
+            content: String::new(),
+            images: Vec::new(),
+            tool_call_id: None,
+            tool_calls: vec![ToolCallRef {
+                id: "call_1".to_string(),
+                name: "list_tables".to_string(),
+                arguments: serde_json::json!({}),
+                provider_payload: None,
+            }],
+        }];
+
+        let standard = build_responses_input_with_tools("", &messages);
+        assert!(standard[0].get("id").is_none());
+        assert!(standard[0].get("status").is_none());
+
+        let agens = build_responses_input_with_tools_variant("", &messages, true);
+        assert_eq!(agens[0]["id"], "fc_call_1");
+        assert_eq!(agens[0]["status"], "completed");
+    }
+
+    #[test]
+    fn only_agens_endpoints_enable_compatibility_variant() {
+        let agens: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "custom",
+            "apiKey": "key",
+            "endpoint": "https://api.agnes-ai.cn/v1",
+            "model": "agnes-2.5-flash",
+            "apiStyle": "responses",
+        }))
+        .unwrap();
+        let other = AiConfig { endpoint: "https://api.openai.com/v1".to_string(), ..agens.clone() };
+
+        assert!(is_agens_endpoint(&agens));
+        assert!(!is_agens_endpoint(&other));
     }
 
     #[test]

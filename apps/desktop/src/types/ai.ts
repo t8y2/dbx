@@ -42,6 +42,8 @@ export interface AiConfig {
   proxyUrl?: string;
   enableThinking?: boolean;
   reasoningLevel?: AiReasoningLevel;
+  /** Optional per-configuration output budget sent as max_tokens/max_output_tokens. */
+  maxOutputTokens?: number;
   contextWindow?: number;
   codexCliPath?: string | null;
   codexCliEnv?: Record<string, string>;

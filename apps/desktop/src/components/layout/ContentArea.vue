@@ -2,7 +2,7 @@
 import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmounted } from "vue";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
-import { canReloadUnavailableDataTab } from "@/lib/table/tableDataRefresh";
+import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
@@ -209,6 +209,7 @@ const props = defineProps<{
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
+  zenMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -243,6 +244,7 @@ const emit = defineEmits<{
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
+  toggleZenMode: [];
 }>();
 
 const { t, locale } = useI18n();
@@ -916,6 +918,11 @@ function refreshQueryEditorCompletionCache(): boolean {
   return true;
 }
 
+function reloadUnavailableDataTab() {
+  const { whereInput, orderBy } = restoredDataTabReloadFilters(props.activeTab);
+  emit("reload", undefined, undefined, whereInput, orderBy);
+}
+
 function refreshData(): boolean {
   // Reuse ObjectBrowser's reload path so schema reloads and stale object-response guards stay intact.
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.refresh?.() ?? false;
@@ -927,7 +934,7 @@ function refreshData(): boolean {
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.refresh?.() ?? false;
   // Restored data tabs intentionally omit row data, so refresh must work before DataGrid mounts.
   if (canReloadUnavailableDataTab(props.activeTab)) {
-    emit("reload");
+    reloadUnavailableDataTab();
     return true;
   }
   if (activeElasticsearchJsonResponse.value) {
@@ -1826,6 +1833,7 @@ defineExpose({
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
+                @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
               >
                 <template #result-toolbar-leading="{ compact }">
                   <QueryResultViewSwitcher
@@ -2199,6 +2207,7 @@ defineExpose({
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset, intent)"
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
+          @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
         >
           <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
             <QueryErrorActions
@@ -2220,7 +2229,7 @@ defineExpose({
             <kbd v-for="key in modRKeys" :key="key" class="min-w-5 rounded border border-border/60 bg-muted/50 px-1.5 py-0.5 text-center font-mono text-[12px] leading-none text-muted-foreground shadow-xs">{{ key }}</kbd>
             <span>{{ t("grid.dataUnavailableHintSuffix") }}</span>
           </div>
-          <Button variant="outline" size="sm" class="h-7 gap-1.5" @click="emit('reload')">
+          <Button variant="outline" size="sm" class="h-7 gap-1.5" @click="reloadUnavailableDataTab()">
             <RefreshCcw class="h-3.5 w-3.5" />
             {{ t("grid.refresh") }}
           </Button>
@@ -2357,6 +2366,8 @@ defineExpose({
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
           :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
+          :zen-mode="props.zenMode"
+          @toggle-zen-mode="emit('toggleZenMode')"
         />
       </div>
     </template>

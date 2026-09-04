@@ -2403,6 +2403,7 @@ mod tests {
                 mysql_engine: None,
                 partitioned: false,
                 is_gaussdb_m_mode: false,
+                table_collation: None,
             });
         assert_eq!(create.warnings, Vec::<String>::new());
         assert_eq!(

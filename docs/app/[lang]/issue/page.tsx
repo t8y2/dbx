@@ -3,11 +3,16 @@ import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { IssueSubmissionClient } from "@/components/issues/IssueSubmissionClient";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const metadata = {
   en: {
     title: "Submit an Issue",
     description: "Describe a DBX problem or suggestion without a GitHub account. Review the AI-polished draft before publishing.",
+  },
+  tr: {
+    title: "Issue Gönder",
+    description: "GitHub hesabı olmadan bir DBX sorununu veya önerisini anlatın. Yayımlamadan önce yapay zekânın düzenlediği taslağı inceleyin.",
   },
   cn: {
     title: "匿名提交 Issue",
@@ -17,7 +22,7 @@ const metadata = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const pageMetadata = buildMetadata({
     title: metadata[locale].title,
     description: metadata[locale].description,
@@ -36,7 +41,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function IssuePage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
 
   return (
     <main className="issue-page min-h-screen text-landing-ink">

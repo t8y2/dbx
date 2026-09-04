@@ -1,0 +1,127 @@
+---
+title: Veri Aktarımı
+description: Tabloları bağlantılar, veritabanları, şemalar ya da veritabanı motorları arasında kopyalayın ve her tablonun sonucunu izleyin.
+---
+
+Veri Aktarımı; tabloları ya da koleksiyonları bir kaynaktan başka bir bağlantıya, veritabanına ya da şemaya kopyalar. Ortam göçü, test verisi hazırlama ve tek seferlik birleştirme için kullanın. Sürekli çoğaltma, CDC ya da çift yönlü eşitleme değildir.
+
+<Callout type="warn">Motorlar arası aktarım, DBX'in alan ve tür dönüşümünden geçer. Sonucu yine de hedefteki yetkiler, kısıtlar, tetikleyiciler, varsayılanlar ve motor anlamı belirler. Önemli göçleri önce prova edin; ardından satır sayılarını ve anahtar alanları doğrulayın.</Callout>
+
+## İki Giriş Noktası
+
+### Veri Aktarımı Sihirbazı
+
+Sihirbaz birden çok tablo için tasarlanmıştır. Kaynak ve hedef bağlantıyı, kataloğu, veritabanını ve şemayı seçin, ardından tablo oluşturmayı, yazma modunu, hedef ad harf durumunu ve toplu iş boyutunu yapılandırın.
+
+### Kenar Çubuğunda Kopyala ve Yapıştır
+
+Nesne ağacında bir veya daha fazla tabloyu kopyaladıktan sonra hedef bir konuma yapıştırın:
+
+- Aynı bağlam içinde yapı ve veri, yalnızca yapı ya da yalnızca veri seçin ve her hedef adı düzenleyin
+- Başka bir bağlantıya, veritabanına ya da şemaya yapıştırmak, kaynak tablolar ve hedef önceden doldurulmuş biçimde Veri Aktarımı sihirbazını açar
+- Tüm satır kopyalaması, üretilen ya da hesaplanan sütunları hariç tutar; PostgreSQL identity ve SQL Server identity sütunları için yola özgü işleme uygular
+
+## Sihirbaz İş Akışı
+
+<Steps>
+  <Step>
+    ### Kaynağı Seçin
+
+    Kaynak bağlantıyı, uygunsa kataloğu, veritabanını ve şemayı seçin. DBX aktarılabilir temel tabloları listeler; MongoDB yolları koleksiyonları listeler.
+
+  </Step>
+  <Step>
+    ### Hedefi Seçin
+
+    Başka bir bağlantı, veritabanı ya da şema seçin. Kaynak ile hedef tam olarak aynı konum olamaz.
+
+  </Step>
+  <Step>
+    ### Tabloları Seçin
+
+    Tümünü seçin, arayın ya da bir alt küme belirleyin. Tek bir istek yalnızca tek bir kaynak bağlamındaki tabloları içerebilir.
+
+  </Step>
+  <Step>
+    ### Seçenekleri Yapılandırın
+
+    Hedef tablo oluşturmayı, yazma modunu, hedef ad harf durumunu ve toplu iş boyutunu gözden geçirin.
+
+  </Step>
+  <Step>
+    ### Arka Planda Çalıştırın ve İnceleyin
+
+    İletişim kutusu kapandıktan sonra da görev çalışmayı sürdürür. İlerleme merkezi; geçerli tabloyu, tablo dizinini, satırları, süreyi, başarısız tabloları ve iptal durumunu bildirir.
+
+  </Step>
+</Steps>
+
+## Aktarım Seçenekleri
+
+| Seçenek | Ayrıntılar |
+| --- | --- |
+| Hedef tabloları oluştur | Tablo yoksa ve yol destekliyorsa kaynak meta verisinden hedef yapıyı üretir |
+| Ekle | Hedefteki mevcut satırları korur ve kaynak satırlarını ekler |
+| Üzerine yaz | Kaynak satırlarını yazmadan önce her hedef tabloyu temizler |
+| Upsert | Hedef yol destekliyorsa ve kullanılabilir bir anahtar varsa anahtara göre günceller ya da ekler |
+| Hedef tablo adı harf durumu | Koru, küçük harf ya da büyük harf; dönüştürülen hedef adlar benzersiz kalmalıdır |
+| Toplu iş boyutu | Sayfalı okumaları ve gruplu yazmaları denetler; arayüz varsayılanı 1000'dir |
+
+Tablo oluşturma kapalıysa uyumlu hedef tabloların önceden var olması gerekir. Tablo oluşturma açık olsa bile, hedef bir kaynak türünü, varsayılanı, kısıtı ya da nesneyi desteklemiyorsa motorlar arası DDL elle değişiklik gerektirebilir.
+
+## PostgreSQL Yapısı ve Sahipliği
+
+Tablo oluşturmanın açık olduğu PostgreSQL'den PostgreSQL'e aktarımlarda DBX; desteklenen dizileri, dizinleri, yabancı anahtarları ve belirli şema düzeyindeki nesneler ile bağımlılıkları işler. Kaynak sahipleri hedef örnekte yoksa DBX size şunları sorar:
+
+- Etkilenen sahiplik meta verisini atlamak
+- Eksik sahipleri geçerli hedef kullanıcıya atamak
+- İptal edip önce gereken hedef rolleri oluşturmak
+
+Bu, `pg_dump` ve `pg_restore` araçlarının tam karşılığı değildir. Uzantılar, yetkiler, politikalar, tetikleyiciler ya da bağımlılık grafikleri karmaşıksa PostgreSQL'in kendi araçlarını kullanın.
+
+## Hata İşleme
+
+Çok tablolu bir görev, ilk tablo hatasından sonra tüm kuyruğu atmaz. DBX hatayı kaydeder, sonraki tabloları dener ve ya başarıyla ya da sonlandırıcı bir hata özetiyle biter.
+
+- İlerleme, tablo başına hata ayrıntılarını saklar
+- Hatalar görüntüleme sınırını aştığında arayüz kaç girdinin atlandığını bildirir
+- Başka bir etkin aktarım aynı tabloyu hedefliyorsa yeni görev reddedilir
+- İptal, sonraki okuma ve yazmaları durdurur; ancak hedefe uygulanmış veri otomatik olarak geri alınmaz
+
+Bu nedenle biten bir görev, her tablonun başarılı olduğu anlamına gelmez. Sonlanma durumunu, hata listesini, hedef satır sayılarını ve anahtar alanları denetleyin.
+
+## Veritabanı Kapsamı
+
+DBX, kaynak ve hedef bağlantıları sürücü yetenek bildirimi üzerinden filtreler. Uygulama; SQL'den SQL'e, MongoDB'den MongoDB'ye ve belirli MongoDB/SQL dönüşüm yollarını içerir. Bağlanılabilen her veritabanı Veri Aktarımı'nı desteklemez.
+
+Yetenekler bileşime göre de değişir:
+
+- Bazı motorlar satır aktarabilir ama kaynak DDL'i yeniden kullanamaz
+- Upsert, hedef motora ve bulunabilir anahtarlara bağlıdır
+- Kataloglar, şemalar, kimlik sütunları, diziler, JSON ve ikili değerler motora özgüdür
+- Özel arama, vektör, mesaj kuyruğu ve yapılandırma merkezi bağlantıları bu genel tablo aktarımı giriş noktasını kullanmaz
+
+Bir bağlantı seçicide görünmüyorsa, geçerli sürücüsü Veri Aktarımı desteği bildirmemiştir; bu yalnızca gizlenmiş bir arayüz işlemi değildir.
+
+## Aktarmadan Önce
+
+- Hedef bağlantıda salt okunur koruma olup olmadığını denetleyin; salt okunur hedefler engellenir
+- Kaynakta okuma, hedefte oluşturma/yazma yetkilerini doğrulayın
+- Harf durumu dönüşümünden sonra hedef ad çakışmalarını denetleyin
+- Birincil anahtarları, benzersiz kısıtları, yabancı anahtarları, tetikleyicileri ve zorunlu alanları inceleyin
+- Üretim verisinin daha alt bir ortama girmeden önce maskelenmesi gerekip gerekmediğine karar verin
+- Veri kümesi etkileşimli bir aktarım için fazla büyükse motorun kendi dışa/içe aktarma ya da çevrimiçi göç araçlarını kullanın
+
+## İlgili Özellikler
+
+<Cards>
+  <Card title="Tablo İçe Aktarma" href="/tr/docs/table-import">
+    Dosyaları mevcut bir tabloya aktarın ya da toplu olarak yeni tablolar oluşturun.
+  </Card>
+  <Card title="Veritabanı Dışa Aktarma" href="/tr/docs/database-export">
+    Çevrimdışı aktarım için incelenebilir SQL dosyaları üretin.
+  </Card>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">
+    Salt okunur korumayı, üretim korumasını ve yetki sınırlarını öğrenin.
+  </Card>
+</Cards>

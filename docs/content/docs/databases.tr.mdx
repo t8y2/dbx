@@ -1,0 +1,114 @@
+---
+title: Veritabanı Desteği
+description: DBX bağlantı profillerini, sürücü çalışma zamanlarını, özel çalışma alanlarını ve yeteneğe bağlı gelişmiş özellikleri anlayın.
+---
+
+Yeni bağlantı seçicisi 90+ veritabanı ve servis profili sunar. Bir profil; varsayılanları, form alanlarını, sunumu ve bir sürücü giriş noktasını tanımlar; ancak bağlanabilmek her gelişmiş özelliğin kullanılabildiği anlamına gelmez.
+
+<Callout type="info">Güncel türler ve yetenekler için asıl kaynak, kurulu bağlantı seçicisi ve `crates/dbx-core/assets/database-drivers.manifest.json` dosyasıdır. Bu sayfa, kırılgan ve eksiksiz olma iddiasındaki bir matristen bilinçli olarak kaçınır.</Callout>
+
+## Bağlantı Aileleri
+
+### SQL ve Uyumlu Protokoller
+
+- MySQL, PostgreSQL, SQLite, SQL Server, ClickHouse, Oracle ve Redshift gibi temel SQL motorları
+- MariaDB, TiDB, OceanBase, Doris, SelectDB, StarRocks, Manticore Search, GoldenDB ve Dolt gibi MySQL protokolü ya da sözdizimi profilleri
+- openGauss, GaussDB, KingbaseES, HighGo, Vastbase ve CockroachDB gibi PostgreSQL uyumlu profiller
+- DM, KWDB, YashanDB, GBase, Teradata, Vertica, Exasol, Firebird ve SAP HANA dâhil üreticiye özgü veritabanları
+- Snowflake, Trino, PrestoSQL, Hive, Spark, DB2, Informix, Databricks ve BigQuery gibi Agent/JDBC analitik motorları
+- Google Cloud Spanner gibi bulut tarafından yönetilen ilişkisel servisler (Agent/JDBC, GoogleSQL ve PostgreSQL lehçeleri)
+
+Protokol uyumluluğu yalnızca bağlantıyı ve belirli lehçe davranışlarını kapsar. Sürümler, sistem katalogları, DDL, yetkiler ve yönetim API'leri farklılık gösterir; bu yüzden DBX, özellikleri yalnızca aile adına bakarak açmak yerine ayrı profiller ve yetenek geçersiz kılmaları kullanır.
+
+### Dosya, Uç ve Barındırılan Veritabanları
+
+- SQLite, DuckDB ve Microsoft Access
+- Cloudflare D1, Turso ve RQLite
+- H2 ve JDBC URL'leriyle erişilen yerel veritabanları
+
+Masaüstü dosya yolları yerel bilgisayara aittir. Docker/Web yolları sunucu kapsayıcısına ya da bağlanmış ana makine depolamasına aittir; tarayıcının çalıştığı bilgisayardaki bir yol otomatik olarak eşlenmez.
+
+### Özel Veri Modelleri ve Servisler
+
+- Redis ve MongoDB
+- Elasticsearch, Easysearch, Meilisearch ve Manticore Search
+- Qdrant, Milvus, Weaviate ve ChromaDB
+- HBase
+- Pulsar, Kafka, RocketMQ ve RabbitMQ
+- etcd, ZooKeeper, Nacos ve Consul KV
+- InfluxDB, IoTDB, TDengine ve diğer zaman serisi ya da IoT profilleri
+
+Bu bağlantılar; anahtar-değer, belge, arama, vektör, mesajlaşma veya yapılandırma merkezi çalışma alanlarını kullanır. Her ilişkisel ızgara ya da SQL kavramını devralmazlar. Bkz. [Özel Çalışma Alanları](/tr/docs/specialized-workspaces).
+
+## Sürücü Çalışma Zamanları
+
+| Çalışma zamanı | Açıklama | Tipik sınır |
+| --- | --- | --- |
+| Yerleşik yerel | DBX içine derlenmiş Rust sürücüsü | Kurulumdan hemen sonra kullanılabilir |
+| Yerel Agent / yardımcı bileşen | DBX tarafından yönetilen Go, Rust ya da dış işlem | Platforma özgü dosyalar gerektirir; DuckDB, Oracle, KingbaseES, XuguDB, RabbitMQ ve benzeri yollar ayrı çalışma zamanları kullanabilir |
+| JDBC Agent | Java Agent ve üreticinin JDBC sürücüsü | Bir JRE, Agent ve yasal olarak edinilmiş üretici JAR'ı gerektirir |
+| JDBC eklentisi | İsteğe bağlı genel JDBC uzantısı | Bilinmeyen motorlar genel JDBC yetenekleriyle çalışır |
+
+Kurulum, yükseltme, çevrimdışı paketler ve çalışma zamanı izleme için [Sürücü Yönetimi](/tr/docs/driver-management), özel JDBC için [JDBC Eklentisi](/tr/docs/plugins) sayfasına bakın.
+
+## Yetenek Düzeyleri
+
+Sürücü bildirimi; temel bağlantıdan denetimli işlemlere uzanan yetenek düzeylerini, motor başına geçersiz kılmalarla birlikte kullanır:
+
+| Düzey | Anlamı |
+| --- | --- |
+| Bağlan | Bağlantı kurma ve profilin desteklediği temel sorguları çalıştırma |
+| Gözat | Veritabanlarına, şemalara, tablolara veya özel nesnelere gözatma |
+| Anla | Salt okunur kaynak, arama ve ilişki iş akışlarını ekler |
+| İşlet | Tablo verisi düzenleme gibi denetimli yazmaları ekler |
+
+Bunun ardından tek tek yetenekler şu özellikleri denetler:
+
+- Şema araması ve ER diyagramları
+- Tablo verisi ve tablo yapısı düzenleme
+- Tablo içe aktarma ve veri aktarımı
+- SQL dosyası çalıştırma
+- Alan soy ağacı ve sorgu yürütme planı
+- Veritabanı oluşturma, kullanıcı yönetimi ve sürücü yönetimi
+
+Bu yüzden menülerde neyin bulunduğu, durağan bir veritabanı adı listesinden daha anlamlıdır. Bir işlem görünmüyorsa DBX sürümünü, veritabanı profilini, çalışma zamanı modunu ve kurulu bileşenleri denetleyin.
+
+## Özellik Sınırları
+
+### SQL Dosyaları ve İlişkisel Araçlar
+
+Redis, MongoDB, arama, vektör, HBase, yapılandırma merkezi ve mesaj kuyruğu çalışma alanları ilişkisel SQL dosyası çalıştırmayı kullanmaz. Bazı SQL motorları; yapı düzenleme, içe aktarma veya aktarım olmadan sorgu ve gözatma iş akışlarını destekler.
+
+### İçe Aktarma ve Aktarım
+
+[Tablo İçe Aktarma](/tr/docs/table-import) ve [Veri Aktarımı](/tr/docs/data-transfer) bağlantıları yeteneğe göre filtreler. Motorlar arası yollar ayrıca tür eşlemesine, anahtarlara, kimlik sütunlarına, şemalara ve hedefteki DDL desteğine bağlıdır.
+
+### Yedekleme ve Dışa Aktarma
+
+- [Veritabanı Dışa Aktarma](/tr/docs/database-export), yeteneğe dayalı mantıksal bir SQL dışa aktarımıdır
+- [Veritabanı Yedekleme](/tr/docs/database-backup) şu anda yalnızca Masaüstü'nde tutarlı MySQL ve PostgreSQL yedeklerini zamanlar
+- Bulut Eşitleme ve yapılandırma dışa aktarma, iş veritabanı içeriğini değil DBX ayarlarını taşır
+
+### Masaüstü ve Docker/Web
+
+İki çalışma zamanı da Rust çekirdeğinin sorgu, meta veri ve güvenlik politikasının çoğunu paylaşır, ancak özellik olarak birebir aynı değildir. Yerel SQL klasörleri, sistem dosyası seçimi, Derin Bağlantılar, yerel CLI Agent'ları ve zamanlanmış veritabanı yedeklemesi yalnızca Masaüstü'ndedir. Web'de dosyalar, sürücüler ve Agent'lar sunucu veri dizininde bulunur.
+
+## Varsayılan Portlar ve Bağlantı URL'leri
+
+Profiller; MySQL `3306`, PostgreSQL `5432`, Redis `6379`, MongoDB `27017`, SQL Server `1433`, Oracle `1521`, Elasticsearch `9200`, Meilisearch `7700` ve RabbitMQ AMQP `5672` gibi yaygın varsayılanları önceden doldurur. Bunlar varsayılandır, zorunluluk değildir.
+
+RabbitMQ gibi servisler ayrı iş ve yönetim portları sunabilir. Özel bir AMQP portundan Yönetim API portu çıkarsanmamalıdır. SSH tünelleri, HTTP proxy'leri, TLS SNI ve fiziksel bağlantı hedefleri de bağımsız olarak doğrulanmalıdır.
+
+DBX pek çok yaygın DSN ve URL biçimini ayrıştırır, ancak parametreler sürüme ve bulut sağlayıcısına göre değişir. Başarılı bir bağlantı testinden sonra da gerçek veritabanını, şemayı, SSL'i ve yetki kapsamını doğrulayın.
+
+## Yerel Test Ortamları
+
+Depo; ClickHouse, MariaDB, MongoDB, MySQL, PostgreSQL ve Redis için sürümü sabitlenmiş Docker Compose laboratuvarları içerir. Bağlantı, sürücü ve gerileme testleri için [Veritabanı Test Laboratuvarı](/tr/docs/database-lab) sayfasını kullanın.
+
+## İlgili Sayfalar
+
+<Cards>
+  <Card title="Özel Çalışma Alanları" href="/tr/docs/specialized-workspaces">İlişkisel olmayan, arama, vektör, mesajlaşma ve yapılandırma merkezi arayüzlerini inceleyin.</Card>
+  <Card title="Sürücü Yönetimi" href="/tr/docs/driver-management">Yerel Agent'ları, yardımcı bileşenleri, JDBC Agent'larını ve JRE'leri kurun ve tanılayın.</Card>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">Veritabanı yetkilerini, salt okunur korumayı, üretim korumasını ve otomasyon sınırlarını öğrenin.</Card>
+</Cards>

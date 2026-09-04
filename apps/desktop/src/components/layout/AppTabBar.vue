@@ -2,18 +2,50 @@
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Pin, ChevronDown, Search, Table2, Code2, TableProperties, PencilRuler, KeyRound, Pencil, Package, Copy, AlertTriangle, Network, Minimize2, Maximize2, Settings, CalendarClock, Activity, Gauge, ShieldCheck, Database, GitBranch, Crosshair } from "@lucide/vue";
+import {
+  X,
+  Pin,
+  ChevronDown,
+  Search,
+  Table2,
+  Code2,
+  TableProperties,
+  PencilRuler,
+  KeyRound,
+  Pencil,
+  Package,
+  Copy,
+  AlertTriangle,
+  Network,
+  Minimize2,
+  Maximize2,
+  Settings,
+  CalendarClock,
+  Activity,
+  Gauge,
+  ShieldCheck,
+  Database,
+  GitBranch,
+  Crosshair,
+  ListFilter,
+  ArrowDownUp,
+  PanelTop,
+  RotateCcw,
+  ChevronsLeft,
+  ChevronsRight,
+} from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import LightDropdown from "@/components/ui/LightDropdown.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
-import { useSettingsStore } from "@/stores/settingsStore";
+import { useSettingsStore, type EditorSettings } from "@/stores/settingsStore";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useTabDrag } from "@/composables/useTabDrag";
 import { connectionColor, tabDisplayTitle, tabTooltipLines } from "@/lib/tabs/tabPresentation";
@@ -32,6 +64,8 @@ const props = defineProps<{
   agentDriverUpdateCount?: number;
   detachedDropTarget?: boolean;
   canDetachTabs?: boolean;
+  tabBarWidth?: number;
+  tabBarCollapsed?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +82,8 @@ const emit = defineEmits<{
   "discard-all-tab-close": [];
   "cancel-tab-close": [];
   "detach-tab": [tab: QueryTab, position?: { x: number; y: number }];
+  "start-resize": [event: MouseEvent];
+  "toggle-collapse": [];
 }>();
 
 const { t } = useI18n();
@@ -74,6 +110,60 @@ const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout ==
 const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
 const isManualTabOrder = computed(() => settingsStore.editorSettings.tabSortMode === "manual");
+// The icon-only collapse only exists in the vertical toolbar; horizontal
+// placements must ignore the persisted collapse state entirely.
+const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
+const tabBarStyle = computed<CSSProperties | undefined>(() => {
+  if (!isVerticalLayout.value) return undefined;
+  if (props.tabBarCollapsed) return { width: "3.5rem", flex: "0 0 3.5rem" };
+  const width = props.tabBarWidth ?? 240;
+  return { width: `${width}px`, flex: `0 0 ${width}px` };
+});
+const tabBarCollapseIcon = computed(() => {
+  const isLeft = settingsStore.editorSettings.tabPlacement === "left";
+  if (props.tabBarCollapsed) return isLeft ? ChevronsRight : ChevronsLeft;
+  return isLeft ? ChevronsLeft : ChevronsRight;
+});
+const tabBarCollapseLabel = computed(() => t(props.tabBarCollapsed ? "tabs.expandTabBar" : "tabs.collapseTabBar"));
+const verticalTabToolbarButtonClass = "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground hover:border-border hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const tabGroupItems = computed(() => [
+  { value: "none", label: t("settings.tabGroupNone") },
+  { value: "database-type", label: t("settings.tabGroupDatabaseType") },
+  { value: "connection", label: t("settings.tabGroupConnection") },
+]);
+const tabSortItems = computed(() => [
+  { value: "manual", label: t("settings.tabSortManual") },
+  { value: "created-asc", label: t("settings.tabSortCreated") },
+  { value: "title-asc", label: t("settings.tabSortTitle") },
+]);
+const tabPlacementItems = computed(() => [
+  { value: "top", label: t("settings.tabPlacementTop") },
+  { value: "bottom", label: t("settings.tabPlacementBottom") },
+  { value: "left", label: t("settings.tabPlacementLeft") },
+  { value: "right", label: t("settings.tabPlacementRight") },
+]);
+
+type TabPreferencePatch = Partial<Pick<EditorSettings, "tabPlacement" | "tabGroupMode" | "tabSortMode" | "tabGroupCustomizations">>;
+
+async function persistTabPreferences(partial: TabPreferencePatch) {
+  try {
+    await settingsStore.updateEditorSettingsAndPersist(partial);
+  } catch (error) {
+    toast(t("tabs.settingsSaveFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+  }
+}
+
+function updateTabGroupMode(value: string) {
+  if (value === "none" || value === "database-type" || value === "connection") void persistTabPreferences({ tabGroupMode: value });
+}
+
+function updateTabSortMode(value: string) {
+  if (value === "manual" || value === "created-asc" || value === "title-asc") void persistTabPreferences({ tabSortMode: value });
+}
+
+function updateTabPlacement(value: string) {
+  if (value === "top" || value === "bottom" || value === "left" || value === "right") void persistTabPreferences({ tabPlacement: value });
+}
 
 function tabGroupKey(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
@@ -107,16 +197,143 @@ function sortDisplayedTabs(tabs: QueryTab[]) {
 const fixedTabs = computed(() => sortDisplayedTabs(queryStore.tabs.filter((tab) => tab.pinned)));
 const regularTabs = computed(() => sortDisplayedTabs(queryStore.tabs.filter((tab) => !tab.pinned)));
 const displayedTabs = computed(() => [...fixedTabs.value, ...regularTabs.value]);
+const collapsedTabGroups = ref<Set<string>>(new Set());
+const tabGroupPalette = ["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"];
+const tabGroupEditorOpen = ref(false);
+const editingTabGroupKey = ref("");
+const editingTabGroupDefaultLabel = ref("");
+const editingTabGroupName = ref("");
+const editingTabGroupColor = ref("");
+const editingTabGroupFallbackColor = ref(tabGroupPalette[0]!);
 
 function isGroupStart(tabs: QueryTab[], index: number) {
   if (settingsStore.editorSettings.tabGroupMode === "none") return false;
   return index === 0 || tabGroupKey(tabs[index - 1]!) !== tabGroupKey(tabs[index]!);
 }
 
-function tabGroupLabel(tab: QueryTab) {
+function isGroupEnd(tabs: QueryTab[], index: number) {
+  if (settingsStore.editorSettings.tabGroupMode === "none") return false;
+  return index === tabs.length - 1 || tabGroupKey(tabs[index + 1]!) !== tabGroupKey(tabs[index]!);
+}
+
+function tabGroupDefaultLabel(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
   if (settingsStore.editorSettings.tabGroupMode === "connection") return connection?.name || tab.connectionId;
   return connection?.driver_label || connection?.driver_profile || connection?.db_type || tab.connectionId;
+}
+
+function tabGroupCustomizationKey(tab: QueryTab) {
+  return `${settingsStore.editorSettings.tabGroupMode}:${tabGroupKey(tab)}`;
+}
+
+function tabGroupCustomization(tab: QueryTab) {
+  return settingsStore.editorSettings.tabGroupCustomizations[tabGroupCustomizationKey(tab)];
+}
+
+function tabGroupLabel(tab: QueryTab) {
+  return tabGroupCustomization(tab)?.name || tabGroupDefaultLabel(tab);
+}
+
+function tabGroupId(tab: QueryTab) {
+  return `${tab.pinned ? "fixed" : "regular"}:${tabGroupKey(tab)}`;
+}
+
+function isTabGroupCollapsed(tab: QueryTab) {
+  if (settingsStore.editorSettings.tabGroupMode === "none" || tabSearchQuery.value.trim()) return false;
+  return collapsedTabGroups.value.has(tabGroupId(tab));
+}
+
+function isTabGroupActive(tab: QueryTab) {
+  if (props.driverStoreActive || props.settingsPageActive) return false;
+  return tabsInDisplayGroup(tab).some((item) => item.id === queryStore.activeTabId);
+}
+
+function toggleTabGroup(tab: QueryTab) {
+  const groupId = tabGroupId(tab);
+  const next = new Set(collapsedTabGroups.value);
+  if (next.has(groupId)) next.delete(groupId);
+  else next.add(groupId);
+  collapsedTabGroups.value = next;
+  nextTick(updateAllScrollButtons);
+}
+
+function expandTabGroupForTab(tabId: string | null) {
+  if (!tabId || settingsStore.editorSettings.tabGroupMode === "none") return;
+  const tab = queryStore.tabs.find((item) => item.id === tabId);
+  if (!tab) return;
+  const groupId = tabGroupId(tab);
+  if (!collapsedTabGroups.value.has(groupId)) return;
+  const next = new Set(collapsedTabGroups.value);
+  next.delete(groupId);
+  collapsedTabGroups.value = next;
+}
+
+function defaultTabGroupColor(tab: QueryTab) {
+  const connectionGroupColor = settingsStore.editorSettings.tabGroupMode === "connection" ? connectionColor(tab.connectionId) : undefined;
+  let hash = 0;
+  for (const character of tabGroupKey(tab)) hash = (hash * 31 + character.codePointAt(0)!) | 0;
+  return connectionGroupColor || tabGroupPalette[Math.abs(hash) % tabGroupPalette.length]!;
+}
+
+function resolvedTabGroupColor(tab: QueryTab) {
+  return tabGroupCustomization(tab)?.color || defaultTabGroupColor(tab);
+}
+
+function groupColorStyle(color: string): CSSProperties {
+  return {
+    "--tab-group-color": color,
+    "--tab-group-soft": hexToRgba(color, 0.12),
+    "--tab-group-rail": hexToRgba(color, 0.3),
+  } as CSSProperties;
+}
+
+function tabGroupStyle(tab: QueryTab): CSSProperties {
+  return groupColorStyle(resolvedTabGroupColor(tab));
+}
+
+const tabGroupEditorPreviewStyle = computed(() => groupColorStyle(editingTabGroupColor.value || editingTabGroupFallbackColor.value));
+const editingTabGroupHasCustomization = computed(() => {
+  const customization = settingsStore.editorSettings.tabGroupCustomizations[editingTabGroupKey.value];
+  return !!(customization?.name || customization?.color);
+});
+
+function openTabGroupEditor(tab: QueryTab) {
+  const customization = tabGroupCustomization(tab);
+  editingTabGroupKey.value = tabGroupCustomizationKey(tab);
+  editingTabGroupDefaultLabel.value = tabGroupDefaultLabel(tab);
+  editingTabGroupName.value = customization?.name || "";
+  editingTabGroupColor.value = customization?.color || "";
+  editingTabGroupFallbackColor.value = defaultTabGroupColor(tab);
+  tabGroupEditorOpen.value = true;
+  nextTick(() => document.querySelector<HTMLInputElement>("[data-tab-group-name-input]")?.focus());
+}
+
+async function persistTabGroupCustomization(name: string, color: string) {
+  if (!editingTabGroupKey.value) return false;
+  const customizations = { ...settingsStore.editorSettings.tabGroupCustomizations };
+  const normalizedName = name.trim();
+  if (normalizedName || color) customizations[editingTabGroupKey.value] = { ...(normalizedName ? { name: normalizedName } : {}), ...(color ? { color } : {}) };
+  else delete customizations[editingTabGroupKey.value];
+  try {
+    await settingsStore.updateEditorSettingsAndPersist({ tabGroupCustomizations: customizations });
+    return true;
+  } catch (error) {
+    toast(t("tabs.settingsSaveFailed", { message: error instanceof Error ? error.message : String(error) }), 5000);
+    return false;
+  }
+}
+
+async function saveTabGroupCustomization() {
+  if (await persistTabGroupCustomization(editingTabGroupName.value, editingTabGroupColor.value)) tabGroupEditorOpen.value = false;
+}
+
+function updateCustomTabGroupColor(event: Event) {
+  editingTabGroupColor.value = (event.target as HTMLInputElement).value;
+}
+
+async function resetTabGroupCustomization(tab?: QueryTab) {
+  if (tab) editingTabGroupKey.value = tabGroupCustomizationKey(tab);
+  if ((await persistTabGroupCustomization("", "")) && !tab) tabGroupEditorOpen.value = false;
 }
 const hasFixedTabs = computed(() => fixedTabs.value.length > 0);
 const regularSurfaceCount = computed(() => regularTabs.value.length + (props.driverStoreOpen ? 1 : 0) + (props.settingsPageOpen ? 1 : 0));
@@ -241,6 +458,23 @@ function tabTitleStyle(tab: QueryTab): CSSProperties | undefined {
 }
 
 type SpecialRegularSurface = "driverStore" | "settings";
+const pendingGroupCloseSpecialSurface = ref<SpecialRegularSurface | null>(null);
+
+function restoreSpecialRegularSurface(surface: SpecialRegularSurface | null) {
+  if (!surface) return;
+  // App.vue activates the query surface when activeTabId changes, so restore
+  // the special surface after that watcher has completed its current flush.
+  nextTick(() => {
+    if (surface === "settings" && props.settingsPageOpen) emit("activate-settings-page");
+    if (surface === "driverStore" && props.driverStoreOpen) emit("activate-driver-store");
+  });
+}
+
+function finishSpecialSurfacePreservingGroupClose() {
+  const surface = pendingGroupCloseSpecialSurface.value;
+  pendingGroupCloseSpecialSurface.value = null;
+  restoreSpecialRegularSurface(surface);
+}
 
 function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   if (keep !== "driverStore" && props.driverStoreOpen) emit("close-driver-store");
@@ -250,6 +484,23 @@ function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
 function closeOtherRegularTabsFromTab(tab: QueryTab) {
   queryStore.closeOtherRegularTabs(tab.id);
   closeSpecialRegularSurfaces();
+}
+
+function tabsInDisplayGroup(tab: QueryTab) {
+  if (settingsStore.editorSettings.tabGroupMode === "none") return [];
+  const groupKey = tabGroupKey(tab);
+  const displayedGroup = tab.pinned ? fixedTabs.value : regularTabs.value;
+  return displayedGroup.filter((item) => tabGroupKey(item) === groupKey);
+}
+
+function closeTabGroup(tab: QueryTab) {
+  const tabsToClose = tabsInDisplayGroup(tab).map((item) => item.id);
+  if (tabsToClose.length === 0) return;
+  const activeSpecialSurface: SpecialRegularSurface | null = props.settingsPageActive ? "settings" : props.driverStoreActive ? "driverStore" : null;
+  pendingGroupCloseSpecialSurface.value = activeSpecialSurface;
+  const finalActiveTabId = queryStore.activeTabId && !tabsToClose.includes(queryStore.activeTabId) ? queryStore.activeTabId : (queryStore.tabs.find((item) => !tabsToClose.includes(item.id))?.id ?? null);
+  queryStore.closeTabsByIds(tabsToClose, finalActiveTabId, finishSpecialSurfacePreservingGroupClose);
+  restoreSpecialRegularSurface(activeSpecialSurface);
 }
 
 function tabsToRightInGroup(tab: QueryTab) {
@@ -368,6 +619,70 @@ function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextM
   ];
 }
 
+function getTabPreferenceMenuItems(): ContextMenuItem[] {
+  return [
+    {
+      label: t("settings.tabPlacement"),
+      icon: PanelTop,
+      children: tabPlacementItems.value.map((item) => ({
+        label: item.label,
+        checked: item.value === settingsStore.editorSettings.tabPlacement,
+        action: () => updateTabPlacement(item.value),
+      })),
+    },
+    {
+      label: t("settings.tabGroup"),
+      icon: ListFilter,
+      children: tabGroupItems.value.map((item) => ({
+        label: item.label,
+        checked: item.value === settingsStore.editorSettings.tabGroupMode,
+        action: () => updateTabGroupMode(item.value),
+      })),
+    },
+    {
+      label: t("settings.tabSort"),
+      icon: ArrowDownUp,
+      children: tabSortItems.value.map((item) => ({
+        label: item.label,
+        checked: item.value === settingsStore.editorSettings.tabSortMode,
+        action: () => updateTabSortMode(item.value),
+      })),
+    },
+  ];
+}
+
+function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
+  const customization = tabGroupCustomization(tab);
+  return [
+    {
+      label: t("contextMenu.editTabGroup"),
+      action: () => openTabGroupEditor(tab),
+      icon: Pencil,
+    },
+    {
+      label: t("contextMenu.resetTabGroup"),
+      action: () => resetTabGroupCustomization(tab),
+      icon: RotateCcw,
+      visible: !!(customization?.name || customization?.color),
+    },
+    { label: "", separator: true },
+    ...getTabPreferenceMenuItems(),
+    { label: "", separator: true },
+    {
+      label: t("contextMenu.closeTabGroup"),
+      action: () => closeTabGroup(tab),
+      icon: X,
+      variant: "destructive",
+    },
+  ];
+}
+
+function openTabGroupContextMenu(event: MouseEvent, open: (event: MouseEvent) => void) {
+  event.preventDefault();
+  document.getSelection()?.removeAllRanges();
+  open(event);
+}
+
 function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
   const closeCurrentLabel = tab.pinned ? t("contextMenu.closeFixedTab") : t("contextMenu.closeTab");
   const closeOtherLabel = tab.pinned ? t("contextMenu.closeOtherFixedTabs") : hasFixedTabs.value ? t("contextMenu.closeOtherRegularTabs") : t("contextMenu.closeOtherTabs");
@@ -419,6 +734,8 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: !!activeTabSidebarTarget(tab),
     },
     { label: "", separator: true },
+    ...getTabPreferenceMenuItems(),
+    { label: "", separator: true },
     {
       label: tab.pinned ? t("contextMenu.unfixTab") : t("contextMenu.fixTab"),
       action: () => queryStore.togglePinnedTab(tab.id),
@@ -427,6 +744,12 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
     },
     { label: "", separator: true },
     { label: closeCurrentLabel, action: () => queryStore.closeTab(tab.id), icon: X },
+    {
+      label: t("contextMenu.closeTabGroup"),
+      action: () => closeTabGroup(tab),
+      visible: settingsStore.editorSettings.tabGroupMode !== "none",
+      icon: X,
+    },
     {
       label: closeOtherLabel,
       action: closeOtherAction,
@@ -474,8 +797,15 @@ function handleDiscardAllAndClose() {
   emit("discard-all-tab-close");
 }
 
-function handleCancelClose() {
+function dismissCloseConfirm() {
+  const specialSurface = pendingGroupCloseSpecialSurface.value;
+  pendingGroupCloseSpecialSurface.value = null;
   queryStore.cancelClosePendingTab();
+  restoreSpecialRegularSurface(specialSurface);
+}
+
+function handleCancelClose() {
+  dismissCloseConfirm();
   emit("cancel-tab-close");
 }
 
@@ -522,8 +852,19 @@ watch(
 );
 
 watch(
-  () => queryStore.activeTabId,
+  () => settingsStore.editorSettings.tabGroupMode,
   () => {
+    collapsedTabGroups.value = new Set();
+    tabGroupEditorOpen.value = false;
+    nextTick(updateAllScrollButtons);
+  },
+);
+
+watch(
+  () => queryStore.activeTabId,
+  (tabId) => {
+    expandTabGroupForTab(tabId);
+    restoreSpecialRegularSurface(pendingGroupCloseSpecialSurface.value);
     nextTick(() => {
       if (!isWrapLayout.value) {
         for (const container of [tabsContainerRef.value, fixedTabsContainerRef.value]) {
@@ -581,6 +922,16 @@ function tabColorStyle(tab: QueryTab) {
   const color = connectionColor(tab.connectionId);
   const isActive = tab.id === queryStore.activeTabId && !props.driverStoreActive && !props.settingsPageActive;
   const isClassic = isClassicLayout.value;
+  if (isVerticalLayout.value) {
+    if (!isActive) return undefined;
+    return color
+      ? {
+          "--app-tab-background": hexToRgba(color, 0.12),
+        }
+      : {
+          "--app-tab-background": "var(--accent)",
+        };
+  }
   if (!color) {
     if (isClassic) {
       return isActive ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;
@@ -609,8 +960,14 @@ function tabColorStyle(tab: QueryTab) {
 
 function specialTabActiveStyle(active: boolean | undefined): CSSProperties | undefined {
   if (!active) return undefined;
+  if (isVerticalLayout.value) return { backgroundColor: "var(--accent)" };
   return isClassicLayout.value ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : { borderColor: "var(--ring)" };
 }
+
+const tabTooltipSide = computed(() => {
+  if (!isVerticalLayout.value) return "bottom" as const;
+  return settingsStore.editorSettings.tabPlacement === "left" ? ("right" as const) : ("left" as const);
+});
 
 function tabIconClass(tab: QueryTab) {
   if (tab.externalSqlFileMissing) return "text-amber-600 dark:text-amber-400";
@@ -640,6 +997,14 @@ const showRegularTabOverflowControls = computed(() => regularTabs.value.length >
 const regularTabOverflowOpen = ref(false);
 const fixedTabOverflowOpen = ref(false);
 const tabSearchQuery = ref("");
+
+watch(
+  () => props.tabBarCollapsed,
+  (collapsed) => {
+    if (collapsed) tabSearchQuery.value = "";
+  },
+);
+
 const filteredOpenTabs = computed(() => {
   const query = tabSearchQuery.value.trim().toLocaleLowerCase();
   if (!query) return displayedTabs.value;
@@ -668,6 +1033,7 @@ const tabBarClass = computed(() => [
       : `w-full bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`,
   hasFixedTabs.value ? "flex-col" : "",
   isClassicLayout.value && hasFixedTabs.value && !isVerticalLayout.value ? "border-b" : "",
+  isVerticalLayout.value && props.tabBarCollapsed ? "vertical-tab-layout--collapsed" : "",
 ]);
 const regularTabRowClass = computed(() => (isVerticalLayout.value ? ["min-h-0 flex-1 flex-col items-stretch"] : [isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2", isClassicLayout.value && !hasFixedTabs.value ? "border-b" : ""]));
 
@@ -722,7 +1088,7 @@ function handleTabMouseDown(event: PointerEvent, tabId: string) {
     // Don't preventDefault touch pointerdowns: that would cancel the tab
     // strip's native horizontal scroll, which is how touch users browse an
     // overflowing tab bar.
-    if (event.pointerType !== "touch") event.preventDefault();
+    if (event.pointerType !== "touch" && (event.buttons & 1) === 1) event.preventDefault();
   }
   if (isManualTabOrder.value) tabDrag.startDrag(event, tabId);
 }
@@ -803,10 +1169,38 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 </script>
 
 <template>
-  <div v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen" data-main-tab-bar class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[tabBarClass, { 'ring-2 ring-primary ring-inset': detachedDropTarget }]">
-    <div v-if="isVerticalLayout" class="relative shrink-0 border-b p-2">
-      <Search class="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-      <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />
+  <div
+    v-if="queryStore.tabs.length > 0 || driverStoreOpen || settingsPageOpen"
+    data-main-tab-bar
+    :data-placement="settingsStore.editorSettings.tabPlacement"
+    class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden"
+    :class="[tabBarClass, { 'ring-2 ring-primary ring-inset': detachedDropTarget }]"
+    :style="tabBarStyle"
+  >
+    <div v-if="isVerticalLayout" class="flex shrink-0 items-center gap-0.5 border-b p-1.5" :class="tabBarCollapsed ? 'justify-center' : ''">
+      <div v-if="!tabBarCollapsed" class="relative min-w-0 flex-1">
+        <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />
+      </div>
+      <div v-if="!tabBarCollapsed" class="flex shrink-0 items-center gap-0">
+        <LightDropdown
+          :model-value="settingsStore.editorSettings.tabGroupMode"
+          :items="tabGroupItems"
+          :aria-label="t('settings.tabGroup')"
+          :trigger-title="t('settings.tabGroup')"
+          :trigger-icon="ListFilter"
+          :trigger-class="verticalTabToolbarButtonClass"
+          :show-trigger-label="false"
+          :show-chevron="false"
+          check-position="right"
+          :match-trigger-width="false"
+          align="end"
+          @update:model-value="updateTabGroupMode"
+        />
+      </div>
+      <button type="button" :class="verticalTabToolbarButtonClass" :title="tabBarCollapseLabel" :aria-label="tabBarCollapseLabel" :aria-expanded="!tabBarCollapsed" @click="emit('toggle-collapse')">
+        <component :is="tabBarCollapseIcon" class="h-4 w-4" />
+      </button>
     </div>
     <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="regularTabRowClass">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
@@ -826,23 +1220,47 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           @wheel="!isVerticalLayout && onTabsWheel($event)"
         >
           <template v-for="(tab, index) in filteredRegularTabs" :key="tab.id">
-            <div v-if="isGroupStart(filteredRegularTabs, index)" class="tab-group-header">{{ tabGroupLabel(tab) }}</div>
-            <CustomContextMenu :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+            <CustomContextMenu v-if="isGroupStart(filteredRegularTabs, index)" :items="() => getTabGroupMenuItems(tab)" v-slot="{ onContextMenu }">
+              <button
+                type="button"
+                class="tab-group-header"
+                :class="{ 'tab-group-header--collapsed': isTabGroupCollapsed(tab), 'tab-group-header--active': isTabGroupActive(tab) }"
+                :style="tabGroupStyle(tab)"
+                :aria-expanded="!isTabGroupCollapsed(tab)"
+                :title="tabGroupLabel(tab)"
+                @click="toggleTabGroup(tab)"
+                @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+              >
+                <span class="tab-group-header-content">
+                  <span class="tab-group-marker" aria-hidden="true" />
+                  <Pin v-if="tab.pinned && !isTabBarCollapsed" class="tab-group-pin" aria-hidden="true" />
+                  <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(tab) ? '-rotate-90' : ''" aria-hidden="true" />
+                  <span v-if="!isTabBarCollapsed" class="tab-group-label">{{ tabGroupLabel(tab) }}</span>
+                  <span v-if="isTabGroupCollapsed(tab) && !isTabBarCollapsed" class="tab-group-count">{{ tabsInDisplayGroup(tab).length }}</span>
+                </span>
+              </button>
+            </CustomContextMenu>
+            <CustomContextMenu v-if="!isTabGroupCollapsed(tab)" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
               <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
                 <Tooltip>
                   <TooltipTrigger as-child>
                     <div
                       class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                      :class="
+                      :class="[
                         isClassicLayout
                           ? [
                               compactTabTitle ? 'min-w-24' : 'min-w-38',
                               'h-full border-r border-border/80 font-medium dark:border-border/45',
                               tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
                             ]
-                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-                      "
-                      :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
+                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
+                        {
+                          'tab-group-tab': settingsStore.editorSettings.tabGroupMode !== 'none',
+                          'tab-group-tab--first': isGroupStart(filteredRegularTabs, index),
+                          'tab-group-tab--last': isGroupEnd(filteredRegularTabs, index),
+                        },
+                      ]"
+                      :style="[tabColorStyle(tab), settingsStore.editorSettings.tabGroupMode !== 'none' ? tabGroupStyle(tab) : undefined, tabDropStyle(tab.id)]"
                       :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                       @click="handleTabClick(tab)"
                       @dblclick="handleTabDoubleClick(tab, $event)"
@@ -873,8 +1291,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                           <Code2 v-else class="h-3.5 w-3.5" />
                         </span>
                       </TabExecutionStatus>
+                      <span v-if="isTabBarCollapsed && isDirtyTab(tab)" class="compact-dirty-tab-marker" aria-hidden="true" />
                       <input
-                        v-if="editingTabId === tab.id"
+                        v-if="editingTabId === tab.id && !isTabBarCollapsed"
                         v-model="editingTitle"
                         :data-tab-title-input="tab.id"
                         :aria-label="t('contextMenu.renameTab')"
@@ -885,17 +1304,17 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                         @keydown.escape.prevent="cancelRenameTab"
                         @blur="commitRenameTab(tab)"
                       />
-                      <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+                      <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                         <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                         <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                       </span>
-                      <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
-                      <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
+                      <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="tab.connectionId" compact />
+                      <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
                         <X class="h-3 w-3" />
                       </button>
                     </div>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                  <TooltipContent :side="tabTooltipSide" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
                     <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
                       <span class="text-muted-foreground">{{ line.label }}</span>
                       <span>{{ line.value }}</span>
@@ -919,14 +1338,15 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 "
                 :style="specialTabActiveStyle(settingsPageActive)"
                 :data-active-tab="settingsPageActive"
+                :title="t('settings.title')"
                 @click="emit('activate-settings-page')"
                 @mousedown.middle.prevent="emit('close-settings-page')"
               >
                 <span class="shrink-0 text-sky-600 dark:text-sky-400">
                   <Settings class="h-3.5 w-3.5" />
                 </span>
-                <span class="min-w-0 truncate flex-1">{{ t("settings.title") }}</span>
-                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-settings-page')">
+                <span v-if="!isTabBarCollapsed" class="min-w-0 truncate flex-1">{{ t("settings.title") }}</span>
+                <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-settings-page')">
                   <X class="h-3 w-3" />
                 </button>
               </div>
@@ -946,17 +1366,18 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                 "
                 :style="specialTabActiveStyle(driverStoreActive)"
                 :data-active-tab="driverStoreActive"
+                :title="t('toolbar.driverManager')"
                 @click="emit('activate-driver-store')"
                 @mousedown.middle.prevent="emit('close-driver-store')"
               >
                 <span class="shrink-0 text-amber-600 dark:text-amber-400">
                   <Package class="h-3.5 w-3.5" />
                 </span>
-                <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
-                <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+                <span v-if="!isTabBarCollapsed" class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
+                <span v-if="!isTabBarCollapsed && (agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
                   {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
                 </span>
-                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
+                <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
                   <X class="h-3 w-3" />
                 </button>
               </div>
@@ -1022,8 +1443,8 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
 
     <div
       v-if="hasVisibleFixedTabs"
-      class="flex w-full min-w-0 shrink-0 overflow-hidden border-t"
-      :class="isVerticalLayout ? 'max-h-[40%] flex-col border-border/70 bg-muted/45 py-1 dark:bg-muted/25' : isClassicLayout ? 'h-8 items-stretch border-border/80 bg-background/45 dark:border-border/45 dark:bg-background/20' : 'h-9 items-center border-border/70 bg-muted/45 px-2 dark:bg-muted/25'"
+      class="flex w-full min-w-0 shrink-0 overflow-hidden"
+      :class="isVerticalLayout ? 'max-h-[40%] flex-col bg-background pt-1' : isClassicLayout ? 'h-8 items-stretch border-t border-border/80 bg-background/45 dark:border-border/45 dark:bg-background/20' : 'h-9 items-center border-t border-border/70 bg-muted/45 px-2 dark:bg-muted/25'"
     >
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showFixedTabScrollbar" class="app-tab-scrollbar app-tab-scrollbar--bottom" :class="{ 'app-tab-scrollbar--dragging': isFixedScrollbarDragging }" @pointerdown="startFixedScrollbarDrag">
@@ -1042,23 +1463,47 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
           @wheel="!isVerticalLayout && onFixedTabsWheel($event)"
         >
           <template v-for="(tab, index) in filteredFixedTabs" :key="tab.id">
-            <div v-if="isGroupStart(filteredFixedTabs, index)" class="tab-group-header">{{ tabGroupLabel(tab) }}</div>
-            <CustomContextMenu :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
+            <CustomContextMenu v-if="isGroupStart(filteredFixedTabs, index)" :items="() => getTabGroupMenuItems(tab)" v-slot="{ onContextMenu }">
+              <button
+                type="button"
+                class="tab-group-header"
+                :class="{ 'tab-group-header--collapsed': isTabGroupCollapsed(tab), 'tab-group-header--active': isTabGroupActive(tab) }"
+                :style="tabGroupStyle(tab)"
+                :aria-expanded="!isTabGroupCollapsed(tab)"
+                :title="tabGroupLabel(tab)"
+                @click="toggleTabGroup(tab)"
+                @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+              >
+                <span class="tab-group-header-content">
+                  <span class="tab-group-marker" aria-hidden="true" />
+                  <Pin v-if="!isTabBarCollapsed" class="tab-group-pin" aria-hidden="true" />
+                  <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(tab) ? '-rotate-90' : ''" aria-hidden="true" />
+                  <span v-if="!isTabBarCollapsed" class="tab-group-label">{{ tabGroupLabel(tab) }}</span>
+                  <span v-if="isTabGroupCollapsed(tab) && !isTabBarCollapsed" class="tab-group-count">{{ tabsInDisplayGroup(tab).length }}</span>
+                </span>
+              </button>
+            </CustomContextMenu>
+            <CustomContextMenu v-if="!isTabGroupCollapsed(tab)" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">
               <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
                 <Tooltip>
                   <TooltipTrigger as-child>
                     <div
                       class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                      :class="
+                      :class="[
                         isClassicLayout
                           ? [
                               compactTabTitle ? 'min-w-24' : 'min-w-38',
                               'h-full border-r border-border/80 font-medium dark:border-border/45',
                               tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90',
                             ]
-                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90']
-                      "
-                      :style="[tabColorStyle(tab), tabDropStyle(tab.id)]"
+                          : [compactTabTitle ? 'min-w-24' : 'min-w-38', 'h-7 rounded-md border', tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
+                        {
+                          'tab-group-tab': settingsStore.editorSettings.tabGroupMode !== 'none',
+                          'tab-group-tab--first': isGroupStart(filteredFixedTabs, index),
+                          'tab-group-tab--last': isGroupEnd(filteredFixedTabs, index),
+                        },
+                      ]"
+                      :style="[tabColorStyle(tab), settingsStore.editorSettings.tabGroupMode !== 'none' ? tabGroupStyle(tab) : undefined, tabDropStyle(tab.id)]"
                       :data-active-tab="tab.id === queryStore.activeTabId && !driverStoreActive && !settingsPageActive"
                       @click="handleTabClick(tab)"
                       @dblclick="handleTabDoubleClick(tab, $event)"
@@ -1089,8 +1534,9 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                           <Code2 v-else class="h-3.5 w-3.5" />
                         </span>
                       </TabExecutionStatus>
+                      <span v-if="isTabBarCollapsed && isDirtyTab(tab)" class="compact-dirty-tab-marker" aria-hidden="true" />
                       <input
-                        v-if="editingTabId === tab.id"
+                        v-if="editingTabId === tab.id && !isTabBarCollapsed"
                         v-model="editingTitle"
                         :data-tab-title-input="tab.id"
                         :aria-label="t('contextMenu.renameTab')"
@@ -1101,20 +1547,20 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
                         @keydown.escape.prevent="cancelRenameTab"
                         @blur="commitRenameTab(tab)"
                       />
-                      <span v-else class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                      <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
                         <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
                         <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(tab)">{{ tabTitleText(tab) }}</span>
                       </span>
-                      <ReadOnlySessionControl :connection-id="tab.connectionId" compact />
-                      <button class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unfixTab')" :title="t('contextMenu.unfixTab')" @click.stop="queryStore.togglePinnedTab(tab.id)">
+                      <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="tab.connectionId" compact />
+                      <button v-if="!isTabBarCollapsed" class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unfixTab')" :title="t('contextMenu.unfixTab')" @click.stop="queryStore.togglePinnedTab(tab.id)">
                         <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
                       </button>
-                      <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
+                      <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="queryStore.closeTab(tab.id)">
                         <X class="h-3 w-3" />
                       </button>
                     </div>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                  <TooltipContent :side="tabTooltipSide" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
                     <template v-for="line in tabTooltipLines(tab, t)" :key="line.label">
                       <span class="text-muted-foreground">{{ line.label }}</span>
                       <span>{{ line.value }}</span>
@@ -1181,13 +1627,65 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
         </Popover>
       </div>
     </div>
+    <div v-if="!isTabBarCollapsed" class="panel-resize-handle" :class="settingsStore.editorSettings.tabPlacement === 'right' ? 'panel-resize-handle--left' : 'panel-resize-handle--right'" @mousedown="emit('start-resize', $event)" />
   </div>
+
+  <Dialog :open="tabGroupEditorOpen" @update:open="tabGroupEditorOpen = $event">
+    <DialogContent class="min-w-0 sm:max-w-sm">
+      <DialogHeader>
+        <DialogTitle class="flex min-w-0 items-center gap-2">
+          <span class="h-4 w-1 shrink-0 rounded-full" :style="{ background: editingTabGroupColor || editingTabGroupFallbackColor }" />
+          <span class="truncate">{{ t("tabs.editGroupTitle", { name: editingTabGroupDefaultLabel }) }}</span>
+        </DialogTitle>
+      </DialogHeader>
+      <div class="space-y-4">
+        <label class="grid gap-1.5 text-sm">
+          <span class="font-medium">{{ t("tabs.groupName") }}</span>
+          <Input v-model="editingTabGroupName" data-tab-group-name-input maxlength="80" :placeholder="editingTabGroupDefaultLabel" class="h-9" @keydown.enter.prevent="saveTabGroupCustomization" />
+        </label>
+        <fieldset class="grid gap-2">
+          <legend class="text-sm font-medium">{{ t("tabs.groupColor") }}</legend>
+          <div class="flex flex-wrap items-center gap-2" :style="tabGroupEditorPreviewStyle">
+            <button type="button" class="tab-group-color-option tab-group-color-option--auto" :class="{ 'tab-group-color-option--selected': editingTabGroupColor === '' }" :aria-label="t('tabs.groupColorAuto')" :title="t('tabs.groupColorAuto')" @click="editingTabGroupColor = ''">
+              <RotateCcw class="h-3.5 w-3.5" />
+            </button>
+            <button
+              v-for="color in tabGroupPalette"
+              :key="color"
+              type="button"
+              class="tab-group-color-option"
+              :class="{ 'tab-group-color-option--selected': editingTabGroupColor === color }"
+              :style="{ '--tab-group-option-color': color }"
+              :aria-label="color"
+              :title="color"
+              @click="editingTabGroupColor = color"
+            />
+            <label
+              class="tab-group-custom-color"
+              :class="{ 'tab-group-color-option--selected': editingTabGroupColor !== '' && !tabGroupPalette.includes(editingTabGroupColor) }"
+              :style="{ '--tab-group-option-color': editingTabGroupColor || editingTabGroupFallbackColor }"
+              :title="t('tabs.groupColorCustom')"
+            >
+              <input type="color" :value="editingTabGroupColor || editingTabGroupFallbackColor" :aria-label="t('tabs.groupColorCustom')" @input="updateCustomTabGroupColor" />
+            </label>
+          </div>
+        </fieldset>
+      </div>
+      <DialogFooter class="sm:justify-between">
+        <Button v-if="editingTabGroupHasCustomization" variant="ghost" class="mr-auto" @click="resetTabGroupCustomization()">{{ t("tabs.resetGroup") }}</Button>
+        <div class="flex justify-end gap-2">
+          <Button variant="outline" @click="tabGroupEditorOpen = false">{{ t("common.cancel") }}</Button>
+          <Button @click="saveTabGroupCustomization">{{ t("common.save") }}</Button>
+        </div>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
 
   <Dialog
     :open="queryStore.showCloseConfirm"
     @update:open="
       (open) => {
-        if (!open) queryStore.cancelClosePendingTab();
+        if (!open) dismissCloseConfirm();
       }
     "
   >
@@ -1263,6 +1761,19 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
   min-height: 2rem;
   height: 2rem !important;
   border-right: 0;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease;
+}
+
+.vertical-tab-layout .app-tab-pill[data-active-tab="true"] {
+  border-color: color-mix(in srgb, var(--tab-group-color, var(--ring)) 18%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color, var(--ring)) 13%, transparent),
+    0 1px 2px rgb(0 0 0 / 0.08),
+    0 3px 9px color-mix(in srgb, var(--tab-group-color, var(--foreground)) 8%, transparent);
 }
 
 .vertical-tab-layout .app-tab-scroll > * {
@@ -1270,21 +1781,355 @@ function onOverflowItemKeydown(event: KeyboardEvent, tabId: string, kind: "regul
   flex: none;
 }
 
-.vertical-tab-layout .tab-group-header {
-  width: 100%;
-  padding: 0.45rem 0.6rem 0.2rem;
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-  font-weight: 600;
-  line-height: 1rem;
-  text-transform: uppercase;
+.vertical-tab-layout--collapsed .app-tab-scroll {
+  align-items: center;
+}
+
+.vertical-tab-layout--collapsed .app-tab-pill {
+  position: relative;
+  width: 2.5rem;
+  min-height: 2.5rem;
+  height: 2.5rem !important;
+  justify-content: center;
+  margin: 0.125rem auto;
+  padding: 0 !important;
+  border-radius: 0.625rem;
+}
+
+.vertical-tab-layout--collapsed .compact-dirty-tab-marker {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 9999px;
+  background: var(--destructive);
+  box-shadow: 0 0 0 1px var(--background);
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header {
+  width: 2.5rem !important;
+  height: 1.75rem;
+  margin: 0.35rem auto 0.1rem;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header-content {
+  justify-content: center;
+  padding: 0;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab {
+  width: 2.5rem;
+  margin-inline: auto;
+  padding: 0 !important;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header::after,
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab::before,
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab::after {
+  display: none;
+}
+
+.tab-group-header {
+  display: inline-flex;
+  flex: none;
+  cursor: pointer;
+  align-items: center;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.tab-group-header:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.tab-group-header-content {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.25rem;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.tab-group-marker {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+}
+
+.tab-group-chevron {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+  transition: transform 150ms ease;
+}
+
+.tab-group-pin {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: none;
+  fill: currentColor;
+  opacity: 0.7;
+}
+
+.tab-group-label {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.app-tab-scroll:not(.wrap-mode) .tab-group-header {
+.tab-group-count {
+  display: inline-flex;
+  min-width: 1rem;
+  height: 1rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  padding-inline: 0.25rem;
+  background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header {
+  position: relative;
+  height: 100%;
   align-self: stretch;
+  margin-inline: 0.15rem 0.05rem;
+  padding: 0;
+  color: var(--tab-group-color);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header-content {
+  height: 1.625rem;
+  border-radius: 9999px;
+  padding-inline: 0.4rem 0.5rem;
+  background: var(--tab-group-soft);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
+  background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color) 35%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  right: -0.45rem;
+  bottom: 0;
+  left: 0.3rem;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after {
+  right: 0.3rem;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-header::after {
+  top: 0;
+  bottom: auto;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab {
+  position: relative;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  right: -0.2rem;
+  bottom: 0;
+  left: -0.2rem;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after {
+  top: 0;
+  bottom: auto;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--first::after {
+  left: 0;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after {
+  right: 0.3rem;
+}
+
+.vertical-tab-layout .tab-group-header {
+  position: relative;
+  width: calc(100% - 1rem) !important;
+  height: 2rem;
+  align-self: center;
+  margin: 0.35rem 0.5rem 0.08rem;
+  padding: 0;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1rem;
+}
+
+.vertical-tab-layout .tab-group-header-content {
+  width: 100%;
+  height: 100%;
+  border-radius: 0.5rem;
+  padding-inline: 0.55rem;
+}
+
+.vertical-tab-layout .tab-group-header:hover .tab-group-header-content,
+.vertical-tab-layout .tab-group-header--active .tab-group-header-content {
+  background: var(--tab-group-soft);
+}
+
+.vertical-tab-layout .tab-group-header--active {
+  color: var(--tab-group-color);
+}
+
+.vertical-tab-layout .tab-group-marker {
+  width: 0.22rem;
+  height: 1rem;
+  border-radius: 9999px;
+}
+
+.vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 1rem;
+  bottom: -1.08rem;
+  left: 0.66rem;
+  width: 0.7rem;
+  border-bottom: 1px solid var(--tab-group-rail);
+  border-left: 1px solid var(--tab-group-rail);
+  border-bottom-left-radius: 0.1875rem;
+  pointer-events: none;
+}
+
+.vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed) .tab-group-marker {
+  position: relative;
+  z-index: 2;
+}
+
+.vertical-tab-layout .tab-group-tab {
+  position: relative;
+  width: calc(100% - 3rem);
+  margin-inline: 2.5rem 0.5rem;
+  padding-inline-start: 0.65rem !important;
+  border-color: transparent;
+}
+
+.vertical-tab-layout .tab-group-tab::before {
+  content: "";
+  position: absolute;
+  top: -0.25rem;
+  bottom: -0.25rem;
+  left: -0.65rem;
+  width: 1px;
+  border-radius: 9999px;
+  background: var(--tab-group-rail);
+  pointer-events: none;
+}
+
+.vertical-tab-layout .tab-group-tab--first::before {
+  top: 50%;
+}
+
+.vertical-tab-layout .tab-group-tab--last::before {
+  bottom: 50%;
+  border-radius: 9999px 9999px 0 0;
+}
+
+.vertical-tab-layout .tab-group-tab::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 0.5px);
+  left: -0.65rem;
+  width: 0.65rem;
+  height: 1px;
+  border-radius: 0 9999px 9999px 0;
+  background: var(--tab-group-rail);
+  pointer-events: none;
+}
+
+.tab-group-color-option,
+.tab-group-custom-color {
+  position: relative;
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: none;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--background);
+  border-radius: 9999px;
+  background: var(--tab-group-option-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);
+  outline: none;
+  transition:
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.tab-group-color-option:hover,
+.tab-group-custom-color:hover {
+  transform: scale(1.08);
+}
+
+.tab-group-color-option--selected {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px var(--tab-group-option-color, var(--tab-group-color));
+}
+
+.tab-group-color-option--auto {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.tab-group-custom-color {
+  overflow: hidden;
+  background: conic-gradient(#ef4444, #f59e0b, #22c55e, #06b6d4, #3b82f6, #a855f7, #ef4444);
+}
+
+.tab-group-custom-color input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  opacity: 0;
 }
 
 /* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */

@@ -176,6 +176,7 @@ fn build_iotdb_insert_statement(
                 value,
                 Some(DatabaseType::Iotdb),
                 column_info_for(iotdb_column_info(options), column),
+                options.identifier_quote.as_deref(),
             )
         })
         .collect::<Vec<_>>()

@@ -2,6 +2,7 @@ import { computed, reactive } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridActions } from "@/composables/useDataGridActions";
 import { clearTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
+import { restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import type { QueryTab } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
@@ -164,6 +165,50 @@ describe("useDataGridActions", () => {
     );
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 250 OFFSET 0", expect.objectContaining({ pagination: { limit: 250, offset: 0 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
+  });
+
+  it("keeps the restored filter and sort when the no-data placeholder refresh runs (#7963)", async () => {
+    // 重启后恢复的数据标签页没有 result，刷新走的是 ContentArea 空态占位符那条
+    // 不带参数的入口；它必须回带标签页自身的 whereInput/orderByInput，
+    // 否则刷新会重新加载整张表。
+    const tab = tableDataTab({
+      result: undefined,
+      whereInput: "status = 'active'",
+      orderByInput: '"name" DESC',
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [
+          { name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+          { name: "name", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+          { name: "status", data_type: "text", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+        ],
+        primaryKeys: ["id"],
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    const { whereInput, orderBy } = restoredDataTabReloadFilters(tab);
+    await actions.onReloadData(undefined, undefined, whereInput, orderBy);
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: "status = 'active'", orderBy: '"name" DESC' }));
+    expect(tab.whereInput).toBe("status = 'active'");
+    expect(tab.orderByInput).toBe('"name" DESC');
+  });
+
+  it("still clears the stored filter when a mounted grid refreshes with an emptied WHERE input", async () => {
+    // 对照：DataGrid 的 currentWhereInput() 在用户清空筛选时返回 undefined，
+    // 所以 onReloadData 里不能无条件回退到 tab.whereInput。
+    const tab = tableDataTab({ whereInput: "status = 'active'" });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.sql, "", undefined, undefined, undefined, undefined, "refresh");
+
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(expect.objectContaining({ whereInput: undefined, orderBy: undefined }));
+    expect(tab.whereInput).toBe("");
   });
 
   it("preserves the toolbar page segment and offset for table-data refresh", async () => {

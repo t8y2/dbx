@@ -12,6 +12,7 @@ use super::column_format::{
 };
 use super::comments::build_sqlserver_column_comment_sql;
 use super::dialect::{capabilities_for, database_label, is_oracle_like, StructureDialect};
+use super::indexes::has_existing_index_change;
 use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{
     clean, is_protected_manticore_id_column, normalize_default, original_comment, original_default, qualified_table,
@@ -176,7 +177,18 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             continue;
         }
 
-        if !has_existing_column_attribute_change(column) && !has_column_extra_change(column) && !has_position_change {
+        // A column handing its primary key membership over to another column keeps its
+        // AUTO_INCREMENT flag in the submitted draft, which MySQL rejects (ERROR 1075) once
+        // the column is no longer keyed. Rewrite it inside the same coalesced ALTER even
+        // though the draft reports no change on the column itself.
+        let clears_orphaned_auto_increment = mysql_coalesced_primary_key_change
+            .is_some_and(|change| mysql_orphans_auto_increment_column(options, column, change));
+
+        if !has_existing_column_attribute_change(column)
+            && !has_column_extra_change(column)
+            && !has_position_change
+            && !clears_orphaned_auto_increment
+        {
             continue;
         }
         let original = column.original.as_ref().unwrap();
@@ -221,14 +233,23 @@ pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mu
             ));
             continue;
         }
-        if !has_rename && !has_attribute_change && !has_position_change {
+        if !has_rename && !has_attribute_change && !has_position_change && !clears_orphaned_auto_increment {
             continue;
         }
 
         match dialect {
             StructureDialect::Mysql => {
-                let clause =
-                    build_mysql_existing_column_clause(column, if has_position_change { &position_clause } else { "" });
+                let rewritten;
+                let effective_column = if clears_orphaned_auto_increment {
+                    rewritten = without_auto_increment(column);
+                    &rewritten
+                } else {
+                    column
+                };
+                let clause = build_mysql_existing_column_clause(
+                    effective_column,
+                    if has_position_change { &position_clause } else { "" },
+                );
                 if mysql_coalesced_primary_key_change
                     .is_some_and(|change| mysql_auto_increment_touches_primary_key(column, change))
                 {
@@ -375,6 +396,54 @@ pub(super) fn validate_primary_key_change_scope(options: &TableStructureSqlOptio
 fn mysql_auto_increment_touches_primary_key(column: &EditableStructureColumn, change: &PrimaryKeyChange<'_>) -> bool {
     column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false))
         && (change.old_ids.contains(column.id.as_str()) || change.new_ids.contains(column.id.as_str()))
+}
+
+/// MySQL allows AUTO_INCREMENT only on a column that leads some key, so a column handing the
+/// primary key over to another column must lose the flag in the same statement — unless an
+/// already existing index that survives this change still keys it.
+fn mysql_orphans_auto_increment_column(
+    options: &TableStructureSqlOptions,
+    column: &EditableStructureColumn,
+    change: &PrimaryKeyChange<'_>,
+) -> bool {
+    column.original.is_some()
+        && column.extra.as_ref().is_some_and(|extra| extra.auto_increment.unwrap_or(false))
+        && change.old_ids.contains(column.id.as_str())
+        && !change.new_ids.contains(column.id.as_str())
+        && !mysql_column_leads_kept_index(options, column)
+}
+
+/// Whether a persisted, non-primary index keys this column for the whole change.
+///
+/// Only an index the draft leaves completely untouched counts. One created by this draft is
+/// added after the column DDL, and an edited one is rebuilt as DROP + CREATE after it, so
+/// neither covers the column while the coalesced ALTER runs — and the DROP would hit the very
+/// same ERROR 1075. Matching is against the persisted names on both sides, so a draft that
+/// swaps two column names cannot credit one column's index to the other.
+///
+/// This applies the InnoDB rule that the auto column must *lead* an index. MyISAM also accepts
+/// it in a later position of a multi-column index; DBX has no engine information here, so such
+/// a table loses AUTO_INCREMENT rather than every InnoDB table keeping an invalid one.
+fn mysql_column_leads_kept_index(options: &TableStructureSqlOptions, column: &EditableStructureColumn) -> bool {
+    let Some(original_name) = column.original.as_ref().map(|original| original.name.as_str()) else {
+        return false;
+    };
+    options.indexes.iter().any(|index| {
+        !index.marked_for_drop
+            && !has_existing_index_change(index)
+            && index.original.as_ref().is_some_and(|original| {
+                !original.is_primary
+                    && original.columns.first().is_some_and(|first| clean(first).eq_ignore_ascii_case(original_name))
+            })
+    })
+}
+
+fn without_auto_increment(column: &EditableStructureColumn) -> EditableStructureColumn {
+    let mut cleared = column.clone();
+    if let Some(extra) = cleared.extra.as_mut() {
+        extra.auto_increment = Some(false);
+    }
+    cleared
 }
 
 pub(super) fn build_primary_key_sql(

@@ -2087,6 +2087,7 @@ export const useConnectionStore = defineStore("connection", () => {
     offset: number;
     pageSize: number;
     searchFilter?: string;
+    pagedSearch?: boolean;
     force?: boolean;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
     if (!options.node.connectionId || options.node.database == null) {
@@ -2102,15 +2103,12 @@ export const useConnectionStore = defineStore("connection", () => {
     });
     const tableNameFilter = effectiveTableNameFilterForNode(options.node, userTableNameFilter);
     const sourceRevision = tableListSourceRevision(options.node.connectionId);
-    // A search must never truncate the fuzzy result set to the first page: the
-    // target table can sort beyond it (e.g. "T_Erp_Nc_SuPlan_List" for
-    // "erpncs" in a large ERP schema), which silently drops it from the first
-    // search even though later, narrower queries succeed. Results are bounded
-    // by SIDEBAR_TABLE_SEARCH_RESULT_BUDGET so a wide fuzzy query cannot push
-    // an unbounded result set through database → IPC → store → tree rendering.
-    // Unfiltered loads keep the page+1 probe used for load-more detection.
-    const fetchLimit = searchFilter ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : options.pageSize + 1;
-    const fetchOffset = searchFilter ? undefined : options.offset;
+    // Table-scoped search must page through the full ordered result set, just
+    // like unfiltered loads, instead of silently stopping at the first budget
+    // window. Global sidebar search keeps the bounded single-shot fetch.
+    const paginate = options.pagedSearch || !searchFilter;
+    const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
+    const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
       metadataListCacheScope({
         kind: "table-list-page",
@@ -2128,7 +2126,7 @@ export const useConnectionStore = defineStore("connection", () => {
       () => listTablesWithOptionalTableNameFilter(options.node.connectionId!, options.node.database!, options.querySchema, searchFilter, fetchLimit, fetchOffset, options.objectTypes, options.node.catalog, tableNameFilter),
       { force: options.force },
     );
-    const hasMore = searchFilter ? false : tables.length > options.pageSize;
+    const hasMore = paginate ? tables.length > options.pageSize : false;
     const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.node.connectionId) === sourceRevision) {
       indexCompletionTables(options.node.connectionId, options.node.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
@@ -2223,6 +2221,7 @@ export const useConnectionStore = defineStore("connection", () => {
     offset: number;
     pageSize: number;
     searchFilter?: string;
+    pagedSearch?: boolean;
     force?: boolean;
   }): Promise<{ children: TreeNode[]; objectCount: number; hasMore: boolean; nextOffset: number; loadMoreParent?: TableTreeLoadMoreParent }> {
     const searchFilter = (options.searchFilter ?? sidebarSearchQuery.value) || undefined;
@@ -2233,12 +2232,9 @@ export const useConnectionStore = defineStore("connection", () => {
       nodeKind: "simple-tables",
     });
     const sourceRevision = tableListSourceRevision(options.connectionId);
-    // A search must never truncate the fuzzy result set to the first page (see
-    // loadPagedTableGroupChildren); results are bounded by
-    // SIDEBAR_TABLE_SEARCH_RESULT_BUDGET, and unfiltered loads keep the
-    // page+1 probe.
-    const fetchLimit = searchFilter ? SIDEBAR_TABLE_SEARCH_RESULT_BUDGET : options.pageSize + 1;
-    const fetchOffset = searchFilter ? undefined : options.offset;
+    const paginate = options.pagedSearch || !searchFilter;
+    const fetchLimit = paginate ? options.pageSize + 1 : SIDEBAR_TABLE_SEARCH_RESULT_BUDGET;
+    const fetchOffset = paginate ? options.offset : undefined;
     const tables = await loadCachedMetadataListPage<TableInfo[]>(
       metadataListCacheScope({
         kind: "table-list-page",
@@ -2255,7 +2251,7 @@ export const useConnectionStore = defineStore("connection", () => {
       () => listTablesWithOptionalTableNameFilter(options.connectionId, options.database, options.querySchema, searchFilter, fetchLimit, fetchOffset, undefined, undefined, tableNameFilter),
       { force: options.force },
     );
-    const hasMore = searchFilter ? false : tables.length > options.pageSize;
+    const hasMore = paginate ? tables.length > options.pageSize : false;
     const pageTables = hasMore ? tables.slice(0, options.pageSize) : tables;
     if (tableListSourceRevision(options.connectionId) === sourceRevision) {
       indexCompletionTables(options.connectionId, options.database, options.effectiveSchema, tableInfosToCompletionTables(pageTables, options.effectiveSchema));
@@ -5553,9 +5549,10 @@ export const useConnectionStore = defineStore("connection", () => {
               offset: 0,
               pageSize,
               searchFilter: options?.searchFilter === "" ? "" : searchFilter || undefined,
+              pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize), page.loadMoreParent) : page.children;
+            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, pageSize), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else if (simpleObjectDisplay) {
             // The synthetic public scope contains no tables. Avoid issuing a
@@ -5706,9 +5703,10 @@ export const useConnectionStore = defineStore("connection", () => {
               offset: 0,
               pageSize: sidebarObjectGroupPageSize(),
               searchFilter: options?.searchFilter === "" ? "" : searchFilter || undefined,
+              pagedSearch: isSidebarTableSearch,
               force: options?.force,
             });
-            children = page.hasMore && !searchFilter ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize()), page.loadMoreParent) : page.children;
+            children = page.hasMore && (!searchFilter || isSidebarTableSearch) ? appendTableTreeLoadMoreNode(page.children, buildLoadMoreNode(node, page.nextOffset, sidebarObjectGroupPageSize()), page.loadMoreParent) : page.children;
             nextObjectCount = page.objectCount;
           } else {
             const pageSize = sidebarObjectGroupPageSize();
@@ -5791,6 +5789,7 @@ export const useConnectionStore = defineStore("connection", () => {
         schema: parent.schema,
         nodeKind: parent.type,
         objectTypes: objectTypesForScope,
+        searchFilter: options?.searchFilter,
         limit: loadMore.pageSize + 1,
         offset: loadMore.offset,
         sidebarDisplayMode: useSettingsStore().editorSettings.sidebarObjectDisplay,
@@ -5819,6 +5818,8 @@ export const useConnectionStore = defineStore("connection", () => {
               nonTableObjectTypes: [],
               offset: loadMore.offset,
               pageSize: loadMore.pageSize,
+              searchFilter: options?.searchFilter,
+              pagedSearch: !!options?.searchFilter,
               force: false,
             });
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
@@ -5828,7 +5829,9 @@ export const useConnectionStore = defineStore("connection", () => {
             const nextChildren = page.hasMore ? appendTableTreeLoadMoreNode(mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize), page.loadMoreParent) : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
-            await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v8")), nextChildren);
+            if (!options?.searchFilter) {
+              await savePersistedTreeChildren(schemaCacheKey(parentConnectionId, parentDatabase, parent.schema || "", ownerAwareMetadataCacheVersion(config, "objects-simple-v8")), nextChildren);
+            }
             const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
             if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
             return;
@@ -5855,6 +5858,7 @@ export const useConnectionStore = defineStore("connection", () => {
               offset: loadMore.offset,
               pageSize: loadMore.pageSize,
               searchFilter: options?.searchFilter,
+              pagedSearch: !!options?.searchFilter,
               force: false,
             });
             const targetParent = treeNodeLoadRelatedTarget(load, parent);
@@ -5881,7 +5885,9 @@ export const useConnectionStore = defineStore("connection", () => {
             nextChildren = page.hasMore ? [...mergedChildren, buildLoadMoreNode(targetParent, page.nextOffset, loadMore.pageSize)] : mergedChildren;
             targetParent.objectCount = mergedChildren.length;
             setChildren(targetParent, nextChildren);
-            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+            if (!options?.searchFilter) {
+              await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+            }
             const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
             if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
             return;
@@ -5890,7 +5896,9 @@ export const useConnectionStore = defineStore("connection", () => {
           if (!targetParent || !parentEpoch.isCurrent()) return;
           targetParent.objectCount = mergedChildren.length;
           setChildren(targetParent, nextChildren);
-          await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+          if (!options?.searchFilter) {
+            await savePersistedTreeChildren(objectGroupCacheKey(targetParent), nextChildren);
+          }
           const currentTargetParent = treeNodeLoadRelatedTarget(load, parent);
           if (currentTargetParent && parentEpoch.isCurrent()) currentTargetParent.isExpanded = true;
         } catch (e) {
@@ -7711,7 +7719,13 @@ export const useConnectionStore = defineStore("connection", () => {
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
     const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}`;
-    if (completionTablesCache.value[cacheKey]) {
+    const cachedTables = completionTablesCache.value[cacheKey];
+    if (cachedTables) {
+      const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
+      if (localTables.length === 0) return cachedTables;
+      const mergedTables = dedupeCompletionTables([...localTables, ...cachedTables]);
+      completionTablesCache.value[cacheKey] = limit ? mergedTables.slice(0, limit) : mergedTables;
+      indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey], catalog);
       return completionTablesCache.value[cacheKey];
     }
     const requestRevision = completionCacheRevision(connectionId, database);

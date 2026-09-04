@@ -8,6 +8,7 @@ import { Copy, Download, Link2, Loader2, Maximize2, Minimize2, Network, Plus, Re
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
+import DiagramSchemaSelect from "./DiagramSchemaSelect.vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { DiagramExportFormat } from "@/lib/export/diagramFormats";
 
@@ -17,6 +18,7 @@ const props = defineProps<{
   connectionId: string;
   database: string;
   schema: string;
+  selectedSchemas?: string[];
   databases: string[];
   schemas: string[];
   sqlConnections: ConnectionConfig[];
@@ -47,6 +49,7 @@ const emit = defineEmits<{
   (e: "set-connection", value: string): void;
   (e: "set-database", value: string): void;
   (e: "set-schema", value: string): void;
+  (e: "set-selected-schemas", value: string[]): void;
   (e: "update:table-search", value: string): void;
   (e: "set-diagram-mode", value: "table" | "engineering"): void;
   (e: "toggle-match-panel"): void;
@@ -116,14 +119,7 @@ function connectionIconType(id: string) {
       </SelectContent>
     </Select>
 
-    <Select v-if="isSchemaAware" :model-value="schema" :disabled="!schemas.length || loadingSchemas" @update:model-value="(value: any) => emit('set-schema', String(value))">
-      <SelectTrigger class="h-8 w-40 text-xs">
-        <SelectValue :placeholder="loadingSchemas ? t('common.loading') : t('diagram.selectSchema')" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem v-for="name in schemas" :key="name" :value="name">{{ name }}</SelectItem>
-      </SelectContent>
-    </Select>
+    <DiagramSchemaSelect v-if="isSchemaAware" :schemas="schemas" :selected-schemas="selectedSchemas || (schema ? [schema] : [])" :loading="loadingSchemas" :disabled="!schemas.length || loadingSchemas" @update:selected-schemas="(value: string[]) => emit('set-selected-schemas', value)" />
 
     <div class="relative min-w-40 flex-1">
       <Search class="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />

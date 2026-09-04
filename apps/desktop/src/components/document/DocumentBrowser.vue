@@ -287,6 +287,16 @@ const documentFilterFieldSearch = ref<Record<string, string>>({});
 const documentFilterRules = ref<DocumentFilterRule[]>([]);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
+function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
+  const mappingTypes = elasticsearchFieldTypes.value;
+  return columns.map((column) => {
+    // Elasticsearch metadata fields are not part of an index mapping, but they
+    // are textual identifiers in the document grid just like mapped keywords.
+    if (column === "_id" || column === "_routing" || column === "_type") return "keyword";
+    return mappingTypes.get(column) ?? "";
+  });
+}
+const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
 const dynamodbIndexName = ref("__table__");
 const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
@@ -419,10 +429,11 @@ function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: J
 
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
+  const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : lastGridColumnTypes.value;
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
-      column_types: lastGridColumnTypes.value,
+      column_types: columnTypes,
       rows: [],
       affected_rows: 0,
       execution_time_ms: 0,
@@ -432,7 +443,7 @@ const gridResult = computed<QueryResult>(() => {
 
   return {
     columns: lastGridColumns.value,
-    column_types: lastGridColumnTypes.value,
+    column_types: columnTypes,
     rows: gridRows.value,
     mongo_documents: docs,
     mongo_copy_documents: copyDocuments.value,
@@ -513,7 +524,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
 
   const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : undefined;
+  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
   result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
   result.has_more = result.truncated;
@@ -879,7 +890,7 @@ async function applyDocumentStructuredFilters() {
 async function loadElasticsearchMappingFields() {
   if (documentStoreProvider.value.kind !== "elasticsearch") return;
   try {
-    elasticsearchMappingFields.value = await api.getColumns(props.connectionId, props.database, "", props.collection);
+    elasticsearchMappingFields.value = (await api.getColumns(props.connectionId, props.database, "", props.collection)) ?? [];
   } catch {
     elasticsearchMappingFields.value = [];
   }

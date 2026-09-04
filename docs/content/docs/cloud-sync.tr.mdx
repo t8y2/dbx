@@ -1,0 +1,176 @@
+---
+title: DBX Yapılandırma Bulut Eşitlemesi
+description: DBX bağlantılarını, ayarlarını ve kayıtlı SQL'i WebDAV, GitHub Gist ya da Gitee parçacıklarıyla eşitleyin.
+---
+
+<Callout type="info">
+DBX; bağlantıları, uygulama ayarlarını ve kayıtlı SQL'i tek bir anlık görüntüde paketleyebilir. Masaüstü WebDAV ya da özel parçacıklarla eşitleyebilir; Web/Docker WebDAV ile eşitleyip anlık görüntüyü başka bir DBX örneğinde geri yükleyebilir.
+</Callout>
+
+<Callout type="warn">Bulut Eşitleme, DBX yapılandırmasını yedekler. Bağlantılarınızın arkasındaki iş veritabanlarını okumaz ya da yedeklemez. Şema ve veri için [Veritabanı Dışa Aktarma](/tr/docs/database-export), zamanlanmış Masaüstü MySQL/PostgreSQL yedekleri için [Veritabanı Yedekleme](/tr/docs/database-backup) sayfasını kullanın.</Callout>
+
+**Ayarlar → Eşitleme** altından bir sağlayıcı seçin:
+
+- **WebDAV**: Zaten bir NAS, Nextcloud ya da başka bir WebDAV hizmeti kullanıyorsanız en uygunudur. Zamanlanmış yüklemeleri destekler.
+- **GitHub / Gitee parçacıkları**: Anlık görüntüyü kendi sunucunuza gerek kalmadan özel bir Gist ya da kod parçacığında saklar. Şu anda yalnızca Masaüstü'nde sunulur ve yüklemeler ile indirmeler elle yapılır.
+
+## Neler Eşitlenir
+
+| Öğe | Varsayılan davranış |
+| --- | --- |
+| Veritabanı bağlantıları ve gizli olmayan seçenekler | Eşitlenir |
+| Kenar çubuğu düzeni ve sabitlenmiş düğümler | Eşitlenir |
+| Kayıtlı SQL kitaplığı | Eşitlenir |
+| Masaüstü ve düzenleyici ayarları | Eşitlenir |
+| Veritabanı, SSH, proxy, HTTP tüneli, bağlantı dizesi ve yapay zekâ API gizli bilgileri | Varsayılan olarak hariç; şifrelenip eşitlenebilir |
+| JDBC sürücüleri, eklentiler ve yerel dosyalar | Eşitlenmez |
+
+<Callout type="warn">
+İndirme; yerel bağlantı meta verisini ve kayıtlı SQL'i uzak anlık görüntüyle değiştirir. Geri yüklemeden önce parçacık kimliğini ya da WebDAV yolunu doğrulayın.
+</Callout>
+
+## GitHub Gist
+
+### Erişim Belirteci Oluşturma
+
+Bir GitHub **ayrıntılı kişisel erişim belirteci** önerilir:
+
+[GitHub ayrıntılı belirteç oluşturma sayfasını açın](https://github.com/settings/personal-access-tokens/new)
+
+<Steps>
+<Step>
+    ### Belirteç ayarlarını açın
+
+    GitHub'a giriş yapın ve **Settings → Developer settings → Personal access tokens → Fine-grained tokens** bölümünü açın.
+  </Step>
+<Step>
+    ### Bir belirteç oluşturun
+
+    **Generate new token**'ı seçin, ardından bir ad ve sona erme tarihi belirleyin.
+  </Step>
+<Step>
+    ### Yetki verin
+
+    **Account permissions** altında **Gists** yetkisini **Read and write** yapın. Depo yetkileri gerekmez.
+  </Step>
+<Step>
+    ### Belirteci kaydedin
+
+    Belirteci hemen kopyalayın. GitHub belirtecin tamamını yalnızca bir kez gösterir.
+  </Step>
+</Steps>
+
+Klasik bir belirteç de çalışır, ancak yalnızca `gist` kapsamını verin.
+
+### İlk Yükleme
+
+<Steps>
+<Step>
+    ### GitHub'ı seçin
+
+    **Ayarlar → Eşitleme → GitHub / Gitee** bölümünü açın ve **GitHub Gist**'i seçin.
+  </Step>
+<Step>
+    ### Belirteci girin
+
+    Erişim belirtecini yapıştırın. **Bu aygıtta şifreli olarak sakla** seçeneğini açmanız önerilir.
+  </Step>
+<Step>
+    ### Gist'i oluşturun
+
+    **Parçacık Kimliği** alanını boş bırakın ve **Yükle**'yi seçin. DBX özel bir Gist oluşturur ve dönen kimliği saklar.
+  </Step>
+</Steps>
+
+DBX, Gist içinde şifreli bir `dbx-sync.json` dosyası saklar. Parçacık şifreleme parolası anlık görüntünün tamamını korur, bu yüzden URL; bağlantı ayrıntılarını, SQL'i ya da ayarları açığa çıkarmaz. Eski sürümlerden kalan düz metin parçacıkları taşıma için hâlâ bir kez indirilebilir.
+
+<Callout type="warn">
+Eski sürümlerin oluşturduğu düz metin parçacıkları yerinde güvenle taşınamaz: aynı Gist'i güncellemek revizyon geçmişini kaldırmaz. Bunun yerine **Eski parçacığı taşı** işlemini kullanın. DBX önce mevcut uzak anlık görüntüyü yeni bir parçacığa şifreler, yeni kimliği yerelde saklar ve silmeden önce eski parçacığı yeniden okur. Başka bir aygıt eski içeriği değiştirdiyse DBX otomatik temizliği durdurur ve hangi eski parçacığın elle silinmesi gerektiğini bildirir. Eski anlık görüntü şifreli kimlik bilgileri içeriyorsa, DBX bunları temizlemeden önce doğrulayabilsin diye özgün kimlik bilgisi parolasını girin. Eski parçacığın açığa çıkarmış olabileceği tüm kimlik bilgilerini değiştirin.
+</Callout>
+
+### Başka Bir Aygıtta Geri Yükleme
+
+1. Özel Gist'i açın ve kimliğini URL'den kopyalayın. URL normalde `https://gist.github.com/<gerçek-kullanıcı-adı>/<gist-kimliği>` biçimindedir; son bölüm kimliktir. Ayrıca `https://gist.github.com/<gist-kimliği>` adresini açıp GitHub'ın gerçek kullanıcı adını içeren URL'ye yönlendirmesini de sağlayabilirsiniz.
+2. Yeni aygıtta aynı GitHub belirtecini ve Gist kimliğini girin.
+3. Erişimi doğrulamak için **Test Et**'i seçin.
+4. **İndir**'i seçip geri yüklemeyi onaylayın.
+
+## Gitee Parçacıkları
+
+### Kişisel Erişim Belirteci Oluşturma
+
+[Gitee kişisel erişim belirteci sayfasını açın](https://gitee.com/profile/personal_access_tokens)
+
+<Steps>
+<Step>
+    ### Belirteç ayarlarını açın
+
+    Gitee'ye giriş yapın ve **Ayarlar → Kişisel Erişim Belirteçleri** bölümünü açın.
+  </Step>
+<Step>
+    ### Bir belirteç oluşturun
+
+    **Yeni belirteç üret**'i seçin ve bir açıklama girin.
+  </Step>
+<Step>
+    ### Yetki verin
+
+    Yalnızca kod parçacığı (`gists`) yetkisini seçin. Yetkiler gruplanmışsa parçacıkları okuyup yazmaya izin veren en küçük yetkiyi seçin.
+  </Step>
+<Step>
+    ### Belirteci kaydedin
+
+    Üretilen belirteci hemen kopyalayın ve bir parola yöneticisinde saklayın.
+  </Step>
+</Steps>
+
+### Yükleme ve Geri Yükleme
+
+1. **Ayarlar → Eşitleme → GitHub / Gitee** altında **Gitee Parçacığı**'nı seçin.
+2. Kişisel erişim belirtecini girin. İlk yüklemede parçacık kimliğini boş bırakın; DBX özel bir parçacık oluşturur ve kimliğini saklar.
+3. Başka bir yerde geri yüklemek için aynı parçacık kimliğini girip **İndir**'i seçin.
+
+Gitee parçacıkları da bir `dbx-sync.json` dosyası kullanır.
+
+## Eşitleme Parolası ve Gizli Bilgiler
+
+GitHub Gist ve Gitee parçacıkları anlık görüntünün tamamını her zaman bir **parçacık şifreleme parolasıyla** şifreler. Parola hiçbir zaman yüklenmez ya da kaydedilmez ve kurtarılamaz. Bu parola, isteğe bağlı olarak eşitlenen kimlik bilgilerini şifreleyen paroladan bağımsızdır.
+
+Anlık görüntüler varsayılan olarak kimlik bilgilerini dışarıda bırakır. Parolaları başka bir aygıtta geri yüklemek için:
+
+1. **Yüklerken şifreli kimlik bilgilerini dâhil et** seçeneğini açın.
+2. Kimlik bilgileri için ayrı bir **eşitleme parolası** girin.
+3. Anlık görüntüyü yükleyin.
+4. Diğer aygıtta **İndirirken şifreli kimlik bilgilerini geri yükle** seçeneğini açın ve aynı kimlik bilgisi parolasını girin. Yerel parolaları değiştirmemek için kapalı bırakın.
+
+DBX, şifreleme anahtarını **Argon2id** ile türetir ve **AES-256-GCM** şifrelemesi kullanır. Sağlayıcı erişim belirteçleri aygıta özgü bir anahtarla şifrelenir ve hiçbir zaman `dbx-sync.json` dosyasına yazılmaz.
+
+<Callout type="warn">
+İki parola da kurtarılamaz. Şifreli bir GitHub/Gitee parçacığı, parçacık şifreleme parolası olmadan geri yüklenemez. WebDAV için, şifreli gizli bilgiler içermeyen bir anlık görüntü parola ifadesi olmadan da geri yüklenebilir.
+</Callout>
+
+## WebDAV
+
+WebDAV uç noktasını, kullanıcı adını, uygulama parolasını ve uzak anlık görüntü yolunu girin. Varsayılan yol `DBX/sync/snapshot.json` şeklindedir.
+
+Web/Docker modunda WebDAV isteklerini DBX sunucusu gönderir, bu yüzden tarayıcı CORS kısıtları geçerli olmaz. WebDAV uygulama parolaları geçerli DBX örneğinde şifrelenir ve eşitleme anlık görüntülerine hiçbir zaman dâhil edilmez.
+
+WebDAV, ilgili DBX istemcisi açık kaldığı sürece zamanlanmış yüklemeleri destekler. Web/Docker kullanırken en az bir DBX sayfasını açık tutun. İndirmeler, geçerli örnekteki verinin yanlışlıkla değiştirilmesini önlemek için her zaman onay ister.
+
+## Sorun Giderme
+
+### HTTP 401 ya da 403
+
+Belirteç geçersiz, süresi dolmuş ya da parçacık okuma/yazma yetkisi yok. En az yetkili yeni bir belirteç oluşturup yeniden test edin.
+
+### HTTP 404
+
+Parçacık kimliği yanlış ya da geçerli belirteç özel parçacığa erişemiyor.
+
+### İlk yüklemeden sonra kimlik nerede?
+
+DBX bunu otomatik olarak saklar. Ayrıca GitHub Gist ya da Gitee parçacık sayfasının URL'sinde bulabilirsiniz.
+
+### Birden çok aygıt otomatik eşitlenebilir mi?
+
+Parçacık eşitlemesi şu anda elle yükleme ve indirme kullanır; eşzamanlı değişiklikleri birleştirmez. Başka bir aygıttaki değişiklikleri değiştirmemek için yüklemeden önce en son anlık görüntüyü indirin.

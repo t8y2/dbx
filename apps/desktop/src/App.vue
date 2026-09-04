@@ -281,7 +281,8 @@ const rightSidebarPanelStorageKeys: Partial<Record<RightSidebarPanelId, string>>
 let lastOpenedRightSidebarPanel = RIGHT_SIDEBAR_PANEL_IDS.find((panelId) => rightSidebarPanelRefs[panelId].value);
 const sidebarOpen = ref(safeLocalStorageGet("dbx-sidebar-open") !== "false");
 const aiPanelReady = ref(false);
-const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize } = usePanelResize();
+const { sidebarWidth, aiPanelWidth, historyWidth, sqlLibraryWidth, sqlFilePanelWidth, tabBarWidth, tabBarCollapsed, startSidebarResize, startAiPanelResize, startHistoryResize, startSqlLibraryResize, startSqlFilePanelResize, startLeftTabBarResize, startRightTabBarResize, setTabBarCollapsed } =
+  usePanelResize();
 const aiAssistantRef = ref<AiAssistantHandle | null>(null);
 const appSidebarRef = ref<InstanceType<typeof AppSidebar> | null>(null);
 const appTabBarRef = ref<InstanceType<typeof AppTabBar> | null>(null);
@@ -599,9 +600,13 @@ async function detachTab(tab: QueryTab, position?: { x: number; y: number }) {
 watch(
   () => activeTab.value?.mode,
   (mode) => {
-    if (mode !== "data") isZenMode.value = false;
+    if (!supportsZenMode(mode)) isZenMode.value = false;
   },
 );
+
+function supportsZenMode(mode: QueryTab["mode"] | undefined) {
+  return mode === "data" || mode === "nacos";
+}
 
 watch(activeOutputView, (view) => {
   if (isDetachedWindowContext && detachedContextTabId) {
@@ -610,7 +615,7 @@ watch(activeOutputView, (view) => {
 });
 
 function toggleZenMode() {
-  if (activeTab.value?.mode !== "data") return;
+  if (!supportsZenMode(activeTab.value?.mode)) return;
   isZenMode.value = !isZenMode.value;
 }
 
@@ -860,6 +865,18 @@ const tabWorkspaceLayoutClass = computed(() => {
   if (settingsStore.editorSettings.tabPlacement === "right") return "flex-row-reverse";
   return isVerticalTabPlacement.value ? "flex-row" : "flex-col";
 });
+
+function startTabBarResize(event: MouseEvent) {
+  if (settingsStore.editorSettings.tabPlacement === "right") {
+    startRightTabBarResize(event);
+    return;
+  }
+  startLeftTabBarResize(event);
+}
+
+function toggleTabBarCollapsed() {
+  setTabBarCollapsed(!tabBarCollapsed.value);
+}
 const updateNotificationsEnabled = computed(() => settingsStore.editorSettings.updateNotificationsEnabled);
 
 function openSettings(initialTab = "appearance", initialSection?: string) {
@@ -2953,7 +2970,7 @@ async function handleKeydown(e: KeyboardEvent) {
     setSidebarOpen(!sidebarOpen.value);
     return;
   }
-  if (isToggleZenModeShortcut(e, shortcuts) && activeTab.value?.mode === "data") {
+  if (isToggleZenModeShortcut(e, shortcuts) && supportsZenMode(activeTab.value?.mode)) {
     e.preventDefault();
     e.stopPropagation();
     toggleZenMode();
@@ -3373,6 +3390,8 @@ onUnmounted(() => {
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
                 :detached-drop-target="detachedDropTargetTabId !== null"
                 :can-detach-tabs="isDesktop"
+                :tab-bar-width="tabBarWidth"
+                :tab-bar-collapsed="tabBarCollapsed"
                 @toggle-zen-mode="toggleZenMode"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
@@ -3386,6 +3405,8 @@ onUnmounted(() => {
                 @discard-all-tab-close="handleDiscardAllPendingTabClose"
                 @cancel-tab-close="cancelPendingAppClose"
                 @detach-tab="detachTab"
+                @start-resize="startTabBarResize"
+                @toggle-collapse="toggleTabBarCollapsed"
               />
               <DetachedTabHeader
                 v-else-if="activeTab"
@@ -3487,6 +3508,7 @@ onUnmounted(() => {
                       :selected-sql="selectedSql"
                       :cursor-pos="cursorPos"
                       :block-dangerous-redis-commands="blockDangerousRedisCommands"
+                      :zen-mode="isZenMode"
                       @update:active-output-view="activeOutputView = $event"
                       @fix-with-ai="fixWithAi"
                       @send-selection-to-ai="sendSelectionToAi"
@@ -3544,6 +3566,7 @@ onUnmounted(() => {
                       @structure-editor-close="activeTab && queryStore.closeTab(activeTab.id)"
                       @open-settings="openSettings"
                       @open-connection-settings="openConnectionSettings"
+                      @toggle-zen-mode="toggleZenMode"
                     />
                   </KeepAlive>
                 </div>

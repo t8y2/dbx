@@ -502,6 +502,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
+    skipTlsVerify: !!config?.skipTlsVerify,
     enableThinking: config?.enableThinking ?? true,
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
     maxOutputTokens,

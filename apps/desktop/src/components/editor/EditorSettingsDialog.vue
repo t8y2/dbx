@@ -3524,6 +3524,7 @@ const aiEditApiStyle = ref<AiApiStyle>("completions");
 const aiEditCustomHeaderRows = ref<AiHeaderRow[]>([]);
 const aiEditProxyEnabled = ref(false);
 const aiEditProxyUrl = ref("");
+const aiEditSkipTlsVerify = ref(false);
 const aiEditEnableThinking = ref(true);
 const aiEditReasoningLevel = ref<AiReasoningLevel>("default");
 const aiEditMaxOutputTokens = ref<number | undefined>(undefined);
@@ -3583,6 +3584,8 @@ const aiIsGrokCli = computed(() => aiEditProvider.value === "grok-cli");
 const aiIsCodeBuddyCli = computed(() => aiEditProvider.value === "codebuddy-cli");
 const aiIsQoderCli = computed(() => aiEditProvider.value === "qoder-cli");
 const aiIsCliProvider = computed(() => CLI_AI_PROVIDERS.has(aiEditProvider.value));
+
+const aiSupportsSkipTlsVerify = computed(() => aiEditProvider.value === "custom" || aiEditProvider.value === "openai-compatible" || aiEditProvider.value === "anthropic-compatible");
 const aiCliProviderLabel = computed(() => selectedAiProviderPreset.value.label);
 const aiCliCommandName = computed(() => {
   if (aiIsClaudeCodeCli.value) return "claude";
@@ -3809,6 +3812,7 @@ function currentAiEditConfig() {
     customHeaders: customHeadersFromRows(),
     proxyEnabled: aiEditProxyEnabled.value,
     proxyUrl: aiEditProxyUrl.value,
+    skipTlsVerify: aiSupportsSkipTlsVerify.value && aiEditSkipTlsVerify.value,
     enableThinking: aiEditEnableThinking.value,
     reasoningLevel: aiEditReasoningLevel.value,
     maxOutputTokens: aiEditMaxOutputTokens.value || undefined,
@@ -3857,6 +3861,7 @@ function aiSelectProvider(presetId: string) {
   aiEditLegacyModels.value = preset.group === "partner" ? [...(preset.models ?? [])] : [];
   aiEditApiStyle.value = preset.apiStyle;
   aiEditCustomHeaderRows.value = [];
+  aiEditSkipTlsVerify.value = false;
   aiEditEnableThinking.value = true;
   aiEditReasoningLevel.value = "default";
   if (CLI_AI_PROVIDERS.has(provider)) void ensureCliMcpStatus();
@@ -3896,6 +3901,7 @@ function aiEnterEditMode(configId?: string) {
       aiEditCustomHeaderRows.value = aiHeaderRowsFromConfig(config.customHeaders);
       aiEditProxyEnabled.value = config.proxyEnabled ?? false;
       aiEditProxyUrl.value = config.proxyUrl ?? "";
+      aiEditSkipTlsVerify.value = config.skipTlsVerify ?? false;
       aiEditEnableThinking.value = config.enableThinking ?? true;
       aiEditReasoningLevel.value = config.reasoningLevel ?? "default";
       aiEditMaxOutputTokens.value = config.maxOutputTokens;
@@ -3930,6 +3936,7 @@ function aiEnterEditMode(configId?: string) {
     aiEditCustomHeaderRows.value = [];
     aiEditProxyEnabled.value = false;
     aiEditProxyUrl.value = "";
+    aiEditSkipTlsVerify.value = false;
     aiEditEnableThinking.value = true;
     aiEditReasoningLevel.value = "default";
     aiEditMaxOutputTokens.value = undefined;
@@ -7775,6 +7782,18 @@ LIMIT 100;</pre
                 <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-center gap-3">
                   <Label class="text-right text-xs">{{ t("ai.proxyUrl") }}</Label>
                   <Input v-model="aiEditProxyUrl" autocomplete="off" class="col-span-2" inputClass="h-8 text-xs" placeholder="socks5://127.0.0.1:7890" :disabled="!aiEditProxyEnabled" />
+                </div>
+
+                <!-- Skip TLS Verify -->
+                <div v-if="aiSupportsSkipTlsVerify" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.sslVerification") }}</Label>
+                  <div class="col-span-2">
+                    <label class="flex items-center gap-2 text-xs text-muted-foreground">
+                      <input v-model="aiEditSkipTlsVerify" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                      {{ t("ai.skipTlsVerify") }}
+                    </label>
+                    <p class="mt-1 text-xs text-muted-foreground">{{ t("ai.skipTlsVerifyHint") }}</p>
+                  </div>
                 </div>
               </div>
             </section>

@@ -51,7 +51,7 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
-import { redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
+import { redisFuzzySearchScanBudget, redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
 import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
@@ -651,14 +651,15 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   // complete. Bound every user-triggered page to a cumulative COUNT budget,
   // preserve the returned cursor, and let the existing "Load more" action
   // continue sparse searches without turning one request into a full scan.
-  const scanCountBudget = 50_000;
+  const isFuzzyKeySearch = searchMode.value === "key" && fuzzyKeySearch.value;
+  let scanCountBudget = redisFuzzySearchScanBudget(0);
   const iterationsPerCall = 8;
   const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
   // When part of the automatic-fill chain, also cap this call to whatever is
   // left of the shared iteration budget — this is what actually bounds the
   // total backend work across every page that chain triggers, not just this
   // one call's own per-call cap.
-  const maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
+  let maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
   let totalKeys = 0;
@@ -670,6 +671,12 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
     const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     completedIterations += iterations;
     if (totalKeys === 0) totalKeys = result.total_keys;
+    if (isFuzzyKeySearch && totalKeys > 0) {
+      scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
+      const fuzzyMaxIterations = Math.ceil(scanCountBudget / Math.max(1, pageSize));
+      const availableIterations = iterationBudget ? completedIterations + iterationBudget.remaining : fuzzyMaxIterations;
+      maxIterations = Math.min(fuzzyMaxIterations, Math.max(maxIterations, availableIterations));
+    }
     if (result.keys.length > 0 || result.cursor === 0) {
       return { ...result, total_keys: totalKeys };
     }

@@ -1276,17 +1276,6 @@ fn query_result_has_rows(result: &db::QueryResult) -> bool {
     !result.rows.is_empty()
 }
 
-fn is_simple_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
 fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseType) -> bool {
     is_postgres_transfer_dialect(source_db) && is_postgres_transfer_dialect(target_db)
 }
@@ -2014,11 +2003,18 @@ fn sqlserver_row_number_page_sql(
     )
 }
 
-fn postgres_index_column_sql(column: &str) -> String {
-    if is_simple_identifier(column) {
-        quote_identifier(column, &DatabaseType::Postgres)
-    } else {
-        column.to_string()
+fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<&str>) -> String {
+    // The base key text: a real column is quoted as an identifier; an expression/functional
+    // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
+    // opclass — see `crates/dbx-core/src/db/postgres.rs`), so quoting the whole thing as
+    // an identifier would turn it into a nonexistent column reference (#6295).
+    let base = if is_expression { column.to_string() } else { quote_identifier(column, &DatabaseType::Postgres) };
+    // The opclass is read separately from `pg_index.indclass` for every key position
+    // (including expression keys) and appended uniformly — it never lives inside the
+    // expression text, so there is no duplication risk.
+    match opclass.filter(|o| !o.is_empty()) {
+        Some(opc) => format!("{base} {opc}"),
+        None => base,
     }
 }
 
@@ -2037,8 +2033,17 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
             .filter(|value| !value.is_empty())
             .map(|value| format!(" USING {value}"))
             .unwrap_or_default();
-        let columns =
-            index.columns.iter().map(|column| postgres_index_column_sql(column)).collect::<Vec<_>>().join(", ");
+        let columns = index
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, column)| {
+                let is_expr = index.key_is_expression.get(i).copied().unwrap_or(false);
+                let opclass = index.column_opclasses.get(i).and_then(|o| o.as_deref());
+                postgres_index_column_sql(column, is_expr, opclass)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let include_clause = index
             .included_columns
             .as_ref()
@@ -5167,6 +5172,16 @@ async fn execute_on_pool_once(
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
             db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows).await
+        }
+        PoolKind::InfluxDb(client) => {
+            let client = client.clone();
+            let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
+            db::influxdb_driver::execute_query(&client, &database, sql).await
+        }
+        PoolKind::InfluxDb3(client) => {
+            let client = client.clone();
+            let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
+            db::influxdb3_driver::execute_query(&client, &database, sql, max_rows).await
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
@@ -8665,6 +8680,97 @@ mod tests {
         (AppState::new(storage), dir)
     }
 
+    async fn spawn_influxdb3_transfer_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 2048];
+                let bytes_read = socket.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let mut chunk = [0_u8; 2048];
+                let bytes_read = socket.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+            let body = r#"[{"time":"2026-09-03T00:00:00Z","value":42}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn transfer_read_dispatches_influxdb3_with_database_and_row_limit() {
+        let (base_url, server) = spawn_influxdb3_transfer_server().await;
+        let (state, dir) = test_app_state().await;
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influxdb3-transfer",
+            "name": "InfluxDB 3 transfer",
+            "db_type": "influxdb3",
+            "host": "127.0.0.1",
+            "port": 8181,
+            "username": "",
+            "password": "",
+            "database": "metrics"
+        }))
+        .unwrap();
+        let client = db::influxdb3_driver::Influxdb3Client::new_for_config(
+            &base_url,
+            &config,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        state.configs.write().await.insert(config.id.clone(), config);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("influxdb3-transfer:metrics".to_string(), PoolKind::InfluxDb3(client));
+            })
+            .await;
+
+        let result = execute_read_on_pool_with_max_rows(
+            &state,
+            "influxdb3-transfer:metrics",
+            "SELECT value FROM weather",
+            Some(1),
+        )
+        .await
+        .unwrap();
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("InfluxDB 3 transfer server did not receive a request")
+            .unwrap();
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert_eq!(payload["db"], json!("metrics"));
+        assert_eq!(payload["q"], json!("SELECT value FROM weather LIMIT 2"));
+        assert_eq!(result.affected_rows, 1);
+    }
+
     #[tokio::test]
     async fn postgres_transfer_metadata_routes_agent_pools() {
         let (state, dir) = test_app_state().await;
@@ -11563,7 +11669,8 @@ mod tests {
             index_type: Some("btree".to_string()),
             included_columns: Some(vec!["created_at".to_string()]),
             comment: Some("lookup index".to_string()),
-            key_is_expression: Vec::new(),
+            key_is_expression: vec![true],
+            column_opclasses: vec![],
         }];
         let foreign_keys = vec![
             db::ForeignKeyInfo {
@@ -11601,6 +11708,128 @@ mod tests {
             vec![
                 "ALTER TABLE \"archive\".\"orders\" ADD CONSTRAINT \"orders_user_id_fkey\" FOREIGN KEY (\"user_id\", \"tenant_id\") REFERENCES \"archive\".\"users\" (\"id\", \"tenant_id\")".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_includes_opclass_for_gin_trigram() {
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_trgm_idx".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"users_name_trgm_idx\" ON \"public\".\"users\" USING gin (\"name\" gin_trgm_ops)".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_no_opclass_when_all_default() {
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_idx".to_string(),
+            columns: vec!["name".to_string(), "status".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false],
+            column_opclasses: vec![None, None],
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"users_name_idx\" ON \"public\".\"users\" (\"name\", \"status\")"
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_expression_appends_opclass() {
+        // The per-column `pg_get_indexdef(indexrelid, colno, pretty)` returns only the
+        // bare expression (PostgreSQL sets `attrsOnly = (colno != 0)`, so the opclass
+        // block is skipped — see `ruleutils.c`). The opclass is read separately from
+        // `indclass` into `column_opclasses`, so transfer DDL must append it to an
+        // expression key just like a real column.
+        let indexes = vec![db::IndexInfo {
+            name: "users_lower_email_idx".to_string(),
+            columns: vec!["lower(email)".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![true],
+            column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"users_lower_email_idx\" ON \"public\".\"users\" USING gin (lower(email) gin_trgm_ops)"
+                .to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_mixed_opclass_and_default() {
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_status_idx".to_string(),
+            columns: vec!["name".to_string(), "status".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false, false],
+            column_opclasses: vec![Some("text_pattern_ops".to_string()), None],
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"users_name_status_idx\" ON \"public\".\"users\" USING btree (\"name\" text_pattern_ops, \"status\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_empty_column_opclasses_vec_falls_back_to_no_opclass() {
+        let indexes = vec![db::IndexInfo {
+            name: "users_name_idx".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: None,
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![],
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "users", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"users_name_idx\" ON \"public\".\"users\" (\"name\")".to_string()]
         );
     }
 

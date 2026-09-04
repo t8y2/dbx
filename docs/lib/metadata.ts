@@ -8,11 +8,13 @@ export const DEFAULT_OG_IMAGE = "/logo.png";
 const LOCALE_MAP: Record<string, string> = {
   en: "en_US",
   cn: "zh_CN",
+  tr: "tr_TR",
 };
 
 const HTML_LANG_MAP: Record<string, string> = {
   en: "en",
   cn: "zh-CN",
+  tr: "tr",
 };
 
 export function getHtmlLang(lang: string): string {
@@ -20,7 +22,7 @@ export function getHtmlLang(lang: string): string {
 }
 
 function swapLang(path: string, to: string): string {
-  return path.replace(/^\/(en|cn)/, `/${to}`);
+  return path.replace(/^\/(en|cn|tr)/, `/${to}`);
 }
 
 interface BuildMetadataParams {
@@ -58,6 +60,7 @@ export function buildMetadata({
       languages: {
         en: `${SITE_URL}${swapLang(path, "en")}`,
         zh: `${SITE_URL}${swapLang(path, "cn")}`,
+        tr: `${SITE_URL}${swapLang(path, "tr")}`,
         "x-default": `${SITE_URL}${swapLang(path, "en")}`,
       },
     },

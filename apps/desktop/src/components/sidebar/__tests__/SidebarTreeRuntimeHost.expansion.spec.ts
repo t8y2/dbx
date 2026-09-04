@@ -11,6 +11,8 @@ import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.
 const connectionStore = {
   treeNodes: [] as TreeNode[],
   sidebarSearchQuery: "",
+  activeConnectionId: null as string | null,
+  connectedIds: new Set<string>(),
   canUseLoadedTreeNodeToggle: vi.fn(() => true),
   releaseCollapsedTreeNodeChildren: vi.fn(),
   getConfig: vi.fn(() => ({ db_type: "mysql", name: "connection" })),
@@ -56,12 +58,47 @@ afterEach(() => {
   document.body.innerHTML = "";
   connectionStore.treeNodes = [];
   connectionStore.sidebarSearchQuery = "";
+  connectionStore.activeConnectionId = null;
+  connectionStore.connectedIds.clear();
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it("activates the owning connection when a cached node toggles locally", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: "mysql:basic:orders", label: "orders", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    connectionStore.connectedIds.add("mysql");
+    connectionStore.activeConnectionId = "another-connection";
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(group);
+    await nextTick();
+
+    expect(connectionStore.activeConnectionId).toBe("mysql");
+    expect(group.isExpanded).toBe(true);
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+  });
+
   it("publishes a rendered group collapse and synchronizes the live tree", async () => {
     const liveGroup: TreeNode = {
       id: "connection:database:__tables",

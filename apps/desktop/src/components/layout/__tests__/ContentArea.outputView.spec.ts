@@ -6,7 +6,11 @@ const contentAreaSource = readFileSync(new URL("../ContentArea.vue", import.meta
 describe("ContentArea completed query output", () => {
   it("re-evaluates the no-table fallback when tab activation resets the shared view", () => {
     expect(contentAreaSource).toContain("props.activeTab.isExecuting, props.activeOutputView] as const");
-    expect(contentAreaSource).toContain('emit("update:activeOutputView", result ? defaultViewForResult(result) : "summary")');
+    expect(contentAreaSource).toContain('emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary")');
+  });
+
+  it("scopes the output-view watcher to the shared result surface", () => {
+    expect(contentAreaSource).toContain("if (props.editorOnly) return;");
   });
 });
 

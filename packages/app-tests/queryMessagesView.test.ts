@@ -7,6 +7,7 @@ import es from "../../apps/desktop/src/i18n/locales/es.ts";
 import it from "../../apps/desktop/src/i18n/locales/it.ts";
 import ja from "../../apps/desktop/src/i18n/locales/ja.ts";
 import ko from "../../apps/desktop/src/i18n/locales/ko.ts";
+import tr from "../../apps/desktop/src/i18n/locales/tr.ts";
 import ptBR from "../../apps/desktop/src/i18n/locales/pt-BR.ts";
 import zhCN from "../../apps/desktop/src/i18n/locales/zh-CN.ts";
 import zhTW from "../../apps/desktop/src/i18n/locales/zh-TW.ts";
@@ -76,11 +77,11 @@ test("ContentArea wires server messages into the switcher and the messages view"
   assert.match(contentArea, /<QueryMessagesView v-else-if="activeOutputView === 'messages'"[\s\S]*:messages="activeTab\.result\?\.messages \?\? \[\]"/);
   // Results with no result set auto-switch via the shared default-view helper.
   assert.match(contentArea, /import \{ defaultViewForResult \} from "@\/lib\/query\/queryResultDefaultView"/);
-  assert.match(contentArea, /emit\("update:activeOutputView", result \? defaultViewForResult\(result\) : "summary"\)/);
+  assert.match(contentArea, /emit\("update:activeOutputView", props\.activeTab\.id, result \? defaultViewForResult\(result\) : "summary"\)/);
 });
 
 test("every locale defines the query message strings", () => {
-  const locales = { en, es, it, ja, ko, "pt-BR": ptBR, "zh-CN": zhCN, "zh-TW": zhTW };
+  const locales = { en, es, it, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 
   for (const [name, locale] of Object.entries(locales)) {
     assert.ok(locale.queryMessages.empty.length > 0, `${name}: queryMessages.empty`);

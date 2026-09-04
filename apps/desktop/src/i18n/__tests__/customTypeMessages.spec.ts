@@ -5,6 +5,7 @@ import itLocale from "@/i18n/locales/it";
 import ja from "@/i18n/locales/ja";
 import ko from "@/i18n/locales/ko";
 import ptBR from "@/i18n/locales/pt-BR";
+import tr from "@/i18n/locales/tr";
 import zhCN from "@/i18n/locales/zh-CN";
 import zhTW from "@/i18n/locales/zh-TW";
 
@@ -13,7 +14,7 @@ type Messages = {
   contextMenu: typeof en.contextMenu;
 };
 
-const locales = { es, it: itLocale, ja, ko, "pt-BR": ptBR, "zh-CN": zhCN, "zh-TW": zhTW } as unknown as Record<string, Messages>;
+const locales = { es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW } as unknown as Record<string, Messages>;
 
 describe("custom type translations", () => {
   it("provides localized labels in every supported non-English locale", () => {

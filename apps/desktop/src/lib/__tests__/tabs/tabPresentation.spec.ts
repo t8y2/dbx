@@ -12,9 +12,13 @@ import {
   resultGridInstanceKey,
   resultSourceRange,
   statementExecutionMarkers,
+  tabColorStyle,
+  tabDatabaseIconType,
   tabDisplayTitle,
+  tabIconClass,
   tabTooltipLines,
   tabularResultItems,
+  dirtyTabTitleStyle,
 } from "@/lib/tabs/tabPresentation";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
@@ -394,5 +398,40 @@ describe("statement execution markers", () => {
   it("invalidates every marker after the editor document changes", () => {
     const executedSql = "SELECT 1;\nSELECT 2;";
     expect(statementExecutionMarkers(`-- edited\n${executedSql}`, [{ columns: ["value"], rows: [[1]], affected_rows: 0, execution_time_ms: 1, statement_index: 0, sourceStatement: "SELECT 1" }], "mysql", "stale-editor-fingerprint", executedSql)).toEqual([]);
+  });
+});
+
+describe("shared tab presentation helpers", () => {
+  it("classifies tab icon colors without MQ special-casing", () => {
+    expect(tabIconClass(queryTab({ mode: "data" }))).toContain("text-emerald-600");
+    expect(tabIconClass(queryTab({ mode: "mq" }))).toBe("");
+    expect(tabIconClass(queryTab({ externalSqlFileMissing: true }))).toContain("text-amber-600");
+  });
+
+  it("builds active/inactive color styles for classic and non-classic layouts", () => {
+    const activeClassic = tabColorStyle(queryTab({}), true, true);
+    expect(activeClassic?.boxShadow).toContain("var(--ring)");
+    const inactiveModern = tabColorStyle(queryTab({}), false, false);
+    expect(inactiveModern?.borderColor).toBeUndefined();
+  });
+
+  it("resolves MQ driver icons from the connection store", () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "mq-1",
+        name: "MQ",
+        db_type: "mq",
+        driver_profile: "kafka",
+        color: "",
+      } as ConnectionConfig,
+    ];
+    expect(tabDatabaseIconType(queryTab({ connectionId: "mq-1", mode: "mq" }))).toBe("kafka");
+  });
+
+  it("returns a dirty-title style only when the tab is dirty", () => {
+    expect(dirtyTabTitleStyle(false)).toBeUndefined();
+    expect(dirtyTabTitleStyle(true)?.fontStyle).toBe("italic");
+    expect(dirtyTabTitleStyle(true)?.fontWeight).toBe(700);
   });
 });

@@ -3,7 +3,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { Compartment, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { StreamLanguage, ensureSyntaxTree } from "@codemirror/language";
 import { Decoration, EditorView } from "@codemirror/view";
-import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, FileClock, FileInput, FileText, Loader2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
+import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
@@ -40,6 +40,8 @@ import {
   isNacosConfigDeleteSnapshotInScope,
   resolveNacosConfigCopyText,
   resolveNacosConfigSaveCompletion,
+  resolveNacosConsoleUrl,
+  nacosMetadataTableRows,
   type NacosConfigDeleteSnapshot,
 } from "@/lib/nacos/nacosAdmin";
 import { createNacosNamespaceRequestGuard, subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
@@ -93,6 +95,11 @@ const props = defineProps<{
   targetKeyword?: string;
   targetRequestId?: number;
   readOnly?: boolean;
+  zenMode?: boolean;
+}>();
+
+const emit = defineEmits<{
+  toggleZenMode: [];
 }>();
 
 type AdminTab = "configs" | "services";
@@ -241,6 +248,8 @@ const instanceEditorOpen = ref(false);
 const instanceEditorError = ref("");
 const instanceEditorTarget = ref<NacosInstanceInfo | null>(null);
 const instanceEditor = ref({ weight: "1", metadata: "{}" });
+const instanceMetadataTableOpen = ref(false);
+const instanceMetadataTableTarget = ref<NacosInstanceInfo | null>(null);
 const serviceEditorOpen = ref(false);
 const serviceEditorLoading = ref(false);
 const serviceEditorError = ref("");
@@ -289,6 +298,16 @@ function isSelectedConfigListItem(item: NacosConfigItem) {
 }
 
 const namespace = computed(() => props.namespace ?? connectionInfo.value?.namespace ?? "");
+const instanceMetadataTableRows = computed(() => nacosMetadataTableRows(instanceMetadataTableTarget.value?.metadata));
+const nacosConsoleUrl = computed(() => {
+  const config = connectionStore.getConfig(props.connectionId)?.external_config;
+  if (!config || typeof config !== "object" || Array.isArray(config)) return undefined;
+  try {
+    return resolveNacosConsoleUrl(config as import("@/types/nacos").NacosAdminConfig);
+  } catch {
+    return undefined;
+  }
+});
 const nacosProductionContext = computed(() => productionContextForDatabase(connectionStore.getConfig(props.connectionId), namespace.value));
 const batchTargetConnections = computed<NacosConfigTransferTarget[]>(() =>
   connectionStore.connections
@@ -2152,6 +2171,11 @@ function openInstanceEditor(instance: NacosInstanceInfo) {
   instanceEditorOpen.value = true;
 }
 
+function openInstanceMetadataTable(instance: NacosInstanceInfo) {
+  instanceMetadataTableTarget.value = instance;
+  instanceMetadataTableOpen.value = true;
+}
+
 function submitInstanceEditor() {
   const instance = instanceEditorTarget.value;
   const weight = Number(instanceEditor.value.weight);
@@ -2645,6 +2669,19 @@ onBeforeUnmount(() => {
   pauseConfigEditorViewportWork();
   destroyConfigEditor();
 });
+
+function openNacosConsole() {
+  const url = nacosConsoleUrl.value;
+  if (!url) {
+    toast(t("nacos.consoleUrlMissing"), 5000);
+    return;
+  }
+  if (isTauriRuntime()) {
+    void import("@tauri-apps/plugin-shell").then(({ open }) => open(url)).catch(() => toast(t("nacos.consoleOpenFailed"), 5000));
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
 </script>
 
 <template>
@@ -2661,6 +2698,15 @@ onBeforeUnmount(() => {
       </div>
       <div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
         <span v-if="connectionError" class="max-w-96 truncate text-xs text-destructive">{{ connectionError }}</span>
+        <Button size="sm" variant="outline" class="h-8 gap-1.5" :title="nacosConsoleUrl ? t('nacos.openConsole') : t('nacos.consoleUrlMissing')" :aria-label="t('nacos.openConsole')" :disabled="!nacosConsoleUrl" @click="openNacosConsole">
+          <ExternalLink class="h-3.5 w-3.5" />
+          {{ t("nacos.openConsole") }}
+        </Button>
+        <Button size="sm" variant="outline" class="h-8 gap-1.5" :title="props.zenMode ? t('nacos.exitZenMode') : t('nacos.enterZenMode')" :aria-label="props.zenMode ? t('nacos.exitZenMode') : t('nacos.enterZenMode')" @click="emit('toggleZenMode')">
+          <Minimize2 v-if="props.zenMode" class="h-3.5 w-3.5" />
+          <Maximize2 v-else class="h-3.5 w-3.5" />
+          {{ props.zenMode ? t("nacos.exitZenMode") : t("nacos.enterZenMode") }}
+        </Button>
         <Button v-if="connectionError" size="sm" variant="outline" class="h-8 w-8 px-0" :title="t('nacos.retryConnectionInfo')" :aria-label="t('nacos.retryConnectionInfo')" :disabled="infoLoading" @click="loadInfo">
           <Loader2 v-if="infoLoading" class="h-3.5 w-3.5 animate-spin" />
           <RefreshCw v-else class="h-3.5 w-3.5" />
@@ -3220,10 +3266,18 @@ onBeforeUnmount(() => {
                           <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="isInstanceUpdating(instance)" @click="resetInstanceWeightDraft(instance)">{{ t("nacos.restore") }}</Button>
                         </div>
                       </div>
-                      <details v-if="instance.metadata && Object.keys(instance.metadata).length" class="min-w-0 self-start text-muted-foreground">
-                        <summary class="cursor-pointer select-none hover:text-foreground">{{ t("nacos.metadataLabel") }}（{{ t("nacos.itemCount", { count: Object.keys(instance.metadata).length }) }}）</summary>
-                        <pre class="mt-1 max-h-32 max-w-full overflow-auto rounded bg-muted p-2 font-mono text-[11px] text-foreground">{{ JSON.stringify(instance.metadata, null, 2) }}</pre>
-                      </details>
+                      <div v-if="instance.metadata && typeof instance.metadata === 'object' && Object.keys(instance.metadata).length" class="min-w-0 self-start">
+                        <div class="nacos-instance-metadata-actions flex min-w-0 flex-wrap items-center gap-1">
+                          <details class="min-w-0 text-muted-foreground">
+                            <summary class="cursor-pointer select-none hover:text-foreground">{{ t("nacos.metadataLabel") }}（{{ t("nacos.itemCount", { count: Object.keys(instance.metadata).length }) }}）</summary>
+                            <pre class="mt-1 max-h-32 max-w-full overflow-auto rounded bg-muted p-2 font-mono text-[11px] text-foreground">{{ JSON.stringify(instance.metadata, null, 2) }}</pre>
+                          </details>
+                          <Button size="sm" variant="ghost" class="h-6 shrink-0 gap-1 px-1.5 text-xs text-muted-foreground hover:text-foreground" :aria-label="t('nacos.viewMetadataTable')" @click="openInstanceMetadataTable(instance)">
+                            <Columns3 class="h-3.5 w-3.5" />
+                            {{ t("nacos.viewMetadataTable") }}
+                          </Button>
+                        </div>
+                      </div>
                       <span v-else class="self-start text-muted-foreground">{{ t("nacos.noMetadata") }}</span>
                     </div>
                   </div>
@@ -3475,6 +3529,34 @@ onBeforeUnmount(() => {
         <DialogFooter>
           <Button variant="outline" @click="instanceEditorOpen = false">{{ t("nacos.cancel") }}</Button>
           <Button @click="submitInstanceEditor">{{ t("nacos.save") }}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog v-model:open="instanceMetadataTableOpen">
+      <DialogContent class="flex max-h-[80vh] flex-col sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{{ t("nacos.instanceMetadataTitle") }}</DialogTitle>
+          <DialogDescription>{{ instanceMetadataTableTarget ? `${instanceMetadataTableTarget.ip}:${instanceMetadataTableTarget.port} · ${instanceMetadataTableTarget.clusterName || "DEFAULT"}` : "" }}</DialogDescription>
+        </DialogHeader>
+        <div class="min-h-0 overflow-auto rounded-md border">
+          <table class="w-full min-w-[420px] text-left text-sm">
+            <thead class="sticky top-0 z-10 bg-muted/85 text-xs text-muted-foreground">
+              <tr>
+                <th class="w-1/3 border-b px-3 py-2 font-medium">{{ t("nacos.metadataKey") }}</th>
+                <th class="border-b px-3 py-2 font-medium">{{ t("nacos.metadataValue") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in instanceMetadataTableRows" :key="row.key" class="border-b last:border-0">
+                <td class="break-all px-3 py-2 align-top font-mono text-xs font-medium">{{ row.key }}</td>
+                <td class="whitespace-pre-wrap break-all px-3 py-2 align-top font-mono text-xs">{{ row.value }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="instanceMetadataTableOpen = false">{{ t("nacos.cancel") }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { contributorAvatarUrl, dedupeContributors, type Contributor } from "@/lib/contributors";
+import type { DocsLang } from "@/lib/i18n";
 
 const landingContributorLimit = 72;
 const landingContributorRowSizes = [12, 16, 16, 16, 12] as const;
@@ -30,7 +31,13 @@ function ContributorAvatar({ c }: { c: Contributor }) {
   );
 }
 
-export function ContributorsWallContent({ contributors, title, desc, lang }: { contributors: Contributor[]; title: string; desc: string; lang: "en" | "cn" }) {
+const WALL_TEXT: Record<DocsLang, { explore: (count: number) => string; certificate: string }> = {
+  en: { explore: (count) => `Explore ${count}+ contributors`, certificate: "Download contributor certificate" },
+  cn: { explore: (count) => `查看 ${count}+ 位贡献者`, certificate: "下载贡献者证书" },
+  tr: { explore: (count) => `${count}+ katkıcıyı görüntüle`, certificate: "Katkı sertifikasını indir" },
+};
+
+export function ContributorsWallContent({ contributors, title, desc, lang }: { contributors: Contributor[]; title: string; desc: string; lang: DocsLang }) {
   const uniqueContributors = dedupeContributors(contributors);
   const visibleContributors = uniqueContributors.slice(0, landingContributorLimit);
   let contributorOffset = 0;
@@ -48,11 +55,11 @@ export function ContributorsWallContent({ contributors, title, desc, lang }: { c
         <p className="mt-2 max-w-[650px] text-landing-muted text-sm leading-[1.65] justify-self-end text-right max-[760px]:max-w-none max-[760px]:text-left">
           {desc}{" "}
           <Link href={`/${lang}/contributors`} prefetch={false} className="landing-inline-link inline-flex items-center gap-[5px]">
-            {lang === "cn" ? `查看 ${uniqueContributors.length}+ 位贡献者` : `Explore ${uniqueContributors.length}+ contributors`}
+            {WALL_TEXT[lang].explore(uniqueContributors.length)}
           </Link>
           <span className="mx-1.5 text-landing-muted" aria-hidden="true">·</span>
           <Link href={`/${lang}/contributors`} prefetch={false} className="landing-inline-link inline-flex items-center gap-[5px]">
-            {lang === "cn" ? "下载贡献者证书" : "Download contributor certificate"}
+            {WALL_TEXT[lang].certificate}
           </Link>
         </p>
       </div>

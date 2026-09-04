@@ -429,9 +429,10 @@ function collectExpandedObjectSearchTargets(node: TreeNode, tasks: SidebarSearch
     if (searchableObjectGroupTypes.has(node.type)) {
       if (searchAutoExpandedNodeIds.has(node.id)) {
         // Search opened this group on the user's behalf to check for matches;
-        // once the query is gone there is nothing to show, so collapse it back
-        // instead of reloading and leaving it open.
+        // once the query is gone, drop the filtered projection and collapse it
+        // back. Its next explicit expansion will load the ordinary first page.
         node.isExpanded = false;
+        store.discardFilteredTreeNodeChildren(node.id);
       } else {
         tasks.push(() => store.loadObjectGroupChildren(node, { force: true }));
       }
@@ -2806,7 +2807,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
 
 <style scoped>
 .sticky-database-header {
-  background-color: var(--background);
+  background-color: var(--sidebar);
 }
 
 .connection-tree-scroller {

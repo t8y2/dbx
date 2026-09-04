@@ -1,0 +1,531 @@
+/*
+ * Shared tab-bar styles for AppTabBar (special pages) and EditorGroupTabBar
+ * (per-group tabs). These rules are global CSS instead of scoped styles
+ * because both components render the same class names and scoped rules in one
+ * component would never match the other's DOM.
+ */
+
+/* 多行平铺模式：覆盖滚动相关样式，让标签换行展示 */
+.app-tab-scroll.wrap-mode {
+  height: auto !important;
+  overflow: visible !important;
+  overflow-x: visible !important;
+  overflow-y: visible !important;
+  flex-wrap: wrap;
+}
+
+/* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */
+.app-tab-strip:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏行容器（直接子 div）在包含 wrap-mode 时解除固定高度和裁剪 */
+.app-tab-bar > div:has(.wrap-mode) {
+  height: auto !important;
+  overflow: visible !important;
+}
+
+/* 标签栏本身也解除裁剪，让换行内容自然撑高 */
+.app-tab-bar:has(.wrap-mode) {
+  overflow: visible !important;
+}
+
+/* 经典布局 + 多行模式：优化多行标签显示 */
+.app-tab-scroll.classic-wrap {
+  row-gap: 0.25rem;
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  align-items: flex-start;
+}
+
+/* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
+.app-tab-scroll.classic-wrap > div {
+  height: 2rem;
+}
+
+.app-tab-pill {
+  background-color: var(--app-tab-background);
+}
+
+.app-tab-pill[data-active-tab="false"]:hover {
+  background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
+}
+
+.dirty-tab-marker {
+  display: inline-flex;
+  width: 0.5rem;
+  height: 0.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 12px;
+  opacity: 0.9;
+  transform: translateY(2px);
+}
+
+.app-tab-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.app-tab-scrollbar {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  z-index: 20;
+  height: 6px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  touch-action: none;
+  transition: opacity 140ms ease;
+}
+
+.app-tab-strip:hover .app-tab-scrollbar,
+.app-tab-strip:focus-within .app-tab-scrollbar,
+.app-tab-scrollbar--dragging {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-tab-scrollbar::before {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+}
+
+.app-tab-scrollbar--bottom {
+  top: auto;
+  bottom: 0;
+}
+
+.app-tab-scrollbar--bottom::before {
+  top: auto;
+  bottom: 0;
+}
+
+.app-tab-scrollbar__thumb {
+  position: absolute;
+  top: 0;
+  height: 2px;
+  min-width: 20px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 30%, transparent);
+  transition:
+    height 120ms ease,
+    background-color 120ms ease;
+}
+
+.app-tab-scrollbar--bottom .app-tab-scrollbar__thumb {
+  top: auto;
+  bottom: 0;
+}
+
+.app-tab-scrollbar:hover .app-tab-scrollbar__thumb,
+.app-tab-scrollbar--dragging .app-tab-scrollbar__thumb {
+  height: 5px;
+  background: color-mix(in oklch, var(--foreground) 52%, transparent);
+}
+
+/* ------------------------------------------------------------------ */
+/* Semantic tab groups (pill clusters) — ported from upstream AppTabBar */
+/* ------------------------------------------------------------------ */
+
+.tab-group-header {
+  display: inline-flex;
+  flex: none;
+  cursor: pointer;
+  align-items: center;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.tab-group-header:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.tab-group-header-content {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.25rem;
+  transition:
+    color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.tab-group-marker {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: none;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+}
+
+.tab-group-chevron {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+  transition: transform 150ms ease;
+}
+
+.tab-group-pin {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: none;
+  fill: currentColor;
+  opacity: 0.7;
+}
+
+.tab-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-group-count {
+  display: inline-flex;
+  min-width: 1rem;
+  height: 1rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  padding-inline: 0.25rem;
+  background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header {
+  position: relative;
+  height: 100%;
+  align-self: stretch;
+  margin-inline: 0.15rem 0.05rem;
+  padding: 0;
+  color: var(--tab-group-color);
+  font-size: 0.6875rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header-content {
+  height: 1.625rem;
+  border-radius: 9999px;
+  padding-inline: 0.4rem 0.5rem;
+  background: var(--tab-group-soft);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
+  background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color) 35%, transparent);
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  right: -0.45rem;
+  bottom: 0;
+  left: 0.3rem;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after {
+  right: 0.3rem;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-header::after {
+  top: 0;
+  bottom: auto;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab {
+  position: relative;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  right: -0.2rem;
+  bottom: 0;
+  left: -0.2rem;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after {
+  top: 0;
+  bottom: auto;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--first::after {
+  left: 0;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after {
+  right: 0.3rem;
+}
+
+.tab-group-color-option,
+.tab-group-custom-color {
+  position: relative;
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: none;
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--background);
+  border-radius: 9999px;
+  background: var(--tab-group-option-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent);
+  outline: none;
+  transition:
+    box-shadow 150ms ease,
+    transform 150ms ease;
+}
+
+.tab-group-color-option:hover,
+.tab-group-custom-color:hover {
+  transform: scale(1.08);
+}
+
+.tab-group-color-option--selected {
+  box-shadow:
+    0 0 0 2px var(--background),
+    0 0 0 4px var(--tab-group-option-color, var(--tab-group-color));
+}
+
+.tab-group-color-option--auto {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.tab-group-custom-color {
+  overflow: hidden;
+  background: conic-gradient(#ef4444, #f59e0b, #22c55e, #06b6d4, #3b82f6, #a855f7, #ef4444);
+}
+
+.tab-group-custom-color input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+  opacity: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Vertical placement (left/right): per-pane sidebar strips (Phase 3)  */
+/* ------------------------------------------------------------------ */
+
+.vertical-tab-layout {
+  flex: 0 0 15rem;
+}
+
+.vertical-tab-layout .app-tab-strip {
+  height: auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.vertical-tab-layout .app-tab-pill {
+  width: 100%;
+  min-width: 0 !important;
+  min-height: 2rem;
+  height: 2rem !important;
+  border-right: 0;
+  background-color: var(--app-tab-background, transparent);
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    color 150ms ease;
+}
+
+.vertical-tab-layout .app-tab-pill[data-active-tab="true"] {
+  border-color: color-mix(in srgb, var(--tab-group-color, var(--ring)) 18%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color, var(--ring)) 13%, transparent),
+    0 1px 2px rgb(0 0 0 / 0.08),
+    0 3px 9px color-mix(in srgb, var(--tab-group-color, var(--foreground)) 8%, transparent);
+}
+
+.vertical-tab-layout .app-tab-scroll > * {
+  width: 100%;
+  flex: none;
+}
+
+.vertical-tab-layout--collapsed .app-tab-scroll {
+  align-items: center;
+}
+
+.vertical-tab-layout--collapsed .app-tab-pill {
+  position: relative;
+  width: 2.5rem;
+  min-height: 2.5rem;
+  height: 2.5rem !important;
+  justify-content: center;
+  margin: 0.125rem auto;
+  padding: 0 !important;
+  border-radius: 0.625rem;
+}
+
+.vertical-tab-layout--collapsed .compact-dirty-tab-marker {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.3rem;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 9999px;
+  background: var(--destructive);
+  box-shadow: 0 0 0 1px var(--background);
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header {
+  width: 2.5rem !important;
+  height: 1.75rem;
+  margin: 0.35rem auto 0.1rem;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header-content {
+  justify-content: center;
+  padding: 0;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab {
+  width: 2.5rem;
+  margin-inline: auto;
+  padding: 0 !important;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header::after,
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab::before,
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab::after {
+  display: none;
+}
+
+.vertical-tab-layout .tab-group-header {
+  position: relative;
+  width: calc(100% - 1rem) !important;
+  height: 2rem;
+  align-self: center;
+  margin: 0.35rem 0.5rem 0.08rem;
+  padding: 0;
+  color: var(--foreground);
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1rem;
+}
+
+.vertical-tab-layout .tab-group-header-content {
+  width: 100%;
+  height: 100%;
+  border-radius: 0.5rem;
+  padding-inline: 0.55rem;
+}
+
+.vertical-tab-layout .tab-group-header:hover .tab-group-header-content,
+.vertical-tab-layout .tab-group-header--active .tab-group-header-content {
+  background: var(--tab-group-soft);
+}
+
+.vertical-tab-layout .tab-group-header--active {
+  color: var(--tab-group-color);
+}
+
+.vertical-tab-layout .tab-group-marker {
+  width: 0.22rem;
+  height: 1rem;
+  border-radius: 9999px;
+}
+
+.vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 1rem;
+  bottom: -1.08rem;
+  left: 0.66rem;
+  width: 0.7rem;
+  border-bottom: 1px solid var(--tab-group-rail);
+  border-left: 1px solid var(--tab-group-rail);
+  border-bottom-left-radius: 0.1875rem;
+  pointer-events: none;
+}
+
+.vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed) .tab-group-marker {
+  position: relative;
+  z-index: 2;
+}
+
+.vertical-tab-layout .tab-group-tab {
+  position: relative;
+  width: calc(100% - 3rem);
+  margin-inline: 2.5rem 0.5rem;
+  padding-inline-start: 0.65rem !important;
+  border-color: transparent;
+}
+
+.vertical-tab-layout .tab-group-tab::before {
+  content: "";
+  position: absolute;
+  top: -0.25rem;
+  bottom: -0.25rem;
+  left: -0.65rem;
+  width: 1px;
+  border-radius: 9999px;
+  background: var(--tab-group-rail);
+  pointer-events: none;
+}
+
+.vertical-tab-layout .tab-group-tab--first::before {
+  top: 50%;
+}
+
+.vertical-tab-layout .tab-group-tab--last::before {
+  bottom: 50%;
+  border-radius: 9999px 9999px 0 0;
+}
+
+.vertical-tab-layout .tab-group-tab::after {
+  content: "";
+  position: absolute;
+  top: calc(50% - 0.5px);
+  left: -0.65rem;
+  width: 0.65rem;
+  height: 1px;
+  border-radius: 0 9999px 9999px 0;
+  background: var(--tab-group-rail);
+  pointer-events: none;
+}

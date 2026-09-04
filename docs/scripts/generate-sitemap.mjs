@@ -1,10 +1,14 @@
 import { readdirSync, writeFileSync } from "fs";
 import { resolve, relative } from "path";
+import { DEFAULT_LANGUAGE, LANGUAGES } from "./languages.mjs";
 
 const OUT_DIR = resolve(import.meta.dirname, "../out");
 const SITE_URL = "https://dbxio.com";
 const EXCLUDE = new Set(["index.html", "404.html", "_not-found.html"]);
-const EXCLUDE_PATHS = new Set(["/en/issue", "/cn/issue"]);
+const EXCLUDE_PATHS = new Set(LANGUAGES.map((language) => `/${language}/issue`));
+// hreflang codes differ from the route segment for locales whose segment is not
+// already a language code.
+const HREFLANG = { en: "en", cn: "zh", tr: "tr" };
 
 function* walkDir(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
@@ -28,18 +32,22 @@ const htmlFiles = [...walkDir(OUT_DIR)].filter((f) => {
   return !EXCLUDE.has(basename) && !EXCLUDE_PATHS.has(pathToUrl(f));
 });
 
+function emptyLanguageMap() {
+  return Object.fromEntries(LANGUAGES.map((language) => [language, null]));
+}
+
 const pagesByPath = new Map();
 
 for (const file of htmlFiles) {
   const url = pathToUrl(file);
-  const match = url.match(/^\/(en|cn)(\/.*)?$/);
+  const match = url.match(new RegExp(`^/(${LANGUAGES.join("|")})(/.*)?$`));
   if (!match) {
-    pagesByPath.set(url, { en: null, cn: null });
+    pagesByPath.set(url, emptyLanguageMap());
     continue;
   }
   const relativePath = match[2] || "/";
   if (!pagesByPath.has(relativePath)) {
-    pagesByPath.set(relativePath, { en: null, cn: null });
+    pagesByPath.set(relativePath, emptyLanguageMap());
   }
   const entry = pagesByPath.get(relativePath);
   entry[match[1]] = url;
@@ -50,19 +58,16 @@ const urls = [];
 const seen = new Set();
 
 for (const [, langs] of pagesByPath) {
-  const localizedPages = [langs.en, langs.cn].filter(Boolean);
+  const localizedPages = LANGUAGES.map((language) => langs[language]).filter(Boolean);
   if (localizedPages.length === 0) continue;
 
-  const altLinks = [];
-  if (langs.en) {
-    altLinks.push({ lang: "en", href: `${SITE_URL}${langs.en}` });
-  }
-  if (langs.cn) {
-    altLinks.push({ lang: "zh", href: `${SITE_URL}${langs.cn}` });
-  }
+  const altLinks = LANGUAGES.filter((language) => langs[language]).map((language) => ({
+    lang: HREFLANG[language] ?? language,
+    href: `${SITE_URL}${langs[language]}`,
+  }));
 
-  if (altLinks.length > 1) {
-    altLinks.push({ lang: "x-default", href: `${SITE_URL}${langs.en}` });
+  if (altLinks.length > 1 && langs[DEFAULT_LANGUAGE]) {
+    altLinks.push({ lang: "x-default", href: `${SITE_URL}${langs[DEFAULT_LANGUAGE]}` });
   }
 
   for (const localizedPage of localizedPages) {

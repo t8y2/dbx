@@ -333,9 +333,12 @@ func (server *server) executeStatements(params map[string]json.RawMessage, trans
 			}
 			return emptyQueryResult(affected, started), nil
 		}
-		if !transactionUnsupported(beginErr) {
-			return queryResult{}, beginErr
+		if transactionUnsupported(beginErr) {
+			// Do not turn an explicit transaction request into auto-commit
+			// execution: a later error would leave prior statements applied.
+			return queryResult{}, errors.New("Hive does not support rollbackable transactions")
 		}
+		return queryResult{}, beginErr
 	}
 	for _, statement := range statements {
 		trimmed := trimStatementSQL(statement)

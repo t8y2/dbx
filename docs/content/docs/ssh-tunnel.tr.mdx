@@ -1,0 +1,183 @@
+---
+title: Tünel / Proxy
+description: Özel veritabanlarına SSH tünelleri, HTTP tünelleri, SOCKS5 proxy'leri ya da HTTP proxy'leri üzerinden bağlanın.
+---
+
+<Callout type="info">DBX, doğrudan erişilemeyen veritabanları için bağlantı katmanları açabilir. Bunları bağlantı iletişim kutusundaki **Tünel / Proxy** sekmesinden yapılandırın.</Callout>
+
+<Callout type="warning">
+  Tüneller, DBX arka ucunun çalıştığı yerde çalışır. Masaüstü'nde yerel yollar ve geçici dinleyiciler sizin bilgisayarınıza aittir. Docker/Web'de yollar, ağ çıkışı ve geçici dinleyiciler tarayıcının çalıştığı bilgisayara değil sunucuya ya da kapsayıcıya aittir.
+</Callout>
+
+DBX üç tünel / proxy türünü destekler:
+
+| Tür        | Ne zaman kullanılır                                                                 |
+| ----------- | ------------------------------------------------------------------------ |
+| SSH tüneli  | Bir bastion sunucusuna ya da veritabanı sunucusuna SSH erişiminiz varsa.                |
+| Proxy       | Ağınız SOCKS5 ya da HTTP CONNECT proxy erişimi gerektiriyorsa.               |
+| HTTP tüneli | Veritabanına yalnızca bir web sunucusu erişebiliyorsa ve SSH/VPN kullanılamıyorsa. |
+
+Ağ veritabanları için DBX, geçerli çalışma zamanında geçici bir port açar ve veritabanı sürücüsünü bu porta yönlendirir. Tünel / proxy katmanı protokol baytlarını gerçek hedefe iletir. Bir bağlantı birden çok taşıma katmanını birleştirebilir; DBX bunları bağlantı iletişim kutusunda gösterilen sırayla kurar.
+
+## Bağlantıya Özel ve Ortak Profiller
+
+Bir katmanı doğrudan bağlantının **Tünel / Proxy** sekmesinden yapılandırın ya da **Ayarlar → Tüneller** altında yeniden kullanılabilir profiller oluşturun:
+
+- Ortak profiller; SSH, SOCKS5 / HTTP CONNECT proxy'leri ve HTTP tünellerini destekler.
+- Birden çok veritabanı bağlantısı aynı profile başvurabilir.
+- Bir profili düzenlemek, ona başvuran her bağlantıyı bir sonraki bağlanışında etkiler.
+- SSH testi erişilebilirliği ve kimlik doğrulamayı doğrular. Proxy testi bir proxy el sıkışması yapar ve isteğe bağlı bir hedef `sunucu:port` kullanabilir.
+- HTTP tünelleri yalnızca gerçek hedef trafiği başladığında tembel olarak açılır, bu yüzden bağımsız bir HTTP tüneli profil testi yoktur.
+
+Bir bağlantı farklı kimlik bilgilerine ya da özel bir katman sırasına ihtiyaç duyduğunda profili o bağlantıdan ayırın.
+
+## SSH Tüneli
+
+SSH tünelleri yerleşiktir. Elle terminal port yönlendirmesi oluşturmanız gerekmez.
+
+| Alan           | Açıklama                                                                   |
+| --------------- | ----------------------------------------------------------------------------- |
+| SSH Sunucusu        | SSH sunucusunun ana makine adı ya da IP'si                                              |
+| SSH Portu        | SSH portu (varsayılan: 22)                                                    |
+| SSH Kullanıcısı        | SSH kimlik doğrulaması için kullanıcı adı                                            |
+| Bağlantı Zaman Aşımı | DBX'in SSH bağlantısını açarken bekleyeceği en uzun süre; varsayılan 5 saniyedir |
+
+<Tabs groupId="ssh-auth" items={['Özel Anahtar (Önerilen)', 'Özel Anahtar + Parola', 'Parola', 'Kimlik Bilgisi Yok']}>
+  <Tab value="Özel Anahtar (Önerilen)">
+    DBX arka ucunun okuyabileceği bir özel anahtar dosyası girin, örneğin `~/.ssh/id_rsa` ya da `~/.ssh/id_ed25519`:
+
+    - **Anahtar Yolu** — Masaüstü yerel dosyalara gözatabilir. Web, elle girilen bir sunucu ya da kapsayıcı yolunu gerektirir.
+    - **Anahtar Parolası** — Anahtarınız şifreliyse parolayı girin.
+
+    Anahtar kimlik doğrulaması parola kimlik doğrulamasından daha güvenlidir.
+
+  </Tab>
+  <Tab value="Özel Anahtar + Parola">
+    Birincil kimlik bilgisi olarak özel anahtarı, yedek olarak parolayı kullanın. DBX önce anahtar kimlik doğrulamasını dener; sunucu anahtarı reddeder ve parola kimlik doğrulamasını sunmayı sürdürürse otomatik olarak parolaya döner.
+
+    - **Anahtar Yolu** — Anahtar dosyanıza gözatıp seçin.
+    - **Anahtar Parolası** — Anahtarınız şifreliyse parolayı girin.
+    - **Parola** — Yedek olarak SSH parolanızı girin.
+
+    Bu; bir anahtarın geçici olarak geri alınmış olabileceği ya da çok atlamalı bir tünelde farklı atlamaların farklı yöntemler gerektirdiği durumlarda kullanışlıdır.
+  </Tab>
+  <Tab value="Parola">
+    SSH parolanızı doğrudan girin. Bu, parola kimlik doğrulamasına izin veren sunucularda çalışır.
+  </Tab>
+  <Tab value="Kimlik Bilgisi Yok">
+    Yalnızca SSH `none` kimlik doğrulamasını kullanır; parola ya da özel anahtar göndermez. Kimlik bilgisiz girişe açıkça izin veren SSH proxy'leri ya da özel ağ geçitleri içindir. Reddedilme başka bir yönteme dönmez.
+  </Tab>
+</Tabs>
+
+### Sunucu Anahtarı Doğrulaması
+
+DBX, bir kimlik bilgisi göndermeden önce SSH sunucu anahtarını doğrular. Güvenilen anahtarlar; sistemin `known_hosts` dosyalarından ve veri dizinindeki DBX'e ait `known_hosts` dosyasından gelir:
+
+- Bilinmeyen bir sunucu, parmak izini incelemenizi ve açıkça kabul etmenizi ister.
+- Yalnızca geçerli bağlantı için güvenebilir ya da DBX'in `known_hosts` dosyasında hatırlayabilirsiniz.
+- DBX, daha önce bilinen bir sunucu için değişmiş bir anahtarı reddeder.
+- Onay arayüzü kullanılamıyorsa, zaman aşımına uğrarsa ya da anahtar reddedilirse bağlantı parola veya özel anahtar gönderilmeden başarısız olur.
+
+### Tüneli Yerel Ağa Açma
+
+<Callout type="warn">Yerel ağa açmak, SSH dinleyicisini `127.0.0.1` yerine `0.0.0.0` yapar. Bu, DBX çalışma zamanının saldırı yüzeyini genişletir ve yalnızca uygun güvenlik duvarı kurallarıyla güvenilir ağlarda kullanılmalıdır.</Callout>
+
+Masaüstü'nde bu, geçici portu bilgisayarınız üzerinden erişilebilir yapabilir. Docker/Web'de dinleyici sunucunun ya da kapsayıcının içindedir; dışarıdan erişilebilirlik yine yayımlanan portlara, kapsayıcı ağına ve ana makine güvenlik duvarına bağlıdır.
+
+## Proxy
+
+Ortamınız SSH yerine giden bir proxy gerektirdiğinde proxy katmanını kullanın.
+
+DBX şunları destekler:
+
+- SOCKS5 proxy
+- HTTP CONNECT proxy
+- İsteğe bağlı proxy kullanıcı adı ve parolası
+
+Ortak bir proxy profili `mysql.internal:3306` gibi isteğe bağlı bir test hedefi içerebilir. Hedef verilmezse test yalnızca proxy uç noktasını ve kimlik bilgilerini doğrular. Rotanın tamamını doğrulamak için veritabanı bağlantı testini kullanın.
+
+## HTTP Tüneli
+
+<Callout type="info">Bu özellik bir HTTP tünelidir. DBX'in şu anda sağladığı betik `dbx_tunnel.php` olduğu için dağıtım dosyası PHP'ye özgüdür, ancak DBX'teki bağlantı türü HTTP tünelidir.</Callout>
+
+Veritabanı özel bir ağın içindeyken o ağdaki bir web sunucusu ona erişebiliyorsa HTTP tünelini kullanın. Bu; yalnızca HTTP/HTTPS'in kullanılabildiği, SSH tünel yetkilerinin fazla geniş ya da erişilemez olduğu ortamlara uyar.
+
+### Betiği Dağıtma
+
+`deploy/dbx_tunnel.php` dosyasını, veritabanına erişebilen bir PHP web sunucusuna yükleyin.
+
+PHP sunucusunda şu ortam değişkenlerini yapılandırın:
+
+| Değişken                         | Zorunlu | Açıklama                                                                 |
+| -------------------------------- | -------- | --------------------------------------------------------------------------- |
+| `DBX_TUNNEL_TOKEN`               | Evet      | Ortak belirteç. DBX'e aynı değeri girin.                                  |
+| `DBX_TUNNEL_ALLOWED_HOSTS`       | Hayır       | Virgülle ayrılmış hedef sunucu izin listesi. Kesinlikle önerilir.               |
+| `DBX_TUNNEL_DIR`                 | Hayır       | Oturum kuyruğu dizini. Varsayılan olarak geçici bir dizindir.                      |
+| `DBX_TUNNEL_MAX_SESSION_SECONDS` | Hayır       | En uzun oturum ömrü. Varsayılan `3600`.                               |
+| `DBX_TUNNEL_PHP`                 | Hayır       | PHP-FPM `fastcgi_finish_request` kullanılamadığında kullanılan PHP CLI yolu.   |
+
+DBX'te bir **HTTP Tüneli** katmanı ekleyin ve şunları doldurun:
+
+| Alan             | Açıklama                                                        |
+| ----------------- | ------------------------------------------------------------------ |
+| Tünel Betiği URL'si | `dbx_tunnel.php` adresinin URL'si, örneğin `https://example.com/dbx_tunnel.php` |
+| Tünel Belirteci      | `DBX_TUNNEL_TOKEN` değeri                                        |
+| Tünel Zaman Aşımı    | HTTP tünelini ve hedef veritabanı bağlantısını açma zaman aşımı |
+
+Veritabanı sunucusu ve portu, dizüstü bilgisayarınızdan değil PHP sunucusundan görüldüğü hâliyle girilmelidir.
+
+### HTTP Tüneli Akışı
+
+```text
+DBX veritabanı sürücüsü
+  -> 127.0.0.1:<yerel geçici port>
+  -> DBX HTTP tünel istemcisi
+  -> HTTP POST istekleri
+  -> web sunucusundaki dbx_tunnel.php
+  -> PHP'den özel veritabanına TCP bağlantısı
+  -> veritabanı
+```
+
+İstek protokolü kısa HTTP yoklamasıdır:
+
+1. DBX, geçerli çalışma zamanında bir TCP dinleyicisi başlatır.
+2. Veritabanı sürücüsü bu yerel porta bağlanır.
+3. DBX; oturum kimliği, hedef sunucu, hedef port ve bağlantı zaman aşımıyla `dbx_tunnel.php` adresine `open` gönderir.
+4. PHP betiği belirteci ve izin listesini doğrular, ardından veritabanına TCP soketi açan bir işçi başlatır.
+5. Veritabanı sürücüsünden gelen baytlar betiğe `write` ile gönderilir.
+6. DBX betiği `read` ile yoklar; yanıt baytları yerel veritabanı sürücüsü bağlantısına geri yazılır.
+7. Bağlantı bittiğinde DBX `close` gönderir ve PHP işçisi veritabanı soketini kapatır.
+
+Bu, DBX Web'i gerektirmez ve WebSocket kullanmaz.
+
+### Güvenlik ve Sınırlar
+
+- Betik URL'si için HTTPS kullanın.
+- Uzun ve rastgele bir `DBX_TUNNEL_TOKEN` belirleyin.
+- Betiğin genel bir iç TCP aktarıcısına dönüşmemesi için `DBX_TUNNEL_ALLOWED_HOSTS` ayarlayın.
+- Mümkün olduğunda betik yoluna herkese açık erişimi kısıtlayın.
+- HTTP tüneli kullanışlıdır, ancak baytları HTTP yoklaması ve sunucu tarafındaki bir kuyruk üzerinden ilettiği için genellikle doğrudan TCP, VPN ya da SSH'tan yavaştır.
+- Diğer katmanlarla birleştirilirse HTTP tüneli ilk tünel / proxy katmanı olmalıdır, çünkü en dıştaki ağ sınırıdır.
+- Betik, özel ağdan hedef sunuculara erişebilir. Onu [Üretim Güvenliği](/tr/docs/production-safety) sayfasındaki en az açıklık ve kimlik bilgisi yönergeleriyle dağıtın ve işletin.
+
+## Dosya Veritabanları
+
+Access bağlantıları dosya tabanlıdır ve tünel / proxy katmanlarını kullanmaz. DuckDB de genellikle yerel bir dosya kullanır, bu yüzden tünel / proxy katmanlarını yalnızca seçili sürücü profili bir ağ uç noktası kullandığında yapılandırın.
+
+SQLite de bir dosya veritabanıdır. Yerel bir SQLite dosyası yine TCP tüneli kullanmaz. Masaüstü uygulamasında, bir Linux amd64/arm64 makinesindeki **uzak SQLite dosyasını** açmak için bir SQLite bağlantısına SSH atlamaları ekleyebilirsiniz. DBX ardından **son SSH atlamasında** kısa ömürlü bir worker başlatır ve o worker ile konuşur; `.db` dosyasını dizüstü bilgisayarınıza kopyalamaz. Yol alanı, yerel bir dosya seçicisi değil, o dosya sunucusundaki mutlak bir yoldur.
+
+Worker'ı yükleyecek olan ilk Test ya da Bağlan işlemi onay ister ve hedef yolu ile özeti gösterir. Worker'ı yalnızca oturum için tutabilir (bağlantıyı kestiğinizde silinir), `~/.cache/dbx/sqlite-worker/<digest>` altında kalıcı kılabilir ya da önceden yerleştirilmiş bir ikili dosyayı gösterebilirsiniz. Masaüstü, **SQLite SSH Worker**'ı Sürücü Yöneticisi'nden hem Linux x64 hem Linux ARM64 ikili dosyalarını içeren tek bir paket olarak kurar, ardından dosya sunucusuna uyanı yükler. SQLCipher, yüklenebilir uzantılar ve eklenmiş veritabanları bu uzak yolda v1'de desteklenmez. Yedekleme, bir SQLite anlık görüntüsünü dizüstü bilgisayarınıza kaydeder; geri yükleme yerel bir SQLite dosyasını yükler ve dosya sunucusunda uygular.
+
+Oracle TNS tanımlayıcıları birden çok yük devretme adresi içerebilir. DBX bu tanımlayıcıyı tek bir geçici uç nokta üzerinden yeniden yazmadığı için TNS modu SSH, proxy ya da HTTP tünel katmanlarıyla birleştirilemez. Tünel gerektiğinde Servis Adı ya da SID modunu kullanın.
+
+<Cards>
+  <Card title="Bağlantı Oluşturma" href="/tr/docs/getting-started">
+    Veritabanı profilini, tünel / proxy katmanlarını, SSL'i ve bağlantı rengini birlikte yapılandırın.
+  </Card>
+  <Card title="Veritabanı Desteği" href="/tr/docs/databases">
+    Hangi veritabanı profillerinin dosya tabanlı, yerel, uyumluluk tabanlı ya da eklenti destekli olduğunu denetleyin.
+  </Card>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">
+    En az yetkiyi, ağ açıklığını, salt okunur korumayı ve üretim yazmalarını planlayın.
+  </Card>
+</Cards>

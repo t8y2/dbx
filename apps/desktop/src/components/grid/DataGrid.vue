@@ -601,6 +601,7 @@ let preservedSelectionOnNextResult: {
 } | null = null;
 let preservedDetailsOnNextResult: {
   sideCell?: PersistedDataGridSelection;
+  sideCellHasPendingDraft?: boolean;
   cellDialog?: PersistedDataGridSelection;
   rowDialog?: PersistedDataGridSelection;
   columnDialog?: PersistedDataGridSelection;
@@ -5805,6 +5806,7 @@ const {
   restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
+  columnIsExclusivelySelected,
   selectedRangeStart,
   selectedRowIds,
   selectedColumnIndexes,
@@ -5962,6 +5964,10 @@ function captureColumnTargetForRefresh(columnIndex: number | null): PersistedDat
 function captureDetailsForRefresh() {
   const details = {
     sideCell: showCellDetail.value ? captureCellTargetForRefresh(detailCell.value) : undefined,
+    // A refresh must not silently discard an unsaved value-editor draft: closing
+    // and reopening the panel (even at the "same" cell) would re-derive its text
+    // from the freshly fetched row, wiping whatever the user was typing.
+    sideCellHasPendingDraft: showCellDetail.value && hasPendingDetailEditorDraft.value,
     cellDialog: cellDetailDialogOpen.value ? captureCellTargetForRefresh(cellDetailDialogTarget.value) : undefined,
     rowDialog: rowDetailDialogOpen.value ? captureRowTargetForRefresh(rowDetailDialogRowId.value) : undefined,
     columnDialog: columnDetailDialogOpen.value ? captureColumnTargetForRefresh(columnDetailDialogColumnIndex.value) : undefined,
@@ -5985,11 +5991,17 @@ function restoreDetailCellAfterRefresh(snapshot: PersistedDataGridSelection | un
 }
 
 function restoreDetailsAfterRefresh(details: NonNullable<typeof preservedDetailsOnNextResult>) {
-  const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
-  if (sideCell) {
-    detailCell.value = sideCell;
-    showCellDetail.value = true;
-    hydrateCellDetailTarget(sideCell);
+  // When the side panel was left open with an unsaved value-editor draft, it was
+  // deliberately kept open (not closed) across this refresh, so there is nothing
+  // to restore here - reassigning detailCell would re-derive the editor text from
+  // the freshly fetched row and clobber the draft the user is still editing.
+  if (!details.sideCellHasPendingDraft) {
+    const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
+    if (sideCell) {
+      detailCell.value = sideCell;
+      showCellDetail.value = true;
+      hydrateCellDetailTarget(sideCell);
+    }
   }
 
   const cellDialog = restoreDetailCellAfterRefresh(details.cellDialog);
@@ -6481,6 +6493,12 @@ watch(activeCellDetailTab, (tab) => {
 const detailEditValue = ref("");
 const detailEditOriginalValue = ref("");
 const isEditingDetail = ref(false);
+// commitDetailEdit() intentionally re-triggers the activeCellDetail watch below to
+// re-sync the editor with the canonical committed value. Any other change to the
+// same cell's underlying data while still editing (e.g. a result refresh, or a
+// large-value hydration resolving) must not clobber the user's in-progress draft.
+let allowActiveCellDetailResync = false;
+let lastSyncedDetailCellKey: string | null = null;
 const detailValueDiffOpen = ref(false);
 const detailValueDiffSnapshot = ref<Readonly<JsonValueDiffSnapshot> | null>(null);
 const hasPendingDetailEditorDraft = computed(() => isEditingDetail.value && detailEditValue.value !== detailEditOriginalValue.value);
@@ -6611,6 +6629,15 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
+  const cellKey = `${detail.rowId}:${detail.colIndex}`;
+  const isSameCellStillEditing = isEditingDetail.value && cellKey === lastSyncedDetailCellKey;
+  lastSyncedDetailCellKey = cellKey;
+  if (isSameCellStillEditing && !allowActiveCellDetailResync) {
+    // The row's underlying data changed (e.g. a result refresh or a large-value
+    // hydration) while the user is still editing this same cell. Keep their draft.
+    return;
+  }
+  allowActiveCellDetailResync = false;
   const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: resolvedDatabaseType.value,
@@ -6688,6 +6715,7 @@ function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
   detailEditOriginalValue.value = "";
+  lastSyncedDetailCellKey = null;
 }
 
 function closeCellDetails() {
@@ -6761,6 +6789,9 @@ function commitDetailEdit() {
   if (!item || item.isDeleted) return;
   applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
   detailEditOriginalValue.value = detailEditValue.value;
+  // Force the activeCellDetail watch to re-run so the editor picks up the
+  // canonical (possibly coerced) committed value.
+  allowActiveCellDetailResync = true;
   detailCell.value = detailCell.value ? { ...detailCell.value } : null;
 }
 
@@ -6994,6 +7025,7 @@ async function applyOrderBySearch() {
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByClause,
+      injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
@@ -7033,6 +7065,7 @@ async function applyWhereFilter() {
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
+      injectDefaultTimeSeriesWhere: true,
       whereInput,
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
@@ -8218,6 +8251,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      injectDefaultTimeSeriesWhere: true,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
       limit: props.pageLimit ?? pageSize.value,
@@ -10546,7 +10580,10 @@ watch(
     clearCellSelection();
     clearRowSelection();
     invalidateContextMenuTarget();
-    closeCellDetails();
+    // Don't discard an unsaved value-editor draft just because the result set
+    // refreshed underneath it; leave the panel/editor state as-is and let
+    // restoreDetailsAfterRefresh() below skip re-opening it from fresh data.
+    if (!detailsSnapshot?.sideCellHasPendingDraft) closeCellDetails();
     closeDetailDialogs();
     if (shouldPreserveTranspose) {
       applyTransposeState(nextTransposeStateForRecordCount(showTranspose.value, transposeRowIndex.value, displayRowCount.value));
@@ -10564,7 +10601,7 @@ watch(
 function onHeaderContext(col: string, columnIndex: number) {
   invalidateContextMenuTarget();
   const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
-  if (visibleColIdx >= 0 && !columnIsSelected(visibleColIdx)) {
+  if (visibleColIdx >= 0 && !columnIsExclusivelySelected(visibleColIdx)) {
     selectColumn(visibleColIdx);
   }
   contextHeaderColumn.value = col;
@@ -10624,6 +10661,7 @@ async function copyAlterColumnSql() {
 
   const options: BuildSingleColumnAlterSqlOptions = {
     databaseType: props.databaseType,
+    driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
     schema: props.tableMeta?.schema,
     tableName: props.tableMeta!.tableName,
     column: draft,

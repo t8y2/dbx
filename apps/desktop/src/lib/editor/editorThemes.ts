@@ -772,9 +772,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ".cm-selectionLayer .cm-selectionBackground": {
       display: "none",
     },
+    // 光标是零宽元素，可见部分只来自 border-left。在 WebView 页面缩放（uiScale）下
+    // 1 CSS px 不再映射为整数设备像素，1.2px 的小数边框加上 transform 造成的独立绘制层
+    // 会被 WebKit 舍入丢弃，表现为光标在部分列/部分窗口宽度下不显示。
+    // 因此：用 margin-top 代替 transform（不产生绘制层），并给边框整数宽度。
+    // 颜色仍由各主题的 borderLeftColor 提供，无需改动主题。
     ".cm-cursor": {
       height: "1.6em !important",
-      transform: "translateY(-0.3em)",
+      marginTop: "-0.3em",
+      borderLeftWidth: "2px",
+      marginLeft: "-1px",
     },
     ".cm-trimmedSelection": {
       backgroundColor: `var(${EDITOR_SELECTION_BACKGROUND_CSS_VAR}, rgb(148 163 184 / 38%))`,

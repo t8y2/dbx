@@ -3,6 +3,13 @@
 import Link from "next/link";
 import { Github, Menu, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { DocsLang } from "@/lib/i18n";
+
+// Order of the nav language button, which cycles rather than toggling: with
+// three locales a two-way "other language" switch would strand Turkish
+// readers on the Chinese site.
+const LANG_CYCLE = ["en", "cn", "tr"] as const satisfies readonly DocsLang[];
+const LANG_BUTTON_LABEL: Record<DocsLang, string> = { en: "EN", cn: "中", tr: "TR" };
 
 const i18n = {
   en: {
@@ -13,9 +20,23 @@ const i18n = {
     sponsors: "Sponsors",
     contributors: "Contributors",
     drivers: "Offline Drivers",
-    langLabel: "Switch to Chinese",
+    langLabel: "Switch language",
     menu: "Open navigation",
     closeMenu: "Close navigation",
+    navLabel: "Primary navigation",
+  },
+  tr: {
+    home: "Ana Sayfa",
+    docs: "Dokümanlar",
+    changelog: "Değişiklik Günlüğü",
+    community: "Topluluk",
+    sponsors: "Sponsorlar",
+    contributors: "Katkıda Bulunanlar",
+    drivers: "Çevrimdışı Sürücüler",
+    langLabel: "Dili değiştir",
+    menu: "Gezinmeyi aç",
+    closeMenu: "Gezinmeyi kapat",
+    navLabel: "Ana gezinme",
   },
   cn: {
     home: "首页",
@@ -25,17 +46,18 @@ const i18n = {
     sponsors: "赞助商",
     contributors: "贡献者",
     drivers: "离线驱动",
-    langLabel: "切换到英文",
+    langLabel: "切换语言",
     menu: "打开导航",
     closeMenu: "关闭导航",
+    navLabel: "主导航",
   },
 };
 
-export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home" | "databases" | "changelog" | "community" | "issue" | "sponsors" | "contributors" | "drivers" }) {
+export function LandingNav({ lang, active }: { lang: DocsLang; active?: "home" | "databases" | "changelog" | "community" | "issue" | "sponsors" | "contributors" | "drivers" }) {
   const ref = useRef<HTMLElement>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const t = i18n[lang];
-  const otherLang = lang === "cn" ? "en" : "cn";
+  const otherLang = LANG_CYCLE[(LANG_CYCLE.indexOf(lang) + 1) % LANG_CYCLE.length];
   const langHrefMap: Record<string, string> = {
     databases: `/${otherLang}/databases`,
     changelog: `/${otherLang}/changelog`,
@@ -92,7 +114,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
   }, [menuOpen]);
 
   return (
-    <nav ref={ref} className={`landing-nav${menuOpen ? " is-menu-open" : ""}`} aria-label={lang === "cn" ? "主导航" : "Primary navigation"}>
+    <nav ref={ref} className={`landing-nav${menuOpen ? " is-menu-open" : ""}`} aria-label={t.navLabel}>
       <div className="landing-nav-inner flex items-center justify-between max-w-[1180px] h-16 mx-auto px-7 max-[760px]:min-h-[60px] max-[760px]:h-auto max-[760px]:px-[18px] max-[760px]:py-2">
         <Link href={`/${lang}`} prefetch={false} className="landing-nav-brand flex min-h-11 items-center gap-2.5 text-landing-ink text-2xl font-[820]" onClick={() => setMenuOpen(false)}>
           <img src="/logo-64.png" alt="" aria-hidden="true" width={28} height={28} />
@@ -114,7 +136,7 @@ export function LandingNav({ lang, active }: { lang: "en" | "cn"; active?: "home
             <Github size={18} strokeWidth={2} />
           </Link>
           <Link href={langHref} prefetch={false} aria-label={t.langLabel} title={t.langLabel} className="landing-nav-link ml-1.5 inline-flex h-9 items-center justify-center rounded-[7px] border border-landing-line px-3 text-[12px] font-[650] tracking-tight text-landing-muted" onClick={() => setMenuOpen(false)}>
-            文/A
+            {LANG_BUTTON_LABEL[otherLang]}
           </Link>
           <button
             type="button"

@@ -18,6 +18,7 @@ describe("ConnectionTree global search loading", () => {
     expect(source).toContain("while (deferredSearchQuery.value === query && store.sidebarSearchQuery === query)");
     expect(source).toContain("const restoreTasks = !newQuery && oldQuery ? restoreTrackedSearchTargets() : [];");
     expect(source).toContain("if (shouldCollapse) node.isExpanded = false;");
+    expect(source).toContain("store.discardFilteredTreeNodeChildren(node.id);");
   });
 
   it("limits concurrent metadata loads without dropping a task", async () => {

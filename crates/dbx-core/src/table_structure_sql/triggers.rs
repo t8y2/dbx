@@ -22,7 +22,7 @@ fn build_trigger_sql_with_mode(
         return Vec::new();
     }
 
-    let dialect = super::dialect::capabilities_for(options.database_type).dialect;
+    let dialect = super::dialect::capabilities_for(options.database_type, options.driver_profile.as_deref()).dialect;
     let database_label = database_label(options.database_type);
     if !matches!(dialect, StructureDialect::Mysql | StructureDialect::Oracle | StructureDialect::SqlServer) {
         if options.triggers.iter().any(has_trigger_edit) {

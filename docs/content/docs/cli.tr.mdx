@@ -1,0 +1,244 @@
+---
+title: DBX CLI
+description: Terminallerden, betiklerden, CI'dan ve Codex'ten bağlantıları, şemaları, sorgu sonuçlarını ve yapay zekâ bağlamını okumak için yerel DBX CLI'yi kullanın.
+---
+
+<Callout type="info">DBX CLI; terminal, betik ve kodlama agent'ı iş akışları için ayrı bir komut satırı paketidir. DBX bağlantı depolamasını ve SQL güvenlik kurallarını MCP sunucusuyla paylaşır.</Callout>
+
+## Kurulum
+
+### npm
+
+```bash
+npm install -g @dbx-app/cli
+```
+
+### Homebrew
+
+```bash
+brew tap t8y2/tap
+brew install dbx-cli
+```
+
+npm başlatıcısı için Node.js 18.18.0 ya da üstü gereklidir. CLI'nin kendisi `better-sqlite3` ya da bir Node.js yerel modül ABI'sine bağlı değildir. Homebrew kullanıcılarının Node.js'i ayrıca yönetmesi gerekmez.
+
+### Bağımsız yerel ikili dosya
+
+`packages-v*` GitHub Sürümü; macOS, Linux ve Windows için yerel CLI arşivleri sunar. Platformunuza uyan arşivi indirin, `CLI-SHA256SUMS` ile doğrulayın, çıkarın ve `dbx` komutunu doğrudan çalıştırın. Bağımsız ikili dosyalar Node.js gerektirmez.
+
+```bash
+tar -xzf dbx-cli-linux-x64-gnu.tar.gz
+chmod +x dbx
+./dbx --version
+```
+
+Özel ya da taşınabilir bir DBX veri dizini kullanırken `DBX_DATA_DIR` değişkenini ayarlayın.
+
+Kurulu sürümü denetleyin:
+
+```bash
+dbx --version
+```
+
+## Yaygın Komutlar
+
+```bash
+dbx doctor
+dbx capabilities
+dbx connections list --json
+dbx connections list --format csv
+dbx schema list local --json
+dbx schema describe local users --json
+dbx query local "select count(*) as total from users" --json
+dbx query local "select id, name from users" --format csv
+dbx query local "select * from users" --limit 50 --timeout 10s --json
+dbx query local --file ./query.sql --json
+dbx context local --tables users,orders
+dbx open local users
+```
+
+## Tanılama
+
+Yerel DBX yollarını, bağlantı deposunun sağlığını ve masaüstü köprüsünün kullanılabilir olup olmadığını incelemek için `dbx doctor` kullanın:
+
+```bash
+dbx doctor
+dbx doctor --json
+```
+
+İsteğe bağlı platform paketi kurulmamışsa `--no-optional` olmadan yeniden kurun:
+
+```bash
+npm uninstall -g @dbx-app/cli
+npm install -g @dbx-app/cli
+```
+
+Hangi veritabanı türlerinin doğrudan sorgulanabildiğini ve hangilerinin şu anda DBX Masaüstü gerektirdiğini görmek için `dbx capabilities` kullanın:
+
+```bash
+dbx capabilities
+dbx capabilities --json
+```
+
+CLI ikili dosyası şu anda PostgreSQL, Redshift, MySQL, Doris, StarRocks, Manticore Search, SQLite, rqlite, KWDB ve QuestDB türlerini doğrudan sorgulanabilir olarak listeler. Kurulu sürüm için asıl kaynak `dbx capabilities` çıktısıdır. Diğer türler; çalışan bir DBX Masaüstü köprüsünü ya da kendi Agent/dış sürücü altyapılarını gerektirir.
+
+## Çalıştırma Modları
+
+### Yerel Depolama
+
+CLI varsayılan olarak Masaüstü ve MCP'nin kullandığı aynı `dbx.db` bağlantı deposunu okur. `DBX_DATA_DIR`, `dbx.db` dosyasını içeren dizini göstermelidir.
+
+- Doğrudan sorgulanabilir türler Masaüstü kapalıyken de çalışabilir
+- Köprü gerektiren türler, Masaüstü'nün çalışmasını ve veri dizinindeki köprü port dosyası aracılığıyla bulunabilmesini gerektirir
+- Agent/JDBC, DuckDB ve diğer dış sürücü yolları yine DBX üzerinden kurulmuş bileşenleri gerektirir
+- `dbx open` her zaman bir Masaüstü arayüz işlemidir ve uygulama kullanılamadığında `DBX_NOT_RUNNING` döndürür
+
+### DBX Web ve Docker
+
+Yerel bağlantı deposu yerine dağıtılmış bir DBX Web arka ucunu kullanmak için `DBX_WEB_URL` değişkenini ayarlayın:
+
+```bash
+DBX_WEB_URL=https://dbx.example.com \
+DBX_WEB_PASSWORD='giris-parolaniz' \
+dbx connections list --json
+```
+
+`DBX_WEB_PASSWORD`, Web giriş parolasıdır. Web modunda bağlantılar, yetkiler, sürücüler ve dosya yolları sunucu ortamına aittir. `dbx open` yine yerel bir Masaüstü köprüsünü hedefler ve uzak bir Web otomasyon API'si olarak görülmemelidir.
+
+## Varsayılan Bağlantı
+
+Sorgu ve bağlam komutlarında bağlantı adını atlamak için `DBX_CONNECTION` değişkenini ayarlayın:
+
+```bash
+DBX_CONNECTION=local dbx query "select 1" --json
+DBX_CONNECTION=local dbx context --tables users,orders
+```
+
+## Çıktı Biçimleri
+
+Kararlı, makine tarafından okunabilir çıktı için `--json` ya da `--format json` kullanın. Başka komut satırı araçlarına aktarılacak sorgu, bağlantı ve şema verisi için `--format csv` kullanın.
+
+```bash
+dbx query local "select id, name from users" --format csv
+```
+
+Hatalar stderr'e yazılır ve sıfır olmayan bir çıkış kodu döndürülür.
+
+## Sorgu Denetimleri
+
+`dbx query`, SQL bağlantıları için SQL çalıştırır ve MongoDB bağlantıları için desteklenen Mongo kabuk komutlarını kabul eder. Redis bu komutla çalıştırılmaz; bunun yerine MCP Redis aracını ya da DBX çalışma alanını kullanın. Sorgu modu varsayılan olarak salt okunurdur.
+
+```bash
+dbx query local "select * from users" --limit 50 --timeout 10s --json
+```
+
+Süreler `ms`, `s` ya da `m` kabul eder; örneğin `500ms`, `10s` veya `1m`.
+
+Tehlikeli olmayan yazma ifadeleri için `--allow-writes` kullanın:
+
+```bash
+dbx query local "update users set name = 'Ada' where id = 1" --allow-writes
+```
+
+`DROP`, `TRUNCATE` ve `ALTER` gibi tehlikeli SQL hem `--allow-writes` hem `--allow-dangerous-sql` gerektirir. Açık işlem ifadeleri CLI tarafından engellenmeye devam eder; sabitlenmiş çok adımlı oturumlar için [MCP durumlu oturumlarını](/tr/docs/mcp) ya da DBX düzenleyicisini kullanın.
+
+Üretim veritabanlarına yapılan yazmalar ve DDL, iki bayrak da verilse bile engellenir. Üretim algılaması, SQL risk sınıflandırması, bağlantının salt okunur koruması ve veritabanı yetkileri bağımsız üst sınırlardır; bayraklar bir üretim atlatması değildir.
+
+## Tire ile Başlayan SQL
+
+Tire ile başlayan SQL'den önce `--` geçirin:
+
+```bash
+dbx query local --json -- "-- comment
+select 1"
+```
+
+## Hata Kodları
+
+CLI JSON hataları kararlı kodlar kullanır:
+
+| Kod                     | Anlamı                                             |
+| ------------------------ | --------------------------------------------------- |
+| `UNKNOWN_OPTION`         | Desteklenmeyen bir bayrak verildi                    |
+| `INVALID_OPTION`         | Bir bayrağın değeri eksik ya da geçersiz   |
+| `INVALID_ARGUMENT`       | Konumsal argümanlar eksik ya da çelişkili     |
+| `CONNECTION_STORE_ERROR` | DBX bağlantı deposu var ama okunamadı |
+| `CONNECTION_NOT_FOUND`   | İstenen adla eşleşen DBX bağlantısı yok         |
+| `SQL_BLOCKED`            | SQL güvenlik kuralları çalıştırmayı engelledi                  |
+| `DBX_NOT_RUNNING`        | DBX Masaüstü köprüsü kullanılamıyor                   |
+| `ERROR`                  | Beklenmeyen çalışma zamanı hatası                          |
+
+## Masaüstü Derin Bağlantıları
+
+DBX Masaüstü; istemciyi tarayıcılardan, bastion sunuculardan ya da betiklerden başlatmak için derin bağlantıları destekler.
+
+Başka bir iletişim kutusu açmadan DBX'i başlatın ya da öne getirin:
+
+```bash
+open 'dbx://open'
+```
+
+Bir web düğmesi protokole doğrudan bağlanabilir:
+
+```html
+<a href="dbx://open">DBX'te Aç</a>
+```
+
+Bağlantı alanları önceden doldurulmuş yeni bağlantı iletişim kutusunu açmak için `dbx://connection/new` kullanın.
+
+DSN modu:
+
+```bash
+open 'dbx://connection/new?url=postgres%3A%2F%2Fapp%3Asecret%40db.internal%3A5432%2Forders'
+```
+
+Alan modu:
+
+```bash
+open 'dbx://connection/new?type=mysql&host=127.0.0.1&port=3306&user=root&password=secret&database=test'
+```
+
+Desteklenen alanlar:
+
+| Alan        | Anlamı                                                                                  |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `type`       | Veritabanı türü; servis türleri arasında `etcd`, `consul`, `nacos-v2`, `nacos-v3`, `r-nacos` bulunur |
+| `url`        | Veritabanı DSN'i; URL kodlaması önerilir                                                |
+| `name`       | DBX'te görünen ad; verilmezse DBX önce `database`, sonra `host` değerini kullanır                      |
+| `host`       | Ana makine adı ya da IP adresi                                                                   |
+| `port`       | Port                                                                                     |
+| `user`       | Kullanıcı adı                                                                                 |
+| `password`   | Parola                                                                                 |
+| `database`   | Veritabanı adı; Redis için bu `0` gibi bir VT dizini olabilir                              |
+| `url_params` | Ek bağlantı parametreleri, örneğin `sslmode=require`                                     |
+| `ssl`        | `true` olduğunda SSL'i etkinleştirir                                                          |
+| `one_time`   | `true` olduğunda otomatik bağlanır, bağlantı kesildikten sonra bağlantıyı siler |
+
+Tek seferlik bağlantı örneği:
+
+```bash
+open 'dbx://connection/new?type=redis&host=127.0.0.1&port=6379&user=default&password=secret&database=0&one_time=true'
+```
+
+Nacos ve servis kaydı örnekleri:
+
+```bash
+open 'dbx://connection/new?type=consul&host=127.0.0.1&port=8500&password=acl-token'
+open 'dbx://connection/new?type=nacos-v3&host=127.0.0.1&port=8848&user=nacos&password=secret'
+open 'dbx://connection/new?type=r-nacos&url=http%3A%2F%2F127.0.0.1%3A8848%2Fnacos&user=admin&password=secret'
+```
+
+`nacos`, `nacos-v2` için; `rnacos`, `r-nacos` için takma addır. URL modunda servis uç noktası yolları korunur; üst düzeydeki `host`, `port`, `user`, `password` ve `ssl` alanları `url` içindeki değerleri geçersiz kılar. Consul için `password`, ACL belirtecidir. `password` verildiğinde Nacos `user` alanını gerektirir. `v` alanını atlamak ya da `v=1` kullanmak geçerli derin bağlantı protokolünü seçer; diğer sürümler reddedilir.
+
+<Callout type="info">Sistem düzeyindeki `dbx://` başlatmalarını test etmeden önce DBX Masaüstü'nü bir kez kurup açın; böylece işletim sistemi URL şemasını kaydedebilir. macOS'ta test etmek için `open 'dbx://open'` ya da `open 'dbx://connection/new?...'` kullanın.</Callout>
+
+<Callout type="warning">Bir derin bağlantı, tarayıcı ve terminal geçmişinde bir veritabanı parolasını ya da Consul ACL belirtecini açığa çıkarabilir. Kimlik bilgisi taşıyan bağlantıları ortak günlüklere, kabuk geçmişine, biletlere ya da sohbet mesajlarına koymayın.</Callout>
+
+## Codex
+
+Codex, CLI'yi doğrudan kabuk araçlarından çağırabilir:
+
+```bash
+dbx schema describe local users --json
+dbx context local --tables users,orders | codex exec "Write a retention query"
+```

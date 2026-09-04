@@ -28,5 +28,7 @@ test("data tab header shows the active connection before the table context", () 
   assert.match(template, /v-if="activeConnection\?\.name\?\.trim\(\)"/);
   assert.match(template, /:title="activeConnection\.name"/);
   assert.doesNotMatch(template, /data-data-header-connection class="[^"]*(?:max-w-4[89]|max-w-5[0-9])/);
-  assert.match(template, /data-data-header-connection class="[^"]*min-w-0[^"]*truncate/);
+  // min-w floor keeps scrollWidth reporting real overflow for the measured
+  // condensation tiers; chips still flex and only truncate under pressure.
+  assert.match(template, /data-data-header-connection class="[^"]*min-w-12[^"]*truncate/);
 });

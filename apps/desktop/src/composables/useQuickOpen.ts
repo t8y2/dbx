@@ -7,6 +7,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import * as api from "@/lib/backend/api";
 import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
+import { containsHan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import i18n from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
@@ -86,6 +87,23 @@ function rangeIndices(start: number, length: number): number[] {
   return Array.from({ length }, (_, index) => start + index);
 }
 
+const PINYIN_QUERY_RE = /^[a-z0-9]+$/;
+
+/**
+ * Original-text indices of the characters that feed `pinyinFirstLetters(text)`, in order.
+ * Iterates by Unicode code point (like `pinyinFirstLetters`), not UTF-16 code unit, so
+ * supplementary-plane Han characters (surrogate pairs) stay aligned with the letters they produce.
+ */
+function pinyinLetterPositions(text: string): number[] {
+  const positions: number[] = [];
+  let index = 0;
+  for (const char of text) {
+    if (/[\p{Script=Han}a-z0-9]/iu.test(char)) positions.push(index);
+    index += char.length;
+  }
+  return positions;
+}
+
 function matchWordPrefixes(words: IdentifierWord[], query: string): number[] | null {
   interface PrefixState {
     queryIndex: number;
@@ -150,6 +168,20 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
     return { kind: "prefix", score: 200 + Math.min(text.length - lowerQuery.length, 99), indices: rangeIndices(0, lowerQuery.length) };
   }
 
+  // DataGrip-style pinyin-initials matching for Chinese identifiers, e.g. "总租金" via "zzj".
+  // Only tried after literal matches fail, so a mixed Han+Latin name that literally prefix-matches
+  // (e.g. "abc表" via "abc") keeps its better literal-prefix score instead of being intercepted here.
+  const isPinyinQuery = PINYIN_QUERY_RE.test(lowerQuery) && containsHan(text);
+  if (isPinyinQuery) {
+    const pinyinLetters = pinyinFirstLetters(text);
+    if (pinyinLetters === lowerQuery) {
+      return { kind: "initials", score: 150 + Math.min(text.length, 99), indices: pinyinLetterPositions(text) };
+    }
+    if (pinyinLetters.startsWith(lowerQuery)) {
+      return { kind: "prefix", score: 250 + Math.min(text.length - lowerQuery.length, 99), indices: pinyinLetterPositions(text).slice(0, lowerQuery.length) };
+    }
+  }
+
   const wordPrefixIndices = matchWordPrefixes(words, lowerQuery);
   if (wordPrefixIndices) {
     return { kind: "word-prefix", score: 300 + Math.min(text.length - lowerQuery.length, 99), indices: wordPrefixIndices };
@@ -168,10 +200,37 @@ export function matchQuickOpenText(query: string, text: string): QuickOpenMatch 
     indices.push(index);
     queryIndex++;
   }
-  if (queryIndex !== lowerQuery.length) return null;
+  if (queryIndex === lowerQuery.length) {
+    const span = indices[indices.length - 1] - indices[0] + 1;
+    return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
+  }
 
-  const span = indices[indices.length - 1] - indices[0] + 1;
-  return { kind: "fuzzy", score: 500 + Math.min(span - lowerQuery.length, 99), indices };
+  // Non-contiguous pinyin-initials fallback, e.g. "zj" matching "总租金" (pinyin initials "zzj"),
+  // matching the ordered-subsequence behavior every other pinyin call site in the app already has.
+  if (isPinyinQuery) {
+    const pinyinLetters = pinyinFirstLetters(text);
+    const positions = pinyinLetterPositions(text);
+    const letterIndices: number[] = [];
+    let letterQueryIndex = 0;
+    let letterCount = 0;
+    // Iterate the initials by code point, keeping letterCount aligned with
+    // positions: unmapped supplementary-plane Han characters occupy two code
+    // units in pinyinLetters but still correspond to exactly one position.
+    for (const letter of pinyinLetters) {
+      if (letterQueryIndex >= lowerQuery.length) break;
+      if (letter === lowerQuery[letterQueryIndex]) {
+        letterIndices.push(positions[letterCount] ?? letterCount);
+        letterQueryIndex += 1;
+      }
+      letterCount += 1;
+    }
+    if (letterQueryIndex === lowerQuery.length) {
+      const pinyinSpan = letterIndices[letterIndices.length - 1] - letterIndices[0] + 1;
+      return { kind: "fuzzy", score: 500 + Math.min(pinyinSpan - lowerQuery.length, 99), indices: letterIndices };
+    }
+  }
+
+  return null;
 }
 
 interface MatchedItem extends QuickOpenItem {

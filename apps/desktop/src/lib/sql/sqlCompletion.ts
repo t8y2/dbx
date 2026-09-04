@@ -4608,6 +4608,13 @@ function buildColumnDetail(column: SqlCompletionColumn): string {
   if (column.isNullable === false) {
     detail += "  NOT NULL";
   }
+  // Surface the column comment inline in the completion row (e.g. Chinese
+  // field notes) so it shows without opening the side info panel. This was
+  // dropped when qualified completion queries were optimized; keep it here.
+  const comment = column.comment?.trim();
+  if (comment) {
+    detail += `  -- ${comment}`;
+  }
   return detail;
 }
 

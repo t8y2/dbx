@@ -1,0 +1,276 @@
+---
+title: MCP Tümleştirmesi
+description: Yapay zekâ kodlama agent'larının, DBX'in yönettiği Model Context Protocol politikası içinde meta veri okumasına, veri sorgulamasına ve durumlu oturumlar kullanmasına izin verin.
+---
+
+<Callout type="info">Yapay zekâ asistanınızı DBX'e bağlayın; şemaları incelemesine, veri sorgulamasına ve sonuçları DBX'te açmasına izin verin.</Callout>
+
+## MCP nedir?
+
+MCP (Model Context Protocol), yapay zekâ istemcilerinin dış araçları çağırmasını sağlar. DBX MCP, yapay zekâ asistanınıza DBX'te yapılandırılmış veritabanı bağlantılarına erişim verir.
+
+```text
+Yapay zekâ agent'ı → DBX MCP → veritabanınız → sonuçlar
+                                 ↘ DBX masaüstü uygulaması (açma ya da sonuç gösterme)
+```
+
+## Hızlı Başlangıç
+
+<Steps>
+  <Step>
+    ### MCP Sunucusunu Kurun
+
+    ```bash
+    npm install -g @dbx-app/mcp-server
+    ```
+
+    npm, paketi geçerli platformunuz için otomatik kurar. `--no-optional` kullanmayın.
+  </Step>
+  <Step>
+    ### Yapay Zekâ Agent'ınızı Yapılandırın
+
+    Proje dizininizde `.mcp.json` oluşturun:
+
+    ```json
+    {
+      "mcpServers": {
+        "dbx": {
+          "command": "npx",
+          "args": ["-y", "@dbx-app/mcp-server"]
+        }
+      }
+    }
+    ```
+
+    Paketi genel olarak kurduysanız `"command": "dbx-mcp-server"` kullanabilirsiniz. Bağlantı izin listesini ve yürütme modunu merkezî olarak **DBX Ayarlar → MCP** bölümünden yönetin; normal istemci yapılandırmalarının yetki değişkenlerine ihtiyacı yoktur. Windows taşınabilir DBX için `DBX_DATA_DIR` değerini `DBX.exe` yanındaki `data` dizinine ayarlayın.
+  </Step>
+  <Step>
+    ### Kullanmaya Başlayın
+
+    Yapay zekâ asistanınıza doğal dille sorun:
+
+    - "Veritabanı bağlantılarımı listele"
+    - "local-pg üzerindeki tabloları göster"
+    - "users tablosunu tanımla"
+    - "Son 7 gündeki siparişleri say"
+    - "orders tablosunu aç" (DBX'in çalışmasını gerektirir)
+  </Step>
+</Steps>
+
+## Desteklenen Yapay Zekâ Agent'ları
+
+| Agent | Yapılandırma |
+| --- | --- |
+| Claude Code | `.mcp.json` |
+| Cursor | `.cursor/mcp.json` |
+| Windsurf | MCP yapılandırması |
+| VS Code + Copilot | MCP uzantısı/yapılandırması |
+| DeepSeek Harness | `$DSH_HOME/profiles/<profil>/cordis.patch.yml` |
+
+### DeepSeek Harness
+
+DeepSeek Harness, MCP sunucularını bir `mcpServers` JSON nesnesi yerine Cordis eklenti girdileriyle yükler. `@dbx-app/mcp-server` kurulduktan sonra `web` profili için aşağıdaki girdiyi `$DSH_HOME/profiles/web/cordis.patch.yml` dosyasına ekleyin: `DSH_HOME` ayarlanmamışsa varsayılan olarak `~/.dsh` kullanılır.
+
+```yaml
+- insert:
+    - id: mcp-dbx
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: dbx
+        transport: stdio
+        command: dbx-mcp-server
+```
+
+Üst düzeydeki `- insert:` sarmalayıcısını koruyun ve diğer patch girdilerinin üzerine yazmayın. Başka bir DSH profili için yoldaki `web` yerine o profilin adını yazın. `dbx-mcp-server` komutu, DSH işleminin `PATH` değişkeninde bulunmalıdır; gerektiğinde tam çalıştırılabilir yolu kullanın.
+
+Oluşan yapılandırmayı doğrulamak için `dsh web --dump-config` çalıştırın, ardından DSH'yi yeniden başlatın ya da sıcak yeniden yüklemesinin patch'i uygulamasını bekleyin. Araçlar modele `mcp__dbx__<araç>` biçiminde sunulur. Araç adlarının ve yetki kurallarının kararlı kalması için `serverName: dbx` değerini değiştirmeyin. Bağlantı erişimi ve yürütme modu **DBX Ayarlar → MCP** bölümünden yönetilmeye devam eder.
+
+## Araçlar
+
+DBX MCP şu anda 17 araç sunar:
+
+| Araç | Açıklama |
+| --- | --- |
+| `dbx_list_connections` | MCP oturumunun görebildiği bağlantıları listeler |
+| `dbx_list_databases` | Bir bağlantı üzerinden kullanılabilen veritabanlarını, MCP veritabanı kapsamına uyarak listeler |
+| `dbx_add_connection` | DBX deposuna bir bağlantı ekler |
+| `dbx_duplicate_connection` | Bir DBX bağlantısını tüm ayarlarıyla çoğaltır |
+| `dbx_remove_connection` | DBX deposundan bir bağlantıyı kaldırır |
+| `dbx_list_tables` | Tabloları, görünümleri ya da koleksiyonları listeler |
+| `dbx_describe_table` | Sütunları ve tablo meta verisini döndürür |
+| `dbx_list_routines` | Bir şemadaki saklı yordamları ve işlevleri, isteğe bağlı `routine_type` filtresiyle (PROCEDURE ya da FUNCTION) listeler |
+| `dbx_get_routine_source` | Bir saklı yordamın ya da işlevin kaynağını ada göre, aşırı yüklenmiş adlar için isteğe bağlı `signature` ile döndürür |
+| `dbx_get_schema_context` | Bir yapay zekâ modeli için sıkı şema bağlamı döndürür |
+| `dbx_execute_query` | SQL ya da desteklenen bir MongoDB kabuk komutu çalıştırır, en fazla 100 satır döndürür |
+| `dbx_open_session` | Tek bir arka uç bağlantısına sabitlenmiş durumlu bir SQL sorgu oturumu açar |
+| `dbx_close_session` | Bir oturumu kapatır ve sabitlenmiş bağlantı kaynaklarını serbest bırakır |
+| `dbx_execute_redis_command` | Bir Redis komutu çalıştırır |
+| `dbx_send_message` | Desteklenen bir mesaj kuyruğu konusuna ya da kuyruğuna mesaj gönderir |
+| `dbx_open_table` | Çalışan DBX masaüstü uygulamasında bir tablo açar |
+| `dbx_execute_and_show` | Bir sorgu çalıştırır ve sonucu DBX'te gösterir |
+
+Bağlantı kapsamlı oturumlar; bağlantıyı değiştiren ve masaüstü arayüzü araçlarını gizler.
+
+## Durumlu Sorgu Oturumları
+
+Normal `dbx_execute_query` çağrıları birbirinden bağımsızdır. Bir iş akışının veritabanı oturum durumunu koruması gerektiğinde önce `dbx_open_session` çağırın ve döndürülen `sessionId` değerini sonraki `dbx_execute_query` çağrılarına geçirin. Tipik kullanımlar:
+
+- `USE` ya da veritabanı bağlamı değişiklikleri
+- Geçici tablolar
+- Oturum değişkenleri ve ayarları
+- Tek bir bağlantı gerektiren açık işlemler ya da çok adımlı tanılamalar
+
+Oturumlar yalnızca SQL bağlantılarını destekler ve tek bir bağlantı ile veritabanına bağlıdır. Bilinmeyen, kapatılmış ya da süresi dolmuş kimlikler sessizce sıradan bir sorguya dönmek yerine hata verir. İşiniz bittiğinde `dbx_close_session` çağırın. Boşta kalan oturumlar 30 dakika sonra geri alınır ve sunucu en fazla 32 eşzamanlı oturuma izin verir.
+
+<Callout type="warn">Durumlu bir oturum SQL politikasını genişletmez. `USE` yalnızca bir oturum içinde anlamlıdır; yazmalar, DDL, üretim koruması, bağlantının salt okunur durumu ve veritabanı yetkileri her istekte yeniden denetlenir.</Callout>
+
+## Veritabanı Erişimi
+
+### DBX Masaüstü için yerel Streamable HTTP
+
+Masaüstü isteğe bağlı olarak kendi Streamable HTTP MCP uç noktasını barındırabilir. **Varsayılan olarak kapalıdır** ve **Ayarlar → MCP → HTTP Servisi** bölümünden etkinleştirildiğinde varsayılan olarak yalnızca `127.0.0.1:5225/mcp` üzerinde dinler. Masaüstü işlemi dinleyiciyi yönetir, yerel bir bearer belirteci oluşturur, kopyalanabilir bir istemci yapılandırması gösterir ve yönetilen HTTP servisi beklenmedik biçimde sonlanırsa yeniden başlatır.
+
+Yerel bir MCP istemcisini bağlamak için:
+
+1. **Ayarlar → MCP → HTTP Servisi** bölümünü açın, **Streamable HTTP Servisi**'ni açın ve başka bir aygıtın gerçekten erişmesi gerekmedikçe varsayılan loopback adresini koruyun.
+2. **Kaydet ve servisi başlat**'a tıklayın. Değişen bir adresi, portu ya da yolu kaydetmek, servisi yeniden başlatarak yapılandırmayı uygular.
+3. Gösterilen servis adresini ve bearer belirtecini MCP istemcisine kopyalayın.
+
+Üretilen değerleri HTTP destekleyen bir MCP istemcisinde kullanın. Taşımaya özgü alan adları istemciler arasında değişir, ancak temel yapılandırma şudur:
+
+```json
+{
+  "type": "http",
+  "url": "http://127.0.0.1:5225/mcp",
+  "headers": {
+    "Authorization": "Bearer <DBX Masaüstü'nün gösterdiği belirteç>"
+  }
+}
+```
+
+Yerel istemciler için varsayılan loopback bağlamasını koruyun. Bir yerel ağ adresine bağlanmak, **Uzaktan erişime izin ver** seçeneğini açmayı ve izin verilen tam `Host` yetkilerini belirlemeyi gerektirir; tarayıcı istemcileri ayrıca tam `Origin` değerlerine ihtiyaç duyar. İstemci varsayılan olmayan bir port gönderdiğinde izin verilen Host değerinde `sunucu:port` kullanın. Belirteci değiştirmek, önceki kimlik bilgisini hemen geçersiz kılar.
+
+### Yerel bağlantılar
+
+MCP, DBX'te kayıtlı bağlantıları kullanır. Yerel olarak çalışan bağlantılar Masaüstü uygulamasının açık kalmasını gerektirmez; köprü destekli ya da kurulu Agent/sürücü yolları yine kendi çalışma zamanlarına bağlıdır.
+
+Yaygın yerel yollar:
+
+| Platform | Varsayılan veritabanı dosyası |
+| --- | --- |
+| macOS | `~/Library/Application Support/com.dbx.app/dbx.db` |
+| Linux | `~/.local/share/com.dbx.app/dbx.db` |
+| Windows | `%APPDATA%\com.dbx.app\dbx.db` |
+
+`DBX_DATA_DIR` değerini `dbx.db` dosyasını içeren dizine ayarlayın. Dosyanın kendisine ayarlamayın.
+
+Yerel SQL, tek düğümlü Redis ve MongoDB yolları MCP üzerinden doğrudan çalışabilir. SSH, küme, üreticiye özgü, dış sürücü ve Agent/JDBC kullanılabilirliği; bağlantı yapılandırmasına ve kurulu DBX bileşenlerine bağlıdır. DBX ürününün desteklediği her veritabanının bağımsız MCP ikili dosyasına gömülü olduğunu varsaymayın.
+
+DuckDB, bağımsız DBX DuckDB sürücüsünü kullanır. Yerel MCP üzerinden bir DuckDB bağlantısını sorgulamadan önce sürücüyü **DBX Sürücü Yöneticisi**'nden kurun. MCP ikili dosyası yardımcı bileşen istemcisini içerir, ancak DuckDB motorunu gömmez.
+
+### Agent/JDBC veritabanları
+
+Oracle, KingbaseES ve XuguDB kendi yerel DBX Agent'larını gerektirir, JRE gerektirmez. Dameng, DB2, Hive, Trino, Snowflake, SAP HANA ve diğer JDBC Agent bağlantıları; uygun Agent'ı, JDBC sürücüsünü ve JRE'yi gerektirir. MCP kullanmadan önce gereken bileşeni DBX'te kurun.
+
+### DBX Web ve Docker modu
+
+Yerel bağlantılar yerine dağıtılmış bir DBX Web arka ucunu kullanmak için `DBX_WEB_URL` değişkenini ayarlayın. Web girişi korumalıysa `DBX_WEB_PASSWORD` değerini de aynı giriş parolasına ayarlayın.
+
+DBX Web istekleri standart sistem proxy ortam değişkenlerine uyar: https URL'leri için `HTTPS_PROXY`/`https_proxy`, http URL'leri için `HTTP_PROXY`/`http_proxy`, yedek olarak `ALL_PROXY`/`all_proxy` ve atlama listesi olarak `NO_PROXY`/`no_proxy` (virgülle ayrılmış sunucular, örn. `localhost,127.0.0.1,.internal.example`). Boş ya da ayarlanmamış bir proxy değeri doğrudan bağlantı (proxy yok) anlamına gelir. HTTP, HTTPS ve SOCKS5 proxy'leri desteklenir (`http://127.0.0.1:7890` ya da `socks5://127.0.0.1:1080`); kimlik doğrulama gerektiren proxy'ler standart `kullanıcı:parola@sunucu:port` URL biçimini kullanır, örn. `http://admin:admin123@127.0.0.1:7890`. Her DBX Web isteğine ek başlıklar eklemek için (örneğin bir ağ geçidinin önünde belirteç kimlik doğrulaması) `DBX_WEB_HEADERS` değerini başlık adları ve dize değerlerinden oluşan bir JSON nesnesine ayarlayın, örn. `{"Authorization":"Bearer <token>"}`. Kendinden imzalı HTTPS arka uçlarında sertifika doğrulaması varsayılan olarak açıktır; doğrulamayı kapatmak için `DBX_WEB_INSECURE_SKIP_VERIFY=1` ayarlayın ya da özel bir CA'ya güvenmek için `DBX_WEB_CA_CERT` değerini bir PEM/DER CA dosyasına ayarlayın. Aynı değişkenler Web modundaki DBX CLI tarafından da kullanılır.
+
+DBX Web ve Docker aynı bağımsız DuckDB sürücüsünü gerektirir. İlk açılıştan sonra Sürücü Yöneticisi'nden kurun. Docker, kurulu sürücüleri `/app/data/agents` altında saklar; bu yüzden `/app/data` bir birim olarak bağlandığında korunurlar.
+
+### DBX Web için yerel Streamable HTTP
+
+DBX Web de MCP'yi kendisi barındırabilir. Bu mod, `DBX_WEB_MCP_TOKEN` (ya da `DBX_WEB_MCP_TOKEN_FILE`) yapılandırılmadıkça kapalıdır. Mevcut Web dinleyicisini ve `/mcp` yolunu kullanır, bu yüzden Docker ve ters proxy dağıtımlarının ikinci bir açık porta ihtiyacı olmaz. `DBX_WEB_MCP_ALLOWED_HOSTS` değerini, istemcilerin `Host` başlığında gönderdiği herkese açık yetkilerle (uygun olduğunda eşlenen portla birlikte) yapılandırın. Bir Compose dosyasına gerçek bir belirteç yazmak yerine `DBX_WEB_MCP_TOKEN_FILE` ya da dağıtım gizli bilgi yöneticinizi kullanın.
+
+Örneğin `4225:4224` olarak yayımlanan bir kapsayıcı `http://localhost:4225/mcp` adresini kullanır:
+
+```yaml
+environment:
+  DBX_WEB_MCP_TOKEN: replace-with-a-long-random-secret
+  DBX_WEB_MCP_ALLOWED_HOSTS: localhost:4225
+ports:
+  - "4225:4224"
+```
+
+İstemciler `Authorization: Bearer <DBX_WEB_MCP_TOKEN>` göndermelidir. Tarayıcı tabanlı istemciler ayrıca tam kaynaklarıyla `DBX_WEB_MCP_ALLOWED_ORIGINS` gerektirir, örneğin `https://mcp.example.com`; yerel istemciler normalde `Origin` başlığı göndermez. Bir ters proxy herkese açık bir yol öneki eklediğinde `DBX_PUBLIC_BASE_PATH=/dbx` ayarlayın; yerel uç nokta o zaman `/dbx/mcp` olur. Yerel HTTP ile mevcut `DBX_WEB_URL` stdio bağdaştırıcısı birlikte var olabilir: DBX bağlantılarını ve MCP politikasını paylaşırlar, bağdaştırıcı ise yalnızca stdio destekleyen istemciler için kullanışlı kalır.
+
+### Masaüstü arayüz araçları
+
+`dbx_open_table` ve `dbx_execute_and_show`, DBX masaüstü uygulamasını gerektirir ve Web modunda ya da kapsamlı politika arayüz araçlarını gizlediğinde kullanılamaz. Diğer araçların Masaüstü'ne ihtiyaç duyup duymadığı, bağlantının yerel yürütmeyi mi yoksa bir köprü/Agent yolunu mu kullandığına bağlıdır.
+
+## Güvenlik ve Ortam Değişkenleri
+
+DBX, **Ayarlar → MCP** altında tek bir yetkili MCP politikası saklar ve her istekte yeniden yükler:
+
+| Yetki modu | İzin verilen işlemler |
+| --- | --- |
+| Salt okunur | Sorgular ve meta veri okumaları |
+| Veri okuma/yazma | Normal eklemeler, etkin biçimde filtrelenmiş güncellemeler/silmeler, kapsamı belirli MongoDB değişiklikleri ve sıradan Redis yazmaları |
+| Tam erişim | Ayrıca geniş güncellemelere/silmelere, DDL'e, `TRUNCATE`'e, MongoDB'de yıkıcı işlemlere ve Redis `FLUSH*` komutlarına izin verir |
+
+`WHERE TRUE`, `WHERE 1 = 1`, `_id: {$exists: true}` gibi etkisiz bir koşul ya da belirsiz bir MongoDB filtresi yüksek riskli olmayı sürdürür. Bağlantı düzeyindeki salt okunur koruma, üretim koruması, veritabanı kimlik bilgileri ve MCP bağlantı izin listesi her modda üst sınır olarak kalır.
+
+MCP'ye açılan bağlantılar için **Ayarlar → MCP** varsayılan bir yürütme yetkisi belirleyebilir: genel moddan devralma, salt okunur, güvenli yazma ya da yüksek riskli yazma. Seçili veritabanları kullanıldığında tek tek veritabanları kendi yürütme yetkisini alabilir. Yürütme yetkileri en özel kapsamdan geriye doğru düşer: **veritabanı ayarı → bağlantı varsayılanı → genel varsayılan**. Örneğin genel ve bağlantı varsayılanları veri okuma/yazma iken bir veritabanı tam erişim kullanabilir. Bağlantı düzeyindeki salt okunur koruma, üretim koruması, veritabanı kapsamı ve veritabanı kimlik bilgileri; hiçbir veritabanı ayarının atlayamayacağı bağımsız kesin sınırlar olarak kalır.
+
+Aynı sayfa yalnızca seçili MCP araçlarını da sunabilir. Bu, yalnızca istemci tarafında bir görüntüleme tercihi değil, her çağrıda uygulanan bir kuraldır; eski bir araç listesini saklayan bir istemci, sunucu tarafındaki izin listesi değiştiğinde reddedilir.
+
+### Erişimi sırayla yapılandırın
+
+Geçerli kapsamı bu sırayla tanımlamak için **Ayarlar → MCP** bölümünü kullanın:
+
+1. MCP'nin **tüm bağlantıları** (ileride eklenecekler dâhil) mi yoksa yalnızca **belirtilen bağlantıları** mı görebileceğini seçin.
+2. Açılan her bağlantı için **tüm veritabanları**, **belirtilen veritabanları** ya da **erişim yok** seçin. Belirtilen veritabanı adları tam eşleşmedir; şu anda izin verilen adları bulmak için `dbx_list_databases` kullanın, ardından isterseniz bu veritabanları için yürütme yetkileri belirleyin.
+3. Her bağlantının varsayılan yürütme yetkisini belirleyin. Tüm veritabanları açıldığında her veritabanı için, seçili veritabanlarında ise geçersiz kılınmayanlar için geçerlidir.
+4. Yalnızca istemcinin ihtiyaç duyduğu MCP araçlarını seçin, ardından genel varsayılan yürütme yetkisini belirleyin.
+
+En özel yürütme ayarı kazanır, ancak izin verilen bir araç yine de gizlenmiş bir bağlantıyı, veritabanı kapsamını, bağlantının salt okunur durumunu, üretim korumasını ya da veritabanı hesabının kendi yetkilerini atlayamaz. Seçili kapsamın dışındaki bir veritabanı için yapılan istekler `DATABASE_OUT_OF_SCOPE` ile reddedilir. Veritabanına özgü yürütme yetkileri varken, bu sınırların atlanmasını önlemek için veritabanları arası SQL ve MongoDB toplama yazmaları reddedilir.
+
+Yükseltme sırasında, yürütme politikası sürümü olmayan kayıtlı bağlantı kuralları önceki üst sınır anlamını korur ve genel yetkiyi genişletemez. Yalnızca geçerli Ayarlar arayüzüyle kaydedilen bir kural, kapsamlı geçersiz kılma anlamı için işaretlenir; mevcut bir eski kuralı düzenlemek, yeni davranışı etkinleştirmeden önce geçerli üst sınırını taşır.
+
+Güncel sunucular; `DBX_MCP_ALLOW_WRITES` ya da `DBX_MCP_ALLOW_DANGEROUS_SQL` değişkenlerinin DBX politikasını genişletmesine izin vermez. Yükseltme uyumluluğu için `DBX_MCP_ALLOW_WRITES=0` (ya da `false`), merkezî bir politika ilk kez kaydedilene dek MCP'yi salt okunur tutar. Ondan sonra merkezî politika yetkilidir ve eski yetki değişkenleri yok sayılır. Eski bağlantı kapsamı değişkenleri DBX izin listesini yalnızca daraltabilir.
+
+| Değişken | Amacı |
+| --- | --- |
+| `DBX_DATA_DIR` | Yerel DBX veri dizinini geçersiz kılar |
+| `DBX_WEB_URL` | Bir DBX Web/Docker arka ucunu kullanır |
+| `DBX_WEB_PASSWORD` | DBX Web'e kimlik doğrular |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web istekleri için standart sistem proxy değişkenleri; boş değer proxy yok anlamına gelir. Kimlik doğrulama `http://kullanıcı:parola@sunucu:port` ile |
+| `NO_PROXY` | Yukarıdaki proxy için standart atlama listesi (virgülle ayrılmış sunucular) |
+| `DBX_WEB_HEADERS` | DBX Web istekleri için ek HTTP başlıklarından oluşan JSON nesnesi, örn. `{"Authorization":"Bearer token"}` |
+| `DBX_WEB_INSECURE_SKIP_VERIFY` | `1`/`true`, kendinden imzalı DBX Web arka uçları için TLS sertifika doğrulamasını kapatır (varsayılan: doğrula) |
+| `DBX_WEB_CA_CERT` | DBX Web TLS doğrulamasında güvenilecek PEM/DER CA dosyası |
+| `DBX_WEB_MCP_TOKEN` | Bu bearer belirteciyle yerel Web Streamable HTTP MCP'yi etkinleştirir |
+| `DBX_WEB_MCP_TOKEN_FILE` | Yerel Web MCP belirtecini bir dosyadan okur; `DBX_WEB_MCP_TOKEN` ile birlikte kullanılamaz |
+| `DBX_WEB_MCP_ALLOWED_HOSTS` | Yerel Web MCP için zorunlu, virgülle ayrılmış herkese açık Host yetkileri |
+| `DBX_WEB_MCP_ALLOWED_ORIGINS` | Yerel Web MCP için izin verilen, virgülle ayrılmış tarayıcı Origin değerleri |
+| `DBX_MCP_ALLOW_WRITES` | Yalnızca yükseltme uyumluluğu: `0`/`false`, yapılandırılmamış bir politikayı salt okunur tutar |
+| `DBX_MCP_SCOPE_CONNECTION_ID` | Tek bir bağlantı kimliği için uyumluluk kapsamı |
+| `DBX_MCP_SCOPE_CONNECTION_IDS` | Birden çok bağlantı kimliği için uyumluluk kapsamı |
+| `DBX_MCP_SCOPE_CONNECTION_NAME` | Oturumu tek bir bağlantı adıyla sınırlar |
+| `DBX_MCP_SCOPE_DATABASE` | Oturumu tek bir veritabanıyla sınırlar |
+| `DBX_MCP_DEBUG_SQL` | Geçici tanılamalara SQL'i dâhil eder |
+
+## Sorun Giderme
+
+<Accordions>
+  <Accordion title="İsteğe bağlı platform paketi kurulmadı">`--no-optional` olmadan yeniden kurun, ardından platformu `node -p 'process.platform + "-" + process.arch'` ile doğrulayın. Geçerli platform, desteklenen platform tablosunda görünmelidir.</Accordion>
+  <Accordion title="dbx.db bulunamıyor">`DBX_DATA_DIR` değerini `dbx.db` dosyasını içeren klasöre ayarlayın. Windows taşınabilir derlemelerinde bu normalde `DBX.exe` yanındaki `data` klasörüdür.</Accordion>
+  <Accordion title="DBX çalışmıyor">Yalnızca `dbx_open_table` ve `dbx_execute_and_show` masaüstü uygulamasını gerektirir. Yerel sorgu araçları DBX açık olmadan da çalışabilir.</Accordion>
+  <Accordion title="Masaüstü HTTP istemcisi ERR_CONNECTION_REFUSED alıyor">**Ayarlar → MCP → HTTP Servisi** bölümünde servisi açın ve **Kaydet ve servisi başlat**'a tıklayın. İstemcinin gösterilen adresi, yolu ve geçerli bearer belirtecini kullandığını doğrulayın. Varsayılan `127.0.0.1` adresi yalnızca aynı bilgisayardan gelen bağlantıları kabul eder.</Accordion>
+  <Accordion title="Masaüstü HTTP adresinin kullanımda olduğunu söylüyor">Seçili adres ve portu başka bir işlem dinliyor. **Ayarlar → MCP → HTTP Servisi** bölümünde kullanılmayan bir port seçin, ardından servisi yeniden başlatmak için yapılandırmayı kaydedin. Aynı HTTP uç noktasıyla iki DBX Masaüstü örneği çalıştırmayın.</Accordion>
+  <Accordion title="Bir istek DATABASE_OUT_OF_SCOPE döndürüyor">Bağlantı açılmış, ancak istenen veritabanı onun MCP veritabanı kapsamında değil. **Ayarlar → MCP** bölümünde tam veritabanı adını ekleyin ya da uygunsa o bağlantının kapsamını tüm veritabanlarına çevirin. Belirli bir kapsam için önce `dbx_list_databases` çağırın ve dönen adlardan birini kullanın.</Accordion>
+  <Accordion title="Daha önce görünen bir araç reddediliyor">Araç artık **Ayarlar → MCP** bölümünde seçili değil ya da geçerli politika buna izin vermiyor. İzin listesini değiştirdikten sonra MCP istemcisinin araç listesini yenileyin; sunucu eskimiş araç çağrılarını da reddeder.</Accordion>
+  <Accordion title="Docker ya da ters proxy MCP isteği başarısız oluyor">Eşlenen port ve varsa `DBX_PUBLIC_BASE_PATH` öneki dâhil herkese açık uç noktayı kullanın. `DBX_WEB_MCP_ALLOWED_HOSTS` değerini tam herkese açık `Host` yetkisine ayarlayın. Tarayıcı istemcileri ayrıca tam bir `DBX_WEB_MCP_ALLOWED_ORIGINS` girdisi gerektirir.</Accordion>
+  <Accordion title="Bir Agent/JDBC veritabanı başlamıyor">DBX Sürücü Yöneticisi üzerinden uygun DBX agent'ını, JDBC sürücüsünü ve JRE'yi kurun ya da güncelleyin. Tescilli sürücüler yerel MCP paketine dâhil değildir.</Accordion>
+  <Accordion title="Bir DuckDB bağlantısı başlamıyor">DBX Sürücü Yöneticisi üzerinden DuckDB sürücüsünü kurun ya da güncelleyin. Yerel MCP, DBX Web ve Docker; DuckDB motorunu gömmek yerine bağımsız sürücüyü kullanır.</Accordion>
+  <Accordion title="better-sqlite3 ya da Node ABI hatası görüyorum">MCP `better-sqlite3` gerektirmez. `@dbx-app/mcp-server` paketini yükseltin; hata `@dbx-app/cli` paketinden geliyorsa ayrı bir paket olduğu için CLI kurulum gereksinimlerini izleyin.</Accordion>
+</Accordions>
+
+## Gereksinimler
+
+- Node.js 18.18.0 ya da üstü
+- En az bir bağlantı yapılandırılmış bir DBX kurulumu
+- Agent/JDBC bağlantıları için uygun DBX Agent, JDBC sürücüsü ve JRE
+- İki arayüz aracı kullanılırken çalışan DBX masaüstü uygulaması

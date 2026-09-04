@@ -56,6 +56,8 @@ import {
   useSettingsStore,
   AI_PROVIDER_PRESETS,
   AI_PROVIDER_PARTNER_PRESETS,
+  AI_OUTPUT_TOKENS_MAX,
+  AI_OUTPUT_TOKENS_MIN,
   EDITOR_THEMES,
   DEFAULT_EDITOR_SETTINGS,
   DEFAULT_DESKTOP_SETTINGS,
@@ -3524,6 +3526,7 @@ const aiEditProxyEnabled = ref(false);
 const aiEditProxyUrl = ref("");
 const aiEditEnableThinking = ref(true);
 const aiEditReasoningLevel = ref<AiReasoningLevel>("default");
+const aiEditMaxOutputTokens = ref<number | undefined>(undefined);
 const aiEditContextWindow = ref<number | undefined>(undefined);
 const aiEditCodexCliPath = ref("");
 const aiEditCodexCliEnvRows = ref<AiEnvRow[]>([]);
@@ -3808,6 +3811,7 @@ function currentAiEditConfig() {
     proxyUrl: aiEditProxyUrl.value,
     enableThinking: aiEditEnableThinking.value,
     reasoningLevel: aiEditReasoningLevel.value,
+    maxOutputTokens: aiEditMaxOutputTokens.value || undefined,
     contextWindow: aiEditContextWindow.value || undefined,
     codexCliPath: aiEditCodexCliPath.value.trim() || undefined,
     codexCliEnv: aiIsCodexCli.value ? cliEnvFromRows(aiEditCodexCliEnvRows.value) : {},
@@ -3894,6 +3898,7 @@ function aiEnterEditMode(configId?: string) {
       aiEditProxyUrl.value = config.proxyUrl ?? "";
       aiEditEnableThinking.value = config.enableThinking ?? true;
       aiEditReasoningLevel.value = config.reasoningLevel ?? "default";
+      aiEditMaxOutputTokens.value = config.maxOutputTokens;
       aiEditContextWindow.value = config.contextWindow;
       aiEditCodexCliPath.value = config.codexCliPath ?? "";
       aiEditCodexCliEnvRows.value = aiEnvRowsFromConfig(config.codexCliEnv);
@@ -3927,6 +3932,7 @@ function aiEnterEditMode(configId?: string) {
     aiEditProxyUrl.value = "";
     aiEditEnableThinking.value = true;
     aiEditReasoningLevel.value = "default";
+    aiEditMaxOutputTokens.value = undefined;
     aiEditContextWindow.value = undefined;
     aiEditCodexCliPath.value = "";
     aiEditCodexCliEnvRows.value = [];
@@ -6867,6 +6873,15 @@ onUnmounted(() => {
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
+              <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <p>{{ t("settings.snippetsPlaceholderHint") }}</p>
+                <pre class="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-background/70 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
+SELECT t.*
+FROM ${1:table} t
+WHERE t.del_flag = 0
+LIMIT 100;</pre
+                >
+              </div>
 
               <div class="overflow-x-auto rounded-md border">
                 <table class="w-full min-w-[720px] text-sm">
@@ -7732,6 +7747,16 @@ onUnmounted(() => {
                     <Input v-model.number="aiEditContextWindow" type="number" min="1000" step="1000" class="h-8 text-xs" :placeholder="t('ai.contextWindowAuto')" />
                     <p class="mt-1 text-xs text-muted-foreground">
                       {{ t("ai.contextWindowHint") }}
+                    </p>
+                  </div>
+                </div>
+                <!-- Maximum Output Tokens -->
+                <div v-if="!aiIsCliProvider" class="grid grid-cols-3 items-start gap-3">
+                  <Label class="text-right text-xs">{{ t("ai.maxOutputTokens") }}</Label>
+                  <div class="col-span-2">
+                    <Input v-model.number="aiEditMaxOutputTokens" type="number" :min="AI_OUTPUT_TOKENS_MIN" :max="AI_OUTPUT_TOKENS_MAX" step="1000" class="h-8 text-xs" :placeholder="t('ai.maxOutputTokensAuto')" />
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      {{ t("ai.maxOutputTokensHint", { min: AI_OUTPUT_TOKENS_MIN, max: AI_OUTPUT_TOKENS_MAX }) }}
                     </p>
                   </div>
                 </div>

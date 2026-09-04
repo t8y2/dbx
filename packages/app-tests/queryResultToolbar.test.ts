@@ -237,5 +237,5 @@ test("DataGrid marks toolbar refresh separately from current-result reloads", ()
 test("Elasticsearch JSON refresh preserves multi-result query groups", () => {
   const contentArea = source(contentAreaPath);
 
-  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
+  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", props\.activeTab\.id, activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
 });

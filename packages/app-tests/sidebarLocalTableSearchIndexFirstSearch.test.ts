@@ -8,18 +8,13 @@
 // for the fuzzy query "erpncs". This test locks in the fixed behavior: the
 // first search builds the index so the complete table set is searchable.
 //
-// Remote searches must stay bounded: every fuzzy match travels
-// database → IPC → store → tree rendering, so the result set is capped by
-// SIDEBAR_TABLE_SEARCH_RESULT_BUDGET (mirrored from connectionStore.ts).
+// Table-scoped remote searches are paginated at the configured sidebar table
+// page size, so a wide fuzzy query can still reach alphabetically-late matches
+// by loading more instead of being silently truncated to one budget window.
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { matchSidebarLabel } from "../../apps/desktop/src/lib/sidebar/sidebarSearch.ts";
 import type { ConnectionConfig, TableInfo, TreeNode } from "@/types/database";
-
-// Mirrors SIDEBAR_TABLE_SEARCH_RESULT_BUDGET in connectionStore.ts (4× the
-// default sidebar_table_page_size of 500). Kept as a local constant because
-// connectionStore must stay dynamically imported for vi.doMock isolation.
-const SIDEBAR_TABLE_SEARCH_RESULT_BUDGET = 2000;
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -202,7 +197,7 @@ describe("sidebar local table search first-search index build (#6190)", () => {
     expect(cached?.map((entry) => entry.name)).toContain("T_Erp_Nc_SuPlan_List");
   }, 30000);
 
-  it("remote search returns the complete fuzzy result set within the result budget", async () => {
+  it("remote search pages through the complete fuzzy result set", async () => {
     const allTables = buildTables();
     const listTables = listTablesFor(allTables);
     const { store, tablesGroup } = await installStore(listTables);
@@ -219,29 +214,40 @@ describe("sidebar local table search first-search index build (#6190)", () => {
       await store.loadObjectGroupChildren(tablesGroup, searchOptions(searchFilter));
     };
 
-    // First remote search: the backend receives the result budget as the
-    // limit — 4× the page size, comfortably above the 801 fuzzy matches of
-    // this schema — so the alphabetically-late target is never truncated.
+    // The first remote search loads one 500-table page plus a load-more node.
+    // The alphabetically-late target is on the next page, so it must not be
+    // dropped from the first result set.
     await search("erpncs");
-    const firstResults = (tablesGroup.children ?? []).map((node) => node.label);
-    expect(firstResults).toContain("T_Erp_Nc_SuPlan_List");
-    expect(listTables.mock.calls.some((call) => call[3] === "erpncs" && call[4] === SIDEBAR_TABLE_SEARCH_RESULT_BUDGET)).toBe(true);
+    let children = tablesGroup.children ?? [];
+    expect(children).toHaveLength(501);
+    expect(children.at(-1)?.type).toBe("load-more");
+    expect(children.map((node) => node.label)).not.toContain("T_Erp_Nc_SuPlan_List");
+    expect(listTables.mock.calls.some((call) => call[3] === "erpncs" && call[4] === 501 && call[5] === 0)).toBe(true);
+
+    await store.loadMoreObjectGroupChildren(children.at(-1)!, { searchFilter: "erpncs" });
+    children = tablesGroup.children ?? [];
+    expect(children.map((node) => node.label)).toContain("T_Erp_Nc_SuPlan_List");
+    expect(listTables.mock.calls.some((call) => call[3] === "erpncs" && call[4] === 501 && call[5] === 500)).toBe(true);
 
     // Repeated searches are order-independent.
     await search("terpncs");
     expect((tablesGroup.children ?? []).map((node) => node.label)).toContain("T_Erp_Nc_SuPlan_List");
     await search("erpncs");
+    children = tablesGroup.children ?? [];
+    expect(children.at(-1)?.type).toBe("load-more");
+    await store.loadMoreObjectGroupChildren(children.at(-1)!, { searchFilter: "erpncs" });
     expect((tablesGroup.children ?? []).map((node) => node.label)).toContain("T_Erp_Nc_SuPlan_List");
   }, 30000);
 
-  it("remote search results never exceed the result budget", async () => {
-    // 3000 tables whose names all contain "erpncs": an unbounded search would
-    // return all 3000; the budget caps a single result set at 2000.
+  it("remote search results remain paginated for very wide queries", async () => {
+    // 3000 tables whose names all contain "erpncs": pagination keeps every
+    // loaded page bounded by the configured sidebar table page size.
     const allTables: TableInfo[] = [];
     for (let i = 0; i < 3000; i++) allTables.push({ name: `ErpNcS${i}`, table_type: "TABLE", comment: null });
     const listTables = listTablesFor(allTables);
     const { store, tablesGroup } = await installStore(listTables);
 
+    store.setSidebarTableSearchQuery(tablesGroup.id, "erpncs");
     await store.loadObjectGroupChildren(tablesGroup, {
       force: true,
       searchFilter: "erpncs",
@@ -250,8 +256,14 @@ describe("sidebar local table search first-search index build (#6190)", () => {
     });
 
     const children = tablesGroup.children ?? [];
-    expect(children.length).toBeLessThanOrEqual(SIDEBAR_TABLE_SEARCH_RESULT_BUDGET);
-    expect(listTables.mock.calls.some((call) => call[3] === "erpncs" && call[4] === SIDEBAR_TABLE_SEARCH_RESULT_BUDGET)).toBe(true);
+    expect(children).toHaveLength(501);
+    expect(children.at(-1)?.type).toBe("load-more");
+    expect(listTables.mock.calls.some((call) => call[3] === "erpncs" && call[4] === 501 && call[5] === 0)).toBe(true);
+
+    await store.loadMoreObjectGroupChildren(children.at(-1)!, { searchFilter: "erpncs" });
+    const loadedRows = (tablesGroup.children ?? []).filter((node) => node.type !== "load-more");
+    expect(loadedRows).toHaveLength(1000);
+    expect((tablesGroup.children ?? []).at(-1)?.type).toBe("load-more");
   }, 30000);
 
   it("an empty (cleared) query never issues a remote fuzzy search", async () => {

@@ -452,8 +452,17 @@ function parseSelectColumn(col: string, sources?: EditableQuerySource[]): Editab
 
 function parseStarSelectColumn(col: string, sources?: EditableQuerySource[]): EditableQueryColumn | null {
   if (col === "*") {
+    // An unqualified `*` is unambiguous when the query has exactly one
+    // source, so it can bind to that source like a qualified `alias.*`
+    // would. Without this, expandProjectionColumnsForSources cannot find a
+    // matching table source (no sourceKey) and drops the star expansion
+    // entirely, misaligning every result column that follows it — e.g.
+    // `SELECT *, amount FROM orders` loses all result-column comments even
+    // though the table has no ambiguity to resolve.
+    const sourceKey = sources?.length === 1 ? sources[0]!.key : undefined;
     return {
       star: true,
+      ...(sourceKey ? { sourceKey } : {}),
       resultName: "*",
       expression: col,
     };

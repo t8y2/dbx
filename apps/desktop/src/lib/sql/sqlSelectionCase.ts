@@ -23,6 +23,14 @@ export function convertSqlSelectionCase(sql: string, range: SqlSelectionRange, m
   });
   if (protectedTokens.length === 0) return convertCase(sql.slice(from, to), mode);
 
+  // A selection fully contained inside one protected token (e.g. the user selected only
+  // text inside a string literal) carries no risk of collateral damage to surrounding SQL,
+  // so honor the explicit request instead of silently no-oping it.
+  const [only] = protectedTokens;
+  if (protectedTokens.length === 1 && only.span.start <= from && to <= only.span.end) {
+    return convertCase(sql.slice(from, to), mode);
+  }
+
   let converted = "";
   let cursor = from;
   for (const item of protectedTokens) {

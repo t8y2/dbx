@@ -1,0 +1,111 @@
+---
+title: DBX'i 1Panel ile Dağıtma
+description: DBX web sürümünü 1Panel uygulama mağazasından kurun, erişin ve güncelleyin.
+---
+
+1Panel uygulama mağazası resmî DBX Docker imajını sunar; böylece DBX web sürümünü elle Docker komutu yazmadan kurup güncelleyebilirsiniz.
+
+<Callout type="info">
+  1Panel, DBX Web'i kurar. Temel veritabanı sorgulama, nesne gözatma, veri düzenleme, içe/dışa aktarma, yapay zekâ ve sürücü yönetimi sunucuda çalışır. Yerel dosya seçicileri, derin bağlantılar, yerel CLI Agent ve Masaüstü'ne özgü zamanlanmış veritabanı yedeklemeleri Web çalışma zamanının parçası değildir.
+</Callout>
+
+## İsteğe bağlı sunucu seçimi
+
+DBX için hâlâ bir sunucuya ihtiyacınız varsa [RainYun](https://www.rainyun.com/MTE5Mjc4Ng==_) hizmetine bakabilirsiniz. RainYun; bulut sunucular, fiziksel sunucular, oyun barındırma ve geliştirici dostu altyapı hizmetleri sunan bir bulut servis sağlayıcısıdır. Docker ve 1Panel gereksinimlerini karşılayan herhangi bir sunucu da DBX'i barındırabilir.
+
+## DBX'i Kurma
+
+1. 1Panel'e giriş yapın ve **Uygulama Mağazası**'nı açın.
+2. `DBX` araması yapın ve resmî DBX uygulamasını seçin.
+3. Kurulacak sürümü seçip **Kur**'a tıklayın.
+4. Kurulum alanlarını gözden geçirin:
+
+   | Ayar | Varsayılan | Açıklama |
+   | --- | --- | --- |
+   | Port | `4224` | DBX Web'e erişmek için kullanılan sunucu portu. Port zaten kullanımdaysa değiştirin. |
+   | Erişim Parolası | Otomatik üretilir | DBX Web'e giriş için kullanılan parola. 1Panel varsayılan değeri `random: true` ayarına göre üretir ve kurulum sırasında değiştirebilirsiniz. |
+
+5. **Onayla**'ya tıklayın ve 1Panel'in imajı indirip kapsayıcıyı başlatmasını bekleyin.
+
+<Callout type="info">
+  Erişim parolası, DBX Web giriş parolasıdır; bir veritabanı parolası değildir. Kurulum sırasında gösterilen ya da girdiğiniz parolayı saklayın.
+</Callout>
+
+## DBX'i Açma
+
+Kurulumdan sonra tarayıcıda şu adresi açın:
+
+```text
+http://SUNUCU_IP:PORT
+```
+
+Örneğin varsayılan portu kullanırken:
+
+```text
+http://192.168.1.100:4224
+```
+
+Kurulum formundaki **Erişim Parolası**'nı girin. Sayfa açılmıyorsa şunları denetleyin:
+
+- DBX uygulaması 1Panel'de çalışıyor mu;
+- tarayıcıdaki port, kurulum formundaki portla aynı mı;
+- bulut güvenlik grubu ve sunucu güvenlik duvarı bu porta izin veriyor mu;
+- port başka bir servis tarafından kullanılıyor mu.
+
+## Kalıcılık ve Güncellemeler
+
+DBX uygulama verisi, 1Panel uygulama dizinindeki `data` dizininde saklanır ve kapsayıcı içinde `/app/data` konumuna bağlanır. Bu dizin; DBX'in depolama veritabanını, kayıtlı bağlantıları, eklentileri, sürücüleri ve diğer kalıcı çalışma zamanı durumunu içerir. Bağlanan dizin kaldırılmadığı sürece kapsayıcıyı yeniden başlatmak ya da güncellemek bu veriyi korur.
+
+DBX'i güncellemek için 1Panel'de **Kurulu** uygulamalar altında açın, kullanılabilir bir sürüm seçip güncellemeyi başlatın. Güncellemeden önce veri dizininin sunucu yedeğinize dâhil olduğunu doğrulayın.
+
+<Callout type="warn">
+  Kayıtlı bağlantıları ve diğer yerel verileri kaldırmak istemiyorsanız DBX'in uygulama veri dizinini silmeyin. Uygulamayı kaldırmadan önce dizini yedekleyin.
+</Callout>
+
+<Callout type="warning">
+  `/app/data` dizinini yedeklemek yalnızca DBX uygulama yapılandırmasını ve çalışma zamanı verisini korur. MySQL, PostgreSQL veya diğer hedef veritabanlarındaki iş verisini yedeklemez. Web, Masaüstü'ndeki zamanlanmış veritabanı yedekleme işlerini sunmaz; yerel veritabanı yedeklerini, bulut anlık görüntülerini ya da özel bir yedekleme sistemini kullanın.
+</Callout>
+
+DuckDB, `dbx-web` imajına gömülü değildir. İlk açılıştan sonra [Sürücü Yöneticisi](/tr/docs/driver-management) üzerinden ayrıca kurun. Sürücü `/app/data/agents` altında saklanır, bu yüzden aynı veri bağlaması tarafından korunur.
+
+## Web Yolları ve Dosyaları
+
+1Panel dağıtımında DBX arka ucu, sunucunun ya da kapsayıcının dosya sistemini okur:
+
+- SSH özel anahtar yolu, yalnızca tarayıcının çalıştığı bilgisayarda değil, kapsayıcı içinde okunabilir olmalıdır.
+- JDBC JAR dosyaları, eklentiler, Agent'lar ve indirilen sürücüler sunucu tarafındaki veri dizininde bulunur.
+- Tarayıcıdan yapılan yüklemeler, bir görev onları okumadan önce denetimli bir sunucu dizinine kopyalanır.
+- Veritabanı dosyası bağlantıları ve sunucu yolları kapsayıcının bakış açısından değerlendirilmelidir.
+
+Arayüz kendi bilgisayarınızın tarayıcısında açık diye o bilgisayara ait mutlak bir yol girmeyin. Masaüstü/Web sınırının tamamı için [DBX Nedir?](/tr/docs/what-is-dbx) sayfasına bakın.
+
+## Veritabanına Bağlanma
+
+Giriş yaptıktan sonra **Yeni Bağlantı**'ya tıklayın ve hedef veritabanı türünü, adresini, portunu, kullanıcı adını ve veritabanı parolasını girin. DBX kapsayıcısının hedef veritabanına erişebilmesi gerekir:
+
+- Aynı sunucudaki bir veritabanı için o sunucudan erişilebilen bir adres ve port kullanın.
+- Aynı Docker ağındaki bir veritabanı için kapsayıcı adını ve kapsayıcı portunu kullanın.
+- Özel ağdaki bir veritabanı için 1Panel sunucusunu o ağa bağlayın ya da gerektiğinde bir [SSH tüneli](/tr/docs/ssh-tunnel) yapılandırın.
+
+<Callout type="info">
+  `4224`, DBX Web servis portudur; hedef veritabanının portu değildir. MySQL, PostgreSQL, Redis veya başka bir bağlantı oluştururken veritabanının kendi portunu girin.
+</Callout>
+
+## Üretim Dağıtımı Önerileri
+
+- Örnek bir değer yerine uzun ve benzersiz bir erişim parolası kullanın.
+- 1Panel ters proxy'si üzerinden HTTPS yapılandırın; güvenlik grubu ve sunucu güvenlik duvarı açıklığını sınırlayın.
+- Denetimli yükseltmeler önemliyse bir sürüme sabitleyin; güncellemeden önce `/app/data` dizinini yedekleyin ve [Değişiklik Günlüğü](/tr/changelog) sayfasını okuyun.
+- En az yetkili, özel bir veritabanı hesabı kullanın ve üretim bağlantılarında salt okunur korumayı tercih edin.
+- Sürücü ve eklenti kaynaklarını inceleyin; güvenmediğiniz JAR ya da çalıştırılabilir dosyaları veri dizinine koymayın.
+
+Veritabanı, yazma, yapay zekâ ve API sınırları için [Üretim Güvenliği](/tr/docs/production-safety) sayfasına bakın.
+
+<Cards>
+  <Card title="Sürücü Yöneticisi" href="/tr/docs/driver-management">
+    Web'in gerektirdiği DuckDB, JDBC ve Agent sürücülerini kurun, çalışma zamanı durumlarını inceleyin.
+  </Card>
+  <Card title="Veritabanı Yedekleme" href="/tr/docs/database-backup">
+    Masaüstü zamanlanmış yedekleme desteğini ve Web dağıtımlarının neden dış bir yedekleme planına ihtiyaç duyduğunu öğrenin.
+  </Card>
+</Cards>

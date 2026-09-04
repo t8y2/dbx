@@ -1029,6 +1029,7 @@ export function createIndexDrafts(indexes: IndexInfo[]): EditableStructureIndex[
     indexType: normalizeStructureIndexType(index.index_type),
     includedColumns: index.included_columns ? [...index.included_columns] : [],
     comment: index.comment ?? "",
+    columnOpclasses: index.column_opclasses ? [...index.column_opclasses] : [],
     original: index,
     markedForDrop: false,
   }));

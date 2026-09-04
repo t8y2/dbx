@@ -1,0 +1,349 @@
+---
+title: Web API Başvurusu
+description: DBX Web ve Docker arayüzünün kullandığı iç HTTP API'leri; kimlik doğrulama, sorgular, arka plan işleri, yüklemeler ve indirmeler dâhil.
+---
+
+<Callout type="warn">Bu API; DBX Web arayüzünü ve MCP Web arka ucu gibi iç araçları çalıştırır. Ayrı, herkese açık bir tümleştirme sözleşmesi değildir. Uç noktalar ve yükler sürümler arasında değişebilir. Betik ve agent iş akışları için mümkün olduğunda [@dbx-app/cli](/tr/docs/cli) ya da [@dbx-app/mcp-server](/tr/docs/mcp) tercih edin.</Callout>
+
+## Temel URL
+
+DBX Web varsayılan olarak `4224` portunu dinler:
+
+```text
+http://localhost:4224
+```
+
+Bir ters proxy alt yolunun arkasında dağıtıldığında `DBX_PUBLIC_BASE_PATH` ayarlayın ve her rotaya önek ekleyin. Örneğin `/dbx` ile:
+
+```text
+https://example.com/dbx/api/auth/check
+```
+
+Tüm API rotaları `/api` altındadır.
+
+## Kimlik Doğrulama
+
+Korumalı rotalar `dbx_session` adlı bir oturum çerezi gerektirir.
+
+### Kimlik Doğrulama Durumunu Denetleme
+
+```http
+GET /api/auth/check
+```
+
+Örnek yanıt:
+
+```json
+{
+  "authenticated": false,
+  "required": true,
+  "setup_required": false
+}
+```
+
+| Alan | Anlamı |
+| --- | --- |
+| `required` | Parola koruması etkin |
+| `setup_required` | İlk çalıştırmada parola kurulumu hâlâ gerekli |
+| `authenticated` | Geçerli isteğin zaten geçerli bir oturumu var |
+
+### İlk Çalıştırma Kurulumu
+
+```http
+POST /api/auth/setup
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+### Giriş
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "password": "your-password"
+}
+```
+
+Başarılı olduğunda yanıt `Set-Cookie: dbx_session=...` başlığını ayarlar. Sonraki isteklerde bu çerezi yeniden kullanın.
+
+Arka arkaya beş başarısız giriş, yaklaşık 60 saniyelik bir kilitlenmeyi tetikler. Oturumlar geçerli Web işleminde tutulur ve yeniden başlatmadan sonra yeniden giriş gerektirir. Çerez `HttpOnly` özelliklidir, `SameSite=Lax` kullanır ve yolu için `DBX_PUBLIC_BASE_PATH` değerini izler.
+
+### Çıkış
+
+```http
+POST /api/auth/logout
+Cookie: dbx_session=...
+```
+
+### Ortam Değişkenleri
+
+| Değişken | Amacı |
+| --- | --- |
+| `DBX_PASSWORD` | Kapsayıcı açılışında başlangıç parolası belirler |
+| `DBX_DISABLE_PASSWORD=1` | Parola korumasını tümüyle kapatır |
+| `DBX_PORT` | Dinleme portunu değiştirir (varsayılan `4224`) |
+| `DBX_DATA_DIR` | `dbx.db` dosyasını içeren veri dizini |
+| `DBX_PUBLIC_BASE_PATH` | DBX'i `/dbx` gibi bir alt yolda sunar |
+| `DBX_MAX_UPLOAD_MB` | Genel istek ve yüklenen dosya sınırını geçersiz kılar; varsayılan 1024 MB. Multipart rotaları sabit protokol yükü ayırır (4 GiB'lık bir dosya için en az `4096` verin) |
+| `DBX_AGENT_DIR` | Web Agent/sürücü dizinini geçersiz kılar; varsayılan olarak veri dizini altındaki `agents` |
+| `DBX_STATIC_DIR` | Web statik varlık dizinini geçersiz kılar |
+
+## İstek Biçimi
+
+- Alan adlandırması her Rust istek türünü izler. Bazı gövdeler `camelCase` kullanır, bağlantı yapılandırması ise hâlâ `snake_case` içerir; tek bir adlandırma kuralını API'nin tamamına uygulamayın.
+- `GET` sorgu parametreleri genellikle `connection_id` gibi `snake_case` kullanır, ancak asıl kaynak geçerli rota uygulamasıdır.
+- Hatalar genellikle bir `error` alanı içeren JSON ve bir HTTP durum kodu döndürür.
+- Uzun süren dışa aktarma, içe aktarma, aktarım, SQL dosyası ve yapay zekâ işlemleri; tek bir eşzamanlı yanıt yerine genellikle bir başlatma isteği ile SSE ilerlemesi ve iptal/indirme rotalarını kullanır.
+
+Şu anda yalnızca veri ızgarası çıkarıcısı, `/api/query/data-grid-extractor-openapi.json` adresinde test edilmiş ve kapsamı belirli bir OpenAPI belgesi sunar. Bu belge DBX Web API'sinin tamamını kapsamaz ve diğer rotaları sürümlemez.
+
+## Bağlantı API'leri
+
+### Bağlantıları Listeleme
+
+```http
+GET /api/connection/list
+Cookie: dbx_session=...
+```
+
+Kayıtlı bağlantı profillerini döndürür. Parolalar gibi gizli bilgiler döndürülen JSON'dan ayrı saklanır.
+
+### Bağlantıları Kaydetme
+
+```http
+POST /api/connection/save
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "configs": [
+    {
+      "name": "local-mysql",
+      "db_type": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "username": "root",
+      "database": "app"
+    }
+  ]
+}
+```
+
+### Bağlantıyı Test Etme
+
+```http
+POST /api/connection/test
+Content-Type: application/json
+
+{
+  "config": {
+    "name": "temp",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### Bağlanma
+
+Veri API'lerinin çoğu, hedef bağlantının önce etkin olmasını bekler.
+
+```http
+POST /api/connection/connect
+Content-Type: application/json
+
+{
+  "config": {
+    "id": "connection-id",
+    "name": "local-mysql",
+    "db_type": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "username": "root",
+    "database": "app"
+  }
+}
+```
+
+### Sağlığı Denetleme
+
+```http
+POST /api/connection/check-health
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id"
+}
+```
+
+## Şema API'leri
+
+### Tabloları Listeleme
+
+```http
+GET /api/schema/tables?connection_id=CONNECTION_ID&database=app&schema=
+Cookie: dbx_session=...
+```
+
+### Sütunları Listeleme
+
+```http
+GET /api/schema/columns?connection_id=CONNECTION_ID&database=app&schema=&table=users
+Cookie: dbx_session=...
+```
+
+Diğer şema rotaları:
+
+- `/api/schema/databases`
+- `/api/schema/schemas`
+- `/api/schema/indexes`
+- `/api/schema/foreign-keys`
+- `/api/schema/ddl`
+
+## SQL Sorgu API'leri
+
+### Tek Bir İfade Çalıştırma
+
+```http
+POST /api/query/execute
+Content-Type: application/json
+
+{
+  "connectionId": "connection-id",
+  "database": "app",
+  "sql": "select id, name from users limit 10"
+}
+```
+
+Örnek yanıt biçimi:
+
+```json
+{
+  "columns": ["id", "name"],
+  "rows": [[1, "Ada"], [2, "Lin"]]
+}
+```
+
+İlgili rotalar:
+
+| Rota | Amacı |
+| --- | --- |
+| `/api/query/execute-multi` | Tek istekte birden çok sonuç kümesi çalıştırır |
+| `/api/query/execute-batch` | Bir ifade listesini çalıştırır |
+| `/api/query/cancel` | Çalışan bir sorguyu iptal eder |
+| `/api/query/build-table-select-sql` | Bir tabloya gözatma sorgusu oluşturur |
+
+## Redis API'leri
+
+Redis gezgini ve komut çalıştırma kendi rotalarını kullanır.
+
+```http
+POST /api/redis/execute-command
+Content-Type: application/json
+
+{
+  "connectionId": "redis-id",
+  "db": 0,
+  "command": "GET mykey"
+}
+```
+
+Diğer yaygın Redis rotaları:
+
+- `/api/redis/scan-keys`
+- `/api/redis/get-value`
+- `/api/redis/set-string`
+- `/api/redis/delete-key`
+
+## MongoDB API'leri
+
+MongoDB rotaları JSON gövdeli `POST` uç noktalarıdır.
+
+### Koleksiyonları Listeleme
+
+```http
+POST /api/mongo/list-collections
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app"
+}
+```
+
+### Belge Bulma
+
+```http
+POST /api/mongo/find-documents
+Content-Type: application/json
+
+{
+  "connectionId": "mongo-id",
+  "database": "app",
+  "collection": "users",
+  "skip": 0,
+  "limit": 20,
+  "filter": "{}"
+}
+```
+
+Diğer MongoDB rotaları arasında `aggregate-documents`, `insert-documents`, `update-documents` ve `delete-documents` bulunur.
+
+## MCP ve CLI Tümleştirmesi
+
+Otomasyon için bu paketleri bakımı, Web API'sini doğrudan çağırmaktan genellikle daha kolaydır:
+
+- MCP: [@dbx-app/mcp-server](/tr/docs/mcp)
+- CLI: [@dbx-app/cli](/tr/docs/cli)
+
+MCP dağıtılmış bir Web örneğine karşı çalıştığında şunu ayarlayın:
+
+```json
+{
+  "env": {
+    "DBX_WEB_URL": "http://localhost:4224",
+    "DBX_WEB_PASSWORD": "your-password"
+  }
+}
+```
+
+MCP sunucusu giriş ve oturum çerezlerini sizin için yönetir.
+
+CLI aynı `DBX_WEB_URL` ve `DBX_WEB_PASSWORD` değişkenlerini destekler. İki tümleştirme de sunucu tarafındaki bağlantıları, sürücüleri, salt okunur korumayı, üretim korumasını ve veritabanı yetkilerini yeniden kullanır; bu da DBX yükseltmeleri boyunca kopyalanmış iç rota yüklerinden daha kolay bakım sağlar.
+
+## Yazmalar, Güvenlik ve Dosya Sınırları
+
+- API kimlik doğrulaması yalnızca isteğin oturum açmış bir oturuma ait olduğunu kanıtlar; veritabanı yetkilerinin yerini almaz
+- Sorgu, içe aktarma ve aktarım yolları bağlantının salt okunur korumasını uygulamayı sürdürür; üretim ve SQL risk politikası ilgili çekirdek yollarda geçerlidir
+- Tarayıcıdan seçilen tablo içe aktarma ve SQL dosyaları, rastgele istemci yollarından okunmak yerine sunucudaki geçici depoya yüklenir
+- Web dışa aktarımları geçici bir sunucu dosyası oluşturur, bunu bir indirme rotasıyla döndürür ve ardından temizler
+- Ters proxy'ler çerezleri ve SSE akışını korumalı, uygun uzun süreli zaman aşımlarına izin vermeli ve herkese açık erişimi sınırlamalıdır
+
+## Örnek Betikler
+
+Depodaki örneklere bakın:
+
+- [examples/web-api/automation.sh](https://github.com/t8y2/dbx/tree/main/examples/web-api/automation.sh)
+- [examples/docker/docker-compose.yml](https://github.com/t8y2/dbx/tree/main/examples/docker/docker-compose.yml)
+- [examples/cli/basic-workflow.sh](https://github.com/t8y2/dbx/tree/main/examples/cli/basic-workflow.sh)
+
+## Rota Grupları
+
+Web arka ucu arayüz için çok daha fazla rota sunar:
+
+- Dışa aktarmalar ve indirmeler için `/api/export/*`
+- Tablo içe aktarmaları için `/api/import/*`
+- Veri aktarım işleri için `/api/transfer/*`
+- Yerleşik yapay zekâ asistanı için `/api/ai/*`
+- Sürücü yönetimi için `/api/agents/*` ve `/api/jdbc/*`
+- Düzenleyici durumu için `/api/history/*` ve `/api/saved-sql/*`
+
+Rotaların tam listesi için depodaki `crates/dbx-web/src/main.rs` dosyasına gözatın.

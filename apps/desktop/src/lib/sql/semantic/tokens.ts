@@ -1,7 +1,12 @@
 import type { SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
-const WORD_START = /[A-Za-z_@$#]/;
-const WORD_PART = /[A-Za-z0-9_@$#]/;
+const WORD_START = /[A-Za-z_@$#\p{ID_Start}]/u;
+const WORD_PART = /[A-Za-z0-9_@$#\p{ID_Continue}]/u;
+
+function characterAt(input: string, index: number): string {
+  const codePoint = input.codePointAt(index);
+  return codePoint === undefined ? "" : String.fromCodePoint(codePoint);
+}
 
 function token(kind: SqlSemanticToken["kind"], text: string, start: number, end: number, depth: number, quote?: string, closed?: boolean): SqlSemanticToken {
   return {
@@ -108,7 +113,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
 
   while (index < input.length) {
     const start = index;
-    const ch = input[index] ?? "";
+    const ch = characterAt(input, index);
     const next = input[index + 1] ?? "";
 
     if (/\s/.test(ch)) {
@@ -190,8 +195,12 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
     }
 
     if (ch === ":" || ch === "?") {
-      index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "")) index += 1;
+      index += ch.length;
+      while (index < input.length) {
+        const part = characterAt(input, index);
+        if (!WORD_PART.test(part)) break;
+        index += part.length;
+      }
       tokens.push(token("parameter", input.slice(start, index), start, index, depth));
       continue;
     }
@@ -204,8 +213,12 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
     }
 
     if (WORD_START.test(ch)) {
-      index += 1;
-      while (index < input.length && WORD_PART.test(input[index] ?? "") && !(dialectId === "postgres" && input[index] === "#")) index += 1;
+      index += ch.length;
+      while (index < input.length) {
+        const part = characterAt(input, index);
+        if (!WORD_PART.test(part) || (dialectId === "postgres" && part === "#")) break;
+        index += part.length;
+      }
       tokens.push(token("word", input.slice(start, index), start, index, depth));
       continue;
     }
@@ -218,7 +231,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    index += 1;
+    index += ch.length;
     tokens.push(token("operator", ch, start, index, depth));
   }
 

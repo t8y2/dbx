@@ -396,6 +396,29 @@ pub(crate) fn uses_metadata_gate(db_type: DatabaseType) -> bool {
     matches!(db_type, DatabaseType::Mysql | DatabaseType::Postgres | DatabaseType::SqlServer)
 }
 
+/// Session-scoped metadata gate allowance for a database type.
+///
+/// A non-empty `client_session_id` normally means the caller opened a
+/// dedicated single-connection session pool (for example MySQL tab sessions),
+/// so the gate allows only one in-flight metadata operation. PostgreSQL is the
+/// exception: `get_or_create_pool_for_session` builds a fresh full-size
+/// (10-connection) pool for each export session, so an allowance of 1 would
+/// serialize the database-export metadata prefetch (4 concurrent DDL/column
+/// lookups) and make three of them time out after METADATA_POOL_ACQUIRE_TIMEOUT
+/// with "DBX metadata pool is busy". Returning the pool's real capacity here
+/// flows into metadata_concurrency_limit, which caps the effective gate at
+/// METADATA_POOL_DEFAULT_LIMIT (6) -- still enough for the 4-wide prefetch and
+/// still isolated from the UI/base pool.
+fn metadata_gate_session_allowance(db_type: DatabaseType) -> usize {
+    if db_type == DatabaseType::Postgres {
+        // Matches db::postgres::connect's Pool::builder().max_size(10).
+        10
+    } else {
+        // MySQL and other session-scoped pools are single-connection.
+        1
+    }
+}
+
 fn metadata_gate_key(
     connection_id: &str,
     database: Option<&str>,
@@ -1369,8 +1392,8 @@ impl AppState {
         client_session_id: Option<&str>,
     ) -> Result<OwnedSemaphorePermit, String> {
         let key = metadata_gate_key(connection_id, database, db_type, client_session_id);
-        let max_connections =
-            if client_session_id.map(str::trim).is_some_and(|session| !session.is_empty()) { 1 } else { 10 };
+        let has_session = client_session_id.map(str::trim).is_some_and(|session| !session.is_empty());
+        let max_connections = if has_session { metadata_gate_session_allowance(db_type) } else { 10 };
         let limit = metadata_concurrency_limit(db_type, max_connections);
         let gate = {
             let mut gates = self.metadata_gates.lock().await;
@@ -2225,7 +2248,15 @@ impl AppState {
             | DatabaseType::Kwdb
             | DatabaseType::Questdb
             | DatabaseType::OpenGauss => {
-                let pg_pool = db::postgres::connect(&url, connect_timeout).await?;
+                // A session pool must have one physical client: sequential
+                // statements can otherwise lose temp tables/SET state when a
+                // pool checkout selects another PostgreSQL connection.
+                let pg_pool = db::postgres::connect_with_max_connections(
+                    &url,
+                    connect_timeout,
+                    postgres_pool_max_connections_for_session(client_session_id),
+                )
+                .await?;
                 // Build TLS cancel context for reconstructing TLS connection during cancel
                 if let Some(ctx) = db::postgres::build_postgres_cancel_context(&url) {
                     self.postgres_cancel_contexts.write().await.insert(pool_key.clone(), ctx);
@@ -5374,6 +5405,14 @@ fn mysql_pool_max_connections_for_session(client_session_id: Option<&str>) -> us
     }
 }
 
+fn postgres_pool_max_connections_for_session(client_session_id: Option<&str>) -> usize {
+    if normalize_client_session_id(client_session_id).is_some() {
+        1
+    } else {
+        10
+    }
+}
+
 fn redis_cluster_transport_prefix(connection_id: &str) -> String {
     format!("{connection_id}:redis-cluster:")
 }
@@ -7706,6 +7745,22 @@ mod tests {
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
     }
 
+    #[test]
+    fn postgres_pool_size_keeps_session_pools_single_connection() {
+        assert_eq!(super::postgres_pool_max_connections_for_session(None), 10);
+        assert_eq!(super::postgres_pool_max_connections_for_session(Some("")), 10);
+        assert_eq!(super::postgres_pool_max_connections_for_session(Some("mcp:batch-1")), 1);
+    }
+
+    #[test]
+    fn stale_mysql_pool_observation_does_not_remove_replacement_generation() {
+        let checked = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let checked_clone = checked.clone();
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        assert!(checked.is_same_pool(&checked_clone));
+        assert!(!checked.is_same_pool(&replacement));
+    }
+
     #[tokio::test]
     async fn stale_postgres_cleanup_preserves_concurrent_replacement_publication() {
         let (state, dir) = test_app_state().await;
@@ -7842,6 +7897,18 @@ mod tests {
         assert_eq!(super::metadata_concurrency_limit(DatabaseType::Mysql, 3), 1);
         assert_eq!(super::metadata_concurrency_limit(DatabaseType::Postgres, 1), 1);
         assert_eq!(super::metadata_concurrency_limit(DatabaseType::SqlServer, 10), 1);
+    }
+
+    #[test]
+    fn session_metadata_gate_allowance_matches_session_pool_capacity() {
+        // PostgreSQL session pools are full-size (10 connections, see
+        // db/postgres.rs Pool::builder().max_size(10)), so the gate must not
+        // serialize the database-export prefetch down to one permit.
+        assert_eq!(super::metadata_gate_session_allowance(DatabaseType::Postgres), 10);
+        // MySQL and other session-scoped pools are single-connection.
+        assert_eq!(super::metadata_gate_session_allowance(DatabaseType::Mysql), 1);
+        // SQL Server gate is intentionally shared/serialized regardless.
+        assert_eq!(super::metadata_gate_session_allowance(DatabaseType::SqlServer), 1);
     }
 
     #[test]

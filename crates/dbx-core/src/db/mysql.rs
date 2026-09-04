@@ -282,7 +282,7 @@ fn nonblank(value: String) -> Option<String> {
 }
 
 async fn query_first_nonblank_string(conn: &mut mysql_async::Conn, sql: &str) -> Option<String> {
-    // MySQL reports nullable metadata such as TABLE_COLLATION as NULL for views.
+    // MySQL reports nullable metadata such as `@@version_comment` as NULL.
     // Reading it as String makes mysql_async panic during row conversion.
     match query_first_column::<String>(conn, sql).await {
         Ok(value) => value.and_then(nonblank),
@@ -3697,11 +3697,9 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 }
 
 fn columns_sql(database: &str, table: &str) -> String {
-    // Query only information_schema.COLUMNS and fetch TABLE_COLLATION separately via
-    // `table_collation_sql`. A LEFT JOIN onto information_schema.TABLES triggers a
-    // catastrophic plan on MySQL 5.7 (observed ~8s vs ~1ms without the join), because 5.7's
-    // TABLES metadata is materialized per-query with poor predicate pushdown. The separate
-    // lookup matches the `get_columns_show` fallback path and keeps results identical.
+    // Query only information_schema.COLUMNS. A LEFT JOIN onto information_schema.TABLES
+    // triggers a catastrophic plan on MySQL 5.7 (observed ~8s vs ~1ms without the join),
+    // because 5.7's TABLES metadata is materialized per-query with poor predicate pushdown.
     format!(
         "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, \
          COLUMN_COMMENT, COLUMN_KEY, NUMERIC_PRECISION, NUMERIC_SCALE, CHARACTER_MAXIMUM_LENGTH, \
@@ -3798,28 +3796,6 @@ fn apply_mysql_generated_column_expressions(columns: &mut [ColumnInfo], expressi
         };
         if let Some(generated_extra) = mysql_generated_column_extra(extra, expression) {
             column.extra = Some(generated_extra);
-        }
-    }
-}
-
-fn table_collation_sql(database: &str, table: &str) -> String {
-    format!(
-        "SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} LIMIT 1",
-        quote_value(database),
-        quote_value(table),
-    )
-}
-
-fn normalize_mysql_column_charset_metadata(columns: &mut [ColumnInfo], table_collation: Option<&str>) {
-    let Some(table_collation) = table_collation.filter(|value| !value.trim().is_empty()) else {
-        return;
-    };
-    for column in columns {
-        if column.collation.as_deref().is_some_and(|value| value.eq_ignore_ascii_case(table_collation)) {
-            // MySQL reports effective values and does not preserve whether an
-            // equivalent table-default collation was explicitly written.
-            column.character_set = None;
-            column.collation = None;
         }
     }
 }
@@ -3964,14 +3940,6 @@ where
     };
     let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| e.to_string())?;
 
-    // When database is empty the COLUMNS query returns no rows, so the
-    // function falls through to get_columns_show and this code path is
-    // never reached.  Skip the collation lookup to avoid a pointless query.
-    let table_collation = if database.trim().is_empty() {
-        None
-    } else {
-        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
-    };
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
@@ -4019,7 +3987,6 @@ where
     }
 
     enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
-    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
 
@@ -4036,11 +4003,6 @@ where
             let result = conn.query_iter(&sql).await.map_err(|e| e.to_string())?;
             result.collect_and_drop().await.map_err(|e| e.to_string())?
         }
-    };
-    let table_collation = if database.trim().is_empty() {
-        None
-    } else {
-        query_first_nonblank_string(&mut conn, &table_collation_sql(database, table)).await
     };
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
@@ -4076,7 +4038,6 @@ where
         })
         .collect();
     enrich_mysql_generated_column_expressions(&mut conn, database, table, &mut columns).await;
-    normalize_mysql_column_charset_metadata(&mut columns, table_collation.as_deref());
     Ok(columns)
 }
 
@@ -5814,6 +5775,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                     included_columns: None,
                     comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 });
                 index_position
             };
@@ -7106,12 +7068,12 @@ mod tests {
     }
 
     #[test]
-    fn mysql_columns_sql_uses_column_key_and_table_default_collation() {
+    fn mysql_columns_sql_uses_column_key_for_primary_keys_without_join() {
         let sql = columns_sql("app", "users");
 
         assert!(sql.contains("information_schema.COLUMNS"));
-        // TABLE_COLLATION is fetched separately via `table_collation_sql`; the LEFT JOIN onto
-        // information_schema.TABLES is intentionally avoided to keep MySQL 5.7 fast.
+        // The LEFT JOIN onto information_schema.TABLES is intentionally avoided to keep
+        // MySQL 5.7 fast.
         assert!(!sql.contains("information_schema.TABLES"));
         assert!(!sql.contains("TABLE_COLLATION"));
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
@@ -7175,52 +7137,11 @@ mod tests {
     }
 
     #[test]
-    fn mysql_nullable_table_collation_uses_optional_string_conversion() {
+    fn mysql_nullable_metadata_uses_optional_string_conversion() {
         let collation = mysql_async::from_value_opt::<Option<String>>(mysql_async::Value::NULL)
             .expect("Option<String> must accept NULL MySQL metadata values");
 
         assert_eq!(collation, None);
-    }
-
-    #[test]
-    fn mysql_column_charset_metadata_clears_values_matching_table_default() {
-        let mut columns = vec![
-            ColumnInfo {
-                name: "inherited_name".to_string(),
-                character_set: Some("utf8mb4".to_string()),
-                collation: Some("utf8mb4_unicode_ci".to_string()),
-                ..Default::default()
-            },
-            ColumnInfo {
-                name: "explicit_other".to_string(),
-                character_set: Some("latin1".to_string()),
-                collation: Some("latin1_bin".to_string()),
-                ..Default::default()
-            },
-            ColumnInfo { name: "numeric_value".to_string(), ..Default::default() },
-        ];
-
-        normalize_mysql_column_charset_metadata(&mut columns, Some("utf8mb4_unicode_ci"));
-
-        assert_eq!((columns[0].character_set.as_deref(), columns[0].collation.as_deref()), (None, None));
-        assert_eq!(columns[1].character_set.as_deref(), Some("latin1"));
-        assert_eq!(columns[1].collation.as_deref(), Some("latin1_bin"));
-        assert_eq!((columns[2].character_set.as_deref(), columns[2].collation.as_deref()), (None, None));
-    }
-
-    #[test]
-    fn mysql_column_charset_metadata_preserves_values_without_table_default() {
-        let mut columns = vec![ColumnInfo {
-            name: "name".to_string(),
-            character_set: Some("utf8mb4".to_string()),
-            collation: Some("utf8mb4_unicode_ci".to_string()),
-            ..Default::default()
-        }];
-
-        normalize_mysql_column_charset_metadata(&mut columns, None);
-
-        assert_eq!(columns[0].character_set.as_deref(), Some("utf8mb4"));
-        assert_eq!(columns[0].collation.as_deref(), Some("utf8mb4_unicode_ci"));
     }
 
     #[test]

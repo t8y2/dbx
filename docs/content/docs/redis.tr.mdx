@@ -1,0 +1,137 @@
+---
+title: Redis Çalışma Alanı
+description: Redis anahtarlarına gözatın, arayın ve düzenleyin; TTL'leri, Stream tüketici gruplarını, Pub/Sub'ı, Slowlog'u ve örnek durumunu inceleyin.
+---
+
+Redis çalışma alanı; anahtar gözatmayı, türe özgü düzenlemeyi, komut çalıştırmayı, örnek incelemeyi ve yüksek riskli komut korumasını tek bir bağlantıda birleştirir. Büyük bir anahtar alanının tamamını bir kerede yüklemek yerine `SCAN` gibi artımlı işlemler kullanır.
+
+## Veritabanları ve Takma Adlar
+
+Redis bağlantıları kullanılabilir numaralı veritabanlarını listeler. `db0`, `db1` ve diğerlerine "Sipariş önbelleği" ya da "Geliştirme" gibi yerel takma adlar atayabilirsiniz. Takma adlar yalnızca DBX'teki görünümü ve aramayı etkiler; Redis komutları yine sayısal veritabanı kimliklerini kullanır.
+
+Tarama sayfa boyutu bağlantı başına saklanır. Çok büyük anahtar alanlarında ya da yüksek gecikmeli ağlarda düşürün; küçük örneklerde dikkatle artırın.
+
+## Anahtarlara Gözatma ve Arama
+
+Anahtar listesi; adı, türü, değer özetini, boyutu ve TTL'i gösterebilir. Şunları destekler:
+
+- `user:*` gibi Redis desenleri
+- Normal bir anahtar sözcüğü "içerir" eşleşmesine dönüştüren bulanık arama
+- Hiyerarşik gruplama ve düz liste gözatma
+- Daha fazla yükleme, tümünü getirme ve uzun bir taramayı durdurma
+- Anahtar adlarını kopyalama, birden çok anahtar seçme ya da yüklenmiş bir grubu seçme
+- Anahtara, değere ya da her ikisine göre arama
+
+Değer araması eşleşen içeriği okur ve String, Hash ile desteklenen diğer yapılar için türe duyarlı eşleştirme uygular. Hash ayrıntıları alanları ve değerleri de doğrudan arayabilir.
+
+<Callout type="warn">Tümünü getir ve değer araması çok sayıda anahtara dokunabilir. Üretimde önce deseni daraltın; Redis gecikmesini, CPU'yu ve ağ trafiğini izleyin.</Callout>
+
+## Veri Türleri
+
+| Tür | Başlıca yetenekler |
+| --- | --- |
+| String | Metin, JSON ve çeşitli görüntüleme biçimleri; gzip ve zlib değerleri salt okunur Sıkıştırma Açıldı biçiminde açılabilir, ham DEFLATE ise ilk deneme başarısız olduktan sonra **DEFLATE olarak yeniden dene** gerektirir; açılmış çıktı 50 MiB ile sınırlıdır; ikili dizeler kaçış karakterli, salt okunur metin olarak gösterilir |
+| Hash | Alan/değer tablosu, arama, sıralama, ekleme, düzenleme ve silme |
+| List | Dizinle sayfalanmış öğeler, ekleme, düzenleme ve silme |
+| Set | Üyelere gözatma, ekleme ve silme |
+| Sorted Set | Üye ve puan gözatma, düzenleme ve silme |
+| Stream | Girdiler, tüketici grupları, tüketiciler, bekleyen mesajlar, gecikme ve teslim ayrıntıları |
+| RedisJSON | JSON ağacı/kaynağı düzenleme, biçimlendirme ve sıkıştırılmış kaydetme; RedisJSON sunucu modülünü gerektirir |
+
+List, Set, Hash, Sorted Set ve Stream üye ayrıntıları, sıkıştırılmış üye değerleri için aynı Sıkıştırma Açıldı biçimini ve Gzip kısayolunu sunar.
+
+Büyük koleksiyon türleri sayfalar hâlinde yüklenir ve mümkün olduğunda toplam ile yüklenen sayıları gösterir.
+
+## Anahtar Oluşturma ve Düzenleme
+
+Bir anahtar oluştururken veri türünü ve başlangıç içeriğini seçin. Pozitif bir TTL belirleyin ya da kalıcı bir anahtar seçin.
+
+Mevcut bir değeri düzenlerken DBX şunları yapabilir:
+
+- Mevcut TTL'i koruma
+- Anahtarı kalıcı yapma
+- Saniye cinsinden göreli bir TTL belirleme
+- Yerel, mutlak bir sona erme zamanı seçme
+- Kaydetmeden önce JSON kaynağını biçimlendirme ya da sıkıştırma
+- Desteklenen değer türleri için yeniden oluşturma komutunu kopyalama
+
+TTL değerleri otomatik olarak geri sayar ve ayrıntı görünümü değerin tamamını düzenli aralıklarla yenileyebilir. Bir anahtar yenilemeden önce sona ererse DBX bunu bildirir ve eskiyen durumu temizler.
+
+<Callout type="info">Değeri değiştirirken TTL'i korumak, geçici bir önbellek girdisinin yanlışlıkla kalıcı olmasını önler. Kaydetmeden önce sona erme davranışını gözden geçirin.</Callout>
+
+## Stream Tüketici Grupları
+
+Stream ayrıntıları ayrıca şunları gösterebilir:
+
+- Tüketici grupları ve son teslim edilen kimlik
+- Okunan girdiler ve gecikme
+- Tüketiciler, boşta kalma süresi ve etkin olmama durumu
+- Bekleyen girdiler, teslim sayısı ve sahibi olan tüketici
+
+Bu değerler Redis tüketici grubu komutlarından gelir ve birikmiş ya da onaylanmamış mesajları çözmeye yardımcı olur. Sürekli bir izleme ya da uyarı sistemi değildir.
+
+## Komut Satırı
+
+Komut satırı, Redis CLI biçemli komutları kabul eder ve yapılandırılmış sonuçlar gösterir:
+
+- Bağlantı başına kaydedilen geçmişte gezinmek için ↑/↓ tuşlarını kullanın
+- Geçerli komut geçmişini temizleyin
+- Metin çıktısını seçip kopyalayın
+- `INFO`, `CLIENT LIST` ve `CONFIG GET` gibi komutları çalıştırın
+- Yanıt destekliyorsa tablo ya da JSON çıktısı görüntüleyin
+
+Komut güvenliği denetimi Redis komutlarını sınıflandırır. Bazı riskli komutlar onay ister, bazıları varsayılan olarak engellenir. Bu denetimi kapatmak; bağlantının salt okunur durumunu, üretim korumasını ya da MCP politikasını atlayamaz.
+
+## Pub/Sub
+
+Pub/Sub paneli şunları yapabilir:
+
+- Bir abonelik oturumunu bağlama ya da bağlantısını kesme
+- Kanallara veya desenlere abone olma
+- Gelen mesajları gerçek zamanlı gösterme
+- Bir kanala mesaj yayınlama
+- Geçerli arayüz oturumundaki mesajları temizleme
+
+Web/Docker abonelik için WebSocket kullanır. Ters proxy'lerin ilgili WebSocket yükseltmesine izin vermesi gerekir.
+
+## Pano, Anahtar İstatistikleri ve Slowlog
+
+Redis panosu sunucu ve örnek bilgilerini daraltılabilir alanlarda gruplar. Sunucu desteğine bağlı olarak şunları gösterebilir:
+
+- Sürüm, çalışma süresi, bellek, istemciler ve bağlantı durumu
+- Anahtar alanı, komutlar, kalıcılık, çoğaltma ve küme özetleri
+- Anahtar başına bellek kullanımı, boşta kalma süresi ya da erişimle ilgili istatistikler
+- Slowlog girdileri, süre, zaman damgası ve küme düğümü
+
+Anahtar istatistikleri ve Slowlog ek Redis komutları gerektirir. Büyük örneklerde ya da kümelerde kapsamı ve girdi sayılarını sınırlayın.
+
+## Toplu ve Yıkıcı İşlemler
+
+- Seçili anahtarları silme
+- Geçerli grup altında yüklenmiş anahtarları silme
+- Etkin Redis veritabanını temizleme
+- Desteklenen toplu alan/üye işlemlerini çalıştırma
+
+Temizleme, toplu silme ve `FLUSH*` işlemleri geri alınamaz. Salt okunur bağlantılar yazmaları reddeder; üretim ve tehlikeli komut denetimleri etkin kalır.
+
+## Güvenlik ve Başarım Önerileri
+
+- Üretim için salt okunur bir hesap ya da ACL kullanın ve DBX salt okunur/üretim korumasını etkinleştirin
+- Artımlı gözatmayı `KEYS *` ile değiştirmeyin; desenleri ve `SCAN` kullanın
+- Değer araması, bellek istatistikleri ve Slowlog sunucu yükünü artırabilir
+- Stream tüketici grubu ayrıntıları bekleyen ve tüketici durumunu okur; sınırsız, yüksek sıklıklı yenilemeden kaçının
+- İkili değerler, modül komutları ve üreticiye özgü uzantılar komut satırını gerektirebilir
+- Bir değerin sıkıştırmasını açmak salt okunurdur ve çıktısı 50 MiB ile sınırlıdır; daha büyük sonuçlar genişletilmek yerine engellemeyen bir bildirim gösterir
+- MCP; sıradan Redis yazmalarına ve yıkıcı `FLUSH*` komutlarına farklı yetki düzeyleri uygular
+
+<Cards>
+  <Card title="Üretim yazmalarını koruyun" href="/tr/docs/production-safety">
+    Salt okunur bağlantıları, üretim korumasını ve MCP Redis yetkilerini yapılandırın.
+  </Card>
+  <Card title="Özel çalışma alanları" href="/tr/docs/specialized-workspaces">
+    MongoDB, vektör, mesaj kuyruğu, etcd, ZooKeeper ve Nacos araçlarını inceleyin.
+  </Card>
+  <Card title="Bağlantıyı yapılandırın" href="/tr/docs/ssh-tunnel">
+    Redis için TLS, SSH, SOCKS5 ya da HTTP proxy yapılandırın.
+  </Card>
+</Cards>

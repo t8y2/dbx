@@ -32,7 +32,7 @@ describe("AI Redis console routing", () => {
     const handler = appSource.match(/function onAiExecuteSql\(sql: string\) \{[\s\S]*?\n\}/)?.[0] ?? "";
     expect(handler).toContain("buildDeduplicatedAppendedEditorSql(currentSql, sql)");
     expect(handler).toContain("if (appendedSql !== currentSql) queryStore.updateSql(tabId, appendedSql);");
-    expect(handler).toContain("runAiGeneratedSql(sql);");
+    expect(handler).toContain("runAiGeneratedSql(sql, tabId);");
     expect(handler).not.toContain("buildAppendedEditorSql(");
   });
 

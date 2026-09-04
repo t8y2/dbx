@@ -22,7 +22,7 @@ use crate::models::connection::DatabaseType;
 use std::collections::HashSet;
 
 pub(super) fn build_column_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
     let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);
@@ -383,7 +383,7 @@ pub(super) fn validate_primary_key_change_scope(options: &TableStructureSqlOptio
     }
 
     let Some(change) = primary_key_change(options) else { return Vec::new() };
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
     let supported =
         if change.old_ids.is_empty() { capabilities.add_primary_key } else { capabilities.alter_primary_key };
     if supported {
@@ -452,7 +452,7 @@ pub(super) fn build_primary_key_sql(
     table: &str,
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
 
     // Membership by draft id (set equality): pure rename / local reorder of the same key
     // columns is not a PK change. A draft that drops a PK column is also rejected here.

@@ -969,6 +969,52 @@ test("replaces typed unquoted prefixes through semantic SQL completion", () => {
   }
 });
 
+test("replaces typed Unicode prefixes through semantic SQL Server completion", () => {
+  for (const fixture of [
+    { prefix: "名", column: "名称" },
+    { prefix: "客户", column: "客户名称" },
+  ] as const) {
+    const sql = `select * from test where ${fixture.prefix}`;
+    const cursor = sql.length;
+    const options = { databaseType: "sqlserver", dialect: "sqlserver" } as const;
+    const semanticModel = buildSqlSemanticModel(sql, cursor, options);
+    const context = sqlCompletionContextFromSemantic(semanticModel, getSqlCompletionContext(sql, cursor, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [{ name: "test", schema: "dbo", type: "table" }],
+      columnsByTable: new Map([["test", [{ name: fixture.column, table: "test", schema: "dbo" }]]]),
+      ...options,
+    });
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+    const column = replacement.items.find((item) => item.type === "column" && item.label === fixture.column);
+
+    assert.ok(column, fixture.prefix);
+    assert.deepEqual(semanticModel.cursorIntent.replacementRange, { start: cursor - fixture.prefix.length, end: cursor }, fixture.prefix);
+    assert.deepEqual(context.replacementRange, { start: cursor - fixture.prefix.length, end: cursor }, fixture.prefix);
+    assert.equal(replacement.from, cursor - fixture.prefix.length, fixture.prefix);
+    assert.equal(`${sql.slice(0, replacement.from)}${column.apply ?? column.label}${sql.slice(cursor)}`, `select * from test where ${fixture.column}`, fixture.prefix);
+  }
+});
+
+test("replaces a Unicode prefix inside an open SQL Server bracket identifier", () => {
+  const sql = "select * from test where [名";
+  const cursor = sql.length;
+  const options = { databaseType: "sqlserver", dialect: "sqlserver" } as const;
+  const semanticModel = buildSqlSemanticModel(sql, cursor, options);
+  const context = sqlCompletionContextFromSemantic(semanticModel, getSqlCompletionContext(sql, cursor, options));
+  const items = buildSqlCompletionItemsFromContext(context, {
+    tables: [{ name: "test", schema: "dbo", type: "table" }],
+    columnsByTable: new Map([["test", [{ name: "名称", table: "test", schema: "dbo" }]]]),
+    ...options,
+  });
+  const replacement = prepareSqlCompletionReplacement(sql, cursor, context, items);
+  const column = replacement.items.find((item) => item.type === "column" && item.label === "名称");
+
+  assert.ok(column);
+  assert.deepEqual(context.replacementRange, { start: cursor - 2, end: cursor });
+  assert.equal(replacement.from, cursor - 2);
+  assert.equal(`${sql.slice(0, replacement.from)}${column.apply ?? column.label}${sql.slice(cursor)}`, "select * from test where [名称]");
+});
+
 test("suggests same-prefix tables while editing double-quoted Oracle-family identifiers", () => {
   for (const databaseType of ["oracle", "dameng"] as const) {
     const markedSql = 'SELECT * FROM "Fo|"';
@@ -1357,7 +1403,7 @@ test("shows column comments in WHERE field completions", () => {
   });
 
   const column = items.find((item) => item.type === "column" && item.label === "status");
-  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL");
+  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL  -- Order lifecycle state");
   assert.equal(column?.info, "public.orders.status\nType: varchar\nNullable: no\nComment: Order lifecycle state");
 });
 

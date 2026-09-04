@@ -3111,6 +3111,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Consenti scorrimento orizzontale barra laterale",
     sidebarAllowHorizontalScrollDescription: "Mostra i nomi lunghi di tabelle, viste e collezioni per intero consentendo lo scorrimento orizzontale della barra laterale.",
     snippetsDescription: "Personalizza i modelli di snippet SQL attivati nell'editor.",
+    snippetsPlaceholderHint: "Usa {'${numero:testo predefinito}'} per creare un segnaposto modificabile. I segnaposto con lo stesso numero restano collegati. Ad esempio:",
     snippetsAdd: "Aggiungi Snippet",
     snippetsLabel: "Etichetta",
     snippetsPrefix: "Prefisso",

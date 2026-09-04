@@ -3113,6 +3113,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Permitir rolagem horizontal da barra lateral",
     sidebarAllowHorizontalScrollDescription: "Mostrar nomes longos de tabelas, views e coleções por completo, permitindo a rolagem horizontal da barra lateral.",
     snippetsDescription: "Personalize os modelos de snippets SQL acionados no editor.",
+    snippetsPlaceholderHint: "Use {'${número:texto padrão}'} para criar um espaço reservado editável. Espaços reservados com o mesmo número permanecem vinculados. Por exemplo:",
     snippetsAdd: "Adicionar snippet",
     snippetsLabel: "Rótulo",
     snippetsPrefix: "Prefixo",

@@ -3101,6 +3101,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "サイドバーの横スクロールを許可",
     sidebarAllowHorizontalScrollDescription: "サイドバーの横スクロールを許可して、長いテーブル、ビュー、コレクション名を完全に表示します。",
     snippetsDescription: "エディタでトリガーされるSQLスニペットテンプレートをカスタマイズします。",
+    snippetsPlaceholderHint: "{'${番号:デフォルトテキスト}'} で編集可能なプレースホルダーを作成できます。同じ番号のプレースホルダーは連動します。例：",
     snippetsAdd: "スニペットを追加",
     snippetsLabel: "ラベル",
     snippetsPrefix: "プレフィックス",

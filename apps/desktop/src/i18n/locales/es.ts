@@ -3113,6 +3113,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "Permitir desplazamiento horizontal lateral",
     sidebarAllowHorizontalScrollDescription: "Muestra completos los nombres largos de tablas, vistas y colecciones permitiendo desplazamiento horizontal en la barra lateral.",
     snippetsDescription: "Personaliza plantillas SQL activadas en el editor.",
+    snippetsPlaceholderHint: "Usa {'${número:texto predeterminado}'} para crear un marcador editable. Los marcadores con el mismo número permanecen vinculados. Por ejemplo:",
     snippetsAdd: "Agregar fragmento",
     snippetsLabel: "Etiqueta",
     snippetsPrefix: "Prefijo",

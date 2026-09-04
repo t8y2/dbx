@@ -60,7 +60,16 @@ CREATE TABLE ${1:table_name} (
 
 ## Placeholders
 
-Use `${1}`, `${2}`, etc. in templates to mark editable positions. After expansion, press `Tab` to jump between placeholders. Placeholders with the same number are edited simultaneously.
+Use `${1}`, `${2}`, etc. in templates to mark editable positions. Add default text after a colon to make the intended object clear, for example:
+
+```sql
+SELECT t.*
+FROM ${1:table} t
+WHERE t.del_flag = 0
+LIMIT 100;
+```
+
+After expansion, press `Tab` to jump between placeholders. Placeholders with the same number are edited simultaneously.
 
 ## Tips
 

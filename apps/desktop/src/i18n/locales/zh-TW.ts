@@ -2962,6 +2962,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "允許側邊欄水平捲動",
     sidebarAllowHorizontalScrollDescription: "透過啟用側邊欄的水平捲動功能，完整顯示長表格、檢視和集合的名稱",
     snippetsDescription: "自訂編輯器中觸發的 SQL 程式碼片段範本。",
+    snippetsPlaceholderHint: "使用 {'${編號:預設文字}'} 建立可編輯的佔位符；編號相同的佔位符會同步修改，例如：",
     snippetsAdd: "新增片段",
     snippetsLabel: "顯示名",
     snippetsPrefix: "觸發鍵",

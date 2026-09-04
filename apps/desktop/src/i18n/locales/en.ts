@@ -3264,6 +3264,7 @@ export default {
     sidebarAllowHorizontalScroll: "Allow sidebar horizontal scroll",
     sidebarAllowHorizontalScrollDescription: "Show long table, view, and collection names in full by allowing horizontal sidebar scrolling.",
     snippetsDescription: "Customize SQL snippet templates triggered in the editor.",
+    snippetsPlaceholderHint: "Use {'${number:default text}'} to create an editable placeholder. Placeholders with the same number stay linked; for example:",
     snippetsAdd: "Add Snippet",
     snippetsLabel: "Label",
     snippetsPrefix: "Prefix",

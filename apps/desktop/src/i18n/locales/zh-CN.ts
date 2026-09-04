@@ -3263,6 +3263,7 @@ export default withEnglishFallback({
     sidebarAllowHorizontalScroll: "允许侧边栏横向滚动",
     sidebarAllowHorizontalScrollDescription: "完整显示较长的表、视图和集合名称；默认关闭以保留省略号截断。",
     snippetsDescription: "自定义编辑器中触发的 SQL 代码片段模板。",
+    snippetsPlaceholderHint: "使用 {'${编号:默认文本}'} 创建可编辑占位符；编号相同的占位符会同步修改，例如：",
     snippetsAdd: "添加片段",
     snippetsLabel: "显示名",
     snippetsPrefix: "触发键",

@@ -75,4 +75,37 @@ describe("codemirrorSqlDialect", () => {
       expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.doubleQuotedStrings, databaseType).toBe(false);
     }
   });
+
+  it("enables backslashEscapes for MySQL-family dialects and ClickHouse while keeping it disabled for standard dialects", () => {
+    const backslashEscapesTypes: DatabaseType[] = ["mysql", "doris", "starrocks", "goldendb", "gbase", "sundb", "databend", "clickhouse", "hive", "spark", "impala", "argo"];
+    for (const databaseType of backslashEscapesTypes) {
+      expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.backslashEscapes, databaseType).toBe(true);
+    }
+
+    const standardTypes: DatabaseType[] = ["postgres", "sqlserver", "sqlite", "oracle", "dameng"];
+    for (const databaseType of standardTypes) {
+      expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.backslashEscapes, databaseType).toBeUndefined();
+    }
+  });
+
+  it("correctly tokenizes string literals containing escaped quotes in MySQL statements without corrupting trailing code", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    const statement = ["SELECT CONCAT('\\'', sl.id) id, sl.settlement_price_tax '本次结算金额含税',", "CASE sc.`type`", "    WHEN 0 THEN '物资'", "    WHEN 1 THEN '设备'", "    ELSE ''", "END AS '合同类型'"].join("\n");
+
+    expect(nodeNameAt(dialect, statement, "'\\''")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "'本次结算金额含税'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "CASE")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "`type`")).toBe("QuotedIdentifier");
+    expect(nodeNameAt(dialect, statement, "WHEN")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "THEN")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "'物资'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "'设备'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "''")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "END")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "'合同类型'")).toBe("String");
+
+    const doubleQuoteStatement = 'SELECT "escaped\\"quote", col FROM tbl';
+    expect(nodeNameAt(dialect, doubleQuoteStatement, '"escaped\\"quote"')).toBe("String");
+    expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
+  });
 });

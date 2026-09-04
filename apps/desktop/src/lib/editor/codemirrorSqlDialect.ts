@@ -6,10 +6,11 @@ export type CodeMirrorSqlDialectName = "mysql" | "postgres" | "sqlserver" | "cli
 
 type CodeMirrorSqlLanguageModule = Pick<typeof import("@codemirror/lang-sql"), "Cassandra" | "MSSQL" | "MySQL" | "PLSQL" | "PostgreSQL" | "SQLite" | "SQLDialect" | "StandardSQL">;
 
-const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
+const MYSQL_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase", "sundb", "databend"]);
 const POSTGRES_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["postgres", "redshift", "gaussdb", "kwdb", "kingbase", "highgo", "uxdb", "vastbase", "opengauss", "questdb"]);
 const ORACLE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"]);
 const SQLITE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["sqlite", "rqlite", "turso", "cloudflare-d1"]);
+const BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES = new Set<DatabaseType>(["hive", "argo", "impala", "spark"]);
 
 const CODEMIRROR_SQLITE_EXTENSION_KEYWORDS = new Set("abort analyze attach autoincrement conflict database detach exclusive fail glob ignore index indexed instead isnull notnull offset plan pragma query raise regexp reindex rename replace temp vacuum virtual".split(" "));
 const STANDARD_SQL_TYPES = "array binary bit boolean char character clob date decimal double float int integer interval large national nchar nclob numeric object precision real smallint time timestamp varchar varying";
@@ -243,6 +244,11 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
           identifierQuotes: '"`',
           backslashEscapes: true,
           spaceAfterDashes: false,
+        }
+      : {}),
+    ...(isMysql || (databaseType && BACKSLASH_ESCAPE_CODEMIRROR_DATABASE_TYPES.has(databaseType))
+      ? {
+          backslashEscapes: true,
         }
       : {}),
     ...(isPlsql ? { doubleQuotedStrings: false } : {}),

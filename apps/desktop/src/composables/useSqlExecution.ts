@@ -113,7 +113,7 @@ export function useSqlExecution(deps: {
   activeConnection: ComputedRef<ConnectionConfig | undefined>;
   executableSql: ComputedRef<string>;
   resolveExecutableSql?: (snapshot?: SqlExecutionSnapshot) => Promise<string>;
-  activeOutputView: Ref<"result" | "summary" | "explain" | "chart" | "messages">;
+  activeOutputView: Ref<"result" | "summary" | "explain" | "chart" | "messages" | "profile">;
   blockDangerousRedisCommands?: Ref<boolean>;
   onMissingDatabase?: () => void;
   requestDangerConfirmation?: (request: SqlExecutionDangerRequest) => Promise<boolean>;

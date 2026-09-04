@@ -1,7 +1,7 @@
 import type { QueryTab } from "@/types/database";
 import type { SavedOpenTab } from "@/lib/app/openTabsPersistence";
 
-export type DetachedOutputView = "result" | "summary" | "explain" | "chart" | "messages";
+export type DetachedOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
 
 export interface DetachedTabRuntimeState {
   editorViewport?: QueryTab["editorViewport"];

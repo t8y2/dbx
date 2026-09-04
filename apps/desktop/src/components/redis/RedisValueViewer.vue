@@ -3775,6 +3775,15 @@ defineExpose({ focusSearch });
 .redis-format-tabs-scroll--active::-webkit-scrollbar-thumb {
   background: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
 }
+
+/* WebKit uses the native scrollbar dimensions when scrollbar-color is set. Keep
+ * the custom 5px scrollbar active in the desktop WebView as well. */
+@supports selector(::-webkit-scrollbar) {
+  .redis-format-tabs-scroll,
+  .redis-format-tabs-scroll--active {
+    scrollbar-color: auto;
+  }
+}
 </style>
 
 <style scoped>

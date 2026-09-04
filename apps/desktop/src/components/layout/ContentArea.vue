@@ -209,6 +209,7 @@ const props = defineProps<{
   selectedSql: string;
   cursorPos: number;
   blockDangerousRedisCommands: boolean;
+  zenMode?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -243,6 +244,7 @@ const emit = defineEmits<{
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
+  toggleZenMode: [];
 }>();
 
 const { t, locale } = useI18n();
@@ -2364,6 +2366,8 @@ defineExpose({
           :target-keyword="activeTab.nacosTargetKeyword"
           :target-request-id="activeTab.nacosTargetRequestId"
           :read-only="connectionIsEffectivelyReadOnly(activeConnection)"
+          :zen-mode="props.zenMode"
+          @toggle-zen-mode="emit('toggleZenMode')"
         />
       </div>
     </template>

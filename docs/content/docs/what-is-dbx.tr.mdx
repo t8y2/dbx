@@ -1,0 +1,153 @@
+---
+title: DBX Nedir?
+description: DBX; 90+ veritabanı ve veri sistemi için masaüstü ve kendi sunucunuzda barındırma, yapay zekâ, CLI ve MCP desteği sunan açık kaynaklı, hafif bir çalışma alanıdır.
+---
+
+DBX; veritabanları ve veri altyapısı için açık kaynaklı, hafif bir çalışma alanıdır. Bağlantı yönetimini, nesne gözatmayı, SQL düzenlemeyi, veri değişikliklerini, şema araçlarını, özel konsolları ve otomasyonu 90+ veritabanı ve veri sistemi genelinde tek bir arayüzde toplar.
+
+DBX her sistemi SQL biçimli bir arayüze zorlamaz. İlişkisel veritabanları sorgu düzenleyicisini, veri ızgarasını ve şema araçlarını kullanır; Redis, MongoDB, vektör veritabanları, mesaj kuyrukları, etcd, ZooKeeper, Nacos ve benzeri sistemler ise kendi veri modellerine göre tasarlanmış çalışma alanlarını kullanır.
+
+<Callout type="info">DBX'i kullanmaya hazırsanız [Hızlı Başlangıç](/tr/docs/getting-started) ile başlayın. Belirli bir motoru ya da özelliği denetlemek için [Veritabanı Desteği ve özellik matrisi](/tr/docs/databases) sayfasını kullanın.</Callout>
+
+![DBX koyu tema arayüz ekran görüntüsü](/screenshot-dark.png)
+
+## DBX Ne Yapmanıza Yardımcı Olur
+
+<Cards>
+  <Card title="Bağlanın ve ortamları ayırın" href="/tr/docs/getting-started">
+    Yerel, test, hazırlık ve üretim bağlantılarını gruplar, renkler, sabitlemeler, arama, salt okunur mod ve üretim korumasıyla yönetin.
+  </Card>
+  <Card title="Sorgulayın, sorun giderin ve analiz edin" href="/tr/docs/query-editor">
+    Günlük SQL işleri için meta veri tamamlamasını, biçimlendirmeyi, seçili çalıştırmayı, sorgu geçmişini, çoklu sonuçları ve yürütme planlarını kullanın.
+  </Card>
+  <Card title="Veriye gözatın ve değiştirin" href="/tr/docs/data-grid">
+    Sanallaştırılmış bir ızgarada veriyi filtreleyin, sıralayın ve düzenleyin; değişiklikleri yazmadan önce üretilen SQL'i inceleyin.
+  </Card>
+  <Card title="Şemaları anlayın ve değiştirin" href="/tr/docs/schema-browser">
+    Veritabanı nesnelerine gözatın, tablo yapılarını düzenleyin, şemaları karşılaştırın, ER diyagramlarını ve soy ağacını inceleyin, incelenebilir DDL üretin.
+  </Card>
+  <Card title="Veriyi taşıyın ve değiş tokuş edin" href="/tr/docs/data-transfer">
+    Tablo dosyalarını içe aktarın, bağlantılar arasında veri taşıyın, SQL dosyaları çalıştırın ve desteklenen yerlerde şemayı ve veriyi dışa aktarın.
+  </Card>
+  <Card title="Bağlantıları araçlara ve yapay zekâya açın" href="/tr/docs/mcp">
+    Yapılandırılmış veritabanlarını terminallere, betiklere ve kodlama agent'larına bağlamak için CLI'yi, MCP'yi ya da kendi sunucunuzdaki arka ucu kullanın.
+  </Card>
+</Cards>
+
+## Yalnızca SQL Veritabanlarından Fazlası
+
+Bağlantı seçicisi, veritabanlarını ve veri sistemlerini gerçekte nasıl kullanıldıklarına göre gruplar. Her kategori tek bir genel sorgu kutusuna düşmek yerine farklı bir çalışma alanı açabilir.
+
+| Kategori | Örnek sistemler | Başlıca DBX deneyimi |
+| --- | --- | --- |
+| İlişkisel ve uyumlu protokoller | MySQL, PostgreSQL, SQLite, Oracle, SQL Server, Dameng, openGauss, GaussDB | SQL düzenleyici, veri ızgarası, nesne ağacı, tablo yapısı ve şema araçları |
+| Analitik ve veri ambarları | ClickHouse, Doris, StarRocks, Databricks, Snowflake, Trino, BigQuery | Sorgular, sonuç analizi, meta veri ve sürücünün desteklediği şema ile dışa aktarma araçları |
+| Belge, anahtar/değer ve arama | MongoDB, Redis, Elasticsearch, Easysearch, Meilisearch, HBase, Cassandra | Özel belge, anahtar, dizin ya da sütun ailesi gezginleri |
+| Grafik, vektör ve yapay zekâ verisi | Neo4j, Qdrant, Milvus, Weaviate, ChromaDB | Grafik bağlantıları ile vektör koleksiyonu gözatma, arama ve değişiklik akışları |
+| Zaman serisi | QuestDB, TDengine, IoTDB, InfluxDB | Zaman serisi sorguları ve sisteme özgü bağlantı, nesne ve veri görünümleri |
+| Mesaj kuyrukları | Pulsar, Kafka, RocketMQ, RabbitMQ | Konular, abonelikler ya da tüketiciler, mesajlar, izleme, yetkiler ve politikalar |
+| Kayıt ve yapılandırma | etcd, ZooKeeper, Nacos | Anahtar/ZNode gözatma, küme durumu, erişim denetimi, yapılandırma ve servis yönetimi |
+| Sürücü uzantıları | JDBCX, özel MySQL/PostgreSQL, isteğe bağlı JDBC eklentileri | Uyumlu protokoller ya da üreticinin JDBC sürücüleriyle kapsamı genişletin |
+
+Gelişmiş özellikler sürücüye, protokole ve veritabanının kendisine bağlıdır. Doğruluk kaynağı olarak [Veritabanı Desteği](/tr/docs/databases) matrisini kullanın; ilişkisel olmayan ve altyapı arayüzleri için [Özel Çalışma Alanları](/tr/docs/specialized-workspaces) sayfasına bakın.
+
+## Tek İş Akışı, Birden Çok Giriş Noktası
+
+| Giriş noktası | Ne için uygundur | Yetenekler ve sınırlar |
+| --- | --- | --- |
+| Masaüstü | Günlük kişisel çalışma, yerel veritabanı dosyaları, eksiksiz tezgâh | Yerel dosyaları, SQL dosya ağacını ve SQL kitaplığını, masaüstü derin bağlantılarını ve diğer işletim sistemi tümleştirmelerini ekler |
+| Docker / Web | Bir sunucuda kendi barındırmanız ve uzak tarayıcı erişimi | Veritabanı iş akışlarının çoğunu paylaşır; yollar sunucuya aittir, bazı yerel dosya ve masaüstü tümleştirmeleri kullanılamaz |
+| CLI | Terminaller, betikler, CI ve Codex iş akışları | Bağlantıları ve şemaları listeler, tabloları tanımlar, sorgu çalıştırır, sıkı bağlam üretir ve Masaüstü'nde bir tablo açabilir |
+| MCP Sunucusu | Claude Code, Cursor, Windsurf ve diğer yapay zekâ istemcileri | Bağlantıları listeler, şemayı okur ve yerel depolamaya ya da DBX Web'e karşı politikayla denetlenen sorgular veya komutlar çalıştırır |
+
+Masaüstü ve Web aynı Rust çekirdeğini kullanır, ancak her sistem tümleştirmesi için birbirinin tam karşılığı değildir. Dağıtım modunu; veritabanının ağdaki yerine, dosyaların yerel makinede mi sunucuda mı olduğuna ve masaüstü derin bağlantılarına ya da yerel SQL dosya yönetimine ihtiyacınız olup olmadığına göre seçin.
+
+## Bağlantıdan Otomasyona
+
+<Steps>
+  <Step>
+    ### Bağlantı sınırını belirleyin
+
+    Bir veritabanı türü seçin, kimlik bilgilerini girin ve gerektiğinde TLS, SSH, SOCKS5, HTTP proxy ya da HTTP tünelleme yapılandırın. Yüksek riskli hedefler için salt okunur modu ya da üretim korumasını etkinleştirin.
+
+  </Step>
+  <Step>
+    ### Önce nesneleri ve bağlamı anlayın
+
+    Veritabanlarını, şemaları, tabloları, sütunları, dizinleri, yabancı anahtarları ve veritabanına özgü nesneleri incelemek için kenar çubuğunu kullanın. Arama, kaynak görünümleri, ER diyagramları ve alan soy ağacı, tanımadığınız sistemlerde yardımcı olur.
+
+  </Step>
+  <Step>
+    ### Sorgulayın, inceleyin ve değiştirin
+
+    Sorgu düzenleyicisinde SQL çalıştırın ya da veri ızgarasını, belge/anahtar-değer gezginlerini ve özel konsolları kullanın. İş akışı destekliyorsa DBX, çalıştırmadan önce SQL ya da istek içeriğini gösterir.
+
+  </Step>
+  <Step>
+    ### Karşılaştırın, taşıyın ve yeniden kullanın
+
+    Tek seferlik işlemleri incelenebilir iş akışlarına dönüştürmek için şema karşılaştırma, tablo içe aktarma, veri aktarımı, veritabanı dışa aktarma, SQL dosyası çalıştırma, sorgu geçmişi ve SQL kitaplığını kullanın.
+
+  </Step>
+  <Step>
+    ### Yapay zekâ ve otomasyon ekleyin
+
+    Uygulama içinde yapay zekâ Sor ya da Agent modunu kullanın; bağlantıları, şema bağlamını ve sorgu çalıştırmayı CLI ile MCP üzerinden betiklere ve kodlama agent'larına açın.
+
+  </Step>
+</Steps>
+
+## Yetenek Haritası
+
+| Görev | DBX'te uygulanan ürün yetenekleri | Dokümantasyon |
+| --- | --- | --- |
+| Bağlantı oluşturma | Bağlantı kategorileri, URL ayrıştırma, TLS, tüneller/proxy'ler, salt okunur mod, üretim koruması ve sürücü seçimi | [Hızlı Başlangıç](/tr/docs/getting-started), [Tüneller ve Proxy'ler](/tr/docs/ssh-tunnel) |
+| Sorgu yazma ve çalıştırma | CodeMirror 6, meta veri tamamlaması, biçimlendirme, yürütme hedefleri, çoklu sonuçlar, iptal ve geçmiş | [Sorgu Düzenleyici](/tr/docs/query-editor) |
+| Sonuçlara gözatma ve düzenleme | Sanal kaydırma, veritabanı tarafında filtre ve sıralama, satır içi düzenleme, SQL önizlemesi ve çeşitli dışa aktarma biçimleri | [Veri Izgarası](/tr/docs/data-grid) |
+| Şemaları anlama | Nesne ağacı ve arama, kaynak görünümleri, tablo yapısı, şema karşılaştırma, ER diyagramları ve alan soy ağacı | [Şema Gezgini](/tr/docs/schema-browser), [Şema Karşılaştırma](/tr/docs/schema-diff) |
+| İçe aktarma, taşıma ve dışa aktarma | CSV/TSV/JSON/Excel içe aktarma, bağlantılar arası aktarım, SQL dosyası çalıştırma ve veritabanı dışa aktarma | [Tablo İçe Aktarma](/tr/docs/table-import), [Veri Aktarımı](/tr/docs/data-transfer) |
+| İlişkisel olmayan sistemleri yönetme | Redis, MongoDB, arama, vektör, HBase, mesaj kuyruğu, kayıt ve yapılandırma çalışma alanları | [Özel Çalışma Alanları](/tr/docs/specialized-workspaces) |
+| Yapay zekâ ve dış araçları kullanma | Sor/Agent, CLI, MCP ve Web/Docker arka uç API'si | [Yapay Zekâ Asistanı](/tr/docs/ai-assistant), [CLI](/tr/docs/cli), [MCP](/tr/docs/mcp) |
+| Kişisel yapılandırmayı taşıma | Bağlantı içe aktarma, şifreli yapılandırma dışa aktarma, WebDAV/Gist/Gitee eşitlemesi ve SQL kitaplığı eşitlemesi | [Yapılandırma Dışa ve İçe Aktarma](/tr/docs/config-export), [Bulut Eşitleme ve Yedekleme](/tr/docs/cloud-sync) |
+
+## Güvenlik Modeli
+
+DBX, tek bir tehlikeli işlem onay anahtarına güvenmek yerine katmanlı denetimler kullanır:
+
+- **Veritabanı hesabı yetkileri** son sınır olmayı sürdürür. Üretim için en az yetkili hesaplar kullanın.
+- **Salt okunur bağlantılar**, çekirdek sorgu yürütme yolunda tanınan yazmaları engeller ve birçok değişiklik giriş noktasını gizler ya da devre dışı bırakır.
+- **Üretim koruması** tüm bir bağlantıyı ya da seçili veritabanlarını kapsayabilir ve algılanan her yazma için yeni ve açık bir onay ister.
+- **İncelenebilir değişiklikler**; veri düzenleme, tablo yapısı, şema karşılaştırma ve benzeri akışlarda mümkün olduğunda önce SQL'i gösterir.
+- **Yapay zekâ Sor modu**, SQL çalıştırmadan yanıt döndürür. Agent, üretimde özerk yazma yetkisi almaz ve SQL'i inceleme için düzenleyiciye geri verir.
+- **MCP politikası**, bağlantı izin listesini ve Salt okunur, Veri okuma/yazma ya da Tam erişim modlarını merkezî olarak denetler. Bağlantının salt okunur durumunu, üretim korumasını ya da veritabanı yetkilerini atlayamaz.
+- **Hassas yapılandırma**, normal bağlantı JSON'undan ayrı saklanır ve yapılandırma dışa aktarımları AES-GCM şifrelemesiyle korunabilir.
+
+Giriş noktaları genelinde yapılandırma ve davranış için [Üretim ve Yazma Güvenliği](/tr/docs/production-safety) sayfasına bakın.
+
+## Bilinmesi Gereken Sınırlar
+
+<Callout type="warn">
+  DBX bir veritabanı tezgâhıdır; yönetilen bir veritabanı hizmeti değildir ve veritabanı yetkilerinin, denetimin, yedeklerin ya da değişiklik onaylarının yerini almaz. Veritabanı dışa aktarma hafif yedekleme veya göç için kullanışlıdır, ancak büyük üretim sistemleri kendi yedekleme araçlarını kullanmalıdır. Yapay zekâ çıktısı, üretilen SQL ve motorlar arası aktarımlar yine insan incelemesi gerektirir.
+</Callout>
+
+- Gelişmiş özellikler her veritabanı için zorla açılmaz; güvenilir olmayan uyumluluk yolları gizlenir ya da kısıtlanır.
+- Docker/Web'de yerel yollar, tarayıcının çalıştığı bilgisayarı değil sunucunun dosya sistemini ifade eder.
+- JDBC ve Agent veritabanları ilgili sürücüyü ya da çalışma zamanını gerektirir ve yerel sürücülerden daha az özellik sunabilir.
+- [Web API](/tr/docs/web-api) öncelikle DBX Web'e ve iç tümleştirmelere hizmet eder; kararlı bir genel sözleşme değildir. Betikler ve yapay zekâ tümleştirmeleri için CLI ya da MCP'yi tercih edin.
+
+## Sonraki Adımlar
+
+<Cards>
+  <Card title="Kurun ve bir bağlantı oluşturun" href="/tr/docs/getting-started">
+    Masaüstü ya da Docker'ı seçin, ardından ilk bağlantıyı, ağ yolunu ve güvenlik ayarlarını yapılandırın.
+  </Card>
+  <Card title="Veritabanı desteğini denetleyin" href="/tr/docs/databases">
+    Bağlantı türlerini, varsayılan portları, sürücü mimarisini ve gelişmiş özellik matrisini inceleyin.
+  </Card>
+  <Card title="Üretim güvenliğini yapılandırın" href="/tr/docs/production-safety">
+    Salt okunur bağlantıları, üretim korumasını ve yapay zekâ ile MCP yetki sınırlarını belirleyin.
+  </Card>
+  <Card title="Bir otomasyon giriş noktası seçin" href="/tr/docs/cli">
+    Terminal, Codex, betik ya da yapay zekâ istemcisi iş akışlarına göre CLI ile MCP arasında seçim yapın.
+  </Card>
+</Cards>

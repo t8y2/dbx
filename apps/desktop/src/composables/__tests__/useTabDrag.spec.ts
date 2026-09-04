@@ -12,20 +12,20 @@ function createDragHarness(onDrop = vi.fn(() => true)) {
   return { drag, source, onDrop };
 }
 
-function beginDrag(source: HTMLElement, x = 100, y = 20, pointerType = "mouse") {
-  source.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, clientX: x, clientY: y, pointerType }));
+function beginDrag(source: HTMLElement, x = 100, y = 20, pointerType = "mouse", buttons = 1, pointerId = 1) {
+  source.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0, buttons, clientX: x, clientY: y, pointerId, pointerType }));
 }
 
-function movePointer(x: number, y = 20, pointerType = "mouse") {
-  document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: x, clientY: y, pointerType }));
+function movePointer(x: number, y = 20, pointerType = "mouse", buttons = 1, pointerId = 1) {
+  document.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, buttons, clientX: x, clientY: y, pointerId, pointerType }));
 }
 
-function releasePointer(x = 0, y = 0) {
-  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: x, clientY: y, screenX: x, screenY: y }));
+function releasePointer(x = 0, y = 0, pointerId = 1) {
+  document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, clientX: x, clientY: y, pointerId, screenX: x, screenY: y }));
 }
 
-function cancelPointer() {
-  document.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true }));
+function cancelPointer(pointerId = 1) {
+  document.dispatchEvent(new PointerEvent("pointercancel", { bubbles: true, pointerId }));
 }
 
 function enterDropTarget(drag: ReturnType<typeof useTabDrag>, tabId = "target", x = 10) {
@@ -95,6 +95,20 @@ describe("useTabDrag", () => {
     expect(drag.state.suppressClick).toBe(false);
   });
 
+  it("clears completed-drag click suppression on a later trackpad tap", () => {
+    const { drag, source } = createDragHarness();
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD);
+    enterDropTarget(drag, "target", 90);
+    releasePointer();
+    expect(drag.state.suppressClick).toBe(true);
+
+    beginDrag(source, 100, 20, "mouse", 0);
+
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.suppressClick).toBe(false);
+  });
+
   it("ignores 18px of jitter, matching a typical touchscreen tap reported as generic mouse input", () => {
     const { drag, source, onDrop } = createDragHarness();
     beginDrag(source);
@@ -104,6 +118,52 @@ describe("useTabDrag", () => {
     expect(drag.state.active).toBe(false);
     expect(drag.state.suppressClick).toBe(false);
     expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("does not arm a drag when the primary button is not held", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source, 100, 20, "mouse", 0);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD, 20, "mouse", 0);
+
+    releasePointer();
+
+    expect(drag.state.active).toBe(false);
+    expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending drag when the primary button is released before movement", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD, 20, "mouse", 0);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD + 10);
+
+    expect(drag.state.active).toBe(false);
+    expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("cancels an active drag when the primary button is no longer held", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD);
+    expect(drag.state.active).toBe(true);
+
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD + 10, 20, "mouse", 0);
+
+    expect(drag.state.active).toBe(false);
+    expect(drag.state.draggedId).toBe(null);
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
+    expect(onDrop).not.toHaveBeenCalled();
+  });
+
+  it("ignores movement from a different pointer", () => {
+    const { drag, source, onDrop } = createDragHarness();
+    beginDrag(source, 100, 20, "mouse", 1, 7);
+    movePointer(100 + TAB_DRAG_HORIZONTAL_THRESHOLD, 20, "mouse", 1, 8);
+
+    expect(drag.state.active).toBe(false);
+    expect(onDrop).not.toHaveBeenCalled();
+    releasePointer(0, 0, 7);
   });
 
   it("never arms a drag for touch input, even past the horizontal threshold", () => {

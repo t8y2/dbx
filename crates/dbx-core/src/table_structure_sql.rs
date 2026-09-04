@@ -31,6 +31,7 @@ pub(crate) use util::{oracle_new_object_reference, sqlserver_unicode_string_lite
 
 use crate::models::connection::DatabaseType;
 
+use column_format::strip_inherited_mysql_column_charsets;
 use columns::{build_column_sql, validate_primary_key_change_scope};
 use comments::build_table_comment_sql;
 use foreign_keys::build_foreign_key_sql;
@@ -49,6 +50,7 @@ pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -
     if options.is_gaussdb_m_mode {
         options.database_type = Some(DatabaseType::Mysql);
     }
+    strip_inherited_mysql_column_charsets(&mut options);
     let primary_key_errors = validate_primary_key_change_scope(&options);
     if !primary_key_errors.is_empty() {
         return TableStructureSqlResult { statements: Vec::new(), warnings: primary_key_errors };

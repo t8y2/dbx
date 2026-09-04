@@ -694,6 +694,18 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     return range.startCol <= colIndex && range.endCol >= colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;
   }
 
+  // Unlike columnIsSelected (used for header highlighting, where any column touched by a
+  // wider selection should light up), this requires the selected cell RANGE to cover this
+  // column only. An explicit multi-column header selection (hasColumnSelection) is left as-is:
+  // that's a deliberate user gesture (click/shift-click/ctrl-click headers), not a stray
+  // full-height cell range left over from selecting a block in the grid body.
+  function columnIsExclusivelySelected(colIndex: number): boolean {
+    if (hasColumnSelection.value) return selectedColumnIndexes.value.has(colIndex);
+    const range = selectedRange.value;
+    if (!range) return false;
+    return range.startCol === colIndex && range.endCol === colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;
+  }
+
   function selectedRangeStart(): CellPosition | null {
     const range = selectedRange.value;
     if (!range) return null;
@@ -727,6 +739,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isCellSelectionDragConfirmed,
     cellIsSelected,
     columnIsSelected,
+    columnIsExclusivelySelected,
     selectedRangeStart,
     selectedRowIds,
     selectedColumnIndexes,

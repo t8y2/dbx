@@ -1010,6 +1010,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);

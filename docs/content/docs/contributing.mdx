@@ -220,7 +220,7 @@ The service ports listen on `127.0.0.1` by default. Set `DB_BIND_ADDRESS=0.0.0.0
 | `packages/app-tests/` | Tests for shared frontend logic |
 | `packages/cli/` | DBX CLI |
 | `packages/mcp-server/` | MCP Server |
-| `docs/content/docs/` | Bilingual website documentation |
+| `docs/content/docs/` | Multilingual website documentation |
 | `agents/drivers/` | Java/JDBC and selected native database agents |
 
 Search for a feature name, visible label, or error message when you do not know the file yet:
@@ -233,11 +233,12 @@ rg "text to find" apps/desktop/src crates src-tauri packages
 
 ### Path A: Update the Website Docs
 
-Documentation is the easiest first contribution. English and Chinese pages use the same base filename:
+Documentation is the easiest first contribution. Every language uses the same base filename:
 
 ```text
 docs/content/docs/example.mdx
 docs/content/docs/example.cn.mdx
+docs/content/docs/example.tr.mdx
 ```
 
 Start the docs site:
@@ -259,6 +260,7 @@ Open the local address printed in the terminal. When adding a page, also registe
 ```text
 docs/content/docs/meta.json
 docs/content/docs/meta.cn.json
+docs/content/docs/meta.tr.json
 ```
 
 Run the fast content check and then the full documentation build before submitting:
@@ -268,7 +270,7 @@ pnpm --dir docs content:check
 make docs-build
 ```
 
-`content:check` verifies bilingual page pairs, navigation coverage and ordering, frontmatter, duplicate titles, and internal links. `make docs-build` runs the check again and validates the Next.js production build.
+`content:check` verifies that every page exists in each language, navigation coverage and ordering, frontmatter, duplicate titles, and internal links. `make docs-build` runs the check again and validates the Next.js production build.
 
 ### Path B: Change the Desktop Frontend
 

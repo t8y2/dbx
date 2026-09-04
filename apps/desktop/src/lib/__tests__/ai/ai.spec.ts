@@ -158,6 +158,44 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain("Ask mode");
   });
 
+  it("uses the configured output budget for non-thinking requests", () => {
+    const request = buildAgentRequest({
+      config: {
+        provider: "deepseek",
+        apiKey: "test",
+        apiUrl: "https://example.invalid",
+        model: "deepseek-v4-flash",
+        enableThinking: false,
+        maxOutputTokens: 1024,
+      },
+      action: "general",
+      mode: "ask",
+      instruction: "generate a long migration",
+      context: context(),
+    });
+
+    expect(request.maxTokens).toBe(1024);
+  });
+
+  it("uses the configured output budget above the thinking minimum", () => {
+    const request = buildAgentRequest({
+      config: {
+        provider: "deepseek",
+        apiKey: "test",
+        apiUrl: "https://example.invalid",
+        model: "deepseek-v4-flash",
+        enableThinking: true,
+        maxOutputTokens: 32768,
+      },
+      action: "general",
+      mode: "ask",
+      instruction: "generate a long migration",
+      context: context(),
+    });
+
+    expect(request.maxTokens).toBe(32768);
+  });
+
   it("MongoDB agent mode uses shell commands instead of SQL", () => {
     const prompt = buildSystemPrompt("general", context({ databaseType: "mongodb", connectionName: "MongoDB", database: "benchmark" }), "agent");
 

@@ -84,6 +84,10 @@ export interface BuildTableStructureChangeSqlOptions {
   tableComment?: string;
   originalTableComment?: string;
   mysqlEngine?: string;
+  /** MySQL only: the table's current default collation. Columns whose collation merely
+   * matches it inherit the table default, so the backend leaves their redundant
+   * `CHARACTER SET`/`COLLATE` clauses out of the generated DDL. */
+  tableCollation?: string;
   /** The target table is a PostgreSQL partitioned parent (`relkind = 'p'`);
    * the backend rejects `CREATE INDEX CONCURRENTLY` on such tables (fail
    * closed) instead of downgrading to a blocking `CREATE INDEX`. */

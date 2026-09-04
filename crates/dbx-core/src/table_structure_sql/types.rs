@@ -216,6 +216,14 @@ pub struct TableStructureSqlOptions {
     pub original_table_comment: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mysql_engine: Option<String>,
+    /// MySQL only: the table's current default collation
+    /// (`information_schema.TABLES.TABLE_COLLATION`). A column whose collation
+    /// merely matches it inherits the table default, so its `CHARACTER SET` /
+    /// `COLLATE` clauses are redundant and are dropped from the generated DDL.
+    /// Introspection keeps reporting the column's real values, which is what
+    /// the structure editor renders in its charset/collation pickers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_collation: Option<String>,
     /// Whether the target table is a partitioned parent table (PostgreSQL
     /// `relkind = 'p'`). PostgreSQL rejects `CREATE INDEX CONCURRENTLY` on
     /// partitioned parents, so the builder refuses such a request up front

@@ -1,0 +1,33 @@
+---
+title: SSS
+description: DBX hakkında sıkça sorulan sorular; bağlantı verisinin nerede saklandığı ve veri dizininin nasıl özelleştirileceği dâhil.
+---
+
+<Callout type="info">DBX Masaüstü hakkında sık sorulan sorular. Bu sayfa veri saklama ve veri dizini ile başlıyor; zamanla yeni başlıklar eklenecek.</Callout>
+
+## Veri ve Yedekleme
+
+<Accordions>
+  <Accordion title="Bağlantı yapılandırmam nerede saklanıyor?">
+    DBX Masaüstü; bağlantıları, kayıtlı kimlik bilgilerini, SSH tünel profillerini, sorgu geçmişini ve uygulama ayarlarını DBX veri dizinindeki tek bir SQLite veritabanı dosyasında (`dbx.db`) saklar:
+
+    - **Windows (yükleyici):** `C:\Users\<kullanıcı>\AppData\Roaming\com.dbx.app\dbx.db`
+    - **Windows (taşınabilir ZIP):** `<DBX.exe klasörü>\data\dbx.db`
+    - **macOS:** `~/Library/Application Support/com.dbx.app/dbx.db`
+    - **Linux:** `~/.local/share/com.dbx.app/dbx.db`
+
+    SSH sunucu anahtarları aynı dizindeki `known_hosts` dosyasında tutulur, bu yüzden DBX `~/.ssh` dizinine hiç dokunmaz. Yazma etkinliğine bağlı olarak veritabanının yanında `dbx.db-wal` ve `dbx.db-shm` denetim noktası dosyaları bulunabilir.
+
+    Eski DBX sürümleri bağlantıları `connections.json` ve `secrets.json` dosyalarında tutuyordu. Bu dosyalar açılışta otomatik olarak `dbx.db` içine taşınır ve özgün dosyalar `*.bak` olarak yeniden adlandırılır.
+
+    Bağlantıları başka bir makineye taşımak için dosyaları kopyalamak yerine şifreli [Yapılandırma Dışa/İçe Aktarma](/tr/docs/config-export) özelliğini kullanın. Elle yedek almak için önce DBX'ten çıkın, ardından veri dizininin tamamını ya da en azından `dbx.db` dosyasını `-wal` ve `-shm` dosyalarıyla birlikte kopyalayın.
+  </Accordion>
+  <Accordion title="Veriyi çalıştırılabilir dosyanın yanında tutabilir veya özel bir veri dizini kullanabilir miyim?">
+    Evet. Desteklenen iki yol var:
+
+    - **Windows taşınabilir ZIP:** sürüm sayfasındaki `DBX_<sürüm>_<mimari>-portable.zip` dosyası bir `portable.dbx` işaret dosyasıyla gelir. İstediğiniz yere çıkarıp çalıştırın; tüm veriler `DBX.exe` yanındaki `data` klasöründe saklanır. İlk açılışta taşınabilir klasör hâlâ boşsa ve `AppData` içinde eski veri varsa, bu veri bir kez otomatik olarak içe aktarılır.
+    - **`DBX_DATA_DIR` ortam değişkeni:** her platformda, hem yükleyici hem taşınabilir sürümlerde çalışır ve en yüksek önceliğe sahiptir. Herhangi bir klasörü gösterebilirsiniz. Yeni dizin boş başlar, bu yüzden Yapılandırma Dışa/İçe Aktarma ile taşıyın ya da DBX çalışmıyorken `dbx.db` dosyasını kopyalayın.
+
+    `portable.dbx` işaret dosyası yalnızca Windows'ta çalışır ve çalıştırılabilir dosyanın yanında `uninstall.exe` varsa (kurulu sürümler) yoksayılır. Veri dizini için uygulama içi bir ayar yoktur.
+  </Accordion>
+</Accordions>

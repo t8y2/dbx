@@ -1357,7 +1357,7 @@ test("shows column comments in WHERE field completions", () => {
   });
 
   const column = items.find((item) => item.type === "column" && item.label === "status");
-  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL");
+  assert.equal(column?.detail, "public.orders  [varchar]  NOT NULL  -- Order lifecycle state");
   assert.equal(column?.info, "public.orders.status\nType: varchar\nNullable: no\nComment: Order lifecycle state");
 });
 

@@ -62,6 +62,7 @@ fn structure_change_options(
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn index_change_options(
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     }
 }
 
@@ -246,6 +248,7 @@ fn builds_mysql_column_and_index_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -462,6 +465,7 @@ fn builds_xugu_type_change_with_native_syntax() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -672,6 +676,7 @@ fn builds_mysql_unsigned_integer_column_with_length_before_attribute() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -707,6 +712,7 @@ fn doris_table_editor_renames_column_without_mysql_change_syntax() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -766,6 +772,7 @@ fn dameng_integer_column_omits_mysql_display_width() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -808,6 +815,7 @@ fn builds_highgo_foreign_key_changes_with_postgres_syntax() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -879,6 +887,7 @@ fn builds_informix_column_and_index_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -935,6 +944,7 @@ fn oracle_does_not_generate_drop_sql_for_all_columns() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -996,6 +1006,7 @@ fn oracle_create_table_preserves_character_length_units() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements[0].contains("BYTE_COL VARCHAR2(12 BYTE)"));
@@ -1031,6 +1042,7 @@ fn oracle_create_table_uses_unquoted_identifiers_for_new_objects() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1067,6 +1079,7 @@ fn oracle_create_table_leaves_uppercase_regular_identifier_unquoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1102,6 +1115,7 @@ fn oracle_create_table_quotes_special_and_reserved_identifiers() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1140,6 +1154,7 @@ fn oracle_create_table_distinguishes_new_and_referenced_foreign_key_identifiers(
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1181,6 +1196,7 @@ fn oracle_existing_quoted_identifiers_keep_exact_spelling() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1213,6 +1229,7 @@ fn oracle_new_identifier_formatting_does_not_change_other_dialects() {
             mysql_engine: None,
             partitioned: false,
             is_gaussdb_m_mode: false,
+            table_collation: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
@@ -1303,6 +1320,7 @@ fn iris_drop_index_includes_table_name() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1344,6 +1362,7 @@ fn iris_ignores_comment_changes_but_keeps_supported_column_alters() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(
@@ -1425,6 +1444,7 @@ fn oracle_compatible_databases_keep_comment_on_sql() {
             mysql_engine: None,
             partitioned: false,
             is_gaussdb_m_mode: false,
+            table_collation: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new(), "{database_type:?}");
@@ -1459,6 +1479,7 @@ fn mysql_create_index_with_comment() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1492,6 +1513,7 @@ fn manticoresearch_builds_create_table_sql_only() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1535,6 +1557,7 @@ fn manticoresearch_builds_add_and_drop_column_sql() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1601,6 +1624,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(
@@ -1671,6 +1695,7 @@ fn gbase8a_allows_mysql_style_column_reorder() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1706,6 +1731,7 @@ fn manticoresearch_does_not_drop_id_column() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1774,6 +1800,7 @@ fn manticoresearch_warns_when_existing_column_properties_change() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -1809,6 +1836,7 @@ fn manticoresearch_ignores_mysql_column_options() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1847,6 +1875,7 @@ fn manticoresearch_builds_text_column_properties() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1877,6 +1906,7 @@ fn manticoresearch_builds_json_secondary_index_property() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1903,6 +1933,7 @@ fn mysql_create_unique_index_with_comment_and_btree() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1931,6 +1962,7 @@ fn mysql_create_functional_index_preserves_key_part_syntax() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1959,6 +1991,7 @@ fn mysql_add_timestamp_column_drops_invalid_precision() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -1987,6 +2020,7 @@ fn mysql_add_timestamp_column_preserves_valid_precision() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2022,6 +2056,7 @@ fn builds_postgres_create_table_with_comments_and_index() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2054,6 +2089,7 @@ fn quotes_expression_like_new_index_columns_without_provenance() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2126,6 +2162,7 @@ fn create_table_trims_table_name_whitespace_for_all_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2163,6 +2200,7 @@ fn warns_for_sqlite_unsafe_column_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -2204,6 +2242,7 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2273,6 +2312,7 @@ fn builds_rqlite_changes_with_sqlite_dialect() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2303,6 +2343,7 @@ fn builds_kingbase_add_column_without_column_keyword() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2368,6 +2409,7 @@ fn builds_mysql_column_reorder_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2424,6 +2466,7 @@ fn mysql_add_column_before_existing_column_does_not_reorder_shifted_column() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2487,6 +2530,7 @@ fn mysql_existing_column_reorder_does_not_reorder_columns_shifted_by_prior_move(
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2562,6 +2606,7 @@ fn mysql_moving_first_column_to_end_uses_single_reorder_statement() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2587,6 +2632,7 @@ fn builds_sql_server_quoted_column_and_index_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2618,6 +2664,7 @@ fn sqlserver_strips_mysql_display_width_from_fixed_integer_types() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2643,6 +2690,7 @@ fn sqlserver_strips_scale_from_float() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2668,6 +2716,7 @@ fn sqlserver_preserves_float_mantissa_bits() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2718,6 +2767,7 @@ fn sqlserver_default_changes_drop_old_constraints_with_isolated_batches() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2930,6 +2980,7 @@ fn sqlserver_unchanged_foreign_key_does_not_warn_when_saving_other_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2960,6 +3011,7 @@ fn sqlserver_add_column_with_identity() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -2990,6 +3042,7 @@ fn dameng_add_column_with_identity() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3014,6 +3067,7 @@ fn dameng_uppercases_lowercase_column_type() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3045,6 +3099,7 @@ fn dameng_rejects_identity_on_incompatible_type() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3078,6 +3133,7 @@ fn sqlserver_rejects_identity_on_incompatible_type() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3114,6 +3170,7 @@ fn sqlserver_changed_foreign_key_still_warns_as_unsupported() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3155,6 +3212,7 @@ fn sqlserver_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3196,6 +3254,7 @@ fn dameng_unchanged_identity_extra_does_not_mark_existing_column_changed() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3450,6 +3509,7 @@ fn dameng_rejects_adding_second_identity_column() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3503,6 +3563,7 @@ fn sqlserver_existing_column_identity_change_warns_without_unchanged_foreign_key
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.statements, Vec::<String>::new());
@@ -3535,6 +3596,7 @@ fn builds_duckdb_create_table_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3581,6 +3643,7 @@ fn builds_clickhouse_nullable_comment_and_reorder_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -3628,6 +3691,7 @@ fn builds_h2_schema_qualified_existing_column_statements() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4568,6 +4632,7 @@ fn mysql_create_table_with_auto_increment() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4596,6 +4661,7 @@ fn mysql_create_table_keeps_column_charset_collation_and_comment() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4628,6 +4694,7 @@ fn mysql_compatible_databases_do_not_emit_mysql_column_charset_clauses() {
             mysql_engine: None,
             partitioned: false,
             is_gaussdb_m_mode: false,
+            table_collation: None,
         });
 
         assert_eq!(result.warnings, Vec::<String>::new());
@@ -4657,6 +4724,7 @@ fn mysql_create_table_with_on_update_current_timestamp() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4686,6 +4754,7 @@ fn postgres_create_table_with_identity() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4717,6 +4786,7 @@ fn dameng_create_table_with_identity() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4744,6 +4814,7 @@ fn dameng_create_table_preserves_character_length_units() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4779,6 +4850,7 @@ fn dameng_alter_column_preserves_character_length_unit() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4815,6 +4887,7 @@ fn dameng_rejects_multiple_identity_columns() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements.is_empty());
@@ -4844,6 +4917,7 @@ fn dameng_rejects_zero_identity_increment() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements.is_empty());
@@ -4874,6 +4948,7 @@ fn sqlserver_create_table_with_identity() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4899,6 +4974,7 @@ fn mysql_quotes_datetime_literal_default() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4924,6 +5000,7 @@ fn mysql_does_not_quote_current_timestamp() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4950,6 +5027,7 @@ fn mysql_does_not_quote_temporal_function_with_parens() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -4975,6 +5053,7 @@ fn mysql_date_literal_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5000,6 +5079,7 @@ fn mysql_time_literal_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5025,6 +5105,7 @@ fn non_temporal_types_are_not_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5151,6 +5232,7 @@ fn builds_mysql_foreign_key_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5181,6 +5263,7 @@ fn builds_mysql_composite_foreign_key() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5214,6 +5297,7 @@ fn builds_oracle_foreign_key_with_supported_actions() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5251,6 +5335,7 @@ fn builds_oracle_foreign_key_replacement() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5287,6 +5372,7 @@ fn builds_mysql_trigger_changes() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5314,6 +5400,7 @@ fn builds_sqlserver_trigger_with_multiple_events() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5357,6 +5444,7 @@ fn rebuilds_changed_sqlserver_trigger_from_complete_metadata_source() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5394,6 +5482,7 @@ fn sqlserver_trigger_edit_restores_disabled_state() {
         partitioned: false,
         mysql_engine: None,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(
@@ -5437,6 +5526,7 @@ fn unchanged_postgres_trigger_does_not_block_column_rename() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5467,6 +5557,7 @@ fn changed_postgres_trigger_remains_unsupported() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements.is_empty());
@@ -5502,6 +5593,7 @@ fn rejects_editing_existing_oracle_trigger_without_complete_source() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements.is_empty());
@@ -5526,6 +5618,7 @@ fn builds_oracle_statement_trigger_without_row_clause() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5562,6 +5655,7 @@ fn drops_existing_oracle_trigger_without_reconstructing_it() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5583,6 +5677,7 @@ fn rejects_unsupported_oracle_compound_trigger_shape() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert!(result.statements.is_empty());
@@ -5608,6 +5703,7 @@ fn mysql_varchar_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5634,6 +5730,7 @@ fn mysql_char_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5659,6 +5756,7 @@ fn mysql_text_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5684,6 +5782,7 @@ fn mysql_enum_default_is_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5709,6 +5808,7 @@ fn mysql_int_default_is_not_quoted() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5840,6 +5940,7 @@ fn mysql_character_column_add_with_charset_collation() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5873,6 +5974,7 @@ fn mysql_numeric_column_omits_charset_collation_in_column_definition() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5916,6 +6018,7 @@ fn mysql_numeric_column_ignores_charset_collation_in_change_detection() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     // No ALTER should be emitted — charset/collation changes on
@@ -5954,6 +6057,7 @@ fn mysql_character_column_detects_charset_collation_change() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -5997,12 +6101,312 @@ fn mysql_character_column_preserves_charset_collation_on_other_change() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
         vec!["ALTER TABLE `users` MODIFY COLUMN `name` varchar(255) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` DEFAULT 'guest';"]
+    );
+}
+#[test]
+fn mysql_inherited_column_charset_is_omitted_from_generated_ddl() {
+    // MySQL reports the effective collation of every character column, so a column
+    // that simply inherits the table default looks identical to one that spells the
+    // same collation out. Introspection keeps those values (the editor needs them to
+    // show the column's current charset), and the redundant clauses are dropped here,
+    // while generating the DDL.
+    let mut col = column("note");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_0900_ai_ci".to_string();
+    col.comment = "Free-form note".to_string();
+    col.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `note` varchar(50) COMMENT 'Free-form note';"]
+    );
+}
+
+#[test]
+fn mysql_explicit_column_charset_survives_the_table_default_comparison() {
+    // A column whose collation differs from the table default must keep its clauses:
+    // MODIFY COLUMN replaces the whole definition, so dropping them would silently
+    // convert the column to the table's default character set.
+    let mut col = column("name");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_unicode_ci".to_string();
+    col.comment = "Display name".to_string();
+    col.original = Some(ColumnInfo {
+        name: "name".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_unicode_ci".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` MODIFY COLUMN `name` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci` COMMENT 'Display name';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_inherited_column_charset_does_not_register_as_a_change() {
+    // The original snapshot is normalized together with the draft, so a column left
+    // untouched by the user never looks like a charset edit and produces no ALTER.
+    let mut col = column("note");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_0900_ai_ci".to_string();
+    col.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+    col.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, Vec::<String>::new());
+}
+
+#[test]
+fn mysql_collation_switched_away_from_the_table_default_is_emitted() {
+    let mut col = column("note");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_bin".to_string();
+    col.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+    col.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["ALTER TABLE `users` MODIFY COLUMN `note` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_bin`;"]
+    );
+}
+
+#[test]
+fn mysql_column_charset_switched_to_the_table_default_drops_the_clause() {
+    // Omitting the clauses is equivalent to writing the table default out, so a column
+    // moved onto the table default still converts — it just does so implicitly.
+    let mut col = column("note");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_0900_ai_ci".to_string();
+    col.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("latin1".to_string()),
+        collation: Some("latin1_bin".to_string()),
+    });
+    col.original_position = Some(0);
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE `users` MODIFY COLUMN `note` varchar(50);"]);
+}
+
+#[test]
+fn mysql_column_charset_is_kept_when_the_table_default_is_unknown() {
+    // Without a table default there is nothing to compare against, so the real values
+    // reported by MySQL are written out rather than guessed away.
+    let mut col = column("note");
+    col.data_type = "varchar(50)".to_string();
+    col.character_set = "utf8mb4".to_string();
+    col.collation = "utf8mb4_0900_ai_ci".to_string();
+    col.comment = "Free-form note".to_string();
+    col.original = Some(ColumnInfo {
+        name: "note".to_string(),
+        data_type: "varchar(50)".to_string(),
+        is_nullable: true,
+        column_default: None,
+        is_primary_key: false,
+        extra: None,
+        comment: None,
+        character_set: Some("utf8mb4".to_string()),
+        collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    let result = build_table_structure_change_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![col],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: None,
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE `users` MODIFY COLUMN `note` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_0900_ai_ci` COMMENT 'Free-form note';"
+        ]
+    );
+}
+
+#[test]
+fn mysql_create_table_omits_inherited_column_charset() {
+    let mut inherited = column("note");
+    inherited.data_type = "varchar(50)".to_string();
+    inherited.character_set = "utf8mb4".to_string();
+    inherited.collation = "utf8mb4_0900_ai_ci".to_string();
+    let mut explicit = column("name");
+    explicit.data_type = "varchar(50)".to_string();
+    explicit.character_set = "utf8mb4".to_string();
+    explicit.collation = "utf8mb4_unicode_ci".to_string();
+
+    let result = build_create_table_sql(TableStructureSqlOptions {
+        database_type: Some(DatabaseType::Mysql),
+        schema: None,
+        table_name: "users".to_string(),
+        columns: vec![inherited, explicit],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        triggers: Vec::new(),
+        table_comment: None,
+        original_table_comment: None,
+        mysql_engine: None,
+        partitioned: false,
+        is_gaussdb_m_mode: false,
+        table_collation: Some("utf8mb4_0900_ai_ci".to_string()),
+    });
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "CREATE TABLE `users` (\n  `note` varchar(50),\n  `name` varchar(50) CHARACTER SET `utf8mb4` COLLATE `utf8mb4_unicode_ci`\n);"
+        ]
     );
 }
 
@@ -6145,6 +6549,7 @@ fn oscar_create_table_with_primary_key_and_comments() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6338,6 +6743,7 @@ fn oscar_drop_index_with_schema_qualifier() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6359,6 +6765,7 @@ fn oscar_table_comment_uses_comment_on_table() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6442,6 +6849,7 @@ fn postgres_partitioned_parent_concurrent_request_rejected() {
         mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     // Fail closed: PostgreSQL rejects CREATE INDEX CONCURRENTLY on a
@@ -6473,6 +6881,7 @@ fn postgres_partitioned_parent_plain_index_unchanged() {
         mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6516,6 +6925,7 @@ fn postgres_create_table_partitioned_concurrent_request_rejected() {
         mysql_engine: None,
         partitioned: true,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(
@@ -6643,6 +7053,7 @@ fn postgres_create_table_concurrent_index() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -6759,6 +7170,7 @@ fn gaussdb_m_options(columns: Vec<EditableStructureColumn>) -> TableStructureSql
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: true,
+        table_collation: None,
     }
 }
 
@@ -6990,6 +7402,7 @@ fn gaussdb_m_rebuild_index_unchanged_type_does_not_rebuild() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: true,
+        table_collation: None,
     };
     let result = build_table_structure_change_sql(options);
     assert!(result.warnings.is_empty());
@@ -7037,6 +7450,7 @@ fn mysql_create_table_nullable_timestamp_without_default_gets_explicit_null() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7066,6 +7480,7 @@ fn mysql_create_table_nullable_timestamp_with_default_still_gets_explicit_null()
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7093,6 +7508,7 @@ fn mysql_create_table_nullable_datetime_does_not_gain_null_keyword() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());
@@ -7120,6 +7536,7 @@ fn mysql_add_column_nullable_timestamp_without_default_gets_explicit_null() {
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
 
     assert_eq!(result.warnings, Vec::<String>::new());

@@ -1,6 +1,6 @@
 use super::column_format::{
     column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
-    is_mysql_character_data_type, is_mysql_timestamp_type,
+    is_mysql_character_data_type, is_mysql_timestamp_type, strip_inherited_mysql_column_charsets,
 };
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
@@ -26,6 +26,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
         dialect = capabilities.dialect;
     }
     options.table_name = clean(&options.table_name);
+    strip_inherited_mysql_column_charsets(&mut options);
     let mut warnings = Vec::new();
     warnings.extend(validate_mysql_engine(&options));
     // Fail closed: a concurrent-index request on a partitioned parent (or on an

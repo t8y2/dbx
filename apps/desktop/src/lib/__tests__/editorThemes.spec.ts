@@ -192,7 +192,7 @@ describe("SQL completion theme", () => {
 });
 
 describe("editor gutters", () => {
-  it("anchors line numbers to the first visual row of wrapped lines", () => {
+  it("keeps single line numbers vertically centered in the base rule", () => {
     const rules = buildEditorFontThemeRules();
 
     expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
@@ -200,6 +200,5 @@ describe("editor gutters", () => {
       display: "flex",
       justifyContent: "flex-end",
     });
-    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
   });
 });

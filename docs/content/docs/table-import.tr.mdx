@@ -1,0 +1,137 @@
+---
+title: Tablo İçe Aktarma
+description: CSV, TSV, metin, JSON, Excel ya da SQL verisini adım adım bir akışla mevcut bir tabloya aktarın veya toplu olarak yeni tablolar oluşturun.
+---
+
+Tablo İçe Aktarma, dosya verisini veritabanı tablolarına yazar. DBX önce kaynağı ayrıştırıp önizler, ardından herhangi bir satır yazılmadan önce ayrıştırma seçeneklerini, hedefi, sütun eşlemelerini ve çalıştırma ayarlarını gözden geçirmenizi ister.
+
+<Callout type="warn">İçe aktarma gerçek veritabanı yazmaları yapar. Bağlantının salt okunur koruması işlemi engeller, ancak son sınır veritabanı yetkileridir. Üretime aktarmadan önce hedef bağlantıyı, hedef tabloyu ve yedekleme planınızı doğrulayın.</Callout>
+
+## Hedef Modları
+
+| Hedef modu | Davranış | Tipik kullanım |
+| --- | --- | --- |
+| Mevcut tablo | Hedef sütunları yükler ve kaynak alanları eşler; ekleme ya da truncate edip içe aktarma destekler | Geriye dönük doldurma, test verisi geri yükleme ve örnek veri değiştirme |
+| Yeni tablo oluştur | Sütun türlerini önizleme verisinden çıkarır; tablo adını, sütun adlarını ve türleri düzenlemenize izin verir | Hızlı dosyadan tabloya akışlar, elektronik tablo göçü ve çoklu dosya içe aktarma |
+
+Tablo oluşturma modu aynı anda birden çok dosya kabul eder. Excel çalışma kitapları, çalışma sayfası başına ayrı görevlere açılır. DBX her dosya ya da sayfa için bir tablo adı önerir ve son adların benzersiz olmasını ister. Görevler sırayla çalışır; her biri kendi önizlemesini, eşlemesini ve tür ayarlarını korur.
+
+## Desteklenen Dosyalar
+
+| Biçim | Ayrıntılar |
+| --- | --- |
+| CSV | Varsayılan olarak virgülle ayrılmış; başlık satırı, satır aralığı ve kodlama yapılandırılabilir |
+| TSV | Sekmeyle ayrılmış metin |
+| Ayırıcılı metin | Özel bir ayırıcı kullanan `.txt` gibi dosyalar |
+| JSON | Tek bir nesne, nesne satırları ya da dizi satırları; yapı açıkça seçilebilir |
+| Excel | Çalışma sayfası seçimiyle `.xlsx`, `.xlsm` ve `.xls` |
+| SQL | Tek bir tablo için birebir `INSERT INTO ... VALUES` ifadeleri içeren `.sql` betikleri |
+
+SQL içe aktarma yalnızca birebir `INSERT INTO ... VALUES` satırlarını kabul eder. İfadeler, `REPLACE`, `INSERT IGNORE`, `INSERT ... SELECT` ve kayıpsız yeniden yazılamayacak diğer yapılar reddedilir; böylece veri ve ifade anlamı korunur.
+
+SQL içe aktarma betiğin tamamını akış dışı yoldan okur, bu yüzden her `.sql` dosyası 100 MB ile sınırlıdır; daha büyük dosyalar açık bir hatayla reddedilir. `TO_DATE` ve `TO_TIMESTAMP` gibi tarih işlevleriyle yazılan değerler, ilk argümanlarının metni olarak içe aktarılır ve hedef sütunun bu biçimi ayrıştırabilmesi gerekir.
+
+Masaüstü, seçilen yerel dosyaları doğrudan okur. Docker/Web, tarayıcıdan seçilen dosyaları geçici sunucu deposuna yükler ve önizleme ile içe aktarma bittikten sonra hazırlanan kaynağı serbest bırakır.
+
+## İçe Aktarma Sihirbazı
+
+<Steps>
+  <Step>
+    ### Dosyaları ve Hedef Modunu Seçin
+
+    İşlemi bir tablodan açmak o tabloyu önceden seçer. Bunun yerine yeni bir tablo oluşturup bir ya da daha fazla dosya seçebilirsiniz.
+
+  </Step>
+  <Step>
+    ### Ayrıştırmayı Yapılandırın
+
+    Kodlamayı, başlık satırını, veri aralığını, çalışma sayfasını, JSON yapısını, boş dize davranışını ve boşluk kırpmayı gözden geçirin.
+
+  </Step>
+  <Step>
+    ### Sütun Eşlemesini İnceleyin
+
+    Kaynak alanları mevcut bir tabloya eşleyin ya da yeni bir tablo için çıkarsanan adları ve veri türlerini inceleyin. Gerçek değerleri doğrulamak için veri önizlemesini kullanın.
+
+  </Step>
+  <Step>
+    ### Planı İnceleyin
+
+    Bağlantıyı, veritabanını, şemayı, tablo adını, içe aktarma modunu, eşleme sayısını, tahmini satır sayısını ve toplu iş boyutunu onaylayın.
+
+  </Step>
+  <Step>
+    ### Çalıştırın ve Sonuçları İnceleyin
+
+    Çalıştırma görünümü; okuma ve yazma aşamalarını, içe aktarılan satırları, bayt ilerlemesini, geçen süreyi, hataları ve iptal durumunu bildirir.
+
+  </Step>
+</Steps>
+
+## Ayrıştırma Seçenekleri
+
+### Metin Kodlaması
+
+CSV, TSV, ayırıcılı metin ve SQL betikleri otomatik algılamayı, UTF-8, GBK, UTF-16 LE ve UTF-16 BE kodlamalarını destekler. Algılama yanlışsa elle bir kodlama seçip önizlemeyi yeniden denetleyin.
+
+### Satır Aralığı
+
+- **Başlık satırı**, alan adları için kullanılacak satırı seçer
+- **Veri başlangıç satırı**, baştaki notları ya da boş satırları atlar
+- **Son veri satırı** içe aktarmayı sınırlar; `0` dosya sonuna kadar okur
+- **Önizleme satırları** yalnızca eşleme önizlemesini denetler, son içe aktarma boyutunu değil
+
+### Değer İşleme
+
+- **Değerleri kırp**, metin değerlerinin çevresindeki boşlukları kaldırır
+- **Boş dizeyi NULL say** varsayılan olarak açıktır; boş dizeleri korumak için kapatın
+- **JSON yapısı** otomatik algılanabilir ya da nesne satırları veya dizi satırları olarak zorlanabilir
+- **Çalışma sayfası**, bir Excel sayfasını seçer; toplu oluşturma modu her sayfa için bağımsız bir görev oluşturur
+
+## Eşleme ve Tablo Oluşturma
+
+Mevcut tablolarda DBX önce tam adları, sonra normalleştirilmiş adları eşleştirir. Normalleştirme; harf durumunu ve boşluk, alt çizgi ile tire farklarını yok sayar.
+
+- Kaynak sütunlar atlanabilir
+- Bir hedef sütun birden çok kez eşlenemez
+- En az bir sütun eşlenmelidir
+- Eşlenmemiş zorunlu sütunların bir varsayılanı, otomatik üretim davranışı ya da boş bırakılabilir tanımı olmalıdır
+
+Yeni tablolarda kaynak sütunlar başlangıçta aynı adlı hedeflere eşlenir ve DBX önizleme değerlerinden veritabanına özgü türler önerir. Öneriler yalnızca bir başlangıç noktasıdır; çalıştırmadan önce tarihleri, duyarlığı, uzun metni, JSON'u, ikili değerleri ve motora özgü türleri inceleyin.
+
+## Modlar ve Toplu İşler
+
+| Seçenek | Davranış |
+| --- | --- |
+| Ekle | Mevcut satırları korur ve yenilerini ekler |
+| Truncate edip içe aktar | Desteklenen yollarda, dosya verisini yazmadan önce hedef tabloyu temizler |
+| Toplu iş boyutu | Grup başına yazılan satır sayısını denetler; varsayılan 500'dür |
+
+Yeni tablo ve çoklu dosya içe aktarımları her zaman ekleme kullanır, çünkü her hedef geçerli görev tarafından oluşturulur. Truncate edip içe aktarma yıkıcıdır ve işlem ya da `TRUNCATE` anlamı veritabanına göre değişir. Tamamlanan her işlemin sonraki bir hatadan sonra geri alınacağını varsaymayın.
+
+## Veritabanı Kapsamı
+
+DBX, Tablo İçe Aktarma'yı sürücü yetenek bildirimi üzerinden sunar. Yalnızca sütun keşfi, tablo oluşturma ya da yazma ve gereken tür dönüşümünü uygulayan bağlantılar bu işlemi etkinleştirir. Özel Redis, MongoDB, arama, vektör, mesaj kuyruğu ve yapılandırma merkezi çalışma alanları bu ilişkisel tablo içe aktarıcısı yerine kendi akışlarını kullanır.
+
+Bağlanabilmek Tablo İçe Aktarma desteği anlamına gelmez. İşlem görünmüyorsa bunu bir yetki sorunu saymadan önce veritabanı türünü, sürücü modunu ve DBX sürümünü denetleyin.
+
+## Hata ve İptal
+
+- Ayrıştırma hataları genellikle yanlış bir kodlamayı, ayırıcıyı, başlık satırını, JSON yapısını ya da çalışma sayfası ayarını gösterir
+- Yazma hataları genellikle tür uyuşmazlıklarından, zorunlu sütunlardan, anahtar çakışmalarından, yetkilerden ya da hedef şema farklarından kaynaklanır
+- İptal sonraki grupları durdurur, ancak uygulanmış grupların geri alınacağı garanti edilmez
+- Toplu oluşturma görevleri sırayla çalışır; başarısız bir görev hata durumunu korur, daha önce tamamlanan tablolar otomatik olarak kaldırılmaz
+
+## İlgili Özellikler
+
+<Cards>
+  <Card title="Veri Aktarımı" href="/tr/docs/data-transfer">
+    Tablo verisini bağlantılar, veritabanları ya da motorlar arasında kopyalayın.
+  </Card>
+  <Card title="Veritabanı Dışa Aktarma" href="/tr/docs/database-export">
+    Yapıyı, veriyi ve desteklenen nesneleri SQL olarak dışa aktarın.
+  </Card>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">
+    Salt okunur korumayı, üretim korumasını ve veritabanı yetki sınırlarını öğrenin.
+  </Card>
+</Cards>

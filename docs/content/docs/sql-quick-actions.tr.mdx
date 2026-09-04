@@ -1,0 +1,72 @@
+---
+title: SQL Hızlı İşlemleri
+description: Bir tablo adı seçip kısayola basarak düzenleyiciden özel SQL şablonlarını çalıştırın.
+---
+
+SQL Hızlı İşlemleri, sorgu düzenleyicisinde seçtiğiniz metin üzerinde yeniden kullanılabilir SQL şablonlarını çalıştırmanızı sağlar. Önce bir tablo tanımlayıcısı seçin, ardından **Ayarlar → Kısayollar** bölümünde yapılandırdığınız kısayola basın.
+
+Bu, tamamlama yoluyla imlecin bulunduğu yere şablon ekleyen [SQL Parçacıkları](/tr/docs/sql-snippets) özelliğinden farklıdır. Hızlı İşlemler, geçerli seçimden SQL üretir ve bunu normal yürütme yolundan geçirir.
+
+## Hızlı İşlemleri Yönetme
+
+**Ayarlar → Kısayollar** bölümünü açıp **SQL Hızlı İşlemleri** başlığına gidin. Her işlem şunları içerir:
+
+| Alan | Amacı |
+| --- | --- |
+| Etiket | Ayarlar listesinde görünen ad. |
+| Kısayol | İşlemi çalıştıran tuş bileşimi. |
+| Durum | İşlemi silmeden etkinleştirir veya devre dışı bırakır. |
+| SQL Şablonu | `${table}` ifadesi seçili metinle değiştirildikten sonra çalıştırılan SQL. |
+
+İşlem ekleyebilir, düzenleyebilir, etkinleştirebilir, devre dışı bırakabilir veya silebilirsiniz. Değişiklikler işlem iletişim kutusundan hemen kaydedilir ya da ayarlar penceresinde **Uygula**'ya tıkladığınızda geçerli olur.
+
+<Callout type="info">
+  `Mod` içeren kısayollar önerilir (macOS'ta `Cmd`, Windows/Linux'ta `Ctrl`). Bunların, `Shift+U` gibi yalın harf tuşlarına göre normal yazmayı engelleme olasılığı daha düşüktür.
+</Callout>
+
+## Hızlı İşlem Çalıştırma
+
+1. SQL düzenleyicisinde bir tablo adı ya da nitelikli tanımlayıcı seçin, örneğin `orders` veya `public.users`.
+2. Yapılandırdığınız kısayola basın.
+3. DBX her `${table}` belirtecini kırpılmış seçimle değiştirir ve genişletilmiş SQL'i çalıştırır.
+
+Örnek şablon:
+
+```sql
+SELECT COUNT(*) FROM ${table}
+```
+
+`orders` seçiliyken DBX şunu çalıştırır:
+
+```sql
+SELECT COUNT(*) FROM orders
+```
+
+Hiçbir şey seçili değilse kısayol çalışmaz ve normal düzenleyici girişi devam eder.
+
+## Kısayol Çakışmaları
+
+DBX, Hızlı İşlem kısayollarını şunlara karşı denetler:
+
+- Listenizdeki diğer Hızlı İşlemler
+- **Ayarlar → Kısayollar** bölümünde gösterilen yerleşik düzenleyici ve genel kısayollar
+
+Çakışan atamalar vurgulanır ve siz çözene kadar **Uygula**'yı engeller.
+
+## Saklama, Eşitleme ve Güvenlik
+
+Hızlı İşlemler, geçerli DBX çalışma zamanında saklanan düzenleyici ayarlarıdır. Masaüstünde [Yapılandırma Bulut Eşitlemesi](/tr/docs/cloud-sync) bunları diğer düzenleyici ayarlarınızla birlikte eşitleyebilir. [Bağlantı Yapılandırması Taşıma](/tr/docs/config-export) yalnızca veritabanı bağlantılarını taşır ve Hızlı İşlemleri içermez.
+
+Bir Hızlı İşlem yalnızca SQL üretir; veritabanı yetkilerini veya DBX üretim korumasını atlamaz. Yazma ya da DDL içeren şablonları çalıştırmadan önce tümüyle genişletilmiş ifadeyi inceleyin ve [Üretim Güvenliği](/tr/docs/production-safety) yönergelerini izleyin.
+
+<Cards>
+  <Card title="SQL Parçacıkları" href="/tr/docs/sql-snippets">
+    Düzenleyici tamamlaması yoluyla imlecin bulunduğu yere yeniden kullanılabilir şablonlar ekleyin.
+  </Card>
+  <Card title="Klavye Kısayolları" href="/tr/docs/keyboard-shortcuts">
+    Yerleşik düzenleyici kısayollarını ve çakışma kurallarını inceleyin.
+  </Card>
+  <Card title="Sorgu Düzenleyici" href="/tr/docs/query-editor">
+    Yürütme kapsamının, sonuç sekmelerinin ve seçimin birlikte nasıl çalıştığını öğrenin.
+  </Card>
+</Cards>

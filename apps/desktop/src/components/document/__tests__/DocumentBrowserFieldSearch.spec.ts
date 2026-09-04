@@ -398,6 +398,33 @@ afterEach(() => {
 });
 
 describe("DocumentBrowser Elasticsearch field search", () => {
+  it("passes Elasticsearch mapping types through to the table grid", async () => {
+    app?.unmount();
+    backend.getColumns.mockResolvedValue([
+      { name: "profile", data_type: "object" },
+      { name: "profile.name", data_type: "keyword" },
+      { name: "title", data_type: "text" },
+    ]);
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: "document-1", title: "Example", profile: { name: "Ada" } }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    app = createApp(DocumentBrowser, {
+      connectionId: "connection-1",
+      database: "",
+      collection: "orders",
+      databaseType: "elasticsearch",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    const types = JSON.parse(root!.querySelector<HTMLElement>("[data-testid='data-grid']")!.dataset.resultColumnTypes ?? "[]");
+
+    expect(types).toEqual(["keyword", "text", "object"]);
+  });
+
   it("migrates hidden columns and passes a stable index layout scope without changing the query result", async () => {
     app?.unmount();
     const legacyScopeKey = documentGridColumnVisibilityScopeKey({

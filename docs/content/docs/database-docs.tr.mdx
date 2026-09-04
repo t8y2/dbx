@@ -1,0 +1,108 @@
+---
+title: Veritabanı Dokümantasyonu
+description: Bir şemaya dokümantasyon olarak gözatın; tabloları ve sütunları notlar ile renk kodlu gruplarla işaretleyin; dbdiagram.io veya CI sapma denetimleri için DBML dışa aktarın.
+---
+
+Veritabanı dokümantasyonu, canlı bir şemayı okunabilir hâle getirir. DBX; tabloları, sütunları, dizinleri ve ilişkileri bir anlık görüntüde toplar, kendi yazdığınız notlarla birleştirir ve gözatılabilir bir başvuru üretir. Aynı anlık görüntü DBML'e serileştirilir, böylece diyagram araçları ve CI denetimleri tam olarak görüntüleyicinin gösterdiğini okur.
+
+Notlar, göç dosyalarınızın yanına commit edebileceğiniz düz bir JSON dosyasında durur; bu da şema dokümantasyonunu pull request'lerde incelenebilir kılar.
+
+## Dokümantasyonu Açma
+
+[Nesne Gezgini](/tr/docs/object-browser) içinde bir tabloya sağ tıklayıp **Dokümantasyon**'u seçin. Görüntüleyici geçerli bağlantı, veritabanı ve şema üzerinde açılır.
+
+Kenar çubuğu **Şemalar** ile **Tablo Grupları** arasında geçiş yapar. Arama; tabloları, sütunları ve grupları aynı anda kapsar. Her tablo sayfası sütunları, dizinleri, **Başvurular** ve **Başvuranlar** bölümlerini listeler; böylece ilişkiler iki yönde de okunur.
+
+## Notlar ve Gruplar
+
+| Neyi işaretlersiniz | Nerede |
+| --- | --- |
+| Proje notu | Dokümantasyon ana sayfası |
+| Tablo notu | Tablo sayfası başlığı |
+| Sütun notu | Tablodaki sütun satırı |
+| Tablo grubu ve rengi | Tablo sayfasındaki grup seçici |
+
+Notlar Markdown kabul eder ve dizinde satır içi görüntülenir. Her düzenleme otomatik kaydedilir; başlıkta önce **Kaydediliyor…**, sonra **Kaydedildi** görünür. Başarısız bir yazma yutulmaz, bildirilir; metniniz korunur, böylece sonraki düzenleme yeniden dener.
+
+Gruplar sabit bir renk değil, bir **renk tonu** saklar. Açıklık ve doygunluk etkin temadan gelir; böylece bir grup hem açık hem koyu modda okunabilir kalır — ve aynı ton, DBML'e aktarıldığında `[color: #rrggbb]` değerine dönüşür.
+
+## Yerel Notlar ve Veritabanı Açıklamaları
+
+Hem veritabanında `COMMENT ON` değeri hem de DBX'te yazılmış notu olan bir sütun, sizin notunuzu **YEREL** işaretiyle gösterir ve veritabanı açıklamasını altında korur. Veritabanında hiçbir şeyin üzerine yazılmaz — DBX dokümantasyon için asla DDL çalıştırmaz ve özgün açıklama her zaman geri alınabilir.
+
+## Notlar Nerede Saklanır
+
+Varsayılan olarak her bağlantının DBX veri dizini içinde kendi notlar dosyası vardır, bu yüzden özellik hiçbir kurulum gerektirmeden çalışır.
+
+Bunun yerine deponuzdaki bir dosyayı göstermek için bağlantının **Gelişmiş** ayarlarındaki **Not dosyası** alanını ayarlayın (`docs_notes_path` olarak saklanır). Notlar dosyası şöyle görünür:
+
+```json
+{
+  "formatVersion": 1,
+  "project": { "name": "Billing", "note": "# Billing\n\nOne schema per tenant." },
+  "groups": [{ "id": "core", "name": "Core", "hue": 210 }],
+  "tables": {
+    "public.orders": {
+      "group": "core",
+      "note": "One row per checkout.",
+      "columns": { "status": { "note": "Lifecycle state." } }
+    }
+  }
+}
+```
+
+Anahtarlar `şema.tablo` ve `şema.tablo.sütun` biçimindedir ve motorun tanımlayıcı harf durumunu nasıl ele aldığına göre normalleştirilir. Yazmalar atomiktir — dosya hedefinin yanına yazılıp yeniden adlandırılır — bu yüzden yarıda kesilen bir kaydetme, metninizin yerinde yarım yazılmış bir dosya bırakamaz.
+
+<Callout type="warn">Notlar dosyasının bulunmaması sorun değildir; boş başlar. Bozuk bir dosya ise bilinçli olarak kesin hatadır: devam etmek, yazıları sessizce atarken görünüşte eksiksiz bir dokümantasyon üretirdi.</Callout>
+
+## Uyarılar
+
+Dokümantasyon sessizce değil, görünür biçimde bozulur. Görüntüleyici şu durumlarda bir bant gösterir:
+
+| Durum | Anlamı |
+| --- | --- |
+| Bir tablo belgelenemedi | Bir tablonun meta verisi okunamadı. Şemanın geri kalanı yine de oluşturuldu. |
+| İlişki bilgisi yok | Motor yabancı anahtar meta verisi bildirmiyor, bu yüzden bağlantı türetilemedi. |
+| Veritabanı açıklamaları kullanılamıyor | Motorun açıklama desteği yok, bu yüzden her açıklama kendi notlarınızdan geliyor. |
+| Bazı notlar artık hiçbir şeyle eşleşmiyor | Bir not, artık var olmayan bir tabloya ya da sütuna başvuruyor. Hiçbir şey silinmedi. |
+| DBML'de gösterilemiyor | Bir yapı DBX'te belgeleniyor ancak dışa aktarılan DBML'de ifade edilemiyor. |
+
+## DBML Dışa Aktarma
+
+```bash
+dbx dbml <connection> [--out path] [--notes path] [--schema name] [--database name] [--tables a,b]
+```
+
+`--out` verilmezse DBML stdout'a yazılır, böylece boru hattına verilebilir. Notlar ve gruplar yalnızca `--notes` bir dosya belirttiğinde birleştirilir; bayrak açık olduğu için yoldaki bir yazım hatası sessizce notsuz çıktı üretmek yerine hata verir.
+
+Çıktı; `Table`, çıkarsanmış kardinaliteyle `Ref`, `Enum` ve `TableGroup` bloklarını içerir ve doğrudan [dbdiagram.io](https://dbdiagram.io) üzerine yapıştırılabilir.
+
+Sonucu commit edin ve incelenmemiş şema sapmasında CI'ın başarısız olmasını sağlayın:
+
+```yaml
+- run: dbx dbml prod --notes docs/dbx-docs.json --out docs/schema.dbml
+- run: git diff --exit-code docs/schema.dbml
+```
+
+## Destek ve Sınırlar
+
+- Yalnızca ilişkisel motorlar. Belge veritabanlarının ve anahtar-değer depolarının DBML karşılığı yoktur ve kapsam dışıdır.
+- Tablolar, sütunlar, dizinler, ilişkiler ve enum'lar belgelenir. Tetikleyiciler, yordamlar, işlevler, diziler ve yetkiler belgelenmez.
+- DBML dışa aktarımı tek yönlüdür. Bir `.dbml` dosyası bir çıktıdır, asla doğruluk kaynağı değildir — DBX onu içe aktarmaz.
+- Yabancı anahtar meta verisi olmayan motorlar, ilişki bağlantısı içermeyen bir dokümantasyon üretir; bu boş bir sayfa yerine uyarı olarak bildirilir.
+- Şema geçmişi ve tablo başına "son güncelleme" izlenmez. Anlık görüntüler sürüm damgalıdır, böylece bu daha sonra eklenebilir.
+
+<Cards>
+  <Card title="Nesne gezgini" href="/tr/docs/object-browser">
+    Dokümantasyonun açıldığı ve nesne kaynağının bulunduğu yer.
+  </Card>
+  <Card title="Şema gezgini" href="/tr/docs/schema-browser">
+    Sütunları, yabancı anahtarları ve açıklamaları doğrudan inceleyin.
+  </Card>
+  <Card title="Alan soy ağacı" href="/tr/docs/field-lineage">
+    Bir sütunun nereden geldiğini ve bir değişikliğin neyi etkilediğini izleyin.
+  </Card>
+  <Card title="CLI" href="/tr/docs/cli">
+    Başsız dokümantasyon dışa aktarımı dâhil tam komut başvurusu.
+  </Card>
+</Cards>

@@ -2,6 +2,7 @@
 
 import type { FormEvent } from "react";
 import { Send } from "lucide-react";
+import type { DocsLang } from "@/lib/i18n";
 
 const CONTACT_EMAIL = "1156263951@qq.com";
 
@@ -33,6 +34,33 @@ const i18n = {
       source: "Source page",
     },
   },
+  tr: {
+    nameLabel: "Ad",
+    namePlaceholder: "Size nasıl hitap edelim?",
+    emailLabel: "E-posta",
+    emailPlaceholder: "siz@sirket.com",
+    organizationLabel: "Kurum",
+    optional: "isteğe bağlı",
+    organizationPlaceholder: "Şirket, ekip veya topluluk",
+    supportTypeLabel: "Destek türü",
+    supportTypes: ["Finansal sponsorluk", "Altyapı veya hizmet", "Geliştirici araçları", "Topluluk iş birliği", "Diğer"],
+    messageLabel: "DBX'i nasıl desteklemek istersiniz?",
+    messagePlaceholder: "Fikrinizi, sunabileceğiniz kaynakları, öngörülen zaman planını ve öneriyi anlamamıza yardımcı olacak diğer bilgileri paylaşın.",
+    submit: "E-posta ile devam et",
+    privacy: "Bu, e-posta uygulamanızı hazır bir mesajla açar. DBX form içeriğini bu sitede saklamaz.",
+    alternatives: "Bize ulaşmanın diğer yolları",
+    qq: "QQ: 86554840",
+    subject: "DBX sponsorluk başvurusu",
+    emailBody: {
+      greeting: "Merhaba DBX ekibi,",
+      name: "Ad",
+      email: "E-posta",
+      organization: "Kurum",
+      supportType: "Destek türü",
+      message: "Mesaj",
+      source: "Kaynak sayfa",
+    },
+  },
   cn: {
     nameLabel: "姓名",
     namePlaceholder: "怎么称呼你？",
@@ -62,7 +90,7 @@ const i18n = {
   },
 };
 
-export function SponsorContactForm({ lang }: { lang: "en" | "cn" }) {
+export function SponsorContactForm({ lang }: { lang: DocsLang }) {
   const t = i18n[lang];
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {

@@ -4,6 +4,7 @@ import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { SponsorContactForm } from "@/components/landing/SponsorContactForm";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -25,6 +26,26 @@ const i18n = {
     astraflowSponsorAction: "Visit UCloud",
     becomeTitle: "Sponsorship inquiries",
     becomeDesc: "If you would like to support DBX with funding, infrastructure, developer tools, or services, tell us about the idea and how to reach you.",
+  },
+  tr: {
+    title: "Sponsorlar ve İş Ortakları",
+    desc: "DBX'i finansman, kaynak, hizmet ve iş birliğiyle destekleyen sponsorlara ve iş ortaklarına teşekkür ederiz.",
+    qiniuSponsorDesc: "Qiniu Cloud, DBX'e nesne depolama, CDN ve diğer bulut altyapı kaynaklarını sağlıyor.",
+    qiniuSponsorAction: "Qiniu Cloud'u ziyaret edin",
+    rainyunSponsorDesc: "RainYun; bulut sunucular, fiziksel sunucular, oyun barındırma ve geliştirici dostu altyapı hizmetleri sunan bir bulut servis sağlayıcısıdır.",
+    rainyunSponsorAction: "RainYun'u ziyaret edin",
+    easysearchSponsorDesc: "Easysearch, Elasticsearch API'leriyle uyumlu kurumsal düzeyde dağıtık bir arama motorudur; tam metin, vektör ve coğrafi aramayı, gerçek zamanlı analitiği ve yapay zekâ yeteneklerini tek platformda birleştirir.",
+    easysearchSponsorAction: "Easysearch'ü ziyaret edin",
+    atlasCloudSponsorDesc: "Atlas Cloud, geliştiricilere sohbet, görsel, video ve ses alanlarında 400+ yapay zekâ modeli için tek ve birleşik bir API sunar.",
+    atlasCloudSponsorAction: "Atlas Cloud'u ziyaret edin",
+    trustasiaSponsorDesc: "TrustAsia, DBX için bulut tabanlı kod imzalama hizmeti sağlayarak otomatik CI/CD derlemeleriyle güvenilir yazılım üretilmesini sağlıyor.",
+    trustasiaSponsorAction: "TrustAsia'yı ziyaret edin",
+    jalapenoSponsorDesc: "Jalapeño Cloud, yapay zekâ altyapısı ve belirteç hesaplama platformudur; DBX'e özel giriş noktasıyla ücretsiz kredi ve yükleme bonusu sunar.",
+    jalapenoSponsorAction: "Jalapeño Cloud'u ziyaret edin",
+    astraflowSponsorDesc: "UCloud, Çin'in STAR Market borsasına kote ilk genel bulut sağlayıcısıdır; 28 küresel bölgede bulut sunucu, veritabanı ve CDN hizmeti verir. AstraFlow platformu 200+ yaygın büyük dil modeline tek tıklamayla erişim sağlar.",
+    astraflowSponsorAction: "UCloud'u ziyaret edin",
+    becomeTitle: "Sponsorluk başvurusu",
+    becomeDesc: "DBX'i finansman, altyapı, geliştirici araçları veya hizmetlerle desteklemek isterseniz fikrinizi ve size nasıl ulaşabileceğimizi yazın.",
   },
   cn: {
     title: "赞助商与合作伙伴",
@@ -50,7 +71,7 @@ const i18n = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const t = i18n[locale];
 
   return buildMetadata({
@@ -63,7 +84,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function SponsorsPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const t = i18n[locale];
   const sponsorItems = [
     {

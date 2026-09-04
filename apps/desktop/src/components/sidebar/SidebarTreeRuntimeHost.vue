@@ -715,6 +715,12 @@ async function openDirectNavigationNode(node: TreeNode, requestId: number) {
 
 async function toggle(requestId = beginNavigationRequest()) {
   const node = activeNode.value;
+  // Remote sidebar search intentionally descends into one active connection.
+  // Keep that scope aligned even when this toggle is satisfied entirely from
+  // already-loaded children and therefore performs no connection request.
+  if (node.connectionId && connectionStore.connectedIds.has(node.connectionId)) {
+    connectionStore.activeConnectionId = node.connectionId;
+  }
   const treeLoadSearchOptions = sidebarTreeContext?.getTreeLoadSearchOptions?.(node);
   if (isDirectNavigationTreeNode(node.type)) {
     try {
@@ -1094,8 +1100,9 @@ function openDriverStoreForInstallError(errMsg: string, node: TreeNode = activeN
 
 async function loadMoreObjectGroupChildren() {
   const node = activeNode.value;
+  const searchFilter = node.loadMore?.parentId ? connectionStore.sidebarTableSearchQueries[node.loadMore.parentId]?.trim() || "" : "";
   try {
-    await connectionStore.loadMoreObjectGroupChildren(node);
+    await connectionStore.loadMoreObjectGroupChildren(node, { searchFilter });
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }

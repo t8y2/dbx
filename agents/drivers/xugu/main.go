@@ -6002,13 +6002,27 @@ func quoteIdentifier(value string) string {
 }
 
 func normalizeValue(value any) any {
+	return normalizeValueWithType(value, "")
+}
+
+// normalizeValueWithType converts a scanned driver value into a JSON-friendly
+// value. columnTypeName drives temporal formatting: XuguDB rejects the ISO
+// "T"/"Z" literal (E19138 时间值常数错误) that time.RFC3339Nano produces, so
+// the round-trippable form is a space-separated wall-clock string. Timezone-
+// aware Xugu types keep the numeric offset; timezone-less ones (DATE/DATETIME/
+// TIME/TIMESTAMP) drop it so clients do not double-apply a shift. Mirrors the
+// oracle-go/kingbase-go timezone-less handling, adapted to Xugu's space rule.
+func normalizeValueWithType(value any, columnTypeName string) any {
 	switch v := value.(type) {
 	case nil:
 		return nil
 	case []byte:
 		return string(v)
 	case time.Time:
-		return v.Format(time.RFC3339Nano)
+		if isXuguTimezoneAwareTemporal(columnTypeName) {
+			return v.Format("2006-01-02 15:04:05.999999999 -07:00")
+		}
+		return v.Format("2006-01-02 15:04:05.999999999")
 	case int:
 		return int64(v)
 	case int8:
@@ -6038,6 +6052,13 @@ func normalizeValue(value any) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+// isXuguTimezoneAwareTemporal reports whether the column type carries a real
+// timezone (…WITH TIME ZONE), so its formatted literal must keep the offset.
+func isXuguTimezoneAwareTemporal(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(columnTypeName))
+	return strings.Contains(normalized, "WITH TIME ZONE")
 }
 
 func emptyIfNil[T any](values []T) []T {

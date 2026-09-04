@@ -126,6 +126,7 @@ const PLATFORM_DEFAULT_SHORTCUTS: Partial<Record<ShortcutActionId, ReadonlySet<s
 };
 const LEGACY_CLOSE_TAB_DEFAULT = "Meta+W";
 const LEGACY_COPY_CURRENT_ROW_DEFAULT = "Mod+D";
+const EDIT_TABLE_STRUCTURE_DEFAULT = "Mod+Shift+D";
 const TAB_NAVIGATION_HISTORY_ACTIONS: ShortcutActionId[] = ["navigateTabHistoryBack", "navigateTabHistoryForward"];
 
 export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
@@ -307,13 +308,13 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     id: "editTableStructure",
     labelKey: "settings.shortcutEditTableStructure",
     scope: "grid",
-    defaultShortcut: "Mod+D",
+    defaultShortcut: EDIT_TABLE_STRUCTURE_DEFAULT,
   },
   {
     id: "copyCurrentRow",
     labelKey: "settings.shortcutCopyCurrentRow",
     scope: "grid",
-    defaultShortcut: "",
+    defaultShortcut: LEGACY_COPY_CURRENT_ROW_DEFAULT,
   },
   {
     id: "deleteCurrentRow",
@@ -635,9 +636,9 @@ export function normalizeShortcutSettings(settings?: Partial<ShortcutSettings>, 
     }),
   ) as ShortcutSettings;
 
-  if (!hasExplicitShortcut(settings, "editTableStructure") && settings?.copyCurrentRow === LEGACY_COPY_CURRENT_ROW_DEFAULT) {
-    normalized.editTableStructure = LEGACY_COPY_CURRENT_ROW_DEFAULT;
-    normalized.copyCurrentRow = "";
+  if (settings?.copyCurrentRow === "" && settings?.editTableStructure === LEGACY_COPY_CURRENT_ROW_DEFAULT) {
+    normalized.editTableStructure = EDIT_TABLE_STRUCTURE_DEFAULT;
+    normalized.copyCurrentRow = LEGACY_COPY_CURRENT_ROW_DEFAULT;
   }
 
   for (const actionId of TAB_NAVIGATION_HISTORY_ACTIONS) {

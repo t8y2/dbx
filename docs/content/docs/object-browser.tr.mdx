@@ -1,0 +1,102 @@
+---
+title: Nesne Gezgini
+description: Veritabanı nesnelerini, istatistiklerini, kaynağını ve toplu işlemlerini incelemek için liste veya ızgara görünümünü kullanın.
+---
+
+Nesne gezgini, etkin veritabanındaki ya da şemadaki nesneleri aranabilir tek bir listede veya ızgarada toplar. Bir veritabanında çok sayıda nesne olduğunda, türe veya meta veriye göre filtreleme gerektiğinde ya da birden çok nesneye aynı işlem uygulanacağında kullanışlıdır.
+
+## Ne Zaman Kullanılır
+
+- Çok sayıda tabloyu, görünümü, yordamı, işlevi, diziyi ve diğer nesneleri tek sayfada görüntüleyin
+- Ada, türe, şemaya, açıklamaya veya kullanılabilir istatistiklere göre filtreleyin
+- Tablo boyutunu, satır sayısını, oluşturma/güncelleme zamanını ve sürücünün sağladığı diğer meta veriyi karşılaştırın
+- Açma, kopyalama, dışa aktarma, silme veya diğer toplu işlemler için nesneleri çoklu seçin
+- Derin bir nesne ağacını genişletmeden DDL veya kaynağı inceleyin
+
+## Gezgini Açma
+
+**Nesne Gezgini**'ni bir bağlantı, veritabanı ya da şema bağlam menüsünden açın. DBX; katalog, veritabanı ve şema kapsamını seçili düğümden türetir.
+
+Gezgin ana sekme ya da yan panel olarak açılabilir. Yan panel, geçerli sorgu veya veri sekmesini görünür tutarken nesneleri incelemek istediğinizde kullanışlıdır.
+
+## Görünümler ve Filtreler
+
+| Özellik | Davranış |
+| --- | --- |
+| Liste görünümü | Ad, tür, şema, açıklama, satır sayısı, boyut ve ilgili sütunlar için en uygunudur |
+| Izgara görünümü | Nesne kartlarını ve temel özetleri taramak için en uygunudur |
+| Nesne türü filtresi | Varsayılan olarak tabloları önceler; görünümlere, yordamlara ve diğer türlere geçebilir |
+| Arama | Nesne adına, şemaya, türe ve seçili meta veriye göre filtreler |
+| Sütun denetimleri | Sütunları yeniden boyutlandırın ve gösterin; görünüm durumu korunabilir |
+
+İstatistikler yalnızca sürücü bunları güvenilir biçimde alabildiğinde görünür. Büyük veritabanlarında satır sayıları ve boyutlar ek maliyet getirebilir, bu yüzden gerektiğinde ihtiyaç duymadığınız istatistikleri kapatın.
+
+## Nesne İşlemleri
+
+Türe uygun bir görünüm açmak için bir nesneye tıklayın veya çift tıklayın:
+
+- Tablo veya görünüm verisi
+- Tablo yapısı, sütunlar, dizinler, yabancı anahtarlar, tetikleyiciler ve DDL
+- Görünümlerin, yordamların, işlevlerin, tetikleyicilerin ve diğer nesnelerin kaynağı
+- Veritabanına özgü yönetim arayüzleri
+
+Bağlam menüleri ayrıca şunları sunabilir:
+
+- Adı, nitelikli adı veya DDL'i kopyalama
+- Sorgu SQL'i üretme
+- İçe aktarma, dışa aktarma, aktarım ve şema giriş noktaları
+- ER diyagramını, alan soy ağacını veya şema karşılaştırmasını açma
+- Nesneyi yeniden adlandırma, truncate etme, silme veya yönetme
+
+Kullanılabilir işlemler; veritabanı yeteneklerine, bağlantının salt okunur durumuna ve hesap yetkilerine bağlıdır.
+
+## Çoklu Seçim ve Toplu İşlemler
+
+Birden çok nesne seçmek için onay kutularını kullanın. Veritabanına bağlı olarak toplu işlemler şunları içerebilir:
+
+- Birden çok nesne adını açma veya kopyalama
+- Toplu dışa aktarma ya da SQL üretme
+- Seçili tabloları silme, boşaltma veya truncate etme
+- Seçili dizinleri silme
+- PostgreSQL ve benzeri veritabanları için cascade farkındalıklı toplu işlemler
+
+<Callout type="warn">Toplu silme, boşaltma ve truncate işlemleri çok sayıda nesneyi etkileyebilir. Üretimde önce seçimi, üretilen SQL'i, yedekleri ve bağımlılıkları doğrulayın.</Callout>
+
+## DDL ve Kaynak
+
+- **DDL'i Görüntüle**, veritabanının veya sürücünün döndürdüğü tanımları tercih eder
+- **Nesne kaynağı**; görünümleri, yordamları, işlevleri, tetikleyicileri ve diğer düzenlenebilir nesneleri kapsar
+- Kaynak görünümleri aramayı destekler ve veritabanı ile nesne izin verdiğinde düzenleyicide açılabilir
+- Kaynağı kaydetmek veya DDL çalıştırmak; salt okunur, üretim ve tehlikeli işlem denetimlerinden geçer
+
+DBX, etkin sürücüden alınabilen tanımı gösterir. Biçimlendirme, yetki/açıklama/depolama özellikleri ve doğrudan düzenleme desteği veritabanına göre değişir.
+
+## Nesne Ağacı ile Nesne Gezgini
+
+| Nesne ağacı | Nesne gezgini |
+| --- | --- |
+| Hiyerarşi, sabitleme ve sık gezinme için uygundur | Çok sayıda eş düzeydeki nesneyi filtrelemek ve karşılaştırmak için uygundur |
+| Sütunları ve alt düğümleri genişletir | Özetler için sütunlar, kartlar ve bir yan panel kullanır |
+| Bağlam menülerini ve sürükle-bırakı öne çıkarır | Aramayı, çoklu seçimi ve toplu işlemleri öne çıkarır |
+
+Her iki yüzey de aynı nesne kimliğini ve meta verisini paylaşır. Bir nesneyi gezginden açın, gerektiğinde aynı düğümü nesne ağacında gösterin.
+
+## Sınırlar
+
+- Nesne türleri ve istatistik sütunları veritabanına göre değişir
+- Satır sayıları ve boyutlar tahmin ya da önbelleğe alınmış değerler olabilir
+- Sistem nesnelerinin görünürlüğü, görünür şema ve sistem şeması ayarlarına bağlıdır
+- Salt okunur bağlantılar nesneleri, DDL'i ve kaynağı inceleyebilir, ancak değişiklik giriş noktaları devre dışıdır veya reddedilir
+- Sürücüler, ilk erişimde büyük nesne kümelerini gruplar hâlinde yükleyebilir
+
+<Cards>
+  <Card title="Nesne ağacı" href="/tr/docs/schema-browser">
+    Hiyerarşik gezinmeyi, sabitlemeleri, sürükle-bırakı ve veritabanına özgü bağlam menülerini kullanın.
+  </Card>
+  <Card title="Tablo yapısı" href="/tr/docs/table-structure">
+    Sütunları ve dizinleri görsel olarak düzenleyin, DDL'i inceleyin.
+  </Card>
+  <Card title="Alan soy ağacı" href="/tr/docs/field-lineage">
+    Yabancı anahtarlardan, görünümlerden ve sorgu geçmişinden ilişkileri izleyin.
+  </Card>
+</Cards>

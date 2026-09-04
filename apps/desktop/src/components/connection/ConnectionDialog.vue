@@ -72,7 +72,7 @@ import { normalizeRabbitmqAddresses, parseRabbitmqAddress } from "@/lib/connecti
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
+import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
@@ -912,6 +912,7 @@ const nacosVersionMode = ref<NacosVersionMode>("v2");
 const nacosApiPlane = ref<NacosApiPlane>("admin");
 const nacosServerAddr = ref("");
 const nacosContextPath = ref("");
+const nacosConsoleUrl = ref("");
 const nacosManagedNamespacesText = ref("");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
@@ -970,6 +971,10 @@ const nacosPrimaryAddressPlaceholder = computed(() => {
   if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console") {
     return "http://127.0.0.1:8080";
   }
+  return "http://127.0.0.1:8848/nacos";
+});
+const nacosWebConsoleUrlPlaceholder = computed(() => {
+  if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3") return "http://127.0.0.1:8080";
   return "http://127.0.0.1:8848/nacos";
 });
 const nacosServiceAddressHint = computed(() => {
@@ -1286,6 +1291,7 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   const contextPath = config?.contextPath?.trim() || "";
   nacosServerAddr.value = serverAddr;
   nacosContextPath.value = contextPath;
+  nacosConsoleUrl.value = config?.consoleUrl?.trim() || "";
   nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
   nacosDynamicAllNamespaces.value = !!config && !config.managedNamespaces?.length && !Array.isArray(form.value.visible_databases);
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
@@ -1656,6 +1662,15 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
   const managedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
   let metricsUrl: string | undefined;
+  let consoleUrl: string | undefined;
+  const usesIndependentConsoleUrl = nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin";
+  if (usesIndependentConsoleUrl && nacosConsoleUrl.value.trim()) {
+    try {
+      consoleUrl = normalizeNacosConsoleUrl(nacosConsoleUrl.value);
+    } catch {
+      throw new Error(t("connection.nacosWebConsoleUrlInvalid"));
+    }
+  }
   if (nacosMetricsMode.value === "custom") {
     try {
       metricsUrl = normalizeNacosMetricsUrl(nacosMetricsUrl.value);
@@ -1681,6 +1696,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     apiPlane: nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" ? nacosApiPlane.value : undefined,
     serverAddr: normalized.serverAddr,
     contextPath: normalized.contextPath || undefined,
+    consoleUrl,
     managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
     rnacosConsoleAddr: rnacosConsoleConfigured ? nacosRNacosConsoleAddr.value.trim() : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
@@ -8214,6 +8230,14 @@ function openExternalUrl(url: string) {
                       <Label>{{ t("connection.nacosPageSize") }}</Label>
                       <Input v-model.number="nacosPageSize" type="number" min="1" max="500" />
                       <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosPageSizeHint") }}</p>
+                    </div>
+
+                    <div v-if="isNacosV3AdminPlane" class="grid gap-1.5 border-t pt-4">
+                      <div>
+                        <Label>{{ t("connection.nacosWebConsoleUrl") }}</Label>
+                        <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("connection.nacosWebConsoleUrlHint") }}</p>
+                      </div>
+                      <Input v-model="nacosConsoleUrl" :placeholder="nacosWebConsoleUrlPlaceholder" />
                     </div>
 
                     <div class="grid gap-2 border-t pt-4">

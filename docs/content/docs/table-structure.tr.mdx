@@ -1,0 +1,144 @@
+---
+title: Tablo Yapısı Düzenleyici
+description: Sütunları, dizinleri, yabancı anahtarları ve tetikleyicileri inceleyip düzenleyin; çalıştırmadan önce lehçeye özgü DDL'i gözden geçirin.
+---
+
+Tablo yapısı düzenleyici, tek tablo meta verisini ve bir değişiklik taslağını kalıcı bir sekmede tutar. DBX yalnızca etkin veritabanı yeteneğinin güvenilir biçimde üretebildiği işlemleri etkinleştirir ve kaydetmeden önce son DDL'i gösterir.
+
+## Düzenleyiciyi Açma
+
+- Bir tabloya sağ tıklayıp **Yapıyı görüntüle** ya da **Yapıyı düzenle** seçin
+- Bir sütun düğümünden açın ve o sütuna odaklanın
+- Bir dizin düğümünden açın ve o dizine odaklanın
+- Veri ızgarasındaki tablo bilgisinden açın
+- Aynı tabloyu Nesne Gezgini'nden ya da bir DDL işleminden açın
+
+Düzenleyici; yapı ile veri arasında geçiş yaparken etkin sekmeyi, kaydırma konumunu, sütun genişliklerini ve yerel sütun sırasını korur.
+
+## Yapı Sekmeleri
+
+| Sekme | Başlıca içerik |
+| --- | --- |
+| Sütunlar | Ad, tür, uzunluk/duyarlık, boş olabilirlik, varsayılan, birincil anahtar, identity, karakter kümesi, collation, açıklama |
+| Dizinler | Ad, sütunlar, tür, benzersizlik durumu, dâhil edilen sütunlar, filtre, açıklama ve yeniden oluşturma işlemi |
+| Yabancı anahtarlar | Yerel sütunlar, hedef tablo/sütunlar, `ON DELETE` ve `ON UPDATE` |
+| Tetikleyiciler | Tetikleyici meta verisi, kaynağı ve desteklenen oluşturma/düzenleme/silme işlemleri |
+| DDL | Geçerli tablo tanımı ya da sürücünün ürettiği yapı SQL'i |
+
+Veritabanı bir meta veri sınıfı sağlamıyorsa ilgili sekme gizlenir, salt okunur olur ya da bir yetenek açıklaması gösterir.
+
+## Sütun Düzenleme
+
+Veritabanı yeteneğine bağlı olarak şunları yapabilirsiniz:
+
+- Sütun ekleme ya da geçerli seçimin ardına ekleme
+- Sütunları silme, yeniden adlandırma ve değiştirme
+- Türü, uzunluğu, duyarlığı, ölçeği ve veritabanına özgü uzunluk birimlerini değiştirme
+- `NULL`, varsayılan, birincil anahtar, identity, karakter kümesi, collation ve açıklamayı değiştirme
+- Yaygın varsayılan değerler için hızlı seçimleri kullanma
+- Sırayı değiştirmek için sütunları sürükleme
+
+Sütunları yeniden sıralamanın iki anlamı vardır:
+
+- MySQL ve fiziksel sütun sırası DDL'i olan diğer veritabanları gerçek bir yeniden sıralama üretir
+- Bazı veritabanlarında yalnızca DBX'teki yerel görüntüleme sırası kaydedilir, fiziksel yapı değişmez
+
+Yeni tablo oluşturmada; yaygın birincil anahtarlar, zaman damgaları ya da denetim sütunları için ayarlardaki hazır alanlar kullanılabilir.
+
+## Dizinler, Yabancı Anahtarlar ve Tetikleyiciler
+
+Dizin yetenekleri lehçeye göre değişir ve şunları içerebilir:
+
+- Bir dizini oluşturma, silme ya da yeniden oluşturma
+- Standart, benzersiz ve veritabanına özgü dizin türleri
+- PostgreSQL, SQL Server ve benzeri veritabanlarında dâhil edilen sütunlar ya da filtreler
+- Desteklenen yerlerde dizin açıklamaları
+- Yeni dizinler için düzenlenebilir otomatik adlar
+
+Yabancı anahtar düzenleme, sütun eşlemelerini ve güncelleme/silme işlemlerini kapsar. Tetikleyici düzenleme, kaynağın alınabilmesine ve güvenli DDL üretimine bağlıdır; desteklenmeyen veritabanları yine de kaynağı ya da kopyalanabilir DDL'i gösterebilir.
+
+## DDL Önizlemesi
+
+Düzenlemeler veritabanını hemen değiştirmez. Kaydetmeden önce DBX, vurgulanmış ve lehçeye özgü SQL üretir:
+
+- `ALTER TABLE ... ADD/DROP/RENAME/MODIFY COLUMN`
+- Varsayılan, `NULL`, birincil anahtar ve açıklama değişiklikleri
+- `CREATE INDEX`, `DROP INDEX` ve yeniden oluşturma işlemleri
+- Yabancı anahtar ve tetikleyici DDL'i
+- SQLite gerektirdiğinde tablo yeniden oluşturma adımları
+
+Kod incelemesi ya da bir göç aracıyla çalıştırmak için DDL'in tamamını kopyalayın.
+
+<Callout type="warn">Sütun silme, tür dönüştürme, `NULL` kısıtını sıkılaştırma, birincil anahtar değiştirme, fiziksel yeniden sıralama ve tablo yeniden oluşturma; tabloları kilitleyebilir ya da veri kaybına yol açabilir. Üretimde çalıştırma etkisini, yedekleri ve geri dönüş planlarını gözden geçirin.</Callout>
+
+## Kaydetme İş Akışı
+
+<Steps>
+  <Step>
+    ### En güncel yapıyı okuyun
+
+    Sütunların, dizinlerin, yabancı anahtarların ve tetikleyicilerin yüklendiğini doğrulayın. Başka bir istemci tabloyu yakın zamanda değiştirdiyse önce yenileyin.
+
+  </Step>
+  <Step>
+    ### Yerel bir taslak oluşturun
+
+    Nesne ekleyin, düzenleyin, kaldırın ya da yeniden sıralayın. Silmeler bekleyen olarak kalır ve henüz çalıştırılmaz.
+
+  </Step>
+  <Step>
+    ### DDL'i inceleyin
+
+    Nitelemeyi, türleri, varsayılanları, kısıtları, dizinleri ve ifade sırasını doğrulayın.
+
+  </Step>
+  <Step>
+    ### Çalıştırın ve yenileyin
+
+    İncelemeden sonra çalıştırın. Üretim kapsamı yeniden üretim yazma onayına girer; DBX başarıdan sonra yapıyı yeniden yükler.
+
+  </Step>
+</Steps>
+
+## Lehçe ve Yetenek Farkları
+
+| Lehçe/veritabanı | Tipik davranış |
+| --- | --- |
+| MySQL / MariaDB uyumlu | Geniş sütun özellikleri, fiziksel yeniden sıralama, birincil anahtar, dizin, yabancı anahtar ve açıklama kapsamı |
+| PostgreSQL / Gauss uyumlu | Lehçe farkındalıklı tür/varsayılan/null/açıklama, dâhil edilen/filtreli dizinler, yabancı anahtarlar ve ilgili DDL |
+| SQLite | Bazı karmaşık sütun değişiklikleri güvenli bir tablo yeniden oluşturma stratejisi kullanır |
+| DuckDB | Yaygın sütun ve dizin işlemlerini SQLite'tan farklı bir davranışla destekler |
+| SQL Server | Varsayılanlar, dâhil edilen sütunlar ve filtreli dizinler için özel sözdizimiyle sütun ve dizin değişiklikleri |
+| Oracle / Dameng ve benzerleri | Oracle biçemli sütun, açıklama ve dizin DDL'i; ilgisiz tam sayı uzunluğu denetimleri kapatılır |
+| ClickHouse / Manticore / InfluxDB ve diğerleri | Yalnızca doğrulanmış ve uygulanmış alt küme etkinleştirilir |
+| JDBC/Agent | Tanınan bir lehçeye eşlenir; lehçe güvenilir biçimde belirlenemezse salt okunur kalır |
+
+Bir veritabanına bağlanılabiliyor diye her DDL özelliğinin düzenlenebilir olduğunu varsaymayın. Güncel doğruluk kaynağı olarak [Veritabanı Desteği](/tr/docs/databases) sayfasını ve düzenleyicideki gerçek denetimleri kullanın.
+
+## Eşzamanlılık ve Kurtarma
+
+- Taslaklar, düzenleyici açıldığında okunan meta veriye dayanır ve dışarıdaki şema değişikliklerini otomatik birleştirmez
+- Çalıştırma başarısız olursa daha önceki ifadeler zaten başarılı olmuş olabilir
+- SQLite yeniden oluşturmalarının ve çoklu ifadeli DDL'in atomikliği veritabanı ile sürücü davranışına bağlıdır
+- Yenileme yapıyı yeniden yükler ve kaydedilmemiş bir taslaktan vazgeçmeyi gerektirebilir
+- Salt okunur bağlantılar kaydetmeyi engeller; üretim yazmaları her seferinde açık onay ister
+
+## Öneriler
+
+- Düzenleyiciyi odaklı, tek tablolu değişiklikler için kullanın
+- Kopyalanan DDL'i sürüm denetimine koyun ve daha büyük göçler için inceleyin
+- Ortamları hizalamak için [Şema Karşılaştırma](/tr/docs/schema-diff) özelliğini kullanın
+- Riskli değişikliklerden önce [Veritabanı Dışa Aktarma](/tr/docs/database-export) ya da [Zamanlanmış Veritabanı Yedekleri](/tr/docs/database-backup) kullanın
+- Önemli sütunları değiştirmeden önce [Alan Soy Ağacı](/tr/docs/field-lineage) ile uygulama kodu aramasını birlikte kullanın
+
+<Cards>
+  <Card title="Şema karşılaştırma" href="/tr/docs/schema-diff">
+    Ortamları karşılaştırın ve dağıtım betikleri üretin.
+  </Card>
+  <Card title="Alan soy ağacı" href="/tr/docs/field-lineage">
+    Yabancı anahtarlardan, görünümlerden ve sorgu geçmişinden ilişkileri inceleyin.
+  </Card>
+  <Card title="Üretim güvenliği" href="/tr/docs/production-safety">
+    Salt okunur bağlantıları ve üretim DDL onayını yapılandırın.
+  </Card>
+</Cards>

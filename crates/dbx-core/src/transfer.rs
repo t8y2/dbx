@@ -2613,10 +2613,15 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
                 _ => format!("'{escaped}'"),
             }
         }
-        serde_json::Value::Array(arr) => match db_type {
-            DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
-            _ => format_pg_array_sql_literal(arr),
-        },
+        serde_json::Value::Array(arr) => {
+            if *db_type == DatabaseType::Postgres && is_postgres_vector_type(column_type) {
+                return format_postgres_vector_sql_literal(val);
+            }
+            match db_type {
+                DatabaseType::ClickHouse | DatabaseType::Databend => format_ch_array_sql_literal(arr),
+                _ => format_pg_array_sql_literal(arr),
+            }
+        }
         _ => {
             let s = val.to_string();
             format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
@@ -2828,6 +2833,46 @@ pub fn format_pg_array_sql_literal(arr: &[serde_json::Value]) -> String {
     let elements: Vec<String> = arr.iter().map(format_pg_array_element).collect();
     let inner = format!("{{{}}}", elements.join(","));
     format!("'{}'", inner.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+pub(crate) fn is_postgres_vector_type(column_type: Option<&str>) -> bool {
+    column_type
+        .map(|column_type| {
+            let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
+            if normalized.trim_end().ends_with("[]") {
+                return false;
+            }
+            let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim_matches('"');
+            matches!(base, "vector" | "halfvec") || base.ends_with(".vector") || base.ends_with(".halfvec")
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn format_postgres_vector_sql_literal(value: &serde_json::Value) -> String {
+    if value.is_null() {
+        return "NULL".to_string();
+    }
+    let text = match value {
+        // pgvector vector/halfvec are scalar extension types whose importable
+        // literal grammar uses square brackets, unlike PostgreSQL arrays.
+        serde_json::Value::Array(arr) => {
+            let elements = arr.iter().map(format_postgres_vector_element).collect::<Vec<_>>();
+            format!("[{}]", elements.join(","))
+        }
+        serde_json::Value::String(text) => text.to_string(),
+        _ => value.to_string(),
+    };
+    quote_postgres_string_literal(&text)
+}
+
+fn format_postgres_vector_element(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.trim().to_string(),
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Null => "NULL".to_string(),
+        _ => value.to_string(),
+    }
 }
 
 fn format_pg_array_element(val: &serde_json::Value) -> String {
@@ -4958,11 +5003,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
 }
 
 /// Strips inline `CONSTRAINT ... FOREIGN KEY ... REFERENCES ...` lines from a
-/// `CREATE TABLE` statement, fixing up the now-dangling trailing comma on the
-/// preceding line. Dialect-agnostic: relies only on the ` FOREIGN KEY ` clause
-/// text, which both Postgres and MySQL-family `SHOW CREATE TABLE` output share,
-/// and on foreign key constraints always being the last items before the closing
-/// paren (true for both dialects' DDL dumps).
+/// `CREATE TABLE` statement, fixing up a trailing comma only when removing the
+/// foreign key leaves one immediately before the table's closing parenthesis.
+/// Dialect-agnostic: relies only on the definition-line shape shared by Postgres
+/// and MySQL-family DDL dumps.
 ///
 /// Only genuine constraint definition lines match (`CONSTRAINT <name> FOREIGN
 /// KEY (` / bare `FOREIGN KEY (`); a column line whose COMMENT or DEFAULT text
@@ -4973,18 +5017,26 @@ fn strip_inline_foreign_key_constraint_lines(statement: &str) -> String {
     }
 
     let mut lines: Vec<String> = Vec::new();
+    let mut removed_foreign_key = false;
     for line in statement.lines() {
         if INLINE_FOREIGN_KEY_CONSTRAINT_LINE_RE.is_match(line) {
-            if let Some(previous) = lines.last_mut() {
-                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
-                if previous[..trimmed_len].ends_with(',') {
-                    previous.truncate(trimmed_len - 1);
-                }
-            }
+            removed_foreign_key = true;
             continue;
         }
         lines.push(line.to_string());
     }
+
+    if removed_foreign_key {
+        if let Some(closing_index) = lines.iter().rposition(|line| line.trim_start().starts_with(')')) {
+            if let Some(previous) = lines[..closing_index].iter_mut().rfind(|line| !line.trim().is_empty()) {
+                let trimmed_len = previous.trim_end_matches(char::is_whitespace).len();
+                if previous[..trimmed_len].ends_with(',') {
+                    previous.remove(trimmed_len - 1);
+                }
+            }
+        }
+    }
+
     lines.join("\n")
 }
 
@@ -5115,6 +5167,16 @@ async fn execute_on_pool_once(
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
             db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows).await
+        }
+        PoolKind::InfluxDb(client) => {
+            let client = client.clone();
+            let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
+            db::influxdb_driver::execute_query(&client, &database, sql).await
+        }
+        PoolKind::InfluxDb3(client) => {
+            let client = client.clone();
+            let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
+            db::influxdb3_driver::execute_query(&client, &database, sql, max_rows).await
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
@@ -8613,6 +8675,97 @@ mod tests {
         (AppState::new(storage), dir)
     }
 
+    async fn spawn_influxdb3_transfer_server() -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 2048];
+                let bytes_read = socket.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before headers were complete");
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let mut chunk = [0_u8; 2048];
+                let bytes_read = socket.read(&mut chunk).await.unwrap();
+                assert!(bytes_read > 0, "request ended before body was complete");
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+            let body = r#"[{"time":"2026-09-03T00:00:00Z","value":42}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn transfer_read_dispatches_influxdb3_with_database_and_row_limit() {
+        let (base_url, server) = spawn_influxdb3_transfer_server().await;
+        let (state, dir) = test_app_state().await;
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": "influxdb3-transfer",
+            "name": "InfluxDB 3 transfer",
+            "db_type": "influxdb3",
+            "host": "127.0.0.1",
+            "port": 8181,
+            "username": "",
+            "password": "",
+            "database": "metrics"
+        }))
+        .unwrap();
+        let client = db::influxdb3_driver::Influxdb3Client::new_for_config(
+            &base_url,
+            &config,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        state.configs.write().await.insert(config.id.clone(), config);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("influxdb3-transfer:metrics".to_string(), PoolKind::InfluxDb3(client));
+            })
+            .await;
+
+        let result = execute_read_on_pool_with_max_rows(
+            &state,
+            "influxdb3-transfer:metrics",
+            "SELECT value FROM weather",
+            Some(1),
+        )
+        .await
+        .unwrap();
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("InfluxDB 3 transfer server did not receive a request")
+            .unwrap();
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+
+        assert_eq!(payload["db"], json!("metrics"));
+        assert_eq!(payload["q"], json!("SELECT value FROM weather LIMIT 2"));
+        assert_eq!(result.affected_rows, 1);
+    }
+
     #[tokio::test]
     async fn postgres_transfer_metadata_routes_agent_pools() {
         let (state, dir) = test_app_state().await;
@@ -10537,6 +10690,30 @@ mod tests {
     }
 
     #[test]
+    fn postgres_transfer_ddl_preserves_constraint_after_inline_foreign_key() {
+        let ddl = "CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_parent_fk\" FOREIGN KEY (\"parent_id\") REFERENCES \"source_7931\".\"dbx_parent\"(\"id\"),\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"source_7931\".\"dbx_child\" (\n  \"id\" integer NOT NULL,\n  \"parent_id\" integer NOT NULL,\n  \"status\" integer NOT NULL,\n  CONSTRAINT \"dbx_child_status_check\" CHECK (status >= 0)\n)".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_removes_multiple_inline_foreign_keys_without_damaging_retained_items() {
+        let ddl = "CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_fk\" FOREIGN KEY (\"owner_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_reviewer_fk\" FOREIGN KEY (\"reviewer_id\") REFERENCES \"users\"(\"id\"),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec!["CREATE TABLE \"public\".\"assignments\" (\n  \"id\" integer NOT NULL,\n  \"owner_id\" integer NOT NULL,\n  \"reviewer_id\" integer NOT NULL,\n  CONSTRAINT \"assignments_owner_check\" CHECK (owner_id > 0),\n  CONSTRAINT \"assignments_owner_reviewer_unique\" UNIQUE (\"owner_id\", \"reviewer_id\")\n)".to_string()]
+        );
+    }
+
+    #[test]
     fn transfer_create_table_result_treats_existing_table_as_preexisting() {
         assert!(!transfer_create_table_created(
             Err("ERROR: relation \"items\" already exists (SQLSTATE 42P07)".to_string()),
@@ -12174,6 +12351,50 @@ mod tests {
             r#"INSERT INTO "public"."files" ("path") VALUES
 (E'C:\\tmp\\file.txt')"#
         );
+    }
+
+    #[test]
+    fn postgres_insert_preserves_pgvector_literals_and_array_controls() {
+        let sql = generate_insert_typed(
+            &[
+                String::from("embedding"),
+                String::from("qualified_embedding"),
+                String::from("compact_embedding"),
+                String::from("scores"),
+                String::from("embedding_history"),
+            ],
+            &[
+                Some(String::from("vector(3)")),
+                Some(String::from("public.vector(3)")),
+                Some(String::from("extensions.halfvec(3)")),
+                Some(String::from("real[]")),
+                Some(String::from("vector(3)[]")),
+            ],
+            &[vec![
+                json!([1.25, -2.5, 3.75]),
+                json!([0, 0.875, -0.014]),
+                json!(["0.5", "-0.25", "4"]),
+                json!([1.25, -2.5, 3.75]),
+                json!([[1.25, -2.5, 3.75], [0, 0.875, -0.014]]),
+            ]],
+            "pgvector_probe",
+            "target_7955",
+            &DatabaseType::Postgres,
+            None,
+        );
+
+        assert_eq!(
+            sql,
+            r#"INSERT INTO "target_7955"."pgvector_probe" ("embedding", "qualified_embedding", "compact_embedding", "scores", "embedding_history") VALUES
+('[1.25,-2.5,3.75]', '[0,0.875,-0.014]', '[0.5,-0.25,4]', '{1.25,-2.5,3.75}', '{{1.25,-2.5,3.75},{0,0.875,-0.014}}')"#
+        );
+    }
+
+    #[test]
+    fn postgres_vector_literal_keeps_null_and_preformatted_string_behavior() {
+        assert_eq!(escape_value_typed(&serde_json::Value::Null, &DatabaseType::Postgres, Some("vector(3)")), "NULL");
+        assert_eq!(escape_value_typed(&json!("[1,2,3]"), &DatabaseType::Postgres, Some("halfvec(3)")), "'[1,2,3]'");
+        assert_eq!(escape_value_typed(&json!([1, 2, 3]), &DatabaseType::Postgres, Some("integer[]")), "'{1,2,3}'");
     }
 
     #[test]

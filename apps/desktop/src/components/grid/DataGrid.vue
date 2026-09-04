@@ -5784,6 +5784,7 @@ const {
   restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
+  columnIsExclusivelySelected,
   selectedRangeStart,
   selectedRowIds,
   selectedColumnIndexes,
@@ -10546,7 +10547,7 @@ watch(
 function onHeaderContext(col: string, columnIndex: number) {
   invalidateContextMenuTarget();
   const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
-  if (visibleColIdx >= 0 && !columnIsSelected(visibleColIdx)) {
+  if (visibleColIdx >= 0 && !columnIsExclusivelySelected(visibleColIdx)) {
     selectColumn(visibleColIdx);
   }
   contextHeaderColumn.value = col;

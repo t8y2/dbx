@@ -125,8 +125,9 @@ describe("keyboard shortcut matching", () => {
   });
 
   it("matches the edit-table-structure shortcut on Windows and macOS", () => {
-    expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, undefined, "Win32")).toBe(true);
-    expect(isEditTableStructureShortcut({ key: "d", metaKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true, shiftKey: true }, undefined, "Win32")).toBe(true);
+    expect(isEditTableStructureShortcut({ key: "d", metaKey: true, shiftKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, undefined, "Win32")).toBe(false);
     expect(isEditTableStructureShortcut({ key: "d", ctrlKey: true }, undefined, "MacIntel")).toBe(false);
   });
 

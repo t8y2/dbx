@@ -1337,6 +1337,11 @@ function updateEditorSelectionDropCursor(currentView: EditorViewType, event: Mou
 }
 
 function startEditorSelectionDrag(currentView: EditorViewType, event: MouseEvent): boolean {
+  // Shift is CodeMirror's native extend-selection gesture. Keep it out of the
+  // custom selection drag path so a shift-click inside the current selection
+  // extends or shrinks the selection instead of collapsing it to the cursor.
+  if (event.shiftKey) return false;
+
   const selection = selectedRangeAtPointer(currentView, event);
   if (!selection) return false;
 
@@ -2896,15 +2901,14 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
 
   try {
     let hoverTables = cachedTables.filter((table) => hoverTableMatchesScope(table, hoverScope));
-    if (hoverTables.length === 0) {
-      const loadedTables = usesLocalOnlyCompletionMetadata()
-        ? connectionStore.lookupLocalCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, hoverScope.catalog)
-        : await connectionStore.listCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, false, hoverScope.schema, hoverScope.catalog);
-      hoverTables = scopeHoverTables(loadedTables, hoverScope);
-      cachedTables = mergeCompletionTables(cachedTables, hoverTables);
-    }
-
     let table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
+    if (!table) {
+      const localTables = connectionStore.lookupLocalCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, hoverScope.catalog);
+      const localHoverTables = scopeHoverTables(localTables, hoverScope);
+      hoverTables = mergeCompletionTables(localHoverTables, hoverTables);
+      cachedTables = mergeCompletionTables(localHoverTables, cachedTables);
+      table = matchTable(qualifiedTableLookup, hoverTables) ?? matchTable(tableLookupName, hoverTables) ?? matchTable(identifier, hoverTables) ?? matchTable(name, hoverTables);
+    }
     if (!table && !usesLocalOnlyCompletionMetadata()) {
       const loadedTables = await connectionStore.listCompletionTables(props.connectionId, hoverScope.database, tableLookupName, MAX_COMPLETION_TABLES, hoverScope.schema, false, hoverScope.schema, hoverScope.catalog);
       const remoteHoverTables = scopeHoverTables(loadedTables, hoverScope);

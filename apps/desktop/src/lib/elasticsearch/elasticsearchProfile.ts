@@ -120,7 +120,11 @@ function markCriticalPath(node: ElasticsearchProfileNode): void {
   if (node.children.length === 0) return;
   let best = node.children[0];
   for (const child of node.children) {
-    if (child.costShare > best.costShare) best = child;
+    // Select by cumulative time_in_nanos (inclusive of descendants), not self
+    // time: a long branch whose cost is mostly in descendants must win over a
+    // child with more local work but a shorter subtree. Ties keep the first
+    // child (stable, deterministic).
+    if (child.timeInNanos > best.timeInNanos) best = child;
   }
   markCriticalPath(best);
 }

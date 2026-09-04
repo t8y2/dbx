@@ -120,6 +120,53 @@ describe("parseElasticsearchProfile", () => {
     expect(right!.isCriticalPath).toBe(false);
   });
 
+  it("selects the critical path by cumulative time, not self time", () => {
+    // Regression: the longest branch has most of its cost in descendants, while
+    // a sibling has more local (self) work. Selecting by costShare/selfTime
+    // would wrongly mark the sibling as the critical path.
+    const body = JSON.stringify({
+      profile: {
+        shards: [
+          {
+            id: "s0",
+            searches: [
+              {
+                query: [
+                  {
+                    type: "BooleanQuery",
+                    time_in_nanos: 1000,
+                    children: [
+                      {
+                        type: "SpanQuery",
+                        description: "cheap node, deep cost",
+                        time_in_nanos: 900,
+                        children: [{ type: "TermQuery", description: "deep leaf", time_in_nanos: 899, children: [] }],
+                      },
+                      {
+                        type: "TermQuery",
+                        description: "local work, short branch",
+                        time_in_nanos: 100,
+                        children: [],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const tree = parseElasticsearchProfile(body)!.shards[0]!.tree;
+    const [deep, local] = tree.children;
+    // SpanQuery (900 cumulative, 1 self) has less self time than TermQuery
+    // (100 self) but is the genuinely longest branch — the critical path must
+    // follow cumulative time all the way to the deep leaf.
+    expect(deep!.isCriticalPath).toBe(true);
+    expect(deep!.children[0]!.isCriticalPath).toBe(true);
+    expect(local!.isCriticalPath).toBe(false);
+  });
+
   it("sorts shards so the highest total is first", () => {
     const parsed = parseElasticsearchProfile(PROFILE_BODY)!;
     expect(parsed.shards).toHaveLength(2);

@@ -3289,6 +3289,7 @@ export const useQueryStore = defineStore("query", () => {
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
         whereInput: tab.whereInput,
+        injectDefaultTimeSeriesWhere: true,
         orderBy,
         limit,
         offset,

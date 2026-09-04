@@ -2248,7 +2248,15 @@ impl AppState {
             | DatabaseType::Kwdb
             | DatabaseType::Questdb
             | DatabaseType::OpenGauss => {
-                let pg_pool = db::postgres::connect(&url, connect_timeout).await?;
+                // A session pool must have one physical client: sequential
+                // statements can otherwise lose temp tables/SET state when a
+                // pool checkout selects another PostgreSQL connection.
+                let pg_pool = db::postgres::connect_with_max_connections(
+                    &url,
+                    connect_timeout,
+                    postgres_pool_max_connections_for_session(client_session_id),
+                )
+                .await?;
                 // Build TLS cancel context for reconstructing TLS connection during cancel
                 if let Some(ctx) = db::postgres::build_postgres_cancel_context(&url) {
                     self.postgres_cancel_contexts.write().await.insert(pool_key.clone(), ctx);
@@ -5397,6 +5405,14 @@ fn mysql_pool_max_connections_for_session(client_session_id: Option<&str>) -> us
     }
 }
 
+fn postgres_pool_max_connections_for_session(client_session_id: Option<&str>) -> usize {
+    if normalize_client_session_id(client_session_id).is_some() {
+        1
+    } else {
+        10
+    }
+}
+
 fn redis_cluster_transport_prefix(connection_id: &str) -> String {
     format!("{connection_id}:redis-cluster:")
 }
@@ -7727,6 +7743,22 @@ mod tests {
         assert_eq!(super::mysql_pool_max_connections_for_session(None), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("")), 10);
         assert_eq!(super::mysql_pool_max_connections_for_session(Some("tab-1")), 1);
+    }
+
+    #[test]
+    fn postgres_pool_size_keeps_session_pools_single_connection() {
+        assert_eq!(super::postgres_pool_max_connections_for_session(None), 10);
+        assert_eq!(super::postgres_pool_max_connections_for_session(Some("")), 10);
+        assert_eq!(super::postgres_pool_max_connections_for_session(Some("mcp:batch-1")), 1);
+    }
+
+    #[test]
+    fn stale_mysql_pool_observation_does_not_remove_replacement_generation() {
+        let checked = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        let checked_clone = checked.clone();
+        let replacement = crate::db::mysql::MySqlPool::new("mysql://root@127.0.0.1:3306/app", 10);
+        assert!(checked.is_same_pool(&checked_clone));
+        assert!(!checked.is_same_pool(&replacement));
     }
 
     #[tokio::test]

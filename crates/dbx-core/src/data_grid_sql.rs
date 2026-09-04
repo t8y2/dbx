@@ -3364,7 +3364,7 @@ fn unwrap_matching_quotes(text: &str) -> String {
 
 fn is_numeric_type(data_type: &str) -> bool {
     let lower = data_type.to_ascii_lowercase();
-    [
+    const NUMERIC_TOKENS: &[&str] = &[
         "int",
         "integer",
         "bigint",
@@ -3379,9 +3379,27 @@ fn is_numeric_type(data_type: &str) -> bool {
         "double",
         "real",
         "money",
-    ]
-    .iter()
-    .any(|part| lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == *part))
+    ];
+    lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| NUMERIC_TOKENS.contains(&token) || is_sized_numeric_token(token))
+}
+
+// Databases like Cloud Spanner (GoogleSQL) and ClickHouse spell their numeric
+// types with an explicit bit width, e.g. INT64/FLOAT64/FLOAT32 or
+// Int8/UInt64/Float64. Recognizing `int`/`uint`/`float` followed by digits keeps
+// these as numeric SQL literals so filter values are not quoted as strings,
+// which strongly typed engines reject (INT64 = STRING has no matching operator).
+// `interval` and similar names stay excluded because they are not `int`+digits.
+fn is_sized_numeric_token(token: &str) -> bool {
+    for prefix in ["int", "uint", "float"] {
+        if let Some(width) = token.strip_prefix(prefix) {
+            if !width.is_empty() && width.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_boolean_type(data_type: &str, database_type: Option<DatabaseType>) -> bool {
@@ -4245,6 +4263,30 @@ mod tests {
             })
             .as_deref(),
             Some("`id` = 49436")
+        );
+        // Cloud Spanner (GoogleSQL) spells integers as INT64; the value must stay
+        // an unquoted numeric literal or `INT64 = STRING` fails to compile.
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Spanner),
+                identifier_quote: Some("`".to_string()),
+                column_name: "slipnumber".to_string(),
+                column_info: Some(column("slipnumber", "INT64", false, None)),
+                raw_value: "1005".to_string(),
+            })
+            .as_deref(),
+            Some("`slipnumber` = 1005")
+        );
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Spanner),
+                identifier_quote: Some("`".to_string()),
+                column_name: "ratio".to_string(),
+                column_info: Some(column("ratio", "FLOAT64", false, None)),
+                raw_value: "1.5".to_string(),
+            })
+            .as_deref(),
+            Some("`ratio` = 1.5")
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {

@@ -5775,6 +5775,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                     included_columns: None,
                     comment: get_opt_str(&row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 });
                 index_position
             };

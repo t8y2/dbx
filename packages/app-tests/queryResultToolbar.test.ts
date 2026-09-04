@@ -6,6 +6,7 @@ import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 const contentAreaPath = "apps/desktop/src/components/layout/ContentArea.vue";
 const appPath = "apps/desktop/src/App.vue";
 const dataGridPath = "apps/desktop/src/components/grid/DataGrid.vue";
+const dataGridToolbarPath = "apps/desktop/src/components/grid/DataGridToolbar.vue";
 const viewSwitcherPath = "apps/desktop/src/components/layout/QueryResultViewSwitcher.vue";
 const toolbarActionsPath = "apps/desktop/src/components/layout/QueryResultToolbarActions.vue";
 
@@ -25,7 +26,7 @@ function assertSfcCompiles(path: string): void {
 }
 
 test("query result toolbar SFCs compile", () => {
-  for (const path of [contentAreaPath, dataGridPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
+  for (const path of [contentAreaPath, dataGridPath, dataGridToolbarPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
 });
 
 test("ContentArea keeps query-result insert and delete capabilities separate", () => {
@@ -169,14 +170,19 @@ test("standalone result views use the same compact toolbar breakpoint", () => {
   assert.match(dataGrid, /isDataGridToolbarCompact\(dataGridTopbarWidth\.value, dataGridViewportWidth\.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH\)/);
 });
 
-test("embedded result toolbar compacts when editing actions overflow its available width", () => {
+test("embedded result toolbar progressively compacts when editing actions overflow its available width", () => {
   const dataGrid = source(dataGridPath);
+  const toolbar = source(dataGridToolbarPath);
 
   assert.match(dataGrid, /dataGridTopbarMutationObserver = new MutationObserver\(updateDataGridTopbarWidth\)/);
   assert.match(dataGrid, /dataGridTopbarMutationObserver\.observe\(topbar, \{ childList: true, characterData: true, subtree: true \}\)/);
   assert.match(dataGrid, /topbar\.scrollWidth > topbar\.clientWidth \+ 1/);
   assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = true/);
+  assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = compactDataGridToolbarActionCount\.value \+ 1/);
   assert.match(dataGrid, /dataGridTopbarWidth\.value >= dataGridTopbarExpandedRequiredWidth\.value/);
+  assert.match(dataGrid, /:compact-action-count="compactDataGridToolbarActionCount"/);
+  assert.match(toolbar, /DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER\.filter/);
+  assert.match(toolbar, /<slot name="navigation" :compact="actionIsCompact\('navigation'\)"/);
 });
 
 test("embedded result toolbar remeasures after the SQL preview action is removed", () => {
@@ -184,7 +190,8 @@ test("embedded result toolbar remeasures after the SQL preview action is removed
 
   assert.match(dataGrid, /if \(previousVisible && !visible\) resetDataGridTopbarOverflowCompact\(\)/);
   assert.match(dataGrid, /dataGridTopbarOverflowCompact\.value = false/);
-  assert.match(dataGrid, /dataGridTopbarRecheckTimer = setTimeout\(/);
+  assert.match(dataGrid, /dataGridTopbarOverflowActionCount\.value = 0/);
+  assert.match(dataGrid, /function scheduleDataGridTopbarRecheck\(\)/);
   assert.match(dataGrid, /clearDataGridTopbarRecheckTimer\(\)/);
 });
 
@@ -230,5 +237,5 @@ test("DataGrid marks toolbar refresh separately from current-result reloads", ()
 test("Elasticsearch JSON refresh preserves multi-result query groups", () => {
   const contentArea = source(contentAreaPath);
 
-  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
+  assert.match(contentArea, /if \(activeElasticsearchJsonResponse\.value\) \{[\s\S]*?emit\("reload", props\.activeTab\.id, activeResultSql\.value, undefined, undefined, undefined, undefined, undefined, "refresh"\);/);
 });

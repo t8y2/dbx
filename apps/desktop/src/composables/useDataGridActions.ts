@@ -45,6 +45,21 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
   const queryStore = useQueryStore();
   const settingsStore = useSettingsStore();
 
+  // A data-grid action names the tab that emitted the event, so a queued
+  // or late-routed event cannot fall back to whichever tab is active now.
+  function resolveActionTab(tabId: string | undefined): QueryTab | undefined {
+    if (!tabId) {
+      return activeTab.value;
+    }
+    const fromStore = queryStore.tabs.find((candidate) => candidate.id === tabId);
+    if (fromStore) {
+      return fromStore;
+    }
+    // Hosts may hold the acting tab outside the store array; identity comes
+    // from the captured id either way.
+    return activeTab.value?.id === tabId ? activeTab.value : undefined;
+  }
+
   function activeQueryTargetOptions(tab: QueryTab) {
     const executionTarget = queryStore.activeResultExecutionTarget(tab.id);
     if (!executionTarget) return {};
@@ -162,15 +177,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return true;
   }
 
-  async function onExecuteSql(sql: string) {
-    const tab = activeTab.value;
+  async function onExecuteSql(sql: string, tabId?: string) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     queryStore.updateSql(tab.id, sql);
     await queryStore.executeTabSql(tab.id, sql, { preserveResultDuringExecution: true });
   }
 
-  async function onReloadData(sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) {
-    const tab = activeTab.value;
+  async function onReloadData(tabId: string | undefined, sql?: string, _searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     const traceId = uuid().slice(0, 8);
     const startedAt = performance.now();
@@ -328,8 +343,8 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeCurrentTab();
   }
 
-  async function onPaginate(offset: number, limit: number, whereInput?: string, orderBy?: string) {
-    const tab = activeTab.value;
+  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string) {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     const appendResult = settingsStore.editorSettings.infiniteScroll && offset > 0 && offset === tab.result?.rows.length;
     const appendOptions = appendResult
@@ -462,8 +477,8 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  async function onSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
-    const tab = activeTab.value;
+  async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
+    const tab = resolveActionTab(tabId);
     if (!tab) return;
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;

@@ -1623,6 +1623,7 @@ function scheduleSqlPreviewRefresh() {
 function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
   return {
     databaseType: databaseType.value,
+    driverProfile: connection.value?.driver_profile,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     // Do not let a draft created by an older build submit properties that the
@@ -3173,6 +3174,7 @@ function addIndex() {
     includedColumns: [],
     comment: "",
     concurrently: false,
+    columnOpclasses: [],
     markedForDrop: false,
   });
   void nextTick(() => {

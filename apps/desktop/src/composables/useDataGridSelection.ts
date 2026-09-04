@@ -43,9 +43,9 @@ const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
 // Trackpad/mouse jitter during a plain click can move the pointer a few pixels between
 // mousedown and mouseup. Without a minimum drag distance, that jitter reads as an
-// intentional drag and turns a single click into a multi-cell/row selection. Guards the
-// same class of gesture as TAB_DRAG_HORIZONTAL_THRESHOLD in useTabDrag.ts, though that one
-// is tuned higher to also absorb touchscreen tap jitter, which doesn't apply here.
+// intentional drag and turns a single click into a multi-cell/row selection. Same class
+// of gesture as the group tab bar's horizontal tab-drag threshold, though that one is
+// tuned higher to also absorb touchscreen tap jitter, which doesn't apply here.
 const GRID_SELECTION_DRAG_THRESHOLD_PX = 12;
 type RowSelectionOperation = "replace" | "add" | "remove";
 

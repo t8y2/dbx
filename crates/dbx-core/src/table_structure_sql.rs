@@ -82,7 +82,7 @@ pub fn build_table_structure_change_sql(mut options: TableStructureSqlOptions) -
 /// Callers using this as an introspection signal must corroborate it against
 /// what was actually collected rather than trust the flag alone.
 pub(crate) fn supports_comments(database_type: crate::models::connection::DatabaseType) -> bool {
-    dialect::capabilities_for(Some(database_type)).comment
+    dialect::capabilities_for(Some(database_type), None).comment
 }
 
 /// Whether this engine's structure editor can generate foreign key DDL — a
@@ -94,7 +94,7 @@ pub(crate) fn supports_comments(database_type: crate::models::connection::Databa
 /// engine where DDL support and introspection support diverge — callers
 /// should corroborate against what was actually collected.
 pub(crate) fn supports_foreign_keys(database_type: crate::models::connection::DatabaseType) -> bool {
-    dialect::capabilities_for(Some(database_type)).foreign_key
+    dialect::capabilities_for(Some(database_type), None).foreign_key
 }
 
 /// Canonical display label for a database engine (e.g. `postgres`,

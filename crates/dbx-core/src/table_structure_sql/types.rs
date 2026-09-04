@@ -94,6 +94,11 @@ pub struct EditableStructureIndex {
     pub index_type: String,
     #[serde(default)]
     pub included_columns: Vec<String>,
+    /// Parallel to `columns`: operator class for each key column (PostgreSQL).
+    /// `None` means default operator class. The UI keeps this array in lockstep
+    /// with `columns`; when empty, opclasses fall back to `original` matching.
+    #[serde(default)]
+    pub column_opclasses: Vec<Option<String>>,
     #[serde(default)]
     pub comment: String,
     #[serde(default)]
@@ -125,6 +130,9 @@ pub struct IndexInfo {
     /// (e.g. sourced from `pg_get_indexdef`), not a plain column name.
     #[serde(default)]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: operator class name for each key column, if non-default.
+    #[serde(default)]
+    pub column_opclasses: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,6 +207,11 @@ pub struct TriggerInfo {
 pub struct TableStructureSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    /// Driver profile reported by the connection (e.g. `"gbase8s"`). GBase 8s
+    /// is Informix-compatible rather than MySQL-compatible like the rest of
+    /// the `Gbase` family, so this disambiguates which dialect to generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,
@@ -272,6 +285,8 @@ pub struct SqliteTableStructurePreview {
 pub struct SingleColumnAlterSqlOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_type: Option<DatabaseType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub table_name: String,

@@ -22,7 +22,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
         capabilities = super::dialect::gaussdb_m_capabilities();
         dialect = StructureDialect::GaussdbM;
     } else {
-        capabilities = capabilities_for(options.database_type);
+        capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
         dialect = capabilities.dialect;
     }
     options.table_name = clean(&options.table_name);

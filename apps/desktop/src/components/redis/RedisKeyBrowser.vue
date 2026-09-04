@@ -51,7 +51,7 @@ import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle";
 import { useToast } from "@/composables/useToast";
-import { redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
+import { redisFuzzySearchScanBudget, redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
 import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
@@ -651,14 +651,15 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   // complete. Bound every user-triggered page to a cumulative COUNT budget,
   // preserve the returned cursor, and let the existing "Load more" action
   // continue sparse searches without turning one request into a full scan.
-  const scanCountBudget = 50_000;
+  const isFuzzyKeySearch = searchMode.value === "key" && fuzzyKeySearch.value;
+  let scanCountBudget = redisFuzzySearchScanBudget(0);
   const iterationsPerCall = 8;
   const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
   // When part of the automatic-fill chain, also cap this call to whatever is
   // left of the shared iteration budget — this is what actually bounds the
   // total backend work across every page that chain triggers, not just this
   // one call's own per-call cap.
-  const maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
+  let maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
   let totalKeys = 0;
@@ -670,6 +671,12 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
     const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     completedIterations += iterations;
     if (totalKeys === 0) totalKeys = result.total_keys;
+    if (isFuzzyKeySearch && totalKeys > 0) {
+      scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
+      const fuzzyMaxIterations = Math.ceil(scanCountBudget / Math.max(1, pageSize));
+      const availableIterations = iterationBudget ? completedIterations + iterationBudget.remaining : fuzzyMaxIterations;
+      maxIterations = Math.min(fuzzyMaxIterations, Math.max(maxIterations, availableIterations));
+    }
     if (result.keys.length > 0 || result.cursor === 0) {
       return { ...result, total_keys: totalKeys };
     }
@@ -782,7 +789,8 @@ async function loadKeys() {
       hasMore.value = false;
       return;
     }
-    const applied = await scanNextPage(requestId);
+    const initialScanBudget = isFuzzyKeySearch.value ? autoLoadBudget : undefined;
+    const applied = await scanNextPage(requestId, undefined, initialScanBudget);
     if (applied && isValueSearchMode.value) {
       await streamValueSearch(requestId);
     }
@@ -2382,7 +2390,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer select-none group"
+                  class="flex items-center gap-2 border-b px-1.5 text-[13px] cursor-pointer select-none group"
                   :class="[
                     isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
                     row.node.kind === 'leaf' ? (isLeafChecked(row.node.keyRaw) && selectedKeyRaw !== row.node.keyRaw ? 'bg-primary/10' : undefined) : groupSelectedCount(row.node) > 0 ? 'bg-primary/10' : undefined,
@@ -2391,7 +2399,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   @click="onRowClick(row.node, $event)"
                   @contextmenu="(event) => onRedisRowContextMenu(event, row.node, onContextMenu)"
                 >
-                  <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
+                  <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${4 + row.depth * 10}px` }">
                     <template v-if="row.node.kind === 'group'">
                       <input
                         type="checkbox"

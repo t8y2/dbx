@@ -6873,6 +6873,15 @@ onUnmounted(() => {
                   {{ t("settings.snippetsAdd") }}
                 </Button>
               </div>
+              <div class="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <p>{{ t("settings.snippetsPlaceholderHint") }}</p>
+                <pre class="mt-2 overflow-x-auto whitespace-pre-wrap rounded bg-background/70 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground">
+SELECT t.*
+FROM ${1:table} t
+WHERE t.del_flag = 0
+LIMIT 100;</pre
+                >
+              </div>
 
               <div class="overflow-x-auto rounded-md border">
                 <table class="w-full min-w-[720px] text-sm">

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   eventToModifierOnlyShortcut,
   eventToShortcut,
+  isConvertNamingStyleShortcut,
   isEditTableStructureShortcut,
   isExecuteSqlInNewResultTabShortcut,
   isGoToColumnShortcut,
@@ -47,6 +48,20 @@ describe("keyboard shortcut matching", () => {
     ["Ò", "KeyL", "Shift+Alt+L"],
   ])("records macOS Option-modified %s by physical letter", (key, code, expected) => {
     expect(eventToShortcut({ key, code, altKey: true, shiftKey: true }, "MacIntel")).toBe(expected);
+  });
+
+  it("matches the naming style shortcut by physical key and rejects extra modifiers", () => {
+    const macEvent = { key: "Ç", code: "KeyC", altKey: true, shiftKey: true };
+    expect(isConvertNamingStyleShortcut(macEvent, undefined, "MacIntel")).toBe(true);
+    expect(isConvertNamingStyleShortcut({ key: "c", code: "KeyC", altKey: true, shiftKey: true }, undefined, "Win32")).toBe(true);
+
+    // Extra Ctrl/Meta held must not fire the Shift+Alt+C default binding.
+    expect(isConvertNamingStyleShortcut({ ...macEvent, ctrlKey: true }, undefined, "MacIntel")).toBe(false);
+    expect(isConvertNamingStyleShortcut({ ...macEvent, metaKey: true }, undefined, "MacIntel")).toBe(false);
+
+    // Custom settings are honored.
+    expect(isConvertNamingStyleShortcut({ key: "n", code: "KeyN", altKey: true, shiftKey: true }, { convertNamingStyle: "Shift+Alt+N" }, "Win32")).toBe(true);
+    expect(isConvertNamingStyleShortcut({ key: "c", code: "KeyC", altKey: true, shiftKey: true }, { convertNamingStyle: "Shift+Alt+N" }, "Win32")).toBe(false);
   });
 
   it("keeps Control distinct from Command when recording macOS shortcuts", () => {

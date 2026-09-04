@@ -763,6 +763,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ...(opts?.scrollable ? { ".cm-scroller": { overflowX: "auto", overflowY: "auto" } } : {}),
     ".cm-content": {
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
+      // Ligature fonts (Fira Code, Cascadia Code, JetBrains Mono, ...) combine
+      // runs like `--`/`==` into a single shaped glyph. CodeMirror repaints
+      // edited lines by patching individual character spans, and that
+      // per-keystroke patching can race the browser's ligature reshaping when
+      // the same character is typed repeatedly in place, leaving earlier
+      // characters unpainted until something else forces a repaint (dbx#7900).
+      // Disabling ligatures here avoids the reshaping entirely, matching the
+      // same fix already applied to DataGridConditionEditor.vue.
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
       lineHeight: "1.6",
       padding: "0",
     },

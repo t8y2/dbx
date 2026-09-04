@@ -2392,6 +2392,7 @@ mod tests {
         let create =
             crate::table_structure_sql::build_create_table_sql(crate::table_structure_sql::TableStructureSqlOptions {
                 database_type: Some(DatabaseType::Oracle),
+                driver_profile: None,
                 schema: Some("APP".to_string()),
                 table_name: "orders_copy".to_string(),
                 columns: vec![column("user_id"), column("userName")],

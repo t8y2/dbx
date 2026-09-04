@@ -202,3 +202,17 @@ describe("editor gutters", () => {
     });
   });
 });
+
+describe("editor font theme", () => {
+  it("disables ligatures on the editor content so repainted character runs stay stable", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // Ligature fonts merge runs like `--`/`==` into one glyph and can race
+    // CodeMirror's per-keystroke span patching (dbx#7900); dropping either
+    // declaration would reintroduce unpainted characters in the query editor.
+    expect(rules[".cm-content"]).toMatchObject({
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
+    });
+  });
+});

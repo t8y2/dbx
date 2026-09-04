@@ -41,6 +41,11 @@ const structureCapabilities = computed(() => getTableStructureCapabilities(props
 const validationErrors = ref<string[]>([]);
 const sqlText = ref("");
 const warnings = ref<string[]>([]);
+// 仅 GIN 缺 opclass 警告阻断同步；其余降级类警告（如 “… not supported … ignored”）保持可继续。
+// Match the warning's stable semantic core ("has no operator class specified")
+// rather than its prefix, so rewording the leading "GIN index …" doesn't
+// silently disable the gate.
+const hasBlockingWarning = computed(() => warnings.value.some((w) => w.includes("has no operator class specified")));
 const building = ref(false);
 const executing = ref(false);
 const execError = ref("");
@@ -122,7 +127,7 @@ async function copySql() {
 }
 
 async function execute() {
-  if (!sqlText.value || validationErrors.value.length) return;
+  if (!sqlText.value || validationErrors.value.length || hasBlockingWarning.value) return;
   executing.value = true;
   execError.value = "";
   try {
@@ -190,7 +195,7 @@ function syncTableLabel(table: DiagramTable): string {
       <DialogFooter class="gap-2 sm:gap-2">
         <Button type="button" variant="outline" size="sm" :disabled="!sqlText" @click="copySql">{{ t("diagram.copySql") }}</Button>
         <Button type="button" variant="ghost" size="sm" @click="openModel = false">{{ t("common.cancel") }}</Button>
-        <Button type="button" size="sm" :disabled="!sqlText || !!validationErrors.length || executing || building" @click="execute">
+        <Button type="button" size="sm" :disabled="!sqlText || !!validationErrors.length || hasBlockingWarning || executing || building" @click="execute">
           {{ executing ? t("diagram.syncing") : t("diagram.executeSync") }}
         </Button>
       </DialogFooter>

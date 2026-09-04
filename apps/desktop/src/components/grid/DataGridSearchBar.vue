@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { ChevronDown, ChevronUp, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 
 const { t } = useI18n();
 
@@ -52,6 +53,7 @@ defineExpose({
       <input
         ref="searchInput"
         v-model="searchText"
+        v-naming-style-support
         type="search"
         autocapitalize="off"
         autocomplete="off"

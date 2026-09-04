@@ -285,14 +285,17 @@ async fn initializes_lists_tools_and_calls_a_tool() {
     let tools = client.peer().list_tools(None).await.expect("list tools");
     let names = tools.tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
     #[cfg(feature = "mq-admin")]
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 18);
     #[cfg(not(feature = "mq-admin"))]
-    assert_eq!(names.len(), 16);
+    assert_eq!(names.len(), 17);
     assert!(names.contains(&"dbx_list_connections"));
     assert!(names.contains(&"dbx_list_databases"));
     assert!(names.contains(&"dbx_duplicate_connection"));
     assert!(names.contains(&"dbx_execute_redis_command"));
     assert!(names.contains(&"dbx_execute_and_show"));
+    assert!(names.contains(&"dbx_execute_batch"));
+    assert!(names.contains(&"dbx_list_routines"));
+    assert!(names.contains(&"dbx_get_routine_source"));
     assert!(names.contains(&"dbx_open_session"));
     assert!(names.contains(&"dbx_close_session"));
     #[cfg(feature = "mq-admin")]

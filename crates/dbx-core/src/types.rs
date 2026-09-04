@@ -456,6 +456,11 @@ pub struct IndexInfo {
     /// introspection source doesn't track this (provenance unknown for that dialect/path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub key_is_expression: Vec<bool>,
+    /// Parallel to `columns`: operator class name for each key column, if non-default.
+    /// For example, a GIN trigram index on a varchar column will have `"gin_trgm_ops"`.
+    /// `None` means the default operator class is used (can be omitted in DDL).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_opclasses: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

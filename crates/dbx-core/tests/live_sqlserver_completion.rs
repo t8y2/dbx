@@ -999,6 +999,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
     active.original_position = Some(1);
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::SqlServer),
+        driver_profile: None,
         schema: Some(schema.clone()),
         table_name: table.to_string(),
         columns: vec![sku, active],

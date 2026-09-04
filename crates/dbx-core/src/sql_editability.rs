@@ -310,11 +310,23 @@ fn parse_select_column(column: &str, sources: &[FromSource]) -> Option<EditableQ
 fn parse_star_select_column(column: &str, sources: &[FromSource]) -> Option<EditableQueryColumn> {
     let trimmed = column.trim();
     if trimmed == "*" {
+        // An unqualified `*` is unambiguous when the query has exactly one
+        // source, so it can bind to that source like a qualified `alias.*`
+        // would. Without this, the star projection carries no source_key and
+        // the ordinal column-comment resolver (apps/desktop TS side) cannot
+        // expand it against the table's columns, misaligning every result
+        // column from that point on — e.g. `SELECT *, amount FROM orders`
+        // loses all result-column comments even though the table has no
+        // ambiguity to resolve.
+        let source_key = match sources {
+            [only] => Some(only.key.clone()),
+            _ => None,
+        };
         return Some(EditableQueryColumn {
             source_name: None,
             source_name_quoted: false,
             source_qualifier: None,
-            source_key: None,
+            source_key,
             star: true,
             result_name: "*".to_string(),
             expression: trimmed.to_string(),
@@ -1222,6 +1234,49 @@ mod tests {
             vec![
                 column(Some("create_date"), false, Some("t"), Some("t:0"), "create_date", "t.create_date"),
                 star_column(Some("t"), Some("t:0"), "t.*"),
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_single_table_bare_star_mixed_with_explicit_column() {
+        // Regression for #8015: a bare, unqualified `*` mixed with another
+        // projected column is unambiguous when the query has exactly one
+        // source, so it must bind to that source (source_key) the same way
+        // a qualified `t.*` does. Previously it carried no source_key,
+        // which made the ordinal column-comment resolver drop the star
+        // expansion entirely and lose comments for the whole result set.
+        let result = analyze_editable_query_editability("SELECT *, amount FROM orders");
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.table_name, "orders");
+        assert_eq!(
+            analysis.columns,
+            vec![
+                star_column(None, Some("orders:0"), "*"),
+                column(Some("amount"), false, None, None, "amount", "amount"),
+            ]
+        );
+    }
+
+    #[test]
+    fn maps_single_aliased_table_bare_trailing_star_after_qualified_columns() {
+        // Matches the issue's own repro shape: qualified explicit columns
+        // followed by a trailing bare `*`, single aliased source.
+        let result = analyze_editable_query_editability(
+            "SELECT fl.sqlicenseno, fl.sqtypetext, * FROM flow_licenseapprove AS fl",
+        );
+
+        assert!(result.editable);
+        let analysis = result.analysis.unwrap();
+        assert_eq!(analysis.table_alias.as_deref(), Some("fl"));
+        assert_eq!(
+            analysis.columns,
+            vec![
+                column(Some("sqlicenseno"), false, Some("fl"), Some("fl:0"), "sqlicenseno", "fl.sqlicenseno"),
+                column(Some("sqtypetext"), false, Some("fl"), Some("fl:0"), "sqtypetext", "fl.sqtypetext"),
+                star_column(None, Some("fl:0"), "*"),
             ]
         );
     }

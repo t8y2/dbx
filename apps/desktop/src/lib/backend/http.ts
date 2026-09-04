@@ -1870,10 +1870,8 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
   if (!res.ok) throw await backendResponseError(res);
 }
 
-export interface OpenTabsStatePayload {
-  tabs: unknown[];
-  activeTabId: string | null;
-}
+export type { OpenTabsStatePayload, PersistedEditorGroup } from "@/lib/app/openTabsPersistence";
+import type { OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
 
 export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
@@ -1891,6 +1889,10 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        ...(payload.groups !== undefined ? { groups: payload.groups } : {}),
+        ...(typeof payload.focusedGroupId === "string" ? { focusedGroupId: payload.focusedGroupId } : {}),
+        ...(payload.orientation === "vertical" || payload.orientation === "horizontal" ? { orientation: payload.orientation } : {}),
+        ...(Array.isArray(payload.sizes) ? { sizes: payload.sizes } : {}),
       }
     : null;
 }

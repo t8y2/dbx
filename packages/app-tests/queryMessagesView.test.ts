@@ -77,7 +77,7 @@ test("ContentArea wires server messages into the switcher and the messages view"
   assert.match(contentArea, /<QueryMessagesView v-else-if="activeOutputView === 'messages'"[\s\S]*:messages="activeTab\.result\?\.messages \?\? \[\]"/);
   // Results with no result set auto-switch via the shared default-view helper.
   assert.match(contentArea, /import \{ defaultViewForResult \} from "@\/lib\/query\/queryResultDefaultView"/);
-  assert.match(contentArea, /emit\("update:activeOutputView", result \? defaultViewForResult\(result\) : "summary"\)/);
+  assert.match(contentArea, /emit\("update:activeOutputView", props\.activeTab\.id, result \? defaultViewForResult\(result\) : "summary"\)/);
 });
 
 test("every locale defines the query message strings", () => {

@@ -64,6 +64,25 @@ interface BatchImportTask {
 }
 
 const SKIP_VALUE = "__skip__";
+const TARGET_COLUMNS_TIMEOUT_MS = 15000;
+const TARGET_COLUMNS_TIMEOUT = Symbol("target-columns-timeout");
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(TARGET_COLUMNS_TIMEOUT), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 const targetColumns = ref<ColumnInfo[]>([]);
 const loadedTargetTableName = ref("");
 const existingTableNames = ref<string[]>([]);
@@ -519,7 +538,7 @@ async function loadTargetColumns() {
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    const columns = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName);
+    const columns = await withTimeout(api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName), TARGET_COLUMNS_TIMEOUT_MS);
     if (requestId !== targetColumnsRequestId) return;
     targetColumns.value = columns;
     loadedTargetTableName.value = tableName;
@@ -529,7 +548,7 @@ async function loadTargetColumns() {
       targetColumns.value = [];
       loadedTargetTableName.value = "";
       columnMapping.value = {};
-      errorMessage.value = String(e?.message || e);
+      errorMessage.value = e === TARGET_COLUMNS_TIMEOUT ? t("tableImport.targetColumnsTimeout") : String(e?.message || e);
     }
   } finally {
     if (requestId === targetColumnsRequestId) loadingTarget.value = false;
@@ -1555,8 +1574,11 @@ watch(rawProgressPercent, (percent) => {
           <Loader2 class="h-3.5 w-3.5 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div v-if="errorMessage && wizardStep !== 'execution'" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {{ errorMessage }}
+        <div v-if="errorMessage && wizardStep !== 'execution'" class="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <span class="flex-1">{{ errorMessage }}</span>
+          <Button v-if="targetMode === 'existing' && !loadingTarget && !existingTargetMetadataReady" variant="outline" size="sm" class="h-6 px-2 text-xs" @click="loadTargetColumns()">
+            {{ t("tableImport.retry") }}
+          </Button>
         </div>
       </div>
 

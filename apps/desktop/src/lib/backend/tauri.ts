@@ -720,10 +720,8 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
   return invoke("save_max_retries", { maxRetries });
 }
 
-export interface OpenTabsStatePayload {
-  tabs: unknown[];
-  activeTabId: string | null;
-}
+export type { OpenTabsStatePayload, PersistedEditorGroup } from "@/lib/app/openTabsPersistence";
+import type { OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
 
 export async function loadEditorSettings(): Promise<unknown | null> {
   return invoke("load_editor_settings");

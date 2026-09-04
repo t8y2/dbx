@@ -9,7 +9,7 @@ import { buildExplainSql, parseExplainResult, parseDamengExplainText, parseOracl
 import { mysqlExplainCompatibilityHint } from "@/lib/diagram/mysqlExplainCompatibility";
 import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQueryEditability, analyzeSelectStructureForDisplay, resolveMetadataColumnName, resolveSourceColumnsByOrdinal, sourceColumnsForResult, type EditableQueryInfo, type EditableQuerySource } from "@/lib/sql/sqlAnalysis";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes, type HiddenPrimaryKeyProjection } from "@/lib/sql/editableQueryHiddenKeys";
-import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs } from "@/lib/app/openTabsPersistence";
+import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsPayload, restoreOpenTabsState, serializeOpenTabs, type OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
@@ -113,6 +113,19 @@ const ORACLE_QUERY_METADATA_PREFLIGHT_BUDGET_MS = 1_000;
 const ORACLE_QUERY_METADATA_PREFLIGHT_TIMEOUT = Symbol("oracle-query-metadata-preflight-timeout");
 const SAVED_SQL_EDITOR_POSITION_PERSIST_DELAY_MS = 500;
 type CloseConfirmContext = "tab" | "batch" | "app";
+
+export interface EditorGroup {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
+}
+
+export interface EditorWorkspacePersistState {
+  groups: EditorGroup[];
+  focusedGroupId: string;
+  orientation: "vertical" | "horizontal";
+  sizes: number[];
+}
 
 interface BatchSqlResumeOptions {
   batch: BatchSqlExecution;
@@ -689,9 +702,20 @@ let saveTabsQueue = Promise.resolve();
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let persistGeneration = 0;
 
-function saveTabs(tabs: QueryTab[], activeTabId: string | null): Promise<void> {
+function saveTabs(tabs: QueryTab[], activeTabId: string | null, workspace?: EditorWorkspacePersistState): Promise<void> {
   if (isDetachedWindow()) return Promise.resolve();
-  const payload = { tabs: serializeOpenTabs(tabs), activeTabId };
+  const payload: OpenTabsStatePayload = {
+    tabs: serializeOpenTabs(tabs),
+    activeTabId,
+    ...(workspace && tabs.length > 0
+      ? {
+          groups: workspace.groups.map((group) => ({ ...group, tabIds: [...group.tabIds] })),
+          focusedGroupId: workspace.focusedGroupId,
+          orientation: workspace.orientation,
+          sizes: [...workspace.sizes],
+        }
+      : {}),
+  };
   saveTabsQueue = saveTabsQueue.catch(() => undefined).then(() => api.saveOpenTabsState(payload));
   return saveTabsQueue;
 }
@@ -708,23 +732,45 @@ function clearLegacySavedTabs() {
   safeLocalStorageRemove(ACTIVE_TAB_STORAGE_KEY);
 }
 
-function restoreSavedTabsFromPayload(payload: { tabs?: unknown; activeTabId?: unknown } | null | undefined, options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
+function restoreSavedTabsFromPayload(
+  payload: { tabs?: unknown; activeTabId?: unknown; groups?: unknown; focusedGroupId?: unknown; orientation?: unknown; sizes?: unknown } | null | undefined,
+  options: { validConnectionIds?: Iterable<string> } = {},
+): { tabs: QueryTab[]; activeTabId: string | null; workspace?: unknown } {
   const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
-  if (restoreMode === "none") return { tabs: [], activeTabId: null };
-  return restoreOpenTabsPayload(payload, {
+  if (restoreMode === "none") {
+    return { tabs: [], activeTabId: null, workspace: undefined };
+  }
+  const restored = restoreOpenTabsPayload(payload, {
     filter: restoreMode === "pinned" ? "pinned" : "all",
     validConnectionIds: options.validConnectionIds,
   });
+  return {
+    ...restored,
+    workspace:
+      payload && "groups" in payload
+        ? {
+            groups: payload.groups,
+            focusedGroupId: payload.focusedGroupId,
+            orientation: payload.orientation,
+            sizes: payload.sizes,
+          }
+        : undefined,
+  };
 }
 
-function restoreLegacySavedTabs(options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null } {
+function restoreLegacySavedTabs(options: { validConnectionIds?: Iterable<string> } = {}): { tabs: QueryTab[]; activeTabId: string | null; workspace?: undefined } {
   const restoreMode = useSettingsStore().editorSettings.openTabsRestoreMode;
-  if (restoreMode === "none") return { tabs: [], activeTabId: null };
+  if (restoreMode === "none") {
+    return { tabs: [], activeTabId: null, workspace: undefined };
+  }
   const legacy = loadLegacySavedTabs();
-  return restoreOpenTabsState(legacy.rawTabs, legacy.rawActiveTabId, {
-    filter: restoreMode === "pinned" ? "pinned" : "all",
-    validConnectionIds: options.validConnectionIds,
-  });
+  return {
+    ...restoreOpenTabsState(legacy.rawTabs, legacy.rawActiveTabId, {
+      filter: restoreMode === "pinned" ? "pinned" : "all",
+      validConnectionIds: options.validConnectionIds,
+    }),
+    workspace: undefined,
+  };
 }
 
 function getI18nT() {
@@ -768,11 +814,378 @@ export const useQueryStore = defineStore("query", () => {
     return keys;
   });
   const activeTabId = ref<string | null>(null);
+  const groups = ref<EditorGroup[]>([{ id: "main", tabIds: [], activeTabId: null }]);
+  const focusedGroupId = ref("main");
+  const orientation = ref<"vertical" | "horizontal">("vertical");
+  const sizes = ref<number[]>([100]);
   const isOpenTabsLoaded = ref(false);
   const activeTabHistory = ref<string[]>([]);
   // Most-recently-activated tab ids, oldest first. Read-only view for the
   // Ctrl+Tab switcher, which renders them in reverse.
   const recentTabIds = computed(() => activeTabHistory.value);
+
+  function findGroup(groupId: string): EditorGroup | undefined {
+    return groups.value.find((group) => group.id === groupId);
+  }
+
+  function focusedGroup(): EditorGroup {
+    return findGroup(focusedGroupId.value) ?? groups.value[0];
+  }
+
+  function groupForTab(tabId: string): EditorGroup | undefined {
+    return groups.value.find((group) => group.tabIds.includes(tabId));
+  }
+
+  function syncActiveTabFromFocusedGroup() {
+    const group = focusedGroup();
+    if (!group) {
+      return;
+    }
+    if (group.activeTabId && tabs.value.some((tab) => tab.id === group.activeTabId)) {
+      activeTabId.value = group.activeTabId;
+      return;
+    }
+    const firstAvailable = groups.value.find((candidate) => candidate.tabIds.length > 0)?.tabIds.find((id) => tabs.value.some((tab) => tab.id === id)) ?? tabs.value[0]?.id ?? null;
+    if (firstAvailable) {
+      activeTabId.value = firstAvailable;
+      if (group.tabIds.includes(firstAvailable)) {
+        group.activeTabId = firstAvailable;
+      }
+    } else {
+      group.activeTabId = null;
+      activeTabId.value = null;
+    }
+  }
+
+  function normalizeGroups() {
+    const validIds = new Set(tabs.value.map((tab) => tab.id));
+
+    // Group ids must be unique and non-empty; keep only the first occurrence.
+    const seenGroupIds = new Set<string>();
+    groups.value = groups.value.filter((group) => {
+      if (!group.id || seenGroupIds.has(group.id)) {
+        return false;
+      }
+      seenGroupIds.add(group.id);
+      return true;
+    });
+
+    // Enforce the four-group limit before assigning missing tabs, so tabs from
+    // dropped groups are merged into a kept group instead of becoming ownerless.
+    if (groups.value.length > 1) {
+      groups.value = groups.value.filter((group) => group.tabIds.length > 0);
+    }
+    if (groups.value.length > 4) {
+      const target = groups.value[0];
+      for (const group of groups.value.slice(4)) {
+        target.tabIds.push(...group.tabIds);
+      }
+      groups.value = groups.value.slice(0, 4);
+    }
+
+    // A tab may only belong to the first group that claims it.
+    const globallyAssigned = new Set<string>();
+    for (const group of groups.value) {
+      const nextTabIds: string[] = [];
+      for (const id of group.tabIds) {
+        if (!validIds.has(id) || globallyAssigned.has(id)) {
+          continue;
+        }
+        globallyAssigned.add(id);
+        nextTabIds.push(id);
+      }
+      group.tabIds = nextTabIds;
+      if (group.activeTabId && !group.tabIds.includes(group.activeTabId)) {
+        group.activeTabId = group.tabIds[0] ?? null;
+      }
+    }
+
+    const assigned = new Set(groups.value.flatMap((group) => group.tabIds));
+    const missing = tabs.value.filter((tab) => !assigned.has(tab.id));
+    if (missing.length > 0) {
+      const target = focusedGroup() ?? groups.value[0];
+      if (target) {
+        for (const tab of missing) {
+          target.tabIds.push(tab.id);
+        }
+      }
+    }
+
+    if (groups.value.length > 1) {
+      groups.value = groups.value.filter((group) => group.tabIds.length > 0);
+    }
+    if (groups.value.length === 0) {
+      groups.value = [{ id: "main", tabIds: [], activeTabId: null }];
+    }
+    if (!groups.value.some((group) => group.id === focusedGroupId.value)) {
+      focusedGroupId.value = groups.value[0].id;
+    }
+
+    // Restore boundary order (guide §3.9): repair each group's active tab,
+    // then repair sizes, and only at the very end derive the global active tab
+    // from the focused group. A stale persisted activeTabId must never pull
+    // focus (or the group active) toward another group.
+    for (const group of groups.value) {
+      if (!group.activeTabId || !group.tabIds.includes(group.activeTabId)) {
+        group.activeTabId = group.tabIds[0] ?? null;
+      }
+    }
+
+    repairGroupSizes();
+
+    syncActiveTabFromFocusedGroup();
+  }
+
+  /** Keeps `sizes` aligned with the current group count after structural changes. */
+  function repairGroupSizes() {
+    const sizeCount = groups.value.length;
+    const validSizes = Array.isArray(sizes.value) && sizes.value.length === sizeCount && sizes.value.every((size) => Number.isFinite(size) && size > 0);
+    if (!validSizes) {
+      const each = Math.floor(100 / sizeCount);
+      sizes.value = groups.value.map((_, index) => (index === sizeCount - 1 ? 100 - each * (sizeCount - 1) : each));
+      return;
+    }
+    const total = sizes.value.reduce((sum, size) => sum + size, 0);
+    if (total <= 0) {
+      const each = Math.floor(100 / sizeCount);
+      sizes.value = groups.value.map((_, index) => (index === sizeCount - 1 ? 100 - each * (sizeCount - 1) : each));
+    } else if (Math.abs(total - 100) > 0.01) {
+      sizes.value = sizes.value.map((size) => (size / total) * 100);
+    }
+  }
+
+  /**
+   * Drops groups that no longer own any tab, keeps one (possibly empty) main
+   * group, re-points the focused group, and re-pairs sizes. Structural store
+   * operations call this directly instead of leaning on a full normalization
+   * pass or a post-flush watcher.
+   */
+  function pruneEmptyGroups() {
+    if (groups.value.length > 1) {
+      groups.value = groups.value.filter((group) => group.tabIds.length > 0);
+    }
+    if (groups.value.length === 0) {
+      groups.value = [{ id: "main", tabIds: [], activeTabId: null }];
+    }
+    if (!groups.value.some((group) => group.id === focusedGroupId.value)) {
+      focusedGroupId.value = groups.value[0].id;
+    }
+    repairGroupSizes();
+  }
+
+  function focusGroup(groupId: string) {
+    const group = findGroup(groupId) ?? groups.value[0];
+    if (!group) {
+      return;
+    }
+    focusedGroupId.value = group.id;
+    const candidate = group.activeTabId && tabs.value.some((tab) => tab.id === group.activeTabId) ? group.activeTabId : (group.tabIds.find((tabId) => tabs.value.some((tab) => tab.id === tabId)) ?? null);
+    if (candidate) {
+      group.activeTabId = candidate;
+      activeTabId.value = candidate;
+    }
+    // If the focused group has no valid active tab, keep the current global
+    // active tab rather than clearing it and unmounting the workspace.
+    settingsStore.settingsPageActive = false;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
+    }
+  }
+
+  function activateTabInGroup(groupId: string, tabId: string) {
+    const group = findGroup(groupId);
+    if (!group || !group.tabIds.includes(tabId)) {
+      return;
+    }
+    group.activeTabId = tabId;
+    focusedGroupId.value = group.id;
+    activeTabId.value = tabId;
+    settingsStore.settingsPageActive = false;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
+    }
+  }
+
+  function activateTab(tabId: string): boolean {
+    const owner = groupForTab(tabId);
+    if (!owner) {
+      return false;
+    }
+    owner.activeTabId = tabId;
+    focusedGroupId.value = owner.id;
+    activeTabId.value = tabId;
+    settingsStore.settingsPageActive = false;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
+    }
+    return true;
+  }
+
+  /**
+   * Atomically registers a freshly built tab: the tab joins the focused group
+   * and (by default) becomes that group's active tab and the global active tab
+   * in one synchronous step. Programmatic open paths must use this instead of
+   * pushing to `tabs` and writing `activeTabId` separately, which used to leave
+   * the new tab ownerless until a post-flush watcher repaired the groups.
+   */
+  function registerOpenTab(tab: QueryTab, options: { activate?: boolean; insertAfterTabId?: string } = {}): string {
+    const anchorIndex = options.insertAfterTabId ? tabs.value.findIndex((item) => item.id === options.insertAfterTabId) : -1;
+    if (anchorIndex >= 0) {
+      tabs.value.splice(anchorIndex + 1, 0, tab);
+    } else {
+      tabs.value.push(tab);
+    }
+    const group = focusedGroup() ?? groups.value[0];
+    if (group && !group.tabIds.includes(tab.id)) {
+      const groupAnchorIndex = options.insertAfterTabId ? group.tabIds.indexOf(options.insertAfterTabId) : -1;
+      if (groupAnchorIndex >= 0) {
+        // Fresh tabs are never pinned; keep them behind the group's pinned block.
+        const pinnedCount = group.tabIds.filter((id) => tabs.value.find((item) => item.id === id)?.pinned).length;
+        const insertAt = tab.pinned ? groupAnchorIndex + 1 : Math.max(groupAnchorIndex + 1, pinnedCount);
+        group.tabIds.splice(insertAt, 0, tab.id);
+      } else {
+        group.tabIds.push(tab.id);
+      }
+    }
+    if (options.activate !== false) {
+      activateTab(tab.id);
+    }
+    return tab.id;
+  }
+
+  function splitTab(tabId: string, direction: "right" | "down"): boolean {
+    if (groups.value.length >= 4) {
+      return false;
+    }
+    // With a single open tab the split is a no-op: the tab moves into the new
+    // group, the emptied source group is pruned, and the layout returns to one
+    // group holding the same tab (only the group identity churns).
+    if (tabs.value.length <= 1) {
+      return false;
+    }
+    const tab = tabs.value.find((item) => item.id === tabId);
+    if (!tab) {
+      return false;
+    }
+    const owner = groupForTab(tabId);
+    if (!owner) {
+      return false;
+    }
+
+    orientation.value = direction === "right" ? "vertical" : "horizontal";
+
+    const newGroupId = uuid();
+    const newGroup: EditorGroup = { id: newGroupId, tabIds: [tabId], activeTabId: tabId };
+    const ownerIndex = groups.value.findIndex((group) => group.id === owner.id);
+    owner.tabIds = owner.tabIds.filter((id) => id !== tabId);
+    if (owner.activeTabId === tabId) {
+      owner.activeTabId = owner.tabIds[0] ?? null;
+    }
+    groups.value.splice(ownerIndex + 1, 0, newGroup);
+    // Removing the tab may leave the source group empty; pruning keeps sizes
+    // paired with the surviving groups without a full normalization pass.
+    pruneEmptyGroups();
+    focusedGroupId.value = newGroup.id;
+    activeTabId.value = tabId;
+    return true;
+  }
+
+  function splitTabRight(tabId: string): boolean {
+    return splitTab(tabId, "right");
+  }
+
+  function splitTabDown(tabId: string): boolean {
+    return splitTab(tabId, "down");
+  }
+
+  function setOrientation(value: "vertical" | "horizontal") {
+    orientation.value = value;
+  }
+
+  function moveTabToGroup(tabId: string, targetGroupId: string, index?: number): boolean {
+    const tab = tabs.value.find((item) => item.id === tabId);
+    const target = findGroup(targetGroupId);
+    if (!tab || !target) {
+      return false;
+    }
+
+    const source = groupForTab(tabId);
+    if (!source) {
+      return false;
+    }
+
+    function pinnedCountIn(tabIds: string[]): number {
+      return tabIds.filter((id) => tabs.value.find((item) => item.id === id)?.pinned).length;
+    }
+
+    if (source.id === target.id) {
+      if (index === undefined) {
+        return false;
+      }
+      const fromIndex = target.tabIds.indexOf(tabId);
+      if (fromIndex < 0) {
+        return false;
+      }
+      const next = [...target.tabIds];
+      next.splice(fromIndex, 1);
+      let insertAt = index;
+      if (fromIndex < insertAt) {
+        insertAt -= 1;
+      }
+      const pinnedCount = pinnedCountIn(next);
+      if (tab.pinned) {
+        insertAt = Math.max(0, Math.min(insertAt, pinnedCount));
+      } else {
+        insertAt = Math.max(pinnedCount, Math.min(insertAt, next.length));
+      }
+      next.splice(insertAt, 0, tabId);
+      target.tabIds = next;
+      return true;
+    }
+
+    source.tabIds = source.tabIds.filter((id) => id !== tabId);
+    if (source.activeTabId === tabId) {
+      source.activeTabId = source.tabIds[0] ?? null;
+    }
+
+    const pinnedCount = pinnedCountIn(target.tabIds);
+    const rawIndex = index ?? target.tabIds.length;
+    const insertAt = tab.pinned ? Math.max(0, Math.min(rawIndex, pinnedCount)) : Math.max(pinnedCount, Math.min(rawIndex, target.tabIds.length));
+    target.tabIds.splice(insertAt, 0, tabId);
+
+    target.activeTabId = tabId;
+    focusedGroupId.value = target.id;
+    activeTabId.value = tabId;
+    pruneEmptyGroups();
+    return true;
+  }
+
+  function unsplitTab(tabId: string): boolean {
+    const main = groups.value[0];
+    if (!main) {
+      return false;
+    }
+    if (main.tabIds.includes(tabId)) {
+      focusGroup(main.id);
+      return true;
+    }
+    const source = groupForTab(tabId);
+    if (!source) {
+      return false;
+    }
+
+    source.tabIds = source.tabIds.filter((id) => id !== tabId);
+    if (source.activeTabId === tabId) {
+      source.activeTabId = source.tabIds[0] ?? null;
+    }
+    main.tabIds.push(tabId);
+    main.activeTabId = tabId;
+    focusedGroupId.value = main.id;
+    activeTabId.value = tabId;
+    pruneEmptyGroups();
+    return true;
+  }
+
   const showCloseConfirm = ref(false);
   const pendingCloseTabId = ref<string | null>(null);
   const pendingBatchCloseTabIds = ref<string[] | null>(null);
@@ -1671,7 +2084,7 @@ export const useQueryStore = defineStore("query", () => {
     clearResultPayload(tab, { evicted: true });
   }
 
-  function applyRestoredOpenTabs(restored: { tabs: QueryTab[]; activeTabId: string | null }) {
+  function applyRestoredOpenTabs(restored: { tabs: QueryTab[]; activeTabId: string | null; workspace?: unknown }) {
     const connectionStore = useConnectionStore();
     for (const tab of restored.tabs) {
       const connection = connectionStore.getConfig(tab.connectionId);
@@ -1682,11 +2095,46 @@ export const useQueryStore = defineStore("query", () => {
       }
     }
     tabs.value = restored.tabs;
-    activeTabId.value = restored.activeTabId;
-    activeTabHistory.value = restored.activeTabId ? [restored.activeTabId] : [];
     for (const tab of restored.tabs) {
-      if (tab.mode === "data") void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
+      if (tab.mode === "data") {
+        void deleteTabResultSnapshot(tabResultCacheKey(tab.id));
+      }
     }
+
+    // Restore order (guide §3.9): the persisted global active tab is only a
+    // hint for legacy tabs-only payloads. Group membership, group actives and
+    // the focused group are repaired first; the global active tab is derived
+    // from the focused group last, so a stale payload value can never move
+    // focus to a different group.
+    const workspace = restored.workspace && typeof restored.workspace === "object" ? (restored.workspace as Record<string, unknown>) : undefined;
+    if (!Array.isArray(workspace?.groups) && restored.activeTabId && tabs.value.some((tab) => tab.id === restored.activeTabId)) {
+      groups.value = [{ id: "main", tabIds: tabs.value.map((tab) => tab.id), activeTabId: restored.activeTabId }];
+      focusedGroupId.value = "main";
+    } else if (workspace) {
+      if (Array.isArray(workspace.groups)) {
+        groups.value = (workspace.groups as Array<Record<string, unknown>>)
+          .filter((group) => group && typeof group.id === "string")
+          .map((group) => ({
+            id: group.id as string,
+            tabIds: Array.isArray(group.tabIds) ? (group.tabIds as unknown[]).map(String) : [],
+            activeTabId: typeof group.activeTabId === "string" ? group.activeTabId : null,
+          }));
+      }
+      if (typeof workspace.focusedGroupId === "string") {
+        focusedGroupId.value = workspace.focusedGroupId;
+      }
+      if (workspace.orientation === "vertical" || workspace.orientation === "horizontal") {
+        orientation.value = workspace.orientation;
+      }
+      if (Array.isArray(workspace.sizes)) {
+        sizes.value = (workspace.sizes as unknown[]).map(Number);
+      }
+    }
+    // Start from no global active so normalization cannot treat the persisted
+    // value as authoritative over the restored focused group.
+    activeTabId.value = null;
+    normalizeGroups();
+    activeTabHistory.value = activeTabId.value ? [activeTabId.value] : [];
   }
 
   async function recoverDetachedTabsToMain(options: { validConnectionIds?: Iterable<string> } = {}) {
@@ -1726,7 +2174,7 @@ export const useQueryStore = defineStore("query", () => {
         // Restore is explicitly disabled, so stale saved payloads should not
         // reappear if the user later changes the setting.
         clearLegacySavedTabs();
-        await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
+        await saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value }).catch(() => undefined);
       }
       await recoverDetachedTabsToMain(options);
       await saveTabs(tabs.value, activeTabId.value).catch(() => undefined);
@@ -1749,7 +2197,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       await recoverDetachedTabsToMain(options);
       try {
-        await saveTabs(tabs.value, activeTabId.value);
+        await saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value });
         // Keep old desktop installs readable until the async store has the
         // migrated state; only then remove the synchronous startup payload.
         clearLegacySavedTabs();
@@ -1817,18 +2265,26 @@ export const useQueryStore = defineStore("query", () => {
 
   const storePersistGeneration = ++persistGeneration;
   watch(
-    [_persistSnapshot, activeTabId],
+    [_persistSnapshot, activeTabId, groups, focusedGroupId, orientation, sizes],
     () => {
       if (storePersistGeneration !== persistGeneration) return;
       if (persistTimer) clearTimeout(persistTimer);
       persistTimer = setTimeout(() => {
-        if (isDetachedWindow()) void flushDetachedTabPersistence(activeTabId.value ?? undefined).catch(() => {});
-        else void saveTabs(tabs.value, activeTabId.value).catch(() => {});
+        if (isDetachedWindow()) {
+          void flushDetachedTabPersistence(activeTabId.value ?? undefined).catch(() => {});
+        } else {
+          void saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value }).catch(() => {});
+        }
         persistTimer = null;
       }, 300);
     },
-    { flush: "post" },
+    { flush: "post", deep: true },
   );
+
+  // Group invariants are maintained by the atomic store operations themselves
+  // (registerOpenTab / activateTab / split / move / close); there is
+  // deliberately no post-flush watcher repairing them here. Normalization is
+  // reserved for the persistence restore boundary.
 
   onScopeDispose(() => {
     if (persistTimer) clearTimeout(persistTimer);
@@ -1847,7 +2303,7 @@ export const useQueryStore = defineStore("query", () => {
       clearTimeout(persistTimer);
       persistTimer = null;
     }
-    return saveTabs(tabs.value, activeTabId.value);
+    return saveTabs(tabs.value, activeTabId.value, { groups: groups.value, focusedGroupId: focusedGroupId.value, orientation: orientation.value, sizes: sizes.value });
   }
 
   async function prepareDetachedTab(tabId: string, runtime: DetachedTabRuntimeState = {}): Promise<DetachedTabHandoff> {
@@ -1894,11 +2350,47 @@ export const useQueryStore = defineStore("query", () => {
     await api.saveDetachedTabHandoff(tabId, handoff);
   }
 
+  /**
+   * Lands a workspace-adopted tab in the pane layout. The split workspace
+   * renders from group membership, so a tab arriving through a detached
+   * handoff must belong to a group to be visible at all. A group that still
+   * carries the id (a return to a pane that never cleaned up) just gets its
+   * active tab repaired; everything else adopts into the first group. Used by
+   * detached-window open, return-to-main, and startup recovery alike.
+   */
+  function ensureTabInWorkspace(tabId: string) {
+    const owner = groups.value.find((group) => group.tabIds.includes(tabId));
+    if (owner) {
+      owner.activeTabId = tabId;
+      focusedGroupId.value = owner.id;
+      return;
+    }
+    const main = groups.value[0];
+    main.tabIds.push(tabId);
+    main.activeTabId = tabId;
+    focusedGroupId.value = main.id;
+  }
+
   async function adoptDetachedTab(handoff: DetachedTabHandoff): Promise<string> {
     if (!handoff || handoff.schemaVersion !== 1 || !handoff.tab || typeof handoff.tab.id !== "string" || handoff.tab.id !== handoff.tabId) throw new Error("Unsupported detached tab state");
     const restored = restoreOpenTabsPayload({ tabs: [handoff.tab], activeTabId: handoff.tabId });
     const restoredTab = restored.tabs[0];
     if (!restoredTab) throw new Error("Unable to restore detached tab");
+    // serializeOpenTabs() blanks `sql` for a clean saved-SQL-library tab to avoid
+    // duplicating on-disk state across app restarts, relying on hydrateSavedSqlTabs()
+    // to refill it afterwards. The detach handoff goes through the same serialization
+    // but skips that hydration step, so do it here too or the new window opens empty.
+    // A freshly created detached window never runs the main-window bootstrap that
+    // populates savedSqlStore's local file index, so useSavedSqlStore().ensureFileContent()
+    // can't find the file locally either — go straight to the backend instead.
+    if (restoredTab.savedSqlId && restoredTab.mode === "query" && !restoredTab.sql) {
+      const file = await api.loadSavedSqlFile(restoredTab.savedSqlId).catch(() => undefined);
+      if (file) {
+        restoredTab.title = restoredTab.customTitle ? restoredTab.title : file.name;
+        restoredTab.sql = file.sql;
+        restoredTab.originalSql = file.sql;
+      }
+    }
     Object.assign(restoredTab, handoff.runtime);
     if (handoff.resultCacheKey) {
       restoredTab.resultCacheKey = handoff.resultCacheKey;
@@ -1911,6 +2403,7 @@ export const useQueryStore = defineStore("query", () => {
     } else {
       tabs.value.push(restoredTab);
     }
+    ensureTabInWorkspace(handoff.tabId);
     activeTabId.value = handoff.tabId;
     return handoff.tabId;
   }
@@ -1918,8 +2411,13 @@ export const useQueryStore = defineStore("query", () => {
   function removeTabAfterDetachedReady(tabId: string): boolean {
     const index = tabs.value.findIndex((tab) => tab.id === tabId);
     if (index < 0) return false;
+    // Group-aware removal: the split workspace renders from group membership,
+    // so the tab must leave its pane too. The emptied pane is pruned exactly
+    // like a bulk close, and a dangling pane (group entry without a tab) is
+    // never left behind for the return trip to trip over.
     tabs.value.splice(index, 1);
-    if (activeTabId.value === tabId) activeTabId.value = tabs.value[Math.min(index, tabs.value.length - 1)]?.id ?? null;
+    removeTabsFromGroups(new Set([tabId]));
+    if (activeTabId.value === tabId) syncActiveTabFromFocusedGroup();
     return true;
   }
 
@@ -1958,11 +2456,10 @@ export const useQueryStore = defineStore("query", () => {
       ...(mode === "query" ? { autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType) } : {}),
     };
     if (mode === "query") tab.originalSql = initialSql ?? "";
-    const activeIndex = options.insertAfterActive ? tabs.value.findIndex((item) => item.id === activeTabId.value) : -1;
-    if (activeIndex >= 0) tabs.value.splice(activeIndex + 1, 0, tab);
-    else tabs.value.push(tab);
-    if (options.activate !== false) activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab, {
+      ...(options.activate === false ? { activate: false } : {}),
+      ...(options.insertAfterActive && activeTabId.value ? { insertAfterTabId: activeTabId.value } : {}),
+    });
   }
 
   function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
@@ -2056,8 +2553,7 @@ export const useQueryStore = defineStore("query", () => {
       mode: "query",
       autoCommit: defaultAutoCommitForDbTypeWithSetting(dbType),
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
+    registerOpenTab(tab);
     refreshExternalSqlFileTitles();
     return id;
   }
@@ -2114,9 +2610,7 @@ export const useQueryStore = defineStore("query", () => {
         eventCreateRequestId,
       },
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openDatabaseBrowser(connectionId: string) {
@@ -2127,7 +2621,7 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const id = uuid();
-    tabs.value.push({
+    return registerOpenTab({
       id,
       title: "Databases",
       connectionId,
@@ -2138,8 +2632,6 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "databases",
     });
-    activeTabId.value = id;
-    return id;
   }
 
   function openDriverProfileWorkspace(connectionId: string, database: string, title: string, mode: QueryTab["mode"], tabScope: DriverProfileWorkspaceScope = "database", workspaceBranch?: string) {
@@ -2152,7 +2644,7 @@ export const useQueryStore = defineStore("query", () => {
     }
 
     const id = uuid();
-    tabs.value.push({
+    return registerOpenTab({
       id,
       title,
       connectionId,
@@ -2164,11 +2656,14 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode,
     });
-    activeTabId.value = id;
-    return id;
   }
 
   function switchTab(tabId: string) {
+    const owner = groupForTab(tabId);
+    if (owner) {
+      activateTabInGroup(owner.id, tabId);
+      return;
+    }
     activeTabId.value = tabId;
     settingsStore.settingsPageActive = false;
     if (typeof window !== "undefined") window.dispatchEvent(new Event(QUERY_SURFACE_ACTIVATION_EVENT));
@@ -2194,9 +2689,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "users",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openProcessList(connectionId: string) {
@@ -2219,9 +2712,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "processlist",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openSqlServerActivityTrace(connectionId: string) {
@@ -2244,9 +2735,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "sqlserver-trace",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openMysqlDashboard(connectionId: string) {
@@ -2269,9 +2758,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "mysql-dashboard",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openPostgresDashboard(connectionId: string) {
@@ -2294,9 +2781,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "postgres-dashboard",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openNacosDashboard(connectionId: string) {
@@ -2319,9 +2804,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "nacos-dashboard",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openDamengJobAdmin(connectionId: string) {
@@ -2344,9 +2827,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "dameng-jobs",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openDamengUsers(connectionId: string) {
@@ -2369,9 +2850,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "dameng-users",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openDamengRoles(connectionId: string) {
@@ -2394,9 +2873,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "dameng-roles",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openMongoBucket(connectionId: string, database: string, bucketName: string) {
@@ -2422,9 +2899,7 @@ export const useQueryStore = defineStore("query", () => {
         bucketName,
       },
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openMongoGridFs(connectionId: string, database: string) {
@@ -2446,9 +2921,7 @@ export const useQueryStore = defineStore("query", () => {
       isExplaining: false,
       mode: "mongo-gridfs",
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openMqAdmin(connectionId: string, target?: { tenant?: string; initialTab?: QueryTab["mqInitialTab"] }) {
@@ -2475,9 +2948,7 @@ export const useQueryStore = defineStore("query", () => {
       mqTenant: target?.tenant,
       mqInitialTab: target?.initialTab,
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openNacosAdmin(connectionId: string, target?: { namespace?: string; namespaceName?: string; dataId?: string; group?: string; keyword?: string }) {
@@ -2516,9 +2987,7 @@ export const useQueryStore = defineStore("query", () => {
       nacosTargetKeyword: target?.keyword,
       nacosTargetRequestId: target?.dataId ? 1 : undefined,
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openMqttAdmin(connectionId: string, target?: { initialTopic?: string }) {
@@ -2543,9 +3012,7 @@ export const useQueryStore = defineStore("query", () => {
       mode: "mqtt",
       mqttInitialTopic: target?.initialTopic,
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function clearNacosNavigationTarget(connectionId: string, namespace: string, requestId?: number) {
@@ -2593,9 +3060,7 @@ export const useQueryStore = defineStore("query", () => {
       structureInitialTabRequestId: initialTab || initialTarget?.name ? 1 : undefined,
       structureInitialTarget: initialTarget?.name ? initialTarget : undefined,
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function isTabDirty(tab: QueryTab): boolean {
@@ -2635,7 +3100,11 @@ export const useQueryStore = defineStore("query", () => {
   function showDirtyTabCloseConfirm(tab: QueryTab, context: CloseConfirmContext) {
     pendingCloseTabId.value = tab.id;
     closeConfirmContext.value = context;
-    activeTabId.value = tab.id;
+    // Move focus through the atomic activate so the confirming dialog, the
+    // shared result area, and the dirty tab's owner group stay coherent.
+    if (!activateTab(tab.id)) {
+      activeTabId.value = tab.id;
+    }
     showCloseConfirm.value = true;
   }
 
@@ -2764,9 +3233,25 @@ export const useQueryStore = defineStore("query", () => {
     pendingBatchCloseFinalActiveTabId.value = undefined;
     pendingBatchCloseComplete = null;
     if (finalActiveTabId !== undefined) {
-      activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
+      commitBatchCloseActiveTab(finalActiveTabId);
     }
     return onComplete;
+  }
+
+  /**
+   * Applies a batch close's chosen active tab while keeping the group
+   * invariants: the surviving tab becomes its owner group's active tab and the
+   * focused group. Falls back to the focused group when the choice no longer
+   * exists.
+   */
+  function commitBatchCloseActiveTab(finalActiveTabId: string | null) {
+    if (finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId)) {
+      if (!activateTab(finalActiveTabId)) {
+        syncActiveTabFromFocusedGroup();
+      }
+      return;
+    }
+    syncActiveTabFromFocusedGroup();
   }
 
   function continuePendingBatchClose() {
@@ -2856,10 +3341,33 @@ export const useQueryStore = defineStore("query", () => {
     releaseTabResultObjectPayloads(tabs.value[idx]);
     clearResultRuns(tabs.value[idx]);
     clearResultPayload(tabs.value[idx]);
+    const owner = groupForTab(id);
+    const ownerIndexInGroup = owner ? owner.tabIds.indexOf(id) : -1;
+    const wasOwnerActive = owner?.activeTabId === id;
+    const wasGlobalActive = activeTabId.value === id;
+
     tabs.value.splice(idx, 1);
     if (tab.externalSqlPath) refreshExternalSqlFileTitles();
-    if (activeTabId.value === id) {
-      activeTabId.value = fallbackActiveTabAfterClose(id, idx);
+
+    if (owner) {
+      owner.tabIds = owner.tabIds.filter((tabId) => tabId !== id);
+      if (wasOwnerActive) {
+        const groupHistory = activeTabHistory.value.filter((tabId) => tabId !== id && owner.tabIds.includes(tabId));
+        owner.activeTabId = groupHistory[groupHistory.length - 1] ?? owner.tabIds[Math.min(ownerIndexInGroup, owner.tabIds.length - 1)] ?? null;
+      }
+      if (owner.tabIds.length === 0 && groups.value.length > 1) {
+        const removedIndex = groups.value.findIndex((group) => group.id === owner.id);
+        groups.value.splice(removedIndex, 1);
+        if (focusedGroupId.value === owner.id) {
+          focusedGroupId.value = groups.value[0]?.id ?? "main";
+        }
+        repairGroupSizes();
+      }
+    }
+
+    if (wasGlobalActive) {
+      const nextGroup = focusedGroup();
+      activeTabId.value = nextGroup?.activeTabId ?? null;
     }
     if (force) resumePendingBatchCloseAfter(id);
   }
@@ -2905,7 +3413,7 @@ export const useQueryStore = defineStore("query", () => {
     const idsToClose = batchIds ?? (pendingId ? [pendingId] : []);
     for (const id of idsToClose) closeTab(id, { force: true });
     if (finalActiveTabId !== undefined) {
-      activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
+      commitBatchCloseActiveTab(finalActiveTabId);
     }
     if (batchIds) onBatchComplete?.();
   }
@@ -2939,7 +3447,7 @@ export const useQueryStore = defineStore("query", () => {
     const dirtyTab = dirtyId ? tabs.value.find((tab) => tab.id === dirtyId) : undefined;
     if (!dirtyTab) return false;
     pendingCloseTabId.value = dirtyTab.id;
-    activeTabId.value = dirtyTab.id;
+    activateTab(dirtyTab.id);
     showCloseConfirm.value = true;
     return true;
   }
@@ -2964,7 +3472,7 @@ export const useQueryStore = defineStore("query", () => {
     const idsToClose = batchIds ?? (pendingId ? [pendingId] : []);
     for (const id of idsToClose) closeTab(id, { force: true });
     if (finalActiveTabId !== undefined) {
-      activeTabId.value = finalActiveTabId && tabs.value.some((tab) => tab.id === finalActiveTabId) ? finalActiveTabId : null;
+      commitBatchCloseActiveTab(finalActiveTabId);
     }
     if (batchIds) onBatchComplete?.();
     return "tabs" as const;
@@ -2976,6 +3484,30 @@ export const useQueryStore = defineStore("query", () => {
       tabs.value.filter((tab) => tab.id !== id).map((tab) => tab.id),
       id,
     );
+  }
+
+  function closeOtherTabsInGroup(groupId: string, id: string) {
+    const group = findGroup(groupId);
+    const target = tabs.value.find((tab) => tab.id === id);
+    if (!group || !target) return;
+    const ids = group.tabIds.filter((tabId) => {
+      const tab = tabs.value.find((item) => item.id === tabId);
+      return tab && tabId !== id && Boolean(tab.pinned) === Boolean(target.pinned);
+    });
+    beginBatchClose(ids, id);
+  }
+
+  function closeAllTabsInGroup(groupId: string, id: string) {
+    const group = findGroup(groupId);
+    const target = tabs.value.find((tab) => tab.id === id);
+    if (!group || !target) return;
+    const ids = group.tabIds.filter((tabId) => {
+      const tab = tabs.value.find((item) => item.id === tabId);
+      return tab && Boolean(tab.pinned) === Boolean(target.pinned);
+    });
+    if (ids.length === 0) return;
+    const finalActiveTabId = group.activeTabId && !ids.includes(group.activeTabId) ? group.activeTabId : id;
+    beginBatchClose(ids, finalActiveTabId);
   }
 
   function closeTabsByIds(ids: Iterable<string>, finalActiveTabId?: string | null, onComplete?: () => void) {
@@ -3136,6 +3668,14 @@ export const useQueryStore = defineStore("query", () => {
       previewSql: original.previewSql,
     };
     tabs.value.splice(idx + 1, 0, newTab);
+
+    const owner = groupForTab(id);
+    if (owner) {
+      const ownerIndex = owner.tabIds.indexOf(id);
+      owner.tabIds.splice(ownerIndex + 1, 0, newId);
+      owner.activeTabId = newId;
+      focusedGroupId.value = owner.id;
+    }
     activeTabId.value = newId;
   }
 
@@ -3163,9 +3703,38 @@ export const useQueryStore = defineStore("query", () => {
 
     const activeClosingIndex = tabs.value.findIndex((tab) => tab.id === activeTabId.value && closingIds.has(tab.id));
     tabs.value = tabs.value.filter((tab) => !closingIds.has(tab.id));
-    if (activeClosingIndex >= 0) {
-      activeTabId.value = tabs.value[Math.min(activeClosingIndex, tabs.value.length - 1)]?.id ?? null;
+    // Resolve the fallback against the POST-filter array: the survivor at the
+    // closing tab's index, not the closing tab itself.
+    const fallbackTabId = activeClosingIndex >= 0 ? tabs.value[Math.min(activeClosingIndex, tabs.value.length - 1)]?.id : undefined;
+    // Drop the closed ids from their owning groups, repair each group's
+    // active tab, and remove groups emptied by this close.
+    removeTabsFromGroups(closingIds);
+    if (fallbackTabId && tabs.value.some((tab) => tab.id === fallbackTabId)) {
+      activateTab(fallbackTabId);
+    } else {
+      syncActiveTabFromFocusedGroup();
     }
+  }
+
+  /**
+   * Removes a set of tab ids from whichever groups own them, repairs each
+   * group's active tab (MRU first, then adjacent), and prunes groups emptied
+   * by the removal. Used by bulk close paths so group state stays consistent
+   * without a normalization pass.
+   */
+  function removeTabsFromGroups(closingIds: Set<string>) {
+    if (closingIds.size === 0) return;
+    for (const group of groups.value) {
+      if (!group.tabIds.some((tabId) => closingIds.has(tabId))) continue;
+      const ownerIndexInGroup = group.activeTabId ? group.tabIds.indexOf(group.activeTabId) : -1;
+      const wasOwnerActive = group.activeTabId != null && closingIds.has(group.activeTabId);
+      group.tabIds = group.tabIds.filter((tabId) => !closingIds.has(tabId));
+      if (wasOwnerActive) {
+        const groupHistory = activeTabHistory.value.filter((tabId) => !closingIds.has(tabId) && group.tabIds.includes(tabId));
+        group.activeTabId = groupHistory[groupHistory.length - 1] ?? group.tabIds[Math.min(Math.max(ownerIndexInGroup, 0), group.tabIds.length - 1)] ?? null;
+      }
+    }
+    pruneEmptyGroups();
   }
 
   function closeScopedTabsWhere(predicate: (tab: QueryTab) => boolean, options: { force?: boolean } = {}) {
@@ -3289,6 +3858,7 @@ export const useQueryStore = defineStore("query", () => {
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
         includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
         whereInput: tab.whereInput,
+        injectDefaultTimeSeriesWhere: true,
         orderBy,
         limit,
         offset,
@@ -3632,9 +4202,7 @@ export const useQueryStore = defineStore("query", () => {
       editorSelection: restoredPosition.selection,
       editorViewport: restoredPosition.viewport,
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   async function hydrateSavedSqlTabs() {
@@ -3658,6 +4226,13 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab) return;
     tab.pinned = !tab.pinned;
     tabs.value = orderPinnedFirst(tabs.value, (item) => !!item.pinned);
+
+    const owner = groupForTab(id);
+    if (owner) {
+      const pinned = owner.tabIds.filter((tabId) => tabs.value.find((item) => item.id === tabId)?.pinned);
+      const regular = owner.tabIds.filter((tabId) => !tabs.value.find((item) => item.id === tabId)?.pinned);
+      owner.tabIds = [...pinned, ...regular];
+    }
   }
 
   function reorderTab(id: string, targetId: string, position: "before" | "after") {
@@ -3672,6 +4247,12 @@ export const useQueryStore = defineStore("query", () => {
     const nextTabs = orderPinnedFirst(reordered, (item) => !!item.pinned);
     if (nextTabs.every((item, index) => item.id === tabs.value[index]?.id)) return false;
     tabs.value = nextTabs;
+
+    const owner = groupForTab(id);
+    if (owner) {
+      const order = new Map(tabs.value.map((tab, index) => [tab.id, index]));
+      owner.tabIds = [...owner.tabIds].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+    }
     return true;
   }
 
@@ -3915,8 +4496,10 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
-    const executionTabId = activeTabId.value;
+  async function executeCurrentSql(sql: string, options?: { tabId?: string; skipRedisSafetyCheck?: boolean; sourceOffset?: number; openInNewResultTab?: boolean; onExecutionStarted?: () => void }) {
+    // Execution targets the requesting tab; only fall back to the global
+    // active tab when the caller did not (or could not) capture one.
+    const executionTabId = options?.tabId ?? activeTabId.value;
     if (!executionTabId) return;
     const tab = tabs.value.find((item) => item.id === executionTabId);
     const previousGridKey = tab ? resultGridInstanceKey(tab) : undefined;
@@ -6530,15 +7113,6 @@ export const useQueryStore = defineStore("query", () => {
     activeTabHistory.value = [...activeTabHistory.value.filter((tabId) => tabId !== id), id];
   }
 
-  function fallbackActiveTabAfterClose(closedId: string, closedIndex: number): string | null {
-    const remainingIds = new Set(tabs.value.map((tab) => tab.id));
-    // Prefer the most recently focused remaining tab. This preserves the
-    // source query tab when a transient table-info/data tab is closed.
-    const history = activeTabHistory.value.filter((tabId) => tabId !== closedId && remainingIds.has(tabId));
-    activeTabHistory.value = history;
-    return [...history].reverse().find((tabId) => remainingIds.has(tabId)) ?? tabs.value[Math.min(closedIndex, tabs.value.length - 1)]?.id ?? null;
-  }
-
   watch(
     activeTabId,
     (id) => {
@@ -6548,6 +7122,16 @@ export const useQueryStore = defineStore("query", () => {
         Date.now(),
         { reuseEstimatedBytes: true },
       );
+    },
+    { flush: "sync" },
+  );
+
+  watch(
+    activeTabId,
+    (id) => {
+      if (tabs.value.length > 0 && (!id || !tabs.value.some((tab) => tab.id === id))) {
+        activeTabId.value = tabs.value[0].id;
+      }
     },
     { flush: "sync" },
   );
@@ -6656,9 +7240,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!restoreCachedResultPayload(tab, archive.snapshot)) return undefined;
     const activeRun = tab.resultRuns?.find((run) => run.id === tab.activeResultRunId) ?? tab.resultRuns?.[0];
     if (activeRun) projectResultRun(tab, activeRun);
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   async function importResultArchive(bytes: Uint8Array | ArrayBuffer): Promise<string | undefined> {
@@ -7043,6 +7625,10 @@ export const useQueryStore = defineStore("query", () => {
   return {
     tabs,
     activeTabId,
+    groups,
+    focusedGroupId,
+    orientation,
+    sizes,
     isOpenTabsLoaded,
     recentTabIds,
     initOpenTabs,
@@ -7060,6 +7646,14 @@ export const useQueryStore = defineStore("query", () => {
     createTab,
     openObjectSourceTab,
     showExecutedQueryResults,
+    focusGroup,
+    activateTab,
+    activateTabInGroup,
+    splitTabRight,
+    splitTabDown,
+    setOrientation,
+    moveTabToGroup,
+    unsplitTab,
     switchTab,
     closeTab,
     forceClosePendingTab,
@@ -7082,6 +7676,8 @@ export const useQueryStore = defineStore("query", () => {
     discardTabChanges,
     requestAppCloseConfirmation,
     closeOtherTabs,
+    closeOtherTabsInGroup,
+    closeAllTabsInGroup,
     closeTabsByIds,
     closeRightTabs,
     closeOtherRegularTabs,

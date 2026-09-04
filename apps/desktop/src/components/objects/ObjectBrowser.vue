@@ -8,6 +8,7 @@ import {
   ArrowRightLeft,
   ArrowUp,
   Braces,
+  Check,
   CheckSquare,
   Clock,
   Clipboard,
@@ -56,6 +57,9 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
+import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
+import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import ProcedureExecutionDialog from "@/components/objects/ProcedureExecutionDialog.vue";
@@ -388,6 +392,17 @@ const objectFilters = computed<ObjectFilter[]>(() =>
     .map(([filter]) => filter),
 );
 const showObjectFilter = computed(() => objectFilters.value.length > 2);
+// Measured condensation for the header row: tier 1 moves the sort/view/checkbox
+// controls into the overflow menu, tier 2 additionally moves the object type
+// filter there and drops the database chip. See useToolbarOverflow for the
+// tier contract.
+const toolbarRef = ref<HTMLElement | null>(null);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.database, () => selectedSchema.value, () => needsSchema.value, () => showObjectFilter.value]);
+const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
+const showInlineSortAndView = computed(() => toolbarTier.value < 1);
+const showInlineCheckboxToggle = computed(() => toolbarTier.value < 1);
+const showInlineObjectFilter = computed(() => toolbarTier.value < 2);
+const showDatabaseChip = computed(() => toolbarTier.value < 2);
 const hasCreatedAt = computed(() => rows.value.some((row) => row.created_at?.trim()));
 const hasUpdatedAt = computed(() => rows.value.some((row) => row.updated_at?.trim()));
 const hasAnyComment = computed(() => rows.value.some((row) => row.comment?.trim()));
@@ -3194,16 +3209,16 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 <template>
   <div ref="rootRef" data-object-browser-root class="flex h-full min-h-0 min-w-0 flex-col bg-background outline-none" tabindex="0" @keydown="onObjectBrowserKeydown">
-    <div v-if="!isEventEditor" class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
-      <div class="flex min-w-0 items-center gap-2">
+    <div v-if="!isEventEditor" ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+      <div class="flex min-w-12 items-center gap-2">
         <span class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium truncate" :title="selectedSchema || props.database">
           {{ selectedSchema || props.database }}
         </span>
-        <span v-if="selectedSchema" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
+        <span v-if="selectedSchema && showDatabaseChip" class="inline-flex max-w-[14rem] min-w-0 items-center rounded border border-border bg-muted/30 px-2 py-0.5 text-xs text-muted-foreground truncate" :title="props.database">
           {{ props.database }}
         </span>
       </div>
-      <div class="flex min-w-0 flex-1 items-center gap-2">
+      <div class="flex min-w-24 flex-1 items-center gap-2">
         <div class="relative min-w-0 flex-1">
           <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input v-model="search" data-object-search-input class="h-7 pl-8 pr-6 text-xs" :placeholder="isMongodb ? t('objects.searchCollections') : t('objects.search')" @keydown="onSearchKeydown" />
@@ -3211,7 +3226,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
             <X class="h-3 w-3" />
           </button>
         </div>
-        <div v-if="showObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+        <div v-if="showObjectFilter && showInlineObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
           <button
             v-for="filter in objectFilters"
             :key="filter"
@@ -3243,7 +3258,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         @update:model-value="onSchemaChange"
       />
       <!-- Sort selector -->
-      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select
           class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
           :value="sortKey"
@@ -3259,7 +3274,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <ArrowDown v-else class="h-3 w-3" />
         </button>
       </div>
-      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isListView }" :title="t('objects.viewList')" @click="setViewMode('list')">
           <List class="h-3.5 w-3.5" />
         </button>
@@ -3267,7 +3282,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           <LayoutGrid class="h-3.5 w-3.5" />
         </button>
       </div>
-      <Button variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
+      <Button v-if="showInlineCheckboxToggle" variant="ghost" size="icon" class="h-7 w-7" :class="{ 'text-primary': settingsStore.editorSettings.objectBrowserShowCheckbox }" :title="t('objects.toggleCheckbox')" @click="toggleCheckboxColumn">
         <CheckSquare v-if="settingsStore.editorSettings.objectBrowserShowCheckbox" class="h-3.5 w-3.5" />
         <Square v-else class="h-3.5 w-3.5" />
       </Button>
@@ -3278,6 +3293,49 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <Clipboard class="mr-1.5 h-3.5 w-3.5" />
         {{ t("objects.pasteTableSelected") }}
       </Button>
+      <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <ArrowDown class="h-3.5 w-3.5" />
+            {{ t("objects.sortBy") }}
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuItem v-for="key in sortKeyOptions" :key="key" @select="onSortKeyChange(key)">
+              <Check v-if="sortKey === key" class="h-3.5 w-3.5" />
+              {{ sortKeyLabel(key) }}
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuItem @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+          <ArrowUp v-if="sortDirection === 'asc'" class="h-3.5 w-3.5" />
+          <ArrowDown v-else class="h-3.5 w-3.5" />
+          {{ sortDirection === "asc" ? t("objects.sortDesc") : t("objects.sortAsc") }}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem @select="setViewMode('list')">
+          <List class="h-3.5 w-3.5" />
+          {{ t("objects.viewList") }}
+        </DropdownMenuItem>
+        <DropdownMenuItem @select="setViewMode('grid')">
+          <LayoutGrid class="h-3.5 w-3.5" />
+          {{ t("objects.viewGrid") }}
+        </DropdownMenuItem>
+        <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
+        <template v-if="showObjectFilter && toolbarTier >= 2">
+          <DropdownMenuSeparator />
+          <DropdownMenuCheckboxItem
+            v-for="filter in objectFilters"
+            :key="filter"
+            :model-value="objectFilter === filter"
+            @select.prevent
+            @update:model-value="
+              userHasSelectedFilter = true;
+              objectFilter = filter;
+            "
+            >{{ filterLabel(filter) }}</DropdownMenuCheckboxItem
+          >
+        </template>
+      </ToolbarOverflowMenu>
     </div>
     <div v-if="selectedTableCount > 0" class="flex h-9 shrink-0 items-center gap-2 overflow-x-auto border-b bg-muted/30 px-3 text-xs">
       <div class="min-w-0 flex-1 truncate text-muted-foreground">

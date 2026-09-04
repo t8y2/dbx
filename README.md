@@ -46,6 +46,7 @@
     <img src="https://img.shields.io/badge/InfluxDB-d30971?logo=influxdb&logoColor=white" />
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
+    <a href="https://1panel.cn/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/1Panel-Partner-005EEB?logo=1panel&amp;logoColor=white" alt="1Panel Partner" /></a>
     <a href="https://cnb.cool/dbxio.com/dbx"><img src="https://img.shields.io/badge/CNB-dbx-F76945?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAppJREFUOE9tk01rE1EUhs+5H5lJ0iQT3FRX2Yi4avoLkv4CWxBcNt11oZiuFKGmXQhFN6kuRESSgitXKf6A5g+I6cqFLiKCiptOkraZ5H4cuZOkH9oLw+UO8z7nvGfei3DFohoEQLAKCGWyGJCSbQZsD3ei7r+f45WATV6xmjdISyAlYLaDliveux+ti5ozwLAaFPhIlk6G6f18sxuO7l9bBiWbVoncDGCMWMl++PI/gJ7IohkmD0zkBxT5oRn5LTpN7ULqBByEtFywWvRyHz8Fx3dvN0UwuMPyR0uJFycddH7tKPHZRn7BjnwwkQcUud0HO/K7oOENcTYPRCEAFERmsCpyfZDZfpdnBosOUKGx13BC60QTIdjpmSzrEWDR+UagjsgMciLXAwfhc4MNpKfQtOPE6mVh0gEOaeTXtWXXEdADpJAR/GaZ/rrM9Us82wORPd5zHbRp7JVcyxR5PRP5LTPy6uo0HXIlG9awMgLuEUABkBYI7VLyxs+yyPW3+Nyg4zqoG+UV7TDRlMBbWA/D43u3qlbLGmgRWM2BjFxjQjWQGQBuu4bYYvrm14JMnQSXcjBcny9A5DXIiDJp9/8FWCXAAOaFUEfILTgIcttOvf+2NJnLdI0fBFUyskZKBGTEJEAmBuzr9LCSUDwGQAwwgMzu+m9/VWOAeZSsk+YP48C4li/sRok1nlBd5PogBjgxNw70PfHyqBADyEVXicasZXCVpxYiLfO+HxVZDHCVYwvu2ebPT7fOLNAm65AWLnEAzvsEcOi9/lPU1aACXDfOLdhD9kxNszGdweQGYstqXgItJwDFNxKvwrp57G8h0zVwldHuA0IFt8El83yIs2FSDcpgxDJpUUTwK7gTduN3AK5iG7ehc/E2/gUPD3q3eY4awwAAAABJRU5ErkJggg==" alt="CNB" /></a>
     <a href="https://mcptoplist.com/server/io.github.t8y2%2Fdbx"><img src="https://mcptoplist.com/badge/io.github.t8y2%2Fdbx.svg" alt="MCP Toplist" /></a>
   </p>
@@ -63,7 +64,7 @@
   </p>
 </div>
 
-## Sponsors & Partners
+## ❤️ Sponsors
 
 <table>
   <tr>
@@ -75,28 +76,6 @@
     <td>
       RainYun is a cloud service provider offering cloud servers, physical servers, game hosting, and developer-friendly infrastructure services.
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">Visit RainYun</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="docs/public/sponsors/qiniu-card.png" alt="Qiniu Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
-      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" valign="middle" width="200">
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
-      </a>
-    </td>
-    <td>
-      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
-      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
     </td>
   </tr>
   <tr>
@@ -130,6 +109,44 @@
     <td>
       UCloud is the first public cloud provider listed on China's STAR Market, with 28 global regions for cloud hosting, databases, and CDN; its AstraFlow platform offers one-click access to 200+ mainstream LLMs.
       <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">Visit UCloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Atlas Cloud gives developers one unified API for 400+ AI models across chat, image, video, and audio.
+      <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">Visit Atlas Cloud</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="docs/public/sponsors/qiniu-card.png" alt="Qiniu Cloud" width="175" />
+      </a>
+    </td>
+    <td>
+      Qiniu Cloud provides DBX with object storage, CDN, and other cloud infrastructure resources.
+      <a href="https://www.qiniu.com/" target="_blank">Visit Qiniu Cloud</a>
+    </td>
+  </tr>
+</table>
+
+## 🤝 Partners
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://1panel.cn/" target="_blank">
+        <img src="docs/public/sponsors/1panel-card.png" alt="1Panel" width="175" />
+      </a>
+    </td>
+    <td>
+      1Panel is a modern open-source Linux server management panel and lightweight AI management platform, offering an intuitive web interface for one-stop management of AI agents, local LLMs, websites, databases, containers, files, and more.
+      <a href="https://1panel.cn/" target="_blank">Visit 1Panel</a>
     </td>
   </tr>
   <tr>
@@ -491,6 +508,7 @@ DBX is free and open source, but ongoing maintenance, database compatibility tes
 <a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
 <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信群-Join-07C160?logo=wechat&logoColor=white" alt="WeChat Group" /></a>
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-Community-blue)](https://linux.do)
+[![1Panel](https://img.shields.io/badge/1Panel-Partner-005EEB?logo=1panel&logoColor=white)](https://1panel.cn)
 
 ## Star History
 

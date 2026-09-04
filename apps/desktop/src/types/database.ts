@@ -552,6 +552,8 @@ export interface IndexInfo {
   comment?: string | null;
   /** Parallel to `columns`: true at index i means columns[i] is a raw expression, not a plain column name. */
   key_is_expression?: boolean[] | null;
+  /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
+  column_opclasses?: (string | null)[] | null;
 }
 
 export interface ReferenceKeyInfo {

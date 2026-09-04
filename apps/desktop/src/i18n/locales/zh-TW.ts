@@ -5647,6 +5647,7 @@ export default withEnglishFallback({
     sidebarShowTooltipsDescription: "在側邊欄的連線與資料庫物件上懸浮時顯示詳細提示；關閉後懸浮不再彈出。",
     snippetsDescription: "自訂編輯器中觸發的 SQL 程式碼片段範本。",
     syncSnippetProviderGitee: "Gitee 程式碼片段",
+    snippetsPlaceholderHint: "使用 {'${編號:預設文字}'} 建立可編輯的佔位符；編號相同的佔位符會同步修改，例如：",
     snippetsAdd: "新增片段",
     snippetsLabel: "顯示名",
     snippetsPrefix: "觸發鍵",

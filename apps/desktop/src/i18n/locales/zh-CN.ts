@@ -6654,6 +6654,7 @@ export default withEnglishFallback({
     sidebarFontSize: "侧边栏字体大小",
     sidebarFontSizeDescription: "侧边栏对象树的字体大小（像素），独立于编辑器字体大小。",
     snippetsDescription: "自定义编辑器中触发的 SQL 代码片段模板。",
+    snippetsPlaceholderHint: "使用 {'${编号:默认文本}'} 创建可编辑占位符；编号相同的占位符会同步修改，例如：",
     snippetsAdd: "添加片段",
     snippetsLabel: "显示名",
     snippetsPrefix: "触发键",

@@ -6332,6 +6332,7 @@ export default withEnglishFallback({
     sidebarShowTooltipsDescription: "Mostra dicas com detalhes ao passar o mouse sobre conexões e objetos do banco de dados na barra lateral. Desative para ocultá-las.",
     snippetsDescription: "Personalize os modelos de snippets SQL acionados no editor.",
     syncSnippetProviderGitee: "Snippets do Gitee",
+    snippetsPlaceholderHint: "Use {'${número:texto padrão}'} para criar um espaço reservado editável. Espaços reservados com o mesmo número permanecem vinculados. Por exemplo:",
     snippetsAdd: "Adicionar snippet",
     snippetsLabel: "Rótulo",
     snippetsPrefix: "Prefixo",

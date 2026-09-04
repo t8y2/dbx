@@ -6330,6 +6330,7 @@ export default withEnglishFallback({
     sidebarShowTooltipsDescription: "Mostra tooltip con dettagli al passaggio del mouse su connessioni e oggetti del database nella barra laterale. Disattiva per nasconderli.",
     snippetsDescription: "Personalizza i modelli di snippet SQL attivati nell'editor.",
     syncSnippetProviderGitee: "Snippet Gitee",
+    snippetsPlaceholderHint: "Usa {'${numero:testo predefinito}'} per creare un segnaposto modificabile. I segnaposto con lo stesso numero restano collegati. Ad esempio:",
     snippetsAdd: "Aggiungi Snippet",
     snippetsLabel: "Etichetta",
     snippetsPrefix: "Prefisso",

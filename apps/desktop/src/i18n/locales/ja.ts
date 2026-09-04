@@ -6356,6 +6356,7 @@ export default withEnglishFallback({
     sidebarShowTooltipsDescription: "サイドバーで接続やデータベースオブジェクトにホバーしたときに詳細ツールチップを表示します。オフにすると表示されません。",
     snippetsDescription: "エディタでトリガーされるSQLスニペットテンプレートをカスタマイズします。",
     syncSnippetProviderGitee: "Gitee コードスニペット",
+    snippetsPlaceholderHint: "{'${番号:デフォルトテキスト}'} で編集可能なプレースホルダーを作成できます。同じ番号のプレースホルダーは連動します。例：",
     snippetsAdd: "スニペットを追加",
     snippetsLabel: "ラベル",
     snippetsPrefix: "プレフィックス",

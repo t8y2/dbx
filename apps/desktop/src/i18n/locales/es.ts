@@ -6330,6 +6330,7 @@ export default withEnglishFallback({
     sidebarShowTooltipsDescription: "Muestra sugerencias con detalles al pasar el cursor sobre conexiones y objetos de la base de datos en la barra lateral. Desactívalo para ocultarlas.",
     snippetsDescription: "Personaliza plantillas SQL activadas en el editor.",
     syncSnippetProviderGitee: "Fragmentos de Gitee",
+    snippetsPlaceholderHint: "Usa {'${número:texto predeterminado}'} para crear un marcador editable. Los marcadores con el mismo número permanecen vinculados. Por ejemplo:",
     snippetsAdd: "Agregar fragmento",
     snippetsLabel: "Etiqueta",
     snippetsPrefix: "Prefijo",

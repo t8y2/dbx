@@ -6672,6 +6672,7 @@ export default {
     sidebarFontSize: "Sidebar font size",
     sidebarFontSizeDescription: "Font size for the sidebar object tree, in pixels. Independent of the editor font size.",
     snippetsDescription: "Customize SQL snippet templates triggered in the editor.",
+    snippetsPlaceholderHint: "Use {'${number:default text}'} to create an editable placeholder. Placeholders with the same number stay linked; for example:",
     snippetsAdd: "Add Snippet",
     snippetsLabel: "Label",
     snippetsPrefix: "Prefix",

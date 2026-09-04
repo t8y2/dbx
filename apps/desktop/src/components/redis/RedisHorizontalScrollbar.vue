@@ -116,7 +116,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="redis-horizontal-scroll-host" :class="{ 'is-scrolling': isScrolling, 'is-dragging': isDragging }">
-    <div ref="scrollRef" class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="onScroll">
+    <div ref="scrollRef" class="redis-format-tabs-scroll flex max-w-full overflow-x-auto rounded-md border bg-muted/20 p-0.5" @scroll="onScroll" @mouseenter="updateMetrics">
       <slot />
     </div>
     <div v-if="hasOverflow" ref="trackRef" class="redis-format-tabs-scrollbar" @pointerdown="onTrackPointerDown">

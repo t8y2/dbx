@@ -151,7 +151,7 @@
   <tr>
     <td width="50%">
       <h3>🪶 20 MB，极致轻量</h3>
-      <p>无需 Java 运行环境，无需 Python 虚拟环境，不内嵌 Chromium。DBX 是单个小巧的二进制文件——下载、安装、连接。DBeaver 依赖 Java；TablePlus 仅限 macOS。DBX 全平台可用，无需额外运行时。</p>
+      <p>无需 Java 运行环境，无需 Python 虚拟环境，不内嵌 Chromium。DBX 是单个小巧的二进制文件——下载、安装、连接。DBeaver 依赖 Java；TablePlus 是 Freemium。DBX 全平台可用，无需额外运行时。</p>
     </td>
     <td width="50%">
       <h3>🤖 AI 原生集成在编辑器里</h3>

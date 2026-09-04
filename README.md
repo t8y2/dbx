@@ -151,7 +151,7 @@
   <tr>
     <td width="50%">
       <h3>🪶 20 MB, zero runtime bloat</h3>
-      <p>No Java JRE. No Python venv. No bundled Chromium. DBX ships as a single small binary — download, install, connect. DBeaver needs Java; TablePlus is macOS-only. DBX runs everywhere with nothing extra.</p>
+      <p>No Java JRE. No Python venv. No bundled Chromium. DBX ships as a single small binary — download, install, connect. DBeaver needs Java; TablePlus is Freemium. DBX runs everywhere with nothing extra.</p>
     </td>
     <td width="50%">
       <h3>🤖 AI that lives in your editor</h3>

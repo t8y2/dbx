@@ -777,7 +777,7 @@ impl DbxMcpServer {
         // transaction mode (more than one statement). A single-statement script
         // ignores use_transaction and runs as normal auto-commit, so combining it
         // with session_id / continue_on_error must still be allowed.
-        let execution_plan = dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type);
+        let execution_plan = self.backend.execution_plan(connection, &database, sql).await;
         let statement_count = execution_plan.statements.len();
         let transactional = request.use_transaction == Some(true) && statement_count > 1;
         // A transactional batch runs on a pooled connection and returns one
@@ -866,7 +866,7 @@ impl DbxMcpServer {
         let execution = self.backend.execute_batch(connection, &database, schema, sql, options).await;
         if let Some(client_session_id) = ephemeral_client_session_id.as_deref() {
             if let Err(error) = self.backend.close_client_session(&connection.id, &database, client_session_id).await {
-                tracing::warn!(connection_id = %connection.id, "failed to close ephemeral MCP batch session: {error}");
+                log::warn!("failed to close ephemeral MCP batch session for {}: {error}", connection.id);
             }
         }
         match execution {

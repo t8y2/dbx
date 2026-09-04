@@ -2956,7 +2956,19 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     // Check the transaction request before database-specific fast paths. Otherwise
     // a backend such as SQL Server or HTTP SQLite can return successful
     // auto-commit results while the API has promised a rollbackable batch.
+    // The DDL cap applies only to this opt-in use_transaction contract: a script
+    // that the user asked to run atomically must not silently produce partial
+    // effects. Other callers that share the transaction kernel (schema-diff
+    // deploy, imports) document a mixed-outcome-on-failure behaviour instead, so
+    // they are deliberately not capped here.
     if options.use_transaction == Some(true) && statements.len() > 1 {
+        if batch_transaction_ddl_is_unrollbackable(db_type, &statements) {
+            return Err(
+                "use_transaction cannot be used with a batch whose DDL cannot be rolled back: DDL statements implicitly commit and cannot be undone. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls."
+                    .to_string()
+                    .into(),
+            );
+        }
         let result = execute_statements_in_transaction_typed(
             state,
             connection_id,
@@ -3117,7 +3129,12 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     Ok(results)
 }
 
-fn query_execution_plan(
+/// Split a batch script into the statements the core will execute, using the
+/// same dialect-aware splitter for every caller. SQL Server agent pools split on
+/// `GO` batch separators (`split_sql_batches`); everything else uses the
+/// database-dialect statement splitter. Public so the MCP pre-check can align its
+/// transaction-entry decision with the core's actual script split.
+pub fn query_execution_plan(
     sql: &str,
     db_type: Option<DatabaseType>,
     preserve_sqlserver_batches: bool,
@@ -3130,6 +3147,38 @@ fn query_execution_plan(
         || crate::sql::SqlExecutionPlan { statements: split_sql_statements(sql), stop_on_error: false },
         |db_type| crate::sql::sql_execution_plan_for_database(sql, db_type),
     )
+}
+
+/// Whether a connection's pool is the SQL Server agent driver, mirroring the
+/// predicate the core uses to select the batch splitter in [`query_execution_plan`].
+/// Reads the existing pool without creating one so callers (the MCP pre-check)
+/// can align their splitter without opening a connection. `false` for non-SQL
+/// Server connections and when no pool is open yet. A SQL Server connection
+/// backed by the legacy agent driver connects as `PoolKind::Agent` and is
+/// detected here; the native driver connects as `PoolKind::SqlServer` and
+/// returns `false`.
+pub async fn connection_pool_is_sqlserver_agent(state: &AppState, connection_id: &str, database: &str) -> bool {
+    let db_type = connection_database_type(state, connection_id).await;
+    if db_type != Some(DatabaseType::SqlServer) {
+        return false;
+    }
+
+    // SQL Server base pool keys are either `connection_id` (no database) or
+    // `connection_id:database`. Peek both without creating a pool.
+    let candidates = match database.trim() {
+        "" => vec![connection_id.to_string()],
+        db => vec![format!("{connection_id}:{db}"), connection_id.to_string()],
+    };
+    for key in candidates {
+        if let Some(pool) = state.pool_handle(&key).await {
+            return match pool {
+                PoolKind::Agent(_) => true,
+                PoolKind::SqlServer(_) => false,
+                _ => false,
+            };
+        }
+    }
+    false
 }
 
 fn single_statement_multi_result(
@@ -4182,13 +4231,6 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     timeout_secs: Option<u64>,
 ) -> Result<db::QueryResult, QueryExecutionError> {
     let db_type = connection_database_type(state, connection_id).await;
-    if batch_transaction_ddl_is_unrollbackable(db_type, statements) {
-        return Err(
-            "use_transaction cannot be used with a batch whose DDL cannot be rolled back: DDL statements implicitly commit and cannot be undone. Run the batch without use_transaction (auto-commit, one result per statement) or split the DDL and DML into separate calls."
-                .to_string()
-                .into(),
-        );
-    }
 
     // Read-only check: intercept all transaction paths before dispatching
     check_read_only_for_connection_multi(state, pool_key, statements).await?;
@@ -4265,12 +4307,15 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     result
 }
 
-/// Whether an explicit batch transaction (`use_transaction`) must be rejected
-/// because the backend's DDL statements implicitly commit and cannot be rolled
-/// back. Uses the same single capability predicate as the schema-diff deploy
-/// path (`database_supports_transactional_ddl`), so it covers every backend
-/// whose DDL is not rollbackable (MySQL-family and Oracle) without re-listing
-/// engines here. Public so the MCP layer can apply the identical check.
+/// Whether an opt-in explicit batch transaction (`use_transaction`) must be
+/// rejected because the backend's DDL statements implicitly commit and cannot be
+/// rolled back. Used by the opt-in batch-transaction entry point (the
+/// `use_transaction` branch of [`execute_multi_core_with_options_for_client_and_progress_typed`])
+/// and by the MCP layer's identical pre-check. It covers every backend whose DDL
+/// is not rollbackable (MySQL-family and Oracle) via the single capability
+/// predicate (`database_supports_transactional_ddl`) without re-listing engines
+/// here. Paths that document a mixed-outcome-on-failure behaviour (schema-diff
+/// deploy, imports) do not call this and keep running-and-reporting.
 pub fn batch_transaction_ddl_is_unrollbackable(db_type: Option<DatabaseType>, statements: &[String]) -> bool {
     let Some(db_type) = db_type else {
         return false;
@@ -7167,6 +7212,80 @@ for line in sys.stdin:
         assert!(!batch_transaction_ddl_is_unrollbackable(Some(DatabaseType::Sqlite), &ddl));
         // An unknown db type cannot be verified — do not risk rejecting valid DDL batches.
         assert!(!batch_transaction_ddl_is_unrollbackable(None, &ddl));
+    }
+
+    #[tokio::test]
+    async fn connection_pool_is_sqlserver_agent_detects_agent_and_native_pools() {
+        let dir = std::env::temp_dir().join(format!("dbx-query-sqlserver-agent-flag-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+
+        // Non-SQL-Server connections never use the SQL Server agent splitter.
+        state.configs.write().await.insert("pg".to_string(), test_connection_config(DatabaseType::Postgres));
+        assert!(!connection_pool_is_sqlserver_agent(&state, "pg", "").await);
+
+        // SQL Server with no pool yet defaults to the native (non-agent) splitter.
+        state.configs.write().await.insert("mssql".to_string(), test_connection_config(DatabaseType::SqlServer));
+        assert!(!connection_pool_is_sqlserver_agent(&state, "mssql", "").await);
+
+        // A SQL Server connection backed by the agent driver is detected, so the
+        // MCP pre-check uses the same GO-batch splitter as the core.
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(
+                    "mssql".to_string(),
+                    PoolKind::agent(crate::db::agent_driver::AgentDriverClient::test_stub()),
+                );
+            })
+            .await;
+        assert!(connection_pool_is_sqlserver_agent(&state, "mssql", "").await);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn transaction_kernel_dispatches_by_backend_capability_not_ddl_content() {
+        // Regression for the maintainer review: the unrollbackable-DDL cap now lives
+        // only in the opt-in use_transaction entry point. The shared transaction
+        // kernel dispatches on the backend's transaction capability, so the
+        // use_transaction error never leaks to callers that share the kernel but do
+        // not set it (schema-diff deploy, imports), which document a mixed outcome
+        // on failure for DDL that cannot be rolled back.
+        let dir = std::env::temp_dir().join(format!("dbx-query-tx-predispatch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "message-queue-tx-ddl";
+        state
+            .update_connection_pools(|pools| {
+                pools.insert(connection_id.to_string(), PoolKind::MessageQueue);
+            })
+            .await;
+        state.configs.write().await.insert(connection_id.to_string(), test_connection_config(DatabaseType::Redis));
+
+        let error = execute_statements_in_transaction_on_pool(
+            &state,
+            connection_id,
+            connection_id,
+            "",
+            &["CREATE TABLE t (id INT)".to_string()],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.contains("cannot provide a rollbackable transaction"),
+            "expected a backend-capability reject, got: {error}"
+        );
+        assert!(
+            !error.contains("whose DDL cannot be rolled back"),
+            "the opt-in use_transaction DDL cap leaked into the shared transaction kernel: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

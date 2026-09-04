@@ -287,6 +287,20 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, schema, sql, options);
         Err("SQL batch execution is not supported by this backend.".to_string())
     }
+    /// Dialect-aware execution plan for a batch script, computed the way the core
+    /// will split it (including the SQL Server agent `GO`-batch splitter), so the
+    /// MCP pre-check's transaction-entry decision never diverges from the core.
+    /// The in-process backend overrides this to resolve the pool's agent-ness;
+    /// the default is the database-dialect splitter.
+    async fn execution_plan(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+    ) -> dbx_core::sql::SqlExecutionPlan {
+        let _ = database;
+        dbx_core::sql::sql_execution_plan_for_database(sql, connection.db_type)
+    }
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String>;
     async fn duplicate_connection_for_mcp(
         &self,
@@ -796,6 +810,17 @@ impl DbxBackend for LocalBackend {
         ))
         .await?;
         Ok(results.into_iter().map(BatchStatementResult::from).collect())
+    }
+
+    async fn execution_plan(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+    ) -> dbx_core::sql::SqlExecutionPlan {
+        let is_sqlserver_agent =
+            dbx_core::query::connection_pool_is_sqlserver_agent(self.state.as_ref(), &connection.id, database).await;
+        dbx_core::query::query_execution_plan(sql, Some(connection.db_type), is_sqlserver_agent)
     }
 
     async fn add_connection_for_mcp(&self, config: ConnectionConfig) -> Result<ConnectionConfig, String> {

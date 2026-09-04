@@ -1937,7 +1937,7 @@ defineExpose({
           <span v-if="activeConnection?.name?.trim()" data-data-header-connection class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground" :title="activeConnection.name">
             {{ activeConnection.name }}
           </span>
-          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium" :title="activeTab.tableMeta?.tableName || activeTab.title">
+          <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 font-medium" :title="activeDataTabTableMeta?.tableName || activeTab.title">
             {{ activeDataTabTableMeta?.tableName || activeTab.title }}
           </span>
           <span class="inline-flex min-w-12 items-center truncate rounded border border-border bg-muted/30 px-2 py-0.5 text-muted-foreground" :title="[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')">

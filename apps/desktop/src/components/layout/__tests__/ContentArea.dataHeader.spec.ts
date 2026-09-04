@@ -21,7 +21,7 @@ describe("ContentArea data-mode header", () => {
   });
 
   it("keeps the full table and schema names reachable via title tooltips", () => {
-    expect(contentAreaSource).toContain(':title="activeTab.tableMeta?.tableName || activeTab.title"');
-    expect(contentAreaSource).toContain("[activeTab.tableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')");
+    expect(contentAreaSource).toContain(':title="activeDataTabTableMeta?.tableName || activeTab.title"');
+    expect(contentAreaSource).toContain("[activeDataTabTableMeta?.schema, databaseDisplayNameForTab(activeTab.connectionId, activeTab.database, t)].filter(Boolean).join('@')");
   });
 });

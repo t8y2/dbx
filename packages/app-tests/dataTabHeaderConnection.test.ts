@@ -22,7 +22,7 @@ function dataModeTemplate(): string {
 test("data tab header shows the active connection before the table context", () => {
   const template = dataModeTemplate();
   const connectionIndex = template.indexOf("data-data-header-connection");
-  const tableIndex = template.indexOf("activeTab.tableMeta?.tableName");
+  const tableIndex = template.indexOf("activeDataTabTableMeta?.tableName");
 
   assert.ok(connectionIndex >= 0 && connectionIndex < tableIndex);
   assert.match(template, /v-if="activeConnection\?\.name\?\.trim\(\)"/);

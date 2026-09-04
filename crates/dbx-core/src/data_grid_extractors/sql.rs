@@ -5,9 +5,9 @@ use super::{
 };
 use crate::data_grid_sql::{
     build_column_predicate, build_data_grid_copy_insert_statement, build_data_grid_copy_update_statements,
-    data_grid_qualified_table_name, format_grid_sql_literal, is_auto_generated_column, is_grid_insert_omitted_column,
-    is_non_identity_generated_column, supports_relational_copy_predicates, DataGridCopyInsertStatementOptions,
-    DataGridCopyUpdateStatementOptions, DataGridTableMeta,
+    data_grid_qualified_table_name, format_grid_sql_literal_with_identifier_quote, is_auto_generated_column,
+    is_grid_insert_omitted_column, is_non_identity_generated_column, supports_relational_copy_predicates,
+    DataGridCopyInsertStatementOptions, DataGridCopyUpdateStatementOptions, DataGridTableMeta,
 };
 use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
@@ -31,7 +31,15 @@ pub(super) fn write_sql_in_list(
             }
             let value = &row[*source_index];
             let info = context.selected_column_info[column_index];
-            tuple.extend_from_slice(format_grid_sql_literal(value, context.request.database_type, info).as_bytes());
+            tuple.extend_from_slice(
+                format_grid_sql_literal_with_identifier_quote(
+                    value,
+                    context.request.database_type,
+                    info,
+                    context.request.identifier_quote.as_deref(),
+                )
+                .as_bytes(),
+            );
         }
         if context.selected_columns.len() > 1 {
             tuple.push(b')');

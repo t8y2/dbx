@@ -4,14 +4,19 @@ import type { lineNumbers } from "@codemirror/view";
 type LineNumbersFactory = typeof lineNumbers;
 type LineNumbersConfig = NonNullable<Parameters<LineNumbersFactory>[0]>;
 
-export const WRAPPED_LINE_NUMBER_GUTTER_CLASS = "cm-db-wrapped-line-number";
-
 export function isWrappedLineNumberGutter(gutterHeight: number, lineHeight: number): boolean {
   return gutterHeight > lineHeight + 1;
 }
 
 export function buildQueryEditorLineNumbersExtension(factory: LineNumbersFactory | null, enabled: boolean, config: LineNumbersConfig): Extension {
   return enabled && factory ? factory(config) : [];
+}
+
+export function setQueryEditorLineNumberAlignment(element: HTMLElement, wrapped: boolean): void {
+  // CodeMirror rebuilds gutter class names as marker state changes. Keep this
+  // measured layout state inline so selection and active-line updates cannot
+  // restore the base centered alignment for a wrapped line.
+  element.style.alignItems = wrapped ? "flex-start" : "";
 }
 
 export function createQueryEditorLineNumberAlignmentExtension(ViewPlugin: typeof import("@codemirror/view").ViewPlugin): Extension {
@@ -44,7 +49,7 @@ export function createQueryEditorLineNumberAlignmentExtension(ViewPlugin: typeof
           },
           write: (measurements) => {
             this.measureScheduled = false;
-            for (const { element, wrapped } of measurements) element.classList.toggle(WRAPPED_LINE_NUMBER_GUTTER_CLASS, wrapped);
+            for (const { element, wrapped } of measurements) setQueryEditorLineNumberAlignment(element, wrapped);
           },
         });
       }

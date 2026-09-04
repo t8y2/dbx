@@ -756,7 +756,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           }
           outputPath = path as string;
         }
-        await api.exportQueryResultCsv(outputPath, result.columns, rows);
+        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -795,7 +795,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path as string;
         }
         const result = await resultToExport(undefined, undefined, false);
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows);
+        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1154,6 +1154,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: meta.tableName,
           filePath: outputPath,
           format,
+          csvQuoteMode: editorSettings.csvQuoteMode,
           columns: columns.value,
           columnTypes: columnTypes.value,
           columnComments: format === "xlsx" ? buildXlsxHeaderOverrides(columns.value, visibleXlsxColumnComments.value, headerMode) : undefined,
@@ -1227,7 +1228,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
     const request = baseRequest
-      ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined, numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true, columnComments, autoFilter: format === "xlsx" ? autoFilter : undefined }
+      ? {
+          ...baseRequest,
+          csvQuoteMode: useSettingsStore().editorSettings.csvQuoteMode,
+          dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
+          numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
+          columnComments,
+          autoFilter: format === "xlsx" ? autoFilter : undefined,
+        }
       : undefined;
     if (!request) throw new Error("Unable to build query result export request");
 

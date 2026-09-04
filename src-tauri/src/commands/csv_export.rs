@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::commands::connection::AppState;
-use dbx_core::csv_export::{export_table_data_csv_core, format_query_result_csv, TableCsvExportOptions};
+use dbx_core::csv_export::{
+    export_table_data_csv_core, format_query_result_csv_with_quote_mode, CsvQuoteMode, TableCsvExportOptions,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tauri::State;
@@ -12,12 +14,14 @@ pub struct QueryResultCsvExportRequest {
     pub file_path: String,
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
+    #[serde(default)]
+    pub csv_quote_mode: CsvQuoteMode,
 }
 
 #[tauri::command]
 pub async fn export_query_result_csv(request: QueryResultCsvExportRequest) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let csv = format_query_result_csv(&request.columns, &request.rows);
+        let csv = format_query_result_csv_with_quote_mode(&request.columns, &request.rows, request.csv_quote_mode);
         std::fs::write(&request.file_path, format!("\u{FEFF}{csv}")).map_err(|err| err.to_string())
     })
     .await

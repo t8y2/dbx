@@ -7711,7 +7711,13 @@ export const useConnectionStore = defineStore("connection", () => {
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
     const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}`;
-    if (completionTablesCache.value[cacheKey]) {
+    const cachedTables = completionTablesCache.value[cacheKey];
+    if (cachedTables) {
+      const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
+      if (localTables.length === 0) return cachedTables;
+      const mergedTables = dedupeCompletionTables([...localTables, ...cachedTables]);
+      completionTablesCache.value[cacheKey] = limit ? mergedTables.slice(0, limit) : mergedTables;
+      indexCompletionTables(connectionId, database, schema, completionTablesCache.value[cacheKey], catalog);
       return completionTablesCache.value[cacheKey];
     }
     const requestRevision = completionCacheRevision(connectionId, database);

@@ -56,3 +56,11 @@ test("round-trips completion selection behavior through the editor settings draf
   assert.deepEqual(patch, { selectFirstCompletionOnOpen: false });
   assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).selectFirstCompletionOnOpen, false);
 });
+
+test("round-trips the persisted CSV quote mode through the editor settings draft", () => {
+  const base = editorSettingsDraftFromSettings(DEFAULT_EDITOR_SETTINGS);
+  const patch = editorSettingsPatchFromDraft({ ...base, csvQuoteMode: "necessary" }, base);
+
+  assert.deepEqual(patch, { csvQuoteMode: "necessary" });
+  assert.equal(editorSettingsDraftFromSettings({ ...DEFAULT_EDITOR_SETTINGS, ...patch }).csvQuoteMode, "necessary");
+});

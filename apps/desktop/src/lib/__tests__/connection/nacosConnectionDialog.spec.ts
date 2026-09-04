@@ -31,6 +31,7 @@ describe("Nacos connection dialog layout", () => {
     expect(main).toContain('t("nacos.nacosAdvancedHint")');
     expect(main).toContain("@click=\"configTab = 'advanced'\"");
     expect(main).toContain('v-model="nacosServerAddr"');
+    expect(main).not.toContain('v-model="nacosConsoleUrl"');
     expect(main).not.toContain('v-model="nacosManagedNamespacesText"');
     expect(main).not.toContain("data-nacos-namespace-access-scope");
     expect(main).not.toContain("data-nacos-ordinary-user-toggle");
@@ -52,6 +53,9 @@ describe("Nacos connection dialog layout", () => {
     expect(advanced).toContain('v-model="nacosContextPath"');
     expect(advanced).toContain('t("nacos.nacosContextPathHint")');
     expect(advanced).toContain('v-model="nacosMetricsMode"');
+    expect(advanced).toContain('v-model="nacosConsoleUrl"');
+    expect(advanced).toContain('t("connection.nacosWebConsoleUrlHint")');
+    expect(advanced).toContain('v-if="isNacosV3AdminPlane"');
     expect(advanced).toContain('v-model="nacosRNacosConsoleAddr"');
     expect(advanced).toContain('v-if="nacosRNacosConsoleAddr.trim()"');
     expect(advanced).toContain('v-model="nacosHistoryEnabled"');
@@ -67,6 +71,7 @@ describe("Nacos connection dialog layout", () => {
     const mainEnd = source.indexOf("<!-- Redis: host, port, user, password, ssl -->", mainStart);
     expect(source.slice(mainStart, mainEnd)).not.toContain("data-nacos-managed-namespaces");
     expect(source.slice(mainStart, mainEnd)).not.toContain('placeholder="http://127.0.0.1:8080"');
+    expect(source).toContain('return "http://127.0.0.1:8080";');
     expect(source).not.toContain("http://127.0.0.1:8010");
     expect(source).not.toContain("http://127.0.0.1:8818");
   });

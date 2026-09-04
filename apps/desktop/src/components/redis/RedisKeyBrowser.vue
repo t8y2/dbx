@@ -1107,8 +1107,8 @@ function requestBatchDelete() {
   showDangerConfirm.value = true;
 }
 
-function requestGroupDelete(node: RedisKeyTreeNode, event: Event) {
-  event.stopPropagation();
+function requestGroupDelete(node: RedisKeyTreeNode, event?: Event) {
+  event?.stopPropagation();
   if (node.kind !== "group" || selectionBusy.value) return;
   const keyRaws = collectRedisGroupKeyRaws(node);
   if (keyRaws.length === 0) return;
@@ -1143,6 +1143,34 @@ async function copyRedisKeyName(keyName: string) {
 }
 
 function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
+  if (node.kind === "group") {
+    const groupPath = node.pathSegments.join(redisKeySeparator.value);
+    const items: ContextMenuItem[] = [
+      {
+        label: t("redis.createKey"),
+        icon: Plus,
+        action: () => openCreateKeyDialog(`${groupPath}${redisKeySeparator.value}`),
+      },
+      {
+        label: t("redis.copyKeyPath"),
+        icon: Copy,
+        action: () => copyRedisKeyName(groupPath),
+      },
+    ];
+    // Fuzzy hierarchy represents only the loaded matching subset. Keep its
+    // destructive actions hidden, matching the inline group-delete button.
+    if (!isFuzzyHierarchyView.value) {
+      items.push({
+        label: t("redis.deleteGroupKeys"),
+        icon: Trash2,
+        variant: "destructive",
+        action: () => requestGroupDelete(node),
+        disabled: () => selectionBusy.value,
+      });
+    }
+    return items;
+  }
+
   const copyText = redisKeyNameCopyText(node);
   if (copyText === null) return [];
   return [
@@ -1155,8 +1183,7 @@ function redisKeyContextMenuItems(node: RedisKeyTreeNode): ContextMenuItem[] {
 }
 
 function onRedisRowContextMenu(event: MouseEvent, node: RedisKeyTreeNode, openContextMenu: (event: MouseEvent) => void) {
-  if (node.kind !== "leaf") return;
-  selectedKeyRaw.value = node.keyRaw;
+  if (node.kind === "leaf") selectedKeyRaw.value = node.keyRaw;
   openContextMenu(event);
 }
 
@@ -1400,8 +1427,9 @@ function onCreateKeyTypeChange(type: any) {
   }
 }
 
-function openCreateKeyDialog() {
+function openCreateKeyDialog(initialKeyName = "") {
   resetCreateKeyForm();
+  createKeyName.value = initialKeyName;
   showCreateKeyDialog.value = true;
 }
 
@@ -2354,7 +2382,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <template #default="{ item: row }">
               <CustomContextMenu :items="redisKeyContextMenuItems(row.node)" v-slot="{ onContextMenu, isOpen }">
                 <div
-                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer group"
+                  class="flex items-center gap-2 border-b px-3 text-[13px] cursor-pointer select-none group"
                   :class="[
                     isOpen || (row.node.kind === 'leaf' && selectedKeyRaw === row.node.keyRaw) ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/40',
                     row.node.kind === 'leaf' ? (isLeafChecked(row.node.keyRaw) && selectedKeyRaw !== row.node.keyRaw ? 'bg-primary/10' : undefined) : groupSelectedCount(row.node) > 0 ? 'bg-primary/10' : undefined,

@@ -2551,6 +2551,11 @@ async fn list_tables_once(
                 .await
                 .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
         }
+        PoolKind::Mysql(p, _) if db_config.as_ref().is_some_and(db::oceanbase_mysql::is_config) => {
+            db::oceanbase_mysql::list_tables(p, mysql_table_metadata_catalog(database, schema))
+                .await
+                .map(|tables| filter_table_infos(tables, filter, limit, offset, object_types, table_name_filter))
+        }
         PoolKind::Mysql(p, mode) => {
             if *mode == MysqlMode::OceanBaseOracle {
                 let tables = db::ob_oracle::list_tables(p, schema).await?;
@@ -3059,9 +3064,9 @@ mod tests {
         ephemeral_agent_metadata_session_id, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
         filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
         finalize_object_source, gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql,
-        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_retryable_metadata_error,
-        metadata_error_action, metadata_name_or_comment_matches, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_oracle_external_driver_config,
+        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_current_schema_from_query_result,
@@ -3467,6 +3472,28 @@ mod tests {
 
         config.jdbc_driver_class = Some("org.mariadb.jdbc.Driver".to_string());
         assert!(!is_mysql_external_driver_config(&config));
+    }
+
+    #[test]
+    fn oracle_external_driver_detection_only_accepts_standard_jdbc_signals() {
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some(" jdbc:oracle:thin:@//127.0.0.1:1521/ORCL ".to_string());
+        assert!(is_oracle_external_driver_config(&config));
+
+        config.connection_string = Some("jdbc:postgresql://127.0.0.1:5432/demo".to_string());
+        config.jdbc_driver_class = Some("oracle.jdbc.OracleDriver".to_string());
+        assert!(!is_oracle_external_driver_config(&config));
+
+        config.connection_string = None;
+        config.jdbc_driver_class = Some(" oracle.jdbc.driver.OracleDriver ".to_string());
+        assert!(is_oracle_external_driver_config(&config));
+
+        config.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/ORCL".to_string());
+        config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
+        assert!(!is_oracle_external_driver_config(&config));
+
+        config.db_type = DatabaseType::Oracle;
+        assert!(!is_oracle_external_driver_config(&config));
     }
 
     #[test]
@@ -5984,6 +6011,8 @@ async fn list_objects_once(
                 db::manticoresearch::list_objects(p, database).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(db::starrocks::is_config) {
                 db::starrocks::list_table_objects(p, database).await.map(unpaged_object_list)
+            } else if db_config.as_ref().is_some_and(db::oceanbase_mysql::is_config) {
+                db::oceanbase_mysql::list_objects(p, database).await.map(unpaged_object_list)
             } else if db_config.as_ref().is_some_and(db::mysql_compatible::uses_show_metadata) {
                 db::mysql::list_table_objects_show(p, database).await.map(unpaged_object_list)
             } else if mysql_table_list_source_for_config(db_config.as_ref()) == MysqlTableListSource::ShowFullTables {
@@ -7607,6 +7636,11 @@ async fn get_table_ddl_once(
     {
         let pool_handle = state.pool_handle(&pool_key).await;
         if let Some(PoolKind::ExternalDriver { config, session, .. }) = pool_handle.as_ref() {
+            if is_oracle_external_driver_config(config.as_ref()) {
+                let config = config.clone();
+                let session = session.clone();
+                return external_driver_oracle_ddl(session, config.as_ref(), database, schema, table).await;
+            }
             if external_driver_uses_mysql_ddl(config.as_ref()) {
                 let config = config.clone();
                 let session = session.clone();
@@ -7904,6 +7938,26 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
     let mysql_driver = driver_class.map(|value| matches!(value, "com.mysql.cj.jdbc.Driver" | "com.mysql.jdbc.Driver"));
 
     match (mysql_url, mysql_driver) {
+        (Some(url_matches), Some(driver_matches)) => url_matches && driver_matches,
+        (Some(url_matches), None) => url_matches,
+        (None, Some(driver_matches)) => driver_matches,
+        (None, None) => false,
+    }
+}
+
+fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {
+    if config.db_type != DatabaseType::Jdbc {
+        return false;
+    }
+
+    let connection_string = config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let driver_class = config.jdbc_driver_class.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    let oracle_url = connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:oracle:"));
+    let oracle_driver = driver_class.map(|value| {
+        matches!(value.to_ascii_lowercase().as_str(), "oracle.jdbc.oracledriver" | "oracle.jdbc.driver.oracledriver")
+    });
+
+    match (oracle_url, oracle_driver) {
         (Some(url_matches), Some(driver_matches)) => url_matches && driver_matches,
         (Some(url_matches), None) => url_matches,
         (None, Some(driver_matches)) => driver_matches,
@@ -10726,6 +10780,34 @@ async fn external_driver_mysql_ddl(
         )
         .await?;
     mysql_external_driver_ddl_from_query_result(result, "Create Table")
+}
+
+async fn external_driver_oracle_ddl(
+    session: std::sync::Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let result: serde_json::Value = session
+        .invoke_with_timeout(
+            "getObjectSource",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "name": table,
+                "object_type": "TABLE",
+            }),
+            agent_metadata_timeout(Some(config)),
+        )
+        .await?;
+    result
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| !source.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "JDBC Oracle plugin returned no table DDL".to_string())
 }
 
 fn normalize_mysql_display_ddl(sql: String) -> String {

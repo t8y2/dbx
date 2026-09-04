@@ -7,6 +7,7 @@ import es from "../../apps/desktop/src/i18n/locales/es.ts";
 import it from "../../apps/desktop/src/i18n/locales/it.ts";
 import ja from "../../apps/desktop/src/i18n/locales/ja.ts";
 import ko from "../../apps/desktop/src/i18n/locales/ko.ts";
+import tr from "../../apps/desktop/src/i18n/locales/tr.ts";
 import ptBR from "../../apps/desktop/src/i18n/locales/pt-BR.ts";
 import zhCN from "../../apps/desktop/src/i18n/locales/zh-CN.ts";
 import zhTW from "../../apps/desktop/src/i18n/locales/zh-TW.ts";
@@ -80,7 +81,7 @@ test("ContentArea wires server messages into the switcher and the messages view"
 });
 
 test("every locale defines the query message strings", () => {
-  const locales = { en, es, it, ja, ko, "pt-BR": ptBR, "zh-CN": zhCN, "zh-TW": zhTW };
+  const locales = { en, es, it, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 
   for (const [name, locale] of Object.entries(locales)) {
     assert.ok(locale.queryMessages.empty.length > 0, `${name}: queryMessages.empty`);

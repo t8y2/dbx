@@ -864,6 +864,7 @@ mod tests {
             proxy_url: String::new(),
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::High,
+            max_output_tokens: None,
             runtime_effort: Some(AiEffortSelection::Enum("high".to_string())),
             context_window: None,
             max_retries: None,

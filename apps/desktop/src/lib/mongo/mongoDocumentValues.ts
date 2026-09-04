@@ -52,7 +52,9 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
 
   const trimmed = raw.trim();
   if (trimmed === "NULL") return null;
-  if (/^(true|false|null)$/i.test(trimmed)) return JSON.parse(trimmed.toLowerCase());
+  if (/^true$/i.test(trimmed)) return true;
+  if (/^false$/i.test(trimmed)) return false;
+  if (/^null$/i.test(trimmed)) return null;
 
   const shellDate = mongoShellDateToExtendedJson(trimmed);
   if (shellDate !== trimmed) return shellDate;
@@ -68,7 +70,12 @@ export function parseMongoDocumentInputValue(raw: MongoInputValue): unknown {
   }
   if (/^-?\d+\.\d+$/.test(trimmed)) return Number(trimmed);
   if (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"')) {
-    return mongoShellDateToExtendedJson(JSON.parse(trimmed));
+    try {
+      return mongoShellDateToExtendedJson(JSON.parse(trimmed));
+    } catch {
+      // JSON-shaped text is still valid user data when it is not valid JSON.
+      return raw;
+    }
   }
   return raw;
 }

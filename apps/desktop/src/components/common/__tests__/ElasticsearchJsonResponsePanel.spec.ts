@@ -125,6 +125,44 @@ afterEach(() => {
 });
 
 describe("ElasticsearchJsonResponsePanel search", () => {
+  it("shows individual Elasticsearch search hits as complete JSON documents", async () => {
+    const body = `{
+      "hits": {
+        "hits": [
+          {
+            "_id": "document-1",
+            "_index": "products",
+            "_score": 1,
+            "_version": 4,
+            "_source": { "name": "Ada", "accountId": 9007199254740993, "tags": ["admin"] },
+            "highlight": { "name": ["<em>Ada</em>"] }
+          },
+          { "_id": "document-2", "_source": { "name": "Grace" } }
+        ]
+      }
+    }`;
+    const { panel, panelElement } = await mountResponsePanel(body, false);
+    const documentButton = [...root!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "mongo.documentView");
+
+    expect(documentButton).toBeDefined();
+    documentButton!.click();
+    await flushUi();
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"_id": "document-1"');
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"_version": 4');
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"highlight": {');
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"accountId": 9007199254740993');
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"tags": [');
+
+    [...root!.querySelectorAll<HTMLButtonElement>("aside button")].find((button) => button.textContent === "document-2")!.click();
+    await flushUi();
+    expect(root!.querySelector("[data-redis-json-editor-stub]")?.textContent).toContain('"_id": "document-2"');
+
+    panelElement.focus();
+    expect(panel.focusSearch()).toBe(true);
+    await flushUi();
+    expect(mocks.openJsonSearch).toHaveBeenCalledOnce();
+  });
+
   it("uses the read-only Redis JSON editor for formatted JSON responses", async () => {
     const { panel, panelElement } = await mountResponsePanel('{"name":"Ada"}', false);
     const editor = root!.querySelector<HTMLElement>("[data-redis-json-editor-stub]");

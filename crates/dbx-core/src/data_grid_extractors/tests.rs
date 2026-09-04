@@ -249,6 +249,34 @@ fn sql_in_list_deduplicates_only_identical_rendered_literals() {
 }
 
 #[test]
+fn sql_in_list_honors_kingbase_bit_literals() {
+    let mut request = request(DataGridExtractorId::SqlInList);
+    request.database_type = Some(DatabaseType::Kingbase);
+    request.identifier_quote = Some("`".to_string());
+    request.columns = vec![column("flag", 0)];
+    request.selected_column_indexes = vec![0];
+    request.table_meta = Some(DataGridTableMeta {
+        catalog: None,
+        database: None,
+        schema: None,
+        table_name: "flags".to_string(),
+        primary_keys: vec![],
+        columns: Some(vec![DataGridColumnInfo {
+            name: "flag".to_string(),
+            data_type: "pg_catalog.bit(1)".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            column_default: None,
+            extra: None,
+        }]),
+    });
+    request.rows = vec![vec![json!("0")], vec![json!("1")]];
+
+    let result = extract_data_grid_selection(request).expect("Kingbase SQL IN extraction");
+    assert_eq!(result.text, "(b'0', b'1')");
+}
+
+#[test]
 fn preserves_duplicate_json_columns_without_overwriting_values() {
     let mut request = request(DataGridExtractorId::Json);
     request.columns[1].display_name = "id".to_string();

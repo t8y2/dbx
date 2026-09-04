@@ -651,6 +651,7 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   // complete. Bound every user-triggered page to a cumulative COUNT budget,
   // preserve the returned cursor, and let the existing "Load more" action
   // continue sparse searches without turning one request into a full scan.
+  const isFuzzyKeySearch = searchMode.value === "key" && fuzzyKeySearch.value;
   let scanCountBudget = redisFuzzySearchScanBudget(0);
   const iterationsPerCall = 8;
   const perCallMaxIterations = Math.max(1, Math.ceil(scanCountBudget / Math.max(1, pageSize)));
@@ -661,10 +662,7 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
   let maxIterations = iterationBudget ? Math.max(0, Math.min(perCallMaxIterations, iterationBudget.remaining)) : perCallMaxIterations;
   let completedIterations = 0;
   let cursor = scanCursor.value;
-  // Continuation pages (cursor != 0) never get total_keys from the backend,
-  // so seed from the keyspace size remembered by the last applied page —
-  // that is what lets the fuzzy budget grow on "Load more" as well.
-  let totalKeys = lastTotalKeys.value;
+  let totalKeys = 0;
 
   while (completedIterations < maxIterations) {
     if (!isCurrentScanOperation(requestId, operationId)) break;
@@ -672,8 +670,8 @@ async function fetchScanPage(requestId = searchRequestId, operationId?: number, 
     if (iterationBudget) iterationBudget.remaining -= iterations;
     const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, effectivePattern.value, pageSize, iterations, true);
     completedIterations += iterations;
-    if (result.total_keys > 0) totalKeys = result.total_keys;
-    if (isFuzzyKeySearch.value && totalKeys > 0) {
+    if (totalKeys === 0) totalKeys = result.total_keys;
+    if (isFuzzyKeySearch && totalKeys > 0) {
       scanCountBudget = redisFuzzySearchScanBudget(totalKeys);
       const fuzzyMaxIterations = Math.ceil(scanCountBudget / Math.max(1, pageSize));
       const availableIterations = iterationBudget ? completedIterations + iterationBudget.remaining : fuzzyMaxIterations;

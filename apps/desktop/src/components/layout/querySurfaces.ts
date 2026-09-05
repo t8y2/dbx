@@ -87,6 +87,7 @@ export interface ContentAreaSurfaceEmits {
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   objectSchemaChange: [tabId: string, schema: string | undefined];
+  objectBrowserSearchChange: [tabId: string, search: string];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   structureEditorSaved: [tabId: string, commentChanged: boolean];
   structureEditorClose: [tabId: string];

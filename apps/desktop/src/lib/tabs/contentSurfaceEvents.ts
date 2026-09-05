@@ -33,6 +33,7 @@ export const contentSurfaceEventNames = [
   "openObjectSource",
   "openObjectTable",
   "objectSchemaChange",
+  "objectBrowserSearchChange",
   "objectBrowserViewportChange",
   "structureEditorSaved",
   "structureEditorClose",

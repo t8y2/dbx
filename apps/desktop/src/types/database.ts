@@ -1291,6 +1291,7 @@ export interface QueryTab {
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
+    search?: string;
     viewport?: ObjectBrowserViewport;
   };
   objectSource?: {

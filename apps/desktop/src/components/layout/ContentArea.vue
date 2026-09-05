@@ -2495,9 +2495,11 @@ defineExpose({
           :initial-event-open-request-id="activeTab.objectBrowser?.eventOpenRequestId"
           :initial-event-create-request-id="activeTab.objectBrowser?.eventCreateRequestId"
           :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
+          :search="activeTab.objectBrowser?.search"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', activeTab.id, $event)"
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
+          @search-change="emit('objectBrowserSearchChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
         />
       </div>

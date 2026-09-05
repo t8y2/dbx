@@ -3591,6 +3591,7 @@ onUnmounted(() => {
                       }
                     "
                     @object-schema-change="(tabId: string, schema: string | undefined) => queryStore.updateSchema(tabId, schema)"
+                    @object-browser-search-change="(tabId: string, search: string) => queryStore.updateObjectBrowserSearch(tabId, search)"
                     @object-browser-viewport-change="(tabId: string, viewport: any) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
                     @structure-editor-saved="
                       (tabId: string, commentChanged: boolean) => {

@@ -223,4 +223,92 @@ describe("SidebarTreeRuntimeHost arrow navigation", () => {
     expect(event.defaultPrevented).toBe(false);
     expect(connectionStore.selectedTreeNodeId).toBe("t1");
   });
+
+  it("ArrowRight does not expand a PostgreSQL custom type without members", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "postgres", name: "connection" });
+    const typeNode: TreeNode = {
+      id: "status",
+      label: "status",
+      type: "type",
+      connectionId: "postgres",
+      database: "public",
+      hasMembers: false,
+      isExpanded: false,
+      children: [{ id: "status-attr", label: "status", type: "type-attributes", connectionId: "postgres", database: "public" }],
+    };
+    connectionStore.treeNodes = [typeNode];
+    selectNode("status");
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [typeNode],
+            getVisibleNodeIndex: () => 0,
+            getVisibleFlatNodes: () => flattenTree([typeNode]),
+            focusTreeNode: vi.fn(),
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: typeNode, depth: 3 });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    const event = arrowEvent("ArrowRight");
+    host.value?.handleRowKeydown(typeNode, event);
+    await nextTick();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(typeNode.isExpanded).toBe(false);
+    expect(connectionStore.selectedTreeNodeId).toBe("status");
+  });
+
+  it("ArrowRight expands a PostgreSQL custom type that has members", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "postgres", name: "connection" });
+    const typeNode: TreeNode = {
+      id: "address",
+      label: "address",
+      type: "type",
+      connectionId: "postgres",
+      database: "public",
+      hasMembers: true,
+      isExpanded: false,
+      children: [{ id: "address-attr", label: "address", type: "type-attributes", connectionId: "postgres", database: "public" }],
+    };
+    connectionStore.treeNodes = [typeNode];
+    selectNode("address");
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup() {
+          provide(sidebarTreeContextKey, {
+            getVisibleNodes: () => [typeNode],
+            getVisibleNodeIndex: () => 0,
+            getVisibleFlatNodes: () => flattenTree([typeNode]),
+            focusTreeNode: vi.fn(),
+          });
+          return () => h(SidebarTreeRuntimeHost, { ref: host, node: typeNode, depth: 3 });
+        },
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    const event = arrowEvent("ArrowRight");
+    host.value?.handleRowKeydown(typeNode, event);
+    await nextTick();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(typeNode.isExpanded).toBe(true);
+    expect(connectionStore.selectedTreeNodeId).toBe("address");
+  });
 });

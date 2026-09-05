@@ -1498,12 +1498,18 @@ async function scrollToSidebarNode(nodeId: string, options?: { align?: SidebarNo
 // as the tabbable one (tabindex follows selection) can focus follow it.
 async function focusSidebarTreeNode(nodeId: string) {
   await nextTick();
+  // Scroll before querying the row: the virtualized tree only keeps rows in
+  // the materialized window in the DOM, so querying first would never find an
+  // out-of-window row and focus would stall at the window edge. Scrolling is
+  // index-driven (no DOM lookup) and a no-op when the row is already visible;
+  // one render frame lets RecycleScroller materialize the target row.
+  await scrollToSidebarNode(nodeId);
   const root = rootRef.value;
   if (!root) return;
+  await waitForSidebarRenderFrame();
   const row = root.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(nodeId)}"]`);
   if (!row) return;
   row.focus({ preventScroll: true });
-  await scrollToSidebarNode(nodeId);
 }
 
 function clearSidebarSelection() {

@@ -1193,7 +1193,7 @@ function isSidebarTreeArrowKey(event: KeyboardEvent): boolean {
 function handleSidebarTreeArrowKey(event: KeyboardEvent): boolean {
   const rows = sidebarTreeContext?.getVisibleFlatNodes?.();
   if (!rows?.length) return false;
-  const action = sidebarTreeArrowAction(rows, activeNode.value.id, event.key);
+  const action = sidebarTreeArrowAction(rows, activeNode.value.id, event.key, { databaseType: currentDatabaseType() });
   if (action.kind === "none") return false;
   if (action.kind === "toggle") {
     toggleNode(activeNode.value);

@@ -83,4 +83,30 @@ describe("sidebar tree arrow navigation", () => {
     expect(sidebarTreeArrowAction(rows, "t1", "PageDown")).toEqual({ kind: "none" });
     expect(sidebarTreeArrowAction(rows, "missing", "ArrowDown")).toEqual({ kind: "none" });
   });
+
+  it("ArrowRight does not expand a PostgreSQL-family custom type without members", () => {
+    const typeNode: TreeNode = { ...node("t1", "type", [node("m1", "type-attributes")]), hasMembers: false };
+    const rows = flattenTree([typeNode]);
+    expect(sidebarTreeArrowAction(rows, "t1", "ArrowRight", { databaseType: "postgres" })).toEqual({ kind: "none" });
+  });
+
+  it("ArrowRight expands a custom type that has members", () => {
+    const typeNode: TreeNode = { ...node("t1", "type", [node("m1", "type-attributes")]), hasMembers: true };
+    const rows = flattenTree([typeNode]);
+    expect(sidebarTreeArrowAction(rows, "t1", "ArrowRight", { databaseType: "postgres" })).toEqual({ kind: "toggle", nodeId: "t1", expanded: true });
+  });
+
+  it("the member gate only applies to custom-type databases", () => {
+    const typeNode: TreeNode = { ...node("t1", "type", [node("m1", "type-attributes")]), hasMembers: false };
+    const rows = flattenTree([typeNode]);
+    expect(sidebarTreeArrowAction(rows, "t1", "ArrowRight", { databaseType: "mysql" })).toEqual({ kind: "toggle", nodeId: "t1", expanded: true });
+    const plainRows = buildRows();
+    expect(sidebarTreeArrowAction(plainRows, "conn1", "ArrowRight", { databaseType: "postgres" })).toEqual({ kind: "toggle", nodeId: "conn1", expanded: true });
+  });
+
+  it("ArrowLeft still collapses an expanded custom type without members", () => {
+    const typeNode: TreeNode = { ...node("t1", "type", [node("m1", "type-attributes")], true), hasMembers: false };
+    const rows = flattenTree([typeNode]);
+    expect(sidebarTreeArrowAction(rows, "t1", "ArrowLeft", { databaseType: "postgres" })).toEqual({ kind: "toggle", nodeId: "t1", expanded: false });
+  });
 });

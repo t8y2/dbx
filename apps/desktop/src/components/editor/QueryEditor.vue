@@ -941,8 +941,8 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       codeMirrorKeymap.of([
         {
           key: "Enter",
-          run: codeMirrorInsertNewlineKeepIndent ?? undefined,
-          shift: codeMirrorInsertNewlineKeepIndent ?? undefined,
+          run: acceptCompletionOrInsertNewline,
+          shift: acceptCompletionOrInsertNewline,
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
@@ -988,6 +988,13 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
       })),
     ),
   ];
+}
+
+function acceptCompletionOrInsertNewline(view: EditorViewType): boolean {
+  if (codeMirrorCompletionStatus?.(view.state) && (codeMirrorAcceptCompletion?.(view) ?? false)) {
+    return true;
+  }
+  return codeMirrorInsertNewlineKeepIndent?.(view) ?? false;
 }
 
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {

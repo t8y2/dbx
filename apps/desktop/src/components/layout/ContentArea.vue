@@ -152,6 +152,7 @@ const emit = defineEmits<{
   editTableStructure: [tableName: string];
   openObjectTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   objectSchemaChange: [schema: string | undefined];
+  objectBrowserSearchChange: [tabId: string, search: string];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
@@ -1547,9 +1548,11 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           :connection="activeConnection"
           :database="activeTab.database"
           :schema="activeTab.objectBrowser?.schema"
+          :search="activeTab.objectBrowser?.search"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', $event)"
           @schema-change="emit('objectSchemaChange', $event)"
+          @search-change="emit('objectBrowserSearchChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
         />
       </div>

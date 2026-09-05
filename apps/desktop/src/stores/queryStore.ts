@@ -1746,6 +1746,13 @@ export const useQueryStore = defineStore("query", () => {
     queueSavedSqlEditorPositionPersist(tab);
   }
 
+  function updateObjectBrowserSearch(id: string, search: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "objects") return;
+    if (tab.objectBrowser?.search === search) return;
+    tab.objectBrowser = { ...tab.objectBrowser, search };
+  }
+
   function updateObjectBrowserViewport(id: string, viewport: ObjectBrowserViewport) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.mode !== "objects") return;
@@ -1897,7 +1904,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!tab || tab.schema === schema) return;
     rollbackTabTransaction(tab);
     tab.schema = schema;
-    if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, viewport: undefined };
+    if (tab.mode === "objects") tab.objectBrowser = { ...tab.objectBrowser, schema, search: undefined, viewport: undefined };
   }
 
   function updateConnection(id: string, connectionId: string, database = "") {
@@ -3781,6 +3788,7 @@ export const useQueryStore = defineStore("query", () => {
     updateSql,
     updateEditorViewport,
     updateEditorSelection,
+    updateObjectBrowserSearch,
     updateObjectBrowserViewport,
     setAutoCommit,
     commitTransaction,

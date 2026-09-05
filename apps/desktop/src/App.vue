@@ -1962,6 +1962,7 @@ onUnmounted(() => {
                         })
                     "
                     @object-schema-change="(schema) => activeTab && queryStore.updateSchema(activeTab.id, schema)"
+                    @object-browser-search-change="(tabId, search) => queryStore.updateObjectBrowserSearch(tabId, search)"
                     @object-browser-viewport-change="(tabId, viewport) => queryStore.updateObjectBrowserViewport(tabId, viewport)"
                     @structure-editor-saved="
                       (commentChanged) =>

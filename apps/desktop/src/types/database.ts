@@ -788,6 +788,7 @@ export interface QueryTab {
     catalog?: string;
     schema?: string;
     objectType?: "tables";
+    search?: string;
     viewport?: ObjectBrowserViewport;
   };
   objectSource?: {

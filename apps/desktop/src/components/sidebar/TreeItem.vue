@@ -1512,6 +1512,7 @@ function onKeydown(event: KeyboardEvent) {
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
+        :data-node-id="node.id"
         :style="rowStyle"
         @click="onClick"
         @dblclick="onDoubleClick"

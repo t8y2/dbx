@@ -175,6 +175,7 @@ import { connectionSupportsProcessList } from "@/lib/database/processListDrivers
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { sidebarTreeArrowAction } from "@/lib/sidebar/sidebarTreeArrowNavigation";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -1142,6 +1143,11 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isSidebarTreeArrowKey(event) && handleSidebarTreeArrowKey(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F2") {
     if (!requestRenameSelectedNode()) return;
     event.preventDefault();
@@ -1178,6 +1184,27 @@ function onKeydown(event: KeyboardEvent) {
 
 function isPasteTreeClipboardShortcut(event: KeyboardEvent): boolean {
   return isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isSidebarTreeArrowKey(event: KeyboardEvent): boolean {
+  return !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown" || event.key === "ArrowLeft" || event.key === "ArrowRight");
+}
+
+function handleSidebarTreeArrowKey(event: KeyboardEvent): boolean {
+  const rows = sidebarTreeContext?.getVisibleFlatNodes?.();
+  if (!rows?.length) return false;
+  const action = sidebarTreeArrowAction(rows, activeNode.value.id, event.key);
+  if (action.kind === "none") return false;
+  if (action.kind === "toggle") {
+    toggleNode(activeNode.value);
+    return true;
+  }
+  connectionStore.connectionMultiSelectActive = false;
+  connectionStore.selectedTreeNodeId = action.nodeId;
+  connectionStore.selectedTreeNodeIds = [action.nodeId];
+  connectionStore.treeSelectionAnchorId = action.nodeId;
+  sidebarTreeContext?.focusTreeNode?.(action.nodeId);
+  return true;
 }
 
 function isEditConnectionShortcut(event: KeyboardEvent): boolean {

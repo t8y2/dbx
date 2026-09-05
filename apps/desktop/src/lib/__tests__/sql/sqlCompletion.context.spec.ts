@@ -14,6 +14,15 @@ describe("sqlCompletion keyword snippets", () => {
   });
 });
 
+describe("sqlCompletion statement scoping", () => {
+  it("does not carry table references across semicolon-separated statements", () => {
+    const sql = "SELECT * FROM issue6094_before; SELECT * FROM issue6094_after WHERE ";
+    const context = getSqlCompletionContext(sql, sql.length);
+
+    expect(context.referencedTables).toEqual([expect.objectContaining({ name: "issue6094_after" })]);
+  });
+});
+
 describe("sqlCompletion quoted schema qualifiers", () => {
   it("parses quoted PostgreSQL schema names before a dot", () => {
     const sql = 'SELECT *\nFROM "order-management".';

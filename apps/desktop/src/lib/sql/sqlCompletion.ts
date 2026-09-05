@@ -1500,6 +1500,10 @@ function currentSqlLikeLineBlockSpan(sql: string, cursor: number): { start: numb
     else if (ch === ";" && !inSingleQuote && !inDoubleQuote && index >= safeCursor) {
       end = index;
       break;
+    } else if (ch === ";" && !inSingleQuote && !inDoubleQuote && index < safeCursor) {
+      // The cursor is past this statement; let semicolon-aware extraction
+      // resolve the next statement instead of treating the whole line as one block.
+      return null;
     }
   }
 

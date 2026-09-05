@@ -5,6 +5,7 @@ import it_ from "../locales/docs/it";
 import ja from "../locales/docs/ja";
 import ko from "../locales/docs/ko";
 import ptBR from "../locales/docs/pt-BR";
+import tr from "../locales/docs/tr";
 import zhCN from "../locales/docs/zh-CN";
 import zhTW from "../locales/docs/zh-TW";
 
@@ -21,6 +22,7 @@ const locales: Array<[string, Record<string, unknown>]> = [
   ["ja", ja],
   ["ko", ko],
   ["pt-BR", ptBR],
+  ["tr", tr],
   ["zh-CN", zhCN],
   ["zh-TW", zhTW],
 ];

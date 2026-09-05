@@ -18,6 +18,7 @@ import { fetchTableDataForExport } from "@/lib/table/tableDataExport";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import { buildXlsxHeaderOverrides, hasXlsxHeaderComments, type XlsxExportOptions, type XlsxHeaderMode } from "@/lib/export/xlsxHeader";
 import { isLoadingStructurePreview, showStructureDocCopyDialog, showStructurePreviewDialog, structureDocCopyText, structureDocCopyTitle, structurePreviewDefaultFileName, structurePreviewError, structurePreviewSql, structurePreviewTitle } from "@/components/sidebar/sidebarTreeDialogState";
+import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
 type StructureCopyFormat = "tsv" | "markdown";
 
@@ -42,6 +43,7 @@ interface SidebarTableExportTarget {
   identifierQuote?: string;
   batchSize: number;
   rowLimit: number | null;
+  csvQuoteMode: CsvQuoteMode;
   fileNameBase?: string;
 }
 
@@ -360,6 +362,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
       identifierQuote: connectionStore.connectionIdentifierQuote(connectionId),
       batchSize: editorSettings.exportBatchSize,
       rowLimit: editorSettings.exportRowLimitEnabled ? editorSettings.exportRowLimit : null,
+      csvQuoteMode: editorSettings.csvQuoteMode,
     };
   }
 
@@ -395,7 +398,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
           executePage: (sql) => api.executeQuery(connectionId, database, sql),
         });
         if (format === "csv") {
-          await api.exportQueryResultCsv(outputPath, result.columns, result.rows);
+          await api.exportQueryResultCsv(outputPath, result.columns, result.rows, target.csvQuoteMode);
         } else {
           const comments = result.columns.map((name) => exportColumnInfos?.find((column) => column.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.comment);
           const headerOverrides = buildXlsxHeaderOverrides(result.columns, comments, headerMode);
@@ -424,6 +427,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
         tableName: target.tableName,
         filePath: outputPath,
         format,
+        csvQuoteMode: target.csvQuoteMode,
         columns: queryColumns,
         columnComments,
         autoFilter: format === "xlsx" ? autoFilter : undefined,

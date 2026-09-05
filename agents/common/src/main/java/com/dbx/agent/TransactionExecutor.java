@@ -56,8 +56,9 @@ public final class TransactionExecutor {
         return unchecked(() -> {
             long start = System.currentTimeMillis();
             if (!supportsTransactions(conn)) {
-                long totalAffected = executeAll(conn, statements, schema, setSchemaSql, resetSchemaSql, runner);
-                return result(totalAffected, start);
+                // An explicit transaction request must not degrade to auto-commit:
+                // callers rely on it to avoid partial writes when a later statement fails.
+                throw new UnsupportedOperationException("Transactions are not supported by this JDBC driver");
             }
 
             boolean savedAutoCommit = conn.getAutoCommit();

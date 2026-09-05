@@ -268,6 +268,7 @@ describe("TableImportDialog existing targets", () => {
     await vi.waitFor(() => {
       expect(mocks.getColumns).toHaveBeenCalledWith("connection-1", "main", "main", "existing_target");
     });
+    await vi.waitFor(() => expect(buttonContaining("Next")?.disabled).toBe(false));
 
     buttonContaining("Next")?.click();
     await flushAsyncUpdates();

@@ -3,7 +3,7 @@ use super::types::TableStructureSqlOptions;
 use super::util::{clean, qualified_table, quote_string};
 
 pub(super) fn build_table_comment_sql(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) -> Vec<String> {
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
     let new_comment = options.table_comment.as_deref().unwrap_or("");
     let original_comment = options.original_table_comment.as_deref().unwrap_or("");
     if clean(new_comment) == clean(original_comment) {

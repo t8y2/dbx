@@ -1,4 +1,4 @@
-import type { NacosApiPlane, NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
+import type { NacosAdminConfig, NacosApiPlane, NacosConfigHistoryItem, NacosConfigItem, NacosConfigKey, NacosContentMatch, NacosImplementation, NacosInstanceInfo, NacosPermissionInfo, NacosRawRequest, NacosServiceInfo, NacosVersionMode } from "@/types/nacos";
 import { diffArrays, diffChars } from "diff";
 
 export type NacosRawTemplateKey = "serverState" | "namespaceList" | "configDetail" | "serviceList" | "instanceList";
@@ -60,6 +60,65 @@ export interface NacosEndpointNormalizationOptions {
   versionMode?: NacosVersionMode;
   apiPlane?: NacosApiPlane;
   contextPath?: string;
+}
+
+export interface NacosMetadataTableRow {
+  key: string;
+  value: string;
+}
+
+/** Makes a metadata object readable in a two-column view without losing nested values. */
+export function nacosMetadataTableRows(metadata: unknown): NacosMetadataTableRow[] {
+  if (!metadata || typeof metadata !== "object") return [];
+  return Object.entries(metadata as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value: typeof value === "string" ? value : (JSON.stringify(value) ?? String(value)),
+  }));
+}
+
+/** Validates a browser-only Nacos console URL without mixing credentials into a saved connection profile. */
+export function normalizeNacosConsoleUrl(input: string): string {
+  let url: URL;
+  try {
+    url = new URL(input.trim());
+  } catch {
+    throw new Error("Nacos console URL must be a valid absolute URL");
+  }
+  if (!["http:", "https:"].includes(url.protocol)) throw new Error("Nacos console URL must use HTTP or HTTPS");
+  if (url.username || url.password) throw new Error("Nacos console URL must not contain embedded credentials");
+  return url.toString().replace(/\/$/, "");
+}
+
+/**
+ * Resolves the web-console address independently from DBX's API connection.
+ * Nacos 3 must be configured explicitly because its Console port can differ
+ * from its Admin API port. Nacos 2 keeps the historical same-endpoint fallback.
+ */
+function resolveNacosConsoleUrlFromServer(serverAddr: string, contextPath: string | undefined, fallbackPath: string): string {
+  const endpoint = new URL(normalizeNacosConsoleUrl(serverAddr));
+  const normalizedContextPath = contextPath?.trim().replace(/^\/+|\/+$/g, "");
+  endpoint.pathname = normalizedContextPath ? `/${normalizedContextPath}` : fallbackPath || "/";
+  endpoint.search = "";
+  endpoint.hash = "";
+  return endpoint.toString().replace(/\/$/, "");
+}
+
+export function resolveNacosConsoleUrl(config: Pick<NacosAdminConfig, "implementation" | "versionMode" | "apiPlane" | "serverAddr" | "contextPath" | "consoleUrl" | "rnacosConsoleAddr">): string | undefined {
+  // A Nacos 3 Console API connection already targets the browser console.
+  // Prefer its primary endpoint even for legacy profiles that kept a stale
+  // standalone console URL.
+  if (config.versionMode === "v3" && config.apiPlane === "console") {
+    const serverAddr = config.serverAddr?.trim();
+    return serverAddr ? resolveNacosConsoleUrlFromServer(serverAddr, config.contextPath, "") : undefined;
+  }
+  if (config.implementation === "rnacos" || (!config.implementation && config.rnacosConsoleAddr?.trim())) {
+    return config.rnacosConsoleAddr?.trim() ? normalizeNacosConsoleUrl(config.rnacosConsoleAddr) : undefined;
+  }
+  if (config.versionMode === "v3") return config.consoleUrl?.trim() ? normalizeNacosConsoleUrl(config.consoleUrl) : undefined;
+
+  const serverAddr = config.serverAddr?.trim();
+  if (!serverAddr) return undefined;
+  return resolveNacosConsoleUrlFromServer(serverAddr, config.contextPath, "/nacos");
 }
 
 /**

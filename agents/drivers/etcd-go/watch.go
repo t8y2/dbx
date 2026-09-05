@@ -236,7 +236,14 @@ func (s *etcdSession) watchStart(params map[string]json.RawMessage) (any, error)
 		startedRevision = *requestedRevision
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), rpcTimeoutSeconds*time.Second)
-		response, err := client.Get(ctx, "\x00", clientv3.WithRange("\x00"), clientv3.WithCountOnly())
+		// Read the revision from the same Key scope that will be watched. A global
+		// range is forbidden for users that are intentionally limited to one or
+		// more prefixes, even when this individual Key or prefix is readable.
+		revisionOptions := []clientv3.OpOption{clientv3.WithCountOnly()}
+		if scope == "prefix" {
+			revisionOptions = append(revisionOptions, clientv3.WithRange(prefixEnd(key)))
+		}
+		response, err := client.Get(ctx, key, revisionOptions...)
 		cancel()
 		if err != nil {
 			return nil, err

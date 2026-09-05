@@ -15,7 +15,7 @@ use super::util::clean;
 /// a concurrent request in the first place).
 pub(super) fn validate_concurrent_index_scope(options: &TableStructureSqlOptions) -> Vec<String> {
     let mut errors = Vec::new();
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
     if !capabilities.index_concurrent || capabilities.dialect != StructureDialect::Postgres {
         return errors;
     }
@@ -43,6 +43,7 @@ pub(super) fn validate_draft(options: &TableStructureSqlOptions) -> Vec<String> 
     let active_columns: Vec<_> = options.columns.iter().filter(|column| !column.marked_for_drop).collect();
     validate_columns(&active_columns, &mut warnings);
     validate_dameng_identity(options, &active_columns, &mut warnings);
+    validate_gin_opclass_warnings(options, &mut warnings);
     for index in options
         .indexes
         .iter()
@@ -66,7 +67,7 @@ pub(super) fn validate_dameng_identity(
     columns: &[&EditableStructureColumn],
     warnings: &mut Vec<String>,
 ) {
-    if capabilities_for(options.database_type).dialect != StructureDialect::Dameng {
+    if capabilities_for(options.database_type, options.driver_profile.as_deref()).dialect != StructureDialect::Dameng {
         return;
     }
 
@@ -98,6 +99,70 @@ pub(super) fn validate_columns(columns: &[&EditableStructureColumn], warnings: &
         let key = clean(&column.name).to_lowercase();
         if !key.is_empty() && !names.insert(key) {
             warnings.push(format!("Column \"{}\" is duplicated.", column.name));
+        }
+    }
+}
+
+/// PostgreSQL GIN indexes on varchar/text/character columns without an explicit
+/// operator class are a common trap: the default `array_ops` class is rarely what
+/// the user wants, and `gin_trgm_ops` (from `pg_trgm` extension) or similar
+/// classes are almost always needed. This is a warning, not an error, because
+/// the default class may be deliberate in some cases.
+fn validate_gin_opclass_warnings(options: &TableStructureSqlOptions, warnings: &mut Vec<String>) {
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
+    if capabilities.dialect != StructureDialect::Postgres {
+        return;
+    }
+
+    // Build a lookup: column name (lowercased) → data type for active columns.
+    let col_types: std::collections::HashMap<String, &str> = options
+        .columns
+        .iter()
+        .filter(|col| !col.marked_for_drop)
+        .map(|col| (clean(&col.name).to_lowercase(), col.data_type.as_str()))
+        .collect();
+
+    let text_like = |dt: &str| -> bool {
+        let lower = dt.to_lowercase();
+        lower == "text"
+            || lower.starts_with("character varying")
+            || lower.starts_with("varchar")
+            || lower.starts_with("character")
+            || lower == "char"
+    };
+
+    for index in options.indexes.iter().filter(|idx| {
+        !idx.marked_for_drop
+            && clean(&idx.index_type).eq_ignore_ascii_case("GIN")
+            && (idx.original.is_none() || has_existing_index_change(idx))
+    }) {
+        for (i, col) in index.columns.iter().enumerate() {
+            let col_name = clean(col);
+            if col_name.is_empty() {
+                continue;
+            }
+            // Expression columns are not matched against table column types.
+            let is_expr =
+                index.original.as_ref().and_then(|orig| orig.key_is_expression.get(i).copied()).unwrap_or(false);
+            if is_expr {
+                continue;
+            }
+            // Check if this column has a text-like type.
+            let Some(dt) = col_types.get(&col_name.to_lowercase()) else {
+                continue;
+            };
+            if !text_like(dt) {
+                continue;
+            }
+            // Check if opclass is explicitly provided.
+            let has_opclass =
+                index.column_opclasses.get(i).and_then(|o| o.as_deref()).map(|v| !clean(v).is_empty()).unwrap_or(false);
+            if !has_opclass {
+                warnings.push(format!(
+                    "GIN index \"{}\" on column \"{}\" (type {}) has no operator class specified. Consider adding an operator class, e.g. `gin_trgm_ops` (requires pg_trgm extension) for text search.",
+                    index.name, col_name, dt
+                ));
+            }
         }
     }
 }

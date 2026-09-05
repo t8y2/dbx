@@ -1,6 +1,40 @@
 use super::dialect::{is_oracle_like, StructureDialect};
-use super::types::EditableStructureColumn;
+use super::types::{EditableStructureColumn, TableStructureSqlOptions};
 use super::util::{clean, format_default_for_sql, normalize_default, quote_ident, quote_string};
+
+/// Drops the `CHARACTER SET` / `COLLATE` inputs of MySQL columns that merely
+/// inherit the table's default collation, so the generated DDL does not spell
+/// out clauses the server would apply anyway.
+///
+/// MySQL reports the *effective* collation of every character column and never
+/// records whether it was written out explicitly, so "equals the table default"
+/// is the only signal available. Omitting the clauses is equivalent to keeping
+/// them: a column definition without `CHARACTER SET` takes the table default,
+/// which is exactly the value being dropped here. This runs on the DDL inputs
+/// only — introspection (`get_columns`) still reports the real values so the
+/// structure editor can show the column's current charset and collation.
+///
+/// The original snapshot is normalized alongside the draft so that an untouched
+/// column does not register as a charset change and trigger a needless `MODIFY`.
+pub(super) fn strip_inherited_mysql_column_charsets(options: &mut TableStructureSqlOptions) {
+    let Some(table_collation) = options.table_collation.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let inherits = |collation: &str| collation.trim().eq_ignore_ascii_case(table_collation);
+    for column in &mut options.columns {
+        if inherits(&column.collation) {
+            column.character_set = String::new();
+            column.collation = String::new();
+        }
+        if let Some(original) = column.original.as_mut() {
+            if original.collation.as_deref().is_some_and(inherits) {
+                original.character_set = None;
+                original.collation = None;
+            }
+        }
+    }
+}
 
 pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStructureColumn) -> String {
     let data_type = column_data_type(dialect, column);

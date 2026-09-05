@@ -1,0 +1,113 @@
+---
+title: Sürücü Yönetimi
+description: Yerleşik, yerel Agent ve JDBC Agent sürücülerini yönetin, JRE sürümlerini yapılandırın ve sürücü güncellemelerini ele alın.
+---
+
+DBX karma bir sürücü mimarisi kullanır: yerleşik Rust sürücüleri, bağımsız yerel Agent'lar ve Java/JDBC Agent'ları.
+
+## Sürücü Mimarisi
+
+| Sürücü Türü       | Nasıl Çalışır                         | Ne İçin Uygundur                                                                                                                                                        |
+| ----------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Yerel (yerleşik) | DBX içine derlenmiş Rust sürücüleri       | MySQL, PostgreSQL, SQLite, SQL Server, Redis, MongoDB, ClickHouse ve daha fazlası                                                                                      |
+| Yerel Agent / dış sürücü | DBX tarafından yönetilen bağımsız Go/Rust işlemi veya yardımcı bileşen | Oracle, KingbaseES, XuguDB, DuckDB ve RabbitMQ gibi ayrı bir çalışma zamanı gerektiren bağlantılar |
+| JDBC Agent        | DBX tarafından yönetilen Java alt işlemi       | JDBC gerektiren veritabanları: GaussDB, openGauss, DM, HighGo, Vastbase, UXDB, Trino, Hive, DB2, Informix, Neo4j, TDengine, YashanDB, GoldenDB, Kylin, SunDB ve daha fazlası |
+
+<Callout type="info">Yerleşik sürücüler hemen çalışır. Yerel Agent'lar ve yardımcı bileşenler platforma özgü dosyalar ister; JDBC Agent'ları ayrıca bir JRE gerektirir. Bağlantı iletişim kutusu eksik bileşenleri sorar, ancak otomatik kurulum ağ erişimine, platforma, lisanslamaya ve geçerli ayarlara bağlıdır.</Callout>
+
+## Sürücü Deposu
+
+Sürücü Deposu sekmesi kullanılabilir tüm agent sürücülerini ve durumlarını gösterir:
+
+- **Kurulu sürücüler**: sürüm numarası, boyut ve güncelleme durumu
+- **Kullanılabilir sürücüler**: tek tıklamayla kurabileceğiniz sürücüler
+- **Güncelleme rozetleri**: kayıtta daha yeni bir sürüm olduğunda
+
+Sürücü Deposu'nu **Ayarlar → Sürücüler** bölümünden açın ya da agent sürücüsü gerektiren bir bağlantı oluştururken görünen sürücü ipucuna tıklayın.
+
+## Sürücü Kurma
+
+<Steps>
+  <Step>
+    ### Sürücü Deposu'nu Açın
+
+    **Ayarlar → Sürücüler** bölümüne gidin ya da bağlantı iletişim kutusundaki sürücü kurulum ipucuna tıklayın.
+  </Step>
+  <Step>
+    ### Bir Sürücü Seçin
+
+    İhtiyacınız olan veritabanı sürücüsünü bulun. Her girdi, desteklenen veritabanını ve sürücü sürümünü gösterir.
+  </Step>
+  <Step>
+    ### Kur'a Tıklayın
+
+    DBX; yerel Agent çalıştırılabilirini ya da JDBC Agent JAR dosyasını ve gereken çalışma zamanını indirir. İndirme sırasında ilerleme gösterilir.
+  </Step>
+  <Step>
+    ### Bağlantı Oluşturun
+
+    Bağlantı iletişim kutusuna dönün. Sürücü artık kullanıma hazırdır.
+  </Step>
+</Steps>
+
+## JRE Yönetimi
+
+JDBC agent sürücüleri bir Java Çalışma Zamanı Ortamı gerektirir. DBX JRE yönetimi içerir:
+
+- **Sistem JRE'si**: DBX, sisteminizde kurulu mevcut bir Java kurulumunu kullanabilir
+- **Yönetilen JRE**: DBX kendi JRE'sini indirip yönetebilir; sistem Java'nızdan yalıtılmıştır
+- **Çoklu JRE desteği**: Gerektiğinde farklı sürücüler farklı JRE sürümlerini hedefleyebilir
+- **Yeniden kurma**: Yönetilen JRE bozulursa Sürücü Deposu'ndan yeniden kurun
+
+## Sürücü Güncellemeleri
+
+DBX sürücü güncellemelerini düzenli olarak denetler:
+
+- Daha yeni sürümler olduğunda Sürücü Deposu sekmesinde güncelleme rozetleri görünür
+- Kurulu tüm sürücüleri aynı anda güncellemek için **Tüm Sürücüleri Yükselt**'e tıklayın
+- Sürücüler tek tek, depodaki kendi girdilerinden yükseltilebilir
+
+## Çalışma Zamanı İzleme
+
+Sürücü Yöneticisi; etkin dış sürücüleri ve Agent'ları protokol modu, etkin oturumlar, PID, bellek, CPU, çalışma süresi ve son hata bilgisiyle özetler. Desteklenen çalışma zamanları buradan durdurulabilir veya yeniden başlatılabilir. Ortak bir çalışma zamanı birden çok bağlantıya hizmet ediyor olabilir, bu yüzden önce etkin oturumları inceleyin.
+
+RabbitMQ gibi mesaj kuyruğu Agent'ları hem bir iş protokolü hem de bir yönetim API'si kullanabilir. Özel AMQP/yönetim portları, SSH tünelleri ve TLS hedefleri birbirinden bağımsız yapılandırılmalıdır; bir port diğerinden çıkarsanmamalıdır.
+
+## Çevrimdışı Sürücü İçe Aktarma
+
+İnternet erişimi olmayan ortamlar için DBX çevrimdışı sürücü kurulumunu destekler:
+
+1. Başka bir makinede, hedef işletim sistemi ve CPU mimarisine uyan DBX çevrimdışı sürücü ZIP dosyasını indirin
+2. Dosyayı çevrimdışı makineye taşıyın
+3. Sürücü Deposu'nda **ZIP'ten İçe Aktar** ile sürücü paketini kurun
+
+Bu; internete kapalı ağlar, katı güvenlik duvarı ortamları ya da kurumlarda önceden onaylanmış sürücü sürümleri için kullanışlıdır.
+
+Her agent, **Çevrimdışı paketi içe aktar** ile kurulabilen tek sürücülük bir ZIP sunar. Java agent paketleri platformdan bağımsızdır ve JRE'yi yinelemez; KingbaseES, Oracle ve Xugu gibi yerel agent'lar ise her işletim sistemi ve CPU mimarisi için ayrı paket sunar.
+
+Hedef makinede bir Java agent'ının gerektirdiği yönetilen JRE yoksa, uygun JRE paketini bir kez içe aktarın ya da tüm sürücüleri ve JRE'yi içeren tam çevrimdışı paketi kullanın.
+
+### Windows'ta KingbaseES İçe Aktarma
+
+Windows x64 için `dbx-agent-kingbase-<sürüm>-windows-x64.zip`, Windows ARM64 için `dbx-agent-kingbase-<sürüm>-windows-aarch64.zip` dosyasını indirin, ardından Sürücü Yöneticisi'nde **Çevrimdışı paketi içe aktar**'ı seçin. Linux ya da macOS paketini içe aktarmayın.
+
+ZIP, o platform için sürüm meta verisini ve yerel agent'ı içerir. DBX bunu `%USERPROFILE%\.dbx\agents\drivers\kingbase\agent.exe` olarak kurar; kullanıcının çalıştırılabilir dosyanın engelini kaldırması ya da elle kopyalaması gerekmez.
+
+### JDBC eklentisini çevrimdışı içe aktarma
+
+Genel JDBC bağlantıları (özel JDBC URL + içe aktarılmış sürücü JAR'ı) ayrı bir **DBX JDBC eklentisi** üzerinden çalışır; bu eklenti kendi `dbx-jdbc-plugin-*.zip` dosyası olarak yayımlanır ve veritabanı başına Agent ZIP dosyalarına gömülmez. Eklentiyi **JDBC Sürücüleri** sekmesindeki **Yerel kurulum** ile kurun (Yerleşik Sürücüler'deki, Agent ZIP dosyaları için olan **Çevrimdışı paketi içe aktar** ile değil).
+
+Asıl sürücü JAR dosyasını (örneğin bir Oracle `ojdbc*.jar`) içe aktarmak her zaman yereldir; bu eklenti paketini ya da herhangi bir ağ erişimini gerektirmez — JDBC eklentisinin kurulu olup olmadığından bağımsız olarak aynı sekmedeki **JAR İçe Aktar**'ı kullanın.
+
+## Eklenti Güncellemeleri
+
+[JDBC Eklentisi](/tr/docs/plugins) tarafından desteklenen veritabanları için DBX, yeni bir eklenti sürümü çıktığında güncelleme bildirimi gösterir. Eklenti güncellemeleri yerleşik agent sürücüleriyle aynı kurulum akışını izler.
+
+## Sorun Giderme
+
+| Sorun                                    | Çözüm                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| Sürücü indirmesi başarısız oluyor                      | Ağ bağlantısını ve güvenlik duvarı kurallarını denetleyin. Çevrimdışı içe aktarma yöntemini deneyin.               |
+| Agent başlamıyor                          | Sürücü Deposu'nda JRE kurulumunu doğrulayın. Gerekirse yönetilen JRE'yi yeniden kurun.               |
+| Sürücü kurulumundan sonra bağlantı testi başarısız oluyor | JDBC URL biçiminin sürücünün beklediği biçime uyduğunu doğrulayın. SSH/proxy ayarlarını denetleyin. |
+| Yanlış sürücü sürümü                       | Geçerli sürücüyü kaldırın ve depodan doğru sürümü kurun.                       |

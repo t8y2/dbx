@@ -22,7 +22,7 @@ export function isQueryTimeoutErrorMessage(message: string, backendError?: Backe
     return QUERY_TIMEOUT_STAGES.has(stage);
   }
   const lower = message.toLowerCase();
-  if (lower.includes("query timed out") || lower.includes("查询超时") || lower.includes("查詢逾時")) return true;
+  if (lower.includes("query timed out") || lower.includes("查询超时") || lower.includes("查詢逾時") || lower.includes("请求执行超时") || lower.includes("請求執行逾時")) return true;
   // Agent RPC client-side timeout (tokio::time::timeout in agent_driver.rs). This is the
   // fallback when JDBC setQueryTimeout never fires (unsupported/unresponsive driver), so the
   // backend already treats it as a query timeout (is_agent_rpc_timeout_error in query.rs) —

@@ -252,6 +252,8 @@ export interface NacosAdminConfig {
   apiPlane?: NacosApiPlane;
   serverAddr: string;
   contextPath?: string;
+  /** Browser URL for the Nacos web console. Nacos 3 uses a separate console endpoint. */
+  consoleUrl?: string;
   /** Namespace IDs used when an official Nacos ordinary user cannot enumerate namespaces or authorization data. */
   managedNamespaces?: string[];
   rnacosConsoleAddr?: string;

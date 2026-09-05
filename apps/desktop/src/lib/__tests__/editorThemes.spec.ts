@@ -192,7 +192,7 @@ describe("SQL completion theme", () => {
 });
 
 describe("editor gutters", () => {
-  it("anchors line numbers to the first visual row of wrapped lines", () => {
+  it("keeps single line numbers vertically centered in the base rule", () => {
     const rules = buildEditorFontThemeRules();
 
     expect(rules[".cm-lineNumbers .cm-gutterElement"]).toMatchObject({
@@ -200,6 +200,19 @@ describe("editor gutters", () => {
       display: "flex",
       justifyContent: "flex-end",
     });
-    expect(rules[".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number"]).toMatchObject({ alignItems: "flex-start" });
+  });
+});
+
+describe("editor font theme", () => {
+  it("disables ligatures on the editor content so repainted character runs stay stable", () => {
+    const rules = buildEditorFontThemeRules();
+
+    // Ligature fonts merge runs like `--`/`==` into one glyph and can race
+    // CodeMirror's per-keystroke span patching (dbx#7900); dropping either
+    // declaration would reintroduce unpainted characters in the query editor.
+    expect(rules[".cm-content"]).toMatchObject({
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
+    });
   });
 });

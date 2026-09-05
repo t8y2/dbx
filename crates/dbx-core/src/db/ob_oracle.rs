@@ -242,6 +242,7 @@ pub async fn list_indexes(pool: &mysql_async::Pool, schema: &str, table: &str) -
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             }
         })
         .collect())

@@ -2,11 +2,16 @@ import { DriversClient } from "./DriversClient";
 import { fetchAgentDownloadCatalog } from "@/lib/agentRegistrySource";
 import { buildMetadata } from "@/lib/metadata";
 import type { Metadata } from "next";
+import { resolveLang } from "@/lib/i18n";
 
 const pageMeta = {
   en: {
     title: "Offline Driver Downloads",
     description: "Download DBX offline driver bundles, database drivers, and JRE packages for air-gapped environments across macOS, Linux, and Windows.",
+  },
+  tr: {
+    title: "Çevrimdışı Sürücü İndirmeleri",
+    description: "İnternet erişimi olmayan ortamlar için DBX çevrimdışı sürücü paketlerini, veritabanı sürücülerini ve JRE paketlerini macOS, Linux ve Windows için indirin.",
   },
   cn: {
     title: "离线驱动下载",
@@ -16,7 +21,7 @@ const pageMeta = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const meta = pageMeta[l];
 
   return buildMetadata({

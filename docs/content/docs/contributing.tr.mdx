@@ -1,0 +1,497 @@
+---
+title: Kaynaktan Derleme ve Katkı
+description: DBX'i sıfırdan kurun, masaüstü uygulamasını çalıştırın, ilk değişikliğinizi yapın, test edin ve bir pull request açın.
+---
+
+Bu eğitim, DBX'e ilk kez katkı verecekler içindir. Sonunda şunları yapmış olacaksınız:
+
+1. Node.js, pnpm, Rust ve yerel derleme bağımlılıklarını kurmak
+2. DBX Masaüstü'nü forklamak, klonlamak ve çalıştırmak
+3. İlgili kodu bulmak ve küçük bir değişikliği tamamlamak
+4. Değişikliğe uygun denetimleri ve testleri çalıştırmak
+5. Bir dal push edip pull request açmak
+
+<Callout type="info">
+  Dokümantasyon, çeviriler, küçük arayüz düzeltmeleri ve test edebileceğiniz bir veritabanına ilişkin issue'lar iyi ilk katkılardır. Her pull request'i tek ve doğrulanabilir bir soruna odaklı tutun.
+</Callout>
+
+## 1. Bir Issue Seçin ve Üstlenin
+
+[DBX Issues](https://github.com/t8y2/dbx/issues) sayfasını açın ve atanmış kimsesi olmayan, yorumlarında etkin bir katkıcı bulunmayan bir issue seçin. İyi ilk katkılar şu özelliklerden birini taşır:
+
+- Yeniden üretme adımları ve beklenen davranış zaten açıktır
+- Kapsam küçük bir dokümantasyon, çeviri ya da arayüz değişikliğidir
+- Kullandığınız ve gerçek bir örnekte doğrulayabildiğiniz bir veritabanını etkiler
+
+Yalnızca etiketlere güvenmeyin. İsteğin hâlâ geçerli olduğunu ve başka bir yerde uygulanmadığını doğrulamak için issue'nun tamamını, yorumları, ekran görüntülerini ve önceki tartışmayı okuyun.
+
+Issue üzerinde kimse çalışmıyorsa şunu tek başına bir yorum olarak yazın:
+
+```text
+/claim
+```
+
+Üstlenme iş akışı, issue uygun olduğunda onu size atar. Önerdiğiniz çözüm mevcut davranışı değiştiriyorsa büyük bir yama yapmadan önce yaklaşımı issue içinde kısaca açıklayın.
+
+Sonradan devam edemezseniz tek başına bir yorum olarak `/unclaim` yazın (`/unclaimed` de kabul edilir). İş akışı yalnızca kendi atamanızı kaldırır; böylece başka bir katkıcı issue'yu üstlenebilir.
+
+## 2. Araç Zincirini Kurun
+
+DBX Masaüstü; Tauri, Vue ve Rust kullanır. Depo şu anda şunları gerektirir:
+
+| Araç | Sürüm |
+| --- | --- |
+| Node.js | 22.13.0 ya da üstü |
+| pnpm | 10.27.0 |
+| Rust | 1.88 ya da üstü |
+| Git | Güncel kararlı sürüm |
+| Make | macOS ve Linux'ta gerekli; Windows'ta isteğe bağlı |
+
+### Node.js ve pnpm Kurun
+
+[Node.js web sitesinden](https://nodejs.org/) Node.js 22 ya da daha yeni bir LTS sürümü kurun, ardından deponun kullandığı pnpm sürümünü etkinleştirin:
+
+```bash
+corepack enable
+corepack prepare pnpm@10.27.0 --activate
+node --version
+pnpm --version
+```
+
+Node.js kurulumunuzda Corepack yoksa şunu kullanın:
+
+```bash
+npm install --global pnpm@10.27.0
+```
+
+### Rust Kurun
+
+`rustup` kurmak için [resmî Rust kurulum kılavuzunu](https://www.rust-lang.org/tools/install) izleyin. Terminali yeniden açıp kurulumu doğrulayın:
+
+```bash
+rustc --version
+cargo --version
+```
+
+### Yerel Bağımlılıkları Kurun
+
+Platform ayrıntılarının tamamı için [resmî Tauri ön koşullarına](https://v2.tauri.app/start/prerequisites/) bakın. DBX ayrıca ODBC geliştirme kitaplıklarını kullanır.
+
+<Tabs groupId="contributing-platform" items={["macOS", "Ubuntu / Debian", "Windows"]}>
+  <Tab value="macOS">
+    Xcode Komut Satırı Araçlarını ve unixODBC'yi kurun:
+
+    ```bash
+    xcode-select --install
+    brew install unixodbc
+    ```
+
+    Gerekiyorsa önce [Homebrew web sitesinden](https://brew.sh/) Homebrew kurun.
+
+  </Tab>
+  <Tab value="Ubuntu / Debian">
+    Derleyici araç zincirini, Tauri WebKit/GTK bağımlılıklarını ve unixODBC'yi kurun:
+
+    ```bash
+    sudo apt update
+    sudo apt install -y \
+      build-essential curl wget file pkg-config \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev \
+      libayatana-appindicator3-dev librsvg2-dev patchelf \
+      libssl-dev unixodbc-dev
+    ```
+
+  </Tab>
+  <Tab value="Windows">
+    1. [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) kurun.
+    2. Yükleyicide **Desktop development with C++** seçeneğini işaretleyin.
+    3. Bir Windows 10/11 SDK ve WebView2'nin kurulu olduğundan emin olun. Windows 11 normalde WebView2 içerir.
+    4. Pakete gömülü OpenSSL'i derlemek için gereken [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases) kurulumunu yapın:
+
+        ```powershell
+        winget install StrawberryPerl.StrawberryPerl
+        ```
+
+        DBX varsayılan olarak `sqlite-sqlcipher` özelliğini etkinleştirir; bu, SQLCipher ve OpenSSL'i kaynaktan derler. Windows'ta OpenSSL `Configure` betiğini çalıştırmak için Perl gerekir. Kurulumdan sonra `perl` komutunun `PATH` üzerinde olması için terminalinizi yeniden açın.
+
+    5. Bu sayfadaki Windows komutlarını PowerShell'de çalıştırın.
+
+    Eşdeğer pnpm komutları aşağıda verildiği için Windows'ta Make isteğe bağlıdır.
+
+  </Tab>
+</Tabs>
+
+## 3. Depoyu Forklayın ve Klonlayın
+
+GitHub'da [t8y2/dbx](https://github.com/t8y2/dbx) deposunu açıp **Fork**'a tıklayın.
+
+`<github-adiniz>` yerine hesap adınızı yazın:
+
+```bash
+git clone https://github.com/<github-adiniz>/dbx.git
+cd dbx
+git remote add upstream https://github.com/t8y2/dbx.git
+git remote -v
+```
+
+Her issue için ayrı bir dal kullanın:
+
+```bash
+git switch -c fix/issue-1234-kisa-aciklama
+```
+
+Başka bir göreve başlamadan önce `main` dalınızı eşitleyin:
+
+```bash
+git switch main
+git fetch upstream
+git rebase upstream/main
+git push origin main
+```
+
+## 4. DBX'i İlk Kez Çalıştırın
+
+### macOS ve Linux
+
+Depo kökünden şunu çalıştırın:
+
+```bash
+make
+```
+
+`make`, bağımlılıkları lockfile'dan kurar ve Tauri masaüstü geliştirme ortamını başlatır. İlk Rust derlemesi uzun sürebilir; sonraki başlatmalar çok daha hızlıdır.
+
+Hafif bir masaüstü derlemesi için varsayılan Rust özelliklerini kapatın ve yalnızca DuckDB yardımcı bileşenini, DynamoDB'yi ve pakete gömülü SQLite'ı etkinleştirin:
+
+```bash
+make dev-fast
+```
+
+Geliştirme derlemeleri, kurulu bir DBX örneğiyle birlikte çalışabilir. İkisi de aynı yerel DBX verisini kullanır, bu yüzden bağlantılar ve geçmiş her iki pencerede de görünür. Aynı bağlantıyı, kayıtlı SQL'i ya da genel ayarı iki pencerede aynı anda değiştirmekten kaçının.
+
+MCP köprüsünü test ederken en son başlatılan örnek, ortak `mcp-bridge-port` keşif dosyasının sahibi olur ve MCP isteklerini alır. Redis PubSub `4224` portunu (ya da ayarlanmışsa `DBX_PORT`) tercih eder ve otomatik olarak kullanılabilir bir yerel porta düşer; ön yüz gerçekte bağlanılan portu kullanır.
+
+### Windows
+
+PowerShell'de çalıştırın:
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm dev:tauri
+```
+
+Aynı hafif derleme için:
+
+```powershell
+pnpm tauri dev -- --no-default-features --features duckdb-sidecar,dynamodb,sqlite-bundled
+```
+
+### Ortamın Çalıştığını Doğrulayın
+
+Başarılı bir çalıştırma, terminalde derleyici hatası olmadan DBX masaüstü penceresini açar. Üç hızlı denetim yapın:
+
+1. Ayarlar'ı açın
+2. Yerel bir test bağlantısı oluşturun ya da açın
+3. Kurulumun yinelenebilir olduğunu doğrulamak için uygulamayı kapatıp yeniden başlatın
+
+`1420` portu zaten kullanımdaysa önceki DBX/Vite geliştirme işlemini durdurup yeniden başlatın.
+
+## Yerel veritabanı test ortamları
+
+Bir veritabanı sürücüsünde, bağlantı akışında, meta veri sorgusunda ya da veritabanına özgü arayüzde yapılan değişiklikler, mümkün olduğunda gerçek bir örneğe karşı denetlenmelidir. Depo bunun için sürümü sabitlenmiş yerel Docker Compose tarifleri sunar:
+
+```bash
+make db-list
+make db DB=mysql@8.4
+make db-verify DB=mysql@8.4
+make db-down DB=mysql@8.4
+```
+
+Servis portları varsayılan olarak `127.0.0.1` üzerinde dinler. Bir makineyi ortak bir ağa açmadan önce `DB_BIND_ADDRESS=0.0.0.0` ayarlayın, güçlü bir `DB_PASSWORD` seçin ve güvenlik duvarı denetimlerini kullanın. Desteklenen tüm tarifler, geçersiz kılmalar ve sıfırlama güvenlik gereksinimleri için [Veritabanı Test Laboratuvarı](/tr/docs/database-lab) sayfasına bakın.
+
+## 5. Depo Düzenini Anlayın
+
+| Yol | Orada neyi değiştirirsiniz |
+| --- | --- |
+| `apps/desktop/src/` | Vue sayfaları, bileşenler, durum, etkileşimler ve çeviriler |
+| `src-tauri/` | Tauri masaüstü komutları, sistem tümleştirmesi ve paketleme |
+| `crates/dbx-core/` | Bağlantılar, sorgular, meta veri ve ortak Rust veritabanı mantığı |
+| `crates/dbx-web/` | Docker/Web arka ucu |
+| `packages/app-tests/` | Ortak ön yüz mantığı testleri |
+| `packages/cli/` | DBX CLI |
+| `packages/mcp-server/` | MCP Sunucusu |
+| `docs/content/docs/` | Çok dilli web sitesi dokümantasyonu |
+| `agents/drivers/` | Java/JDBC ve belirli yerel veritabanı agent'ları |
+
+Dosyayı henüz bilmiyorsanız bir özellik adını, görünen etiketi ya da hata mesajını arayın:
+
+```bash
+rg "aranacak metin" apps/desktop/src crates src-tauri packages
+```
+
+## 6. İlk Değişikliğinizi Yapın
+
+### Yol A: Web Sitesi Dokümanlarını Güncelleyin
+
+Dokümantasyon en kolay ilk katkıdır. Her dil aynı temel dosya adını kullanır:
+
+```text
+docs/content/docs/example.mdx
+docs/content/docs/example.cn.mdx
+docs/content/docs/example.tr.mdx
+```
+
+Dokümantasyon sitesini başlatın:
+
+```bash
+make docs
+```
+
+Windows'ta:
+
+```powershell
+cd docs
+pnpm install --frozen-lockfile --ignore-workspace
+pnpm dev
+```
+
+Terminalde yazılan yerel adresi açın. Bir sayfa eklerken onu şuralara da kaydedin:
+
+```text
+docs/content/docs/meta.json
+docs/content/docs/meta.cn.json
+docs/content/docs/meta.tr.json
+```
+
+Göndermeden önce hızlı içerik denetimini ve ardından tam dokümantasyon derlemesini çalıştırın:
+
+```bash
+pnpm --dir docs content:check
+make docs-build
+```
+
+`content:check`; her dil için sayfa eşlerini, gezinme kapsamını ve sırasını, frontmatter'ı, yinelenen başlıkları ve iç bağlantıları doğrular. `make docs-build` bu denetimi yeniden çalıştırır ve Next.js üretim derlemesini doğrular.
+
+### Yol B: Masaüstü Ön Yüzünü Değiştirin
+
+Ön yüz kodu `apps/desktop/src/` altındadır. Masaüstü uygulamasının tamamını çalıştırın ya da yalnızca web ön yüzünü başlatın:
+
+```bash
+make dev-web
+```
+
+Değişiklikten sonra en azından şunları çalıştırın:
+
+```bash
+pnpm typecheck
+pnpm lint
+pnpm test
+```
+
+Arayüz değişikliklerinde açık ve koyu temaları, dar pencereleri, boş veriyi, yükleme ve hata durumlarını denetleyin. Pull request'e ekran görüntüsü ya da kayıt ekleyin.
+
+### Yol C: Rust Arka Ucunu Değiştirin
+
+Ortak Rust mantığı başlıca `crates/dbx-core/` altındadır; masaüstü komutları `src-tauri/` içindedir. DuckDB ilgisizse hızlı denetimlerle başlayın:
+
+```bash
+make cargo-check-fast
+make cargo-test-fast
+```
+
+Veritabanı davranışı değişiklikleri yalnızca sahte nesnelerle değil, gerçek bir veritabanına karşı doğrulanmalıdır. Pull request'e veritabanı türünü ve sürümünü, yeniden üretme SQL'ini, önceki davranışı ve düzeltilmiş davranışı ekleyin.
+
+### Yol D: Bir Agent Sürücüsünü Değiştirin
+
+Agent'lar; DBX ile stdin/stdout JSON-RPC üzerinden iletişim kuran ayrı işlemlerdir. Java/JDBC agent'ları normalde JDK 21 kullanır; yerel agent'lar Go ya da Rust kullanır. Önce şunları okuyun:
+
+- [`agents/README.md`](https://github.com/t8y2/dbx/blob/main/agents/README.md)
+- [`agents/docs/agent-authoring.md`](https://github.com/t8y2/dbx/blob/main/agents/docs/agent-authoring.md)
+
+#### Mevcut Bir Java/JDBC Agent'ını Değiştirme
+
+Depo kökünden `agents/` dizinine girin ve yalnızca hedef modülü derleyin:
+
+```bash
+cd agents
+java --version
+./gradlew :<sürücü-modülü>:test :<sürücü-modülü>:shadowJar
+```
+
+Shadow JAR şuraya yazılır:
+
+```text
+agents/drivers/<sürücü-modülü>/build/libs/
+```
+
+Başarılı bir derleme, yerel DBX uygulamasının yeni kodu kullandığı anlamına gelmez. DBX, kullanıcı ana dizini altındaki `.dbx/agents/drivers/<db_type>/agent.jar` dosyasını çalıştırır; bu yüzden çalışma zamanı JAR'ını yedekleyip değiştirin:
+
+<Tabs groupId="agent-runtime-replace" items={["macOS / Linux", "Windows PowerShell"]}>
+  <Tab value="macOS / Linux">
+    ```bash
+    cp ~/.dbx/agents/drivers/<db_type>/agent.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar.bak
+    cp drivers/<driver-module>/build/libs/*-all.jar \
+      ~/.dbx/agents/drivers/<db_type>/agent.jar
+    ```
+  </Tab>
+  <Tab value="Windows PowerShell">
+    ```powershell
+    Copy-Item "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" `
+      "$HOME\.dbx\agents\drivers\<db_type>\agent.jar.bak"
+    $jar = Get-ChildItem "drivers\<driver-module>\build\libs\*-all.jar" | Select-Object -First 1
+    Copy-Item $jar.FullName "$HOME\.dbx\agents\drivers\<db_type>\agent.jar" -Force
+    ```
+  </Tab>
+</Tabs>
+
+Eski agent işleminin sonlanması ve yeni JAR'ın yüklenmesi için DBX'i yeniden başlatın ya da veritabanı bağlantısını kesip yeniden bağlanın. Issue'daki yeniden üretme akışını gerçek veritabanı sürümüne karşı yineleyin.
+
+#### `agents/versions.json` Ne Zaman Değiştirilir
+
+<Callout type="warn">
+  Mevcut bir sürücüyü değiştirirken `agents/versions.json` dosyasını düzenlemeyin. Agent yayın iş akışı; çalışma zamanı dosyalarını önceki `agents-v*` etiketiyle karşılaştırır, o yayının yayın sonrası sürüm eşitleme commit'ini geçerli sürüm temeli olarak kullanır ve değişen modüllerin yama sürümünü otomatik artırır. Değişmeyen modüller, önceki değişmez yayından doğrulanmış dosyaları yeniden kullanır.
+</Callout>
+
+- `agents/drivers/<modül>/` altındaki bir değişiklik, yayında o modülün sürümünü otomatik artırır
+- `agents/common/src/main/` ya da `agents/common/build.gradle` altındaki bir değişiklik, ortak çalışma zamanını paketleyen her modülün sürümünü artırır
+- Yeni bir sürücü modülü, `agents/versions.json` dosyasına `"rabbitmq": "0.1.0"` gibi bir başlangıç girdisi eklemelidir
+- Yeni bir Java/JDBC sürücüsü ayrıca `agents/settings.gradle` dosyasını, desteklenen agent tablosunu, derleme yapılandırmasını ve testleri güncellemelidir
+- Yeni bir yerel sürücü, Gradle'ın hallettiğini varsaymak yerine derleme ve yayın dosyalarını agent yazım/yayın denetim listesine göre kaydetmelidir
+- `versions.json` içindeki anahtarlar yayımlanan modüllerle eşleşmelidir; altyapı modülleri `common` ve `test-support` için sürüm girdisi yoktur
+
+Normal hata düzeltme pull request'leri, değişikliğin etkili olması için sürümü elle artırmaz. Sürüm artırımları ve yayın dosyaları agent yayın iş akışına aittir.
+
+#### Yerel Agent'lar
+
+`oracle`, `kingbase` ve `xugu` gibi yerel agent'lar `agent.jar` yerine bir `agent` çalıştırılabiliri kullanır. Go testlerini çalıştırıp modülden derleyin, ardından yerel çalışma zamanı çalıştırılabilirini değiştirmek için README dosyasını izleyin:
+
+```bash
+cd agents/drivers/<yerel-modül>
+go test ./...
+go build -o agent .
+```
+
+Yeni bir veritabanı agent'ı için olgun, lisans açısından uyumlu bir Go ya da Rust sürücüsünü tercih edin. Güvenilir bir yerel sürücü yoksa Java/JDBC kullanın.
+
+#### Eksiksiz Agent Doğrulaması
+
+`agents/` dizininden şunları çalıştırın:
+
+```bash
+python3 -m unittest discover -s scripts -p '*_test.py'
+python3 scripts/validate_agents.py
+./gradlew test shadowJar --continue
+python3 scripts/validate_agent_jars.py
+```
+
+`validate_agents.py`; modül bildirimlerini, `versions.json` dosyasını, Gradle yapılandırmasını, Main-Class meta verisini, çalışma zamanı sınıflandırmasını ve yasak artıkları denetler. `validate_agent_jars.py`, derlenen JAR dosyalarının beklenen giriş sınıflarını içerdiğini doğrular.
+
+## 7. Commit Etmeden Önce Değişikliği Denetleyin
+
+Yamayı inceleyin ve derleme çıktıları, veritabanı dosyaları, gizli bilgiler ya da ilgisiz biçimlendirme içermediğinden emin olun:
+
+```bash
+git status
+git diff
+```
+
+Değişen alana uygun denetimleri çalıştırın:
+
+| Değişen alan | En az denetim |
+| --- | --- |
+| Web sitesi dokümanları | `make docs-build` |
+| Ön yüz/arayüz | `pnpm typecheck && pnpm lint && pnpm test` |
+| Rust | `make cargo-check-fast && make cargo-test-fast` |
+| CLI/MCP/Node Çekirdeği | `pnpm test:packages` |
+| Agent | Agent betik doğrulaması, ilgili Gradle/Go testleri, dosya doğrulaması ve gerçek bir yerel çalışma zamanı testi |
+
+Bir değişiklik birden çok alanı kapsıyorsa denetimleri birlikte çalıştırın. Bir hata düzeltmesinde, hatanın gittiğini kanıtlamak için özgün yeniden üretme adımlarını yineleyin ve gerilemeler için komşu normal davranışları test edin.
+
+## 8. Commit Edin ve Push Edin
+
+Kısa, geleneksel bir commit mesajı kullanın:
+
+```bash
+git add <bu-göreve-ait-değişen-dosyalar>
+git commit -m "fix(scope): describe the change"
+git push -u origin HEAD
+```
+
+Yaygın önekler:
+
+- Hata düzeltmesi için `fix(scope):`
+- Özellik için `feat(scope):`
+- Dokümantasyon için `docs:`
+- Testler için `test(scope):`
+
+İlgisiz sorunları aynı commit'te ya da pull request'te birleştirmeyin.
+
+## 9. Bir Pull Request Açın
+
+Fork'unuzu GitHub'da açın ve **Compare & pull request**'e tıklayın. Hedef depoyu `t8y2/dbx`, hedef dalı `main` yapın.
+
+Pull request açıklaması şunları içermelidir:
+
+1. İlgili issue, örneğin `Fixes #1234`
+2. Neyin değiştiği
+3. Bu yaklaşımın neden seçildiği
+4. Çalıştırdığınız testler
+5. Arayüz değişiklikleri için ekran görüntüleri ya da kayıtlar
+6. Veritabanı değişiklikleri için veritabanı adı, sürümü ve doğrulama adımları
+
+CI başarısız olursa başarısız işi açıp günlüklerini inceleyin. Düzeltmeyi aynı dala push edin; başka bir pull request açmanız gerekmez.
+
+Bağlantılı PR'ınız varsayılan dala merge edildiği hâlde issue açık kalırsa, tek başına bir issue yorumu olarak `/close` yazın. İş akışı issue'yu yalnızca siz onun geçerli atanmış kişisiyseniz ve issue'ya çapraz başvuran merge edilmiş bir PR'ın yazarıysanız kapatır.
+
+## 10. İncelemeden Sonra Pull Request'i Güncelleyin
+
+İnceleme geri bildirimi aldıktan sonra aynı dalda çalışmayı sürdürün:
+
+```bash
+git add <değişen-dosyalar>
+git commit -m "fix(scope): address review feedback"
+git push
+```
+
+İnceleme sırasında `main` belirgin biçimde değiştiyse eşitleyip yeniden push edin:
+
+```bash
+git fetch upstream
+git rebase upstream/main
+git push --force-with-lease
+```
+
+<Callout type="warn">
+  Düz `--force` değil, `--force-with-lease` kullanın. Bu, henüz almadığınız uzak commit'lerin üzerine yazmayı reddeder.
+</Callout>
+
+## Sorun Giderme
+
+### İlk Rust Derlemesi Yavaş
+
+Bu beklenen bir durumdur. Varsayılan Rust özelliklerinin kapalı olduğu, yalnızca DuckDB yardımcı bileşeni ve DynamoDB'nin etkin olduğu hafif bir masaüstü derlemesi için `make dev-fast` kullanın. `make cargo-check-fast` ve `make cargo-test-fast` tüm isteğe bağlı varsayılan özellikleri atlar, bu yüzden DuckDB'ye özgü yolları doğrulamaz.
+
+### pnpm Yanlış Sürümü Bildiriyor
+
+Depo sürümünü yeniden etkinleştirin:
+
+```bash
+corepack prepare pnpm@10.27.0 --activate
+```
+
+### Arayüz Değişikliği Yansıtmıyor
+
+`apps/desktop/src/` altını değiştirdiğinizi, Vite/Tauri işleminin hâlâ çalıştığını ve terminalde ya da tarayıcı konsolunda derleme hatası olmadığını doğrulayın. Rust komut değişiklikleri normalde yeniden derlemeyi tetikler.
+
+### Hangi Testleri Çalıştıracağınızı Bilmiyorsunuz
+
+Değişen dizin için en az denetimle başlayın, ardından issue'nun gerçek yeniden üretme akışını uygulayın. Kapsam yine de belirsizse tamamladığınız doğrulamaları ve bilinen boşlukları pull request'te listeleyin; böylece maintainer'lar yol gösterebilir.
+
+## Yardım Alın
+
+- Engeli özgün issue'da anlatın ve tam hatayı ile işletim sistemi sürümünü ekleyin
+- [Discord](https://discord.gg/W7NyVDRt6a) sunucusuna katılın
+- Depodaki [CONTRIBUTING.md](https://github.com/t8y2/dbx/blob/main/CONTRIBUTING.md) dosyasını okuyun
+
+Yalnızca "derleme başarısız oldu" demeyin. Komutu, günlükteki ilk anlamlı hatayı, işletim sisteminizi ve Node.js, pnpm ile Rust sürümlerinizi ekleyin.

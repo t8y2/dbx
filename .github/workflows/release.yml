@@ -117,6 +117,9 @@ jobs:
           done
 
   build:
+    # Explicit name keeps matrix-only fields such as asset_pattern from being
+    # appended to the generated job display name.
+    name: build (${{ matrix.platform }}, ${{ matrix.target }})
     needs: release-ready
     strategy:
       fail-fast: false

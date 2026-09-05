@@ -1,0 +1,153 @@
+---
+title: Şema Gezgini ve Nesne Ağacı
+description: DBX kenar çubuğundan bağlantıları düzenleyin, veritabanı nesnelerini arayın, veri ve yapı açın, veritabanına özgü işlemleri çalıştırın.
+---
+
+Nesne ağacı, DBX'teki başlıca gezinme yüzeyidir. Yalnızca veritabanlarını, şemaları, tabloları ve sütunları göstermez; bağlantı gruplarını, görünür kapsamı, nesne aramasını, sabitlemeleri, kopyala/yapıştır işlemlerini, şema eylemlerini, özel çalışma alanlarını ve yönetim görünümlerini de yönetir.
+
+## Bağlantı ve Nesne Hiyerarşisi
+
+Tipik bir ilişkisel hiyerarşi şöyle görünür:
+
+```text
+Bağlantı grubu
+ └── Bağlantı
+      └── Katalog / veritabanı
+           └── Şema
+                └── Tablo / görünüm / yordam / diğer nesne
+                     └── Sütun / dizin / yabancı anahtar / tetikleyici
+```
+
+Gerçek hiyerarşi veritabanı modelini izler:
+
+| Tür | Örnek ağaç |
+| --- | --- |
+| MySQL uyumlu | Bağlantı → veritabanı → tablo/görünüm → sütun/dizin/yabancı anahtar/tetikleyici |
+| PostgreSQL, Oracle, SQL Server ve diğerleri | Bağlantı → veritabanı ya da servis → şema → nesne |
+| Doris / StarRocks | Birden çok katalog varsa katalog → veritabanı → tablo; yalnızca `internal` varsa düz yapı |
+| Redis | Bağlantı → Redis VT; anahtarlar özel gezginde sayfalanır |
+| MongoDB | Bağlantı → veritabanı → koleksiyonlar, dizinler ve GridFS bucket'ları |
+| Elasticsearch / Easysearch / Meilisearch | Bağlantı → dizinler ve diğer belge nesneleri |
+| HBase, vektör, mesaj kuyruğu, etcd, ZooKeeper, Nacos | [Özel Çalışma Alanları](/tr/docs/specialized-workspaces) açan sisteme özgü nesneler |
+
+## Bağlantı Grupları ve Toplu Yönetim
+
+- Özel alt grup adlarıyla iç içe gruplar oluşturun
+- Bağlantıları gruplara sürükleyin ya da kopyala/yapıştır ve toplu taşıma kullanın
+- Bağlantıları çoklu seçip gruplama, kopyalama, bağlantı kesme ve diğer toplu işlemler için araç çubuğunu kullanın
+- Bağlantı renklerini, notları, sabitlemeleri, salt okunur durumu ve üretim kapsamını yapılandırın
+- Bir bağlantı adını kopyalayın ya da bağlantının tamamını yeni bir girdi olarak çoğaltın
+- Bağlantı ipuçlarında sunucu, port, veritabanı türü ve diğer özetleri inceleyin
+
+Desteklenen bağlantı içe aktarmaları grup bilgisini koruyabilir. Kenar çubuğu düzenleri aygıtlar arasında taşındığında DBX bağlantı kimliklerini yeniden eşler.
+
+## Genişletme, Daraltma ve Sabitleme
+
+- Bir düğümü genişletmek ya da daraltmak için tıklayın
+- Geçerli ağaç kapsamı için **Tümünü genişlet** ya da **Tümünü daralt** kullanın
+- Sık kullandığınız bağlantıları, veritabanlarını, şemaları, tabloları ya da Nacos ad alanlarını sabitleyin
+- Uzun listelerde kaydırırken etkin veritabanını ya da önemli satırı görünür tutun
+- Açık sekmelerin ilgili ağaç nesnesini seçmesine ya da göstermesine izin verin
+
+Sabitlemeler gezinmeyi kolaylaştırır ama üretimi işaretlemez. Salt okunur ve üretim durumunu [Üretim ve Yazma Güvenliği](/tr/docs/production-safety) sayfasından ayrıca yapılandırın.
+
+## Arama ve Filtreleme
+
+Nesne ağacı araması şunlarla eşleşebilir:
+
+- Bağlantılar, gruplar, veritabanları, kataloglar ve şemalar
+- Tablolar, görünümler, sütunlar, dizinler ve belirli veritabanına özgü nesneler
+- Nesne yolları, sütun açıklamaları ve tablo açıklamaları
+- Yüklenmiş meta veriler ve sunucu tarafında filtrelemeyi destekleyen tablo listeleri
+
+Bazı aramalar anahtar sözcüğü gecikmeli olarak sürücüye iletir ve önce tüm tabloları yüklemekten kaçınır. Aramayı düğüm türüne göre kısıtlayabilir ya da etkin veritabanı içindeki yerel tablo aramasını kullanabilirsiniz.
+
+Görünür kapsam ayarları; veritabanlarını, şemaları, sistem şemalarını ya da yapılandırılmış öneklere sahip tabloları gizleyebilir. Yeni oluşturulan veritabanları ya da şemalar görünür listeye otomatik eklenebilir.
+
+<Callout type="info">Arama sonuçları hesabın görünürlüğüne ve yüklenmiş meta veriye bağlıdır. Bir nesne oluşturduktan, sildikten ya da yeniden adlandırdıktan sonra ilgili düğümü yenileyin.</Callout>
+
+## Meta Veri Görünümü
+
+Veritabanına ve ayarlara bağlı olarak ağaç şunları gösterebilir:
+
+- Tablo ve sütun açıklamaları
+- Sütun türü, boş olabilirlik, varsayılan ve kısıt özetleri
+- Nesne sayıları ve yükleme durumu
+- Tablo türü ile katalog, şema ve veritabanı yolu
+- MongoDB koleksiyon meta verisi
+- Veritabanına özgü nesne türleri ve durum bilgisi
+
+Nesne meta verisi görünümü yapılandırılabilir. Büyük şemalarda görsel gürültüyü ve meta veri isteklerini azaltmak için yalnızca gereken ek bilgiyi gösterin.
+
+## Veri, Yapı ve Kaynak Açma
+
+| İşlem | Sonuç |
+| --- | --- |
+| Tabloyu aç | [Veri Izgarası](/tr/docs/data-grid) açılır |
+| Yapıyı görüntüle | Sütunlar, dizinler, yabancı anahtarlar, tetikleyiciler ve DDL sekmeleri açılır |
+| Tablo yapısını düzenle | [Tablo Yapısı Düzenleyici](/tr/docs/table-structure) açılır |
+| DDL'i görüntüle | Veritabanının ya da sürücünün ürettiği nesne tanımını okur |
+| Kaynağı aç | Görünüm, yordam, işlev, tetikleyici ya da diğer kaynağı bir yan panelde veya düzenleyicide gösterir |
+| Sorgu nesnesini bul | Düzenleyicideki imlecin bulunduğu tabloyu bulur ya da tablo/sütun başvurularını SQL'e sürükler |
+| Özel nesneyi aç | Redis, MongoDB, vektör, HBase, MQ, etcd, ZooKeeper ya da Nacos çalışma alanlarını açar |
+
+Tablo, nesne ve veri sekmeleri ayrı kimlikler kullanır; böylece aynı adlı nesneler yanlışlıkla aynı veri sekmesini yeniden kullanmaz.
+
+## Bağlam Menüleri ve Toplu İşlemler
+
+Bağlam menüleri düğüm türünden ve veritabanı yeteneklerinden üretilir. Yaygın işlemler şunlardır:
+
+- Veritabanı ve şema oluşturma, yeniden adlandırma ya da silme; desteklenen açıklamaları, karakter kümelerini veya collation'ları düzenleme
+- Tablo oluşturma, kopyalama, yapıştırma, yeniden adlandırma, truncate etme ya da silme
+- Hedef sürücü destekliyorsa tablo yapısını veya verisini veritabanları arasında kopyalayıp yapıştırma
+- Veri, yapı, DDL, kaynak, ER diyagramı, alan soy ağacı, şema karşılaştırma ve veritabanı araması açma
+- Veri içe aktarma, veri aktarma, SQL dosyaları çalıştırma, veritabanı dışa aktarma ya da desteklenen dosya veritabanlarını yedekleme
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE` ve diğer SQL şablonlarını üretme
+- Dizinleri, tetikleyicileri, yordamları, uzantıları, kullanıcıları, işleri ve veritabanına özgü nesneleri yönetme
+- Panoları, işlemleri/oturumları ya da özel yönetim sayfalarını açma
+
+Yıkıcı işlemler daha belirgin biçimde gruplanır; salt okunur duruma, üretim kapsamına ve veritabanı yeteneğine göre görünür ya da onay ister.
+
+## Kopyalama, Yapıştırma ve Sürükleme
+
+- Bağlantı, veritabanı, şema, tablo, sütun ya da seçili tablo adlarını kopyalayın
+- Desteklenen yerlerde veritabanı/şema nitelemesini ve tanımlayıcı tırnaklamasını seçin
+- Başvuru üretmek için tabloları ya da sütunları SQL düzenleyicisine sürükleyin
+- Yapı ya da veri aktarımını başlatmak için bir tabloyu kopyalayıp uyumlu bir hedefe yapıştırın
+- Yerel dosya veritabanlarını işletim sisteminin dosya yöneticisinde gösterin
+
+Veritabanları arası kopyalama; tür eşlemesini, varsayılanları, kısıtları ve kimlik anlamını içerir. Önce [Veri Aktarımı](/tr/docs/data-transfer) sayfasını ve üretilen SQL'i inceleyin.
+
+## Veritabanına Özgü Hiyerarşiler
+
+DBX her sistemi ilişkisel bir ağaca zorlamaz. Örneğin:
+
+- SQL Server bağlı sunucuları ve veritabanı nesnelerini gösterebilir
+- Doris / StarRocks dış katalogları ve dış tablolar için üç parçalı adları destekler
+- MongoDB koleksiyonları, dizinleri ve GridFS'i gösterir
+- Elasticsearch / Easysearch / Meilisearch dizinleri birinci sınıf nesne olarak modeller
+- Dameng, Oracle, PostgreSQL ve diğerleri yordamları, işleri, uzantıları ya da yönetim nesnelerini gösterebilir
+- etcd, Nacos, mesaj kuyrukları ve vektör veritabanları ağaç düğümlerinden özel çalışma alanları açar
+
+## Güvenlik ve Başarım Sınırları
+
+- Ağaç yalnızca geçerli hesabın görebildiği nesneleri gösterir; eksik nesneler çoğunlukla veritabanı yetkilerine işaret eder
+- Büyük şemalar tembel yükleme, önbellekleme ve sunucu tarafında filtreleme kullanır; amaçsızca her şeyi genişletmekten kaçının
+- Sistem şemaları, nesne sayıları ve ek meta veri istek hacmini artırır ve kapatılabilir
+- Silme, truncate, veritabanları arası yapıştırma ve yönetim işlemleri geri alınamayabilir; önce yedekleri ve kapsamı inceleyin
+- Salt okunur bağlantılar birçok değişiklik giriş noktasını gizler ya da reddeder, ancak son sınır veritabanı yetkileridir
+
+<Cards>
+  <Card title="Tüm nesnelere gözatın" href="/tr/docs/object-browser">
+    Tablolar, görünümler, yordamlar ve istatistikler için liste ya da ızgara görünümlerini kullanın.
+  </Card>
+  <Card title="Tablo yapısını düzenleyin" href="/tr/docs/table-structure">
+    Sütunları ve dizinleri değiştirin, çalıştırmadan önce DDL'i inceleyin.
+  </Card>
+  <Card title="Veritabanında arayın" href="/tr/docs/object-browser">
+    Büyük veritabanlarında nesneleri türe, ada ve meta veriye göre bulun.
+  </Card>
+  <Card title="Özel sistemleri yönetin" href="/tr/docs/specialized-workspaces">
+    Redis, MongoDB, vektör, MQ, etcd, ZooKeeper ve Nacos çalışma alanlarını açın.
+  </Card>
+</Cards>

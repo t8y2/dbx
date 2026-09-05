@@ -12,7 +12,7 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
         capabilities = caps;
         dialect = StructureDialect::GaussdbM;
     } else {
-        let caps = capabilities_for(options.database_type);
+        let caps = capabilities_for(options.database_type, options.driver_profile.as_deref());
         capabilities = caps;
         dialect = caps.dialect;
     }
@@ -114,6 +114,45 @@ pub(super) fn has_existing_index_change(index: &EditableStructureIndex) -> bool 
         || index_list_changed(&index.included_columns, original.included_columns.as_ref())
         || clean(&index.filter) != clean(original.filter.as_deref().unwrap_or(""))
         || clean(&index.comment) != clean(original.comment.as_deref().unwrap_or(""))
+        || index_opclasses_changed(
+            &index.column_opclasses,
+            &original.column_opclasses,
+            &index.columns,
+            &original.columns,
+        )
+}
+
+/// Compare opclass arrays positionally, skipping expression columns.
+/// When the column list has changed we already detect that above; here we only
+/// compare opclasses for columns that exist in both the edited and original lists.
+fn index_opclasses_changed(
+    next: &[Option<String>],
+    previous: &[Option<String>],
+    next_cols: &[String],
+    prev_cols: &[String],
+) -> bool {
+    // If the edited side has explicit opclasses, compare positionally.
+    if !next.is_empty() {
+        // Length mismatch (shouldn't happen when columns are in lockstep, but
+        // defend against it): any difference in length is a change.
+        if next.len() != previous.len() {
+            return true;
+        }
+        return next.iter().zip(previous.iter()).any(|(n, p)| {
+            let n_flat = n.as_deref().map(clean).filter(|v| !v.is_empty());
+            let p_flat = p.as_deref().map(clean).filter(|v| !v.is_empty());
+            n_flat != p_flat
+        });
+    }
+    // If the edited side has no opclasses, check whether the original side
+    // had any non-default opclasses for columns still present.
+    if previous.iter().any(|o| o.as_deref().map(|v| !clean(v).is_empty()).unwrap_or(false)) {
+        let prev_set: std::collections::HashSet<_> = prev_cols.iter().map(|c| clean(c)).collect();
+        return next_cols.iter().zip(previous.iter()).any(|(nc, po)| {
+            po.as_deref().map(|v| !clean(v).is_empty()).unwrap_or(false) && prev_set.contains(&clean(nc))
+        });
+    }
+    false
 }
 
 pub(super) fn index_list_changed(next: &[String], previous: Option<&Vec<String>>) -> bool {
@@ -170,14 +209,19 @@ fn mysql_index_column_sql(column: &str) -> String {
     }
 }
 
-fn postgres_index_column_sql(column: &str, is_expression: bool) -> String {
-    // Expression/functional index key parts arrive as raw expression text, not a plain
-    // column name; quoting the whole expression as an identifier turns it into a literal
-    // column reference that doesn't exist (#6295).
-    if is_expression {
-        column.trim().to_string()
-    } else {
-        quote_ident(StructureDialect::Postgres, column)
+fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<&str>) -> String {
+    // The base key text: a real column is quoted as an identifier; an expression/functional
+    // key part arrives as raw expression text (from the per-column `pg_get_indexdef`, which
+    // omits the opclass — see `list_indexes_with_sql`), so quoting the whole thing as an
+    // identifier would turn it into a nonexistent column reference (#6295).
+    let base =
+        if is_expression { column.trim().to_string() } else { quote_ident(StructureDialect::Postgres, column.trim()) };
+    // The opclass is read separately from `pg_index.indclass` for every key position
+    // (including expression keys) and appended uniformly — it never lives inside the
+    // expression text, so there is no duplication risk.
+    match opclass.filter(|o| !o.is_empty()) {
+        Some(opc) => format!("{} {}", base, opc),
+        None => base,
     }
 }
 
@@ -214,6 +258,49 @@ fn key_expression_flags(index: &EditableStructureIndex, columns: &[String]) -> V
                     original.key_is_expression.get(i).copied().unwrap_or(false)
                 }
                 None => false,
+            }
+        })
+        .collect()
+}
+
+/// Per-key operator class provenance for `columns` (the edited/current key list).
+///
+/// Honors explicit per-key opclasses (`index.column_opclasses`) positionally when
+/// they are aligned to `columns` (non-empty, same length) and represent a genuine
+/// edit: either there is no `original` (a newly created index, where the UI
+/// authors `column_opclasses` in lockstep with `columns`), or the edited
+/// opclasses differ from the round-tripped `original.column_opclasses`. A stale
+/// copy left behind by a column toggle/reorder — still equal to the original —
+/// falls through to the order-independent text-matching below, so opclasses are
+/// never misassigned positionally before the editor maintains `column_opclasses`
+/// in lockstep with `columns`. Once that lockstep is in place the guard always
+/// passes and the honor branch is authoritative.
+fn key_opclasses(index: &EditableStructureIndex, columns: &[String]) -> Vec<Option<String>> {
+    if !index.column_opclasses.is_empty()
+        && index.column_opclasses.len() == columns.len()
+        && index.original.as_ref().is_none_or(|original| original.column_opclasses != index.column_opclasses)
+    {
+        return index.column_opclasses.to_vec();
+    }
+    let original = match &index.original {
+        Some(original) if !original.column_opclasses.is_empty() => original,
+        _ => return vec![None; columns.len()],
+    };
+    let mut consumed = vec![false; original.columns.len()];
+    columns
+        .iter()
+        .map(|column| {
+            let claimed = original
+                .columns
+                .iter()
+                .enumerate()
+                .find(|(i, original_column)| !consumed[*i] && *original_column == column);
+            match claimed {
+                Some((i, _)) => {
+                    consumed[i] = true;
+                    original.column_opclasses.get(i).cloned().flatten()
+                }
+                None => None,
             }
         })
         .collect()
@@ -259,7 +346,7 @@ pub(super) fn build_create_index_statements(
     concurrently_supported: bool,
     for_new_table: bool,
 ) -> Vec<String> {
-    let capabilities = capabilities_for(database_type_for_dialect(dialect));
+    let capabilities = capabilities_for(database_type_for_dialect(dialect), None);
     let name = clean(&index.name);
     let columns: Vec<String> =
         index.columns.iter().map(|column| clean(column)).filter(|column| !column.is_empty()).collect();
@@ -278,6 +365,7 @@ pub(super) fn build_create_index_statements(
     let unique = if index.is_unique { "UNIQUE " } else { "" };
     let replace = if or_replace { "OR REPLACE " } else { "" };
     let key_is_expression = key_expression_flags(index, &columns);
+    let key_opclasses = key_opclasses(index, &columns);
     let cols = columns
         .iter()
         .enumerate()
@@ -287,7 +375,7 @@ pub(super) fn build_create_index_statements(
             } else if dialect == StructureDialect::GaussdbM {
                 gaussdbm_index_column_sql(column, key_is_expression[i])
             } else if dialect == StructureDialect::Postgres {
-                postgres_index_column_sql(column, key_is_expression[i])
+                postgres_index_column_sql(column, key_is_expression[i], key_opclasses[i].as_deref())
             } else if for_new_table {
                 quote_new_ident(database_type, dialect, column)
             } else {

@@ -279,6 +279,38 @@ class StandardJdbcMetadataTest {
         assertEquals("SALES", capturedArgs.get()[1]);
     }
 
+    @Test
+    void listTablesSkipsEscapeWhenProfileDisablesWildcards() {
+        // databend 等驱动的 getSearchStringEscape() 返回 "\\"，但 getTables 把 _ 当字面量且忽略转义，
+        // 转义含 _ 的库名（如 my_db）会返回 0 行（#8114）。profile.escapeSchemaWildcards=false 时应原样传入。
+        JdbcAgentProfile noEscapeProfile = new JdbcAgentProfile(
+            "example.Driver",
+            "jdbc:example://{host}:{port}/{database}",
+            0,
+            false,
+            Collections.emptySet(),
+            Arrays.asList("TABLE", "VIEW", "BASE TABLE"),
+            "\"",
+            "USE",
+            true,
+            false,
+            false,
+            false,
+            false
+        );
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        Connection conn = schemaEscapeConnection("\\", rows(
+            row("TABLE_NAME", "A", "TABLE_TYPE", "TABLE", "REMARKS", null)
+        ), capturedArgs);
+
+        List<TableInfo> tables = StandardJdbcMetadata.INSTANCE.listTables(conn, noEscapeProfile, "", "my_db");
+
+        assertEquals(1, tables.size());
+        assertEquals("A", tables.get(0).getName());
+        // 关闭转义：schemaPattern 应为原始 "my_db"，而非 "my\\_db"
+        assertEquals("my_db", capturedArgs.get()[1]);
+    }
+
     private static Connection schemaEscapeConnection(String searchEscape, ResultSet tables, AtomicReference<Object[]> capturedArgs) {
         DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
             @Override

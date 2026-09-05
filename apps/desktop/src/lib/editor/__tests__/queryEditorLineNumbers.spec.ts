@@ -2,7 +2,7 @@
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, GutterMarker, gutter, lineNumbers } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildQueryEditorLineNumbersExtension, isWrappedLineNumberGutter } from "@/lib/editor/queryEditorLineNumbers";
+import { buildQueryEditorLineNumbersExtension, isWrappedLineNumberGutter, setQueryEditorLineNumberAlignment } from "@/lib/editor/queryEditorLineNumbers";
 
 class StatementRunMarker extends GutterMarker {}
 
@@ -45,6 +45,21 @@ describe("query editor line numbers", () => {
     expect(isWrappedLineNumberGutter(20.8, 20.8)).toBe(false);
     expect(isWrappedLineNumberGutter(21.6, 20.8)).toBe(false);
     expect(isWrappedLineNumberGutter(42, 20.8)).toBe(true);
+  });
+
+  it("keeps wrapped-line alignment when CodeMirror rebuilds a gutter marker class", () => {
+    const element = document.createElement("div");
+    element.className = "cm-gutterElement";
+
+    setQueryEditorLineNumberAlignment(element, true);
+    // GutterElement#setMarkers owns and replaces className for active-line and
+    // selection marker changes. The measured alignment must survive it.
+    element.className = "cm-gutterElement cm-activeLineGutter";
+
+    expect(element.style.alignItems).toBe("flex-start");
+
+    setQueryEditorLineNumberAlignment(element, false);
+    expect(element.style.alignItems).toBe("");
   });
 
   it("keeps line selection behavior when enabled", () => {

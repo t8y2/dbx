@@ -120,13 +120,14 @@ const previewStyle = computed<CSSProperties>(() => {
 });
 const previewArrowStyle = computed<CSSProperties>(() => ({ top: `${historyPreview.value?.arrowTop ?? 0}px` }));
 
-function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { width?: number; textIndent?: number } = {}) {
+function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { width?: number; paddingLeft?: number; paddingRight?: number } = {}) {
   const probe = document.createElement(wrap ? "div" : "span");
   const style = window.getComputedStyle(input);
   const width = options.width ?? input.clientWidth;
-  const textIndent = options.textIndent !== undefined ? `${options.textIndent}px` : style.textIndent;
+  const paddingLeft = options.paddingLeft !== undefined ? `${options.paddingLeft}px` : style.paddingLeft;
+  const paddingRight = options.paddingRight !== undefined ? `${options.paddingRight}px` : style.paddingRight;
   probe.textContent = input.value || input.placeholder || "";
-  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${width}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${style.paddingRight} ${style.paddingBottom} ${style.paddingLeft};text-indent:${textIndent};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
+  probe.style.cssText = `position:fixed;left:-9999px;top:-9999px;visibility:hidden;box-sizing:border-box;${wrap ? `width:${width}px;white-space:pre-wrap;overflow-wrap:anywhere;padding:${style.paddingTop} ${paddingRight} ${style.paddingBottom} ${paddingLeft};` : "white-space:pre;"}font:${style.font};font-size:${style.fontSize};font-family:${style.fontFamily};font-weight:${style.fontWeight};line-height:${style.lineHeight};letter-spacing:${style.letterSpacing};`;
   document.body.appendChild(probe);
   return probe;
 }
@@ -140,7 +141,11 @@ function shouldExpand(input: HTMLTextAreaElement) {
 }
 
 function measureExpandedHeight(input: HTMLTextAreaElement, rect: typeof expandedRect.value) {
-  const probe = createTextProbe(input, true, { width: Math.max(1, rect.width - 8), textIndent: rect.prefix });
+  const probe = createTextProbe(input, true, {
+    width: Math.max(1, rect.width - 8),
+    paddingLeft: rect.prefix + 2,
+    paddingRight: rect.suffix + 8,
+  });
   const style = window.getComputedStyle(input);
   const lineHeight = Number.parseFloat(style.lineHeight) || 24;
   const contentHeight = probe.scrollHeight;
@@ -843,8 +848,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   width: calc(100% - 1rem + var(--data-grid-expanded-scrollbar-offset));
   max-width: none;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0.125rem;
-  text-indent: var(--data-grid-condition-prefix-indent);
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
   overflow-x: hidden;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -908,8 +912,7 @@ defineExpose({ focus, dismiss: editor.dismiss, rememberHistory: editor.rememberH
   min-width: 0;
   height: auto;
   margin-right: calc(-1 * var(--data-grid-expanded-scrollbar-offset));
-  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem 0.125rem;
-  text-indent: var(--data-grid-condition-prefix-indent);
+  padding: 0 calc(var(--data-grid-condition-suffix-width) + 0.5rem) 0.0625rem calc(var(--data-grid-condition-prefix-indent) + 0.125rem);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

@@ -1,0 +1,84 @@
+---
+title: Yapılandırma Dışa/İçe Aktarma
+description: Veritabanı bağlantılarını AES-256-GCM ile şifrelenmiş parolalarla dışa aktarın. Makineler arasında güvenle taşıyın.
+---
+
+<Callout type="info">Veritabanı bağlantılarınızı şifrelenmiş parolalarla (AES-256-GCM) dışa aktarın. Makineler arasında güvenle taşıyın. Şifreli dışa aktarma varsayılan olarak kalır.</Callout>
+
+<Callout type="warn">Bu işlem, iş veritabanınızın şemasını veya verisini değil, DBX bağlantı yapılandırmasını dışa aktarır ve bir veritabanı yedeği değildir. Veritabanı içeriği için [Veritabanı Dışa Aktarma](/tr/docs/database-export) ya da [Veritabanı Yedekleme](/tr/docs/database-backup) sayfalarını kullanın.</Callout>
+
+## Dışa Aktarma
+
+<Steps>
+<Step>
+    ### Dışa Aktarmayı Başlatın
+
+    Kenar çubuğu başlığındaki **Dışa Aktar** düğmesine tıklayın.
+  </Step>
+<Step>
+    ### Bağlantıları Seçin
+
+    Bir veya daha fazla bağlantı seçin. Varsayılan olarak tüm bağlantılar seçilidir. Yalnızca seçili bağlantılar, kenar çubuğu grupları ile sıraları ve başvurulan tünel profilleri dışa aktarılır.
+  </Step>
+<Step>
+    ### Koruma Biçimini Seçin
+
+    Parolalarınızı şifrelemek için bir parola ifadesi girin. Güvenilir bir ortamda tek seferlik bir taşıma için bunun yerine **Şifresiz dışa aktar** seçeneğini seçip uyarıyı onaylayabilirsiniz. Düz metin dosyası veritabanı parolalarını, SSH Tünel kimlik bilgilerini ve diğer hassas bilgileri içerebilir.
+  </Step>
+<Step>
+    ### Dosyayı Kaydedin
+
+    Bir kayıt konumu seçin. Dışa aktarılan dosya yalnızca seçili bağlantıları, ilgili düzeni ve başvurulan tünel profillerini içerir. Şifreli dışa aktarma önerilir.
+  </Step>
+</Steps>
+
+## İçe Aktarma
+
+<Steps>
+<Step>
+    ### İçe Aktarmayı Başlatın
+
+    Kenar çubuğu başlığındaki **İçe Aktar** düğmesine tıklayın.
+  </Step>
+<Step>
+    ### Dosyayı Seçin ve Şifreyi Çözün
+
+    Dışa aktarılmış dosyayı seçin. DBX, şifreli ve düz yapılandırma dosyalarını otomatik olarak ayırt eder. Şifreli dosyalarda önce parola ifadesi istenir; böylece DBX hiçbir şey yazmadan dosyanın şifresini çözüp önizleyebilir.
+  </Step>
+<Step>
+    ### Bağlantıları Seçin
+
+    Dosyadaki hangi bağlantıların içe aktarılacağını seçin. Varsayılan olarak tüm bağlantılar seçilidir.
+  </Step>
+<Step>
+    ### Tamamlandı
+
+    Yalnızca seçili bağlantılar, parolaları geri yüklenmiş biçimde içe aktarılır. Ad + sunucu + port ile yinelenenler ayıklanır. Seçili bağlantıların kenar çubuğu grupları ve sırası içe aktarmadan sonra da uygulanabilir.
+  </Step>
+</Steps>
+
+## Güvenlik
+
+- Parolalar **PBKDF2** anahtar türetmesiyle **AES-256-GCM** kullanılarak şifrelenir
+- Parola ifadesi olmadan şifreli bir dosyanın şifresi çözülemez
+- Düz metin dışa aktarma şifreli değildir; veritabanı parolalarını, SSH Tünel kimlik bilgilerini ve diğer gizli bilgileri açığa çıkarabilir. Bunu yalnızca güvenilir bir ortamda geçici taşıma için kullanın
+- Dışa aktarma dosyası standart JSON'dur; USB bellek, bulut depolama vb. ile taşınabilir
+- DBX; sıradan bağlantı alanlarını, veritabanı parolaları, SSH parolaları, SSH anahtar parolaları ve tam bağlantı dizeleri gibi gizli bilgilerden ayrı saklar. Şifreli dışa aktarma birleşik veriyi korur; düz metin dışa aktarma bu gizli bilgileri okunabilir JSON olarak yazar.
+- Parola ifadesini bir sır gibi koruyun. Hem dışa aktarma dosyasına hem de parola ifadesine sahip olan herkes kayıtlı bağlantıları geri yükleyebilir.
+
+## Geriye Dönük Uyumluluk
+
+İçe aktarma, şifreli veya düz yapılandırma dosyalarını otomatik olarak algılar. Ayrıca eski sürümlerden gelen düz JSON dosyalarını (parolasız) ve ham bağlantı yapılandırma dizilerini de destekler.
+
+## Neler Dâhil
+
+| Öğe                                                                        | Dâhil mi                                                                   |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Bağlantı adı, türü, sunucusu, portu, veritabanı, rengi                     | Evet                                                                       |
+| URL parametreleri, SSL, SSH, proxy, görünür veritabanı ayarları            | Evet                                                                       |
+| Veritabanı parolası, SSH parolası, SSH anahtar parolası, bağlantı dizesi   | Evet; şifreli dışa aktarmada şifrelenir, düz metinde okunabilir olur       |
+| Üretici JDBC sürücü JAR dosyaları                                          | Hayır; sürücüleri hedef makinede yeniden kurun veya içe aktarın            |
+| Seçili bağlantıların kenar çubuğu grupları ve sırası                       | Evet; içe aktarmadan sonra uygulayıp uygulamayacağınızı seçin              |
+| Kayıtlı SQL ve arayüz/düzenleyici ayarları                                 | Hayır; taşımak için [Bulut Eşitleme](/tr/docs/cloud-sync) kullanın         |
+
+JDBC taşımaları için bağlantı ayarlarını buradan dışa aktarın, ardından hedef makinede eklentiyi kurup sürücü JAR dosyalarını içe aktarmak için [JDBC Eklentisi](/tr/docs/plugins) sayfasını izleyin.

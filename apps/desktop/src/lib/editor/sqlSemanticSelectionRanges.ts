@@ -420,6 +420,22 @@ export function sqlStringContentRangeAt(doc: string, position: number, assoc: -1
   return range && range.from <= character && character < range.to ? range : null;
 }
 
+// SQL LIKE wildcards that a double-click on a string literal should skip so the
+// selection lands on the searchable word instead of `%…%`/`_…_` (issue #8129).
+const SQL_STRING_WILDCARD_CHARACTERS = new Set(["%", "_"]);
+
+// Shrinks a string-content range past leading/trailing LIKE wildcards. Used only
+// by the double-click selection path, not the semantic expand-selection index, so
+// widening still reaches the full quoted content. Returns the original range when
+// it has no wildcard boundary or is entirely wildcards (nothing meaningful left).
+export function trimSqlStringWildcardBoundaries(doc: string, range: SemanticSelectionRange): SemanticSelectionRange {
+  let from = range.from;
+  let to = range.to;
+  while (from < to && SQL_STRING_WILDCARD_CHARACTERS.has(doc[from] ?? "")) from += 1;
+  while (to > from && SQL_STRING_WILDCARD_CHARACTERS.has(doc[to - 1] ?? "")) to -= 1;
+  return from < to ? { from, to } : range;
+}
+
 function findStatement(context: SemanticSelectionContext, analysis: SqlSemanticSelectionAnalysis): PreparedStatementWindow | undefined {
   let low = 0;
   let high = analysis.statements.length;

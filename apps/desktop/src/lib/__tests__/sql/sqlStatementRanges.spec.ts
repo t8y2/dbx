@@ -369,6 +369,20 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 'it''s; ok'", "SELECT 2"]);
   });
 
+  it("treats backslash as a literal inside single quotes for standard SQL (issue #8189)", () => {
+    // ESCAPE '\' is a complete one-char string in standard SQL; the closing quote must not be
+    // swallowed, so the following statement keeps its own range (and thus its run button).
+    const sql = "SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\';\nSELECT * FROM USER;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\'", "SELECT * FROM USER"]);
+    // No databaseType (generic) must behave the same as a standard-SQL dialect.
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql)).length).toBe(2);
+  });
+
+  it("keeps backslash-escaped quotes as one string for MySQL (no regression)", () => {
+    const sql = "SELECT 'a\\'b; still string';\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 'a\\'b; still string'", "SELECT 2"]);
+  });
+
   it("ignores semicolons inside double-quoted identifiers", () => {
     const sql = 'SELECT "a;b";\nSELECT 2';
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(['SELECT "a;b"', "SELECT 2"]);

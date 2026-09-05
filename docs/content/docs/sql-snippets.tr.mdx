@@ -1,0 +1,78 @@
+---
+title: SQL Parçacıkları
+description: Düzenleyici tamamlaması için yeniden kullanılabilir SQL şablonlarını, tetikleyici öneklerini ve sekmeyle gezilen yer tutucuları yönetin.
+---
+
+SQL parçacıkları düzenleyicide tamamlama adayı olarak görünür. Eşleşen bir tetikleyiciyi kabul ederek şablonu imlecin bulunduğu yere ekleyin, ardından düzenlenebilir yer tutucular arasında gezinmek için `Tab` ve `Shift+Tab` tuşlarını kullanın.
+
+## Parçacıkları Yönetme
+
+**Ayarlar → Parçacıklar** bölümünü açın. Her parçacık şunları içerir:
+
+| Alan | Amacı |
+| --- | --- |
+| Etiket | Tamamlama listesinde görünen ad. Etiket boşsa DBX öneki kullanır. |
+| Önek | Tamamlama adayıyla eşleşen metin. Zorunludur ve geçerli parçacık listesinde benzersiz olmalıdır. |
+| Durum | Parçacığı silmeden etkinleştirir veya devre dışı bırakır. |
+| SQL Gövdesi | Tamamlamayı kabul ettiğinizde düzenleyiciye eklenen şablon. |
+
+Parçacık ekleyebilir, düzenleyebilir, etkinleştirebilir, devre dışı bırakabilir veya silebilirsiniz. **Varsayılanları Geri Yükle**, geçerli taslağı DBX'in yerleşik parçacıklarıyla değiştirir; değişikliklerinizi kalıcı kılmak için ayarlar iletişim kutusunda **Uygula**'ya tıklayın.
+
+<Callout type="info">
+  DBX; `sel`, `ins`, `upd`, `cte` ve `join` gibi yaygın parçacıklarla gelir. Bazı yerleşik şablonlar etkin veritabanına uyum sağlar; örneğin uygun satır sınırı ya da `ALTER TABLE` sözdizimini seçer. Özel parçacıklar tam olarak yazıldığı gibi eklenir.
+</Callout>
+
+## Bir Parçacığı Genişletme
+
+1. SQL düzenleyicisinde `sel` gibi bir önek yazın.
+2. Tamamlama listesinde etiketi ve gövde önizlemesini doğrulayın.
+3. Kabul etmek için `Tab` ya da `Enter` tuşuna basın veya adaya tıklayın.
+4. Şablonda yer tutucular varsa ileri gitmek için `Tab`, geri gitmek için `Shift+Tab` tuşuna basın.
+
+Hiçbir aday görünmüyorsa parçacığın etkin olduğunu, önekin geçerli metinle eşleştiğini ve düzenleyici otomatik tamamlamasının açık olduğunu doğrulayın.
+
+## Yer Tutucu Sözdizimi
+
+DBX, CodeMirror parçacık sözdizimini kullanır:
+
+| Sözdizimi | Amacı |
+| --- | --- |
+| `${}` | Boş, düzenlenebilir bir alan oluşturur. |
+| `${ad}` | Varsayılan metni `ad` olan bir alan oluşturur; aynı adlı alanlar birlikte düzenlenir. |
+| `${1}` | Açık bir alan sırası belirler. |
+| `${1:varsayılanMetin}` | Sırayı belirler ve varsayılan metin sağlar. |
+| `#{ad}` | `${ad}` biçiminin alternatifi. |
+
+Numaralı alanlar sayısal sırayı izler. Numarasız alanlar şablondaki metin sırasını izler. Yer tutucu olarak ayrıştırılmaması gereken açma veya kapama süslü parantezini ters eğik çizgiyle kaçırın.
+
+Örneğin:
+
+```sql
+SELECT ${1:columns}
+FROM ${2:table}
+WHERE ${3:condition}
+ORDER BY ${4:column};
+```
+
+Birden çok konumu birlikte düzenlemek için bir alanı yeniden kullanın:
+
+```sql
+SELECT ${1:column}, COUNT(*) AS cnt
+FROM ${2:table}
+GROUP BY ${1:column};
+```
+
+## Saklama, Eşitleme ve Güvenlik
+
+Parçacıklar, geçerli DBX çalışma zamanında saklanan düzenleyici ayarlarıdır. Masaüstünde [Yapılandırma Bulut Eşitlemesi](/tr/docs/cloud-sync) parçacıkları diğer düzenleyici ayarlarınızla birlikte eşitleyebilir. [Bağlantı Yapılandırması Taşıma](/tr/docs/config-export) yalnızca veritabanı bağlantılarını taşır ve parçacıkları içermez.
+
+Bir parçacık yalnızca SQL üretir; veritabanı yetkilerini veya DBX üretim korumasını atlamaz. Yazma ya da DDL içeren şablonları çalıştırmadan önce tümüyle genişletilmiş ifadeyi inceleyin ve [Üretim Güvenliği](/tr/docs/production-safety) yönergelerini izleyin.
+
+<Cards>
+  <Card title="Sorgu Düzenleyici" href="/tr/docs/query-editor">
+    Tamamlama, yürütme kapsamı, geçmiş ve SQL dosyalarının birlikte nasıl çalıştığını öğrenin.
+  </Card>
+  <Card title="Klavye Kısayolları" href="/tr/docs/keyboard-shortcuts">
+    Tamamlamayı kabul etme, biçimlendirme ve çalıştırma için geçerli kısayolları inceleyin.
+  </Card>
+</Cards>

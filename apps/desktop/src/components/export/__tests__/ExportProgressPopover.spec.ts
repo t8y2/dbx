@@ -33,9 +33,15 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
 });
 
 import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue";
+import { dataTransferFailureCopyText, sqlFileFailureCopyText } from "@/components/export/failureDetailCopyText";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: vi.fn(),
+}));
 
 const mountedApps: App[] = [];
 let now = 0;
@@ -50,12 +56,15 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockImplementation(() => now);
   resetTracker();
   i18n.global.locale.value = "en";
+  vi.mocked(copyToClipboard).mockReset();
+  vi.mocked(copyToClipboard).mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
   resetTracker();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -74,6 +83,16 @@ async function mountPopover() {
   app.mount(container);
   await nextTick();
 }
+
+describe("failure detail copy text", () => {
+  it("formats a data-transfer failure from its authoritative fields", () => {
+    expect(dataTransferFailureCopyText({ table: "users", error: "permission denied" })).toBe("users\npermission denied");
+  });
+
+  it("includes available SQL context without adding lines for missing fields", () => {
+    expect(sqlFileFailureCopyText({ statementIndex: 2, fileName: "batch.sql", statementSummary: "", error: "raw error" }, "syntax error")).toBe("#2 batch.sql\nsyntax error");
+  });
+});
 
 describe("ExportProgressPopover task duration", () => {
   it("distinguishes manual exports from scheduled backups and uses a compact failure dot", async () => {
@@ -215,6 +234,7 @@ describe("ExportProgressPopover task duration", () => {
   });
 
   it("expands complete per-table transfer failure details", async () => {
+    vi.useFakeTimers();
     const tracker = useExportTracker();
     const task = tracker.addDataTransferTask("failed-transfer", "source to target", 2);
     tracker.updateDataTransferTask(task.exportId, {
@@ -252,6 +272,62 @@ describe("ExportProgressPopover task duration", () => {
     expect(detailsButton?.getAttribute("aria-expanded")).toBe("true");
     expect(document.body.textContent).toContain("users");
     expect(document.body.textContent).toContain("permission denied for relation users");
+
+    const copyButton = document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]');
+    expect(copyButton?.getAttribute("aria-label")).toBe("Copy failure details");
+    copyButton?.click();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("users\npermission denied for relation users");
+    expect(useToast().message.value).toBe("Failure details copied");
+    expect(copyButton?.title).toBe("Failure details copied");
+    expect(copyButton?.getAttribute("aria-label")).toBe("Failure details copied");
+    expect(copyButton?.querySelector("svg")?.classList.contains("text-green-500")).toBe(true);
+
+    vi.advanceTimersByTime(2000);
+    await nextTick();
+
+    expect(copyButton?.title).toBe("Copy failure details");
+    expect(copyButton?.getAttribute("aria-label")).toBe("Copy failure details");
+    expect(copyButton?.querySelector("svg")?.classList.contains("text-green-500")).toBe(false);
+  });
+
+  it("moves copied feedback between same-named failures from different tasks", async () => {
+    const tracker = useExportTracker();
+    for (const [taskId, error] of [
+      ["first-transfer", "first error"],
+      ["second-transfer", "second error"],
+    ] as const) {
+      const task = tracker.addDataTransferTask(taskId, "source to target", 1);
+      tracker.updateDataTransferTask(task.exportId, {
+        transferId: task.exportId,
+        table: "users",
+        tableIndex: 0,
+        totalTables: 1,
+        rowsTransferred: 0,
+        totalRows: null,
+        status: "error",
+        error,
+        terminal: false,
+      });
+    }
+
+    await mountPopover();
+    for (const detailsButton of document.body.querySelectorAll<HTMLButtonElement>('button[aria-expanded="false"]')) detailsButton.click();
+    await nextTick();
+
+    const copyButtons = document.body.querySelectorAll<HTMLButtonElement>('button[title="Copy failure details"]');
+    expect(copyButtons).toHaveLength(2);
+    copyButtons[0]?.click();
+
+    await vi.waitFor(() => expect(copyButtons[0]?.title).toBe("Failure details copied"));
+    expect(copyButtons[1]?.title).toBe("Copy failure details");
+
+    copyButtons[1]?.click();
+
+    await vi.waitFor(() => expect(copyButtons[1]?.title).toBe("Failure details copied"));
+    expect(copyButtons[0]?.title).toBe("Copy failure details");
   });
 
   it("shows the total failure count and omitted-detail notice when the bounded list is full", async () => {
@@ -319,6 +395,140 @@ describe("ExportProgressPopover task duration", () => {
     expect(document.body.textContent).toContain("#7");
     expect(document.body.textContent).toContain("ALTER TABLE users ADD missing_type");
     expect(document.body.textContent).toContain("type missing_type does not exist");
+
+    const copyButton = document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]');
+    copyButton?.click();
+
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith("#7\nALTER TABLE users ADD missing_type\ntype missing_type does not exist");
+      expect(copyButton?.title).toBe("Failure details copied");
+      expect(copyButton?.getAttribute("aria-label")).toBe("Failure details copied");
+      expect(copyButton?.querySelector("svg")?.classList.contains("text-green-500")).toBe(true);
+    });
+  });
+
+  it("includes the SQL file name and omits a missing statement summary without an empty line", async () => {
+    const tracker = useExportTracker();
+    const task = tracker.addSqlFileTask("sql-file-name-copy", "batch.sql", "/tmp/batch.sql");
+    tracker.updateSqlFileTask(
+      task.exportId,
+      {
+        executionId: task.exportId,
+        status: "statementFailed",
+        statementIndex: 2,
+        successCount: 1,
+        failureCount: 1,
+        affectedRows: 1,
+        elapsedMs: 10,
+        statementSummary: "",
+        error: "syntax error",
+      },
+      { fileIndex: 0, fileName: "batch.sql" },
+    );
+
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click();
+    await nextTick();
+    document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]')?.click();
+
+    await vi.waitFor(() => {
+      expect(copyToClipboard).toHaveBeenCalledWith("#2 batch.sql\nsyntax error");
+    });
+  });
+
+  it("shows a localized error when copying failure details fails", async () => {
+    vi.mocked(copyToClipboard).mockRejectedValueOnce(new Error("clipboard unavailable"));
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("copy-failed-transfer", "source to target", 1);
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "audit_log",
+      tableIndex: 0,
+      totalTables: 1,
+      rowsTransferred: 0,
+      totalRows: null,
+      status: "error",
+      error: "permission denied",
+      terminal: false,
+    });
+
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click();
+    await nextTick();
+    document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]')?.click();
+
+    await vi.waitFor(() => {
+      expect(useToast().message.value).toBe("Failed to copy failure details: clipboard unavailable");
+    });
+    expect(document.body.querySelector('button[title="Failure details copied"]')).toBeNull();
+  });
+
+  it("clears the copied feedback timer when the component unmounts", async () => {
+    vi.useFakeTimers();
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("unmount-copy-feedback", "source to target", 1);
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "users",
+      tableIndex: 0,
+      totalTables: 1,
+      rowsTransferred: 0,
+      totalRows: null,
+      status: "error",
+      error: "permission denied",
+      terminal: false,
+    });
+
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click();
+    await nextTick();
+    document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]')?.click();
+    await Promise.resolve();
+    await nextTick();
+
+    const timerCountBeforeUnmount = vi.getTimerCount();
+    expect(timerCountBeforeUnmount).toBeGreaterThanOrEqual(2);
+    mountedApps.pop()?.unmount();
+    expect(vi.getTimerCount()).toBe(timerCountBeforeUnmount - 2);
+  });
+
+  it("does not start copied feedback after unmount while the clipboard write is pending", async () => {
+    vi.useFakeTimers();
+    let resolveCopy: (() => void) | undefined;
+    vi.mocked(copyToClipboard).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveCopy = resolve;
+        }),
+    );
+    const tracker = useExportTracker();
+    const task = tracker.addDataTransferTask("pending-unmount-copy-feedback", "source to target", 1);
+    tracker.updateDataTransferTask(task.exportId, {
+      transferId: task.exportId,
+      table: "users",
+      tableIndex: 0,
+      totalTables: 1,
+      rowsTransferred: 0,
+      totalRows: null,
+      status: "error",
+      error: "permission denied",
+      terminal: false,
+    });
+
+    await mountPopover();
+    document.body.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')?.click();
+    await nextTick();
+    document.body.querySelector<HTMLButtonElement>('button[title="Copy failure details"]')?.click();
+
+    expect(vi.getTimerCount()).toBe(1);
+    mountedApps.pop()?.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolveCopy?.();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

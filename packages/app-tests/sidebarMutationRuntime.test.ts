@@ -6,7 +6,7 @@ const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTre
 const connectionMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarConnectionMutationRuntime.ts", "utf8");
 const databaseSpecificMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarDatabaseSpecificMutationRuntime.ts", "utf8");
 const tableMutationRuntime = readFileSync("apps/desktop/src/composables/useSidebarTableMutationRuntime.ts", "utf8");
-const localeSources = Object.fromEntries(["en", "es", "it", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"].map((locale) => [locale, readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8")]));
+const localeSources = Object.fromEntries(["en", "es", "it", "ja", "ko", "pt-BR", "tr", "zh-CN", "zh-TW"].map((locale) => [locale, readFileSync(`apps/desktop/src/i18n/locales/${locale}.ts`, "utf8")]));
 
 function functionBody(name: string): string {
   const source = [runtimeHost, connectionMutationRuntime, databaseSpecificMutationRuntime, tableMutationRuntime].find((candidate) => candidate.includes(`function ${name}(`));

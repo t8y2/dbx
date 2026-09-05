@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type CSSProperties } from "vue";
-import { Check, Columns3, GripVertical, Search } from "@lucide/vue";
+import { Check, GripVertical, ListChecks, Search } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -306,7 +306,7 @@ onBeforeUnmount(resetColumnDragState);
         :title="t('grid.columnVisibility')"
         :aria-label="t('grid.columnVisibility')"
       >
-        <Columns3 class="h-3.5 w-3.5" />
+        <ListChecks class="h-3.5 w-3.5" />
         <span v-if="!compact">{{ t("grid.columnVisibility") }}</span>
         <span v-if="!compact && (grid?.hiddenColumnCount ?? 0) > 0" class="tabular-nums"> {{ grid?.visibleColumnCount }}/{{ grid?.displayableColumnCount }} </span>
       </Button>

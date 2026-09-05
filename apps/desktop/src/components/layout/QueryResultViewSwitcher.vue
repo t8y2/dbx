@@ -5,8 +5,8 @@ import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 
-type OutputView = "result" | "summary" | "explain" | "chart" | "messages";
-type PrimaryResultView = Exclude<OutputView, "explain">;
+type OutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+type PrimaryResultView = Exclude<OutputView, "explain" | "profile">;
 
 const props = withDefaults(
   defineProps<{

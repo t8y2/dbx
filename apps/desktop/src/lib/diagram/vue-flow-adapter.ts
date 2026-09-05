@@ -1,4 +1,4 @@
-import type { DiagramTable, DiagramRelationship } from "./erDiagram";
+import { diagramTableId, type DiagramTable, type DiagramRelationship } from "./erDiagram";
 import type { InferredRelationship, DiagramNode, DiagramEdge, DiagramLayer } from "@/types/diagram";
 import type { Node, Edge } from "@vue-flow/core";
 import { useLayerStore } from "./layer-store";
@@ -14,34 +14,49 @@ export type RelationshipEdgeData = {
 };
 
 /** Table is on canvas when unlayered, or when its layer is visible. */
-export function isTableCanvasVisible(tableName: string, layers: DiagramLayer[]): boolean {
-  const layer = layers.find((l) => l.tableNames.includes(tableName));
+export function isTableCanvasVisible(tableName: string, layers: DiagramLayer[], rawName?: string): boolean {
+  const layer = layers.find((l) => l.tableNames.includes(tableName) || (rawName && l.tableNames.includes(rawName)));
   if (!layer) return true;
   return layer.visible;
 }
 
 /** positions are absolute canvas coordinates; converted to relative when parented to a visible layer */
-export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>): Node<{ table: DiagramTable }>[] {
+export function toVueFlowNodes(tables: DiagramTable[], positions?: Record<string, { x: number; y: number }>, isMultiSchema = false): Node<{ table: DiagramTable; isMultiSchema?: boolean }>[] {
   const layerStore = useLayerStore();
   const layers = layerStore.layers;
 
+  // Track raw name frequencies to avoid ambiguous fallback when multiple schemas have identical table names
+  const rawNameCounts = new Map<string, number>();
+  if (isMultiSchema) {
+    for (const table of tables) {
+      rawNameCounts.set(table.name, (rawNameCounts.get(table.name) ?? 0) + 1);
+    }
+  }
+
   return tables
-    .filter((table) => !table.pendingDrop && isTableCanvasVisible(table.name, layers))
+    .filter((table) => {
+      if (table.pendingDrop) return false;
+      const tableId = diagramTableId(table, isMultiSchema);
+      const allowRawFallback = !isMultiSchema || rawNameCounts.get(table.name) === 1;
+      return isTableCanvasVisible(tableId, layers, allowRawFallback ? table.name : undefined);
+    })
     .map((table) => {
-      const layer = layerStore.getLayerByTable(table.name);
-      const absolute = positions?.[table.name] || { x: 0, y: 0 };
+      const tableId = diagramTableId(table, isMultiSchema);
+      const allowRawFallback = !isMultiSchema || rawNameCounts.get(table.name) === 1;
+      const layer = layerStore.getLayerByTable(tableId) || (allowRawFallback ? layerStore.getLayerByTable(table.name) : undefined);
+      const absolute = positions?.[tableId] || (allowRawFallback ? positions?.[table.name] : undefined) || { x: 0, y: 0 };
       const visibleParent = layer?.visible ? layer : undefined;
       const layerPos = visibleParent?.position || { x: 0, y: 0 };
       const relative = visibleParent ? { x: absolute.x - layerPos.x, y: absolute.y - layerPos.y } : absolute;
 
       return {
-        id: table.name,
+        id: tableId,
         type: "table",
         position: relative,
         parentNode: visibleParent?.id,
         expandParent: false,
         zIndex: TABLE_Z_INDEX,
-        data: { table },
+        data: { table, isMultiSchema },
       };
     });
 }

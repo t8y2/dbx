@@ -15,6 +15,7 @@ const props = defineProps<{
   data: {
     table: DiagramTable;
     relationships?: (DiagramRelationship | InferredRelationship)[];
+    isMultiSchema?: boolean;
   };
   selected?: boolean;
 }>();
@@ -34,7 +35,10 @@ function isForeignKeyColumn(table: DiagramTable, columnName: string): boolean {
 
 function isRelationshipColumn(table: DiagramTable, columnName: string): boolean {
   if (!props.data.relationships) return false;
-  return props.data.relationships.some((relationship) => (relationship.sourceTable === table.name && relationship.sourceColumn === columnName) || (relationship.targetTable === table.name && relationship.targetColumn === columnName));
+  const tableId = props.data.isMultiSchema && table.schema ? `${table.schema}.${table.name}` : table.name;
+  return props.data.relationships.some(
+    (relationship) => ((relationship.sourceTable === tableId || relationship.sourceTable === table.name) && relationship.sourceColumn === columnName) || ((relationship.targetTable === tableId || relationship.targetTable === table.name) && relationship.targetColumn === columnName),
+  );
 }
 
 function truncateLabel(value: string, maxChars: number): string {
@@ -42,7 +46,9 @@ function truncateLabel(value: string, maxChars: number): string {
   return `${value.slice(0, Math.max(1, maxChars - 1))}…`;
 }
 
-const layerColor = computed(() => layerStore.getLayerColor(props.data.table.name));
+const tableIdentifier = computed(() => (props.data.isMultiSchema && props.data.table.schema ? `${props.data.table.schema}.${props.data.table.name}` : props.data.table.name));
+
+const layerColor = computed(() => layerStore.getLayerColor(tableIdentifier.value) || layerStore.getLayerColor(props.data.table.name));
 
 const handleOffsetStyle = computed(() =>
   EDGE_HANDLE_OUTSET > 0
@@ -69,9 +75,14 @@ const handleOffsetStyle = computed(() =>
     <div class="overflow-hidden rounded-[inherit]">
       <div class="flex h-11 cursor-grab items-center gap-2 border-b bg-muted/40 px-3 active:cursor-grabbing">
         <Table2 class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="data.table.name">
-          {{ truncateLabel(data.table.name, TABLE_NAME_MAX_CHARS) }}
-        </span>
+        <div class="min-w-0 flex-1 flex flex-col justify-center">
+          <span v-if="data.isMultiSchema && data.table.schema" class="truncate text-[10px] text-muted-foreground font-mono leading-none mb-0.5" :title="data.table.schema">
+            {{ data.table.schema }}
+          </span>
+          <span class="min-w-0 truncate text-sm font-medium leading-tight" :title="data.isMultiSchema && data.table.schema ? `${data.table.schema}.${data.table.name}` : data.table.name">
+            {{ truncateLabel(data.table.name, TABLE_NAME_MAX_CHARS) }}
+          </span>
+        </div>
         <Badge v-if="isDraft" variant="outline" class="h-5 shrink-0 px-1.5 text-[10px] border-amber-500/50 text-amber-700 dark:text-amber-400">Draft</Badge>
         <Badge variant="outline" class="h-5 px-1.5 text-[10px]">{{ visibleColumns(data.table).length }}</Badge>
       </div>

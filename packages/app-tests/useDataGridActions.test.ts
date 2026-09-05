@@ -96,7 +96,7 @@ test("data reload executes before slow metadata refresh completes", async () => 
     assert.ok(tab);
 
     const actions = useDataGridActions(computed(() => tab));
-    const reload = actions.onReloadData(undefined, undefined, undefined, undefined, 50, 0);
+    const reload = actions.onReloadData(tabId, undefined, undefined, undefined, undefined, 50, 0);
 
     await waitFor(() => !!executeBody, 5_000);
     assert.equal(executeBody.clientSessionId, tabId);
@@ -161,7 +161,7 @@ test("data reload preserves current page offset instead of resetting to page 1",
 
     const actions = useDataGridActions(computed(() => tab));
     // Simulate refresh from page 5 with pageSize=100 → offset=400
-    await actions.onReloadData(undefined, undefined, undefined, undefined, 100, 400);
+    await actions.onReloadData(tabId, undefined, undefined, undefined, undefined, 100, 400);
 
     assert.equal(buildSqlOptions?.offset, 400, "build-table-select-sql must receive offset=400 to stay on page 5");
     assert.equal(buildSqlOptions?.limit, 100, "limit must be 100");
@@ -210,7 +210,7 @@ test("infinite pagination fetches and appends only the next table segment", asyn
     tab.resultPageOffset = 0;
 
     const actions = useDataGridActions(computed(() => tab));
-    await actions.onPaginate(1, 100);
+    await actions.onPaginate(tabId, 1, 100);
 
     assert.equal(buildSqlOptions?.offset, 1);
     assert.equal(buildSqlOptions?.limit, 100);
@@ -264,8 +264,8 @@ test("query toolbar refresh reruns the complete multi-result SQL and keeps the a
     });
     const actions = useDataGridActions(computed(() => tab));
 
-    await actions.onReloadData("select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
-    await actions.onReloadData("select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
+    await actions.onReloadData(tabId, "select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
+    await actions.onReloadData(tabId, "select * from orders", undefined, undefined, undefined, 100, 0, "refresh");
 
     assert.equal(executeTabSql.mock.calls.length, 2);
     for (const call of executeTabSql.mock.calls) {
@@ -389,7 +389,7 @@ describe("multi-result preservation after submit", () => {
 
       // Simulate DataGrid submit reload: onReloadData with the current
       // result's sourceStatement (single statement, not the full batch SQL)
-      await actions.onReloadData("select * from users");
+      await actions.onReloadData(tabId, "select * from users");
 
       // The second result must be preserved
       assert.equal(tab.results?.length, 2, "both results must survive after submit");
@@ -493,7 +493,7 @@ describe("multi-result preservation after submit", () => {
       const actions = useDataGridActions(computed(() => tab));
 
       // Simulate DataGrid submit reload on the SECOND result
-      await actions.onReloadData("select * from orders");
+      await actions.onReloadData(tabId, "select * from orders");
 
       // The first result must be preserved
       assert.equal(tab.results?.length, 2, "both results must survive after submit on second result");

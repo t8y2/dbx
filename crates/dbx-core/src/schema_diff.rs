@@ -2866,6 +2866,14 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
                 if source_included.is_empty() { "none".to_string() } else { source_included.join(", ") }
             ));
         }
+        if source_index.column_opclasses != target_index.column_opclasses {
+            let fmt_opclass = |o: &Option<String>| -> String {
+                o.as_deref().filter(|v| !v.is_empty()).unwrap_or("default").to_string()
+            };
+            let src_str = source_index.column_opclasses.iter().map(fmt_opclass).collect::<Vec<_>>().join(", ");
+            let tgt_str = target_index.column_opclasses.iter().map(fmt_opclass).collect::<Vec<_>>().join(", ");
+            changes.push(format!("opclass: {} → {}", tgt_str, src_str));
+        }
         if !changes.is_empty() {
             diffs.push(IndexDiff {
                 diff_type: "modified".to_string(),
@@ -5645,6 +5653,7 @@ mod tests {
             included_columns: overrides.included_columns,
             comment: overrides.comment,
             key_is_expression: overrides.key_is_expression,
+            column_opclasses: overrides.column_opclasses,
         }
     }
 
@@ -6591,6 +6600,7 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         };
         let diff = TableDiff {
             diff_type: "modified".into(),
@@ -6652,6 +6662,7 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         };
         let unchanged_fk = ForeignKeyInfo {
             name: "fk_events_parent".into(),
@@ -6989,6 +7000,7 @@ mod tests {
             included_columns: Some(vec!["payload".into()]),
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         };
         let btree_sql = create_index_sql("events", &btree, DatabaseType::SqlServer, Some("dbo"));
         assert_eq!(
@@ -7007,6 +7019,7 @@ mod tests {
             included_columns: Some(vec!["status".into(), "payload".into()]),
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         };
         assert_eq!(
             create_index_sql("events", &columnstore, DatabaseType::SqlServer, Some("dbo")),
@@ -7702,6 +7715,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_orders_status".to_string(),
@@ -7713,12 +7727,51 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
 
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].diff_type, "modified");
         assert_eq!(diffs[0].changes, vec!["unique: YES → NO", "columns: status → status, created_at"]);
+    }
+
+    #[test]
+    fn detects_opclass_change_in_postgres_index() {
+        let source_index = index(IndexInfo {
+            name: "idx_name_trgm".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+        });
+        let target_index = index(IndexInfo {
+            name: "idx_name_trgm".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![None],
+        });
+
+        let diffs = diff_indexes(&[source_index], &[target_index]);
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "modified");
+        assert!(
+            diffs[0].changes.iter().any(|c| c.contains("opclass")),
+            "Expected opclass change line, got: {:?}",
+            diffs[0].changes
+        );
     }
 
     #[test]
@@ -7734,6 +7787,7 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         });
         let target_index = index(IndexInfo {
             name: "test_UNIQUE".to_string(),
@@ -7745,6 +7799,7 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         });
 
         let diffs = diff_indexes(std::slice::from_ref(&source_index), &[target_index]);
@@ -7806,6 +7861,7 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![],
         });
 
         let sql = generate_schema_sync_sql(
@@ -7865,6 +7921,7 @@ mod tests {
                 expression_key_part.to_string(),
             ],
             key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![],
             is_unique: true,
             is_primary: false,
             filter: None,
@@ -7931,6 +7988,7 @@ mod tests {
                 name: "idx_weird_columns".to_string(),
                 columns: vec!["order item".to_string(), "a(b)".to_string(), "a::b".to_string()],
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
                 is_unique: false,
                 is_primary: false,
                 filter: None,
@@ -8116,6 +8174,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -8459,6 +8518,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -9181,6 +9241,7 @@ mod tests {
                     included_columns: Some(vec!["User ID".to_string()]),
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "Order User FK".to_string(),
@@ -9244,6 +9305,7 @@ mod tests {
                     included_columns: None,
                     comment: Some("status lookup".to_string()),
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "user-fk".to_string(),
@@ -9297,6 +9359,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "parent item fk".to_string(),
@@ -10369,6 +10432,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })),
                 target: None,
                 changes: vec![],
@@ -10410,6 +10474,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 })),
                 changes: vec![],
             }]),
@@ -10808,6 +10873,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10819,6 +10885,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs.len(), 1, "index type diff detected");
@@ -10838,6 +10905,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10849,6 +10917,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs[0].changes.iter().filter(|c| c.contains("FULLTEXT")).count(), 1, "fulltext change");
@@ -10868,6 +10937,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10879,6 +10949,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs.len(), 1, "order diff detected");
@@ -10899,6 +10970,7 @@ mod tests {
                 included_columns: Some(vec!["b".into(), "c".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10910,6 +10982,7 @@ mod tests {
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs.len(), 1, "included columns diff detected");
@@ -10929,6 +11002,7 @@ mod tests {
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10940,6 +11014,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs.len(), 1, "included added");
@@ -10959,6 +11034,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10970,6 +11046,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             })],
         );
         assert_eq!(diffs.len(), 1, "filter diff");
@@ -10991,6 +11068,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -11002,6 +11080,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 }),
             ],
             &[
@@ -11015,6 +11094,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -11026,6 +11106,7 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
                 }),
             ],
         );
@@ -11394,6 +11475,7 @@ mod tests {
                         included_columns: None,
                         comment: None,
                         key_is_expression: Vec::new(),
+                        column_opclasses: vec![],
                     })),
                     target: None,
                     changes: vec![],
@@ -11412,6 +11494,7 @@ mod tests {
                         included_columns: None,
                         comment: None,
                         key_is_expression: Vec::new(),
+                        column_opclasses: vec![],
                     })),
                     changes: vec![],
                 },
@@ -11807,6 +11890,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             }),
             target: None,
             changes: vec![],
@@ -12059,6 +12143,7 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
             }),
             target: None,
             changes: vec![],

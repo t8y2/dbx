@@ -2,16 +2,17 @@
 
 import type { ReactNode } from "react";
 import { useState } from "react";
+import type { DocsLang } from "@/lib/i18n";
 
-export function ExpandableDatabaseGrid({ children, lang }: { children: ReactNode; lang: "en" | "cn" }) {
+const TOGGLE_LABEL: Record<DocsLang, { less: string; more: string }> = {
+  en: { less: "Show fewer databases", more: "Show all databases" },
+  cn: { less: "收起数据库列表", more: "展开全部数据库" },
+  tr: { less: "Daha az veritabanı göster", more: "Tüm veritabanlarını göster" },
+};
+
+export function ExpandableDatabaseGrid({ children, lang }: { children: ReactNode; lang: DocsLang }) {
   const [expanded, setExpanded] = useState(false);
-  const label = expanded
-    ? lang === "cn"
-      ? "收起数据库列表"
-      : "Show fewer databases"
-    : lang === "cn"
-      ? "展开全部数据库"
-      : "Show all databases";
+  const label = expanded ? TOGGLE_LABEL[lang].less : TOGGLE_LABEL[lang].more;
 
   return (
     <>

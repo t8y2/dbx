@@ -1,12 +1,12 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 
 export type ExportCellValue = string | number | boolean | null;
 
-export function formatCsv(columns: string[], rows: ExportCellValue[][]): string {
-  const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
-  const header = columns.map(esc).join(",");
-  const body = rows.map((row) => row.map((c) => (c === null ? "" : esc(String(c)))).join(",")).join("\n");
+export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMode: CsvQuoteMode = "all"): string {
+  const header = columns.map((column) => escapeCsvField(column, quoteMode)).join(",");
+  const body = rows.map((row) => row.map((cell) => (cell === null ? "" : escapeCsvField(String(cell), quoteMode))).join(",")).join("\n");
   return `${header}\n${body}`;
 }
 

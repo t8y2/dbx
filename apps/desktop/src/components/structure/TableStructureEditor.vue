@@ -37,6 +37,7 @@ import { invalidateObjectMetadataCache, loadObjectMetadataFacet, type ObjectMeta
 import { invalidateTableMetadataCache } from "@/lib/metadata/tableMetadataCache";
 import { type BuildTableStructureChangeSqlOptions, type EditableStructureColumn, type EditableStructureForeignKey, type EditableStructureIndex, type EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql";
 import { buildMysqlAutoIncrementCounterStatement, canEditMysqlAutoIncrementCounter, refreshMysqlAutoIncrementCounterDraft } from "@/lib/table/mysqlAutoIncrementCounter";
+import { mysqlTableCollationSql, parseMysqlTableCollation } from "@/lib/table/mysqlTableCollation";
 import { MYSQL_STORAGE_ENGINES_SQL, mysqlTableEngineSql, mysqlTableEngineSqlOption, parseMysqlTableEngineMetadata, refreshMysqlTableEngineDraft, supportsMysqlTableEngine } from "@/lib/table/mysqlTableEngine";
 import { PRESET_FIELDS_TEMPLATE_ID, createTableColumnTemplateDrafts } from "@/lib/table/tableColumnTemplates";
 import { getMysqlDataTypeHelp } from "@/lib/table/mysqlDataTypeHelp";
@@ -928,6 +929,9 @@ const showCharacterSet = computed(() => structureDialect.value === "mysql");
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
 const charsetMetadataLoading = ref(false);
+// The table's own default collation, used only to keep inherited charsets out of the
+// generated DDL. Columns keep the real values MySQL reports so the pickers stay filled.
+const mysqlTableDefaultCollation = ref("");
 
 const mysqlCharsetOptions = computed<string[]>(() => {
   const meta = serverCharsetMetadata.value;
@@ -953,6 +957,22 @@ async function loadCharsetMetadata() {
     serverCharsetMetadata.value = fallbackCreateDatabaseCharsetMetadata();
   } finally {
     charsetMetadataLoading.value = false;
+  }
+}
+
+async function loadMysqlTableDefaultCollation() {
+  if (!showCharacterSet.value || isCreateMode.value || !props.connectionId || !props.database || !props.tableName) {
+    mysqlTableDefaultCollation.value = "";
+    return;
+  }
+  try {
+    await store.ensureConnected(props.connectionId);
+    const result = await api.executeQuery(props.connectionId, props.database, mysqlTableCollationSql(props.database, props.tableName), undefined, undefined, { maxRows: 1 });
+    mysqlTableDefaultCollation.value = parseMysqlTableCollation(result);
+  } catch {
+    // Optional metadata: without it the DDL just spells out the charset the column
+    // already has, which is equivalent SQL — never block the editor on this lookup.
+    mysqlTableDefaultCollation.value = "";
   }
 }
 
@@ -1603,6 +1623,7 @@ function scheduleSqlPreviewRefresh() {
 function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
   return {
     databaseType: databaseType.value,
+    driverProfile: connection.value?.driver_profile,
     schema: props.schema,
     tableName: isCreateMode.value ? newTableName.value.trim() : props.tableName || "",
     // Do not let a draft created by an older build submit properties that the
@@ -1614,6 +1635,7 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     tableComment: tableComment.value,
     originalTableComment: isCreateMode.value ? undefined : originalTableComment.value,
     mysqlEngine: mysqlTableEngineSqlOption({ value: mysqlTableEngine.value, originalValue: originalMysqlTableEngine.value }, isCreateMode.value, supportsMysqlEngine.value && !mysqlTableEngineLoading.value && !mysqlTableEngineLoadError.value),
+    tableCollation: mysqlTableDefaultCollation.value || undefined,
     partitioned: isPartitionedParent.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
   };
@@ -1772,6 +1794,7 @@ function resetState() {
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
   mysqlTableEngineLoadError.value = "";
+  mysqlTableDefaultCollation.value = "";
   tableOwner.value = "";
   originalTableOwner.value = "";
   tableOwnerLoadRequestId += 1;
@@ -2040,6 +2063,7 @@ async function loadStructure(
       // Load live charset/collation metadata from the MySQL server so the column
       // editor shows the correct options for the server version.
       void loadCharsetMetadata();
+      void loadMysqlTableDefaultCollation();
       const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
       const hydratedColumnDrafts = supportsCharacterLengthUnits.value && options.characterLengthUnitsAfterSave ? restoreCharacterLengthUnitsAfterSave(databaseType.value, nextColumnDrafts, options.characterLengthUnitsAfterSave) : nextColumnDrafts;
       columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
@@ -3150,6 +3174,7 @@ function addIndex() {
     includedColumns: [],
     comment: "",
     concurrently: false,
+    columnOpclasses: [],
     markedForDrop: false,
   });
   void nextTick(() => {
@@ -3862,6 +3887,7 @@ watch(
     originalMysqlTableEngine,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
+    mysqlTableDefaultCollation,
     tableOwner,
     ddlDraft,
     columns,

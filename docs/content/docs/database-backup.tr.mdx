@@ -1,0 +1,162 @@
+---
+title: Zamanlanmış Veritabanı Yedekleri
+description: DBX Masaüstü'nde MySQL ve PostgreSQL için elle, saatlik, günlük ya da haftalık SQL yedekleme zamanlamaları oluşturun.
+---
+
+Zamanlanmış veritabanı yedekleri; MySQL ve PostgreSQL bağlantıları için SQL dosyaları üretmek üzere DBX veritabanı dışa aktarma motorunu kullanır. Geliştirme, test ve küçük ile orta ölçekli veritabanlarının yinelenen mantıksal yedekleri için uygundur; tablo kapsamı, saklama, çalıştırma geçmişi ve elle çalıştırma özelliklerini içerir.
+
+Yalnızca bir kez çalışması gereken bir yedek için zamanlama oluşturmak yerine Ayarlar'daki **Şimdi yedekle** seçeneğini kullanın. Aynı bağlantıyı, hedefi, veritabanını, tabloyu ve içerik kapsamını yapılandırıp **Yedeklemeyi başlat**'ı seçin. Bu tek seferlik çalıştırma bir zamanlama oluşturmaz ya da değiştirmez, sonraki çalıştırmayı hesaplamaz ve zamanlanmış çalıştırmalarla aynı yedekleme geçmişinde görünür.
+
+<Callout type="warn">Zamanlanmış yedekler şu anda DBX Masaüstü'nün açık kalmasını gerektirir. Bağımsız bir sunucu zamanlayıcısı değildir ve fiziksel yedeklerin, zaman noktasına geri dönüşün, WAL/binlog arşivlemesinin ya da bulut sağlayıcısının yedekleme hizmetlerinin yerini almaz.</Callout>
+
+## Destek Kapsamı
+
+| Öğe | Geçerli davranış |
+| --- | --- |
+| Veritabanları | MySQL ve PostgreSQL |
+| Platform | DBX Masaüstü |
+| Çıktı | Veritabanı/şema hedefi başına bir `.sql` dosyası |
+| Sıklık | Her N saatte bir, günün belirli bir saatinde ya da haftanın belirli bir günü ve saatinde |
+| İçerik | Tablo yapısı, veri, veritabanı nesneleri ve isteğe bağlı `DROP TABLE IF EXISTS` |
+| Tablo kapsamı | Tümü, desene göre dâhil etme ya da desene göre hariç tutma |
+| Saklama | Yapılandırılmış sayıda başarılı yedekleme dosyasını sakla |
+
+## Tek Seferlik Yedekleme Çalıştırma
+
+<Steps>
+  <Step>
+    ### Tek seferlik yedekleme formunu açın
+
+    Ayarlar'daki veritabanı yedekleme sayfasını açın ve **Şimdi yedekle**'yi seçin.
+
+  </Step>
+  <Step>
+    ### Yedeklemeyi yapılandırın
+
+    Bir MySQL ya da PostgreSQL bağlantısı, hedef dizin, veritabanı kapsamı, tablo kapsamı ve yedekleme içeriği seçin. Tek seferlik yedeklemenin zamanlama adı, sıklığı, saklama sayısı ya da etkinlik durumu yoktur.
+
+  </Step>
+  <Step>
+    ### Başlatın ve doğrulayın
+
+    **Yedeklemeyi başlat**'ı seçin. Çalıştırma ortak veritabanı dışa aktarma motorunu kullanır ve **Yedekleme geçmişi** bölümünde görünür; ilerleme, iptal, üretilen dosyalar ve hatalar zamanlanmış çalıştırmalarla aynı davranışı gösterir.
+
+  </Step>
+</Steps>
+
+## Zamanlama Oluşturma
+
+<Steps>
+  <Step>
+    ### Yedekleme ayarlarını açın
+
+    Ayarlar'daki veritabanı yedekleme sayfasını açın ve bir zamanlama oluşturun.
+
+  </Step>
+  <Step>
+    ### Bağlantıyı ve veritabanlarını seçin
+
+    Bir MySQL ya da PostgreSQL bağlantısı seçin. Sistem dışı tüm veritabanlarını yedekleyin ya da belirli veritabanlarını seçin.
+
+  </Step>
+  <Step>
+    ### Tablo kapsamını yapılandırın
+
+    Tüm tabloları seçin, eşleşen desenleri dâhil edin ya da eşleşen desenleri hariç tutun. Desenler `*` ve `?` destekler ve `şema.tablo` ya da `veritabanı.şema.tablo` biçimiyle eşleşebilir.
+
+  </Step>
+  <Step>
+    ### Dizini ve sıklığı belirleyin
+
+    Yerel bir hedef dizin seçin ve saatlik, günlük ya da haftalık zamanlamayı yapılandırın. DBX bir sonraki çalıştırmayı önizler.
+
+  </Step>
+  <Step>
+    ### İçeriği ve saklamayı seçin
+
+    Yapıyı, veriyi, nesneleri ve `DROP TABLE IF EXISTS` seçeneğini belirleyin, ardından kaç geçmiş yedeğin saklanacağını seçin.
+
+  </Step>
+  <Step>
+    ### Kaydedin ve doğrulayın
+
+    Zamanlamayı önce elle çalıştırın. Otomatik çalıştırmayı etkinleştirmeden önce bağlantı yetkilerini, tablo kapsamını, hedef dizini ve üretilen dosyaları doğrulayın.
+
+  </Step>
+</Steps>
+
+## Tablo Desenleri
+
+Desenleri virgül, noktalı virgül ya da satır sonuyla ayırın. Örneğin:
+
+```text
+public.*
+audit_*
+orders_202?
+```
+
+- **Dâhil et**, yalnızca eşleşen tabloları dışa aktarır
+- **Hariç tut**, diğer her şeyi dışa aktarır ve eşleşen tabloları atlar
+- PostgreSQL adları büyük/küçük harfe duyarlıdır
+- MySQL eşleştirmesi `lower_case_table_names` ayarını izler
+
+Bir dâhil etme kuralı hiçbir tabloyla eşleşmezse, boş ama başarılı bir yedek bildirmek yerine çalıştırma başarısız olur.
+
+## Tutarlılık ve Çalıştırma
+
+Her yedekleme, veritabanı/şema hedeflerini dışa aktarmadan önce tutarlı bir anlık görüntü oturumu kurar. DBX ardından salt okunur anlık görüntü işlemini geri alır ve iş değişikliklerini uygulamaz.
+
+Yedekleme çalıştırmaları ortak dışa aktarma görev alanında görünür ve şunları gösterir:
+
+- Geçerli veritabanı ve nesne
+- Başarı, hata ya da iptal durumu
+- Elle mi zamanlanmış mı tetiklendiği
+- Üretilen dosya listesi
+- Hata ayrıntıları ve zaman damgaları
+
+İptal, kalan dışa aktarımları durdurur. Hata ya da iptal durumunda DBX o çalıştırmadan kalan kısmi dosyaları kaldırmaya çalışır; böylece eksik çıktı başarılı bir yedek sanılmaz.
+
+## Saklama ve Geçmiş
+
+Her zamanlamanın bir saklama sayısı vardır. Sınırın ötesindeki eski çalıştırmalar geçmişten ayıklanır ve dosyaları silinir. Tek tek yedekleme çalıştırmaları ve dosyaları elle de kaldırılabilir.
+
+<Callout type="warn">Hedef dizinin yine bağımsız bir işletim sistemi, NAS ya da nesne depolama yedeğine ihtiyacı vardır. Aynı diskteki başka bir klasöre kaydetmek; disk arızasına, fidye yazılımına ya da makinenin kaybına karşı koruma sağlamaz.</Callout>
+
+## Geri Yükleme Provaları
+
+Üretilen `.sql` dosyaları [SQL Dosyası Çalıştırma](/tr/docs/sql-file) ile içe aktarılabilir. Yalıtılmış bir ortamda düzenli olarak şunları doğrulayın:
+
+- Dosyanın tamamı okunabiliyor ve çalıştırılabiliyor
+- Şema, dizinler, nesneler ve satır sayıları doğru
+- Karakter kümesi, saat dilimi, dizi/identity değerleri ve yetkiler için gereken izleyen adımlar var
+- Uygulama geri yüklenen veritabanına bağlanabiliyor
+
+Başarılı bir yedekleme çalıştırması dosya üretiminin tamamlandığı anlamına gelir; geri yüklemeye hazır olduğunu kanıtlamaz.
+
+## Zamanlanmış Yedekleme ile Veritabanı Dışa Aktarma
+
+| Özellik | Ne için uygundur |
+| --- | --- |
+| [Veritabanı Dışa Aktarma](/tr/docs/database-export) | Tek seferlik göç, değişiklik öncesi yedek ve elle kapsam seçimi |
+| Zamanlanmış Veritabanı Yedekleme | Sabit bir bağlantı ve kapsam için yinelenen mantıksal yedekler |
+| Veritabanının kendi yedeklemesi | Büyük üretim veritabanları, PITR, artımlı/fiziksel yedekleme, yüksek erişilebilirlik ve uyumluluk gereksinimleri |
+
+## Güvenlik Önerileri
+
+- Yalnızca yedekleme için gereken okuma yetkilerine sahip bir veritabanı hesabı kullanın
+- Hedefi verinin hassasiyet düzeyine göre koruyun ve şifreleyin
+- İş verisi içeren SQL dosyalarını hiçbir zaman herkese açık bir depoya commit etmeyin
+- Veritabanları ya da tablolar yeniden adlandırıldıktan sonra kapsamı yeniden denetleyin
+- DBX Masaüstü kapalıysa, bilgisayar uykudaysa ya da hedef erişilemezse zamanlamalar sunucu zamanlayıcısı güvenilirliğiyle çalışmaz
+
+<Cards>
+  <Card title="Tek seferlik veritabanı dışa aktarma" href="/tr/docs/database-export">
+    Yapıyı, veriyi, nesneleri ve veritabanı kapsamını elle seçin.
+  </Card>
+  <Card title="SQL dosyalarını geri yükleyin" href="/tr/docs/sql-file">
+    Yedekleme dosyalarını ifade düzeyinde ilerleme ve hatalarla çalıştırın.
+  </Card>
+  <Card title="Üretim güvenliği" href="/tr/docs/production-safety">
+    Salt okunur hesaplar, üretim koruması ve en az yetki politikaları kullanın.
+  </Card>
+</Cards>

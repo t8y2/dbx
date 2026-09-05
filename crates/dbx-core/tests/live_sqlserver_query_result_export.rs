@@ -122,6 +122,7 @@ async fn live_sqlserver_xlsx_export_can_outlive_query_timeout_while_rows_keep_ar
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-xlsx-{suffix}")),
         date_time_format: None,
+        csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
         column_comments: None,

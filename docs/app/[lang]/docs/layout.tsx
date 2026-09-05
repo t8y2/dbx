@@ -3,12 +3,12 @@ import { DocsLayout } from "fumadocs-ui/layouts/docs";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import { DocsSidebarFooter, DocsSidebarLanguageButton } from "@/components/DocsSidebarFooter";
 import { StaticSearchDialog } from "@/components/StaticSearchDialog";
-import { i18nUI } from "@/lib/i18n";
+import { i18nUI, resolveLang } from "@/lib/i18n";
 import { source } from "@/lib/source";
 
 export default async function Layout({ params, children }: { params: Promise<{ lang: string }>; children: ReactNode }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
 
   return (
     <RootProvider

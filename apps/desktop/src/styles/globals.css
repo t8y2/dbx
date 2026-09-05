@@ -2437,6 +2437,14 @@ html.dbx-legacy-webview [data-slot="dialog-content"][class*="sm:max-w-[min(1180p
 .splitpanes--horizontal .splitpanes__pane {
   transition: none !important;
 }
+/* Stock splitpanes keeps `will-change: width/height` on ready panes forever.
+   Layout properties are never composited, so the hint cannot pay off; it only
+   keeps every pane (and the editor/grid subtree inside it) in a pessimized
+   style/layout state, which amplifies per-frame work while dragging a
+   splitter. Killing it app-wide keeps the stock pane transition intact. */
+.splitpanes--ready .splitpanes__pane {
+  will-change: auto !important;
+}
 .splitpanes--vertical > .splitpanes__splitter {
   width: 3px !important;
   border-left: 1px solid var(--border);

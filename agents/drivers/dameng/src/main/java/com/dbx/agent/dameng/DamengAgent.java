@@ -1274,7 +1274,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
      *   <li>TRIGGER → ALL_TRIGGERS.TRIGGER_BODY</li>
      *   <li>SEQUENCE → 由 ALL_SEQUENCES 元数据重建 CREATE SEQUENCE 语句</li>
      *   <li>PROCEDURE/FUNCTION/PACKAGE/PACKAGE_BODY/TYPE/TYPE_BODY → ALL_SOURCE 按 LINE 拼接，
-     *       再以 SYS.SYSOBJECTS + SYS.SYSTEXTS 作为最后一层</li>
+     *       再以 SYS.SYSOBJECTS + SYS.SYSTEXTS(TXT/SEQNO) 作为最后一层</li>
      * </ul>
      * 所有字典来源都不可用时返回带原因说明的占位源码（不可编辑），避免双击对象查看源码直接报错；
      * 连接类错误（断连/超时等）不属于元数据不可用，继续上抛由上层处理会话。
@@ -1418,9 +1418,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
         try {
             String type = normalizeObjectSourceType(objectType);
             List<String> typeCandidates = switch (type) {
-                // 不同 DM 版本对函数/过程的 TYPE 取值不一致（有的统一为 PROCEDURE），逐一尝试。
-                case "FUNCTION" -> List.of("FUNCTION", "PROCEDURE");
-                case "PROCEDURE" -> List.of("PROCEDURE", "FUNCTION");
+                case "FUNCTION", "PROCEDURE" -> List.of("PROC", type);
                 case "PACKAGE" -> List.of("PACKAGE");
                 case "PACKAGE_BODY" -> List.of("PACKAGE BODY", "PACKAGE_BODY");
                 case "TYPE" -> List.of("TYPE");
@@ -1429,14 +1427,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
             };
             for (String candidate : typeCandidates) {
                 String source = readAllSourceLines(schema, name, candidate);
-                if (notBlank(source)) {
+                if (notBlank(source) && routineSourceMatchesRequestedType(schema, name, type, candidate, source)) {
                     return catalogRoutineObjectSource(schema, name, objectType, source);
                 }
-            }
-            // 兜底：忽略 TYPE 过滤按名称读取全部源码行（同一 schema 内对象名唯一）。
-            String anyTypeSource = readAllSourceLines(schema, name, null);
-            if (notBlank(anyTypeSource)) {
-                return catalogRoutineObjectSource(schema, name, objectType, anyTypeSource);
             }
             return null;
         } catch (RuntimeException error) {
@@ -1447,16 +1440,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private String readAllSourceLines(String schema, String name, String sourceType) throws Exception {
-        String sql = sourceType == null
-            ? "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? ORDER BY LINE"
-            : "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
+        String sql = "SELECT TEXT FROM ALL_SOURCE WHERE OWNER = ? AND NAME = ? AND TYPE = ? ORDER BY LINE";
         StringBuilder source = new StringBuilder();
         try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
             stmt.setString(1, schema);
             stmt.setString(2, name);
-            if (sourceType != null) {
-                stmt.setString(3, sourceType);
-            }
+            stmt.setString(3, sourceType);
             try (ResultSet rs = stmt.executeQuery()) {
                 while (rs.next()) {
                     String line = coalesce(readTextColumn(rs, 1));
@@ -1468,6 +1457,66 @@ public final class DamengAgent extends AbstractJdbcAgent {
             }
         }
         return source.toString();
+    }
+
+    private boolean routineSourceMatchesRequestedType(
+        String schema,
+        String name,
+        String objectType,
+        String sourceType,
+        String source
+    ) {
+        if (!("FUNCTION".equals(objectType) || "PROCEDURE".equals(objectType))
+            || !"PROC".equalsIgnoreCase(sourceType)) {
+            return true;
+        }
+        String catalogType = readDamengRoutineObjectType(schema, name);
+        return catalogType != null
+            ? objectType.equals(catalogType)
+            : routineSourceStartsWithType(source, objectType);
+    }
+
+    private String readDamengRoutineObjectType(String schema, String name) {
+        String sql = """
+            SELECT o.INFO1
+            FROM SYS.SYSOBJECTS o
+            JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH'
+            WHERE o.SUBTYPE$ = 'PROC' AND s.NAME = ? AND o.NAME = ?
+            """.stripIndent().trim();
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, schema);
+            stmt.setString(2, name);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                String info1 = rs.getString(1);
+                return switch (info1 == null ? "" : info1.trim()) {
+                    case "0" -> "FUNCTION";
+                    case "1" -> "PROCEDURE";
+                    default -> "PROCEDURE";
+                };
+            }
+        } catch (RuntimeException error) {
+            if (isDamengConnectionError(error)) {
+                throw error;
+            }
+            return null;
+        } catch (Exception error) {
+            if (isDamengConnectionError(error)) {
+                throw new RuntimeException(error);
+            }
+            return null;
+        }
+    }
+
+    private static boolean routineSourceStartsWithType(String source, String objectType) {
+        String normalizedSource = source.stripLeading().toUpperCase(Locale.ROOT);
+        String normalizedType = objectType.toUpperCase(Locale.ROOT);
+        return startsWithRoutineDeclaration(normalizedSource, normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "CREATE " + normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "CREATE OR REPLACE " + normalizedType)
+            || startsWithRoutineDeclaration(normalizedSource, "ALTER " + normalizedType);
     }
 
     private static ObjectSource catalogRoutineObjectSource(
@@ -1505,12 +1554,12 @@ public final class DamengAgent extends AbstractJdbcAgent {
             // DM 将过程/函数/包/类型的定义文本按行存放在 SYS.SYSTEXTS，
             // SYS.SYSOBJECTS 的 SCHID 关联所属 schema；适用于 ALL_SOURCE 不可用的实例。
             String sql = """
-                SELECT t.TEXT
+                SELECT t.TXT
                 FROM SYS.SYSTEXTS t
                 JOIN SYS.SYSOBJECTS o ON o.ID = t.ID
                 JOIN SYS.SYSOBJECTS s ON s.ID = o.SCHID AND s.TYPE$ = 'SCH' AND s.NAME = ?
                 WHERE o.NAME = ?
-                ORDER BY t.LINE
+                ORDER BY t.SEQNO
                 """.stripIndent().trim();
             StringBuilder source = new StringBuilder();
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
@@ -1527,6 +1576,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 }
             }
             return notBlank(source.toString())
+                && routineSourceMatchesRequestedType(
+                    schema,
+                    name,
+                    normalizeObjectSourceType(objectType),
+                    "PROC",
+                    source.toString()
+                )
                 ? catalogRoutineObjectSource(schema, name, objectType, source.toString())
                 : null;
         } catch (RuntimeException error) {

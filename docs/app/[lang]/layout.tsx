@@ -4,6 +4,7 @@ import type { Metadata, Viewport } from "next";
 import { RouteProgress } from "@/components/RouteProgress";
 import { buildMetadata, DEFAULT_DESCRIPTION, getHtmlLang, SITE_NAME, SITE_URL } from "@/lib/metadata";
 import { buildSiteStructuredData } from "@/lib/structuredData";
+import { i18n, resolveLang } from "@/lib/i18n";
 
 const LOCALE_MAP: Record<string, { locale: string; title: string; description: string }> = {
   en: {
@@ -16,11 +17,16 @@ const LOCALE_MAP: Record<string, { locale: string; title: string; description: s
     title: "DBX - 20MB，管理90+种数据库",
     description: "90+ 种数据库，仅 20 MB。支持桌面与 Docker 自托管，内置 AI 助手。",
   },
+  tr: {
+    locale: "tr_TR",
+    title: "DBX - 90+ veritabanını 20 MB ile yönetin",
+    description: "90+ veritabanı, yalnızca 20 MB. Masaüstü ve Docker ile kendi sunucunuzda barındırma, yerleşik yapay zekâ asistanı.",
+  },
 };
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const meta = LOCALE_MAP[l];
 
   const pageMetadata = buildMetadata({
@@ -57,7 +63,7 @@ export const viewport: Viewport = {
 
 export default async function LangLayout({ params, children }: { params: Promise<{ lang: string }>; children: ReactNode }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const siteStructuredData = buildSiteStructuredData();
 
   return (
@@ -82,5 +88,5 @@ export default async function LangLayout({ params, children }: { params: Promise
 }
 
 export function generateStaticParams() {
-  return [{ lang: "en" }, { lang: "cn" }];
+  return i18n.languages.map((lang) => ({ lang }));
 }

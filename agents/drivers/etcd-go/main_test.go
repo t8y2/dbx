@@ -1,12 +1,22 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/api/v3/mvccpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestHandshakeAdvertisesCapabilities(t *testing.T) {
@@ -162,6 +172,117 @@ func TestTLSConfigRequiresCertAndKeyTogether(t *testing.T) {
 	_, err = tlsConfigFor(connectionParams{SSL: true, CertPath: "/tmp/cert.pem", KeyPath: "/tmp/key.pem"})
 	if err == nil {
 		t.Fatalf("expected key pair load failure for missing files")
+	}
+}
+
+func TestClientCertificateUsername(t *testing.T) {
+	config := &tls.Config{Certificates: []tls.Certificate{{Leaf: &x509.Certificate{Subject: pkix.Name{CommonName: " cert-reader "}}}}}
+	if got := clientCertificateUsername(config); got != "cert-reader" {
+		t.Fatalf("clientCertificateUsername() = %q, want cert-reader", got)
+	}
+	if got := clientCertificateUsername(&tls.Config{}); got != "" {
+		t.Fatalf("empty certificate username = %q, want empty", got)
+	}
+}
+
+func TestReadableKeyRangesUsesAuthStatusAndEffectiveIdentity(t *testing.T) {
+	withoutAuth := newEtcdSession()
+	withoutAuth.username = "cert-reader"
+	allKeys, ranges, err := withoutAuth.readableKeyRanges()
+	if err != nil || !allKeys || len(ranges) != 0 {
+		t.Fatalf("disabled auth should allow all keys: all=%v ranges=%v err=%v", allKeys, ranges, err)
+	}
+
+	missingIdentity := newEtcdSession()
+	missingIdentity.authEnabled = true
+	allKeys, ranges, err = missingIdentity.readableKeyRanges()
+	if err != nil || allKeys || len(ranges) != 0 {
+		t.Fatalf("enabled auth without an identity should expose no ranges: all=%v ranges=%v err=%v", allKeys, ranges, err)
+	}
+}
+
+func TestReadAccessCacheExpiresAndReturnsACopy(t *testing.T) {
+	state := newEtcdSession()
+	state.cacheReadAccess(false, []etcdReadRange{{start: "/team-a/", end: "/team-a0"}})
+
+	allKeys, ranges, ok := state.cachedReadAccess(time.Now())
+	if !ok || allKeys || len(ranges) != 1 || ranges[0].start != "/team-a/" {
+		t.Fatalf("cached read access = all=%v ranges=%#v ok=%v", allKeys, ranges, ok)
+	}
+	ranges[0].start = "/mutated/"
+	_, ranges, ok = state.cachedReadAccess(time.Now())
+	if !ok || ranges[0].start != "/team-a/" {
+		t.Fatalf("cached range was not copied: %#v", ranges)
+	}
+
+	state.clientMu.Lock()
+	state.readAccess.expiresAt = time.Now().Add(-time.Second)
+	state.clientMu.Unlock()
+	if _, _, ok := state.cachedReadAccess(time.Now()); ok {
+		t.Fatal("expired read access cache was returned")
+	}
+}
+
+func TestAuthenticationNotEnabledFallbackClearsCachedRestrictions(t *testing.T) {
+	if !isAuthenticationNotEnabled(rpctypes.ErrAuthNotEnabled) {
+		t.Fatal("authentication-not-enabled status was not recognized")
+	}
+	if isAuthenticationNotEnabled(status.Error(codes.PermissionDenied, "authentication is not enabled")) {
+		t.Fatal("permission-denied status must not disable authentication")
+	}
+
+	state := newEtcdSession()
+	state.authEnabled = true
+	state.cacheReadAccess(false, []etcdReadRange{{start: "/team-a/", end: "/team-a0"}})
+	state.disableAuth()
+	if state.authEnabled {
+		t.Fatal("authentication remained enabled after compatibility fallback")
+	}
+	if _, _, ok := state.cachedReadAccess(time.Now()); ok {
+		t.Fatal("compatibility fallback retained stale restricted ranges")
+	}
+}
+
+func TestAuthUserGetReportsDisabledAuthWithoutAClient(t *testing.T) {
+	state := newEtcdSession()
+	state.username = "cert-reader"
+	result, err := state.authUserGet(map[string]json.RawMessage{})
+	if err != nil {
+		t.Fatalf("authUserGet() failed: %v", err)
+	}
+	detail := result.(map[string]any)
+	if detail["user"] != "cert-reader" || detail["authEnabled"] != false {
+		t.Fatalf("unexpected auth detail: %#v", detail)
+	}
+}
+
+type recordingRangeGetter struct {
+	responses []*clientv3.GetResponse
+	revisions []int64
+}
+
+func (g *recordingRangeGetter) Get(_ context.Context, key string, options ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+	op := clientv3.OpGet(key, options...)
+	g.revisions = append(g.revisions, op.Rev())
+	response := g.responses[0]
+	g.responses = g.responses[1:]
+	return response, nil
+}
+
+func TestListReadableRangesPinsFirstResponseRevision(t *testing.T) {
+	getter := &recordingRangeGetter{responses: []*clientv3.GetResponse{
+		{Header: &etcdserverpb.ResponseHeader{Revision: 10}, Kvs: []*mvccpb.KeyValue{{Key: []byte("a")}}},
+		{Header: &etcdserverpb.ResponseHeader{Revision: 12}, Kvs: []*mvccpb.KeyValue{{Key: []byte("z")}}},
+	}}
+	result, err := newEtcdSession().listReadableRanges(getter, []etcdReadRange{{start: "a", end: "b"}, {start: "z", end: "zz"}}, "\x00", 10, nil, false)
+	if err != nil {
+		t.Fatalf("listReadableRanges() failed: %v", err)
+	}
+	if len(getter.revisions) != 2 || getter.revisions[0] != 0 || getter.revisions[1] != 10 {
+		t.Fatalf("range revisions = %v, want [0 10]", getter.revisions)
+	}
+	if revision := result.(map[string]any)["revision"]; revision != "10" {
+		t.Fatalf("result revision = %v, want 10", revision)
 	}
 }
 
@@ -466,6 +587,62 @@ func TestPutRejectsConflictingLeaseOptions(t *testing.T) {
 	_, err := state.put(params)
 	if err == nil || err.Error() != "Not connected" {
 		t.Fatalf("expected Not connected before option validation, got %v", err)
+	}
+}
+
+func TestNormalizeReadRangesKeepsOnlyOutermostReadableScopes(t *testing.T) {
+	ranges := normalizeReadRanges([]etcdReadRange{
+		{start: "/team-a/", end: "/team-a0"},
+		{start: "/team-a/config", end: "/team-a/config\x00"},
+		{start: "/team-b/", end: "/team-b0"},
+		{start: "/invalid", end: "/invalid"},
+	})
+	if len(ranges) != 2 {
+		t.Fatalf("readable ranges = %#v, want two outer ranges", ranges)
+	}
+	if ranges[0].start != "/team-a/" || ranges[1].start != "/team-b/" {
+		t.Fatalf("unexpected readable ranges: %#v", ranges)
+	}
+	merged := normalizeReadRanges([]etcdReadRange{{start: "a", end: "d"}, {start: "c", end: "f"}})
+	if len(merged) != 1 || merged[0].start != "a" || merged[0].end != "f" {
+		t.Fatalf("overlapping ranges must merge: %#v", merged)
+	}
+	fromKey := normalizeReadRanges([]etcdReadRange{{start: "/team-c/", end: unboundedRangeEnd}, {start: "/team-d/", end: "/team-e/"}})
+	if len(fromKey) != 1 || fromKey[0].start != "/team-c/" || fromKey[0].end != unboundedRangeEnd {
+		t.Fatalf("from-key permission must remain unbounded: %#v", fromKey)
+	}
+	if rangeStartAtOrAfterEnd("/team-z/", unboundedRangeEnd) {
+		t.Fatal("an unbounded range end must not exclude a later continuation")
+	}
+	if !isAllKeyPermission("", "\x00") || !isAllKeyPermission("\x00", "\x00") {
+		t.Fatal("all-Key permissions must be recognized")
+	}
+}
+
+func TestIntersectReadRangesLimitsBroadPrefixToGrantedScopes(t *testing.T) {
+	granted := []etcdReadRange{
+		{start: "/dbx", end: "/dby"},
+		{start: "/team/secret", end: "/team/secret\x00"},
+	}
+
+	broad := intersectReadRanges(granted, "/", "0")
+	if len(broad) != 2 || broad[0] != granted[0] || broad[1] != granted[1] {
+		t.Fatalf("broad prefix intersections = %#v, want %#v", broad, granted)
+	}
+
+	narrow := intersectReadRanges(granted, "/dbx/config/", "/dbx/config0")
+	if len(narrow) != 1 || narrow[0].start != "/dbx/config/" || narrow[0].end != "/dbx/config0" {
+		t.Fatalf("narrow prefix intersection = %#v", narrow)
+	}
+
+	disjoint := intersectReadRanges(granted, "/other/", "/other0")
+	if len(disjoint) != 0 {
+		t.Fatalf("disjoint prefix intersections = %#v, want none", disjoint)
+	}
+
+	unbounded := intersectReadRanges([]etcdReadRange{{start: "/dbx", end: unboundedRangeEnd}}, "/dbx", unboundedRangeEnd)
+	if len(unbounded) != 1 || unbounded[0].end != unboundedRangeEnd {
+		t.Fatalf("unbounded prefix intersection = %#v", unbounded)
 	}
 }
 

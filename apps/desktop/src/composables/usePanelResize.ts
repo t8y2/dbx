@@ -21,6 +21,8 @@ export function usePanelResize() {
   const historyWidth = ref(Number(safeLocalStorageGet("dbx-history-width")) || 288);
   const sqlLibraryWidth = ref(Number(safeLocalStorageGet("dbx-sql-library-width")) || 288);
   const sqlFilePanelWidth = ref(Number(safeLocalStorageGet("dbx-sql-file-panel-width")) || 288);
+  const tabBarWidth = ref(Number(safeLocalStorageGet("dbx-tab-bar-width")) || 240);
+  const tabBarCollapsed = ref(safeLocalStorageGet("dbx-tab-bar-collapsed") === "true");
 
   function startPanelResize(widthRef: Ref<number>, storageKey: string, direction: "left" | "right", maxWidth: PanelMaxWidth = DEFAULT_PANEL_MAX_WIDTH) {
     return (e: MouseEvent) => {
@@ -55,6 +57,13 @@ export function usePanelResize() {
   const startHistoryResize = startPanelResize(historyWidth, "dbx-history-width", "left");
   const startSqlLibraryResize = startPanelResize(sqlLibraryWidth, "dbx-sql-library-width", "left");
   const startSqlFilePanelResize = startPanelResize(sqlFilePanelWidth, "dbx-sql-file-panel-width", "left");
+  const startLeftTabBarResize = startPanelResize(tabBarWidth, "dbx-tab-bar-width", "right");
+  const startRightTabBarResize = startPanelResize(tabBarWidth, "dbx-tab-bar-width", "left");
+
+  function setTabBarCollapsed(collapsed: boolean) {
+    tabBarCollapsed.value = collapsed;
+    safeLocalStorageSet("dbx-tab-bar-collapsed", String(collapsed));
+  }
 
   return {
     sidebarWidth,
@@ -62,10 +71,15 @@ export function usePanelResize() {
     historyWidth,
     sqlLibraryWidth,
     sqlFilePanelWidth,
+    tabBarWidth,
+    tabBarCollapsed,
     startSidebarResize,
     startAiPanelResize,
     startHistoryResize,
     startSqlLibraryResize,
     startSqlFilePanelResize,
+    startLeftTabBarResize,
+    startRightTabBarResize,
+    setTabBarCollapsed,
   };
 }

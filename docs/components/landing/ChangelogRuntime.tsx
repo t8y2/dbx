@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ChangelogList } from "@/components/landing/ChangelogList";
-import { changelogReleaseUrl, type ChangelogIndexEntry, type ChangelogRelease } from "@/lib/changelog";
+import { changelogDataLang, changelogReleaseUrl, type ChangelogIndexEntry, type ChangelogRelease } from "@/lib/changelog";
 import { requestJson } from "@/lib/httpJson";
+import type { DocsLang } from "@/lib/i18n";
 
 type ChangelogRuntimeProps = {
-  lang: "en" | "cn";
+  lang: DocsLang;
   index: ChangelogIndexEntry[];
   initialRelease: ChangelogRelease | null;
   fallbackReleases?: ChangelogRelease[] | null;
@@ -16,6 +17,10 @@ const text = {
   en: {
     empty: "No releases found.",
     loadError: "Failed to load this release. Please retry or check GitHub Releases.",
+  },
+  tr: {
+    empty: "Sürüm kaydı bulunamadı.",
+    loadError: "Bu sürüm yüklenemedi. Tekrar deneyin ya da GitHub Releases sayfasına bakın.",
   },
   cn: {
     empty: "暂无版本记录。",
@@ -55,7 +60,7 @@ export function ChangelogRuntime({ lang, index, initialRelease, fallbackReleases
     setErrorMessage(undefined);
     setRelease(null);
 
-    requestJson<ChangelogRelease>(changelogReleaseUrl(lang, selectedTag))
+    requestJson<ChangelogRelease>(changelogReleaseUrl(changelogDataLang(lang), selectedTag))
       .then((data) => {
         if (cancelled) return;
         cache.set(selectedTag, data);

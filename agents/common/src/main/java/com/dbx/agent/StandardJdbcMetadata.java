@@ -123,12 +123,12 @@ public final class StandardJdbcMetadata {
                 listObjects(listTables(conn, profile, configuredDatabase, schema, tableConstraints), schema)
             );
             DatabaseMetaData meta = conn.getMetaData();
-            appendRoutines(result, meta, null, schema, schema);
+            appendRoutines(result, meta, profile.getEscapeSchemaWildcards(), null, schema, schema);
             if (!containsRoutine(result)
                 && profile.getCatalogFallbackEnabled()
                 && configuredDatabase != null
                 && !configuredDatabase.trim().isEmpty()) {
-                appendRoutines(result, meta, configuredDatabase, schema, schema);
+                appendRoutines(result, meta, profile.getEscapeSchemaWildcards(), configuredDatabase, schema, schema);
             }
             result.sort(Comparator.comparing(ObjectInfo::getName));
             return normalized.filterObjects(result);
@@ -350,7 +350,7 @@ public final class StandardJdbcMetadata {
         // JDBC has no portable metadata limit/offset. Use table types for safe pushdown and filter/page locally.
         // schema 是 DatabaseMetaData.getTables() 的 schemaPattern，_ 和 % 具有通配符语义；
         // HANA 存在 _SYS_RT 等含下划线的 schema，需按 getSearchStringEscape() 转义，避免混入其他 schema 的对象。
-        try (ResultSet rs = meta.getTables(catalog, escapeSchemaPattern(meta, schema), "%", tableTypes)) {
+        try (ResultSet rs = meta.getTables(catalog, escapeSchemaPattern(meta, schema, profile.getEscapeSchemaWildcards()), "%", tableTypes)) {
             while (rs.next()) {
                 result.add(new TableInfo(
                     rs.getString("TABLE_NAME"),
@@ -635,12 +635,14 @@ public final class StandardJdbcMetadata {
     private static void appendRoutines(
         List<ObjectInfo> result,
         DatabaseMetaData meta,
+        boolean escapeSchemaWildcards,
         String catalog,
         String schema,
         String schemaLabel
     ) {
-        // schema 作为 getProcedures/getFunctions 的 schemaPattern，同样需要转义 _ 和 % 通配符。
-        String schemaPattern = escapeSchemaPattern(meta, schema);
+        // schema 作为 getProcedures/getFunctions 的 schemaPattern，同样需要转义 _ 和 % 通配符
+        // （databend 等驱动除外，见 escapeSchemaPattern）。
+        String schemaPattern = escapeSchemaPattern(meta, schema, escapeSchemaWildcards);
         Set<String> procedureNames = new LinkedHashSet<>();
         try (ResultSet rs = meta.getProcedures(catalog, schemaPattern, "%")) {
             while (rs.next()) {
@@ -707,10 +709,16 @@ public final class StandardJdbcMetadata {
      *
      * <p>当 schema 为空白（将映射为 {@code null}，表示不做 schema 过滤）或驱动未提供转义字符时，原样返回。
      */
-    private static String escapeSchemaPattern(DatabaseMetaData meta, String schema) {
+    private static String escapeSchemaPattern(DatabaseMetaData meta, String schema, boolean escapeWildcards) {
         String normalized = blankToNull(schema);
         if (normalized == null) {
             return null;
+        }
+        // 某些驱动（如 databend）的 getSearchStringEscape() 返回 '\'，但其 getTables/getProcedures 把 _ 当字面量
+        // 且忽略转义，转义反而匹配不到，导致含 _ 的库名（如 my_db）返回 0 行（#8114）。
+        // 这类驱动通过 profile.escapeSchemaWildcards=false 关闭转义。
+        if (!escapeWildcards) {
+            return normalized;
         }
         String escape;
         try {

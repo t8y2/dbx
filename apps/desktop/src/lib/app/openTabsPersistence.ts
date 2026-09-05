@@ -66,6 +66,23 @@ export interface RestoredOpenTabs {
   activeTabId: string | null;
 }
 
+/** Group membership persisted with the open-tabs payload. */
+export interface PersistedEditorGroup {
+  id: string;
+  tabIds: string[];
+  activeTabId: string | null;
+}
+
+/** Shared open-tabs transport payload — the single definition both backend adapters persist. */
+export interface OpenTabsStatePayload {
+  tabs: unknown[];
+  activeTabId: string | null;
+  groups?: PersistedEditorGroup[];
+  focusedGroupId?: string;
+  orientation?: "vertical" | "horizontal";
+  sizes?: number[];
+}
+
 export type OpenTabsRestoreFilter = "all" | "pinned";
 export interface OpenTabsRestoreOptions {
   queryOnly?: boolean;

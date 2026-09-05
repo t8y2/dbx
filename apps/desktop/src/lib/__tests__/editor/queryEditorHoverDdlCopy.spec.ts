@@ -4,6 +4,21 @@ import { describe, expect, it } from "vitest";
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 
 describe("QueryEditor hover DDL copy", () => {
+  it("reconciles the local sidebar index before remote hover fallback", () => {
+    const hoverStart = queryEditorSource.indexOf("async function resolveSqlHoverTooltip");
+    const hoverEnd = queryEditorSource.indexOf("\n}\n\nfunction sqlErrorDecorationRange", hoverStart);
+    const hoverSource = queryEditorSource.slice(hoverStart, hoverEnd);
+    const localLookup = hoverSource.indexOf("connectionStore.lookupLocalCompletionTables");
+    const remoteLookup = hoverSource.indexOf("connectionStore.listCompletionTables");
+
+    expect(hoverStart).toBeGreaterThanOrEqual(0);
+    expect(hoverEnd).toBeGreaterThan(hoverStart);
+    expect(localLookup).toBeGreaterThanOrEqual(0);
+    expect(remoteLookup).toBeGreaterThan(localLookup);
+    expect(hoverSource).toContain("hoverTables = mergeCompletionTables(localHoverTables, hoverTables);");
+    expect(hoverSource).toContain("cachedTables = mergeCompletionTables(localHoverTables, cachedTables);");
+  });
+
   it("gates only the table DDL branch on the preference, keeping column hover", () => {
     expect(queryEditorSource).not.toContain("if (!settingsStore.editorSettings.showTableDdlHoverPreview) return null;");
     expect(queryEditorSource).toContain("if (table && settingsStore.editorSettings.showTableDdlHoverPreview && !semanticQualifierIsRowSource");

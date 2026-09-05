@@ -79,4 +79,19 @@ describe("usePanelResize", () => {
     expect(aiPanelWidth.value).toBe(600);
     expect(localStorage.getItem("dbx-ai-panel-width")).toBe("600");
   });
+
+  it("persists the collapsed vertical tab bar state across composable instances", () => {
+    const first = usePanelResize();
+    expect(first.tabBarCollapsed.value).toBe(false);
+
+    first.setTabBarCollapsed(true);
+    expect(first.tabBarCollapsed.value).toBe(true);
+    expect(localStorage.getItem("dbx-tab-bar-collapsed")).toBe("true");
+
+    const restored = usePanelResize();
+    expect(restored.tabBarCollapsed.value).toBe(true);
+
+    restored.setTabBarCollapsed(false);
+    expect(localStorage.getItem("dbx-tab-bar-collapsed")).toBe("false");
+  });
 });

@@ -203,6 +203,7 @@ const props = withDefaults(
     exportFileExtension?: string;
     exportFallbackName?: string;
     enableMultiSelect?: boolean;
+    canWriteKey?: (route: KvKeyRoute) => boolean;
     onWatchKey?: (route: KvKeyRoute) => void;
     onDeletePrefix?: (prefix: string) => void;
     watchActiveKey?: string | null;
@@ -413,6 +414,21 @@ const selectedValueClipboardText = computed(() => {
   return selectedValueUsesUtf8Preview.value && preview?.ok ? preview.value : selectedTextValue.value;
 });
 const selectedKeyBytes = computed(() => selectedValue.value?.keyBytes ?? selectedRouteKeyBytes.value ?? null);
+function keyIsWritable(key: string, keyBytes?: KvValue | null): boolean {
+  return !props.readOnly && (props.canWriteKey?.({ key, keyBytes }) ?? true);
+}
+const selectedKeyWritable = computed(() => Boolean(selectedKey.value && keyIsWritable(selectedKey.value, selectedKeyBytes.value)));
+const editKeyWritable = computed(() => {
+  const key = editKey.value.trim();
+  if (!key) return false;
+  const keyBytes = !isCreating.value && key === selectedKey.value ? selectedKeyBytes.value : null;
+  return keyIsWritable(key, keyBytes);
+});
+const renameTargetWritable = computed(() => {
+  const target = renameValue.value.trim();
+  if (!target) return false;
+  return keyIsWritable(target) && (renameMode.value === "copy" || selectedKeyWritable.value);
+});
 const selectedKeyLocked = computed(() => Boolean(String(selectedMetadata.value?.session ?? "").trim()));
 const isWatchingSelectedKey = computed(() => Boolean(selectedKey.value && props.watchActiveKey === selectedKey.value));
 const activeSearchHighlight = computed(() => (props.searchHighlight?.key === selectedKey.value ? props.searchHighlight : null));
@@ -460,8 +476,8 @@ const editValueSize = computed(() => {
   }
   return new TextEncoder().encode(editValue.value).length;
 });
-const canEditSelectedValue = computed(() => !props.readOnly && !selectedKeyLocked.value && (!selectedValueIsBase64.value || props.allowBinaryEdit));
-const canDeleteSelectedValue = computed(() => !props.readOnly && !selectedKeyLocked.value);
+const canEditSelectedValue = computed(() => selectedKeyWritable.value && !selectedKeyLocked.value && (!selectedValueIsBase64.value || props.allowBinaryEdit));
+const canDeleteSelectedValue = computed(() => selectedKeyWritable.value && !selectedKeyLocked.value);
 const consulMetadataRows = computed(() => {
   const metadata = selectedMetadata.value;
   return [
@@ -1258,6 +1274,11 @@ async function saveKey() {
     return;
   }
   const key = props.lazyHierarchy ? normalizeLazyKvPath(rawKey, props.lazyPathStyle) : rawKey;
+  const keyBytes = !isCreating.value && key === selectedKey.value ? selectedKeyBytes.value : null;
+  if (!keyIsWritable(key, keyBytes)) {
+    editError.value = t("connection.readOnly");
+    return;
+  }
   const validationError = validateKvValue(editValue.value, editFormat.value);
   if (validationError) {
     editError.value = validationError;
@@ -1275,6 +1296,7 @@ async function saveKey() {
 async function confirmSaveKey() {
   if (!pendingSave.value) return;
   const { key, value, options } = pendingSave.value;
+  if (!keyIsWritable(key, options?.keyBytes)) return;
   saving.value = true;
   editError.value = "";
   editErrorKind.value = "request";
@@ -1367,7 +1389,8 @@ async function selectNodeForAction(node: BrowserTreeNode) {
 }
 
 async function openDeleteForNode(node: BrowserTreeNode) {
-  if (props.readOnly) return;
+  const route = routeFromNode(node);
+  if (!keyIsWritable(route.key, route.keyBytes)) return;
   await selectNodeForAction(node);
   if (!selectedKey.value || !selectedValue.value?.found || !canDeleteSelectedValue.value) return;
   showDeleteConfirm.value = true;
@@ -1499,7 +1522,7 @@ function onEditFormatChange(value: unknown) {
 }
 
 function openRenameDialog() {
-  if (!selectedKey.value || !props.api.rename || props.readOnly) return;
+  if (!selectedKey.value || !props.api.rename || !selectedKeyWritable.value) return;
   renameMode.value = "rename";
   renameValue.value = selectedKey.value;
   renameError.value = "";
@@ -1513,6 +1536,10 @@ async function moveOrCopySelectedKey() {
   const next = renameValue.value.trim();
   if (!next) {
     renameError.value = props.labels.keyRequired;
+    return;
+  }
+  if (!renameTargetWritable.value) {
+    renameError.value = t("connection.readOnly");
     return;
   }
   renaming.value = true;
@@ -1564,7 +1591,7 @@ function compareHistory(event: KvHistoryEvent) {
 }
 
 async function restoreHistory() {
-  if (!selectedKey.value || !historyRestoreValue.value) return;
+  if (!selectedKey.value || !historyRestoreValue.value || !selectedKeyWritable.value) return;
   restoring.value = true;
   try {
     await props.api.put(props.connectionId, selectedKey.value, historyRestoreValue.value, {
@@ -1584,6 +1611,8 @@ async function restoreHistory() {
 
 function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
   if (!props.enableNodeActions) return [];
+  const route = routeFromNode(node);
+  const nodeWritable = keyIsWritable(route.key, route.keyBytes);
   const items: ContextMenuItem[] = [
     {
       label: props.labels.add || props.labels.newKey,
@@ -1598,7 +1627,7 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
         label: props.labels.edit,
         icon: Pencil,
         action: () => void loadSelectedKey(routeFromNode(node)).then(openEditDialog),
-        disabled: props.readOnly,
+        disabled: !nodeWritable,
       },
       {
         label: props.labels.clone || "Clone",
@@ -1617,7 +1646,7 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
         label: props.labels.rename || "Rename",
         icon: Pencil,
         action: () => void loadSelectedKey(routeFromNode(node)).then(openRenameDialog),
-        disabled: props.readOnly,
+        disabled: !nodeWritable,
       });
     }
     if (props.api.history) {
@@ -1649,7 +1678,7 @@ function nodeContextMenuItems(node: BrowserTreeNode): ContextMenuItem[] {
       icon: Trash2,
       variant: "destructive",
       action: () => void openDeleteForNode(node),
-      disabled: props.readOnly || !nodeHasValue(node),
+      disabled: !nodeWritable || !nodeHasValue(node),
     });
   }
   return items;
@@ -2239,7 +2268,7 @@ defineExpose({
         </div>
         <DialogFooter class="mx-0 mb-0 shrink-0 gap-3 border-t bg-muted/10 px-6 py-5">
           <Button variant="outline" class="h-10 min-w-20" @click="showEditDialog = false">{{ t("common.cancel") }}</Button>
-          <Button class="h-10 min-w-20" :disabled="saving || readOnly" @click="saveKey">
+          <Button class="h-10 min-w-20" :disabled="saving || !editKeyWritable" @click="saveKey">
             <Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" />
             {{ t("common.save") }}
           </Button>
@@ -2260,7 +2289,7 @@ defineExpose({
         </div>
         <DialogFooter>
           <Button variant="outline" :disabled="renaming" @click="showRenameDialog = false">{{ t("common.cancel") }}</Button>
-          <Button :disabled="renaming || readOnly" @click="moveOrCopySelectedKey">
+          <Button :disabled="renaming || !renameTargetWritable" @click="moveOrCopySelectedKey">
             <Loader2 v-if="renaming" class="mr-2 h-4 w-4 animate-spin" />
             {{ renameMode === "copy" ? labels.clone || "Clone" : labels.rename || "Rename" }}
           </Button>
@@ -2317,7 +2346,7 @@ defineExpose({
       :before="selectedTextValue"
       :after="historyRestoreValue?.data || ''"
       :loading="restoring"
-      :show-confirm="!readOnly && !!historyRestoreValue"
+      :show-confirm="selectedKeyWritable && !!historyRestoreValue"
       :confirm-label="labels.restore || 'Restore'"
       @confirm="restoreHistory"
     />

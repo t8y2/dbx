@@ -131,6 +131,7 @@ describe("queryStore table data refresh", () => {
       largeValuePreviewSize: 8192,
       includeRowId: false,
       whereInput: "status = 'ACTIVE'",
+      injectDefaultTimeSeriesWhere: true,
       orderBy: "created_at DESC",
       limit: 25,
       offset: 50,

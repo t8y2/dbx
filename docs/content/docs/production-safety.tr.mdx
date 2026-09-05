@@ -1,0 +1,165 @@
+---
+title: Üretim ve Yazma Güvenliği
+description: Salt okunur bağlantılar, üretim koruması, SQL incelemesi, yapay zekâ sınırları ve MCP politikalarıyla veritabanı hatalarını azaltın.
+---
+
+DBX yazma güvenliğini bağımsız katmanlara ayırır: veritabanı yetkileri, bağlantının salt okunur durumu, üretim koruması, tehlikeli işlem onayı, yapay zekâ yürütme kuralları ve MCP politikası. Bunlar birlikte hataları azaltır, ancak veritabanı yetkilerinin, denetimin, yedeklerin ya da değişiklik onaylarının yerini almaz.
+
+<Callout type="warn">Hiçbir istemci tarafı önlem, veritabanı yetkilerinin yerini almaz. Üretim sistemleri yine en az yetkili hesaplar, veritabanı denetimi, güvenilir yedekler ve ekip onayı iş akışları kullanmalıdır.</Callout>
+
+## Koruma Katmanları
+
+| Katman | Amacı | Üst düzey bir araç bunu atlayabilir mi? |
+| --- | --- | --- |
+| Veritabanı hesabı yetkileri | Hangi nesnelerin okunabileceğine, değiştirilebileceğine ya da yönetilebileceğine son olarak veritabanı sunucusu karar verir | Hayır |
+| Bağlantı salt okunur | DBX çekirdek sorgu yolundaki tanınan yazmaları engeller ve birçok değişiklik giriş noktasını devre dışı bırakır | Yapay zekâ, CLI ve MCP bunu genişletemez. Tezgâh, açık onaydan sonra yazmaları 1 ya da 5 dakikalığına açabilir; kaydedilmiş ayar açık kalır |
+| Üretim koruması | Tüm bir bağlantıyı ya da seçili veritabanlarını üretim olarak işaretler ve yazmalar için yeni bir onay ister | Normal onay ve Agent yetkisi bunu kalıcı olarak atlayamaz |
+| Tehlikeli SQL/komut onayı | DDL, sınırsız değişiklikler, riskli Redis komutları ve benzeri işlemler için uyarı ekler ya da engeller | Kendi ayarıyla denetlenir, ancak salt okunur ya da üretim korumasını asla genişletmez |
+| Genel MCP politikası | Bir bağlantı izin listesi ve üç yürütme moduyla tüm MCP istemcilerini kısıtlar | İstemci ortam değişkenleri, kaydedilmiş merkezî politikayı genişletemez |
+
+## Salt Okunur Bağlantı Yapılandırma
+
+Bir bağlantı oluştururken ya da düzenlerken **Salt okunur bağlantı** seçeneğini etkinleştirin. DBX bu bayrağı çekirdek sorgu yürütmesine ve veritabanına özgü işlemlere taşır.
+
+Salt okunur bağlantılar şunlar için kullanışlıdır:
+
+- Üretim sorgu hesapları ve ortak sorun giderme bağlantıları
+- Yalnızca şemalara, satırlara, belgelere, anahtarlara ya da izleme verisine gözatması gereken iş akışları
+- Veri değişikliğinin mümkün olmaması gereken, CLI'ye, MCP'ye ya da yapay zekâya açılan bağlantılar
+
+Salt okunur koruma yalnızca gizlenmiş bir düğme değildir. DBX çekirdek yürütme yolundaki tanınan SQL yazmalarını reddeder; MCP, MongoDB, Redis, mesaj kuyrukları ve birçok özel çalışma alanı bağlantı durumunu yeniden denetler.
+
+### Geçici yazma kilidi açma
+
+Masaüstü ve web tezgâhında salt okunur bir bağlantı yazmaları sessizce yok saymaz. Değişiklik yapan bir işlem bir onay iletişim kutusu açar. **1 dakika** ya da **5 dakika** seçin (varsayılan 1 dakika). Onayladıktan sonra:
+
+- Süre bitene kadar o bağlantıdaki yazmalar yeniden sorulmadan başarılı olur
+- Kalan süre salt okunur denetiminde gösterilir; **Yazmaları şimdi kilitle** pencereyi erken kapatır
+- Kaydedilmiş **Salt okunur bağlantı** ayarı açık kalır
+- Bir bağlantının kilidini açmak diğerlerininkini açmaz
+- Pencere sona erdiğinde bir sonraki yazma yeniden sorar
+
+MCP ve CLI'de onay arayüzü yoktur ve kaydedilmiş salt okunur bayrağını kullanmayı sürdürürler, bu yüzden bu pencereyi kullanamazlar.
+
+<Callout type="info">Salt okunur uygulaması yine de SQL ya da komutları sınıflandırmaya dayanır. En güvenilir sınır, yazma yetkisi olmayan bir veritabanı hesabıdır.</Callout>
+
+## Üretim Koruması Yapılandırma
+
+<Steps>
+  <Step>
+    ### Bağlantı ayarlarını açın
+
+    Bir bağlantı oluşturun ya da düzenleyin ve **Üretim** bölümünü bulun.
+
+  </Step>
+  <Step>
+    ### Korumayı etkinleştirin
+
+    **Üretim korumasını etkinleştir** seçeneğini açın. Tek veritabanlı bağlantılar tüm bağlantıyı korur; çok veritabanlı bağlantılar tümünü ya da seçili veritabanlarını koruyabilir.
+
+  </Step>
+  <Step>
+    ### Kapsamı inceleyin
+
+    Yalnızca seçili veritabanları korunuyorsa gerçek her üretim veritabanının listede olduğunu doğrulayın. Veritabanı eklendiğinde ya da yeniden adlandırıldığında listeyi yeniden denetleyin.
+
+  </Step>
+  <Step>
+    ### Yazma uyarısını doğrulayın
+
+    Ayara gerçek bir bağlantıda güvenmeden önce zararsız bir test ya da bir test ortamı kullanarak üretim filigranının ve yazma iletişim kutusunun beklendiği gibi davrandığını doğrulayın.
+
+  </Step>
+</Steps>
+
+Üretim koruması etkinken tezgâh bir üretim göstergesi gösterir. DBX; etkin bağlantının, etkin veritabanının ya da açık SQL hedefinin korunan kapsama ait olduğunu algılarsa ve işlem veriyi veya şemayı değiştiriyorsa ortak onay iletişim kutusunu açar.
+
+Her üretim yazması yeni ve açık bir karar gerektirir. Onay saklanmaz ve normal tehlikeli SQL uyarısını kapatarak atlanamaz.
+
+## Giriş Noktalarına Göre Davranış
+
+| Giriş noktası | Salt okunur bağlantı | Üretim koruması |
+| --- | --- | --- |
+| SQL düzenleyici | Kullanıcı 1/5 dakikalık kilit açma penceresini onaylamadıkça tanınan yazmaları reddeder | İşlem başına onay için hedef bağlantıyı, veritabanını, kaynağı ve SQL'i gösterir |
+| Veri ızgarası | Aynı kilit açma penceresi onaylanana kadar kaydetmeleri, silmeleri ve diğer değişiklikleri devre dışı bırakır ya da reddeder | Satır kaydetme ve silme işlemleri ortak üretim onay akışına girer |
+| Tablo yapısı ve nesne işlemleri | Kilit açma penceresi onaylanana kadar tanınan değişiklik giriş noktalarını gizler ya da devre dışı bırakır | DDL, kaynak kaydetmeleri ve veritabanı yönetimi ortak onay akışına girer |
+| Şema karşılaştırma, SQL dosyaları ve veri üretimi | Salt okunur bir hedefe yazamaz | Üretilen SQL ya da betikler çalıştırılmadan önce üretim onayı ister |
+| Redis, MongoDB, etcd, mesaj kuyrukları ve benzeri sistemler | Sisteme özgü komutlar ve işlemler için salt okunur durumu yeniden denetler | Değişiklik giriş noktaları üretim ve özel tehlike kurallarına tabi kalır |
+| Yapay zekâ Sor | SQL çalıştırmaz | SQL çalıştırmaz |
+| Yapay zekâ Agent | Salt okunur durumu atlayamaz | Üretim SQL'ini insan incelemesi ve elle çalıştırma için düzenleyiciye geri verir |
+| MCP | Bağlantının salt okunur durumu her mod için üst sınırdır; tezgâhtaki kilit açma penceresi geçerli değildir | Üretim koruması MCP politikası için üst sınır olmayı sürdürür |
+
+## Yapay Zekâ Yürütme Sınırları
+
+### Sor Modu
+
+Sor modu SQL üretir, açıklar, iyileştirir ya da düzeltir. Model çıktısı otomatik çalıştırılmaz; inceleme için kopyalanabilir ya da düzenleyiciye yerleştirilebilir.
+
+### Agent Modu
+
+Agent, kullanıcı amacına göre okumaları çalıştırabilir ve politika izin verdiğinde sınırlı yazmaları ele alabilir. Bir yazma onayı, geçerli hedef ve işlemle sınırlıdır.
+
+Etkin veritabanı üretim olarak korunuyorsa Agent özerk yazma yetkisi almaz. DBX önerilen SQL'i düzenleyiciye koyar ve üretim yazma iletişim kutusu üzerinden elle onay ister.
+
+SQL sınıflandırması ve mod ayrıntıları için [Yapay Zekâ Asistanı](/tr/docs/ai-assistant) sayfasına bakın.
+
+## MCP Yetkileri
+
+DBX, **Ayarlar → MCP** altında tek bir merkezî politika saklar ve her MCP isteği bu politikayı yeniden yükler.
+
+| Mod | Örnek işlemler |
+| --- | --- |
+| Salt okunur | Sorgular, meta veri okumaları ve bağlantı ya da nesne listeleme |
+| Veri okuma/yazma | Normal eklemeler, etkin biçimde filtrelenmiş güncellemeler/silmeler, kapsamı belirli MongoDB değişiklikleri, sıradan Redis yazmaları ve bağlantı yönetimi |
+| Tam erişim | Ayrıca geniş değişikliklere, DDL'e, `TRUNCATE`'e, veri temizlemeye ve yüksek riskli yönetim komutlarına izin verir |
+
+Yürütme modunun yanı sıra **İzin verilen bağlantılar** ayarını da yapılandırın. İzin listesinin dışındaki bağlantılar MCP'ye açılmaz. Şu sınırlar her modda etkin kalır:
+
+- Bağlantının salt okunur durumu
+- Üretim koruması
+- Veritabanı hesabı yetkileri
+- Kaydedilmiş bağlantı izin listesi
+
+Eksiksiz yapılandırma, istemci örnekleri ve uyumluluk davranışı için [MCP Tümleştirmesi](/tr/docs/mcp) sayfasına bakın.
+
+## Tehlikeli SQL ve Özel Komutlar
+
+Üretim korumasının dışında DBX, belirli yüksek riskli işlemlere ek kurallar uygular:
+
+- Sorgu düzenleyici, tehlikeli SQL çalışmadan önce bir onay gösterebilir
+- Redis riskli komutları engelleyebilir ya da onay isteyebilir
+- Veri ızgarası, tablo yapısı, şema karşılaştırma ve veri üretme akışları mümkün olduğunda önce SQL'i gösterir
+- MCP Veri okuma/yazma; sınırsız güncellemeleri/silmeleri, DDL'i, `TRUNCATE`'i ve güvenilir biçimde sınıflandıramadığı yüksek riskli istekleri reddeder
+- Motorlar arası aktarım ve toplu içe aktarma; tür eşlemelerinin, hedef tabloların ve truncate seçeneklerinin ayrıca incelenmesini gerektirir
+
+## Önerilen Yapılandırma
+
+| Senaryo | Öneri |
+| --- | --- |
+| Yerel geliştirme | Normal bir bağlantı kullanın, tehlikeli SQL onayını açık tutun ve Tam erişim yerine MCP Veri okuma/yazma tercih edin |
+| Test ya da hazırlık | Belirgin bağlantı adları ve renkleri kullanın, tehlikeli SQL onayını koruyun ve MCP izin listesini sınırlayın |
+| Üretimde salt okuma | Veritabanında salt okunur bir hesabın yanı sıra DBX salt okunur ve üretim korumasını kullanın; MCP'yi Salt okunur modda tutun |
+| Üretimde değişiklik | Ayrı ve en az yetkili bir hesap kullanın, üretim korumasını açın, SQL'i inceleyin, yedekleri ve onayları saklayın, MCP Tam erişimden kaçının |
+| Ortak Docker | Bir giriş parolası belirleyin, `/app/data` dizinini kalıcı kılın, ağ erişimini kısıtlayın ve her hedef için ayrı veritabanı yetkileri kullanın |
+
+## Bilinen Sınırlar
+
+- SQL ve komut sınıflandırması temkinlidir ancak sunucu tarafındaki yetkilerin yerini alamaz.
+- Saklı yordamların, üreticiye özgü uzantıların ve dinamik SQL'in yalnızca metinden belirlenemeyen etkileri olabilir.
+- Üretim koruması DBX üzerinden başlatılan işlemleri kapsar; diğer istemcilerin kendi yetkileri ve denetimi gerekir.
+- Yapılandırma eşitlemesi ve dışa aktarma DBX ayarlarını taşır; iş veritabanlarının yedeği değildir.
+
+<Cards>
+  <Card title="Daha güvenli bir bağlantı oluşturun" href="/tr/docs/getting-started">
+    Bağlantı türünü, ağ yolunu, salt okunur durumu ve üretim kapsamını yapılandırın.
+  </Card>
+  <Card title="Veri değişikliklerini inceleyin" href="/tr/docs/data-grid">
+    Satır içi düzenlemeleri, silmeleri, SQL önizlemesini ve kaydetme akışını öğrenin.
+  </Card>
+  <Card title="Yapay zekâyı yapılandırın" href="/tr/docs/ai-assistant">
+    Sor, Agent, SQL sınıflandırması ve üretim davranışını inceleyin.
+  </Card>
+  <Card title="MCP'yi yapılandırın" href="/tr/docs/mcp">
+    Bağlantı izin listesini, yürütme modunu ve istemci tümleştirmesini ayarlayın.
+  </Card>
+</Cards>

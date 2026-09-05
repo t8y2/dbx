@@ -1506,7 +1506,6 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-connection-tint': connectionColor,
             'hover:bg-accent': node.type !== 'connection',
             'hover:bg-sidebar-accent': node.type === 'connection',
-            rounded: !selectionVisual.rowSelected,
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
@@ -1773,7 +1772,7 @@ function onKeydown(event: KeyboardEvent) {
   position: sticky;
   top: 0;
   z-index: 2;
-  background-color: var(--background);
+  background-color: var(--sidebar);
 }
 
 .tree-item-connection-tint:hover::before {

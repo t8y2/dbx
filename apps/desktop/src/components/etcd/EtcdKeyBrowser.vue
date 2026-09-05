@@ -154,11 +154,25 @@ const transferLoadingDetail = ref("");
 const transferPreviewLoaded = ref(false);
 const syncConfigurationExpanded = ref(true);
 
-const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
+const etcdAccess = computed(() => connectionStore.getEtcdAccessCapabilities(props.connectionId));
+const canManageEtcd = computed(() => etcdAccess.value.admin);
+const canWriteEtcdKeys = computed(() => etcdAccess.value.writable);
+const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)) || !canWriteEtcdKeys.value);
+function canWriteConnectionKey(connectionId: string, key: string, keyBytes?: api.KvValue | null): boolean {
+  const config = connectionStore.getConfig(connectionId);
+  return config?.db_type === "etcd" && !connectionIsEffectivelyReadOnly(config) && connectionStore.canWriteEtcdKey(connectionId, key, keyBytes);
+}
+function canWriteCurrentKey(route: { key: string; keyBytes?: api.KvValue | null }): boolean {
+  return canWriteConnectionKey(props.connectionId, route.key, route.keyBytes);
+}
+function permissionDenied(): Error {
+  return new Error("ETCD_PERMISSION_DENIED: The current etcd user is not authorized to write this Key");
+}
 // etcd 2.x connections speak the v2 API: no key history, no leases, no maintenance.
 const isV2Api = computed(() => connectionStore.getConfig(props.connectionId)?.driver_profile === "etcd-v2");
 const etcdConnections = computed(() => connectionStore.connections.filter((connection) => connection.db_type === "etcd"));
-const targetReadOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)));
+const targetReadOnly = computed(() => !targetConnectionId.value || connectionIsEffectivelyReadOnly(connectionStore.getConfig(targetConnectionId.value)) || !connectionStore.getEtcdAccessCapabilities(targetConnectionId.value).writable);
+const selectedTreeKeysWritable = computed(() => selectedTreeKeys.value.length > 0 && selectedTreeKeys.value.every((item) => canWriteCurrentKey(item)));
 const selectedTransferRows = computed(() => transferRows.value.filter((row) => row.selected && isTransferRowSelectable(row)));
 const selectableTransferRows = computed(() => transferRows.value.filter(isTransferRowSelectable));
 const filteredTransferRows = computed(() => {
@@ -274,13 +288,23 @@ const etcdApi = computed(() => ({
     return { ...result, key: shown, keyIdentity: identity };
   },
   getMetadata: (connectionId: string, key: string, options?: api.KvGetOptions | null) => api.etcdGet(connectionId, key, { ...keyOptions(key), ...options, metadataOnly: true }),
-  put: (connectionId: string, key: string, value: api.KvValue, options?: api.KvPutOptions | null) =>
-    api.etcdPut(connectionId, key, value, {
+  put: (connectionId: string, key: string, value: api.KvValue, options?: api.KvPutOptions | null) => {
+    const keyBytes = options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyOptions(key).keyBytes);
+    if (!canWriteConnectionKey(connectionId, key, keyBytes)) throw permissionDenied();
+    return api.etcdPut(connectionId, key, value, {
       ...options,
-      keyBytes: options?.keyBytes ?? (options?.expectedCreateRevision === "0" ? undefined : keyOptions(key).keyBytes),
-    }),
-  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => api.etcdDelete(connectionId, key, { ...options, keyBytes: options?.keyBytes ?? keyOptions(key).keyBytes }),
-  rename: api.etcdRename,
+      keyBytes,
+    });
+  },
+  deleteKey: (connectionId: string, key: string, options?: api.KvDeleteOptions | null) => {
+    const keyBytes = options?.keyBytes ?? keyOptions(key).keyBytes;
+    if (!canWriteConnectionKey(connectionId, key, keyBytes)) throw permissionDenied();
+    return api.etcdDelete(connectionId, key, { ...options, keyBytes });
+  },
+  rename: (connectionId: string, request: { key: string; keyBytes?: api.KvValue | null; newKey: string; expectedModRevision?: api.KvInt64 | null }) => {
+    if (!canWriteConnectionKey(connectionId, request.key, request.keyBytes) || !canWriteConnectionKey(connectionId, request.newKey)) throw permissionDenied();
+    return api.etcdRename(connectionId, request);
+  },
   // The v2 API has no event history; hiding the entry keeps KvKeyBrowser from
   // offering restore/compare actions it cannot fulfill.
   history: isV2Api.value ? undefined : api.etcdHistory,
@@ -344,6 +368,11 @@ const labels = computed(() => ({
 }));
 
 async function refreshTtlCapability() {
+  if (!canManageEtcd.value) {
+    supportsTtl.value = false;
+    ttlCapabilityKnown.value = true;
+    return;
+  }
   const connectionId = props.connectionId;
   if (ttlCapabilityInFlightConnection === connectionId) return;
   const request = ++ttlCapabilityRequest;
@@ -373,8 +402,16 @@ function stopTtlCapabilityRefresh() {
 
 function startTtlCapabilityRefresh() {
   stopTtlCapabilityRefresh();
-  void refreshTtlCapability();
-  ttlCapabilityRefreshTimer = setInterval(() => void refreshTtlCapability(), ttlCapabilityRefreshIntervalMs);
+  const refreshAccessAndTtl = async () => {
+    try {
+      await connectionStore.ensureEtcdAccessCapabilities(props.connectionId, { force: true, verifyHealth: false });
+    } catch {
+      // The Key browser surfaces connection failures through its own requests.
+    }
+    await refreshTtlCapability();
+  };
+  void refreshAccessAndTtl();
+  ttlCapabilityRefreshTimer = setInterval(() => void refreshAccessAndTtl(), ttlCapabilityRefreshIntervalMs);
 }
 
 watch(
@@ -400,6 +437,7 @@ function normalizedLease(metadata?: api.KvKeyMetadata | null) {
 
 function isTransferRowSelectable(row: TransferRow): boolean {
   if (["unchanged", "skipped", "applied"].includes(row.operation)) return false;
+  if (!row.source || !canWriteConnectionKey(targetConnectionId.value, row.displayKey, row.source.key)) return false;
   if (transferMode.value !== "sync" || row.operation !== "update") return true;
   return transferConflictPolicy.value === "OVERWRITE";
 }
@@ -533,7 +571,7 @@ function selectedTreeKeyDetails(): string {
 
 async function deleteSelectedTreeKeys() {
   const selected = [...selectedTreeKeys.value];
-  if (!selected.length || readOnly.value) return;
+  if (!selected.length || readOnly.value || !selected.every((item) => canWriteCurrentKey(item))) return;
   batchDeleting.value = true;
   const completed: EtcdMultiSelection[] = [];
   let deleted = 0;
@@ -708,6 +746,7 @@ async function onImportFile(event: Event) {
 }
 
 async function openSync() {
+  if (readOnly.value) return;
   transferMode.value = "sync";
   targetConnectionId.value = etcdConnections.value.find((connection) => connection.id !== props.connectionId)?.id || "";
   transferKeyFilter.value = "";
@@ -768,11 +807,16 @@ async function previewTransfer() {
   transferError.value = "";
   transferPreviewLoaded.value = false;
   try {
+    await connectionStore.ensureEtcdAccessCapabilities(targetId, { force: true, verifyHealth: false });
+    if (generation !== transferPreviewGeneration) return;
     let compared = 0;
     const sourceRows = await mapWithConcurrency(bundle.entries, TARGET_LOOKUP_CONCURRENCY, async (source) => {
       const shown = displayKey(source.key);
       if (normalizedLease(source.metadata) !== "0") {
         return { id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, operation: "skipped" as const, reason: "Leased keys are skipped by default.", selected: false };
+      }
+      if (!canWriteConnectionKey(targetId, shown, source.key)) {
+        return { id: `source:${kvValueByteIdentity(source.key)}`, displayKey: shown, source, operation: "skipped" as const, reason: t("etcd.targetKeyWriteDenied"), selected: false };
       }
       const target = await api.etcdGet(targetId, shown, { keyBytes: source.key });
       if (generation !== transferPreviewGeneration) throw new Error("同步预览已被新的请求替换。");
@@ -809,6 +853,10 @@ async function applyTransfer() {
   const targetId = targetConnectionId.value;
   const rows = [...selectedTransferRows.value];
   if (!targetId || rows.length === 0) return;
+  if (!rows.every((row) => row.source && canWriteConnectionKey(targetId, row.displayKey, row.source.key))) {
+    transferError.value = t("etcd.selectedKeysWriteDenied");
+    return;
+  }
   // Invalidate any preview that is still resolving before writes begin.
   transferPreviewGeneration++;
   transferApplying.value = true;
@@ -966,8 +1014,16 @@ async function openSearchResult(result: SearchResult) {
 }
 
 async function openOperations(nextMode: Extract<WorkbenchMode, "maintenance" | "watch" | "lease">) {
+  if ((nextMode === "maintenance" || nextMode === "lease") && !canManageEtcd.value) return;
   activeOperation.value = nextMode;
   mode.value = nextMode;
+  operationsStatus.value = null;
+  // A watch is scoped to the Key/prefix supplied by the user. Do not probe
+  // cluster status first: ordinary etcd users normally lack that privilege.
+  if (nextMode === "watch") {
+    operationsLoading.value = false;
+    return;
+  }
   operationsLoading.value = true;
   try {
     operationsStatus.value = await api.etcdStatus(props.connectionId);
@@ -988,6 +1044,7 @@ function openWatchWorkspaceAfterCreate() {
 }
 
 async function refreshLeaseOptions() {
+  if (!canManageEtcd.value) return;
   try {
     leaseOptions.value = (await api.etcdLeaseList(props.connectionId)).leases;
   } catch (error) {
@@ -1034,7 +1091,7 @@ defineExpose({ focusSearch, refresh });
         <Button size="sm" :variant="mode === 'keys' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'keys'"><KeyRound class="h-4 w-4" /> {{ t("etcd.key") }}</Button>
         <Button size="sm" :variant="mode === 'search' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-3 text-sm" @click="mode = 'search'"><Search class="h-4 w-4" /> {{ t("etcd.globalSearch") }}</Button>
       </div>
-      <Button v-if="!isV2Api" size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
+      <Button v-if="!isV2Api && canManageEtcd" size="sm" :variant="mode === 'maintenance' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('maintenance')"><Wrench class="h-4 w-4" />{{ t("etcd.admin.maintenance") }}</Button>
       <Button
         size="sm"
         :variant="mode === 'watch' ? 'secondary' : 'ghost'"
@@ -1045,7 +1102,7 @@ defineExpose({ focusSearch, refresh });
         "
         ><Activity class="h-4 w-4" />{{ t("etcd.admin.watch") }}</Button
       >
-      <Button v-if="!isV2Api" size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
+      <Button v-if="!isV2Api && canManageEtcd" size="sm" :variant="mode === 'lease' ? 'secondary' : 'ghost'" class="h-8 gap-1.5 px-2.5 text-sm" @click="openOperations('lease')"><KeyRound class="h-4 w-4" />{{ t("etcd.admin.lease") }}</Button>
       <div class="flex-1" />
       <Badge v-if="readOnly" variant="outline">{{ t("connection.readOnly") }}</Badge>
       <DropdownMenu>
@@ -1064,9 +1121,9 @@ defineExpose({ focusSearch, refresh });
           </template>
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly || selectedTreeKeys.length === 0 || batchDeleting" @click="batchDeleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("etcd.delete") }}</Button>
+      <Button size="sm" variant="destructive" class="h-8 gap-1.5" :disabled="readOnly || !selectedTreeKeysWritable || batchDeleting" @click="batchDeleteOpen = true"><Trash2 class="h-3.5 w-3.5" />{{ t("etcd.delete") }}</Button>
       <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly" @click="fileInput?.click()"><Upload class="h-3.5 w-3.5" /> {{ t("etcd.import") }}</Button>
-      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="etcdConnections.length < 2" @click="openSync"><ArrowRightLeft class="h-3.5 w-3.5" /> {{ t("etcd.sync") }}</Button>
+      <Button size="sm" variant="outline" class="h-8 gap-1.5" :disabled="readOnly || etcdConnections.length < 2" @click="openSync"><ArrowRightLeft class="h-3.5 w-3.5" /> {{ t("etcd.sync") }}</Button>
       <input ref="fileInput" type="file" accept="application/json,.json" class="hidden" @change="onImportFile" />
     </div>
 
@@ -1077,13 +1134,14 @@ defineExpose({ focusSearch, refresh });
       :connection-id="props.connectionId"
       :api="etcdApi"
       :labels="labels"
-      :supports-ttl="supportsTtl"
-      :supports-lease-binding="!isV2Api"
+      :supports-ttl="supportsTtl && canManageEtcd"
+      :supports-lease-binding="!isV2Api && canManageEtcd"
       :ttl-capability-known="ttlCapabilityKnown"
       :enable-node-actions="true"
       :safe-write="true"
       :allow-binary-edit="true"
       :read-only="readOnly"
+      :can-write-key="canWriteCurrentKey"
       :enable-multi-select="true"
       :on-watch-key="openWatchForKey"
       export-format="dbx-etcd-bundle"
@@ -1164,10 +1222,10 @@ defineExpose({ focusSearch, refresh });
         <div v-else class="flex h-52 items-center justify-center px-6 text-center text-sm text-muted-foreground">输入关键词后开始搜索。可使用 Prefix 限定扫描范围。</div>
       </div>
     </div>
-    <div v-if="operationsStatus || operationsLoading || watchPreset" v-show="isOperationsMode" class="min-h-0 flex-1 overflow-auto p-4">
+    <div v-if="isOperationsMode" class="min-h-0 flex-1 overflow-auto p-4">
       <div v-if="operationsLoading && !operationsStatus" class="flex h-32 items-center justify-center text-sm text-muted-foreground"><Loader2 class="mr-2 h-4 w-4 animate-spin" />加载集群状态...</div>
       <EtcdAdminConsole
-        v-else-if="operationsStatus || watchPreset"
+        v-else-if="operationsStatus || activeOperation === 'watch'"
         :connection-id="connectionId"
         :status="operationsStatus"
         :sections="[activeOperation]"

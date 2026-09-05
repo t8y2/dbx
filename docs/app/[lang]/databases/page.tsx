@@ -8,6 +8,7 @@ import { RevealSection } from "@/components/landing/RevealSection";
 import { ExpandableDatabaseGrid } from "@/components/landing/ExpandableDatabaseGrid";
 import { databaseSupport } from "@/data/databaseSupport";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const i18n = {
   en: {
@@ -18,6 +19,15 @@ const i18n = {
     ctaLink: "Request on GitHub",
     footer: "Want to learn more about what works with each engine?",
     footerLink: "Read the feature matrix",
+  },
+  tr: {
+    title: "Desteklenen Veritabanları",
+    desc: "DBX 90+ veritabanı motorunu destekler: Rust yerel sürücüleri, MySQL/PostgreSQL uyumlu türler ve JDBC uzantıları.",
+    ctaTitle: "Kullandığınız veritabanını göremiyor musunuz?",
+    ctaDesc: "Yeni bir veritabanı motoru için GitHub Discussions'ta bir başlık açın. Üreticiler ve topluluk kullanıcıları katkı verebilir.",
+    ctaLink: "GitHub'da talep edin",
+    footer: "Her motorun hangi özellikleri desteklediğini merak ediyor musunuz?",
+    footerLink: "Özellik matrisine bakın",
   },
   cn: {
     title: "支持的数据库",
@@ -32,7 +42,7 @@ const i18n = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return buildMetadata({
@@ -45,7 +55,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function DatabasesPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return (

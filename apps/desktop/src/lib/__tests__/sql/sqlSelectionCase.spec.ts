@@ -14,11 +14,18 @@ describe("convertSqlSelectionCase", () => {
     expect(convertSqlSelectionCase(sql, { from: 0, to: sql.length }, "upper")).toBe("SELECT CODE FROM ORDERS WHERE CODE = 'abc001'");
   });
 
-  it("preserves the selected fragment when the selection is inside a string literal", () => {
+  it("converts a selection that is fully contained inside a string literal", () => {
     const sql = "select * from orders where code = 'AbC001'";
     const from = sql.indexOf("bC");
 
-    expect(convertSqlSelectionCase(sql, { from, to: from + 2 }, "lower")).toBe("bC");
+    expect(convertSqlSelectionCase(sql, { from, to: from + 2 }, "lower")).toBe("bc");
+  });
+
+  it("still protects a string literal when the selection extends beyond it", () => {
+    const sql = "select code from orders where code = 'abc001'";
+    const from = sql.indexOf("code =");
+
+    expect(convertSqlSelectionCase(sql, { from, to: sql.length }, "upper")).toBe("CODE = 'abc001'");
   });
 
   it("preserves PostgreSQL dollar-quoted string literals", () => {

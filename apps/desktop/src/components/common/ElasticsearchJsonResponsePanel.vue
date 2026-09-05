@@ -7,7 +7,7 @@ import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { formatJsonSource } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource, parseJsonPreservingLargeNumbers, stringifyJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { TEXT_CONTENT_SEARCH_MATCH_LIMIT, canFullHighlightTextContent, findTextContentMatches, nextTextContentSearchMatchIndex, renderTextContentMatchesHtml, textContentSearchStatus, type TextContentMatch } from "@/lib/common/textContentSearch";
 
 const props = defineProps<{
@@ -23,7 +23,10 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
-const responseView = ref<"raw" | "json">("json");
+type ResponseView = "raw" | "json" | "document";
+type ElasticsearchHit = { label: string; record: Record<string, unknown> };
+
+const responseView = ref<ResponseView>("json");
 const responsePanelRef = ref<HTMLElement>();
 const rawPreRef = ref<HTMLPreElement>();
 const jsonEditorRef = ref<{ openSearch: () => boolean }>();
@@ -41,6 +44,29 @@ const formattedBody = computed(() => {
     return { valid: false, text: "" };
   }
 });
+const documentHits = computed<ElasticsearchHit[]>(() => {
+  try {
+    const response = parseJsonPreservingLargeNumbers(props.body);
+    const hits = response && typeof response === "object" && !Array.isArray(response) ? (response as Record<string, unknown>).hits : undefined;
+    const hitDocuments = hits && typeof hits === "object" && !Array.isArray(hits) ? (hits as Record<string, unknown>).hits : undefined;
+    if (!Array.isArray(hitDocuments)) return [];
+    return hitDocuments.flatMap((hit, index) => {
+      if (!hit || typeof hit !== "object" || Array.isArray(hit)) return [];
+      const record = hit as Record<string, unknown>;
+      const id = typeof record._id === "string" && record._id ? record._id : String(index + 1);
+      // Keep the complete search hit, including optional fields such as
+      // highlights and inner hits, without coercing Elasticsearch long values.
+      return [{ label: id, record }];
+    });
+  } catch {
+    return [];
+  }
+});
+const selectedDocumentIndex = ref(0);
+const selectedDocument = computed(() => documentHits.value[selectedDocumentIndex.value]);
+// Keep raw records and stringify only the selected hit, so a large hit list
+// does not hold a formatted copy of every document in memory at once.
+const selectedDocumentText = computed(() => (selectedDocument.value ? stringifyJsonPreservingLargeNumbers(selectedDocument.value.record, 2) : ""));
 
 const statusClass = computed(() => {
   if (props.status >= 500) return "border-destructive/40 bg-destructive/10 text-destructive";
@@ -65,6 +91,7 @@ watch(
   () => props.body,
   () => {
     resetResponseSearch();
+    selectedDocumentIndex.value = 0;
     responseView.value = formattedBody.value.valid ? "json" : "raw";
   },
   { immediate: true },
@@ -78,7 +105,7 @@ watch(responseSearchQuery, () => {
 
 async function copyResponse() {
   try {
-    await copyToClipboard(props.body);
+    await copyToClipboard(responseView.value === "document" ? selectedDocumentText.value || props.body : props.body);
     toast(t("grid.copied"), 2000);
   } catch (error: any) {
     toast(t("grid.copyFailed", { message: error?.message || String(error) }), 5000);
@@ -94,7 +121,7 @@ function handleResponsePanelPointerDown() {
 function focusSearch(): boolean {
   if (!responsePanelRef.value?.contains(document.activeElement)) return false;
 
-  if (responseView.value === "json") {
+  if (responseView.value !== "raw") {
     void nextTick(() => jsonEditorRef.value?.openSearch());
     return true;
   }
@@ -119,10 +146,15 @@ function closeResponseSearch() {
   resetResponseSearch(true);
 }
 
-function switchResponseView(view: "raw" | "json") {
+function switchResponseView(view: ResponseView) {
+  if (view === "document" && !documentHits.value.length) return;
   if (responseView.value === view) return;
   responseView.value = view;
   if (view !== "raw") resetResponseSearch();
+}
+
+function selectDocument(index: number) {
+  selectedDocumentIndex.value = index;
 }
 
 function moveResponseSearchMatch(delta: -1 | 1) {
@@ -211,6 +243,16 @@ defineExpose({ focusSearch });
           >
             {{ t("redis.jsonView") }}
           </button>
+          <button
+            v-if="documentHits.length"
+            type="button"
+            class="h-6 rounded-[4px] px-2 text-xs transition-colors"
+            :class="responseView === 'document' ? 'bg-background font-medium text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+            :aria-pressed="responseView === 'document'"
+            @click="switchResponseView('document')"
+          >
+            {{ t("mongo.documentView") }}
+          </button>
           <button v-if="canShowTable" type="button" class="h-6 rounded-[4px] px-2 text-xs transition-colors bg-background font-medium text-foreground shadow-sm" @click="emit('showTable')">
             {{ t("tabs.tableData") }}
           </button>
@@ -226,6 +268,21 @@ defineExpose({ focusSearch });
     <div class="min-h-0 flex-1 overflow-hidden bg-background">
       <pre v-if="responseView === 'raw' && canHighlightRawSearch" ref="rawPreRef" class="m-0 h-full overflow-auto bg-transparent p-4 font-mono text-sm leading-6 whitespace-pre" v-html="highlightedRawResponse" />
       <pre v-else-if="responseView === 'raw'" ref="rawPreRef" class="m-0 h-full overflow-auto bg-transparent p-4 font-mono text-sm leading-6 whitespace-pre">{{ body }}</pre>
+      <div v-else-if="responseView === 'document'" class="flex h-full min-h-0">
+        <aside class="w-52 shrink-0 overflow-y-auto border-r bg-muted/10 p-1.5">
+          <button
+            v-for="(document, index) in documentHits"
+            :key="`${document.label}:${index}`"
+            type="button"
+            class="flex w-full items-center rounded px-2 py-1.5 text-left font-mono text-xs transition-colors"
+            :class="selectedDocumentIndex === index ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground'"
+            @click="selectDocument(index)"
+          >
+            <span class="truncate">{{ document.label }}</span>
+          </button>
+        </aside>
+        <RedisJsonEditor v-if="selectedDocument" ref="jsonEditorRef" :model-value="selectedDocumentText" read-only class="min-h-0 min-w-0 flex-1" />
+      </div>
       <RedisJsonEditor v-else-if="formattedBody.valid" ref="jsonEditorRef" :model-value="formattedBody.text" read-only class="min-h-0 flex-1" />
     </div>
   </section>

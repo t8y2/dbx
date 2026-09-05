@@ -17,9 +17,10 @@ use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, uses_single_row_insert_statements};
 use crate::transfer::{
-    format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra,
-    is_mysql_generated_column_extra, keyset_pagination_sql_with_identifier_quote, quote_identifier,
-    quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
+    format_ch_array_sql_literal, format_pg_array_sql_literal, format_postgres_vector_sql_literal,
+    is_identity_column_extra, is_mysql_generated_column_extra, is_postgres_vector_type,
+    keyset_pagination_sql_with_identifier_quote, quote_identifier, quote_postgres_string_literal,
+    wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::{ObjectSourceKind, SpatialColumn};
 
@@ -441,8 +442,8 @@ fn format_export_sql_literal_typed(
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
     }
-    if is_postgres_vector_export_column(database_type, column_type) {
-        return format_postgres_vector_export_literal(value);
+    if database_type == Some(DatabaseType::Postgres) && is_postgres_vector_type(column_type) {
+        return format_postgres_vector_sql_literal(value);
     }
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
@@ -509,37 +510,14 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     quote_postgres_string_literal(&text)
 }
 
-fn format_postgres_vector_export_literal(value: &Value) -> String {
-    if value.is_null() {
-        return "NULL".to_string();
-    }
-    let text = match value {
-        // pgvector vector/halfvec are scalar extension types whose importable
-        // literal grammar uses square brackets, unlike PostgreSQL arrays.
-        Value::Array(arr) => format_postgres_vector_export_text(arr),
-        Value::String(text) => text.to_string(),
-        _ => value.to_string(),
-    };
-    quote_postgres_string_literal(&text)
-}
-
-fn format_postgres_vector_export_text(arr: &[Value]) -> String {
-    let elements = arr.iter().map(format_postgres_vector_export_element).collect::<Vec<_>>();
-    format!("[{}]", elements.join(","))
-}
-
-fn format_postgres_vector_export_element(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.trim().to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Null => "NULL".to_string(),
-        _ => value.to_string(),
-    }
-}
-
 fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+// OpenGauss exports use standard-conforming strings, so backslashes are
+// literal and only embedded single quotes need doubling.
+fn quote_opengauss_export_sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 fn is_sqlserver_unicode_export_type(column_type: &str) -> bool {
@@ -551,6 +529,7 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
     match database_type {
         Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
         Some(DatabaseType::Postgres) => quote_postgres_string_literal(text),
+        Some(DatabaseType::OpenGauss) => quote_opengauss_export_sql_string(text),
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
@@ -1274,17 +1253,6 @@ fn is_postgres_bytea_export_column(database_type: Option<DatabaseType>, column_t
             .unwrap_or(false)
 }
 
-fn is_postgres_vector_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
-    database_type == Some(DatabaseType::Postgres)
-        && column_type
-            .map(|column_type| {
-                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
-                let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim_matches('"');
-                matches!(base, "vector" | "halfvec") || base.ends_with(".vector") || base.ends_with(".halfvec")
-            })
-            .unwrap_or(false)
-}
-
 pub fn build_export_sql_insert(options: BuildExportSqlInsertOptions) -> Result<String, String> {
     build_export_insert_statements(options.insert).map(|statements| statements.join("\n"))
 }
@@ -1383,8 +1351,133 @@ fn normalize_export_table_ddl(
 
 fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts: DdlNormalizeOptions) -> String {
     let ddl = normalize_export_table_ddl(ddl, database_type, opts);
+    let ddl =
+        if database_type == Some(DatabaseType::OpenGauss) { normalize_opengauss_table_ddl_comments(&ddl) } else { ddl };
     let ddl = ddl.trim().trim_end_matches(';').trim_end();
     format!("{ddl};")
+}
+
+/// openGauss 6.x `pg_get_tabledef` can concatenate comment text into a
+/// `COMMENT ON` literal without escaping embedded single quotes. Normalize
+/// only those generated comment statements; all other DDL text remains
+/// untouched.
+fn normalize_opengauss_table_ddl_comments(ddl: &str) -> String {
+    let mut normalized = String::with_capacity(ddl.len());
+    for line in ddl.split_inclusive('\n') {
+        let (line_body, line_ending) = match line.strip_suffix('\n') {
+            Some(body) => match body.strip_suffix('\r') {
+                Some(body) => (body, "\r\n"),
+                None => (body, "\n"),
+            },
+            None => (line, ""),
+        };
+        let leading = line_body.len() - line_body.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
+        let statement = &line_body[leading..];
+        if let Some(statement) = normalize_opengauss_comment_statement(statement) {
+            normalized.push_str(&line_body[..leading]);
+            normalized.push_str(&statement);
+        } else {
+            normalized.push_str(line_body);
+        }
+        normalized.push_str(line_ending);
+    }
+    normalized
+}
+
+fn normalize_opengauss_comment_statement(statement: &str) -> Option<String> {
+    let uppercase = statement.to_ascii_uppercase();
+    if !uppercase.starts_with("COMMENT ON ") {
+        return None;
+    }
+
+    let is_pos = find_opengauss_comment_is_keyword(statement, &uppercase)?;
+    let value_start = is_pos + " IS ".len();
+    let value = &statement[value_start..];
+    let value_leading = value.len() - value.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
+    let value = &value[value_leading..];
+    let quote_offset = match value.as_bytes() {
+        [b'\'', ..] => 0,
+        [b'e' | b'E', b'\'', ..] => 1,
+        _ => return None,
+    };
+    let opening_quote = value_start + value_leading + quote_offset;
+    let statement_end = statement.trim_end().len();
+    let literal_end = statement[..statement_end]
+        .strip_suffix(';')
+        .map_or(statement_end, |without_terminator| without_terminator.len());
+    if opening_quote >= literal_end {
+        return None;
+    }
+
+    let closing_quote = statement[..literal_end].rfind('\'')?;
+    if closing_quote <= opening_quote || !statement[closing_quote + 1..literal_end].trim().is_empty() {
+        return None;
+    }
+    let literal = &statement[opening_quote..=closing_quote];
+    if opengauss_comment_literal_is_valid(literal) {
+        return Some(statement.to_string());
+    }
+
+    let raw_comment = &statement[opening_quote + 1..closing_quote];
+    let escaped_comment = raw_comment.replace('\'', "''");
+    let mut normalized = String::with_capacity(statement.len() + escaped_comment.len() - raw_comment.len());
+    normalized.push_str(&statement[..opening_quote + 1]);
+    normalized.push_str(&escaped_comment);
+    normalized.push_str(&statement[closing_quote..]);
+    Some(normalized)
+}
+
+fn find_opengauss_comment_is_keyword(statement: &str, uppercase: &str) -> Option<usize> {
+    let mut cursor = "COMMENT ON ".len();
+    while cursor + " IS ".len() <= statement.len() {
+        if statement.as_bytes().get(cursor) == Some(&b'\"') {
+            cursor = skip_opengauss_quoted_identifier(statement, cursor);
+            continue;
+        }
+        if uppercase.get(cursor..cursor + " IS ".len()) == Some(" IS ") {
+            return Some(cursor);
+        }
+        cursor += statement[cursor..].chars().next()?.len_utf8();
+    }
+    None
+}
+
+fn skip_opengauss_quoted_identifier(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\"' {
+            if bytes.get(cursor + 1) == Some(&b'\"') {
+                cursor += 2;
+            } else {
+                return cursor + 1;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn opengauss_comment_literal_is_valid(literal: &str) -> bool {
+    let bytes = literal.as_bytes();
+    if bytes.len() < 2 || bytes.first() != Some(&b'\'') || bytes.last() != Some(&b'\'') {
+        return false;
+    }
+
+    let mut cursor = 1;
+    while cursor < bytes.len() - 1 {
+        if bytes[cursor] == b'\'' {
+            if cursor + 1 < bytes.len() - 1 && bytes[cursor + 1] == b'\'' {
+                cursor += 2;
+            } else {
+                return false;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    true
 }
 
 fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>) {
@@ -4388,6 +4481,60 @@ mod tests {
     }
 
     #[test]
+    fn opengauss_export_inserts_escape_quotes_without_doubling_backslashes() {
+        let style = r#""{\"paddingTop\":\"20vh\",\"fontSize\":16}""#;
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::OpenGauss),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("dbx_issue_json".to_string()),
+            qualified_table_name: None,
+            columns: vec!["comment_text".to_string(), "style".to_string()],
+            column_types: vec![Some("text".to_string()), Some("json".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("逻辑删除标志：'0'-未删除，'1'-已删除"), json!(style)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        let expected_style = format!("'{style}'");
+        assert_eq!(
+            statements,
+            vec![format!(
+                "INSERT INTO \"public\".\"dbx_issue_json\" (\"comment_text\", \"style\") VALUES ('逻辑删除标志：''0''-未删除，''1''-已删除', {expected_style});"
+            )]
+        );
+    }
+
+    #[test]
+    fn postgres_export_keeps_json_escape_sequences_for_the_same_value() {
+        let style = r#""{\"paddingTop\":\"20vh\",\"fontSize\":16}""#;
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("dbx_issue_json".to_string()),
+            qualified_table_name: None,
+            columns: vec!["style".to_string()],
+            column_types: vec![Some("json".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(style)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        let expected_style = format!("E'{}'", style.replace('\\', "\\\\"));
+        assert_eq!(
+            statements,
+            vec![format!("INSERT INTO \"public\".\"dbx_issue_json\" (\"style\") VALUES ({expected_style});")]
+        );
+    }
+
+    #[test]
     fn postgres_vector_export_preserves_pgvector_bracket_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -4399,18 +4546,29 @@ mod tests {
                 "id".to_string(),
                 "embedding".to_string(),
                 "qualified_embedding".to_string(),
+                "compact_embedding".to_string(),
                 "labels".to_string(),
+                "embedding_history".to_string(),
             ],
             column_types: vec![
                 Some("integer".to_string()),
                 Some("vector(2)".to_string()),
                 Some("public.vector".to_string()),
+                Some("halfvec(2)".to_string()),
                 Some("text[]".to_string()),
+                Some("public.vector(2)[]".to_string()),
             ],
             column_extras: Vec::new(),
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
-            rows: vec![vec![json!(1), json!([1.2, 3.4]), json!(["5", "6"]), json!(["x", "y"])]],
+            rows: vec![vec![
+                json!(1),
+                json!([1.2, 3.4]),
+                json!(["5", "6"]),
+                json!([-0.25, 4]),
+                json!(["x", "y"]),
+                json!([[1.2, 3.4], [5, 6]]),
+            ]],
             batch_size: Some(10),
         })
         .unwrap();
@@ -4418,7 +4576,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                r#"INSERT INTO "public"."items" ("id", "embedding", "qualified_embedding", "labels") VALUES (1, '[1.2,3.4]', '[5,6]', '{"x","y"}');"#
+                r#"INSERT INTO "public"."items" ("id", "embedding", "qualified_embedding", "compact_embedding", "labels", "embedding_history") VALUES (1, '[1.2,3.4]', '[5,6]', '[-0.25,4]', '{"x","y"}', '{{1.2,3.4},{5,6}}');"#
             ]
         );
     }
@@ -5073,6 +5231,32 @@ mod tests {
             ]
             .join("\n")
         );
+    }
+
+    #[test]
+    fn opengauss_export_escapes_single_quotes_in_comment_ddl() {
+        let ddl = concat!(
+            "CREATE TABLE \"public\".\"dbx_issue_comment\" (\"flag\" varchar(8));\n",
+            "COMMENT ON COLUMN \"public\".\"dbx_issue_comment\".\"flag\" IS '逻辑删除标志：'0'-未删除，'1'-已删除';"
+        );
+
+        assert_eq!(
+            format_export_table_ddl(ddl, Some(DatabaseType::OpenGauss), DdlNormalizeOptions::default()),
+            concat!(
+                "CREATE TABLE \"public\".\"dbx_issue_comment\" (\"flag\" varchar(8));\n",
+                "COMMENT ON COLUMN \"public\".\"dbx_issue_comment\".\"flag\" IS '逻辑删除标志：''0''-未删除，''1''-已删除';"
+            )
+        );
+    }
+
+    #[test]
+    fn opengauss_export_leaves_other_literals_and_valid_comments_unchanged() {
+        let ddl = concat!(
+            "CREATE TABLE \"public\".\"notes\" (\"body\" text DEFAULT 'O''Hara');\n",
+            "COMMENT ON COLUMN \"public\".\"notes\".\"body\" IS 'owner''s note';"
+        );
+
+        assert_eq!(format_export_table_ddl(ddl, Some(DatabaseType::OpenGauss), DdlNormalizeOptions::default()), ddl);
     }
 
     #[test]

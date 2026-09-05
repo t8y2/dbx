@@ -1639,6 +1639,7 @@ mod tests {
                 proxy_url: String::new(),
                 enable_thinking: true,
                 reasoning_level: crate::ai::AiReasoningLevel::Default,
+                max_output_tokens: None,
                 runtime_effort: None,
                 context_window: None,
                 max_retries: None,

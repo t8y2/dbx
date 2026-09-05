@@ -179,7 +179,8 @@ export function buildAgentRequest(input: AiRequestInput, history?: api.AiMessage
   ];
 
   const params = actionParams(input.action);
-  const maxTokens = input.config.enableThinking ? Math.max(params.maxTokens, 8192) : params.maxTokens;
+  const baseMaxTokens = input.config.maxOutputTokens ?? params.maxTokens;
+  const maxTokens = input.config.enableThinking ? Math.max(baseMaxTokens, 8192) : baseMaxTokens;
   return { messages, systemPrompt, taskContract, maxTokens };
 }
 

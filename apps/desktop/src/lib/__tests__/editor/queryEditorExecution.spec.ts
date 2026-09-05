@@ -5,6 +5,7 @@ import { createQueryEditorExecutionViewportOwnership, isQueryEditorPositionVisib
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const contentAreaSource = readFileSync(new URL("../../../components/layout/ContentArea.vue", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
+const editorGroupSource = readFileSync(new URL("../../../components/layout/EditorGroup.vue", import.meta.url), "utf8");
 const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
 const sqlExecutionSource = readFileSync(new URL("../../../composables/useSqlExecution.ts", import.meta.url), "utf8");
 const queryStoreSource = readFileSync(new URL("../../../stores/queryStore.ts", import.meta.url), "utf8");
@@ -56,14 +57,21 @@ describe("QueryEditor execution routing", () => {
     expect(queryEditorSource).toContain("return sqlExecutionSnapshotFromView(currentView);");
     expect(contentAreaSource).toContain("function captureQueryEditorExecutionSnapshot()");
     expect(contentAreaSource).toContain("queryEditorRef.value?.captureExecutionSnapshot();");
-    expect(appSource).toContain("const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot>();");
-    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = contentAreaRef.value?.captureQueryEditorExecutionSnapshot?.();");
+    expect(appSource).toContain("const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot & { tabId?: string }>();");
+    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = snapshot ? { ...snapshot, tabId: activeTab.value?.id } : undefined;");
     expect(appSource).toContain('if (source === "pointer")');
     expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = undefined;");
-    expect(appSource).toContain("void tryExecute(snapshot);");
-    expect(appSource).toContain('@execute-pointer-down="captureActiveEditorExecutionSnapshot()"');
-    expect(appSource).toContain('@execute="requestActiveEditorExecute($event)"');
+    expect(appSource).toContain("void tryExecute(snapshot, { tabId: snapshot.tabId ?? activeTab.value?.id });");
+    expect(appSource).toContain('@execute="(tabId: string, override?: SqlExecutionOverride) => tryExecute(override, { tabId })"');
+    // Per-group toolbars call back into App-owned orchestration via injection.
+    expect(appSource).toContain("provide(EDITOR_TOOLBAR_ACTIONS, {");
+    expect(appSource).toContain("captureExecutionSnapshot: captureActiveEditorExecutionSnapshot,");
+    expect(appSource).toContain("toolbarExecute: requestActiveEditorExecute,");
+    expect(editorGroupSource).toContain('@execute-pointer-down="toolbar.captureExecutionSnapshot()"');
+    expect(editorGroupSource).toContain('@toolbar-execute="toolbar.toolbarExecute($event)"');
     expect(editorToolbarSource).toContain("function onExecutePointerDown(event: MouseEvent)");
+    expect(editorToolbarSource).toContain('emit("toolbarExecute", event.detail > 0 ? "pointer" : "keyboard")');
+    expect(editorToolbarSource).not.toContain('emit("execute", event.detail > 0 ? "pointer" : "keyboard")');
   });
 
   it("uses the opt-in blank-line fallback and otherwise reports the missing cursor statement", () => {

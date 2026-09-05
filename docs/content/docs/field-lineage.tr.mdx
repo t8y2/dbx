@@ -1,0 +1,91 @@
+---
+title: Alan Soy Ağacı
+description: Yabancı anahtarlardan, görünüm tanımlarından, sorgu geçmişinden ve eşleşen adlardan yukarı akış, aşağı akış ve olası sütun etkisini çözümleyin.
+---
+
+Alan soy ağacı; bir sütunun nereden geldiğini, nerede kullanıldığını ve bir değişikliğin neyi etkileyebileceğini yanıtlamaya yardımcı olur. DBX, veritabanı meta verisini yerel sorgu geçmişiyle birleştirir ve her ad eşleşmesini doğrulanmış bir bağımlılık saymak yerine kanıt gücünü etiketler.
+
+## Soy Ağacını Açma
+
+Alan soy ağacını bir sütun düğümünden, tablo yapısından ya da ilgili bağlam menüsünden açın. Etkin sütun hedef olur ve sonuçlar ilgili tabloları, sütunları, görünümleri veya geçmiş SQL'i listeler.
+
+## İlişki Kaynakları ve Güven Düzeyi
+
+| Kaynak | Varsayılan güven | Anlamı |
+| --- | --- | --- |
+| Yabancı anahtar | Kesin | Veritabanı, geçerli sütun ile hedef sütun arasında bir kısıt bildiriyor |
+| Görünüm tanımı | Olası veya muhtemel | Görünüm kaynağı hem hedef tabloya hem de sütuna başvuruyorsa güven daha yüksektir |
+| Sorgu geçmişi | Olası veya muhtemel | Geçmiş SQL'de hem tablo hem sütun varsa kanıt daha güçlüdür |
+| Aynı adlı sütun | Muhtemel | Yalnızca ada dayalı çıkarım; iş bağlamında doğrulanmalıdır |
+
+Arayüz **Kesin**, **Olası** ve **Muhtemel** ayrımını yapar. Önce yabancı anahtarlara ve açık kaynak başvurularına odaklanmak için düşük güvenli sonuçları filtreleyin.
+
+## Arama ve Filtreler
+
+- Tablo, sütun, görünüm veya SQL parçacığı arayın
+- Güven düzeyine göre filtreleyin
+- Gösterilen ve toplam ilişki sayısını görün
+- Tablo veya sütun adlarını kopyalayın
+- Hedef tablonun verisini ya da yapısını açın
+- İlgili nesneyi ağaçta gösterin
+
+Soy ağacı; yabancı anahtarları, görünüm kaynağını ve ilgili meta veriyi veritabanının yeteneğine göre yükler. Büyük şemalarda ilk çözümleme zaman alabilir.
+
+## Kanıt Olarak Sorgu Geçmişi
+
+DBX, çalıştırılmış sorguları destekleyici kanıt olarak kullanır:
+
+- Bir `JOIN` içinde birlikte görünen alanlar
+- `WHERE`, `SELECT` ya da ifadelerde başvurulan hedef sütunlar
+- Eşleşen bir alanı kullanan geçmiş düzeltme veya raporlama SQL'i
+
+Geçmiş, yalnızca DBX'te çalıştırılan ya da kaydedilen SQL'i temsil eder. Tüm uygulama kodunu, ETL'i, BI'ı veya diğer istemcileri kapsamaz.
+
+<Callout type="warn">Sorgu geçmişi hassas tablo adları, koşullar ve sabit değerler içerebilir. Soy ağacını göstermeden, günlükleri dışa aktarmadan ya da ekran görüntüsü paylaşmadan önce gizliliği gözden geçirin.</Callout>
+
+## Görünüm ve Kaynak Çözümlemesi
+
+Görünüm ilişkileri, veritabanının döndürdüğü tanımları kullanır. Şu durumlarda güven düşebilir:
+
+- Dinamik SQL veya üretilmiş yordam metni
+- Açık şema olmadan belirsiz tablolar ya da sütunlar
+- `SELECT *`, karmaşık alt sorgular veya üreticiye özgü uzantılar
+- Eksiksiz görünüm kaynağı döndürmeyen veritabanları
+
+Elle doğrulamak için bir görünüm sonucunu açın ve kaynağı [Nesne Gezgini](/tr/docs/object-browser) içinde inceleyin.
+
+## İş Akışları
+
+### Bir Sütunu Değiştirmeden Önce
+
+1. Doğrulanmış yabancı anahtar ilişkilerini inceleyin
+2. Olası görünümleri ve geçmiş SQL'i gözden geçirin
+3. Muhtemel aynı adlı ilişkileri iş bağlamıyla doğrulayın
+4. Uygulama depolarında, ETL ve BI varlıklarında aramaya devam edin
+5. Hedef ortamdaki değişiklikleri incelemek için [Şema Karşılaştırma](/tr/docs/schema-diff) özelliğini kullanın
+
+### Tanımadığınız Bir Veritabanını Anlamak
+
+Birincil anahtarlar, iş tanımlayıcıları, kullanıcı kimlikleri veya zaman sütunlarıyla başlayın ve ilgili tablolar ile görünümleri izleyin. Sütun açıklamaları ve nesne kaynağı, genellikle yalnızca ad eşleşmesinden daha güçlü kanıttır.
+
+## Destek ve Sınırlar
+
+- Soy ağacı; yabancı anahtar, görünüm kaynağı ya da ayrıştırılabilir sorgu geçmişi gerektirir, bu yüzden kapsam veritabanına göre değişir
+- Bildirilmiş yabancı anahtar yoksa DBX yalnızca görünüm, geçmiş ve aynı ad ipuçları sunabilir
+- Sonuçlar güçlü tutarlılıkta bir veri yönetişimi grafiği değildir ve her uygulamayı, mesaj akışını, ETL ya da BI sistemini içermez
+- Geçmişi silmek veya yerel veriyi temizlemek sorgu geçmişi kaynağını daraltır
+- Güncel motor kapsamı için [Veritabanı Desteği](/tr/docs/databases) matrisine bakın
+
+<Callout type="info">Önemli şema değişiklikleri yine de veritabanı kısıtları, kaynak incelemesi, uygulama kodu araması ve iş sahibinin onayını gerektirir. Soy ağacı araştırmayı daraltır; etki analizinin yerini almaz.</Callout>
+
+<Cards>
+  <Card title="Şema gezgini" href="/tr/docs/schema-browser">
+    Sütunları, yabancı anahtarları, açıklamaları ve nesne hiyerarşisini inceleyin.
+  </Card>
+  <Card title="Nesne kaynağı" href="/tr/docs/object-browser">
+    Görünüm, yordam, işlev ve tetikleyici tanımlarını inceleyin.
+  </Card>
+  <Card title="Şema karşılaştırma" href="/tr/docs/schema-diff">
+    Ortam farklarını ve dağıtım betiklerini inceleyin.
+  </Card>
+</Cards>

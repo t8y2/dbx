@@ -3,11 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, ChevronRight, FolderOpen } from "@lucide/vue";
+import { Loader2, Check, CheckCircle2, XCircle, AlertCircle, X, FileDown, DatabaseBackup, FileCode2, ArrowRightLeft, Layers3, ChevronRight, FolderOpen, Copy } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { dataTransferFailureCopyText, sqlFileFailureCopyText } from "@/components/export/failureDetailCopyText";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import * as api from "@/lib/backend/api";
 
 const { t } = useI18n();
@@ -17,17 +19,22 @@ const open = ref(false);
 const showAll = ref(false);
 const expandedFailureTaskIds = ref<string[]>([]);
 const revealingTaskIds = ref<string[]>([]);
+const copiedFailureDetailKey = ref("");
 const currentTime = ref(Date.now());
 const MAX_VISIBLE = 5;
 
 let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+let copiedFailureDetailTimer: ReturnType<typeof setTimeout> | undefined;
+let unmounted = false;
 onMounted(() => {
   elapsedTimer = setInterval(() => {
     currentTime.value = Date.now();
   }, 1000);
 });
 onBeforeUnmount(() => {
+  unmounted = true;
   if (elapsedTimer) clearInterval(elapsedTimer);
+  if (copiedFailureDetailTimer) clearTimeout(copiedFailureDetailTimer);
 });
 
 const reversedTasks = computed(() => {
@@ -243,6 +250,31 @@ function hasUnlistedTaskError(task: ExportTask) {
   return true;
 }
 
+function dataTransferFailureDetailKey(taskId: string, table: string): string {
+  return `data-transfer:${taskId}:${table}`;
+}
+
+function sqlFileFailureDetailKey(taskId: string, fileIndex: number | undefined, statementIndex: number): string {
+  return `sql-file:${taskId}:${fileIndex ?? -1}:${statementIndex}`;
+}
+
+async function copyFailureDetail(text: string, key: string): Promise<void> {
+  try {
+    await copyToClipboard(text);
+    if (unmounted) return;
+    copiedFailureDetailKey.value = key;
+    if (copiedFailureDetailTimer) clearTimeout(copiedFailureDetailTimer);
+    copiedFailureDetailTimer = setTimeout(() => {
+      if (copiedFailureDetailKey.value === key) copiedFailureDetailKey.value = "";
+      copiedFailureDetailTimer = undefined;
+    }, 2000);
+    toast(t("exportProgress.failureDetailCopied"));
+  } catch (error: unknown) {
+    if (unmounted) return;
+    toast(t("exportProgress.failureDetailCopyFailed", { message: translateBackendError(t, error) }), 5000);
+  }
+}
+
 function openTask(task: ExportTask): void {
   task.onOpen?.();
 }
@@ -307,7 +339,19 @@ function openTask(task: ExportTask): void {
                 <div v-if="failureDetailsExpanded(task.exportId)" class="mt-1.5 max-h-44 overflow-y-auto rounded border border-destructive/20 bg-destructive/5">
                   <template v-if="task.kind === 'data-transfer'">
                     <div v-for="failure in task.transferFailures" :key="failure.table" class="border-b border-destructive/15 px-2.5 py-2 last:border-b-0">
-                      <div class="break-all font-mono font-medium text-foreground">{{ failure.table }}</div>
+                      <div class="flex min-w-0 items-start justify-between gap-2">
+                        <div class="min-w-0 break-all font-mono font-medium text-foreground">{{ failure.table }}</div>
+                        <button
+                          type="button"
+                          class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
+                          :title="copiedFailureDetailKey === dataTransferFailureDetailKey(task.exportId, failure.table) ? t('exportProgress.failureDetailCopied') : t('exportProgress.copyFailureDetail')"
+                          :aria-label="copiedFailureDetailKey === dataTransferFailureDetailKey(task.exportId, failure.table) ? t('exportProgress.failureDetailCopied') : t('exportProgress.copyFailureDetail')"
+                          @click.stop="copyFailureDetail(dataTransferFailureCopyText(failure), dataTransferFailureDetailKey(task.exportId, failure.table))"
+                        >
+                          <Check v-if="copiedFailureDetailKey === dataTransferFailureDetailKey(task.exportId, failure.table)" class="h-3.5 w-3.5 text-green-500" aria-hidden="true" />
+                          <Copy v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" aria-hidden="true" />
+                        </button>
+                      </div>
                       <div class="mt-0.5 select-text whitespace-pre-wrap break-words text-destructive">{{ failure.error }}</div>
                       <div v-if="failure.truncated" class="mt-0.5 text-muted-foreground">{{ t("exportProgress.failureDetailTruncated") }}</div>
                     </div>
@@ -315,9 +359,21 @@ function openTask(task: ExportTask): void {
                   </template>
                   <template v-else>
                     <div v-for="failure in task.sqlFileFailures" :key="`${failure.fileIndex ?? -1}:${failure.statementIndex}`" class="border-b border-destructive/15 px-2.5 py-2 last:border-b-0">
-                      <div class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
-                        <span class="shrink-0">#{{ failure.statementIndex }}</span>
-                        <span v-if="failure.fileName" class="truncate text-muted-foreground" :title="failure.fileName">{{ failure.fileName }}</span>
+                      <div class="flex min-w-0 items-start justify-between gap-2">
+                        <div class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
+                          <span class="shrink-0">#{{ failure.statementIndex }}</span>
+                          <span v-if="failure.fileName" class="truncate text-muted-foreground" :title="failure.fileName">{{ failure.fileName }}</span>
+                        </div>
+                        <button
+                          type="button"
+                          class="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-muted"
+                          :title="copiedFailureDetailKey === sqlFileFailureDetailKey(task.exportId, failure.fileIndex, failure.statementIndex) ? t('exportProgress.failureDetailCopied') : t('exportProgress.copyFailureDetail')"
+                          :aria-label="copiedFailureDetailKey === sqlFileFailureDetailKey(task.exportId, failure.fileIndex, failure.statementIndex) ? t('exportProgress.failureDetailCopied') : t('exportProgress.copyFailureDetail')"
+                          @click.stop="copyFailureDetail(sqlFileFailureCopyText(failure, translateBackendError(t, failure.error)), sqlFileFailureDetailKey(task.exportId, failure.fileIndex, failure.statementIndex))"
+                        >
+                          <Check v-if="copiedFailureDetailKey === sqlFileFailureDetailKey(task.exportId, failure.fileIndex, failure.statementIndex)" class="h-3.5 w-3.5 text-green-500" aria-hidden="true" />
+                          <Copy v-else class="h-3.5 w-3.5 text-muted-foreground hover:text-foreground" aria-hidden="true" />
+                        </button>
                       </div>
                       <div v-if="failure.statementSummary" class="mt-0.5 select-text whitespace-pre-wrap break-words font-mono text-foreground">{{ failure.statementSummary }}</div>
                       <div class="mt-0.5 select-text whitespace-pre-wrap break-words text-destructive">{{ translateBackendError(t, failure.error) }}</div>

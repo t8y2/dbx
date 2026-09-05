@@ -96,6 +96,11 @@ function clearParameterValues() {
   values.value = next;
 }
 
+function ignoreParameters() {
+  open.value = false;
+  emit("execute", props.sql);
+}
+
 function updateValue(name: string, value: string) {
   const matchedHistory = histories.value[name]?.find((entry) => entry.value === value);
   values.value[name] = { ...(values.value[name] ?? { kind: "string" }), ...(matchedHistory ? { kind: matchedHistory.kind } : {}), value };
@@ -226,6 +231,9 @@ async function copyResolvedSql() {
       </div>
 
       <DialogFooter>
+        <Button type="button" variant="outline" data-testid="sql-parameters-ignore" @click="ignoreParameters">
+          {{ t("sqlParameters.ignore") }}
+        </Button>
         <Button variant="outline" @click="open = false">{{ t("dangerDialog.cancel") }}</Button>
         <Button variant="outline" @click="copyResolvedSql">
           <Copy class="mr-1.5 h-4 w-4" />

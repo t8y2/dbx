@@ -392,8 +392,8 @@ test("matches Cmd+S for saving", () => {
   assert.equal(isSaveShortcut({ key: "s", metaKey: true }), true);
 });
 
-test("leaves copy current row disabled by default while honoring custom shortcuts", () => {
-  assert.equal(isCopyCurrentRowShortcut({ key: "d", metaKey: true }), false);
+test("matches copy current row Mod+D by default while honoring custom shortcuts", () => {
+  assert.equal(isCopyCurrentRowShortcut({ key: "d", metaKey: true }), true);
   assert.equal(isCopyCurrentRowShortcut({ key: "d", altKey: true }, { copyCurrentRow: "Alt+D" }), true);
 });
 

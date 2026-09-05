@@ -122,6 +122,38 @@ describe("useDataGridSelection", () => {
     expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
   });
 
+  it("distinguishes a column merely covered by a wider full-height range from one exclusively selected", () => {
+    const selection = createSelection();
+
+    // Full-height rectangle spanning columns 1-2 (e.g. dragged across two columns).
+    selection.selectSingleCell(0, 1);
+    selection.extendCellSelectionTo(3, 2);
+
+    expect(selection.columnIsSelected(1)).toBe(true);
+    expect(selection.columnIsSelected(2)).toBe(true);
+    expect(selection.columnIsExclusivelySelected(1)).toBe(false);
+    expect(selection.columnIsExclusivelySelected(2)).toBe(false);
+
+    // Narrowing to just column 1 (what a header click/selectColumn does) makes it exclusive.
+    selection.selectColumn(1);
+
+    expect(selection.columnIsExclusivelySelected(1)).toBe(true);
+    expect(selection.columnIsExclusivelySelected(2)).toBe(false);
+  });
+
+  it("treats an explicit multi-column header selection as exclusive for every column it contains", () => {
+    const selection = createSelection();
+
+    // Deliberate multi-column selection via header click + shift-click (not a stray cell range).
+    selection.selectColumn(0);
+    selection.selectColumn(1, rowEvent({ shift: true }));
+
+    expect(selection.hasColumnSelection.value).toBe(true);
+    expect(selection.columnIsExclusivelySelected(0)).toBe(true);
+    expect(selection.columnIsExclusivelySelected(1)).toBe(true);
+    expect(selection.columnIsExclusivelySelected(2)).toBe(false);
+  });
+
   it("moves a single-column rectangular cell selection with its column after reordering", () => {
     const selection = createSelection();
 

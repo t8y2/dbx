@@ -1,0 +1,130 @@
+---
+title: MongoDB Çalışma Alanı
+description: MongoDB belgelerine gözatın, filtreleyin, düzenleyin ve kopyalayın; koleksiyonları, dizinleri ve GridFS'i yönetin.
+---
+
+MongoDB çalışma alanı; belgeleri ilişkisel bir modele zorlamak yerine veritabanları, koleksiyonlar, belgeler, dizinler ve GridFS çevresinde düzenlenmiştir. Hem ızgara hem tam JSON görünümü sunar ve `ObjectId`, tarihler ile uzun tam sayılar gibi Genişletilmiş JSON türlerini korur.
+
+## Bağlantılar ve Sürücüler
+
+Standart bir `mongodb://` ya da `mongodb+srv://` bağlantı dizesi kullanın; gerektiğinde çoğaltma kümesi, kimlik doğrulama veritabanı, TLS ve diğer parametreleri URL'ye ekleyin. Atlas, çoğaltma kümeleri ve doğrudan kurulumlar aynı bağlantı giriş noktasını paylaşır.
+
+DBX yerel MongoDB yolunu tercih eder. Sunucu ya da kimlik doğrulama protokolü eski sürücüyü gerektirdiğinde `mongodb-legacy` Agent'ını seçebilir ya da otomatik olarak ona dönebilirsiniz. Eski yol daha az yönetim ve değişiklik yeteneği sunabilir.
+
+## Veritabanları ve Koleksiyonlar
+
+Nesne ağacı şunları yapabilir:
+
+- Veritabanlarını, koleksiyonları, dizinleri ve GridFS bucket'larını listelemek
+- Belge sayısını, boyutu ve kullanılabilir diğer koleksiyon istatistiklerini göstermek
+- Yazılabilir yerel yol kullanılırken koleksiyon oluşturmak, yeniden adlandırmak ya da silmek
+- Veritabanlarını, tek bir dizini ya da `_id_` dışındaki silinebilir tüm dizinleri silmek
+- Bir koleksiyondan belge gezginini ya da sorgu düzenleyicisini açmak
+
+Yeniden adlandırma ve yıkıcı işlemler hedefi gösterip önizleme ister ve salt okunur ile üretim korumasına tabi kalır.
+
+## Belgelere Gözatma ve Sayfalama
+
+Belge gezgini şunları destekler:
+
+- Tahmini toplamla sayfalı okuma
+- Izgara ve tam belge görünümleri
+- `address.city` gibi üst düzey ve iç içe alanlar
+- Aranabilir alan seçimi, gizli sütunlar ve kalıcı sütun düzeni
+- Hızlı filtreler ve çoklu alan koşulları
+- Veritabanı tarafında sıralama ve koleksiyon sorguları
+
+MongoDB toplamları tahmin olabilir. Etkin biçimde değişen koleksiyonlarda gözatarken sayı ve son sayfa değişebilir.
+
+## Filtreler ve Komutlar
+
+Belge gezgininde alan filtreleri oluşturun ya da bir MongoDB sorgu sekmesinde kabuk biçemli komutlar kullanın. Tamamlama; koleksiyonları, alanları, sorgu işleçlerini, güncelleme işleçlerini, toplama aşamalarını ve imleç yöntemlerini önerebilir.
+
+Örnekler:
+
+```javascript
+db.users.find({ status: "active" }).sort({ createdAt: -1 })
+```
+
+```javascript
+db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $group: { _id: "$customerId", total: { $sum: "$amount" } } }
+])
+```
+
+MongoDB sorgu bağlamını değiştirmek için `use <veritabanı>` kullanın.
+
+## Izgarada Düzenleme
+
+Izgara yaygın alanları sütunlara açar ve şunları destekler:
+
+- Üst düzey ya da iç içe alanları düzenleme
+- Alan ekleme ve kaldırma
+- Belge oluşturma, çoğaltma ve silme
+- Seçili belgeleri JSON, Markdown ya da MongoDB Shell ifadeleri olarak kopyalama
+- Yeni belge şablonu kopyalanırken `_id` alanını hariç tutma
+- Kaydetmeden önce bekleyen güncelleme ya da silme hedeflerini inceleme
+
+Belge yapıları birbirinden çok farklı olan koleksiyonlar, gizli alanların gözden kaçmaması için tam belge görünümünde daha iyi ele alınır.
+
+## JSON Belge Düzenleme
+
+Belge ayrıntıları bir alan ağacı ile tam JSON kaynağı arasında geçiş yapabilir:
+
+- Belge oluştururken tam JSON yapıştırın
+- Kaydetmeden önce JSON sözdizimini ve kök nesne yapısını doğrulayın
+- İç içe nesneleri ya da dizileri biçimlendirin, daraltın ve kopyalayın
+- `$oid`, `$date` ve `$numberLong` gibi Genişletilmiş JSON değerlerini koruyun
+- `_id` değerini yeni belgeyi oluşturup eskisini kaldırarak değiştirin
+- Tam JSON'u, belgenin tamamının değiştirilmesi anlamıyla kaydedin
+
+<Callout type="warn">Tam belge değiştirme, nesnenin tamamını geri yazar. Özellikle eşzamanlı güncelleme alan koleksiyonlarda JSON'un korunması gereken her alanı içerdiğini doğrulayın.</Callout>
+
+## Dizinler
+
+Nesne ağacı ve koleksiyon yapısı; dizin adını, alanlarını, benzersizliğini ve diğer meta veriyi gösterebilir. Yerel sürücü destekliyorsa tek bir dizini silebilir, silinebilir tüm dizinleri kaldırabilir ya da dizinleri yapı işlemleriyle yönetebilirsiniz.
+
+MongoDB `_id_` dizinini korur; parçalama ya da diğer sunucu kuralları ek dizinleri koruyabilir. Asıl kaynak sunucunun yanıtıdır.
+
+## GridFS
+
+GridFS çalışma alanı bucket'ları ve dosyaları yönetir:
+
+- Bucket'lara gözatma, oluşturma ve silme
+- Dosya yükleme, indirme, önizleme ve silme
+- Dosya adını, boyutunu, yükleme zamanını, parçalarını ve meta verisini inceleme
+- Dosyaları alanlara göre filtreleme ve sıralama
+- Dosya listelerini ya da meta veriyi dışa aktarma
+
+Bir bucket'ı silmek dosyalarını ve parçalarını kaldırır. Üretimde bunu yapmadan önce bucket adını ve yedeği doğrulayın.
+
+## Kopyalama ve Dışa Aktarma
+
+- Geçerli belgeyi, seçili belgeleri ya da alan değerlerini kopyalayın
+- Düz JSON ya da tür bilgisini koruyan Genişletilmiş JSON olarak kopyalayın
+- Izgara sonucundan çoklu biçim kopyalama ve dışa aktarma kullanın
+- Bir MongoDB `find` sonucunu dışa aktarma; yalnızca görüntülenen sayfayla sınırlı kalmaz, sorgu ve dışa aktarma sınırlarına tabi olarak sonucun tamamını kapsar
+
+Büyük bir koleksiyonu dışa aktarmadan önce filtreleri daraltın; sunucu imleç kullanımını, ağ aktarımını ve yerel dosya boyutunu izleyin.
+
+## Güvenlik ve Uyumluluk Sınırları
+
+- Salt okunur bağlantılar belge, alan, dizin, koleksiyon, veritabanı ve GridFS değişikliklerini engeller
+- Üretim koruması, tanınan yazmalardan önce onay ister
+- MCP Veri okuma/yazma yalnızca kapsamı belirli MongoDB değişikliklerine izin verir; belirsiz ya da fiilen sınırsız filtreler yüksek risklidir
+- Eski Agent, yerel koleksiyon ve dizin yönetimini desteklemeyebilir
+- Atlas yetkileri, kimlik doğrulama veritabanı, TLS ve IP izin listeleri MongoDB tarafından uygulanır
+- Sayfalanmış toplamlar tahmin olabilir ve güçlü tutarlılıkta sayılar olarak görülmemelidir
+
+<Cards>
+  <Card title="Üretim yazmalarını koruyun" href="/tr/docs/production-safety">
+    MongoDB filtre kapsamını, salt okunur bağlantıları ve MCP politikasını inceleyin.
+  </Card>
+  <Card title="Bağlantılar ve sürücüler" href="/tr/docs/driver-management">
+    Yerel ve eski Agent'ları yönetin, sürücü başlatma sorunlarını giderin.
+  </Card>
+  <Card title="Özel çalışma alanları" href="/tr/docs/specialized-workspaces">
+    Redis, arama, vektör, HBase, mesaj kuyruğu ve yapılandırma araçlarını inceleyin.
+  </Card>
+</Cards>

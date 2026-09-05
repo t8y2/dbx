@@ -388,6 +388,9 @@ func TestLiveEtcdAgent(t *testing.T) {
 	if len(members) == 0 || members[0]["reachable"] != true || members[0]["version"] == nil {
 		t.Fatalf("unexpected member rows: %#v", members)
 	}
+	if errors, ok := members[0]["errors"].([]string); !ok || len(errors) != 0 {
+		t.Fatalf("successful member must include an empty errors list: %#v", members[0])
+	}
 	if keyCount, err := strconvParse(statusRow["keyCount"].(string)); err != nil || keyCount <= 0 {
 		t.Fatalf("keyCount must be a positive numeric string: %#v", statusRow["keyCount"])
 	}

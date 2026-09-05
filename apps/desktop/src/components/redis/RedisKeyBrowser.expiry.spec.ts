@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   redisExecuteCommand: vi.fn(),
   saveHistory: vi.fn(),
   canBuildRedisFuzzyTree: vi.fn((loadedKeyCount: number) => loadedKeyCount <= 200_000),
+  createRedisKeyTreeIndex: vi.fn(),
+  flattenVisibleRedisKeyTree: vi.fn(),
   toast: vi.fn(),
   updateRedisDbKeyStats: vi.fn(),
   listRedisCompletionCommandDocs: vi.fn(),
@@ -33,6 +35,7 @@ const mocks = vi.hoisted(() => ({
   infiniteScroll: false,
   queryResultMaxRowsEnabled: true,
   queryResultMaxRows: 5000,
+  loadedTtl: -1,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
@@ -56,7 +59,14 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/lib/redis/redisKeyTree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/redis/redisKeyTree")>();
-  return { ...actual, canBuildRedisFuzzyTree: mocks.canBuildRedisFuzzyTree };
+  mocks.createRedisKeyTreeIndex.mockImplementation(actual.createRedisKeyTreeIndex);
+  mocks.flattenVisibleRedisKeyTree.mockImplementation(actual.flattenVisibleRedisKeyTree);
+  return {
+    ...actual,
+    canBuildRedisFuzzyTree: mocks.canBuildRedisFuzzyTree,
+    createRedisKeyTreeIndex: mocks.createRedisKeyTreeIndex,
+    flattenVisibleRedisKeyTree: mocks.flattenVisibleRedisKeyTree,
+  };
 });
 
 vi.mock("@/stores/connectionStore", () => ({
@@ -287,7 +297,26 @@ vi.mock("@/components/editor/DangerConfirmDialog.vue", async () => {
 
 vi.mock("./RedisValueViewer.vue", async () => {
   const { defineComponent, h } = await import("vue");
-  return { default: defineComponent({ setup: () => () => h("div") }) };
+  return {
+    default: defineComponent({
+      props: { keyDisplay: String, keyRaw: String },
+      emits: ["loaded"],
+      setup(props, { emit }) {
+        return () =>
+          h("button", {
+            "data-test-emit-key-loaded": "",
+            onClick: () =>
+              emit("loaded", {
+                key_display: props.keyDisplay,
+                key_raw: props.keyRaw,
+                ttl: mocks.loadedTtl,
+                redis_type: "hash",
+                data: { kind: "hash", items: [] },
+              }),
+          });
+      },
+    }),
+  };
 });
 
 vi.mock("./RedisPubSubPanel.vue", async () => {
@@ -379,6 +408,7 @@ function resetApiMocks() {
   mocks.infiniteScroll = false;
   mocks.queryResultMaxRowsEnabled = true;
   mocks.queryResultMaxRows = 5000;
+  mocks.loadedTtl = -1;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
   mocks.redisGetValue.mockImplementation((_connectionId: string, _db: number, keyRaw: string) => Promise.resolve(redisValue(keyRaw)));
   mocks.redisSetString.mockResolvedValue(undefined);
@@ -673,6 +703,80 @@ describe("RedisKeyBrowser scope changes", () => {
 });
 
 describe("RedisKeyBrowser TTL list badges and no-expiry filter", () => {
+  it("refreshes one key's metadata without rebuilding the loaded tree", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [{ ...redisKeyInfo("string"), ttl: -1 }],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+
+    const keyCheckbox = requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`);
+    const keyRow = keyCheckbox.parentElement?.parentElement?.parentElement;
+    expect(keyRow).toBeInstanceOf(HTMLElement);
+    keyRow?.click();
+    await settle();
+
+    const buildsBeforeDetailLoaded = mocks.createRedisKeyTreeIndex.mock.calls.length;
+    const flattensBeforeDetailLoaded = mocks.flattenVisibleRedisKeyTree.mock.calls.length;
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+
+    expect(mocks.createRedisKeyTreeIndex).toHaveBeenCalledTimes(buildsBeforeDetailLoaded);
+    expect(mocks.flattenVisibleRedisKeyTree).toHaveBeenCalledTimes(flattensBeforeDetailLoaded);
+    expect(keyRow?.textContent).toContain("hash");
+    expect(keyRow?.textContent).toContain("redis.noExpiry");
+  });
+
+  it("refreshes no-expiry membership when detail metadata changes TTL", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({
+      cursor: 0,
+      keys: [redisKeyInfo("string")],
+      total_keys: 1,
+    });
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`).closest<HTMLElement>(".group")?.click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-redis-no-expiry-filter]").click();
+    await settle();
+    expect(document.body.textContent).toContain("redis.noExpiryKeysEmpty");
+
+    requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+    await settle();
+
+    expect(document.querySelector(`[data-redis-leaf="${KEY_RAW}"]`)).not.toBeNull();
+    expect(document.body.textContent).toContain("redis.noExpiry");
+  });
+
+  it("starts the local TTL countdown when detail metadata gains an expiry", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.redisScanKeysBatch.mockResolvedValue({
+        cursor: 0,
+        keys: [{ ...redisKeyInfo("string"), ttl: -1 }],
+        total_keys: 1,
+      });
+      mountBrowser();
+      await settle();
+
+      requiredElement<HTMLInputElement>(`[data-redis-leaf="${KEY_RAW}"]`).closest<HTMLElement>(".group")?.click();
+      await settle();
+      mocks.loadedTtl = 2;
+      requiredElement<HTMLButtonElement>("[data-test-emit-key-loaded]").click();
+      await settle();
+      expect(document.body.textContent).toContain("redis.ttlSecond");
+
+      await vi.advanceTimersByTimeAsync(3000);
+      await settle();
+      expect(document.body.textContent).toContain("redis.expired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("renders TTL badges per row and filters rows to keys without expiry", async () => {
     mocks.redisScanKeysBatch.mockResolvedValue({
       cursor: 0,

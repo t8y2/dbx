@@ -1,0 +1,124 @@
+---
+title: Veritabanı Dışa Aktarma
+description: Bir veya daha fazla veritabanından yapıyı, veriyi ve okunabilir veritabanı nesnelerini akış hâlinde SQL dosyalarına aktarın.
+---
+
+Veritabanı Dışa Aktarma; küçük yedekler, göçler, test veri kümeleri ya da riskli değişiklikler öncesi anlık görüntüler için incelenebilir SQL betikleri üretir. Tek bir veritabanı/şema aktarabilir ya da bir bağlantıdaki birden çok veritabanı için ayrı dışa aktarımları düzenleyebilir.
+
+<Callout type="info">SQL dışa aktarma mantıksal bir dışa aktarmadır; veritabanına özgü fiziksel bir yedek değildir. Büyük üretim sistemleri, zaman noktasına geri dönüş, artımlı yedekleme ya da katı tutarlılık için resmî veritabanı araçlarını kullanın. Zamanlanmış ve tutarlı MySQL ile PostgreSQL dışa aktarımları için bkz. [Veritabanı Yedekleme](/tr/docs/database-backup).</Callout>
+
+## Dışa Aktarılan İçerik
+
+| İçerik | Ayrıntılar |
+| --- | --- |
+| Tablo yapısı | `CREATE TABLE`, sütunlar, birincil anahtarlar, dizinler, kısıtlar ve sürücü üzerinden görünen diğer DDL |
+| Tablo verisi | Gruplar hâlinde okunan ve tablonun tamamı belleğe alınmadan `INSERT` ifadeleri olarak yazılan satırlar |
+| Veritabanı nesneleri | Motorun okunabilir tanım sunduğu görünümler, diziler, uzantılar, yordamlar ve işlevler |
+| Veritabanı oluşturma | İsteğe bağlı MySQL `CREATE DATABASE IF NOT EXISTS` ve `USE` ön bölümü |
+| İçe aktarma yardımcıları | Yabancı anahtar denetimleri, kimlik sütunu yazmaları, yordam ayırıcıları ve benzeri gereksinimler için motora özgü hazırlık ve temizlik |
+
+Yalnızca seçili tablolar dışa aktarılırken yapı ve veri o alt kümeyle sınırlıdır. Birkaç tablo seçildi diye şema genelindeki yordamlar dâhil edilmez. Nesne kapsamı her zaman veritabanına ve sürücüye bağlıdır.
+
+## Tek Veritabanı Dışa Aktarma
+
+<Steps>
+  <Step>
+    ### Bağlantı ve Veritabanı Seçin
+
+    Uygun olduğunda bir veritabanı ve şema seçin, ardından dâhil edilecek tabloları belirleyin.
+
+  </Step>
+  <Step>
+    ### İçeriği ve DDL'i Yapılandırın
+
+    Yapıyı, veriyi, nesneleri, mevcut tabloyu silme davranışını, MySQL veritabanı oluşturmayı ve otomatik artan değer işleyişini seçin.
+
+  </Step>
+  <Step>
+    ### Çıktıyı Seçin
+
+    Masaüstü, seçtiğiniz yerel bir `.sql` yoluna yazar. Docker/Web geçici sunucu deposuna yazar ve sonucu tarayıcı üzerinden indirir.
+
+  </Step>
+  <Step>
+    ### Arka Planda Üretin ve İnceleyin
+
+    İlerleme; hazırlığı, geçerli nesneyi, nesne dizinini, dışa aktarılan satırları, hataları ve iptali bildirir. Görev ilerleme merkezinde görünür kalır.
+
+  </Step>
+</Steps>
+
+Başarılı bir Masaüstü dışa aktarımından sonra görev sonucu, çıktıyı dosya yöneticisinde gösterebilir. Web, indirmeden sonra geçici sunucu dosyasını kaldırır.
+
+## Tüm Veritabanlarını Dışa Aktarma
+
+Geçerli bağlantıdan birden çok veritabanı aramak ve seçmek için Tüm Veritabanlarını Dışa Aktar seçeneğini etkinleştirin:
+
+- Şeması olmayan motorlar normalde veritabanı başına bir `.sql` dosyası üretir
+- PostgreSQL gibi şema farkındalıklı motorlar şema başına bir plan oluşturur; bir veritabanında birden çok şema varsa dosya adları hem veritabanını hem şemayı içerir
+- Masaüstü, her plan öğesini seçtiğiniz çıktı dizinine yazar
+- Docker/Web her dosyayı sunucuda üretir ve tarayıcı indirmelerini tetikler
+- Bir plan öğesi başarısız olur ya da iptal edilirse sonraki öğeler durur; hâlihazırda tamamlanan dosyalar otomatik olarak kaldırılmaz
+
+Tüm veritabanı dışa aktarımı, bağımsız mantıksal dışa aktarımların sıralı olarak düzenlenmesidir. Tek bir veritabanları arası işlem ya da örnek genelinde tutarlı bir anlık görüntü değildir.
+
+## Yapı Seçenekleri
+
+### Mevcut Tabloları Sil
+
+Etkinleştirildiğinde DBX, ilgili `CREATE TABLE` ifadesinden önce veritabanına uyarlanmış `DROP TABLE IF EXISTS` ifadeleri yazar. Betiği çalıştırmak hedefteki veriyi silebilir, bu yüzden bu seçeneği dikkatle inceleyin.
+
+### MySQL Veritabanı Oluştur
+
+MySQL dışa aktarımları başa `CREATE DATABASE IF NOT EXISTS` ve `USE` ekleyebilir. İçe aktaran hesabın uygun yetkileri olmalıdır. Beklenmedik veritabanı oluşturmayı ya da bağlam değişimini önlemek için seçenek varsayılan olarak kapalıdır.
+
+### MySQL Otomatik Artan Başlangıcı
+
+Varsayılan olarak tablo düzeyindeki `AUTO_INCREMENT=N` korunur. Otomatik Artanı Atla seçeneği yalnızca bu tablo seçeneğini kaldırır; sütunun `AUTO_INCREMENT` özniteliğini kaldırmaz. Bu, yeni bir ortamın kendi başlangıç dizi değerini seçmesi istendiğinde kullanışlıdır.
+
+## Veri Yazma ve Tutarlılık
+
+DBX sayfalı ya da akış tabanlı okuma kullanır ve satırları artımlı olarak yazar. Etkileşimli dışa aktarımlar şu anda 1000 satırlık toplu iş boyutu kullanır. Üretilen insert ifadeleri, veritabanı yeteneklerine göre çok satırlı ya da tek satırlı olabilir.
+
+Dışa aktarma yolu şunları yapmaya çalışır:
+
+- MySQL yabancı anahtar denetimlerini devre dışı bırakıp sonra geri yüklemek
+- Gerektiğinde desteklenen kimlik sütunlarına yapılan açık yazmaları sarmalamak
+- Dizeleri, tarihleri, JSON'u, dizileri, ikili değerleri ve `NULL` değerini hedef lehçeye göre biçimlendirmek
+- Veritabanının gerektirdiği yordam ayırıcılarını ya da toplu iş sınırlarını eklemek
+- Aynı tablonun grupları arasındaki sapmayı azaltmak için desteklenen bağlantılarda kararlı bir oturum kullanmak
+
+Etkileşimli SQL dışa aktarımı yine de her veritabanı ve nesne genelinde tek bir küresel anlık görüntü sözü veremez. Tutarlılık gerektiğinde [Veritabanı Yedekleme](/tr/docs/database-backup) ya da veritabanının kendi araçlarını kullanın.
+
+## Hatalar ve İptal
+
+- Bir tablo ya da nesne okunamadığında normal dışa aktarma yolları hatayı bir SQL yorumu olarak yazıp devam edebilir; meta veri, bağlantı veya dosya hataları görevi sonlandırabilir
+- İptal, nesneler ya da satır grupları arasında geçerli olur
+- Masaüstü, yeniden kullanmadan önce denetlenmesi gereken kısmi bir dosya bırakabilir
+- Web, hata ya da iptal sonrası geçici sunucu dosyalarını temizler ve başarılı bir indirme tetiklemez
+- Başarılı bir dışa aktarma yalnızca dosyanın üretildiğini doğrular; başka bir veritabanında başarılı bir geri yüklemeyi değil
+
+## Geri Yükleme ve Doğrulama
+
+Dışa aktarılmış bir betiği önizleyip çalıştırmak için [SQL Dosyası Çalıştırma](/tr/docs/sql-file) özelliğini kullanın. Geri yüklemeden önce şunları denetleyin:
+
+- Hedef motor ve sürüm uyumluluğu
+- Dosyanın `DROP TABLE`, `CREATE DATABASE` ya da büyük insert grupları içerip içermediği
+- Oluşturma, nesne ve veri yazma yetkileri
+- İçe aktarmadan sonra tablo sayıları, satır sayıları, dizinler, kısıtlar, diziler ve kritik nesneler
+
+<Callout type="warn">Dışa aktarılan dosyalar parola özetleri, belirteçler, kişisel bilgiler ve iş açısından hassas veriler içerebilir. Maskelenmemiş dışa aktarımları herkese açık depolara commit etmeyin ve güvenmediğiniz ortamlara göndermeyin.</Callout>
+
+## İlgili Özellikler
+
+<Cards>
+  <Card title="Veritabanı Yedekleme" href="/tr/docs/database-backup">
+    Masaüstü'nde tutarlı MySQL ve PostgreSQL SQL yedeklerini zamanlayın.
+  </Card>
+  <Card title="SQL Dosyası Çalıştırma" href="/tr/docs/sql-file">
+    SQL dosyalarını önizleyin, toplu çalıştırın ve sonuçları inceleyin.
+  </Card>
+  <Card title="Veri Aktarımı" href="/tr/docs/data-transfer">
+    Ara bir SQL dosyası olmadan tablo verisini bağlantılar arasında doğrudan kopyalayın.
+  </Card>
+</Cards>

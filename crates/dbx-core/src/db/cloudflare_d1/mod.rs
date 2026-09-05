@@ -200,6 +200,7 @@ pub async fn list_indexes(client: &CloudflareD1Client, _schema: &str, table: &st
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
         });
     }
     Ok(indexes)

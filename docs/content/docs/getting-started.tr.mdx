@@ -1,0 +1,275 @@
+---
+title: Hızlı Başlangıç
+description: DBX'i kurun, ilk bağlantınızı oluşturun ve masaüstü, Docker ile kaynaktan çalıştırma akışlarını öğrenin.
+---
+
+Bu kılavuz üç şeyi kapsar:
+
+1. DBX'i kurmak ya da Docker sürümünü başlatmak
+2. İlk veritabanı bağlantınızı oluşturmak ve test etmek
+3. Katkı vermek ya da yerelde hata ayıklamak istediğinizde DBX'i kaynaktan çalıştırmak
+
+## Bir Kurulum Yöntemi Seçin
+
+<Tabs groupId="platform" items={['macOS', 'Windows', 'Linux', 'Docker']}>
+  <Tab value="macOS">
+    Homebrew ile kurun:
+
+    ```bash
+    brew install --cask dbx
+    ```
+
+    Daha sonra şununla güncelleyin:
+
+    ```bash
+    brew upgrade --cask dbx
+    ```
+
+    Ayrıca [GitHub Releases](https://github.com/t8y2/dbx/releases) sayfasından bir `.dmg` yükleyicisi indirebilirsiniz.
+
+  </Tab>
+  <Tab value="Windows">
+    Scoop ile kurun:
+
+    ```bash
+    scoop bucket add dbx https://github.com/t8y2/scoop-bucket
+    scoop install dbx
+    ```
+
+    Daha sonra şununla güncelleyin:
+
+    ```bash
+    scoop update dbx
+    ```
+
+    Ayrıca [GitHub Releases](https://github.com/t8y2/dbx/releases) sayfasından bir `.msi` yükleyicisi indirebilirsiniz.
+
+  </Tab>
+  <Tab value="Linux">
+    [FlatPark](https://flatpark.org/apps/com.dbxio.dbx/) üzerinden Flatpak ile kurun (her dağıtımda çalışır):
+
+    ```bash
+    flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
+    flatpak install flatpark com.dbxio.dbx
+    ```
+
+    Daha sonra şununla güncelleyin:
+
+    ```bash
+    flatpak update com.dbxio.dbx
+    ```
+
+    Ayrıca [GitHub Releases](https://github.com/t8y2/dbx/releases) sayfasından bir paket indirebilirsiniz:
+
+    | Biçim | Kullanım durumu |
+    |---|---|
+    | `.deb` | Debian, Ubuntu ve uyumlu dağıtımlar |
+    | `.rpm` | Fedora, CentOS, SUSE ve uyumlu dağıtımlar |
+    | `.AppImage` | Taşınabilir Linux masaüstü kullanımı |
+
+    `.AppImage` için dosyayı ilk çalıştırmadan önce çalıştırılabilir yapın:
+
+    ```bash
+    chmod +x DBX*.AppImage
+    ```
+
+  </Tab>
+  <Tab value="Docker">
+    Docker; DBX'i bir sunucuda kendiniz barındırmak ve tarayıcıdan açmak içindir:
+
+    ```bash
+    docker run -d \
+      --pull=always \
+      --name dbx \
+      -p 4224:4224 \
+      -v dbx-data:/app/data \
+      t8y2/dbx:latest
+    ```
+
+    `latest` etiketi geçerli sürümü indirir. Bu, platformlar arası `dbx-data` adlı birimi kullanır. Çin'de daha hızlı indirme için `docker.cnb.cool/dbxio.com/dbx:latest` kullanın.
+
+    ### Ortam Değişkenleri
+
+    Docker imajı şu başlangıç değişkenlerini destekler. Birini `-e AD=değer` ile ayarlayın; örneğin üretim dağıtımları `-e DBX_PASSWORD=parolaniz` eklemelidir:
+
+    | Değişken | Varsayılan | Amacı |
+    | --- | --- | --- |
+    | `DBX_PASSWORD` | Ayarlanmamış | Web giriş parolası; üretim için önerilir |
+    | `DBX_DISABLE_PASSWORD` | `false` | Giriş korumasını kapatmak için `true` ya da `1` yapın |
+    | `DBX_DATA_DIR` | `/app/data` | Kalıcı veri dizini |
+    | `DBX_PORT` | `4224` | Kapsayıcı dinleme portu |
+    | `DBX_PUBLIC_BASE_PATH` | `/` | `/dbx` gibi bir alt yol altında dağıtım |
+
+    Ardından `http://localhost:4224` adresini açın.
+
+    `deploy/docker-compose.yml` geçerli çalışma kopyasını derler. Yayımlanmış bir imajı dağıtmak için `deploy/docker-compose.release.yml` kullanın:
+
+    ```bash
+    docker compose -f deploy/docker-compose.release.yml up -d
+    ```
+
+    ```yaml
+    services:
+      dbx:
+        image: t8y2/dbx:latest
+        # For faster pulls in China, use the CNB image instead:
+        # image: docker.cnb.cool/dbxio.com/dbx:latest
+        pull_policy: always
+        ports:
+          - "4224:4224"
+        volumes:
+          - dbx-data:/app/data
+        restart: unless-stopped
+
+    volumes:
+      dbx-data:
+    ```
+
+  </Tab>
+</Tabs>
+
+## Masaüstü mü Docker mı
+
+| Mod | Ne için uygundur | Depolama | Önemli sınır |
+| --- | --- | --- | --- |
+| Masaüstü | Günlük yerel çalışma, yerel veritabanı dosyaları, eksiksiz tezgâh | Yerel uygulama veri dizini | Yerel SQL dosya ağacını/kitaplığını, masaüstü derin bağlantılarını ve işletim sistemi dosya tümleştirmesini destekler |
+| Docker / Web | Bir sunucuda kendi barındırmanız ve uzak tarayıcı erişimi | Docker birimi ya da sunucu veri dizini | Yollar sunucuya aittir; bazı yerel dosya ve masaüstü tümleştirmeleri kullanılamaz |
+
+Masaüstü ve Web veritabanı iş akışlarının çoğunu ve Rust çekirdeğini paylaşır, ancak yerel tümleştirmeleri birebir aynı değildir. SQLite, DuckDB, Access, dış SQL dosyaları ya da yerel dizinler için dosyanın hangi makineye ait olduğunu doğrulayın; Docker normalde dizinin kapsayıcıya bağlanmasını gerektirir.
+
+<Callout type="info">Bir tabloyu açan ya da sonuçları masaüstü arayüzünde gösteren MCP araçları, DBX Masaüstü'nün çalışmasını gerektirir. Yalnızca sorgu yapan MCP araçları yerel DBX veri dizinini doğrudan okuyabilir ya da bir DBX Web/Docker arka ucuna bağlanabilir.</Callout>
+
+## İlk Bağlantınızı Oluşturun
+
+<Steps>
+  <Step>
+    ### Yeni Bağlantı'yı Açın
+
+    Kenar çubuğundan ya da araç çubuğundan **Yeni Bağlantı**'ya tıklayın.
+
+  </Step>
+  <Step>
+    ### Bir Veritabanı Türü Seçin
+
+    MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle gibi yerleşik bir profil ya da [Veritabanı Desteği](/tr/docs/databases) sayfasında listelenen uyumluluk ve Agent/JDBC profillerinden birini seçin.
+
+  </Step>
+  <Step>
+    ### Bağlantı Ayrıntılarını Doldurun
+
+    Ağ veritabanları için gerektiğinde sunucuyu, portu, kullanıcı adını, parolayı ve varsayılan veritabanını girin. SQLite, DuckDB ve Access için sunucu ve port yerine yerel bir veritabanı dosyası seçin.
+
+  </Step>
+  <Step>
+    ### Varsa Bir URL Yapıştırın
+
+    DBX; MySQL, PostgreSQL, Redis, MongoDB, ClickHouse, SQL Server, Oracle, Elasticsearch, Easysearch, Meilisearch, DM, GaussDB, openGauss, TDengine ve Access gibi motorlar için yaygın bağlantı URL'lerini ayrıştırabilir. Kaydetmeden önce ayrıştırılan alanları inceleyin.
+
+  </Step>
+  <Step>
+    ### Ağ Seçeneklerini Ekleyin
+
+    Özel ağların, bastion sunucuların, yalnızca web erişimi olan ağ geçitlerinin ya da SOCKS5/HTTP proxy ortamlarının arkasındaki veritabanları için [Tünel / Proxy](/tr/docs/ssh-tunnel) kullanın.
+
+  </Step>
+  <Step>
+    ### Test Edin ve Kaydedin
+
+    Kimlik bilgilerini, ağ erişimini ve yetkileri doğrulamak için **Test Et**'e tıklayın. Test geçtikten sonra bağlantıyı kaydedin ve kenar çubuğundan açın.
+
+  </Step>
+</Steps>
+
+<Callout type="info">Bağlantı parolaları, SSH parolaları, SSH anahtar parolaları ve bağlantı dizeleri; DBX'in yerel depolamasında normal bağlantı JSON'undan ayrı saklanır. Şifreli bağlantı ayarlarını taşımanız gerektiğinde [Yapılandırma Dışa/İçe Aktarma](/tr/docs/config-export) özelliğini kullanın.</Callout>
+
+## Üretim Hatalarını Azaltın
+
+- Üretim bağlantılarına `prod-orders` gibi belirgin bir ad verin; amacını anlatmak için renkleri, grupları ve notları kullanın.
+- Yalnızca sorgu erişimi için veritabanında salt okunur bir hesabı DBX **Salt okunur bağlantı** ayarıyla birleştirin.
+- Tüm bağlantı ya da seçili veritabanları için **Üretim korumasını** etkinleştirin; DBX yazmalar için yeni ve açık bir onay ister.
+- Bir sunucuda çok sayıda veritabanı ya da şema varsa yalnızca şu anda ihtiyacınız olan nesneleri gösterin.
+- Düzenlemeleri, içe aktarımları, aktarımları, SQL dosyalarını ya da şema eşitleme işlemlerini uygulamadan önce üretilen SQL'i inceleyin.
+- MCP bağlantılarını bir izin listesinin arkasına alın ve varsayılan olarak Tam erişimi açmak yerine Salt okunur ya da Veri okuma/yazma modunu tercih edin.
+
+Davranışın tamamı ve önerilen yapılandırmalar için [Üretim ve Yazma Güvenliği](/tr/docs/production-safety) sayfasına bakın.
+
+## Sırada Ne Denemeli
+
+<Cards>
+  <Card title="SQL Yazın" href="/tr/docs/query-editor">
+    Tamamlamayı, biçimlendirmeyi, seçili çalıştırmayı, iptali ve geçmişi kullanın.
+  </Card>
+  <Card title="Veriye Gözatın" href="/tr/docs/data-grid">
+    Sonuçları inceleyin, güvenli olduğunda satırları düzenleyin, SQL'i önizleyin ve veriyi dışa aktarın.
+  </Card>
+  <Card title="Şemayı Keşfedin" href="/tr/docs/schema-browser">
+    Veritabanlarına, şemalara, tablolara, sütunlara, Redis anahtarlarına ve MongoDB koleksiyonlarına gözatın.
+  </Card>
+</Cards>
+
+## Yaygın Bağlantı Sorunları
+
+| Belirti                      | Denetleyin                                                                                          |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| Zaman aşımı                      | Sunucu, port, güvenlik duvarı, güvenlik grubu, VPN, Docker ana makinesine erişim ya da özel ağ erişimi |
+| Kimlik doğrulama başarısız        | Kullanıcı adı, parola, kimlik doğrulama modu, SSL gereksinimi, uzaktan giriş yetkisi                        |
+| Bağlandı ama tablo yok      | Varsayılan veritabanı, şema, yetkiler, meta veri okuma erişimi, görünür veritabanı filtresi           |
+| Dosya veritabanı açılmıyor    | Dosya yolu, dosya izinleri, bağlanmış Docker birimi ya da desteklenmeyen dosya uzantısı              |
+| Özel veritabanına erişilemiyor | Tünel / proxy, VPN yapılandırın ya da Docker'ı veritabanına erişebilen bir makinede çalıştırın          |
+
+## Kaynaktan Çalıştırma
+
+DBX'e katkı verirken ya da yerelde hata ayıklarken kaynak modunu kullanın.
+
+<Callout type="info">
+  İlk kez katkı verecek olanlar; eksiksiz platform kurulumu, fork alma, issue üstlenme, test ve pull request adımları için [Kaynaktan Derleme ve Katkı](/tr/docs/contributing) sayfasını izlemelidir.
+</Callout>
+
+### Gereksinimler
+
+- [Node.js](https://nodejs.org/) >= 22.13.0
+- [pnpm](https://pnpm.io/) 10.27.0
+- Make (macOS ve Linux'ta gereklidir; Windows'ta isteğe bağlı)
+- [Rust](https://www.rust-lang.org/tools/install) >= 1.88
+
+### Sistem Bağımlılıkları
+
+<Tabs groupId="dev-platform" items={["macOS", "Linux", "Windows"]}>
+  <Tab value="macOS">```bash brew install unixodbc ```</Tab>
+  <Tab value="Linux">```bash sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev unixodbc-dev ```</Tab>
+  <Tab value="Windows">
+    Pakete gömülü OpenSSL'i derlemek için gereken [Strawberry Perl](https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases) kurulumunu yapın:
+
+    ```powershell
+    winget install StrawberryPerl.StrawberryPerl
+    ```
+
+    DBX varsayılan olarak `sqlite-sqlcipher` özelliğini etkinleştirir; bu, SQLCipher ve OpenSSL'i kaynaktan derler. Windows'ta OpenSSL `Configure` betiğini çalıştırmak için Perl gerekir. Kurulumdan sonra `perl` komutunun `PATH` üzerinde olması için terminalinizi yeniden açın.
+
+  </Tab>
+</Tabs>
+
+### Geliştirmeye Başlama
+
+```bash
+git clone https://github.com/t8y2/dbx.git
+cd dbx
+make
+```
+
+`make`, gerektiğinde kök bağımlılıkları kurar ve yerel Tauri masaüstü geliştirme ortamını başlatır.
+
+Web sürümü için:
+
+```bash
+make dev-web
+make dev-backend
+```
+
+### Masaüstü Paketleri Derleme
+
+```bash
+make package
+```
+
+Masaüstü yükleyicileri `target/release/bundle/` dizinine yazılır.

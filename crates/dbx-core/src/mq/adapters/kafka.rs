@@ -86,8 +86,8 @@ impl KafkaAdmin {
         client.call_with_timeout(method, params, self.config.rpc_timeout()).await
     }
 
-    /// The Kafka agent bounds message browsing with its configured request timeout.
-    /// Do not preempt that with the driver's generic 30-second RPC timeout.
+    /// The Kafka agent bounds these operations with its configured request timeout.
+    /// Do not preempt that with the driver's generic RPC timeout.
     async fn call_with_agent_timeout<T: DeserializeOwned + Send + 'static>(
         &self,
         method: &str,
@@ -186,7 +186,7 @@ impl MessageQueueAdmin for KafkaAdmin {
     // ---- Topics ----
 
     async fn list_topics(&self, _ns: &NamespaceRef, _opts: ListTopicsOpts) -> Result<Vec<TopicInfo>, String> {
-        let result: serde_json::Value = self.call("mq_list_topics", serde_json::json!({})).await?;
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_list_topics", serde_json::json!({})).await?;
         let topics = result.get("topics").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
         Ok(topics
@@ -1333,5 +1333,53 @@ mod tests {
         let missing = serde_json::json!({ "name": "unknown" });
         let partitions = missing.get("partitions").and_then(|v| v.as_u64()).map(|v| v as u32);
         assert!(!partitions.map(|p| p > 0).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn topic_listing_does_not_preempt_agent_timeout_fallback() {
+        let script_path = std::env::temp_dir().join(format!("dbx-kafka-topic-timeout-{}.py", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+import time
+
+print(json.dumps({"ready": True}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["method"] == "mq_list_topics":
+        time.sleep(1.2)
+        print(json.dumps({
+            "jsonrpc": "2.0",
+            "id": request["id"],
+            "result": {"topics": [{"name": "delayed", "internal": False}]},
+        }), flush=True)
+"#,
+        )
+        .expect("write test agent script");
+
+        let python = if cfg!(windows) { "python" } else { "python3" };
+        let client = AgentDriverClient::spawn(
+            AgentLaunchSpec::new(python).with_args([script_path.to_string_lossy().to_string()]),
+        )
+        .await
+        .expect("spawn test agent");
+        // The delayed response models the Kafka agent returning its fallback after metadata timeout.
+        let mut config = kafka_config(serde_json::json!({ "bootstrapServers": "broker:9092" }), MqAuth::None, false);
+        config.query_timeout_secs = 1;
+        let admin = KafkaAdmin { client: Arc::new(Mutex::new(client)), config };
+
+        let result = admin
+            .list_topics(
+                &NamespaceRef { tenant: "_kafka".to_string(), namespace: "_kafka".to_string() },
+                ListTopicsOpts::default(),
+            )
+            .await;
+        drop(admin);
+        let _ = std::fs::remove_file(&script_path);
+
+        let topics = result.expect("topic listing should wait for the agent response");
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].name, "delayed");
     }
 }

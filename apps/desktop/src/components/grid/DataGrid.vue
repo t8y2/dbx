@@ -354,7 +354,9 @@ import { resolveGridFocusRestoreTarget } from "@/lib/dataGrid/dataGridFocusResto
 import { buildOrderedGridRows, type GridInsertRowPosition, type GridNewRowPlacement } from "@/lib/dataGrid/gridNewRowPlacement";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
+  DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
   dataGridDeleteRowToolbarState,
+  dataGridToolbarActionCollapseCount,
   isDataGridToolbarCompact,
   type DataGridReloadIntent,
   type DataGridToolbarActionCapability,
@@ -568,6 +570,7 @@ const emit = defineEmits<{
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
+  changeQueryTimeout: [connectionId: string];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -598,6 +601,7 @@ let preservedSelectionOnNextResult: {
 } | null = null;
 let preservedDetailsOnNextResult: {
   sideCell?: PersistedDataGridSelection;
+  sideCellHasPendingDraft?: boolean;
   cellDialog?: PersistedDataGridSelection;
   rowDialog?: PersistedDataGridSelection;
   columnDialog?: PersistedDataGridSelection;
@@ -710,6 +714,7 @@ const columnCommentMap = computed(() => {
 const dataGridTopbarWidth = ref(0);
 const dataGridViewportWidth = ref(0);
 const dataGridTopbarOverflowCompact = ref(false);
+const dataGridTopbarOverflowActionCount = ref(0);
 const dataGridTopbarExpandedRequiredWidth = ref(0);
 const showColumnCommentsInHeader = computed(() => settingsStore.editorSettings.showColumnCommentsInHeader);
 const showColumnTypesInHeader = computed(() => settingsStore.editorSettings.showColumnTypesInHeader);
@@ -731,6 +736,8 @@ const compactColumnHeaderActions = computed(() => settingsStore.editorSettings.c
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const dataGridSearchMode = computed(() => settingsStore.editorSettings.dataGridSearchMode);
 const compactDataGridToolbar = computed(() => dataGridTopbarOverflowCompact.value || isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const responsiveDataGridToolbarActionCount = computed(() => dataGridToolbarActionCollapseCount(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH));
+const compactDataGridToolbarActionCount = computed(() => Math.max(responsiveDataGridToolbarActionCount.value, dataGridTopbarOverflowActionCount.value));
 const infiniteScrollEnabled = computed(() => props.paginationEnabled && settingsStore.editorSettings.infiniteScroll);
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
@@ -2559,6 +2566,8 @@ let gridScrollbarsRuntime: DataGridScrollbarsRuntime;
 let dataGridTopbarResizeObserver: ResizeObserver | null = null;
 let dataGridTopbarMutationObserver: MutationObserver | null = null;
 let dataGridTopbarRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+const DATA_GRID_TOPBAR_RECHECK_DELAY_MS = 360;
+const DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX = 16;
 let cellEditResizeObserver: ResizeObserver | null = null;
 // vue-virtual-scroller's @resize only fires in pageMode (it observes window),
 // so in container-scroll mode (transpose uses RecycleScroller without pageMode)
@@ -3208,43 +3217,57 @@ function observeGridHorizontalScrollbarScroller() {
 
 function updateDataGridTopbarWidth() {
   const topbar = dataGridTopbarRef.value;
+  const previousActionCount = compactDataGridToolbarActionCount.value;
   dataGridTopbarWidth.value = topbar?.clientWidth ?? 0;
   dataGridViewportWidth.value = typeof window === "undefined" ? 0 : window.innerWidth;
 
   if (!topbar) return;
 
-  const fixedBreakpointCompact = isDataGridToolbarCompact(dataGridTopbarWidth.value, dataGridViewportWidth.value, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH);
-  if (fixedBreakpointCompact) return;
-
-  if (dataGridTopbarOverflowCompact.value) {
-    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
-      dataGridTopbarOverflowCompact.value = false;
-      dataGridTopbarExpandedRequiredWidth.value = 0;
-    }
+  if (compactDataGridToolbarActionCount.value !== previousActionCount) {
+    scheduleDataGridTopbarRecheck();
     return;
   }
 
+  if (dataGridTopbarOverflowCompact.value || dataGridTopbarOverflowActionCount.value > 0) {
+    if (dataGridTopbarWidth.value >= dataGridTopbarExpandedRequiredWidth.value) {
+      dataGridTopbarOverflowCompact.value = false;
+      dataGridTopbarOverflowActionCount.value = 0;
+      dataGridTopbarExpandedRequiredWidth.value = 0;
+      scheduleDataGridTopbarRecheck();
+      return;
+    }
+  }
+
   // The action list gains preview/save/rollback controls in editable grids. The
-  // fixed breakpoint cannot see that extra width, so capture the full layout
-  // width before the overflow-clip wrapper can hide the trailing action.
+  // responsive breakpoint cannot see that extra width, so progressively
+  // compact the leftmost controls before overflow-clip hides a trailing action.
   if (topbar.scrollWidth > topbar.clientWidth + 1) {
-    dataGridTopbarExpandedRequiredWidth.value = topbar.scrollWidth;
-    dataGridTopbarOverflowCompact.value = true;
+    dataGridTopbarExpandedRequiredWidth.value = Math.max(dataGridTopbarExpandedRequiredWidth.value, topbar.scrollWidth + DATA_GRID_TOPBAR_EXPAND_HYSTERESIS_PX);
+    if (!compactDataGridToolbar.value) {
+      dataGridTopbarOverflowCompact.value = true;
+    } else if (compactDataGridToolbarActionCount.value < DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length) {
+      dataGridTopbarOverflowActionCount.value = compactDataGridToolbarActionCount.value + 1;
+    } else {
+      return;
+    }
+    scheduleDataGridTopbarRecheck();
   }
 }
 
 function resetDataGridTopbarOverflowCompact() {
-  if (!dataGridTopbarOverflowCompact.value) return;
+  if (!dataGridTopbarOverflowCompact.value && dataGridTopbarOverflowActionCount.value === 0) return;
   dataGridTopbarOverflowCompact.value = false;
+  dataGridTopbarOverflowActionCount.value = 0;
   dataGridTopbarExpandedRequiredWidth.value = 0;
+  scheduleDataGridTopbarRecheck();
+}
+
+function scheduleDataGridTopbarRecheck() {
   if (dataGridTopbarRecheckTimer) clearTimeout(dataGridTopbarRecheckTimer);
-  // Wait for the label-width transition to finish before measuring the newly
-  // shortened action list. If it still overflows, updateDataGridTopbarWidth
-  // captures its new, smaller expanded width.
   dataGridTopbarRecheckTimer = setTimeout(() => {
     dataGridTopbarRecheckTimer = null;
     updateDataGridTopbarWidth();
-  }, 360);
+  }, DATA_GRID_TOPBAR_RECHECK_DELAY_MS);
 }
 
 function clearDataGridTopbarRecheckTimer() {
@@ -5783,6 +5806,7 @@ const {
   restoreCellSelectionState,
   cellIsSelected,
   columnIsSelected,
+  columnIsExclusivelySelected,
   selectedRangeStart,
   selectedRowIds,
   selectedColumnIndexes,
@@ -5940,6 +5964,10 @@ function captureColumnTargetForRefresh(columnIndex: number | null): PersistedDat
 function captureDetailsForRefresh() {
   const details = {
     sideCell: showCellDetail.value ? captureCellTargetForRefresh(detailCell.value) : undefined,
+    // A refresh must not silently discard an unsaved value-editor draft: closing
+    // and reopening the panel (even at the "same" cell) would re-derive its text
+    // from the freshly fetched row, wiping whatever the user was typing.
+    sideCellHasPendingDraft: showCellDetail.value && hasPendingDetailEditorDraft.value,
     cellDialog: cellDetailDialogOpen.value ? captureCellTargetForRefresh(cellDetailDialogTarget.value) : undefined,
     rowDialog: rowDetailDialogOpen.value ? captureRowTargetForRefresh(rowDetailDialogRowId.value) : undefined,
     columnDialog: columnDetailDialogOpen.value ? captureColumnTargetForRefresh(columnDetailDialogColumnIndex.value) : undefined,
@@ -5963,11 +5991,17 @@ function restoreDetailCellAfterRefresh(snapshot: PersistedDataGridSelection | un
 }
 
 function restoreDetailsAfterRefresh(details: NonNullable<typeof preservedDetailsOnNextResult>) {
-  const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
-  if (sideCell) {
-    detailCell.value = sideCell;
-    showCellDetail.value = true;
-    hydrateCellDetailTarget(sideCell);
+  // When the side panel was left open with an unsaved value-editor draft, it was
+  // deliberately kept open (not closed) across this refresh, so there is nothing
+  // to restore here - reassigning detailCell would re-derive the editor text from
+  // the freshly fetched row and clobber the draft the user is still editing.
+  if (!details.sideCellHasPendingDraft) {
+    const sideCell = restoreDetailCellAfterRefresh(details.sideCell);
+    if (sideCell) {
+      detailCell.value = sideCell;
+      showCellDetail.value = true;
+      hydrateCellDetailTarget(sideCell);
+    }
   }
 
   const cellDialog = restoreDetailCellAfterRefresh(details.cellDialog);
@@ -6459,6 +6493,12 @@ watch(activeCellDetailTab, (tab) => {
 const detailEditValue = ref("");
 const detailEditOriginalValue = ref("");
 const isEditingDetail = ref(false);
+// commitDetailEdit() intentionally re-triggers the activeCellDetail watch below to
+// re-sync the editor with the canonical committed value. Any other change to the
+// same cell's underlying data while still editing (e.g. a result refresh, or a
+// large-value hydration resolving) must not clobber the user's in-progress draft.
+let allowActiveCellDetailResync = false;
+let lastSyncedDetailCellKey: string | null = null;
 const detailValueDiffOpen = ref(false);
 const detailValueDiffSnapshot = ref<Readonly<JsonValueDiffSnapshot> | null>(null);
 const hasPendingDetailEditorDraft = computed(() => isEditingDetail.value && detailEditValue.value !== detailEditOriginalValue.value);
@@ -6589,6 +6629,15 @@ watch(activeCellDetail, (detail) => {
     resetDetailEdit();
     return;
   }
+  const cellKey = `${detail.rowId}:${detail.colIndex}`;
+  const isSameCellStillEditing = isEditingDetail.value && cellKey === lastSyncedDetailCellKey;
+  lastSyncedDetailCellKey = cellKey;
+  if (isSameCellStillEditing && !allowActiveCellDetailResync) {
+    // The row's underlying data changed (e.g. a result refresh or a large-value
+    // hydration) while the user is still editing this same cell. Keep their draft.
+    return;
+  }
+  allowActiveCellDetailResync = false;
   const value = dataGridCellEditorText({
     value: detail.value,
     databaseType: resolvedDatabaseType.value,
@@ -6666,6 +6715,7 @@ function resetDetailEdit() {
   isEditingDetail.value = false;
   detailEditValue.value = "";
   detailEditOriginalValue.value = "";
+  lastSyncedDetailCellKey = null;
 }
 
 function closeCellDetails() {
@@ -6739,6 +6789,9 @@ function commitDetailEdit() {
   if (!item || item.isDeleted) return;
   applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
   detailEditOriginalValue.value = detailEditValue.value;
+  // Force the activeCellDetail watch to re-run so the editor picks up the
+  // canonical (possibly coerced) committed value.
+  allowActiveCellDetailResync = true;
   detailCell.value = detailCell.value ? { ...detailCell.value } : null;
 }
 
@@ -6972,6 +7025,7 @@ async function applyOrderBySearch() {
       primaryKeys: tableMeta.primaryKeys,
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByClause,
+      injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
@@ -7011,6 +7065,7 @@ async function applyWhereFilter() {
       ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
       orderBy: orderByInput.value.trim() || (sortCol.value ? `${queryColumnRef(sortCol.value)} ${sortDir.value.toUpperCase()}` : undefined),
       limit: pageSize.value,
+      injectDefaultTimeSeriesWhere: true,
       whereInput,
       includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
@@ -8155,6 +8210,12 @@ async function cancelActiveExport() {
   await exportCancelHandler.value?.();
 }
 
+function changeExportQueryTimeout() {
+  if (!props.connectionId) return;
+  exportProgressDialog.value = false;
+  emit("changeQueryTimeout", props.connectionId);
+}
+
 const userFacingSql = ref("");
 let userFacingSqlGeneration = 0;
 
@@ -8190,6 +8251,7 @@ async function syncUserFacingSql() {
       tableName: props.tableMeta.tableName,
       tableType: props.tableMeta.tableType,
       includeDatabaseName,
+      injectDefaultTimeSeriesWhere: true,
       whereInput: currentWhereInput(),
       orderBy: currentOrderBy(),
       limit: props.pageLimit ?? pageSize.value,
@@ -10518,7 +10580,10 @@ watch(
     clearCellSelection();
     clearRowSelection();
     invalidateContextMenuTarget();
-    closeCellDetails();
+    // Don't discard an unsaved value-editor draft just because the result set
+    // refreshed underneath it; leave the panel/editor state as-is and let
+    // restoreDetailsAfterRefresh() below skip re-opening it from fresh data.
+    if (!detailsSnapshot?.sideCellHasPendingDraft) closeCellDetails();
     closeDetailDialogs();
     if (shouldPreserveTranspose) {
       applyTransposeState(nextTransposeStateForRecordCount(showTranspose.value, transposeRowIndex.value, displayRowCount.value));
@@ -10536,7 +10601,7 @@ watch(
 function onHeaderContext(col: string, columnIndex: number) {
   invalidateContextMenuTarget();
   const visibleColIdx = visibleColumnIndexes.value.indexOf(columnIndex);
-  if (visibleColIdx >= 0 && !columnIsSelected(visibleColIdx)) {
+  if (visibleColIdx >= 0 && !columnIsExclusivelySelected(visibleColIdx)) {
     selectColumn(visibleColIdx);
   }
   contextHeaderColumn.value = col;
@@ -10596,6 +10661,7 @@ async function copyAlterColumnSql() {
 
   const options: BuildSingleColumnAlterSqlOptions = {
     databaseType: props.databaseType,
+    driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
     schema: props.tableMeta?.schema,
     tableName: props.tableMeta!.tableName,
     column: draft,
@@ -11072,7 +11138,8 @@ watch(cellDetailPanelLayout, (layout) => {
 watch([showCellDetail, activeCellDetail, cellDetailPanelIsBottom, detailPanelHeight], scheduleActiveCellEditTextareaResize);
 
 const ddlDrawerStyle = computed(() => ({
-  width: `${ddlWidth.value}px`,
+  width: `min(${ddlWidth.value}px, 100%)`,
+  maxWidth: "100%",
 }));
 
 const detailPanelStyle = computed(() =>
@@ -11087,17 +11154,24 @@ const mongoJsonPreviewStyle = computed(() => ({
   width: `${mongoJsonPreviewWidth.value}px`,
 }));
 
-const contentGridStyle = computed(() =>
-  cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value
-    ? {
-        gridTemplateColumns: "minmax(0, 1fr) auto",
-        gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
-      }
-    : {
-        gridTemplateColumns: "minmax(0, 1fr) auto auto",
-        gridTemplateRows: "minmax(0, 1fr)",
-      },
-);
+const contentGridStyle = computed(() => {
+  const hasRightCellDetail = !cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value;
+  const tableInfoAvailableWidth = hasRightCellDetail ? `max(0px, calc(100% - ${detailPanelHeight.value}px))` : "100%";
+  const tableInfoTrack = showTableInfo.value ? `minmax(0, min(${ddlWidth.value}px, ${tableInfoAvailableWidth}))` : "0px";
+  const detailTrack = hasRightCellDetail ? `minmax(0, min(${detailPanelHeight.value}px, 100%))` : "0px";
+
+  if (cellDetailPanelIsBottom.value && showCellDetail.value && activeCellDetail.value) {
+    return {
+      gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack}`,
+      gridTemplateRows: `minmax(${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px, 1fr) minmax(0, min(${detailPanelHeight.value}px, 70vh, ${CELL_DETAIL_PANEL_MAX_HEIGHT}px, calc(100% - ${CELL_DETAIL_TABLE_MIN_VISIBLE_HEIGHT}px)))`,
+    };
+  }
+
+  return {
+    gridTemplateColumns: `minmax(0, 1fr) ${tableInfoTrack} ${detailTrack}`,
+    gridTemplateRows: "minmax(0, 1fr)",
+  };
+});
 
 function toggleCellDetailPanelLayout() {
   const nextLayout = cellDetailPanelIsBottom.value ? "right" : "bottom";
@@ -12631,7 +12705,8 @@ function openGridSnapshot() {
 
           <DataGridToolbar
             class="ml-auto"
-            :compact="compactDataGridToolbar"
+            :compact-action-count="compactDataGridToolbarActionCount"
+            :navigation-visible="props.result.columns.length > 0"
             :refresh="refreshToolbarCapability"
             :auto-refresh="autoRefreshToolbarCapability"
             :add-row="addRowToolbarCapability"
@@ -12688,17 +12763,17 @@ function openGridSnapshot() {
               </Tooltip>
             </template>
 
-            <template #navigation>
+            <template #navigation="{ compact }">
               <Tooltip v-if="props.result.columns.length">
                 <TooltipTrigger as-child>
                   <Popover v-model:open="goToColumnOpen">
                     <PopoverTrigger as-child>
-                      <Button variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compactDataGridToolbar ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
+                      <Button data-toolbar-action="navigation" variant="ghost" size="sm" :class="['data-grid-topbar-action-button h-5 shrink-0 text-xs px-1.5', compact ? 'data-grid-topbar-action-button--compact' : '', goToColumnOpen ? 'text-primary bg-primary/10' : '']">
                         <Columns3 class="data-grid-topbar-action-icon w-3 h-3" />
                         <span
                           class="data-grid-topbar-action-label"
                           :class="{
-                            'data-grid-topbar-action-label--compact': compactDataGridToolbar,
+                            'data-grid-topbar-action-label--compact': compact,
                           }"
                           >{{ t("grid.goToColumn") }}</span
                         >
@@ -14121,7 +14196,7 @@ function openGridSnapshot() {
           <div
             v-if="showTableInfo"
             data-native-clipboard
-            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0"
+            class="table-info-drawer relative col-start-2 row-start-1 border-l flex flex-col bg-background min-w-0 max-w-full"
             :class="[{ 'row-span-2': cellDetailPanelIsBottom }, { 'ddl-drawer-resizing': isResizingDdl }]"
             :style="ddlDrawerStyle"
             @contextmenu="onDrawerContextMenu"
@@ -14857,7 +14932,17 @@ function openGridSnapshot() {
     />
     <ImagePreviewDialog v-if="imagePreviewMounted" v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />
-    <ExportProgressDialog v-if="exportProgressDialogMounted" v-model:open="exportProgressDialog" v-bind="exportProgressState" :disable-cancel="!exportCancelHandler" :can-minimize="exportCanMinimize" @cancel="cancelActiveExport" @minimize="exportProgressDialog = false" />
+    <ExportProgressDialog
+      v-if="exportProgressDialogMounted"
+      v-model:open="exportProgressDialog"
+      v-bind="exportProgressState"
+      :connection-id="connectionId"
+      :disable-cancel="!exportCancelHandler"
+      :can-minimize="exportCanMinimize"
+      @cancel="cancelActiveExport"
+      @minimize="exportProgressDialog = false"
+      @change-query-timeout="changeExportQueryTimeout"
+    />
   </div>
 </template>
 

@@ -1,0 +1,113 @@
+---
+title: SQL Biçimlendirme
+description: Bir seçimi ya da düzenleyicinin tamamını veritabanı farkındalıklı sözdizimiyle biçimlendirin, ardından geçerli biçimlendirici seçeneklerini ve JSON yapılandırmasını yönetin.
+---
+
+DBX, biçimlendirici lehçesini etkin bağlantıdan seçer ve sonucu sorgu düzenleyicisine geri yazar. Metin seçiliyse yalnızca o aralık biçimlendirilir; aksi hâlde DBX düzenleyicinin tamamını biçimlendirir.
+
+**SQL'i Biçimlendir** araç çubuğu düğmesini ya da [Klavye Kısayolları](/tr/docs/keyboard-shortcuts) sayfasında belgelenen yapılandırılabilir biçimlendirme komutunu kullanın.
+
+<Callout type="info">
+  Biçimlendirme yalnızca metni yeniden yazar, hiçbir zaman SQL çalıştırmaz. Desteklenmeyen sözdizimi hata döndürür ve özgün metni değiştirmeden bırakır. Tek bir biçimlendirme işlemi en fazla `1.000.000` karakter kabul eder.
+</Callout>
+
+## Lehçe Seçimi
+
+DBX şu an şu diller için özel biçimlendirici gramerleri kullanır:
+
+| Bağlantı türü | Biçimlendirici lehçesi |
+| --- | --- |
+| MySQL | MySQL |
+| PostgreSQL, openGauss, GaussDB, KingbaseES, Redshift ve ilgili profiller | PostgreSQL |
+| SQLite, Turso, rqlite ve Cloudflare D1 | SQLite |
+| SQL Server | Transact-SQL |
+| ClickHouse | ClickHouse |
+| Diğer SQL veritabanları | Genel SQL; gerektiğinde bir kez PostgreSQL grameriyle yeniden denenir |
+
+MongoDB sorgu düzenleyicisi bu SQL lehçesi eşlemesi yerine ayrı bir Mongo Shell biçimlendiricisi kullanır.
+
+## Biçimlendirme Seçeneklerini Yapılandırma
+
+**Ayarlar → SQL Biçimlendirici** bölümünü açın. Form modu şunları sunar:
+
+| Seçenek | Değerler veya davranış |
+| --- | --- |
+| Anahtar sözcük, veri türü, işlev ve tanımlayıcı harf durumu | `upper`, `lower` veya `preserve` |
+| Girinti biçemi | `standard`, `tabularLeft` veya `tabularRight` |
+| Girinti | Boşluk veya sekme |
+| Sekme genişliği | `2` veya `4` |
+| Mantıksal işleçte satır sonu | İşleçten önce veya sonra |
+| İfade genişliği | `50`, `80` veya `120` |
+| Sorgular arası satır sayısı | `0`, `1` veya `2` |
+| Sık işleçler | İşleçlerin çevresindeki boşlukları azaltır |
+| Noktalı virgülden önce satır sonu | İfadeyi sonlandıran noktalı virgülü yeni satıra koyar |
+| Parametre türleri | Konumsal, numaralı, adlandırılmış, tırnaklı veya özel regex parametrelerini tanır |
+
+**Varsayılanları Geri Yükle**, geçerli DBX derlemesinde tanımlı biçimlendirici ayarlarını geri getirir. Değişiklikleri kalıcı kılmak için ayarlar iletişim kutusunda **Uygula**'ya tıklayın.
+
+## JSON Modu ve İçe / Dışa Aktarma
+
+JSON modu; biçimlendirici ayarlarını tam olarak düzenlemek, kopyalamak ya da taşımak için kullanışlıdır. Geçerli dosya yalnızca `version`, `formatter` ve `options` alanlarını içerir:
+
+```json
+{
+  "version": 1,
+  "formatter": "sql-formatter",
+  "options": {
+    "keywordCase": "upper",
+    "dataTypeCase": "preserve",
+    "functionCase": "preserve",
+    "identifierCase": "preserve",
+    "indentStyle": "standard",
+    "useTabs": false,
+    "tabWidth": 2,
+    "logicalOperatorNewline": "before",
+    "expressionWidth": 50,
+    "linesBetweenQueries": 1,
+    "denseOperators": false,
+    "newlineBeforeSemicolon": false,
+    "paramTypes": null
+  }
+}
+```
+
+JSON düzenleyici taslağı sürekli doğrular. DBX şu durumlarda uygulamayı veya içe aktarmayı engeller:
+
+- metin geçerli JSON değilse;
+- `version` değeri `1` değilse;
+- `formatter` değeri `sql-formatter` değilse;
+- `options` bilinmeyen bir alan içeriyorsa; ya da
+- bir değer geçerli derlemenin kabul ettiği aralığın dışındaysa.
+
+**Yapılandırmayı Dışa Aktar**, `dbx-sql-formatter.json` dosyasını indirir. İçe aktarma yalnızca SQL biçimlendirici seçeneklerini değiştirir; bağlantıları, düzenleyici kısayollarını ya da diğer DBX ayarlarını değiştirmez. Daha geniş bir ayar taşıması gerektiğinde [Yapılandırma Bulut Eşitlemesi](/tr/docs/cloud-sync) kullanın.
+
+## Parametre Tanıma
+
+Biçimlendirici varsayılanlarını kullanmak için `paramTypes` değerini `null` yapın. Ek parametre sözdizimini şuna benzer bir nesneyle yapılandırın:
+
+```json
+{
+  "positional": true,
+  "numbered": ["?", "$"],
+  "named": [":", "@", "$"],
+  "quoted": [":", "@", "$"],
+  "custom": [
+    { "regex": "@\\{[^}]+\\}" }
+  ]
+}
+```
+
+- `numbered` yalnızca `?`, `:` ve `$` kabul eder.
+- `named` ve `quoted` yalnızca `:`, `@` ve `$` kabul eder.
+- Her `custom` öğesi yalnızca boş olmayan, geçerli bir `regex` içerebilir.
+
+DBX her zaman `${ad}` ve `#{ad}` değişkenleri için tanıma ekler; böylece bu şablonlar biçimlendirici ayrıştırma hatasına yol açmaz. `null` olmayan eski `params` seçeneği artık metin değiştirme için kullanılmaz; bunun yerine `paramTypes` değerini yapılandırın.
+
+<Cards>
+  <Card title="Sorgu Düzenleyici" href="/tr/docs/query-editor">
+    Biçimlendirmenin, sıkıştırmanın, yürütme kapsamının ve tamamlamanın nasıl çalıştığını öğrenin.
+  </Card>
+  <Card title="SQL Parçacıkları" href="/tr/docs/sql-snippets">
+    Sekmeyle gezilen yer tutucularla yeniden kullanılabilir SQL şablonları oluşturun.
+  </Card>
+</Cards>

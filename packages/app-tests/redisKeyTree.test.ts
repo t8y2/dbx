@@ -11,6 +11,8 @@ import {
   mergeKeysIntoRedisKeyTree,
   redisKeyNameCopyText,
   redisKeyToFlatTreeRow,
+  updateRedisKeyInfoMetadataByRaw,
+  updateRedisKeyTreeLeafMetadata,
   REDIS_FUZZY_TREE_MAX_KEYS,
   type RedisKeyTreeGroupNode,
   type RedisKeyTreeNode,
@@ -195,11 +197,108 @@ test("tree index incrementally merges SCAN pages with loaded counts and selectio
   assert.equal(team.loadedLeafCount, 3);
   assert.equal(api.loadedLeafCount, 2);
   assert.equal(orders.loadedLeafCount, 1);
-  assert.equal(index.keyRaws.size, 4);
+  assert.equal(index.leafByKeyRaw.size, 4);
   assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get("k3"), [team.id, api.id]);
   assert.ok(addedGroupIds.has(orders.id));
   assert.ok(!addedGroupIds.has(team.id));
   assert.deepEqual(collectRedisGroupKeyRaws(team), ["k1", "k3", "k2"]);
+  assert.equal(index.leafByKeyRaw.get("k3")?.fullKeyDisplay, "team:api:v2");
+  assert.equal(index.leafByKeyRaw.get("k4")?.fullKeyDisplay, "orders:1");
+});
+
+test("tree metadata refresh updates one indexed leaf without changing structure", () => {
+  const index = createRedisKeyTreeIndex(
+    [
+      { ...makeKey("team:api:v1", "k1"), size: 1, value_preview: "old" },
+      { ...makeKey("team:web:home", "k2"), size: 2, value_preview: "other" },
+    ],
+    3,
+  );
+  const root = index.root;
+  const team = findGroup(root, "team");
+  const api = findGroup(team.children, "api");
+  const leaf = index.leafByKeyRaw.get("k1");
+  assert.ok(leaf);
+  const identity = {
+    id: leaf.id,
+    label: leaf.label,
+    fullKeyDisplay: leaf.fullKeyDisplay,
+    keyRaw: leaf.keyRaw,
+    pathSegments: leaf.pathSegments,
+    teamCount: team.loadedLeafCount,
+    apiCount: api.loadedLeafCount,
+  };
+  const getLeafByKeyRaw = index.leafByKeyRaw.get.bind(index.leafByKeyRaw);
+  let leafLookups = 0;
+  index.leafByKeyRaw.get = (keyRaw) => {
+    leafLookups++;
+    return getLeafByKeyRaw(keyRaw);
+  };
+
+  assert.equal(
+    updateRedisKeyTreeLeafMetadata(index, {
+      key_display: "ignored:identity",
+      key_raw: "k1",
+      key_type: "hash",
+      ttl: 42,
+      size: 99,
+      value_preview: "new",
+    }),
+    true,
+  );
+  assert.equal(leafLookups, 1);
+
+  assert.strictEqual(index.root, root);
+  assert.strictEqual(index.leafByKeyRaw.get("k1"), leaf);
+  assert.deepEqual(
+    {
+      id: leaf.id,
+      label: leaf.label,
+      fullKeyDisplay: leaf.fullKeyDisplay,
+      keyRaw: leaf.keyRaw,
+      pathSegments: leaf.pathSegments,
+      teamCount: team.loadedLeafCount,
+      apiCount: api.loadedLeafCount,
+    },
+    identity,
+  );
+  assert.deepEqual({ keyType: leaf.keyType, ttl: leaf.ttl, size: leaf.size, valuePreview: leaf.valuePreview }, { keyType: "hash", ttl: 42, size: 99, valuePreview: "new" });
+  assert.equal(updateRedisKeyTreeLeafMetadata(index, makeKey("missing", "missing")), false);
+});
+
+test("flat metadata refresh performs one identity lookup independent of index size", () => {
+  for (const reportedSize of [1, 1_000_000]) {
+    const existing = { ...makeKey("probe", "probe"), size: 1, value_preview: "old" };
+    let lookups = 0;
+    const keyByRaw = {
+      size: reportedSize,
+      get(key: string) {
+        lookups++;
+        return key === "probe" ? existing : undefined;
+      },
+    } as ReadonlyMap<string, RedisKeyInfo>;
+
+    assert.equal(
+      updateRedisKeyInfoMetadataByRaw(keyByRaw, {
+        key_display: "probe",
+        key_raw: "probe",
+        key_type: "list",
+        ttl: 30,
+        size: 12,
+        value_preview: "updated",
+      }),
+      true,
+    );
+    assert.equal(lookups, 1);
+    assert.deepEqual(existing, {
+      key_display: "probe",
+      key_raw: "probe",
+      key_type: "list",
+      ttl: 30,
+      size: 12,
+      value_preview: "updated",
+    });
+  }
 });
 
 test("buildRedisKeyTree honors custom and empty Redis key separators", () => {

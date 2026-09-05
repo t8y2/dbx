@@ -77,10 +77,20 @@ async function copy() {
 
   <!-- centered: 居中占满 -->
   <div v-else class="flex-1 min-h-0 flex flex-col items-center justify-center gap-2 px-6 py-4 text-center">
-    <TriangleAlert class="h-8 w-8 text-destructive/50" aria-hidden="true" />
-    <div data-native-clipboard class="min-h-0 max-h-48 max-w-lg overflow-auto space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
+    <TriangleAlert class="h-8 w-8 shrink-0 text-destructive/50" aria-hidden="true" />
+    <!--
+      The message box must NOT carry a fixed max-height cap: every ancestor up
+      the results pane is overflow-hidden (DataGrid root/cell, splitpanes pane),
+      so this box is the only scroll surface and the flex chain
+      (flex-1 min-h-0) is what bounds it to the pane height. A fixed rem cap
+      clips long error text with an unreachable scrollbar instead — see issue
+      #7960. min-h-0 is the vertical shrink enabler; min-w-0 lets long
+      unspaced backend tokens wrap instead of widening this centered child.
+      Do not remove either.
+    -->
+    <div data-native-clipboard class="min-h-0 min-w-0 max-w-lg overflow-y-auto space-y-1 select-text text-destructive" @mousedown.stop @click.stop>
       <div class="text-sm font-medium">{{ displayTitle }}</div>
-      <div class="text-xs break-all cursor-text text-destructive/80 select-text">{{ message }}</div>
+      <div class="text-xs whitespace-pre-wrap break-words text-left cursor-text text-destructive/80 select-text">{{ message }}</div>
     </div>
     <div class="shrink-0 flex flex-wrap items-center justify-center gap-2 text-foreground">
       <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2 text-xs" @click.stop="copy">

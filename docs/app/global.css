@@ -378,6 +378,9 @@ a {
   background: #08080a;
   overflow: hidden;
   position: relative;
+  /* 建立层叠上下文，使 position:fixed 的负 z-index 星空层被约束在本页背景之上
+     （而非穿透到 body 之后消失），同时把 nav 等正 z-index 子元素限制在页面内 */
+  isolation: isolate;
 }
 
 .landing::after {
@@ -393,6 +396,29 @@ a {
 
 .landing a {
   text-decoration: none;
+}
+
+/* Starfield —— 漫游星空装饰层：铺满深色背景，极缓慢漂移，刻意克制不抢焦点。 */
+
+.landing-starfield {
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 固定铺满整个着陆页，沉到内容与 .landing::after 噪点层之下，仅在 .landing 背景之上。
+   fixed 层不随滚动，形成稳定的深空背景；上下轻微淡出避免硬边 */
+.landing-starfield--page {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, black 8%, black 92%, transparent 100%);
+}
+
+.landing-starfield-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* Reveal animation */
@@ -587,7 +613,7 @@ a {
   inset: 0;
   background:
     radial-gradient(ellipse at 50% 34%, rgba(44, 88, 174, 0.42), transparent 52%), radial-gradient(ellipse at 18% 16%, rgba(82, 213, 255, 0.13), transparent 34%), radial-gradient(ellipse at 76% 22%, rgba(68, 209, 157, 0.1), transparent 30%),
-    linear-gradient(180deg, #08080a 0%, #0d0e12 48%, #08080a 82%, #08080a 100%);
+    linear-gradient(180deg, rgba(8, 8, 10, 0.28) 0%, rgba(13, 14, 18, 0.78) 48%, rgba(8, 8, 10, 0.36) 82%, rgba(8, 8, 10, 0.18) 100%);
   z-index: -3;
 }
 

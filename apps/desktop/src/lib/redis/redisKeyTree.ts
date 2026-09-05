@@ -43,7 +43,7 @@ export interface RedisKeyTreeRow {
 export interface RedisKeyTreeIndex {
   root: RedisKeyTreeNode[];
   groupById: Map<string, RedisKeyTreeGroupNode>;
-  keyRaws: Set<string>;
+  leafByKeyRaw: Map<string, RedisKeyTreeLeafNode>;
   ancestorGroupIdsByKeyRaw: Map<string, readonly string[]>;
 }
 
@@ -106,7 +106,7 @@ export function createRedisKeyTreeIndex(keys: readonly RedisKeyInfo[], db: numbe
   const index: RedisKeyTreeIndex = {
     root: [],
     groupById: new Map(),
-    keyRaws: new Set(),
+    leafByKeyRaw: new Map(),
     ancestorGroupIdsByKeyRaw: new Map(),
   };
   appendRedisKeysToTreeIndex(index, keys, db, separator);
@@ -122,7 +122,7 @@ export function appendRedisKeysToTreeIndex(index: RedisKeyTreeIndex, keys: reado
   const addedGroupIds = new Set<string>();
 
   for (const key of keys) {
-    if (index.keyRaws.has(key.key_raw)) continue;
+    if (index.leafByKeyRaw.has(key.key_raw)) continue;
 
     const pathSegments = separator ? key.key_display.split(separator) : [key.key_display];
     const ancestorGroupIds: string[] = [];
@@ -154,7 +154,7 @@ export function appendRedisKeysToTreeIndex(index: RedisKeyTreeIndex, keys: reado
       }
     }
 
-    currentLevel.push({
+    const leaf: RedisKeyTreeLeafNode = {
       kind: "leaf",
       id: buildLeafId(db, key.key_raw),
       label: pathSegments[pathSegments.length - 1],
@@ -166,14 +166,46 @@ export function appendRedisKeysToTreeIndex(index: RedisKeyTreeIndex, keys: reado
       size: key.size ?? 0,
       valuePreview: key.value_preview ?? "",
       pathSegments,
-    });
+    };
+    currentLevel.push(leaf);
     touchedLevels.add(currentLevel);
-    index.keyRaws.add(key.key_raw);
+    index.leafByKeyRaw.set(key.key_raw, leaf);
     index.ancestorGroupIdsByKeyRaw.set(key.key_raw, ancestorGroupIds);
   }
 
   for (const nodes of touchedLevels) nodes.sort(compareRedisTreeNodes);
   return { addedGroupIds };
+}
+
+/**
+ * Refreshes metadata for an existing tree leaf without changing namespace
+ * identity, hierarchy, ordering, or aggregate counts.
+ */
+export function updateRedisKeyTreeLeafMetadata(index: RedisKeyTreeIndex, key: RedisKeyInfo): boolean {
+  const leaf = index.leafByKeyRaw.get(key.key_raw);
+  if (!leaf) return false;
+
+  leaf.keyType = key.key_type ?? "";
+  leaf.ttl = key.ttl ?? -2;
+  leaf.size = key.size ?? 0;
+  leaf.valuePreview = key.value_preview ?? "";
+  return true;
+}
+
+/**
+ * Refreshes metadata on the canonical flat-list record through its identity
+ * index. The existing object is retained so large shallow collections do not
+ * need to be copied for a single-key refresh.
+ */
+export function updateRedisKeyInfoMetadataByRaw(keyByRaw: ReadonlyMap<string, RedisKeyInfo>, key: RedisKeyInfo): boolean {
+  const existing = keyByRaw.get(key.key_raw);
+  if (!existing) return false;
+
+  existing.key_type = key.key_type;
+  existing.ttl = key.ttl;
+  existing.size = key.size;
+  existing.value_preview = key.value_preview;
+  return true;
 }
 
 export function buildRedisKeyTree(keys: RedisKeyInfo[], db: number, separator = ":"): RedisKeyTreeNode[] {

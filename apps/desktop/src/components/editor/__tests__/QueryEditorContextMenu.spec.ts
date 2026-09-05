@@ -165,3 +165,16 @@ describe("QueryEditor batch column selection", () => {
     expect(source).toContain("maxRenderedOptions: batchColumnSelectionExpandedRendering ? Number.MAX_SAFE_INTEGER : 100,");
   });
 });
+
+describe("QueryEditor pointer selection", () => {
+  it("lets CodeMirror handle shift-click instead of starting the selection drag gesture", () => {
+    const start = source.indexOf("function startEditorSelectionDrag");
+    const end = source.indexOf("\n}\n\nfunction executeFromContextMenu", start);
+    const dragSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(dragSource).toContain("if (event.shiftKey) return false;");
+    expect(dragSource.indexOf("if (event.shiftKey) return false;")).toBeLessThan(dragSource.indexOf("const selection = selectedRangeAtPointer"));
+  });
+});

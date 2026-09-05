@@ -23,7 +23,7 @@ fn build_foreign_key_sql_with_mode(
     }
 
     let database_label = database_label(options.database_type);
-    let capabilities = super::dialect::capabilities_for(options.database_type);
+    let capabilities = super::dialect::capabilities_for(options.database_type, options.driver_profile.as_deref());
     let dialect = capabilities.dialect;
     if !capabilities.foreign_key {
         if has_foreign_key_edits(&options.foreign_keys) {

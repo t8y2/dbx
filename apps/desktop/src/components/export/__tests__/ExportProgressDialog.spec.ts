@@ -80,3 +80,29 @@ describe("ExportProgressDialog display name", () => {
     expect(document.body.textContent).toContain("audit_log (.csv)");
   });
 });
+
+describe("ExportProgressDialog query timeout action", () => {
+  it("offers connection settings for a query timeout", async () => {
+    i18n.global.locale.value = "en";
+    const onChangeQueryTimeout = vi.fn();
+    await mountDialog({
+      ...baseProps,
+      status: "Error",
+      errorMessage: "Agent RPC error (-1): dm.jdbc.driver.DMException: 请求执行超时",
+      connectionId: "dm-1",
+      onChangeQueryTimeout,
+    });
+
+    const button = [...document.body.querySelectorAll("button")].find((element) => element.textContent?.includes("Change query timeout"));
+    expect(button).toBeTruthy();
+    button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onChangeQueryTimeout).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer timeout settings for unrelated export errors", async () => {
+    i18n.global.locale.value = "en";
+    await mountDialog({ ...baseProps, status: "Error", errorMessage: "Permission denied", connectionId: "dm-1" });
+
+    expect(document.body.textContent).not.toContain("Change query timeout");
+  });
+});

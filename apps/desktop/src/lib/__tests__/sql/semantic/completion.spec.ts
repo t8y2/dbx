@@ -60,6 +60,15 @@ describe("semantic SQL completion candidates", () => {
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).not.toContain("legacy_id");
   });
 
+  it("shows the column comment inline in the completion detail", () => {
+    const columnsByTable = new Map<string, SqlCompletionColumn[]>([["users", [{ name: "nickname", table: "users", schema: "public", dataType: "text", comment: "用户昵称" }]]]);
+
+    const { items } = semanticCompletion("SELECT nick| FROM users", { columnsByTable }, { databaseType: "postgres", dialect: "postgres" });
+
+    const nickname = items.find((item) => item.type === "column" && item.label === "nickname");
+    expect(nickname?.detail).toContain("-- 用户昵称");
+  });
+
   it("ignores line-comment semicolons after a real statement boundary", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["codex_completion_a", [{ name: "legacy_id", table: "codex_completion_a", schema: "public" }]],

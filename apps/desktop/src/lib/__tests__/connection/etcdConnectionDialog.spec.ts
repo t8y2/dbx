@@ -29,7 +29,7 @@ describe("etcd v2 feature trimming", () => {
   });
 
   it("hides lease binding and the maintenance/lease workspaces for v2 connections", () => {
-    expect(browserSource).toContain(':supports-lease-binding="!isV2Api"');
-    expect(browserSource).toContain('<Button v-if="!isV2Api"');
+    expect(browserSource).toContain(':supports-lease-binding="!isV2Api && canManageEtcd"');
+    expect(browserSource).toContain('<Button v-if="!isV2Api && canManageEtcd"');
   });
 });

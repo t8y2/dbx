@@ -13,6 +13,7 @@ export interface DiagramJsonSnapshot {
   };
   tables: Array<{
     name: string;
+    schema?: string;
     columns: Array<{
       name: string;
       dataType: string;

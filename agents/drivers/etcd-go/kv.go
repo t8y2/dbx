@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +19,10 @@ import (
 
 const defaultListLimit = 100
 const preserveLeaseMaxAttempts = 3
+
+type etcdRangeGetter interface {
+	Get(context.Context, string, ...clientv3.OpOption) (*clientv3.GetResponse, error)
+}
 
 func (s *etcdSession) listPrefix(params map[string]json.RawMessage) (any, error) {
 	client, err := s.activeClient()
@@ -39,6 +45,14 @@ func (s *etcdSession) listPrefix(params map[string]json.RawMessage) (any, error)
 			return nil, err
 		}
 		start = string(decoded)
+	}
+	allKeys, readableRanges, err := s.readableKeyRanges()
+	if err != nil {
+		return nil, err
+	}
+	if !allKeys {
+		readableRanges = intersectReadRanges(readableRanges, prefixStart(prefix), prefixEnd(prefix))
+		return s.listReadableRanges(client, readableRanges, start, limit, revision, includeValues)
 	}
 
 	ctx, cancel := s.beginOperation()
@@ -74,6 +88,98 @@ func (s *etcdSession) listPrefix(params map[string]json.RawMessage) (any, error)
 		result["continuation"] = nil
 	}
 	result["revision"] = longString(response.Header.Revision)
+	return result, nil
+}
+
+// intersectReadRanges limits granted ranges to the requested prefix range.
+// etcd authorizes the complete range in a Range request, so querying a broad
+// prefix directly would be rejected even when it contains readable subranges.
+func intersectReadRanges(ranges []etcdReadRange, start, end string) []etcdReadRange {
+	intersections := make([]etcdReadRange, 0, len(ranges))
+	for _, granted := range ranges {
+		candidate := granted
+		if bytes.Compare([]byte(start), []byte(candidate.start)) > 0 {
+			candidate.start = start
+		}
+		if rangeEndGreater(candidate.end, end) {
+			candidate.end = end
+		}
+		if candidate.end == "" || rangeStartAtOrAfterEnd(candidate.start, candidate.end) {
+			continue
+		}
+		intersections = append(intersections, candidate)
+	}
+	return normalizeReadRanges(intersections)
+}
+
+// listReadableRanges pages through the union of the ranges granted to a
+// restricted user. Each range is queried independently, so etcd never sees an
+// unauthorized global range request.
+func (s *etcdSession) listReadableRanges(client etcdRangeGetter, ranges []etcdReadRange, start string, limit int, revision *int64, includeValues bool) (any, error) {
+	ctx, cancel := s.beginOperation()
+	defer s.endOperation(cancel)
+
+	byKey := make(map[string]*mvccpb.KeyValue)
+	var snapshotRevision int64
+	if revision != nil && *revision > 0 {
+		snapshotRevision = *revision
+	}
+	for _, keyRange := range ranges {
+		requestStart := keyRange.start
+		if bytes.Compare([]byte(start), []byte(requestStart)) > 0 {
+			requestStart = start
+		}
+		if rangeStartAtOrAfterEnd(requestStart, keyRange.end) {
+			continue
+		}
+		options := []clientv3.OpOption{
+			clientv3.WithRange(keyRange.end),
+			clientv3.WithLimit(int64(limit + 1)),
+			clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
+		}
+		if snapshotRevision > 0 {
+			options = append(options, clientv3.WithRev(snapshotRevision))
+		}
+		response, err := client.Get(ctx, requestStart, options...)
+		if err != nil {
+			return nil, err
+		}
+		if snapshotRevision == 0 {
+			snapshotRevision = response.Header.Revision
+		}
+		for _, item := range response.Kvs {
+			byKey[string(item.Key)] = item
+		}
+	}
+
+	items := make([]*mvccpb.KeyValue, 0, len(byKey))
+	for _, item := range byKey {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return bytes.Compare(items[i].Key, items[j].Key) < 0
+	})
+	more := len(items) > limit
+	if more {
+		items = items[:limit]
+	}
+
+	keys := make([]any, 0, len(items))
+	for _, item := range items {
+		row := metadataMap(item)
+		row["key"] = displayBytes(item.Key)
+		row["keyBytes"] = bytesObject(item.Key)
+		if includeValues {
+			row["value"] = valueObject(item.Value)
+		}
+		keys = append(keys, row)
+	}
+	result := map[string]any{"keys": keys, "revision": longString(snapshotRevision)}
+	if more && len(items) > 0 {
+		result["continuation"] = nextContinuation(items[len(items)-1].Key)
+	} else {
+		result["continuation"] = nil
+	}
 	return result, nil
 }
 

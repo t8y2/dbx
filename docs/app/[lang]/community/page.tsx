@@ -2,6 +2,7 @@ import { LandingNav } from "@/components/landing/LandingNav";
 import { LandingFooter } from "@/components/landing/LandingFooter";
 import { buildMetadata } from "@/lib/metadata";
 import type { Metadata } from "next";
+import { resolveLang } from "@/lib/i18n";
 
 const channels = [
   {
@@ -51,6 +52,14 @@ const i18n = {
     wechat: { name: "WeChat Group", desc: "Join via Tencent Docs invite link." },
     github: { name: "GitHub Discussions", desc: "Bug reports, feature requests, and long-form discussions." },
   },
+  tr: {
+    title: "Topluluk",
+    desc: "DBX topluluğuna katılın — soru sorun, geri bildirim paylaşın ve diğer kullanıcılarla tanışın.",
+    discord: { name: "Discord", desc: "Anlık sohbet, soru-cevap ve özellik tartışmaları." },
+    qq: { name: "QQ Grubu", desc: "Grup numarası: 1087880322" },
+    wechat: { name: "WeChat Grubu", desc: "Tencent Docs davet bağlantısıyla katılın." },
+    github: { name: "GitHub Discussions", desc: "Hata bildirimleri, özellik istekleri ve uzun tartışmalar." },
+  },
   cn: {
     title: "交流群",
     desc: "加入 DBX 社区 — 提问、反馈、与其他用户交流。",
@@ -63,7 +72,7 @@ const i18n = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return buildMetadata({
@@ -76,7 +85,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function CommunityPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const l = lang === "cn" ? "cn" : "en";
+  const l = resolveLang(lang);
   const t = i18n[l];
 
   return (

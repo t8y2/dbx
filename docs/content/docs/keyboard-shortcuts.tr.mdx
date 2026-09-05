@@ -1,0 +1,80 @@
+---
+title: Klavye Kısayolları
+description: Geçerli varsayılanları inceleyin; düzenleyici, ızgara, kenar çubuğu ve genel eylemleri Ayarlar'dan özelleştirin.
+---
+
+DBX kısayolları tek bir yapılandırılabilir eylem kaydından gelir. **Ayarlar → Kısayollar**, kurulu sürüm ve geçerli platform için etkin atamayı gösterir; bu yüzden varsayılanlar değiştikten veya kullanıcı bir tuşu özelleştirdikten sonra asıl kaynak burasıdır.
+
+`Mod`, macOS'ta `Cmd`, Windows/Linux'ta `Ctrl` anlamına gelir.
+
+## Yaygın Varsayılanlar
+
+### SQL Düzenleyici
+
+| Varsayılan | Eylem |
+| --- | --- |
+| `Mod+Enter` | Geçerli ifadeyi veya seçili SQL'i çalıştır |
+| `Mod+\` | Yeni sonuç sekmesinde çalıştır |
+| `Shift+Mod+F` | SQL'i biçimlendir |
+| `Mod+/` | Satır yorumunu aç/kapat |
+| `Mod+S` | SQL'i kaydet |
+| `Tab` | Tamamlamayı kabul et |
+| `Shift+Tab` | Girintiyi azalt |
+| `Mod+D` | Geçerli satırı çoğalt |
+| `Shift+Mod+K` | Geçerli satırı sil |
+| `Alt+↑` / `Alt+↓` | Geçerli satırı yukarı/aşağı taşı |
+| `Shift+Alt+↑` / `Shift+Alt+↓` | Geçerli satırı yukarı/aşağı kopyala |
+| `Shift+Alt+U` / `Shift+Alt+L` | Seçimi büyük/küçük harfe dönüştür |
+| `Mod+.` | Kod katlamayı aç/kapat |
+| `Mod+Shift+A` | Seçimi yapay zekâya gönder |
+
+Geçerli kayıtta varsayılan bir "tüm SQL'i çalıştır" eylemi yoktur. Eski `Ctrl/Cmd+Shift+Enter` belgelerine güvenmek yerine bir aralık seçin ya da düzenleyicinin çoklu ifade yürütme giriş noktasını kullanın.
+
+### Izgara ve Veri
+
+| Varsayılan | Eylem |
+| --- | --- |
+| `F5` | Geçerli veriyi yenile |
+| `Mod+D` | Geçerli satırı kopyala |
+| `Delete` | Geçerli satırı silinmek üzere işaretle |
+| `Tab` | Devrik görünümü aç/kapat |
+
+Standart kopyalama ve yapıştırma yine platform kurallarını izler. Geçerli Satırı Kopyala, Geçerli Satırı Sil ve Devrik Görünümü Aç/Kapat, DBX'te yapılandırılabilir eylemlerdir.
+
+### Genel ve Gezinme
+
+| Varsayılan | Eylem |
+| --- | --- |
+| `Mod+T` | Yeni sorgu |
+| `Mod+P` | Hızlı aç |
+| `Mod+W` | Geçerli sekmeyi kapat |
+| `Ctrl+Alt+←` / `Ctrl+Alt+→` | Sekme ziyaret geçmişinde geri/ileri |
+| `Shift+Mod+[` / `Shift+Mod+]` | Önceki/sonraki sekme |
+| `Mod+1` … `Mod+9` | Numaralı bir sekmeye geç |
+| `Mod+B` | Kenar çubuğunu aç/kapat |
+| `Mod+=` / `Mod+-` / `Mod+0` | Yakınlaştır, uzaklaştır, arayüz yakınlaştırmasını sıfırla |
+
+Kenar çubuğunda ayrıca kopyalama, yapıştırma, bağlantı düzenleme ve değiştirici tuşla yeni sekmede açma için yapılandırılabilir eylemler vardır.
+
+## Hızlı Aç
+
+Geçerli çalışma alanındaki bağlantıları, veritabanlarını, şemaları, tabloları, görünümleri ve kayıtlı SQL'i aramak için `Mod+P` tuşlarına basın. Sonuçlar yüklenmiş ve aranabilir nesnelerden gelir. Meta verisi henüz yüklenmemiş büyük bir bağlantı için önce ilgili düğümü genişletin ya da yenileyin.
+
+## Özelleştirme ve Çakışmalar
+
+1. **Ayarlar → Kısayollar** bölümünü açın
+2. Bir eylem seçip kayıt moduna girin
+3. Yeni bir tuş bileşimine basın ya da istemediğiniz atamayı temizleyin
+4. Çakışmaları çözüp kaydedin
+
+DBX, çakışmaları kapsam içinde algılar. Düzenleyici, ızgara, arama, kenar çubuğu ve genel eylemlerin ayrı kapsamları vardır; ancak tarayıcı, işletim sistemi, giriş yöntemi veya erişilebilirlik yazılımı bir tuşu yine de önce ayırmış olabilir.
+
+Windows/Linux'ta `Ctrl+Alt` AltGr anlamına gelebilir, bu yüzden DBX bu bileşimleri temkinli eşleştirir. macOS'ta Option+harf dönüştürülmüş karakterler üretebilir; DBX fiziksel tuş yedeğini yalnızca güvenli olduğu yerlerde kullanır.
+
+## İlgili Sayfalar
+
+<Cards>
+  <Card title="Sorgu Düzenleyici" href="/tr/docs/query-editor">Yürütme aralıklarını, sonuç sekmelerini ve düzenleyici davranışını inceleyin.</Card>
+  <Card title="SQL Hızlı İşlemleri" href="/tr/docs/sql-quick-actions">Bir tablo adı seçtikten sonra özel SQL şablonları çalıştırın.</Card>
+  <Card title="SQL Biçimlendirici" href="/tr/docs/sql-formatter">Biçimlendirici ayarları düzenleyicisi için kuralları ve kısayolları yapılandırın.</Card>
+</Cards>

@@ -1,0 +1,187 @@
+---
+title: Sorgu Düzenleyici
+description: DBX'te SQL yazın, anlayın, parametreleyin, çalıştırın, çözümleyin ve yeniden kullanın.
+---
+
+Sorgu düzenleyici, DBX'teki SQL çalışma alanıdır. Lehçe farkındalıklı vurgulamayı ve tamamlamayı, anlamsal tanılamayı, parametre girişini, yürütme ilerlemesini, çoklu sonuçları, yürütme planlarını, sorgu geçmişini, SQL kitaplığını ve yapay zekâ desteğini tek bir sekmede birleştirir.
+
+## Temel İş Akışı
+
+<Steps>
+  <Step>
+    ### Bağlantı bağlamını seçin
+
+    Bir sorgu oluştururken bağlantıyı, veritabanını ve şemayı seçin. Ayrıca nesne ağacından, Hızlı Aç'tan, SQL Kitaplığı'ndan ya da SQL Dosyaları'ndan bağlama uygun bir sorgu açabilirsiniz.
+
+  </Step>
+  <Step>
+    ### SQL yazın ve inceleyin
+
+    Tamamlamayı, üzerine gelince çıkan ayrıntıları, anlamsal tanılamayı, biçimlendirmeyi ve kod katlamayı kullanın. Ayarlara bağlı olarak `Ctrl/Cmd+Tıklama` tablo verisine ya da ilgili nesneye gidebilir.
+
+  </Step>
+  <Step>
+    ### Yürütme kapsamını açık kılın
+
+    Çalıştırılacak SQL'i seçin ya da geçerli ifadeyi veya düzenleyicinin tamamını kullanın. Çok ifadeli metinlerde yürütme hedefi seçicisi tam aralığı doğrulayabilir.
+
+  </Step>
+  <Step>
+    ### Sonuçları ya da bir planı inceleyin
+
+    Sonuç alanı birden çok çalıştırmayı, yatay sekmeleri ya da liste görünümünü destekler. Plan ağacını, özeti ve standart sonuç tablosunu incelemek için Yürütme Planı'nı kullanın.
+
+  </Step>
+  <Step>
+    ### Kaydedin ve yeniden kullanın
+
+    Kararlı sorguları SQL Kitaplığı'na ya da dış `.sql` dosyalarına kaydedin, ardından geçmiş, Hızlı Aç ya da klasörler üzerinden yeniden açın.
+
+  </Step>
+</Steps>
+
+## SQL Çalıştırma
+
+| Eylem | macOS | Windows / Linux |
+| --- | --- | --- |
+| Geçerli kapsamı çalıştır | `Cmd+Enter` | `Ctrl+Enter` |
+| Yeni sonuçta çalıştır | `Cmd+\` | `Ctrl+\` |
+| Çalıştırmayı durdur | Düğme Durdur'a dönüştükten sonra çalıştırma düğmesine tıklayın | Düğme Durdur'a dönüştükten sonra çalıştırma düğmesine tıklayın |
+
+Metin seçiliyse DBX seçimi önceler. Aksi hâlde kapsamı geçerli ifade ve yürütme hedefi ayarları belirler. Kısayollar [Klavye Kısayolları](/tr/docs/keyboard-shortcuts) sayfasından değiştirilebilir.
+
+Normal çalıştırma etkin sonucu günceller. **Yeni sonuçta çalıştır**, karşılaştırma için eski sonuçları korur. Sonuçlar yatay sekmeleri ya da liste görünümünü kullanabilir; tekrarlanan çalıştırmalar çalıştırma geçmişini saklayabilir ya da önemli sonuçları sabitleyebilir.
+
+Çoklu ifade yürütmesinde sonuç alanı; geçerli ifadeyi, toplam sayıyı, tamamlanma durumunu ve hataları gösterir. Sürücü destekliyorsa etkin sorgu ya da kalan ifadeler iptal edilebilir.
+
+<Callout type="warn">İptal, sürücüye ve veritabanına bağlıdır. Durdur'a tıkladıktan sonra sunucunun geçerli ifadeyi kesmesi zaman alabilir.</Callout>
+
+### Çalıştırmadan önce DML değişikliklerini önizleyin
+
+Bir `UPDATE`, `INSERT` ya da `DELETE` ifadesi için araç çubuğunda bir **Değişiklikleri önizle** düğmesi bulunur (düzenleyici bağlam menüsünde de vardır). DBX, ifadeyi eşdeğer bir salt okunur `SELECT` ifadesine dönüştürür ve yeni bir sonuç sekmesinde açar. Önizleme, yazılan ifadeleri yeniden değerlendirir; bu yüzden yan etkisi olan ifadeler (bir diziyi ilerletmek, oynak işlevler) önizleme sırasında da etkili olur ve belirlenimci olmayan işlevler (`uuid()`, `rand()`, `now()`) için gösterilen değerler gerçek çalıştırmadan farklı olabilir:
+
+- `UPDATE` — ızgara, etkilenen satırları ve atanan her sütun için bir **`sütun (yeni)`** sütunu gösterir (ifadeler değerlendirilir, bu yüzden `SET a = a + 1` gerçek yeni değeri gösterir);
+- `INSERT` — ızgara, eklenecek satırları gösterir (sütun adları hedef sütunlardan gelir, `VALUES` genişletilir);
+- `DELETE` — ızgara, kaldırılacak satırları gösterir.
+
+DBX'in güvenle dönüştüremediği ifadeler (örneğin bazı lehçeye özgü biçimler ya da `UPDATE ... FROM`) **Önizleme desteklenmiyor** olarak bildirilir ve yine de normal biçimde çalıştırılabilir.
+
+## Yürütme Kapsamı ve Hedef Seçici
+
+| Kapsam | Nasıl seçilir | Ne için uygundur |
+| --- | --- | --- |
+| Seçili SQL | Çalıştırmadan önce metni seçin | Çok ifadeli bir taslakta en açık ve en güvenli seçenek |
+| Geçerli ifade | İmleci bir ifadenin içine koyun | Bir betikten tek bir ifadeyi hızlıca çalıştırma |
+| Düzenleyicinin tamamı | Seçim yok ve ayarlar belgenin tamamını seçiyor | Kısa, tek amaçlı betikler |
+
+Yürütme hedefi seçicisi çalıştırılabilir ifadeleri işaretler ve gerektiğinde bir önizleme gösterir. Ayarlardan kapatılabilir, ancak üretim ve karmaşık betikler için kullanışlıdır.
+
+Büyük `.sql` dosyaları ya da ifade başına ilerleme ve dosya düzeyinde istatistik gerektiren görevler için [SQL Dosyası Çalıştırma](/tr/docs/sql-file) özelliğini kullanın.
+
+## Tamamlama ve Anlamsal Tanılama
+
+Tamamlama, etkin veritabanı lehçesini ve meta veriyi kullanarak şunları önerir:
+
+- SQL anahtar sözcükleri, işlevler, türler ve motora özgü sözdizimi
+- Veritabanları, şemalar, tablolar, görünümler, sütunlar ve sütun açıklamaları
+- Tablo takma adları, CTE'ler, alt sorgu kapsamı ve görünür alanlar
+- Yabancı anahtarlara ya da ilişki meta verisine dayalı JOIN koşulları
+- MySQL, PostgreSQL, SQL Server, ClickHouse ve diğerleri için lehçeye özgü işlevler ve sözdizimi
+- Kullanıcı tanımlı [SQL Parçacıkları](/tr/docs/sql-snippets)
+
+Anlamsal tanılama; çözülemeyen belirli tabloları, sütunları, takma adları ve SQL yapılarını işaretler. Hataları erken yakalamaya yardımcı olur, ancak üreticiye özgü uzantıların kabul ya da reddedileceğini garanti etmez; asıl kaynak sunucunun yanıtıdır.
+
+<Callout type="info">Nesne oluşturduktan ya da değiştirdikten sonra bağlantı meta verisini yenileyin. DBX, büyük şemalarda yinelenen istekleri azaltmak için tablo yapısını önbelleğe alır ve tembel yükler.</Callout>
+
+## Tablo ve Nesne Gezinmesi
+
+- Ayarlara bağlı olarak veriyi açmak ya da nesneyi bulmak için bir tablo adına `Ctrl/Cmd+Tıklayın`
+- İmlecin bulunduğu yerde başvurulan tabloyu kenar çubuğunda bulun
+- Bağlantıları, veritabanlarını, tabloları, SQL Dosyalarını ve SQL Kitaplığı'nı aramak için Hızlı Aç'ı kullanın
+- Gömülü nesne kaynağı görünümlerinde arama yapın ve daha fazla çalışmak için SQL'i düzenleyicide açın
+
+Gezinme, SQL ayrıştırmasına ve geçerli meta veriye bağlıdır. Dinamik SQL, belirsiz adlar ya da şemasız başvurular elle onay gerektirebilir.
+
+## SQL Parametreleri ve Değişkenleri
+
+Çalıştırmadan önce DBX yaygın yer tutucuları tanıyabilir ve bir parametre girişi iletişim kutusu açabilir:
+
+| Sözdizimi | Örnek |
+| --- | --- |
+| Konumsal | `?` |
+| Adlandırılmış | `:user_id` |
+| Kabuk biçemli | `${user_id}` |
+| MyBatis biçemli | `#{user_id}` |
+| SQL Server biçemli | `@user_id` |
+| Betik değişkeni | `@set user_id = 42;` |
+
+Parametreler dize, sayı, boole, `NULL` ya da ham SQL değeri olarak girilebilir. Veritabanı başına ayarlar, yerel sözdizimiyle çakışan yer tutucu biçimlerini kapatabilir.
+
+<Callout type="warn">Ham SQL parametreleri otomatik olarak tırnaklanmaz. Bunları yalnızca incelenmiş SQL parçaları için kullanın ve güvenilmeyen girdiyi asla birleştirmeyin.</Callout>
+
+## Biçimlendirme, Sıkıştırma ve Katlama
+
+- **SQL'i Biçimlendir**, girintiyi, satır sonlarını ve anahtar sözcük biçemini normalleştirir
+- **SQL'i Sıkıştır**, kopyalamak ya da üretilen SQL'i incelemek için gereksiz boşlukları kaldırır
+- **Kod katlama**, uzun sorguları, alt sorguları ya da yordam bloklarını daraltır ve yapılandırılabilir kısayolları vardır
+- Biçimlendirici ve değişken sözdizimi ayarları için [SQL Biçimlendirme](/tr/docs/sql-formatter) sayfasına bakın
+
+Biçimlendirme ve sıkıştırma yalnızca düzenleyici metnini değiştirir; SQL çalıştırmaz.
+
+## Yürütme Planı
+
+Yürütme Planı; `SELECT`, `WITH`, `TABLE` ya da `VALUES` gibi çözümlenmesi güvenli, sorgu benzeri SQL kabul eder. Desteklenen veritabanları şunları döndürebilir:
+
+- Standart bir sonuç tablosu
+- Genişletilebilir bir plan ağacı
+- Düğüm, maliyet, tahmini satır, ilişki ve dizin özetleri
+- Veritabanının döndürdüğü ham ayrıntılar
+
+`EXPLAIN` anlamı veritabanına göre değişir ve bazı motorlar yalnızca tablo ya da metin çıktısı verir. Bir plan, gerçek üretim başarımını değil iyileştiricinin tahminlerini yansıtır; veri hacmi, istatistikler, dizinler ve ölçülmüş çalışma süresiyle birlikte değerlendirin.
+
+## Sorgu Geçmişi
+
+Sorgu geçmişi, çalıştırılan SQL'i bağlantı başına zaman ve bağlam bilgisiyle saklar. Şunları yapabilirsiniz:
+
+- Tarih aralığına göre filtreleme
+- SQL'i arama ve düzenleyiciye geri yükleme
+- Normal ve yapay zekâ destekli kaynakları ayırt etme
+- Daha önceki sorun giderme çalışmalarını kurtarma ya da karşılaştırma
+- Geçmişteki SQL'i alan soy ağacında olası bir başvuru kaynağı olarak kullanma
+
+<Callout type="warn">Geçmiş; iş alanları, tablo adları, koşullar ya da sabit değerler içerebilir. Günlükleri, ekran görüntülerini ya da yapılandırma yedeklerini paylaşmadan önce hassas bilgileri gözden geçirin.</Callout>
+
+## SQL Kitaplığı ve SQL Dosyaları
+
+| Yöntem | Ne için uygundur | Platform sınırı |
+| --- | --- | --- |
+| SQL Kitaplığı | Yeniden kullanılabilir sorguları DBX içindeki klasörlerde kaydetme ve arama | Tam yerel SQL Kitaplığı yönetimi Masaüstü'nde kullanılabilir; bulut eşitleme kapsamı ayarlara bağlıdır |
+| Dış SQL Dosyaları | `.sql` dosyalarını bir depoyla, betik dizini ya da düzenleyiciyle paylaşma | Yerel dosya açma/kaydetme ve dosya ağacı Masaüstü yetenekleridir |
+| Sorgu sekmeleri | Geçici analiz ve bitmemiş taslaklar | Ayarlar tüm sekmeleri, yalnızca sabitlenmiş sekmeleri ya da hiçbirini geri yükleyebilir |
+
+Kaydetme iletişim kutusu klasör arayabilir ya da oluşturabilir. Hızlı Aç hem SQL Kitaplığı girdilerini hem SQL Dosyalarını dizinler.
+
+## Güvenlik ve Sınırlar
+
+- Salt okunur bağlantılar çekirdek yürütme yolundaki tanınan yazmaları reddeder
+- Üretim koruması yazmalar için yeni ve açık bir onay ister
+- Tehlikeli SQL onayı ve Redis komut güvenliği ek katmanlardır
+- `USE` ve veritabanı değişimleri sorgu bağlamını günceller, ancak etkin bağlantı ve hedef veritabanı yine gözden geçirilmelidir
+- Tamamlama, tanılama ve yürütme planları etkin sürücüye ve meta veri desteğine bağlıdır
+
+Kuralların tamamı için [Üretim ve Yazma Güvenliği](/tr/docs/production-safety) sayfasına bakın.
+
+<Cards>
+  <Card title="Sonuçları inceleyin" href="/tr/docs/data-grid">
+    Veri ızgarasında gözatmayı, kopyalamayı, dışa aktarmayı ve güvenli düzenlemeyi öğrenin.
+  </Card>
+  <Card title="SQL dosyalarını çalıştırın" href="/tr/docs/sql-file">
+    Büyük betikleri dosya ve ifade düzeyinde ilerlemeyle çalıştırın.
+  </Card>
+  <Card title="Parçacıkları yapılandırın" href="/tr/docs/sql-snippets">
+    Tamamlamayla açılan kişisel SQL şablonları oluşturun.
+  </Card>
+  <Card title="Yapay zekâyı kullanın" href="/tr/docs/ai-assistant">
+    SQL üretin, açıklayın ve iyileştirin, ardından inceleme için düzenleyiciye geri getirin.
+  </Card>
+</Cards>

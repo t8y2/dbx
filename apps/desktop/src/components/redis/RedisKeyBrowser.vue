@@ -196,12 +196,14 @@ interface ScanIterationBudget {
 // actual SCAN iterations (the same unit as the `max_iterations` sent to the
 // backend), decremented by every backend call the automatic path makes —
 // regardless of how many pages/keys those calls span — and stop deterministically
-// the moment it's spent. Reset alongside the rest of the per-operation state
-// in `invalidateScanRequests`. An explicit "Load more" click or a real scroll
+// the moment it's spent. Reset for genuine new load/search/scope operations;
+// KeepAlive deactivation only invalidates ownership so it cannot replenish the
+// same retained operation. An explicit "Load more" click or a real scroll
 // event is a single user-triggered request and keeps its own uncapped
 // per-call budget (see `fetchScanPage`); only the automatic follow-up check
 // they hand off to afterward is constrained by this shared budget.
 const AUTO_LOAD_TOTAL_SCAN_ITERATIONS = 50;
+const REDIS_VALUE_SCAN_COUNT = 100;
 let autoLoadBudget: ScanIterationBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
 let redisBrowserIsActive = true;
 let reloadKeysOnActivation = false;
@@ -224,12 +226,14 @@ let fetchAllPublicationRollback: null | {
 } = null;
 // 展开分组时已定向补扫且已扫尽的子树（见 fillGroupSubtree）；在 loadKeys 重置。
 const subtreeFilledGroupIds = new Set<string>();
-// 补扫停在预算上限、尚未扫尽的分组：保存继续扫描所需的 SCAN 游标，供
-// “加载更多”/滚动按展开顺序续扫（见 resumePendingGroupSubtrees）；同样在
-// loadKeys 重置。
+// 尚未扫尽的分组：保存已应用的最新 SCAN 游标，包括下一个请求还在飞行中时。
+// 这样预算停止、折叠或 KeepAlive 失效都能从已确认的位置续扫；“加载更多”/
+// 滚动按展开顺序续扫（见 resumePendingGroupSubtrees）。loadKeys 会重置该状态。
 const subtreePendingGroupCursors = new Map<string, number>();
-// 正在补扫中的分组：避免展开与续扫并发重复扫同一子树。
-const subtreeFillingGroupIds = new Set<string>();
+// 正在补扫中的分组及其操作所有权：避免展开与续扫并发重复扫同一子树，并防止
+// 旧 generation 的 catch/finally 清掉或覆盖同 id 的新补扫。
+const subtreeFillOperations = new Map<string, number>();
+let subtreeFillOperationId = 0;
 // 刷新前已展开分组的快照（#7173）：刷新首屏重建树时，本轮尚未扫到的分组会被
 // rebuildTree 从 expandedGroupIds 中裁掉；后续 load-more 页面让这些分组重新
 // 出现时，用该快照恢复展开状态。SCAN 游标归零（本轮已扫尽，仍未出现的分组
@@ -772,7 +776,7 @@ function mergeTree(newKeys: RedisKeyInfo[]) {
   if (checkedKeys.value.size > 0) selectionEpoch.value++;
 }
 
-function invalidateScanRequests(): number {
+function invalidateScanRequests(resetAutoLoadBudget = true): number {
   rollbackFetchAllPublication();
   deactivateFetchAllVisibleRows();
   // Keep invalidation authoritative even when the old Fetch All continuation
@@ -784,7 +788,8 @@ function invalidateScanRequests(): number {
   searchRequestId++;
   loadMoreOperationId++;
   loadingMore.value = false;
-  autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
+  subtreeFillOperations.clear();
+  if (resetAutoLoadBudget) autoLoadBudget = { remaining: AUTO_LOAD_TOTAL_SCAN_ITERATIONS };
   return searchRequestId;
 }
 
@@ -799,7 +804,7 @@ function isCurrentScanOperation(requestId: number, operationId?: number): boolea
 async function fetchScanPage(requestId = searchRequestId, operationId?: number, iterationBudget?: ScanIterationBudget): Promise<RedisScanResult> {
   const pageSize = redisScanPageSize.value;
   if (isValueSearchMode.value) {
-    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, Math.min(pageSize, REDIS_VALUE_SCAN_COUNT), searchMode.value === "all");
   }
 
   // Keep each backend call small so a changed search can cancel between calls.
@@ -848,7 +853,7 @@ async function fetchScanBatchPage(maxIterations: number, options: { count?: numb
   const pageSize = options.count ?? redisScanPageSize.value;
   // Value search cannot be batched because each key requires a GET.
   if (isValueSearchMode.value) {
-    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, pageSize, searchMode.value === "all");
+    return api.redisScanValues(props.connectionId, props.db, scanCursor.value, "*", valueQuery.value, Math.min(pageSize, REDIS_VALUE_SCAN_COUNT), searchMode.value === "all");
   }
   return api.redisScanKeysBatch(props.connectionId, props.db, scanCursor.value, effectivePattern.value, pageSize, maxIterations, options.includeTypes ?? false);
 }
@@ -922,15 +927,11 @@ async function scanNextPage(requestId = searchRequestId, operationId?: number, i
   return true;
 }
 
-async function streamValueSearch(requestId: number) {
-  while (requestId === searchRequestId && isValueSearchMode.value && valueQuery.value && hasMore.value) {
-    const applied = await scanNextPage(requestId);
-    if (!applied) return;
-  }
-}
-
 async function loadKeys() {
   if (!redisBrowserIsActive) return;
+  // Consume a deferred reload only once an active load actually starts; a
+  // connection check may finish after KeepAlive has paused the browser again.
+  reloadKeysOnActivation = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   searchPending.value = false;
@@ -944,7 +945,7 @@ async function loadKeys() {
   positiveTtlKeyRaws.clear();
   subtreeFilledGroupIds.clear();
   subtreePendingGroupCursors.clear();
-  subtreeFillingGroupIds.clear();
+  subtreeFillOperations.clear();
   replaceFlatKeyRecords([]);
   treeKeys.value = [];
   treeIndex = null;
@@ -969,9 +970,6 @@ async function loadKeys() {
     }
     const initialScanBudget = isFuzzyKeySearch.value ? autoLoadBudget : undefined;
     const applied = await scanNextPage(requestId, undefined, initialScanBudget);
-    if (applied && isValueSearchMode.value) {
-      await streamValueSearch(requestId);
-    }
     succeeded = applied;
   } finally {
     if (requestId === searchRequestId) {
@@ -1008,9 +1006,11 @@ async function loadMore(iterationBudget?: ScanIterationBudget) {
   // automatic-fill check as everywhere else instead of relying on the user to
   // notice and click again.
   if (applied && isCurrentScanOperation(requestId, operationId)) {
-    // 主页面推进的同时，按展开顺序续扫一个停在预算上限的子树（#7918）：
-    // 巨大分组靠“加载更多”/滚动逐段补全，而不是一次展开就扫尽。
-    resumePendingGroupSubtrees(requestId);
+    if (!iterationBudget) {
+      // 只有用户点击“加载更多”或真实滚动时，才按展开顺序续扫一个停在预算上限
+      // 的子树；短视口自动主补页不得额外获得一份独立子树预算。
+      resumePendingGroupSubtrees(requestId);
+    }
     void maybeAutoLoadMoreRedisKeys();
   }
 }
@@ -1026,6 +1026,9 @@ async function loadMore(iterationBudget?: ScanIterationBudget) {
 // scroll handler already uses.
 async function maybeAutoLoadMoreRedisKeys() {
   await nextTick();
+  // Value/all pages load per-key metadata and values. Layout changes must not
+  // turn a sparse query into an implicit background scan.
+  if (isValueSearchMode.value) return;
   // Unique visible/loaded keys are a poor stop condition on their own: an
   // empty, all-duplicate, or sparsely-matching page grows that count by ~0,
   // so relying on it alone lets a short viewport turn an ordinary tree load
@@ -1339,40 +1342,56 @@ function mergeScannedKeys(newKeys: RedisKeyInfo[]) {
 
 async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = searchRequestId) {
   if (subtreeFilledGroupIds.has(group.id)) return;
-  if (subtreeFillingGroupIds.has(group.id)) return;
-  subtreeFillingGroupIds.add(group.id);
+  if (subtreeFillOperations.has(group.id)) return;
+  const operationId = ++subtreeFillOperationId;
+  subtreeFillOperations.set(group.id, operationId);
   // 续扫从上次停在的游标继续，避免把已扫过的前缀重扫一遍
   const resumeCursor = subtreePendingGroupCursors.get(group.id) ?? 0;
-  subtreePendingGroupCursors.delete(group.id);
   const pattern = redisGroupSubtreePattern(group.pathSegments, redisKeySeparator.value);
   let cursor = resumeCursor;
   let mergedNewKeys = 0;
   let iterationsLeft = SUBTREE_FILL_MAX_SCAN_ITERATIONS;
   try {
-    while (requestId === searchRequestId && !isFetchingAll.value && iterationsLeft > 0) {
+    while (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId && expandedGroupIds.value.has(group.id) && !isFetchingAll.value && iterationsLeft > 0) {
       if (flatKeys.value.length >= redisInfiniteScrollMaxKeys.value) break;
       if (mergedNewKeys >= SUBTREE_FILL_MAX_NEW_KEYS) break;
       const iterations = Math.min(SUBTREE_SCAN_ITERATIONS_PER_CALL, iterationsLeft);
       const result = await api.redisScanKeysBatch(props.connectionId, props.db, cursor, pattern, redisScanPageSize.value, iterations, true);
       iterationsLeft -= iterations;
-      if (requestId !== searchRequestId) return;
+      if (requestId !== searchRequestId || subtreeFillOperations.get(group.id) !== operationId) return;
       const newKeys = collectUniqueRedisKeys(result.keys, loadedKeyRaws);
       mergeScannedKeys(newKeys);
       mergedNewKeys += newKeys.length;
       cursor = result.cursor;
       if (cursor === 0) {
+        subtreePendingGroupCursors.delete(group.id);
         subtreeFilledGroupIds.add(group.id);
         return;
       }
+      // Keep the last applied cursor available while the next request is in
+      // flight. A KeepAlive pause can invalidate that request, but must not
+      // force the retained subtree to restart from cursor zero.
+      subtreePendingGroupCursors.set(group.id, cursor);
     }
     // 子树未扫尽（预算用尽或触到全局键数上限）：保留游标等待续扫
-    subtreePendingGroupCursors.set(group.id, cursor);
+    if (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId) subtreePendingGroupCursors.set(group.id, cursor);
   } catch (error) {
     // 失败不阻塞浏览；已并入的进度保留在游标里，下次展开/续扫从断点重试
-    subtreePendingGroupCursors.set(group.id, cursor);
-    toast(errorMessage(error), 5000);
+    if (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId) {
+      subtreePendingGroupCursors.set(group.id, cursor);
+      toast(errorMessage(error), 5000);
+    }
   } finally {
-    subtreeFillingGroupIds.delete(group.id);
+    if (requestId === searchRequestId && subtreeFillOperations.get(group.id) === operationId) {
+      // Keep confirmed progress during the pass, then let other pending groups
+      // take the next continuation. Completed or invalidated fills stay removed.
+      const pendingCursor = subtreePendingGroupCursors.get(group.id);
+      if (pendingCursor !== undefined) {
+        subtreePendingGroupCursors.delete(group.id);
+        subtreePendingGroupCursors.set(group.id, pendingCursor);
+      }
+      subtreeFillOperations.delete(group.id);
+    }
   }
 }
 
@@ -1382,12 +1401,14 @@ async function fillGroupSubtree(group: RedisKeyTreeGroupNode, requestId = search
 function resumePendingGroupSubtrees(requestId = searchRequestId) {
   if (!shouldFillGroupSubtree()) return;
   for (const groupId of subtreePendingGroupCursors.keys()) {
+    if (subtreeFillOperations.has(groupId)) continue;
     const group = treeIndex?.groupById.get(groupId);
     if (!group) {
       // 分组已不存在（键被删除或树被重建），游标作废
       subtreePendingGroupCursors.delete(groupId);
       continue;
     }
+    if (!expandedGroupIds.value.has(groupId)) continue;
     void fillGroupSubtree(group, requestId);
     return;
   }
@@ -2259,6 +2280,9 @@ function onSearchInput() {
     fetchAllLoadedCount.value = 0;
     selectedKeyRaw.value = null;
     resetCheckedKeys();
+    // The rendered rows may stay visible while editing, but their cursor
+    // belongs to the last submitted pattern and must not be continued.
+    hasMore.value = false;
     return;
   }
   if (searchTimer) clearTimeout(searchTimer);
@@ -2528,11 +2552,16 @@ function pauseRedisBrowserBackgroundWork() {
   // 帧回调仍会在隐藏组件上触发并调用 loadMore() 跑一次冗余 SCAN，故在此一并取消并置 0。
   if (redisInfiniteScrollFrame) cancelAnimationFrame(redisInfiniteScrollFrame);
   redisInfiniteScrollFrame = 0;
-  invalidateScanRequests();
+  // KeepAlive retains this operation's rows and cursor, so pausing invalidates
+  // ownership without granting the same operation another automatic budget.
+  invalidateScanRequests(false);
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
   fetchAllLoadedCount.value = 0;
   loading.value = false;
+  // The edited value/all query has not run yet; its old cursor cannot be
+  // retained as progress for the new query when we cancel the debounce.
+  if (searchPending.value) reloadKeysOnActivation = true;
   searchPending.value = false;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
@@ -2640,16 +2669,18 @@ onMounted(async () => {
 onActivated(async () => {
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
-  const shouldReload = reloadKeysOnActivation;
-  reloadKeysOnActivation = false;
   // Ensure the connection is still alive after reactivation (e.g. tab switch).
-  // If keys failed to load previously (empty list), retry loading.
+  // Retry an empty failed/interrupted load, but retain successful sparse pages.
   try {
     await connectionStore.ensureConnected(props.connectionId);
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
-  if ((shouldReload || flatKeys.value.length === 0) && !loading.value) {
+  // loadKeys resets the cursor before requesting its first page. A nonzero
+  // retained cursor therefore distinguishes an applied empty page from a
+  // failed/interrupted reload even if hasMore still reflects the previous load.
+  const hasRetainedScanCursor = hasMore.value && scanCursor.value !== 0;
+  if ((reloadKeysOnActivation || (flatKeys.value.length === 0 && !hasRetainedScanCursor)) && !loading.value) {
     void loadKeys();
   }
 });
@@ -2726,7 +2757,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 <Button v-if="(flatKeys.length > 0 || hasMore) && !allKeysSelected" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.selectAllLoadedTitle')" data-redis-select-all @click="selectAllKeys">{{ t("redis.selectAllLoaded") }}</Button>
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys" @click="loadKeys">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
                 </Button>

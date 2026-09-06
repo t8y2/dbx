@@ -8389,14 +8389,22 @@ fn sqlserver_object_type_filter(kind: &db::ObjectSourceKind) -> &'static str {
     }
 }
 
+fn sqlserver_source_object_id_expression(schema: &str, name: &str) -> String {
+    let schema = schema.replace('\'', "''");
+    let name = name.replace('\'', "''");
+    if schema.trim().is_empty() {
+        format!("OBJECT_ID(QUOTENAME(N'{name}'))")
+    } else {
+        format!("OBJECT_ID(QUOTENAME(N'{schema}') + N'.' + QUOTENAME(N'{name}'))")
+    }
+}
+
 pub fn sqlserver_object_source_sql(schema: &str, name: &str, kind: &db::ObjectSourceKind) -> String {
     format!(
         "SELECT m.definition FROM sys.sql_modules m \
          JOIN sys.objects o ON o.object_id = m.object_id \
-         JOIN sys.schemas s ON s.schema_id = o.schema_id \
-         WHERE s.name = {} AND o.name = {} AND o.type IN ({})",
-        sql_string(schema),
-        sql_string(name),
+         WHERE o.object_id = {} AND o.type IN ({})",
+        sqlserver_source_object_id_expression(schema, name),
         sqlserver_object_type_filter(kind)
     )
 }
@@ -9726,11 +9734,25 @@ mod object_source_tests {
     }
 
     #[test]
-    fn builds_sqlserver_object_source_sql_for_schema_scoped_routines() {
-        assert_eq!(
-            sqlserver_object_source_sql("dbo", "refresh_cache", &ObjectSourceKind::Procedure),
-            "SELECT m.definition FROM sys.sql_modules m JOIN sys.objects o ON o.object_id = m.object_id JOIN sys.schemas s ON s.schema_id = o.schema_id WHERE s.name = 'dbo' AND o.name = 'refresh_cache' AND o.type IN ('P')"
-        );
+    fn builds_sqlserver_object_source_sql_from_exact_schema_and_object_identity() {
+        for name in ["F_GetEnumName", "F_GetEnumName1", "F_GetEnumName10"] {
+            let sql = sqlserver_object_source_sql("dbo", name, &ObjectSourceKind::Function);
+            assert!(sql.contains(&format!("o.object_id = OBJECT_ID(QUOTENAME(N'dbo') + N'.' + QUOTENAME(N'{name}'))")));
+            assert!(sql.contains("o.type IN ('FN','IF','TF','FS','FT')"));
+            assert!(!sql.contains("LIKE"));
+        }
+
+        let dbo_sql = sqlserver_object_source_sql("dbo", "F_GetEnumName1", &ObjectSourceKind::Function);
+        let other_schema_sql =
+            sqlserver_object_source_sql("other_schema", "F_GetEnumName1", &ObjectSourceKind::Function);
+        assert_ne!(dbo_sql, other_schema_sql);
+        assert!(other_schema_sql.contains("QUOTENAME(N'other_schema') + N'.' + QUOTENAME(N'F_GetEnumName1')"));
+    }
+
+    #[test]
+    fn sqlserver_object_source_sql_escapes_object_identity_literals() {
+        let sql = sqlserver_object_source_sql("schema'with-quote", "function]name", &ObjectSourceKind::Function);
+        assert!(sql.contains("QUOTENAME(N'schema''with-quote') + N'.' + QUOTENAME(N'function]name')"));
     }
 
     #[test]

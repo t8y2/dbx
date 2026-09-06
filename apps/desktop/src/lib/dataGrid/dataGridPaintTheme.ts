@@ -21,6 +21,10 @@ export interface DataGridPaintTheme {
   cellSelectedBorder: string;
   cellSelectedSingle: string;
   cellSelectedSingleBorder: string;
+  /** 整行选中背景：比选区覆盖淡色指示更深，点击行号选中整行时醒目显示 */
+  rowSelected: string;
+  /** 整行选中行内的脏单元格背景：跟随整行选中色同步加深的黄褐变体 */
+  rowSelectedDirty: string;
   cellHover: string;
   cellSearch: string;
   cellCurrentSearch: string;
@@ -280,6 +284,8 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const cellSelectedDirty = isDark ? "rgb(76, 66, 38)" : "rgb(235, 224, 184)";
   const cellSelectedBorder = isDark ? "rgb(96, 165, 250)" : "rgb(59, 130, 246)";
   const cellSelectedSingle = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
+  const rowSelected = isDark ? "rgb(30, 74, 128)" : "rgb(96, 165, 250)";
+  const rowSelectedDirty = isDark ? "rgb(100, 94, 52)" : "rgb(199, 185, 120)";
   const cellHover = accent;
   const cellSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.match : "rgb(253, 245, 184)";
   const cellCurrentSearch = isDark ? DATA_GRID_DARK_SEARCH_COLORS.current : "rgba(253, 224, 71, 0.52)";
@@ -289,7 +295,7 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
   const rowNumberEdited = isDark ? DATA_GRID_DARK_ROW_NUMBER_EDITED_BG : DATA_GRID_LIGHT_ROW_NUMBER_EDITED_BG;
   const rowNumberDeleted = isDark ? DATA_GRID_DARK_ROW_NUMBER_DELETED_BG : DATA_GRID_LIGHT_ROW_NUMBER_DELETED_BG;
   const rowNumberActive = activeSurface;
-  const rowNumberSelected = isDark ? "rgb(30, 64, 96)" : "rgb(191, 219, 254)";
+  const rowNumberSelected = isDark ? "rgb(30, 74, 128)" : "rgb(96, 165, 250)";
   const typeDefaults = defaultDataGridTypeColors(isDark);
   const typeForegrounds = { unknown: foreground } as DataGridTypeForegrounds;
   for (const key of DATA_GRID_TYPE_COLOR_KEYS) {
@@ -314,6 +320,8 @@ export function resolveDataGridPaintTheme(options: { getVar: (name: string) => s
     cellSelectedBorder: paintToken(getVar, "--data-grid-cell-selected-border", cellSelectedBorder),
     cellSelectedSingle: paintToken(getVar, "--data-grid-cell-selected-single-bg", cellSelectedSingle),
     cellSelectedSingleBorder: paintToken(getVar, "--data-grid-cell-selected-single-border", primary),
+    rowSelected: paintToken(getVar, "--data-grid-row-selected-bg", rowSelected),
+    rowSelectedDirty: paintToken(getVar, "--data-grid-row-selected-dirty-bg", rowSelectedDirty),
     cellHover: isDark ? cellHover : paintToken(getVar, "--data-grid-cell-hover-bg", cellHover),
     cellSearch: isDark ? cellSearch : paintToken(getVar, "--data-grid-cell-search-bg", cellSearch),
     cellCurrentSearch: isDark ? cellCurrentSearch : paintToken(getVar, "--data-grid-cell-current-search-bg", cellCurrentSearch),

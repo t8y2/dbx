@@ -147,8 +147,9 @@ export function resolveCanvasBackingStoreMetrics(options: { width: number; heigh
   };
 }
 
-export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "cellSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
-  if (options.isSelected) return theme.cellSelected;
+export function resolveCanvasDataGridRowFill(theme: Pick<DataGridPaintTheme, "cellActive" | "rowSelected">, rowBase: string, options: { isActive: boolean; isDeleted: boolean; isSelected: boolean }): string {
+  // 整行选中用专属深色 token，与选区覆盖淡色指示（cellSelected）区分层级
+  if (options.isSelected) return theme.rowSelected;
   if (options.isActive && !options.isDeleted) return theme.cellActive;
   return rowBase;
 }
@@ -533,7 +534,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       if (selectedFillVisual && isDirtyCell) {
-        ctx.fillStyle = theme.cellSelectedDirty;
+        // 行选中时脏格跟随整行选中色加深；仅格选中时维持原有选区脏格色
+        ctx.fillStyle = rowSelectionVisual ? theme.rowSelectedDirty : theme.cellSelectedDirty;
         ctx.fillRect(clippedX, y, cellPaintWidth, CANVAS_DATA_GRID_ROW_HEIGHT);
       }
       if (isSearchMatch) {

@@ -6534,6 +6534,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "Ao criar uma nova consulta, preenche o editor com SELECT * FROM <tabela> com base na aba de tabela ativa ou na tabela selecionada na barra lateral.",
     generateSqlIncludeDatabaseName: "Incluir nome do banco de dados no SQL gerado",
     generateSqlIncludeDatabaseNameDescription: "Quando compatível com o banco de dados, o SQL de tabela gerado usa banco.tabela em vez de somente o nome da tabela.",
+    generateSqlQuoteIdentifiers: "Usar aspas em identificadores no SQL gerado",
+    generateSqlQuoteIdentifiersDescription: "Quando desativado, as referências de tabela em novas consultas omitem as aspas específicas do dialeto. Palavras reservadas, caracteres especiais e nomes sensíveis a maiúsculas podem exigir aspas.",
     formatSqlOnSqlFileSave: "Formatar SQL ao salvar arquivos SQL",
     formatSqlOnSqlFileSaveDescription: "Formata automaticamente o SQL ao salvar um arquivo SQL, incluindo arquivos salvos na biblioteca SQL e consultas salvas como arquivos .sql.",
     clickTableNavigationTarget: "Ctrl+Clique abre DDL da tabela",

@@ -6532,6 +6532,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "Al crear una nueva consulta, rellena el editor con SELECT * FROM <tabla> según la pestaña de tabla activa o la tabla seleccionada en la barra lateral.",
     generateSqlIncludeDatabaseName: "Incluir el nombre de la base de datos en el SQL generado",
     generateSqlIncludeDatabaseNameDescription: "Cuando la base de datos lo admite, el SQL de tabla generado usa base_de_datos.tabla en lugar de solo el nombre de la tabla.",
+    generateSqlQuoteIdentifiers: "Citar identificadores en el SQL generado",
+    generateSqlQuoteIdentifiersDescription: "Al desactivarlo, las referencias de tabla de las consultas nuevas omiten las comillas del dialecto. Las palabras reservadas, los caracteres especiales y los nombres sensibles a mayúsculas pueden necesitar comillas.",
     formatSqlOnSqlFileSave: "Formatear SQL al guardar archivos SQL",
     formatSqlOnSqlFileSaveDescription: "Formatea automáticamente el SQL al guardar un archivo SQL, incluidos los archivos guardados en la biblioteca SQL y las consultas guardadas como archivos .sql.",
     clickTableNavigationTarget: "Ctrl+Clic abre DDL de tabla",

@@ -2262,6 +2262,7 @@ async function newQuery() {
     driverProfile: conn.driver_profile,
     identifierQuote: connectionStore.connectionIdentifierQuote?.(target.connectionId),
     includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+    quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
   });
   const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   if (initialSql) {

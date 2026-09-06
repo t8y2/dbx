@@ -6547,6 +6547,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "新規クエリ作成時、アクティブなテーブルタブまたはサイドバーで選択したテーブルに基づき、エディタに SELECT * FROM <テーブル名> を自動入力します。",
     generateSqlIncludeDatabaseName: "生成 SQL にデータベース名を含める",
     generateSqlIncludeDatabaseNameDescription: "データベースが対応している場合、生成するテーブル SQL でテーブル名のみではなく database.table を使用します。",
+    generateSqlQuoteIdentifiers: "生成 SQL の識別子を引用符で囲む",
+    generateSqlQuoteIdentifiersDescription: "無効にすると、新規クエリのテーブル参照では方言固有の引用符を省略します。予約語、特殊文字、大文字小文字を区別する名前では引用符が必要な場合があります。",
     formatSqlOnSqlFileSave: "SQL ファイル保存時に SQL をフォーマット",
     formatSqlOnSqlFileSaveDescription: "SQL ファイル保存時に SQL を自動フォーマットします。SQL ライブラリに保存されたファイルや、新規クエリを .sql ファイルとして保存する場合も含みます。",
     clickTableNavigationTarget: "Ctrl+クリックでテーブル構造を開く",

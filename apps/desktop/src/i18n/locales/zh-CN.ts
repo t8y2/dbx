@@ -6952,6 +6952,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "新建查询时，根据当前激活的数据表标签页或侧边栏选中的表，自动在编辑器中填充 SELECT * FROM <表名>。",
     generateSqlIncludeDatabaseName: "生成 SQL 时包含数据库名",
     generateSqlIncludeDatabaseNameDescription: "数据库支持时，生成的表 SQL 将使用“数据库名.表名”，而不只包含表名。",
+    generateSqlQuoteIdentifiers: "生成 SQL 时为标识符添加引号",
+    generateSqlQuoteIdentifiersDescription: "关闭后，新建查询中的表引用将不再使用数据库方言引号。保留字、特殊字符或大小写敏感名称可能仍需手动添加引号。",
     formatSqlOnSqlFileSave: "保存 SQL 文件时格式化 SQL",
     formatSqlOnSqlFileSaveDescription: "保存 SQL 文件时自动格式化 SQL，包括通过 SQL 库保存的文件以及将新查询保存为 .sql 文件等场景。",
     clickTableNavigationTarget: "Ctrl+点击表名打开 DDL",

@@ -240,6 +240,7 @@ describe("settings search", () => {
       { titleKey: "settings.clickTableNavigationTarget", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.prefillNewQueryWithSelect", category: "navigation", targetId: "navigation" },
       { titleKey: "settings.generateSqlIncludeDatabaseName", category: "editor", targetId: "editor" },
+      { titleKey: "settings.generateSqlQuoteIdentifiers", category: "editor", targetId: "editor" },
       { titleKey: "settings.formatSqlOnSqlFileSave", category: "editor", targetId: "editor" },
       { titleKey: "settings.showTableDdlHoverPreview", category: "editor", targetId: "editor" },
       { titleKey: "settings.sqlFormatterKeywordCase", category: "formatter", targetId: "formatter" },

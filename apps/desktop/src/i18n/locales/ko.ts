@@ -6285,6 +6285,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "새 쿼리를 만들 때 활성 테이블 탭이나 사이드바에서 선택한 테이블을 기반으로 편집기에 SELECT * FROM <table>을 미리 채웁니다.",
     generateSqlIncludeDatabaseName: "생성된 SQL에 데이터베이스 이름 포함",
     generateSqlIncludeDatabaseNameDescription: "데이터베이스가 지원하는 경우 생성된 테이블 SQL에서 테이블 이름만이 아니라 database.table을 사용합니다.",
+    generateSqlQuoteIdentifiers: "생성된 SQL에서 식별자 인용",
+    generateSqlQuoteIdentifiersDescription: "끄면 새 쿼리의 테이블 참조에서 데이터베이스 방언별 인용을 생략합니다. 예약어, 특수 문자 또는 대소문자 구분 이름에는 인용이 필요할 수 있습니다.",
     formatSqlOnSqlFileSave: "SQL 파일 저장 시 SQL 서식 지정",
     formatSqlOnSqlFileSaveDescription: "SQL 파일을 저장할 때 SQL을 자동으로 서식 지정합니다. SQL 라이브러리에 저장된 파일과 새 쿼리를 .sql 파일로 저장하는 경우도 포함합니다.",
     sqlVariableSyntax: "SQL 변수 및 자리표시자 치환",

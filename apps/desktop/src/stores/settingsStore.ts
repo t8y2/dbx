@@ -799,6 +799,7 @@ export interface EditorSettings {
   openDataTabsNextToActive: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
+  generateSqlQuoteIdentifiers: boolean;
   formatSqlOnSqlFileSave: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
@@ -1028,6 +1029,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   openDataTabsNextToActive: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
+  generateSqlQuoteIdentifiers: true,
   formatSqlOnSqlFileSave: false,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
@@ -1499,6 +1501,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
+    generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
     formatSqlOnSqlFileSave: settings.formatSqlOnSqlFileSave === true,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
@@ -2187,6 +2190,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
+    if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
     if (partial.formatSqlOnSqlFileSave !== undefined) editorSettings.value.formatSqlOnSqlFileSave = partial.formatSqlOnSqlFileSave === true;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);

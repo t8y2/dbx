@@ -1808,6 +1808,7 @@ async function newQuery() {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           tableName: node.label,
           columns: [],
         });

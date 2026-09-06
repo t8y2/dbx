@@ -538,6 +538,7 @@ const editDataTabReuseMode = ref<DataTabReuseMode>(settingsStore.editorSettings.
 const editOpenDataTabsNextToActive = ref(settingsStore.editorSettings.openDataTabsNextToActive);
 const editPrefillNewQueryWithSelect = ref(settingsStore.editorSettings.prefillNewQueryWithSelect);
 const editGenerateSqlIncludeDatabaseName = ref(settingsStore.editorSettings.generateSqlIncludeDatabaseName);
+const editGenerateSqlQuoteIdentifiers = ref(settingsStore.editorSettings.generateSqlQuoteIdentifiers);
 const editFormatSqlOnSqlFileSave = ref(settingsStore.editorSettings.formatSqlOnSqlFileSave);
 const editShowTableDdlHoverPreview = ref(settingsStore.editorSettings.showTableDdlHoverPreview);
 const editClickTableNavigationTarget = ref<ClickTableNavigationTarget>(settingsStore.editorSettings.clickTableNavigationTarget);
@@ -690,6 +691,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     openDataTabsNextToActive: editOpenDataTabsNextToActive.value,
     prefillNewQueryWithSelect: editPrefillNewQueryWithSelect.value,
     generateSqlIncludeDatabaseName: editGenerateSqlIncludeDatabaseName.value,
+    generateSqlQuoteIdentifiers: editGenerateSqlQuoteIdentifiers.value,
     formatSqlOnSqlFileSave: editFormatSqlOnSqlFileSave.value,
     showTableDdlHoverPreview: editShowTableDdlHoverPreview.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
@@ -1094,6 +1096,7 @@ function syncEditorSettingsDraftFromStore() {
   editOpenDataTabsNextToActive.value = settingsStore.editorSettings.openDataTabsNextToActive;
   editPrefillNewQueryWithSelect.value = settingsStore.editorSettings.prefillNewQueryWithSelect;
   editGenerateSqlIncludeDatabaseName.value = settingsStore.editorSettings.generateSqlIncludeDatabaseName;
+  editGenerateSqlQuoteIdentifiers.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers;
   editFormatSqlOnSqlFileSave.value = settingsStore.editorSettings.formatSqlOnSqlFileSave;
   editShowTableDdlHoverPreview.value = settingsStore.editorSettings.showTableDdlHoverPreview;
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
@@ -1364,6 +1367,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
     editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
     editGenerateSqlIncludeDatabaseName.value = DEFAULT_EDITOR_SETTINGS.generateSqlIncludeDatabaseName;
+    editGenerateSqlQuoteIdentifiers.value = DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers;
     editFormatSqlOnSqlFileSave.value = DEFAULT_EDITOR_SETTINGS.formatSqlOnSqlFileSave;
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -1502,6 +1506,7 @@ function resetAllDefaults() {
   editOpenDataTabsNextToActive.value = DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive;
   editPrefillNewQueryWithSelect.value = DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect;
   editGenerateSqlIncludeDatabaseName.value = DEFAULT_EDITOR_SETTINGS.generateSqlIncludeDatabaseName;
+  editGenerateSqlQuoteIdentifiers.value = DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers;
   editFormatSqlOnSqlFileSave.value = DEFAULT_EDITOR_SETTINGS.formatSqlOnSqlFileSave;
   editShowTableDdlHoverPreview.value = DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -5022,6 +5027,16 @@ onUnmounted(() => {
                     </p>
                   </div>
                   <Switch id="generate-sql-include-database-name" v-model="editGenerateSqlIncludeDatabaseName" class="mt-0.5" />
+                </div>
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="generate-sql-quote-identifiers">{{ t("settings.generateSqlQuoteIdentifiers") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.generateSqlQuoteIdentifiersDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="generate-sql-quote-identifiers" v-model="editGenerateSqlQuoteIdentifiers" class="mt-0.5" />
                 </div>
 
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">

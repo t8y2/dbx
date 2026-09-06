@@ -98,6 +98,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ openDataTabsNextToActive: null } as any).openDataTabsNextToActive).toBe(false);
   });
 
+  it("quotes generated SQL identifiers by default and preserves an explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: true }).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: false }).generateSqlQuoteIdentifiers).toBe(false);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: "false" } as any).generateSqlQuoteIdentifiers).toBe(true);
+  });
+
   it("keeps SQL-file save formatting disabled unless explicitly enabled", () => {
     expect(normalizeEditorSettings({}).formatSqlOnSqlFileSave).toBe(false);
     expect(normalizeEditorSettings({ formatSqlOnSqlFileSave: true }).formatSqlOnSqlFileSave).toBe(true);

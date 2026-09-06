@@ -5845,6 +5845,8 @@ export default withEnglishFallback({
     prefillNewQueryWithSelectDescription: "新建查詢時，根據目前啟用的資料表分頁或側邊欄選取的資料表，自動在編輯器中填入 SELECT * FROM <資料表名稱>。",
     generateSqlIncludeDatabaseName: "產生 SQL 時包含資料庫名稱",
     generateSqlIncludeDatabaseNameDescription: "資料庫支援時，產生的資料表 SQL 會使用「資料庫名稱.資料表名稱」，而非只包含資料表名稱。",
+    generateSqlQuoteIdentifiers: "產生 SQL 時為識別碼加上引號",
+    generateSqlQuoteIdentifiersDescription: "關閉後，新建查詢中的資料表參考不再使用資料庫方言引號。保留字、特殊字元或大小寫敏感名稱可能仍需手動加上引號。",
     formatSqlOnSqlFileSave: "儲存 SQL 檔案時格式化 SQL",
     formatSqlOnSqlFileSaveDescription: "儲存 SQL 檔案時自動格式化 SQL，包括透過 SQL 庫儲存的檔案，以及將新查詢儲存為 .sql 檔案等場景。",
     clickTableNavigationTarget: "Ctrl+點擊表名開啟 DDL",

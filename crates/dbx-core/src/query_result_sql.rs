@@ -2360,7 +2360,10 @@ mod tests {
 
         let page_sql = plan.page_sql.expect("pagination plan provides page SQL");
         assert!(page_sql.to_uppercase().contains("GROUP BY"));
-        assert!(page_sql.contains("ORDER BY 1, 2, 3 LIMIT 500;"), "dedup pagination must be appended after the GROUP BY, got: {page_sql}");
+        assert!(
+            page_sql.contains("ORDER BY 1, 2, 3 LIMIT 500;"),
+            "dedup pagination must be appended after the GROUP BY, got: {page_sql}"
+        );
 
         let count_sql = plan.count_sql.expect("pagination plan provides count SQL");
         assert!(count_sql.starts_with("SELECT COUNT(*) AS dbx_total_rows FROM ("));

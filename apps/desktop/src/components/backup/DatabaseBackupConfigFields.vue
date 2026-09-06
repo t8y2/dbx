@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Check, ChevronDown, FolderOpen, Loader2, Search } from "@lucide/vue";
+import ConnectionGroupBadge from "@/components/connection/ConnectionGroupBadge.vue";
 import type { DatabaseBackupExecutionConfig } from "@/lib/backup/scheduledDatabaseBackup";
 import type { ConnectionConfig } from "@/types/database";
 
@@ -90,6 +91,7 @@ watch(
               @click="selectConnection(connection.id)"
             >
               <Check class="h-4 w-4 shrink-0" :class="connection.id === draft.connectionId ? 'opacity-100' : 'opacity-0'" />
+              <ConnectionGroupBadge :connection-id="connection.id" />
               <span class="min-w-0 flex-1 truncate">{{ connection.name }}</span>
             </button>
             <div v-if="filteredConnections.length === 0" class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingConnections") }}</div>

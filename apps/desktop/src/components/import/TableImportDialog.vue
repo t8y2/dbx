@@ -455,6 +455,8 @@ function openDataTypePicker(sourceColumn: string, input: HTMLInputElement) {
 function updateDataTypePickerQuery(sourceColumn: string, value: string) {
   if (activeDataTypeColumn.value !== sourceColumn || !dataTypePickerOpen.value) return;
   dataTypePickerQuery.value = value;
+  // 保持旧行为：手输内容即时提交，带参数的自定义类型（如 VARCHAR(50)）也能落盘
+  updateColumnDataType(sourceColumn, value);
   activeDataTypeOptionIndex.value = dataTypePickerOptions.value.length ? 0 : -1;
 }
 

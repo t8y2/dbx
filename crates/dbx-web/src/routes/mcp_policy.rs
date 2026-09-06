@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::http::HeaderMap;
+use dbx_core::mcp_policy::McpConnectionGroupPath;
 use dbx_core::models::connection::ConnectionConfig;
 use dbx_core::storage::{McpDatabaseScope, McpGlobalPolicy};
 
@@ -231,8 +232,30 @@ async fn load_policy(state: &Arc<WebState>) -> Result<McpGlobalPolicy, AppError>
     state.app.storage.load_mcp_global_policy().await.map(|state| state.policy()).map_err(AppError::from)
 }
 
-fn ensure_allowed(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), AppError> {
-    if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
+async fn load_policy_context(
+    state: &Arc<WebState>,
+) -> Result<(McpGlobalPolicy, HashMap<String, McpConnectionGroupPath>), AppError> {
+    let policy = load_policy(state).await?;
+    let group_paths = match state.app.storage.load_sidebar_layout().await {
+        Ok(Some(layout)) => dbx_core::mcp_policy::connection_group_paths(&layout),
+        Ok(None) => Ok(HashMap::new()),
+        Err(error) => Err(error),
+    };
+    match group_paths {
+        Ok(paths) => Ok((policy, paths)),
+        Err(error) if dbx_core::mcp_policy::policy_uses_connection_groups(&policy) => {
+            Err(AppError::from(format!("MCP_POLICY_UNAVAILABLE: {error}")))
+        }
+        Err(_) => Ok((policy, HashMap::new())),
+    }
+}
+
+fn ensure_allowed(
+    policy: &McpGlobalPolicy,
+    group_path: Option<&McpConnectionGroupPath>,
+    connection_id: &str,
+) -> Result<(), AppError> {
+    if !dbx_core::mcp_policy::policy_allows_connection(policy, group_path, connection_id) {
         return Err(AppError::from(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
         )));
@@ -257,10 +280,20 @@ fn ensure_database_in_scope(policy: &McpGlobalPolicy, connection_id: &str, datab
 }
 
 /// Execution modes are scoped defaults: a database setting overrides a
-/// configured connection default, which in turn overrides the global default.
+/// configured connection default, then the nearest configured group and the
+/// global default.
 /// Connection read-only and production protections are checked separately.
 fn effective_database_execution_policy(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> (bool, bool) {
-    dbx_core::mcp_policy::effective_database_execution_policy(policy, connection_id, database)
+    effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
+}
+
+fn effective_database_execution_policy_with_groups(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    database: &str,
+) -> (bool, bool) {
+    dbx_core::mcp_policy::effective_database_execution_policy_with_groups(policy, group_ids, connection_id, database)
 }
 
 fn ensure_sql_database_execution_scope(
@@ -320,7 +353,8 @@ pub async fn ensure_scope(state: &Arc<WebState>, headers: &HeaderMap, connection
     if !is_mcp_request(headers) {
         return Ok(());
     }
-    ensure_allowed(&load_policy(state).await?, connection_id)
+    let (policy, group_paths) = load_policy_context(state).await?;
+    ensure_allowed(&policy, group_paths.get(connection_id), connection_id)
 }
 
 pub async fn ensure_write(
@@ -353,8 +387,9 @@ pub async fn ensure_mongo_pipeline_target(
     if !is_mcp_request(headers) {
         return Ok(database.to_string());
     }
-    let policy = load_policy(state).await?;
-    ensure_allowed(&policy, connection_id)?;
+    let (policy, group_paths) = load_policy_context(state).await?;
+    let group_path = group_paths.get(connection_id);
+    ensure_allowed(&policy, group_path, connection_id)?;
     let config = load_connection(state, connection_id).await?;
     let database = dbx_core::mcp_policy::resolve_database(database, config.database.as_deref());
     ensure_database_in_scope(&policy, connection_id, &database)?;
@@ -381,12 +416,15 @@ async fn ensure_write_with_risk(
     if !is_mcp_request(headers) {
         return Ok(());
     }
-    let policy = load_policy(state).await?;
-    ensure_allowed(&policy, connection_id)?;
+    let (policy, group_paths) = load_policy_context(state).await?;
+    let group_path = group_paths.get(connection_id);
+    ensure_allowed(&policy, group_path, connection_id)?;
     let config = load_connection(state, connection_id).await?;
     let database = dbx_core::mcp_policy::resolve_database(database, config.database.as_deref());
     ensure_database_in_scope(&policy, connection_id, &database)?;
-    let (read_only, allow_dangerous_sql) = effective_database_execution_policy(&policy, connection_id, &database);
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, connection_id, &database);
     if read_only {
         return Err(AppError::from(format!(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. {action} blocked."
@@ -422,8 +460,9 @@ pub async fn ensure_sql(
     if !is_mcp_request(headers) {
         return Ok(database.to_string());
     }
-    let policy = load_policy(state).await?;
-    ensure_allowed(&policy, connection_id)?;
+    let (policy, group_paths) = load_policy_context(state).await?;
+    let group_path = group_paths.get(connection_id);
+    ensure_allowed(&policy, group_path, connection_id)?;
     let config = load_connection(state, connection_id).await?;
     let database = dbx_core::mcp_policy::resolve_database(database, config.database.as_deref());
     ensure_database_in_scope(&policy, connection_id, &database)?;
@@ -434,7 +473,9 @@ pub async fn ensure_sql(
     }
     let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
     ensure_sql_database_execution_scope(&policy, &config, &database, sql)?;
-    let (read_only, allow_dangerous_sql) = effective_database_execution_policy(&policy, connection_id, &database);
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, connection_id, &database);
     if read_only && is_write {
         return Err(AppError::from(format!(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. SQL write blocked."

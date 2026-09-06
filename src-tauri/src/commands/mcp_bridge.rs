@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -7,6 +8,7 @@ use tokio::net::TcpListener;
 
 use super::connection::AppState;
 
+use dbx_core::mcp_policy::McpConnectionGroupPath;
 use dbx_core::storage::{McpDatabaseScope, McpGlobalPolicy};
 
 const BIND_ADDR: &str = "127.0.0.1:0";
@@ -601,14 +603,14 @@ async fn resolve_connection(
     connection_id: Option<&str>,
     connection_name: &str,
 ) -> Result<crate::models::connection::ConnectionConfig, String> {
-    let policy = load_mcp_policy(state).await?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
     let configs = state.storage.load_connections().await.map_err(|e| mcp_policy_unavailable(e.to_string()))?;
     let config = if let Some(id) = connection_id.filter(|s| !s.is_empty()) {
         configs.iter().find(|c| c.id == id).ok_or_else(|| format!("Connection with id '{}' not found", id))?
     } else {
         find_config_by_name(&configs, connection_name).ok_or_else(|| "Connection not found".to_string())?
     };
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(&config.id), &config.id)?;
     let mut state_configs = state.configs.write().await;
     if !state_configs.contains_key(&config.id) {
         state_configs.insert(config.id.clone(), config.clone());
@@ -626,6 +628,24 @@ async fn load_mcp_policy(state: &Arc<AppState>) -> Result<McpGlobalPolicy, Strin
         .map_err(|error| mcp_policy_unavailable(error.to_string()))
 }
 
+async fn load_mcp_policy_context(
+    state: &Arc<AppState>,
+) -> Result<(McpGlobalPolicy, HashMap<String, McpConnectionGroupPath>), String> {
+    let policy = load_mcp_policy(state).await?;
+    let group_paths = match state.storage.load_sidebar_layout().await {
+        Ok(Some(layout)) => dbx_core::mcp_policy::connection_group_paths(&layout),
+        Ok(None) => Ok(HashMap::new()),
+        Err(error) => Err(error),
+    };
+    match group_paths {
+        Ok(paths) => Ok((policy, paths)),
+        Err(error) if dbx_core::mcp_policy::policy_uses_connection_groups(&policy) => {
+            Err(mcp_policy_unavailable(error))
+        }
+        Err(_) => Ok((policy, HashMap::new())),
+    }
+}
+
 fn mcp_policy_unavailable(error: String) -> String {
     if error.starts_with("MCP_POLICY_UNAVAILABLE:") {
         error
@@ -635,7 +655,15 @@ fn mcp_policy_unavailable(error: String) -> String {
 }
 
 fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), String> {
-    if policy.allowed_connection_ids.as_ref().is_some_and(|allowed| !allowed.iter().any(|id| id == connection_id)) {
+    ensure_connection_in_mcp_scope_with_groups(policy, None, connection_id)
+}
+
+fn ensure_connection_in_mcp_scope_with_groups(
+    policy: &McpGlobalPolicy,
+    group_path: Option<&McpConnectionGroupPath>,
+    connection_id: &str,
+) -> Result<(), String> {
+    if !dbx_core::mcp_policy::policy_allows_connection(policy, group_path, connection_id) {
         return Err(format!(
             "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by DBX MCP settings"
         ));
@@ -662,7 +690,16 @@ fn ensure_database_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str, d
 }
 
 fn effective_database_execution_policy(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> (bool, bool) {
-    dbx_core::mcp_policy::effective_database_execution_policy(policy, connection_id, database)
+    effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
+}
+
+fn effective_database_execution_policy_with_groups(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    database: &str,
+) -> (bool, bool) {
+    dbx_core::mcp_policy::effective_database_execution_policy_with_groups(policy, group_ids, connection_id, database)
 }
 
 async fn ensure_mcp_write_allowed(
@@ -681,10 +718,13 @@ async fn ensure_mcp_write_allowed_with_risk(
     action: &str,
     dangerous: bool,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    let group_path = group_paths.get(&config.id);
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_path, &config.id)?;
     ensure_database_in_mcp_scope(&policy, &config.id, database)?;
-    let (read_only, allow_dangerous_sql) = effective_database_execution_policy(&policy, &config.id, database);
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, database);
     if read_only {
         return Err(format!(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. {action} blocked."
@@ -710,8 +750,8 @@ pub(crate) async fn ensure_mcp_read_allowed_by_id(
     connection_id: &str,
     database: &str,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(connection_id), connection_id)?;
     ensure_database_in_mcp_scope(&policy, connection_id, database)?;
     let configs = state.storage.load_connections().await.map_err(|e| format!("MCP_POLICY_UNAVAILABLE: {e}"))?;
     let config = configs
@@ -745,8 +785,8 @@ async fn ensure_mcp_mongo_pipeline_target_allowed_by_id(
     database: &str,
     pipeline_json: &str,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, connection_id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_paths.get(connection_id), connection_id)?;
     dbx_core::mcp_policy::ensure_mongo_database_execution_scope(&policy, connection_id, database, pipeline_json)?;
     for target_database in mongo_pipeline_output_databases(pipeline_json, database)? {
         ensure_database_in_mcp_scope(&policy, connection_id, &target_database)?;
@@ -1030,8 +1070,9 @@ async fn ensure_mcp_sql_allowed(
     database: &str,
     sql: &str,
 ) -> Result<(), String> {
-    let policy = load_mcp_policy(state).await?;
-    ensure_connection_in_mcp_scope(&policy, &config.id)?;
+    let (policy, group_paths) = load_mcp_policy_context(state).await?;
+    let group_path = group_paths.get(&config.id);
+    ensure_connection_in_mcp_scope_with_groups(&policy, group_path, &config.id)?;
     ensure_database_in_mcp_scope(&policy, &config.id, database)?;
     if let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == config.id) {
         if rule.database_scope == McpDatabaseScope::Selected
@@ -1051,7 +1092,9 @@ async fn ensure_mcp_sql_allowed(
     ensure_mcp_sql_database_switch_allowed(config.db_type, sql)?;
     let is_write = dbx_core::query_execution_sql::is_write_sql_for_database(sql, config.db_type);
     dbx_core::mcp_policy::ensure_sql_database_execution_scope(&policy, config, database, sql)?;
-    let (read_only, allow_dangerous_sql) = effective_database_execution_policy(&policy, &config.id, database);
+    let group_ids = group_path.map(|path| path.ids.as_slice()).unwrap_or_default();
+    let (read_only, allow_dangerous_sql) =
+        effective_database_execution_policy_with_groups(&policy, group_ids, &config.id, database);
     if read_only && is_write {
         return Err(format!(
             "MCP_READ_ONLY: MCP execution permission for database '{database}' is read-only. SQL write blocked."

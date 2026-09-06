@@ -234,6 +234,10 @@ pub struct McpGlobalPolicy {
     #[serde(default)]
     pub allow_dangerous_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
+    /// Stable sidebar group ids whose current descendant connections are
+    /// exposed when an explicit connection scope is configured.
+    #[serde(default)]
+    pub allowed_group_ids: Vec<String>,
     /// `None` exposes every built-in MCP tool. A list is an explicit
     /// allowlist and is enforced independently of connection permissions.
     #[serde(default)]
@@ -242,8 +246,23 @@ pub struct McpGlobalPolicy {
     /// the current execution policy version remain legacy ceilings.
     #[serde(default)]
     pub connection_policies: Vec<McpConnectionPolicy>,
+    /// Execution defaults inherited by every connection currently contained
+    /// in the referenced sidebar group. Nested groups are resolved from root
+    /// to leaf, so the closest configured group wins.
+    #[serde(default)]
+    pub group_policies: Vec<McpGroupPolicy>,
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGroupPolicy {
+    pub group_id: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub allow_dangerous_sql: bool,
 }
 
 fn default_mcp_connection_execution_mode_configured() -> bool {
@@ -368,9 +387,13 @@ pub struct McpGlobalPolicyState {
     pub allow_dangerous_sql: bool,
     pub allowed_connection_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub allowed_group_ids: Vec<String>,
+    #[serde(default)]
     pub allowed_tool_names: Option<Vec<String>>,
     #[serde(default)]
     pub connection_policies: Vec<McpConnectionPolicy>,
+    #[serde(default)]
+    pub group_policies: Vec<McpGroupPolicy>,
     #[serde(default)]
     pub query_timeout_secs: Option<u64>,
 }
@@ -381,8 +404,10 @@ impl McpGlobalPolicyState {
             read_only: self.read_only,
             allow_dangerous_sql: self.allow_dangerous_sql,
             allowed_connection_ids: self.allowed_connection_ids.clone(),
+            allowed_group_ids: self.allowed_group_ids.clone(),
             allowed_tool_names: self.allowed_tool_names.clone(),
             connection_policies: self.connection_policies.clone(),
+            group_policies: self.group_policies.clone(),
             query_timeout_secs: self.query_timeout_secs,
         }
     }
@@ -400,6 +425,8 @@ impl McpGlobalPolicy {
             ids.dedup();
             ids
         });
+        let allowed_group_ids =
+            if allowed_connection_ids.is_some() { normalize_mcp_ids(&self.allowed_group_ids) } else { Vec::new() };
         let allowed_tool_names = self.allowed_tool_names.as_ref().map(|tools| {
             let mut tools = tools
                 .iter()
@@ -481,15 +508,50 @@ impl McpGlobalPolicy {
             }
         }
 
+        let mut group_policies = HashMap::<String, McpGroupPolicy>::new();
+        for rule in &self.group_policies {
+            let group_id = rule.group_id.trim();
+            if group_id.is_empty() {
+                continue;
+            }
+            group_policies
+                .entry(group_id.to_string())
+                .and_modify(|current| {
+                    current.read_only |= rule.read_only;
+                    current.allow_dangerous_sql &= rule.allow_dangerous_sql;
+                })
+                .or_insert_with(|| McpGroupPolicy {
+                    group_id: group_id.to_string(),
+                    read_only: rule.read_only,
+                    allow_dangerous_sql: !rule.read_only && rule.allow_dangerous_sql,
+                });
+        }
+        let mut group_policies = group_policies.into_values().collect::<Vec<_>>();
+        group_policies.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+        for rule in &mut group_policies {
+            if rule.read_only {
+                rule.allow_dangerous_sql = false;
+            }
+        }
+
         Self {
             read_only: self.read_only,
             allow_dangerous_sql: !self.read_only && self.allow_dangerous_sql,
             allowed_connection_ids,
+            allowed_group_ids,
             allowed_tool_names,
             connection_policies,
+            group_policies,
             query_timeout_secs: self.query_timeout_secs,
         }
     }
+}
+
+fn normalize_mcp_ids(ids: &[String]) -> Vec<String> {
+    let mut ids = ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty()).map(ToOwned::to_owned).collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 fn normalize_mcp_database_names(databases: &[String]) -> Vec<String> {
@@ -2034,8 +2096,10 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
+                        allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
                         connection_policies: policy.connection_policies,
+                        group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
                     });
                 };
@@ -2048,8 +2112,10 @@ impl Storage {
                         read_only: policy.read_only,
                         allow_dangerous_sql: policy.allow_dangerous_sql,
                         allowed_connection_ids: policy.allowed_connection_ids,
+                        allowed_group_ids: policy.allowed_group_ids,
                         allowed_tool_names: policy.allowed_tool_names,
                         connection_policies: policy.connection_policies,
+                        group_policies: policy.group_policies,
                         query_timeout_secs: policy.query_timeout_secs,
                     });
                 };
@@ -2061,8 +2127,10 @@ impl Storage {
                     read_only: policy.read_only,
                     allow_dangerous_sql: policy.allow_dangerous_sql,
                     allowed_connection_ids: policy.allowed_connection_ids,
+                    allowed_group_ids: policy.allowed_group_ids,
                     allowed_tool_names: policy.allowed_tool_names,
                     connection_policies: policy.connection_policies,
+                    group_policies: policy.group_policies,
                     query_timeout_secs: policy.query_timeout_secs,
                 })
             })
@@ -3052,7 +3120,24 @@ fn ensure_mcp_connection_change_allowed_in_tx(
         );
     }
     if let Some(connection_id) = target_connection_id {
-        if policy.allowed_connection_ids.as_ref().is_some_and(|ids| !ids.iter().any(|id| id == connection_id)) {
+        let group_paths = if crate::mcp_policy::policy_uses_connection_groups(&policy) {
+            let layout_json: Option<String> = tx
+                .query_row("SELECT layout_json FROM sidebar_layout WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))?;
+            layout_json
+                .map(|json| {
+                    let layout = serde_json::from_str(&json)
+                        .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: invalid sidebar layout JSON: {error}"))?;
+                    crate::mcp_policy::connection_group_paths(&layout)
+                        .map_err(|error| format!("MCP_POLICY_UNAVAILABLE: {error}"))
+                })
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        if !crate::mcp_policy::policy_allows_connection(&policy, group_paths.get(connection_id), connection_id) {
             return Err(format!(
                 "CONNECTION_OUT_OF_SCOPE: connection '{connection_id}' is not allowed by the current DBX MCP policy"
             ));
@@ -6584,8 +6669,10 @@ mod tests {
                 read_only: false,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: None,
+                allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
                 connection_policies: Vec::new(),
+                group_policies: Vec::new(),
                 query_timeout_secs: None,
             }
         );
@@ -6609,8 +6696,10 @@ mod tests {
                 read_only: true,
                 allow_dangerous_sql: false,
                 allowed_connection_ids: Some(vec!["conn-1".to_string(), "conn-2".to_string()]),
+                allowed_group_ids: Vec::new(),
                 allowed_tool_names: None,
                 connection_policies: Vec::new(),
+                group_policies: Vec::new(),
                 query_timeout_secs: Some(120),
             }
         );

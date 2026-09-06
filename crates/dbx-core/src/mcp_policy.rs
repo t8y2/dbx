@@ -1,9 +1,106 @@
+use std::collections::HashMap;
+
 use crate::models::connection::ConnectionConfig;
 use crate::production_safety::sql_references_disallowed_database;
 use crate::storage::McpGlobalPolicy;
+use serde::Deserialize;
+use serde_json::Value;
 
 /// Version used by rules that opt into scoped override semantics.
 pub const MCP_EXECUTION_POLICY_VERSION: u8 = 1;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpConnectionGroupPath {
+    pub ids: Vec<String>,
+    pub names: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SidebarLayout {
+    #[serde(default)]
+    groups: Vec<SidebarGroup>,
+    #[serde(default)]
+    order: Vec<SidebarOrderEntry>,
+}
+
+#[derive(Deserialize)]
+struct SidebarGroup {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum SidebarOrderEntry {
+    #[serde(rename = "group")]
+    Group {
+        id: String,
+        children: Option<Vec<SidebarOrderEntry>>,
+        #[serde(rename = "connectionIds")]
+        connection_ids: Option<Vec<String>>,
+    },
+    #[serde(rename = "connection")]
+    Connection { id: String },
+}
+
+/// Resolve each connection's stable group ids and display names from the
+/// persisted sidebar tree. Legacy `connectionIds` group entries remain valid.
+pub fn connection_group_paths(layout: &Value) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
+    let layout = serde_json::from_value::<SidebarLayout>(layout.clone())
+        .map_err(|error| format!("INVALID_SIDEBAR_LAYOUT: {error}"))?;
+    let groups = layout.groups.into_iter().map(|group| (group.id, group.name)).collect::<HashMap<_, _>>();
+    let mut paths = HashMap::new();
+    collect_connection_group_paths(&layout.order, &groups, &mut McpConnectionGroupPath::default(), &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_connection_group_paths(
+    entries: &[SidebarOrderEntry],
+    groups: &HashMap<String, String>,
+    path: &mut McpConnectionGroupPath,
+    paths: &mut HashMap<String, McpConnectionGroupPath>,
+) -> Result<(), String> {
+    for entry in entries {
+        match entry {
+            SidebarOrderEntry::Connection { id } => {
+                paths.insert(id.clone(), path.clone());
+            }
+            SidebarOrderEntry::Group { id, children, connection_ids } => {
+                let name =
+                    groups.get(id).ok_or_else(|| format!("INVALID_SIDEBAR_LAYOUT: group '{id}' has no metadata"))?;
+                path.ids.push(id.clone());
+                path.names.push(name.clone());
+                if let Some(children) = children {
+                    collect_connection_group_paths(children, groups, path, paths)?;
+                } else if let Some(connection_ids) = connection_ids {
+                    for connection_id in connection_ids {
+                        paths.insert(connection_id.clone(), path.clone());
+                    }
+                }
+                path.ids.pop();
+                path.names.pop();
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn policy_uses_connection_groups(policy: &McpGlobalPolicy) -> bool {
+    !policy.allowed_group_ids.is_empty() || !policy.group_policies.is_empty()
+}
+
+pub fn policy_allows_connection(
+    policy: &McpGlobalPolicy,
+    group_path: Option<&McpConnectionGroupPath>,
+    connection_id: &str,
+) -> bool {
+    policy.allowed_connection_ids.as_ref().is_none_or(|allowed| {
+        allowed.iter().any(|id| id == connection_id)
+            || group_path.is_some_and(|path| {
+                path.ids.iter().any(|id| policy.allowed_group_ids.iter().any(|allowed| allowed == id))
+            })
+    })
+}
 
 /// Resolve an omitted or blank request database to the connection default.
 pub fn resolve_database(requested: &str, configured: Option<&str>) -> String {
@@ -23,7 +120,21 @@ pub fn effective_database_execution_policy(
     connection_id: &str,
     database: &str,
 ) -> (bool, bool) {
+    effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
+}
+
+pub fn effective_database_execution_policy_with_groups(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection_id: &str,
+    database: &str,
+) -> (bool, bool) {
     let mut effective = (policy.read_only, policy.allow_dangerous_sql);
+    for group_id in group_ids {
+        if let Some(rule) = policy.group_policies.iter().find(|rule| rule.group_id == *group_id) {
+            effective = (rule.read_only, !rule.read_only && rule.allow_dangerous_sql);
+        }
+    }
     let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection_id) else {
         return effective;
     };

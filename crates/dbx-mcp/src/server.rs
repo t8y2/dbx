@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -318,6 +318,7 @@ struct ResolvedConnection {
     connection: dbx_core::models::connection::ConnectionConfig,
     policy: McpGlobalPolicy,
     database_scope: DatabaseScope,
+    group_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -411,12 +412,15 @@ impl DbxMcpServer {
         match self.load_scoped_connections().await {
             Ok(connections) if connections.is_empty() => text("No connections configured in DBX."),
             Ok(connections) => {
-                let group_paths = self.backend.load_connection_group_paths().await.unwrap_or_default();
+                let group_paths = self.backend.load_connection_group_details().await.unwrap_or_default();
                 let rows = connections
                     .iter()
                     .map(|connection| {
                         let mut summary = ConnectionSummary::from(connection);
-                        summary.group_path = group_paths.get(&connection.id).cloned().unwrap_or_default();
+                        summary.group_path = group_paths
+                            .get(&connection.id)
+                            .map(|path| path.names.clone())
+                            .unwrap_or_default();
                         summary
                     })
                     .collect::<Vec<_>>();
@@ -630,7 +634,12 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let policy = effective_policy_for_database(&resolved.policy, connection, &database);
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &database,
+        );
         if let Some(session) = &session {
             if session.database != database {
                 return tool_error(
@@ -643,9 +652,10 @@ impl DbxMcpServer {
             }
         }
         if connection.db_type == DatabaseType::MongoDb {
-            let command = match validate_mongo_command(
+            let command = match validate_mongo_command_with_groups(
                 connection,
                 &resolved.policy,
+                &resolved.group_ids,
                 &resolved.database_scope,
                 &database,
                 &request.sql,
@@ -715,6 +725,9 @@ impl DbxMcpServer {
         description = "Execute a SQL script containing multiple statements in one call and return a result per statement. Statements are split with a database-dialect-aware parser, so semicolons inside strings, comments and stored procedures are handled. Stops at the first failing statement unless continue_on_error is true. Pass session_id (from dbx_open_session) when statements must share one connection (e.g. temporary tables, USE/SET). When use_transaction is true and the script has multiple statements, the whole script runs in one transaction and the call returns a single merged result instead of one result per statement (single-statement scripts run normally and return that one result); use_transaction cannot be combined with session_id or continue_on_error, and is rejected when the backend cannot provide a rollbackable transaction or for MySQL-family DDL scripts (DDL implicitly commits and cannot be rolled back)."
     )]
     async fn execute_batch(&self, Parameters(request): Parameters<ExecuteBatchQueryRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_execute_batch").await {
+            return error;
+        }
         let resolved = match self.resolve_connection(&request.selector).await {
             Ok(resolved) => resolved,
             Err(error) => return error,
@@ -772,6 +785,18 @@ impl DbxMcpServer {
         // A pinned session makes USE/SET CATALOG meaningful, so database
         // switching is allowed — unless a hard database scope is configured.
         let allow_database_switch = session.is_some() && self.scope.database.is_none();
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &database,
+        );
+        if let Err(error) = ensure_sql_database_scope(&resolved.database_scope, connection, &database, sql) {
+            return error;
+        }
+        if let Err(error) = ensure_sql_database_execution_scope(&resolved.policy, connection, &database, sql) {
+            return error;
+        }
         // Split with the same dialect-aware splitter the core uses, early, so the
         // option-validity checks below only fire for scripts that actually enter
         // transaction mode (more than one statement). A single-statement script
@@ -824,7 +849,7 @@ impl DbxMcpServer {
         // Classify the whole script as a unit so a single write/DDL statement in
         // the batch fails closed under read-only / dangerous-SQL / production
         // policy, exactly as the Web /api/query/execute-multi route does.
-        let permissions = match validate_sql_policy(connection, &resolved.policy, &database, sql, allow_database_switch)
+        let permissions = match validate_sql_policy(connection, &policy, &database, sql, allow_database_switch)
         {
             Ok(permissions) => permissions,
             Err(error) => return error,
@@ -989,7 +1014,12 @@ impl DbxMcpServer {
             Err(error) => return tool_error("REDIS_COMMAND_BLOCKED", error),
         };
         let safety = classify_command(&argv[0]);
-        let policy = effective_policy_for_database(&resolved.policy, connection, &database.to_string());
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &database.to_string(),
+        );
         let permissions = mcp_permissions(connection, &policy);
         if safety != RedisCommandSafety::Allowed && policy.read_only {
             return tool_error(
@@ -1068,8 +1098,9 @@ impl DbxMcpServer {
             if request.topic.trim().is_empty() {
                 return tool_error("MESSAGE_TOPIC_REQUIRED", "Message topic must not be empty.");
             }
-            let policy = effective_policy_for_database(
+            let policy = effective_policy_for_database_with_groups(
                 &resolved.policy,
+                &resolved.group_ids,
                 connection,
                 connection.database.as_deref().unwrap_or(""),
             );
@@ -1239,9 +1270,13 @@ impl DbxMcpServer {
             Ok(connections) => connections,
             Err(error) => return tool_error("CONNECTION_LOAD_ERROR", error),
         };
+        let group_paths = match self.load_group_paths_for_policy(&policy).await {
+            Ok(paths) => paths,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
         let allowed = connections
             .iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
+            .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
             .cloned()
             .collect::<Vec<_>>();
         let source =
@@ -1326,7 +1361,11 @@ impl DbxMcpServer {
                     }),
             );
         };
-        if !policy_allows_connection(&policy, &target) {
+        let group_paths = match self.load_group_paths_for_policy(&policy).await {
+            Ok(paths) => paths,
+            Err(error) => return backend_tool_error("MCP_POLICY_UNAVAILABLE", error),
+        };
+        if !policy_allows_connection(&policy, group_paths.get(&target.id), &target) {
             return tool_error(
                 "CONNECTION_OUT_OF_SCOPE",
                 format!("Connection \"{}\" is not allowed by DBX MCP settings.", target.id),
@@ -1396,7 +1435,12 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let policy = effective_policy_for_database(&resolved.policy, connection, &database);
+        let policy = effective_policy_for_database_with_groups(
+            &resolved.policy,
+            &resolved.group_ids,
+            connection,
+            &database,
+        );
         if connection.db_type != DatabaseType::MongoDb {
             if let Err(error) = ensure_sql_database_scope(&resolved.database_scope, connection, &database, &request.sql)
             {
@@ -1418,7 +1462,14 @@ impl DbxMcpServer {
         };
         if connection.db_type == DatabaseType::MongoDb {
             if let Err(error) =
-                validate_mongo_command(connection, &resolved.policy, &resolved.database_scope, &database, &request.sql)
+                validate_mongo_command_with_groups(
+                    connection,
+                    &resolved.policy,
+                    &resolved.group_ids,
+                    &resolved.database_scope,
+                    &database,
+                    &request.sql,
+                )
             {
                 return error;
             }
@@ -1462,11 +1513,25 @@ impl DbxMcpServer {
     async fn load_scoped_connections(&self) -> Result<Vec<dbx_core::models::connection::ConnectionConfig>, String> {
         let policy = self.backend.load_mcp_global_policy().await?;
         let connections = self.backend.load_connections().await?;
+        let group_paths = self.load_group_paths_for_policy(&policy).await?;
         Ok(connections
             .into_iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
+            .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
             .filter(|connection| !self.scope.connection_scope_enabled() || self.scope.matches(connection))
             .collect())
+    }
+
+    async fn load_group_paths_for_policy(
+        &self,
+        policy: &McpGlobalPolicy,
+    ) -> Result<HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>, String> {
+        match self.backend.load_connection_group_details().await {
+            Ok(paths) => Ok(paths),
+            Err(error) if dbx_core::mcp_policy::policy_uses_connection_groups(policy) => {
+                Err(format!("MCP_POLICY_UNAVAILABLE: {error}"))
+            }
+            Err(_) => Ok(HashMap::new()),
+        }
     }
 
     async fn load_policy(&self) -> Result<McpGlobalPolicy, CallToolResult> {
@@ -1574,6 +1639,10 @@ impl DbxMcpServer {
 
     async fn resolve_connection(&self, selector: &ConnectionSelector) -> Result<ResolvedConnection, CallToolResult> {
         let policy = self.load_policy().await?;
+        let group_paths = self
+            .load_group_paths_for_policy(&policy)
+            .await
+            .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         let connections =
             self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
         if let Some(id) = selector.connection_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
@@ -1587,13 +1656,13 @@ impl DbxMcpServer {
                     format!("Connection \"{id}\" is outside this DBX AI session scope."),
                 ));
             }
-            if !policy_allows_connection(&policy, &connection) {
+            if !policy_allows_connection(&policy, group_paths.get(&connection.id), &connection) {
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
                     format!("Connection \"{id}\" is not allowed by DBX MCP settings."),
                 ));
             }
-            return Ok(resolved_connection(policy, connection));
+            return Ok(resolved_connection(policy, connection, group_paths.get(id)));
         }
         if self.scope.connection_scope_enabled() {
             let connection = connections
@@ -1608,13 +1677,14 @@ impl DbxMcpServer {
                     ));
                 }
             }
-            if !policy_allows_connection(&policy, &connection) {
+            if !policy_allows_connection(&policy, group_paths.get(&connection.id), &connection) {
                 return Err(tool_error(
                     "CONNECTION_OUT_OF_SCOPE",
                     "The DBX AI session scope is outside the global MCP connection allowlist.",
                 ));
             }
-            return Ok(resolved_connection(policy, connection));
+            let path = group_paths.get(&connection.id);
+            return Ok(resolved_connection(policy, connection, path));
         }
         let Some(name) = selector.connection_name.as_deref().map(str::trim).filter(|name| !name.is_empty()) else {
             return Err(tool_error("CONNECTION_NOT_FOUND", "Either connection_id or connection_name is required."));
@@ -1623,7 +1693,7 @@ impl DbxMcpServer {
             connections.into_iter().filter(|connection| connection.name.eq_ignore_ascii_case(name)).collect::<Vec<_>>();
         let allowed = matching
             .iter()
-            .filter(|connection| policy_allows_connection(&policy, connection))
+            .filter(|connection| policy_allows_connection(&policy, group_paths.get(&connection.id), connection))
             .cloned()
             .collect::<Vec<_>>();
         match allowed.as_slice() {
@@ -1634,7 +1704,7 @@ impl DbxMcpServer {
                 "CONNECTION_OUT_OF_SCOPE",
                 format!("Connection \"{name}\" is not allowed by DBX MCP settings."),
             )),
-            [connection] => Ok(resolved_connection(policy, connection.clone())),
+            [connection] => Ok(resolved_connection(policy, connection.clone(), group_paths.get(&connection.id))),
             _ => Err(tool_error("AMBIGUOUS_CONNECTION", ambiguous_connections(name, &allowed))),
         }
     }
@@ -1751,9 +1821,10 @@ fn agent_result(result: dbx_core::agent_events::ToolResult) -> CallToolResult {
 
 fn policy_allows_connection(
     policy: &McpGlobalPolicy,
+    group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
     connection: &dbx_core::models::connection::ConnectionConfig,
 ) -> bool {
-    policy.allowed_connection_ids.as_ref().is_none_or(|allowed| allowed.iter().any(|id| id == &connection.id))
+    dbx_core::mcp_policy::policy_allows_connection(policy, group_path, &connection.id)
 }
 
 fn policy_allows_tool(policy: &McpGlobalPolicy, tool_name: &str) -> bool {
@@ -1777,9 +1848,11 @@ fn database_scope_for_connection(
 fn resolved_connection(
     policy: McpGlobalPolicy,
     connection: dbx_core::models::connection::ConnectionConfig,
+    group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
 ) -> ResolvedConnection {
     let database_scope = database_scope_for_connection(&policy, &connection);
-    ResolvedConnection { connection, policy, database_scope }
+    let group_ids = group_path.map(|path| path.ids.clone()).unwrap_or_default();
+    ResolvedConnection { connection, policy, database_scope, group_ids }
 }
 
 #[allow(clippy::result_large_err)]
@@ -1839,9 +1912,23 @@ fn effective_policy_for_database(
     connection: &dbx_core::models::connection::ConnectionConfig,
     database: &str,
 ) -> McpGlobalPolicy {
+    effective_policy_for_database_with_groups(policy, &[], connection, database)
+}
+
+fn effective_policy_for_database_with_groups(
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    database: &str,
+) -> McpGlobalPolicy {
     let mut policy = policy.clone();
     (policy.read_only, policy.allow_dangerous_sql) =
-        dbx_core::mcp_policy::effective_database_execution_policy(&policy, &connection.id, database);
+        dbx_core::mcp_policy::effective_database_execution_policy_with_groups(
+            &policy,
+            group_ids,
+            &connection.id,
+            database,
+        );
     // This returned value is carried through the request only; retaining a
     // complete policy document here could accidentally be reused for another
     // connection by a future caller.
@@ -1973,6 +2060,18 @@ fn validate_mongo_command(
     database: &str,
     source: &str,
 ) -> Result<MongoCommand, CallToolResult> {
+    validate_mongo_command_with_groups(connection, policy, &[], database_scope, database, source)
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_mongo_command_with_groups(
+    connection: &dbx_core::models::connection::ConnectionConfig,
+    policy: &McpGlobalPolicy,
+    group_ids: &[String],
+    database_scope: &DatabaseScope,
+    database: &str,
+    source: &str,
+) -> Result<MongoCommand, CallToolResult> {
     let command = mongo::parse(source).map_err(|error| {
         tool_error(
             "QUERY_ERROR",
@@ -2001,7 +2100,7 @@ fn validate_mongo_command(
             ensure_database_in_scope(database_scope, &target_database)?;
         }
     }
-    let effective_policy = effective_policy_for_database(policy, connection, database);
+    let effective_policy = effective_policy_for_database_with_groups(policy, group_ids, connection, database);
     let permissions = mcp_permissions(connection, &effective_policy);
     let production_database = match &command {
         MongoCommand::Aggregate { pipeline, .. } => {
@@ -2253,7 +2352,12 @@ mod tests {
     }
 
     fn resolved_connection_for_test(connection: ConnectionConfig) -> ResolvedConnection {
-        ResolvedConnection { connection, policy: McpGlobalPolicy::default(), database_scope: DatabaseScope::All }
+        ResolvedConnection {
+            connection,
+            policy: McpGlobalPolicy::default(),
+            database_scope: DatabaseScope::All,
+            group_ids: Vec::new(),
+        }
     }
 
     fn result_text(result: &CallToolResult) -> &str {
@@ -2720,6 +2824,7 @@ mod tests {
             connection: sql,
             policy: McpGlobalPolicy::default(),
             database_scope: DatabaseScope::Selected(vec!["reporting".to_string()]),
+            group_ids: Vec::new(),
         };
         let server = DbxMcpServer::with_runtime_options(Arc::new(FakeBackend::default()), McpScope::default(), false);
         assert_eq!(server.resolve_database(Some("reporting".to_string()), &selected).unwrap(), "reporting");
@@ -2730,6 +2835,7 @@ mod tests {
             connection: connection("redis", "redis", "redis", "0"),
             policy: McpGlobalPolicy::default(),
             database_scope: DatabaseScope::Selected(vec!["2".to_string()]),
+            group_ids: Vec::new(),
         };
         assert_eq!(server.resolve_redis_database(Some(2), &redis).unwrap(), 2);
         let error = server.resolve_redis_database(Some(3), &redis).unwrap_err();

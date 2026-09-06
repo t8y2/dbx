@@ -2011,6 +2011,8 @@ export default withEnglishFallback({
     rowsPerPageShort: " 行",
     columnDetails: "列詳細",
     tableInfo: "テーブル情報",
+    pinTableInfo: "テーブル情報パネルを固定",
+    unpinTableInfo: "テーブル情報パネルの固定を解除",
     tableInfoColumns: "列",
     tableInfoIndexes: "インデックス",
     columnPrimaryIndex: "主キーインデックス",

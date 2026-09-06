@@ -2004,6 +2004,8 @@ export default withEnglishFallback({
     rowsPerPageShort: " 筆/頁",
     columnDetails: "欄位詳情",
     tableInfo: "資料表屬性",
+    pinTableInfo: "固定資料表屬性面板",
+    unpinTableInfo: "取消固定資料表屬性面板",
     tableInfoColumns: "欄位",
     tableInfoIndexes: "索引",
     columnPrimaryIndex: "主鍵索引",

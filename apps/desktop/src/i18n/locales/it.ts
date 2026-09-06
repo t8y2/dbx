@@ -1999,6 +1999,8 @@ export default withEnglishFallback({
     rowsPerPageShort: " righe",
     columnDetails: "Dettagli Colonna",
     tableInfo: "Informazioni Tabella",
+    pinTableInfo: "Blocca il pannello delle informazioni sulla tabella",
+    unpinTableInfo: "Sblocca il pannello delle informazioni sulla tabella",
     tableInfoColumns: "Colonne",
     tableInfoIndexes: "Indici",
     columnPrimaryIndex: "Indice chiave primaria",

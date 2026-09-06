@@ -2076,6 +2076,8 @@ export default withEnglishFallback({
     rowsPerPageShort: " 行/页",
     columnDetails: "列详情",
     tableInfo: "表属性",
+    pinTableInfo: "固定表属性面板",
+    unpinTableInfo: "取消固定表属性面板",
     tableInfoColumns: "字段",
     tableInfoIndexes: "索引",
     columnPrimaryIndex: "主键索引",

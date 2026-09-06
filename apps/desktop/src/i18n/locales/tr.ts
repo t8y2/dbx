@@ -2152,6 +2152,8 @@ export default withEnglishFallback({
     rowsPerPageShort: " satır",
     columnDetails: "Sütun Ayrıntıları",
     tableInfo: "Tablo Bilgisi",
+    pinTableInfo: "Tablo bilgileri panelini sabitle",
+    unpinTableInfo: "Tablo bilgileri panelinin sabitlemesini kaldır",
     tableInfoColumns: "Sütunlar",
     tableInfoIndexes: "Dizinler",
     columnPrimaryIndex: "Birincil anahtar dizini",

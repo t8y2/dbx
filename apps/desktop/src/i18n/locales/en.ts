@@ -2152,6 +2152,8 @@ export default {
     rowsPerPageShort: " rows",
     columnDetails: "Column Details",
     tableInfo: "Table Info",
+    pinTableInfo: "Pin table info panel",
+    unpinTableInfo: "Unpin table info panel",
     tableInfoColumns: "Columns",
     tableInfoIndexes: "Indexes",
     columnPrimaryIndex: "Primary key index",

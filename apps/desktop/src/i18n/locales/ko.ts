@@ -1975,6 +1975,8 @@ export default withEnglishFallback({
     rowsPerPageShort: "행",
     columnDetails: "컬럼 상세",
     tableInfo: "테이블 정보",
+    pinTableInfo: "테이블 정보 패널 고정",
+    unpinTableInfo: "테이블 정보 패널 고정 해제",
     tableInfoColumns: "컬럼",
     tableInfoIndexes: "인덱스",
     columnPrimaryIndex: "기본 키 인덱스",

@@ -2291,6 +2291,7 @@ defineExpose({
           :execution-database="activeDataTabExecutionDatabase"
           :table-meta="activeDataTabTableMeta"
           :table-info-tab="activeTab.tableInfoTab"
+          :auto-show-table-info="settingsStore.editorSettings.tableInfoDrawerPinned"
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
           :total-row-count="activeTab.resultTotalRowCount"

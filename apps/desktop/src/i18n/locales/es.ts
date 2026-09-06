@@ -2012,6 +2012,8 @@ export default withEnglishFallback({
     searchColumn: "Buscar columna/comentario...",
     noColumnsFound: "No se encontraron columnas",
     tableInfo: "Información de tabla",
+    pinTableInfo: "Fijar el panel de información de la tabla",
+    unpinTableInfo: "Desfijar el panel de información de la tabla",
     tableInfoColumns: "Columnas",
     tableInfoIndexes: "Índices",
     columnPrimaryIndex: "Índice de clave primaria",

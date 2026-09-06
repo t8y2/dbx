@@ -1881,6 +1881,28 @@ export async function saveEditorSettings(settings: unknown): Promise<void> {
   await saveBrowserAppState("editor_settings", settings);
 }
 
+// Background images are desktop-only: the web backend has no local data dir.
+export interface BackgroundImageInfo {
+  storedPath: string;
+  fileName: string;
+}
+
+export async function saveBackgroundImage(_sourcePath: string): Promise<BackgroundImageInfo> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function clearBackgroundImage(_storedPath: string): Promise<void> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function readBackgroundImage(_storedPath: string): Promise<string> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function checkBackgroundImage(_storedPath: string): Promise<boolean> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
 export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> {
   const value = await loadBrowserAppState("open_tabs");
   if (!value || typeof value !== "object") return null;

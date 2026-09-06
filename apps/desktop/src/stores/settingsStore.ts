@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
 import { setDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
@@ -681,6 +682,7 @@ export interface EditorSettings {
   uiFontFamily: string;
   uiScale: number;
   theme: EditorTheme;
+  backgroundImage: BackgroundImageSettings;
   customThemeColors: CustomThemeColors;
   customThemes: CustomTheme[];
   activeCustomThemeId: string;
@@ -910,6 +912,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   uiFontFamily: DEFAULT_UI_FONT_FAMILY,
   uiScale: 1,
   theme: "app",
+  backgroundImage: defaultBackgroundImageSettings(),
   customThemeColors: { ...DEFAULT_CUSTOM_THEME_COLORS },
   customThemes: [...DEFAULT_CUSTOM_THEMES],
   activeCustomThemeId: "default",
@@ -1534,6 +1537,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     clickTableNavigationTarget: normalizeClickTableNavigationTarget(settings.clickTableNavigationTarget),
     completionTriggerMode: normalizeCompletionTriggerMode(settings.completionTriggerMode),
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
+    backgroundImage: normalizeBackgroundImageSettings(settings.backgroundImage),
   };
 }
 
@@ -2035,6 +2039,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.fontSize !== undefined) editorSettings.value.fontSize = partial.fontSize;
     if (partial.uiFontFamily !== undefined) editorSettings.value.uiFontFamily = normalizeFontFamily(partial.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily);
     if (partial.uiScale !== undefined) editorSettings.value.uiScale = normalizeUiScale(partial.uiScale);
+    if (partial.backgroundImage !== undefined) editorSettings.value.backgroundImage = normalizeBackgroundImageSettings(partial.backgroundImage);
     if (partial.theme !== undefined) editorSettings.value.theme = partial.theme;
     if (partial.customThemeColors !== undefined) {
       editorSettings.value.customThemeColors = {

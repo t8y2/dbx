@@ -131,6 +131,9 @@ import {
   forgetWebdavSyncSecretsPassphrase,
   forgetWebdavSavedPassword,
   getAppSupportInfo,
+  checkBackgroundImage,
+  clearBackgroundImage,
+  saveBackgroundImage,
   loadMaxAgentTurns,
   saveMaxAgentTurns,
   loadMaxRetries,
@@ -193,6 +196,7 @@ import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepp
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_CUSTOM_UI_COLOR_DEFS, APP_THEME_PALETTES, type AppCornerStyle, type AppCustomUiColors, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
+import { BACKGROUND_IMAGE_STORAGE_LIMIT_BYTES, defaultBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -380,6 +384,12 @@ const editTableFontFamily = ref(settingsStore.editorSettings.tableFontFamily);
 const editUiFontFamily = ref(settingsStore.editorSettings.uiFontFamily);
 const editUiScale = ref(settingsStore.editorSettings.uiScale);
 const editTheme = ref(settingsStore.editorSettings.theme);
+const editBackgroundImage = ref<BackgroundImageSettings>(cloneBackgroundImageDraft(settingsStore.editorSettings.backgroundImage));
+const backgroundImageTransparencyPercent = computed(() => Math.round((1 - editBackgroundImage.value.opacity) * 100));
+const backgroundImageFileMissing = ref(false);
+// Set when the draft clears a configured image; the stored copy is only
+// deleted once the change is actually applied.
+let pendingBackgroundImageCleanup: string | null = null;
 const editCustomThemes = ref<CustomTheme[]>([...settingsStore.editorSettings.customThemes]);
 const editActiveCustomThemeId = ref(settingsStore.editorSettings.activeCustomThemeId);
 const editDataGridTypeColorSchemes = ref<DataGridTypeColorScheme[]>(cloneDataGridTypeColorSchemes(settingsStore.editorSettings.dataGridTypeColorSchemes));
@@ -622,6 +632,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     uiFontFamily: editUiFontFamily.value,
     uiScale: editUiScale.value,
     theme: editTheme.value,
+    backgroundImage: editBackgroundImage.value,
     customThemes: editCustomThemes.value,
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
@@ -721,6 +732,80 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
 
 const editEditorSettingsBase = ref<EditorSettingsDraft>(editorSettingsDraftFromSettings(settingsStore.editorSettings));
 const hasEditorDraftChanges = computed(() => editorSettingsDraftChanged(currentEditorSettingsDraft(), editEditorSettingsBase.value));
+
+// --- Background image draft state ---
+function cloneBackgroundImageDraft(settings: BackgroundImageSettings): BackgroundImageSettings {
+  return JSON.parse(JSON.stringify(settings)) as BackgroundImageSettings;
+}
+
+async function checkBackgroundImageFileExists() {
+  const filePath = editBackgroundImage.value.filePath;
+  if (!filePath) {
+    backgroundImageFileMissing.value = false;
+    return;
+  }
+  try {
+    backgroundImageFileMissing.value = !(await checkBackgroundImage(filePath));
+  } catch {
+    backgroundImageFileMissing.value = true;
+  }
+}
+
+async function pickBackgroundImage() {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: t("settings.backgroundImageFilterName"), extensions: ["png", "jpg", "jpeg", "webp", "bmp", "gif"] }],
+    });
+    if (Array.isArray(selected) || typeof selected !== "string" || !selected) return;
+    try {
+      const { stat } = await import("@tauri-apps/plugin-fs");
+      const metadata = await stat(selected);
+      if (metadata.size > BACKGROUND_IMAGE_STORAGE_LIMIT_BYTES) {
+        toast(t("settings.backgroundImageTooLarge"), 4000);
+        return;
+      }
+    } catch {
+      // The Rust command re-validates; keep going so it can produce the error.
+    }
+    const info = await saveBackgroundImage(selected);
+    editBackgroundImage.value = {
+      ...defaultBackgroundImageSettings(),
+      opacity: editBackgroundImage.value.opacity,
+      blur: editBackgroundImage.value.blur,
+      filePath: info.storedPath,
+      fileName: info.fileName,
+    };
+    backgroundImageFileMissing.value = false;
+  } catch (error) {
+    // Surface every failure (missing command in a stale binary, fs scope, copy
+    // errors): Tauri rejections are plain strings, so String() keeps the detail.
+    console.error("[dbx] background image selection failed", error);
+    toast(`${t("settings.backgroundImageSaveFailed")}: ${error instanceof Error ? error.message : String(error)}`, 6000);
+  }
+}
+
+function clearBackgroundImageDraft() {
+  const previousPath = editBackgroundImage.value.filePath;
+  editBackgroundImage.value = {
+    ...defaultBackgroundImageSettings(),
+    opacity: editBackgroundImage.value.opacity,
+    blur: editBackgroundImage.value.blur,
+  };
+  backgroundImageFileMissing.value = false;
+  if (previousPath) pendingBackgroundImageCleanup = previousPath;
+}
+
+// Slider shows surface transparency (100% = wallpaper most visible); the stored
+// field stays surface opacity, so the value is inverted on the way in/out.
+function updateBackgroundImageTransparency(transparencyPercent: number) {
+  editBackgroundImage.value = { ...editBackgroundImage.value, opacity: Math.min(1, Math.max(0.05, 1 - transparencyPercent / 100)) };
+}
+
+function updateBackgroundImageBlur(value: number) {
+  editBackgroundImage.value = { ...editBackgroundImage.value, blur: Math.min(20, Math.max(0, Math.round(value))) };
+}
 
 const snippetDialogOpen = ref(false);
 const snippetEditingId = ref<string | null>(null);
@@ -1024,6 +1109,8 @@ function syncEditorSettingsDraftFromStore() {
   editUiFontFamily.value = settingsStore.editorSettings.uiFontFamily;
   editUiScale.value = settingsStore.editorSettings.uiScale;
   editTheme.value = settingsStore.editorSettings.theme;
+  editBackgroundImage.value = cloneBackgroundImageDraft(settingsStore.editorSettings.backgroundImage);
+  pendingBackgroundImageCleanup = null;
   editCustomThemes.value = [...settingsStore.editorSettings.customThemes];
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
@@ -1231,6 +1318,11 @@ async function persistSettings() {
     settingsStore.updateEditorSettings(editorSettingsPatch);
     await settingsStore.persistEditorSettings();
     editEditorSettingsBase.value = editorSettingsDraftFromSettings(settingsStore.editorSettings);
+  }
+  if (pendingBackgroundImageCleanup) {
+    const cleanupPath = pendingBackgroundImageCleanup;
+    pendingBackgroundImageCleanup = null;
+    void clearBackgroundImage(cleanupPath).catch(() => {});
   }
   const metadataCacheMaxMemoryMb = normalizeMetadataCacheMemoryMb(editMetadataCacheMaxMemoryMb.value);
   await settingsStore.updateDesktopSettings({
@@ -3231,6 +3323,7 @@ onMounted(() => {
   void refreshWebDavPasswordStatus();
   checkLayoutDescTruncation();
   initTruncationObservers();
+  void checkBackgroundImageFileExists();
 });
 
 onUnmounted(() => {
@@ -5579,6 +5672,42 @@ onUnmounted(() => {
                       </div>
                     </div>
                   </Button>
+                </div>
+              </div>
+
+              <div v-if="!isWeb" class="settings-appearance-group" data-background-image-settings>
+                <Label>{{ t("settings.backgroundImage") }}</Label>
+                <p class="text-xs text-muted-foreground">{{ t("settings.backgroundImageDescription") }}</p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <Button type="button" variant="outline" size="sm" class="h-8" @click="pickBackgroundImage">
+                    {{ t("settings.backgroundImageChoose") }}
+                  </Button>
+                  <Button v-if="editBackgroundImage.filePath" type="button" variant="outline" size="sm" class="h-8" @click="clearBackgroundImageDraft">
+                    {{ t("settings.backgroundImageClear") }}
+                  </Button>
+                  <span v-if="editBackgroundImage.fileName" class="min-w-0 truncate text-xs text-muted-foreground" :title="editBackgroundImage.fileName">
+                    {{ editBackgroundImage.fileName }}
+                  </span>
+                  <span v-else class="text-xs text-muted-foreground">{{ t("settings.backgroundImageNone") }}</span>
+                </div>
+                <p v-if="backgroundImageFileMissing" class="text-xs text-destructive">
+                  {{ t("settings.backgroundImageMissing") }}
+                </p>
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between gap-2">
+                      <Label for="background-image-transparency" class="text-xs text-muted-foreground">{{ t("settings.backgroundImageTransparency") }}</Label>
+                      <span class="text-xs text-muted-foreground">{{ backgroundImageTransparencyPercent }}%</span>
+                    </div>
+                    <input id="background-image-transparency" type="range" min="0" max="95" step="1" :value="backgroundImageTransparencyPercent" class="w-full accent-primary" @input="updateBackgroundImageTransparency(Number(($event.target as HTMLInputElement).value))" />
+                  </div>
+                  <div class="space-y-1">
+                    <div class="flex items-center justify-between gap-2">
+                      <Label for="background-image-blur" class="text-xs text-muted-foreground">{{ t("settings.backgroundImageBlur") }}</Label>
+                      <span class="text-xs text-muted-foreground">{{ editBackgroundImage.blur }}px</span>
+                    </div>
+                    <input id="background-image-blur" type="range" min="0" max="20" step="1" :value="editBackgroundImage.blur" class="w-full accent-primary" @input="updateBackgroundImageBlur(Number(($event.target as HTMLInputElement).value))" />
+                  </div>
                 </div>
               </div>
 

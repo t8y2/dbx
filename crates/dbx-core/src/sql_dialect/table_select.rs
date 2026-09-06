@@ -488,7 +488,7 @@ pub(crate) fn quote_table_data_identifier(
         return quote_table_identifier(database_type, name);
     };
     if matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss | DatabaseType::Postgres)) {
-        return quote_gaussdb_jdbc_identifier(name, quote);
+        return quote_gaussdb_jdbc_identifier(name, quote, database_type);
     }
     if quote.is_empty() {
         return name.to_string();

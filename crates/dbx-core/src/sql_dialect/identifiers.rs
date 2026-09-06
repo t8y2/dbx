@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::models::connection::DatabaseType;
 use percent_encoding::percent_decode_str;
 
@@ -172,7 +174,11 @@ pub(crate) fn quote_iris_identifier(name: &str, identifier_quote: Option<&str>) 
     format!("{quote}{}{quote}", name.replace(quote, &format!("{quote}{quote}")))
 }
 
-pub(crate) fn quote_gaussdb_jdbc_identifier(name: &str, identifier_quote: &str) -> String {
+pub(crate) fn quote_gaussdb_jdbc_identifier(
+    name: &str,
+    identifier_quote: &str,
+    database_type: Option<DatabaseType>,
+) -> String {
     if is_explicitly_quoted_identifier(name) {
         return name.to_string();
     }
@@ -182,6 +188,8 @@ pub(crate) fn quote_gaussdb_jdbc_identifier(name: &str, identifier_quote: &str) 
     }
     let requires_quote = !is_simple_lower_identifier(name)
         || is_postgres_reserved_identifier(name)
+        || (matches!(database_type, Some(DatabaseType::Gaussdb | DatabaseType::OpenGauss))
+            && is_gaussdb_only_reserved_identifier(name))
         || (quote == "`" && is_mysql_only_reserved_identifier(name));
     if !requires_quote {
         return name.to_string();
@@ -312,6 +320,57 @@ fn is_postgres_reserved_identifier(name: &str) -> bool {
     )
 }
 
+/// Words GaussDB/openGauss reserve that plain PostgreSQL does not, so they
+/// are missed by [`is_postgres_reserved_identifier`] alone (t8y2/dbx#6283).
+/// For example `compact` is a bare lowercase identifier that passes
+/// [`is_simple_lower_identifier`] and isn't a Postgres keyword, but GaussDB
+/// reserves it and rejects it unquoted in DDL.
+///
+/// This is the static fallback for when no live `pg_get_keywords()` catalog
+/// could be probed from the target (see `AppState::gaussdb_reserved_keywords`).
+/// The list was cross-checked against a writable openGauss 5.0.0 instance's
+/// own `pg_get_keywords()` — the authoritative source per openGauss's docs —
+/// by diffing against its full 653-row catalog: every word below has
+/// `catcode` `R` (`reserved`) or `T` (`reserved, can be function or type
+/// name`) there. Words from Huawei's GaussDB(DWS) keyword reference that
+/// turned out *not* to be reserved on core GaussDB/openGauss (`hot`,
+/// `nlssort`, `warmup` aren't keywords at all; `fenced`, `internal`, `plan`,
+/// `tsfield`, `tstag`, `tstime` are `unreserved`) are deliberately absent:
+/// quoting them would reintroduce the case-locking bug this exists to fix.
+/// `compact` was additionally confirmed by running `CREATE TABLE ... (compact
+/// int)` unquoted, which fails with `ERROR: syntax error at or near "compact"`.
+///
+/// Note this snapshot is version-specific — e.g. `maxvalue` is reserved on
+/// openGauss 5.0 but unreserved on current openGauss — which is exactly why
+/// the live catalog takes precedence whenever it is available.
+fn is_gaussdb_only_reserved_identifier(name: &str) -> bool {
+    matches!(
+        name,
+        "authid"
+            | "buckets"
+            | "compact"
+            | "csn"
+            | "deltamerge"
+            | "excluded"
+            | "groupparent"
+            | "hdfsdirectory"
+            | "less"
+            | "maxvalue"
+            | "minus"
+            | "modify"
+            | "nocycle"
+            | "performance"
+            | "procedure"
+            | "recyclebin"
+            | "reject"
+            | "rownum"
+            | "shrink"
+            | "sysdate"
+            | "timecapsule"
+            | "verify"
+    )
+}
+
 fn is_mysql_only_reserved_identifier(name: &str) -> bool {
     matches!(
         name,
@@ -415,29 +474,68 @@ pub(crate) fn quote_transfer_identifier(name: &str, database_type: &DatabaseType
     }
 }
 
-pub(crate) fn transfer_column_identifier(
-    name: &str,
-    database_type: &DatabaseType,
-    quote_target_column_names: bool,
-) -> String {
-    if quote_target_column_names
-        || !matches!(database_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss)
-        || !is_simple_unquoted_identifier(name)
-        || is_postgres_reserved_identifier(&name.to_ascii_lowercase())
-    {
-        quote_transfer_identifier(name, database_type)
-    } else {
-        name.to_string()
+/// How data-transfer *column* identifiers are quoted on the target. Table and
+/// schema names are unaffected and always go through
+/// [`quote_transfer_identifier`].
+#[derive(Clone, Copy)]
+pub(crate) struct TransferColumnQuoting<'a> {
+    /// `TransferRequest::quote_target_column_names`. `true` (the default)
+    /// quotes every column name exactly as the source spelled it.
+    pub(crate) quote_target_column_names: bool,
+    /// Live `pg_get_keywords()` reserved-word catalog for the GaussDB/openGauss
+    /// target server (see `AppState::gaussdb_reserved_keywords`). Only
+    /// consulted when `quote_target_column_names` is `false` on such a target;
+    /// `None` falls back to the static keyword lists.
+    pub(crate) gaussdb_keywords: Option<&'a HashSet<String>>,
+}
+
+impl TransferColumnQuoting<'static> {
+    /// The default: quote every column name.
+    pub(crate) const QUOTED: Self = Self { quote_target_column_names: true, gaussdb_keywords: None };
+}
+
+impl<'a> TransferColumnQuoting<'a> {
+    pub(crate) fn new(quote_target_column_names: bool, gaussdb_keywords: Option<&'a HashSet<String>>) -> Self {
+        Self { quote_target_column_names, gaussdb_keywords }
     }
 }
 
-fn is_simple_unquoted_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
+/// Quote a transfer column name for the target.
+///
+/// With `quote_target_column_names` (the default) every name is quoted
+/// as-is. When the user opts out of that on a GaussDB/openGauss target
+/// (t8y2/dbx#6205), a column is left unquoted only if it is safe to: a plain
+/// lowercase identifier that is not a reserved word on that server. Anything
+/// else — mixed or upper case, special characters, reserved words — keeps
+/// its quotes, so the name can never be silently case-folded by the server
+/// or produce invalid DDL. This matches the heuristic already used for
+/// GaussDB JDBC identifier quoting in [`quote_gaussdb_jdbc_identifier`].
+///
+/// The reserved-word check prefers the live `pg_get_keywords()` catalog of
+/// the actual target server when one is available, and uses it *alone*: a
+/// GaussDB/openGauss server reports its complete reserved-word set for its
+/// build, Postgres-inherited words included, so unioning a static list back
+/// on top could force-quote a word that server does not reserve (e.g.
+/// `maxvalue`, reserved on openGauss 5.0 but not on current openGauss).
+/// Without a live catalog it falls back to the static PostgreSQL list plus
+/// [`is_gaussdb_only_reserved_identifier`].
+pub(crate) fn transfer_column_identifier(
+    name: &str,
+    database_type: &DatabaseType,
+    quoting: TransferColumnQuoting<'_>,
+) -> String {
+    if quoting.quote_target_column_names || !matches!(database_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) {
+        return quote_transfer_identifier(name, database_type);
+    }
+    let is_reserved = match quoting.gaussdb_keywords {
+        Some(live) => live.contains(name),
+        None => is_postgres_reserved_identifier(name) || is_gaussdb_only_reserved_identifier(name),
     };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    if is_simple_lower_identifier(name) && !is_reserved {
+        name.to_string()
+    } else {
+        quote_transfer_identifier(name, database_type)
+    }
 }
 
 /// Qualified table name for transfer SQL.

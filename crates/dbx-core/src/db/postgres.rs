@@ -11,7 +11,7 @@ use rustls::server::ParsedCertificate;
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
@@ -56,6 +56,82 @@ pub(crate) fn gaussdb_identifier_quote_for_compatibility_mode(compatibility_mode
         "M" | "B" | "MYSQL" => Some("`"),
         "A" | "PG" | "ORA" | "POSTGRESQL" => Some("\""),
         _ => None,
+    }
+}
+
+/// `pg_get_keywords()` catcode `R` (reserved) or `T` (reserved, can be
+/// function or type name) — the same criterion used to hand-derive the
+/// static GaussDB-only reserved-word list this function supersedes with a
+/// live, per-server-version result (t8y2/dbx#6283 follow-up).
+pub(crate) const GAUSSDB_RESERVED_KEYWORDS_SQL: &str = "SELECT word FROM pg_get_keywords() WHERE catcode IN ('R','T')";
+
+/// Outcome of a live `pg_get_keywords()` probe. Distinguishes failures that
+/// are worth caching (the outcome will be identical on retry — e.g. the
+/// server actually answered with an error, such as permission denied or an
+/// undefined function, or the query came back empty) from failures that are
+/// likely transient (couldn't even check out a connection, the probe timed
+/// out, or the connection dropped mid-query with no server-side response)
+/// and should be retried rather than pinned to "unavailable" for the rest of
+/// the connection's lifetime (t8y2/dbx#6283 follow-up).
+pub enum GaussdbReservedKeywordsProbe {
+    Available(HashSet<String>),
+    /// The query ran and either failed (e.g. permission denied on
+    /// `pg_get_keywords()`, or an engine that doesn't have the function) or
+    /// returned zero rows — a deterministic outcome for this server, safe to
+    /// cache so a multi-table transfer job doesn't re-pay a checkout + query
+    /// round trip per table for a server that will never answer.
+    NotSupported,
+    /// Couldn't check out a connection, or the probe timed out before the
+    /// server responded — likely transient, must NOT be cached.
+    Retryable,
+}
+
+/// SQLSTATEs that mean the *connection/session* failed rather than that the
+/// query is deterministically unsupported: query cancellation, server
+/// shutdown, or any class-08 connection exception. Retrying against the same
+/// server can still succeed, so these must not be classified `NotSupported`
+/// (t8y2/dbx#6283 follow-up).
+fn is_deterministic_gaussdb_probe_failure(db_error: &tokio_postgres::error::DbError) -> bool {
+    let code = db_error.code().code();
+    !matches!(code, "57014" | "57P01" | "57P02" | "57P03") && !code.starts_with("08")
+}
+
+/// Live catalog of GaussDB/openGauss reserved keywords for this exact server,
+/// so identifier quoting reflects the actual target version instead of a
+/// hand-diffed static list that can drift across releases (e.g. `maxvalue` is
+/// reserved on openGauss 5.0 but not on current openGauss).
+pub async fn gaussdb_reserved_keywords(pool: &Pool) -> GaussdbReservedKeywordsProbe {
+    let timeout = super::connection_timeout();
+    let client = match checkout_postgres_client(pool, None, timeout).await {
+        Ok(client) => client,
+        Err(_) => return GaussdbReservedKeywordsProbe::Retryable,
+    };
+    let query_result = match tokio::time::timeout(timeout, client.query(GAUSSDB_RESERVED_KEYWORDS_SQL, &[])).await {
+        Ok(result) => result,
+        Err(_) => return GaussdbReservedKeywordsProbe::Retryable,
+    };
+    let rows = match query_result {
+        Ok(rows) => rows,
+        // `as_db_error()` is `Some` only when the server actually parsed the
+        // query and returned a SQLSTATE error (e.g. undefined_function,
+        // insufficient_privilege) — a deterministic outcome for this server,
+        // safe to cache. Any other error (connection closed, I/O, TLS) means
+        // the server never got to respond, which is transient and must not
+        // be cached as "unsupported". A subset of SQLSTATE errors (query
+        // cancellation, server shutdown, class-08 connection exceptions) are
+        // themselves transient even though the server did respond, so those
+        // fall through to `Retryable` too.
+        Err(error) if error.as_db_error().is_some_and(is_deterministic_gaussdb_probe_failure) => {
+            return GaussdbReservedKeywordsProbe::NotSupported;
+        }
+        Err(_) => return GaussdbReservedKeywordsProbe::Retryable,
+    };
+    let words: HashSet<String> =
+        rows.iter().filter_map(|row| row.try_get::<_, String>(0).ok()).map(|w| w.to_ascii_lowercase()).collect();
+    if words.is_empty() {
+        GaussdbReservedKeywordsProbe::NotSupported
+    } else {
+        GaussdbReservedKeywordsProbe::Available(words)
     }
 }
 
@@ -8522,9 +8598,15 @@ mod tests {
     }
 
     fn postgres_error_response(message: &str) -> Vec<u8> {
+        postgres_error_response_with_code("0A000", message)
+    }
+
+    fn postgres_error_response_with_code(code: &str, message: &str) -> Vec<u8> {
         let mut payload = Vec::new();
         payload.extend_from_slice(b"SERROR\0");
-        payload.extend_from_slice(b"C0A000\0");
+        payload.push(b'C');
+        payload.extend_from_slice(code.as_bytes());
+        payload.push(0);
         payload.push(b'M');
         payload.extend_from_slice(message.as_bytes());
         payload.extend_from_slice(b"\0\0");
@@ -8534,6 +8616,108 @@ mod tests {
         response.extend_from_slice(&payload);
         response.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
         response
+    }
+
+    /// What the mock backend does when it receives the `gaussdb_reserved_keywords()`
+    /// probe query, after completing the startup handshake and the best-effort
+    /// connection-identity query issued by `NoticeCapturingConnect::connect`.
+    enum GaussdbProbeMockResponse {
+        /// Respond with a SQLSTATE error, as a real server would for a
+        /// deterministic (e.g. permission-denied) or transient (e.g.
+        /// query-canceled) failure.
+        Error(&'static str),
+        /// Drop the connection without responding, simulating the connection
+        /// dying mid-query with no server-side response.
+        Disconnect,
+    }
+
+    async fn serve_gaussdb_probe(listener: TcpListener, probe_response: GaussdbProbeMockResponse) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let startup_len = socket.read_u32().await.unwrap();
+        assert!(startup_len >= 8);
+        let mut startup = vec![0_u8; startup_len as usize - 4];
+        socket.read_exact(&mut startup).await.unwrap();
+        assert_eq!(&startup[..4], &[0, 3, 0, 0]);
+        socket
+            .write_all(&[
+                b'R', 0, 0, 0, 8, 0, 0, 0, 0, // AuthenticationOk
+                b'K', 0, 0, 0, 12, 0, 0, 0, 1, 0, 0, 0, 2, // BackendKeyData
+                b'Z', 0, 0, 0, 5, b'I', // ReadyForQuery
+            ])
+            .await
+            .unwrap();
+
+        let mut request = [0_u8; 1024];
+
+        // `NoticeCapturingConnect::connect` issues its own best-effort
+        // identity query right after the handshake, once per physical
+        // connection.
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the connect-time identity query");
+        socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
+
+        // `checkout_postgres_client` resolves the notice-attribution identity
+        // again on first checkout via `resolve_postgres_client_key`, which is
+        // a separate best-effort query independent of the one above.
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the checkout-time identity query");
+        socket.write_all(&postgres_error_response("identity probe unavailable")).await.unwrap();
+
+        let read = socket.read(&mut request).await.unwrap();
+        assert!(read > 0, "client should issue the reserved-keywords probe query");
+        match probe_response {
+            GaussdbProbeMockResponse::Error(code) => {
+                socket.write_all(&postgres_error_response_with_code(code, "probe failed")).await.unwrap();
+            }
+            GaussdbProbeMockResponse::Disconnect => {}
+        }
+    }
+
+    async fn connect_pool_against_mock_gaussdb(probe_response: GaussdbProbeMockResponse) -> (Pool, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(serve_gaussdb_probe(listener, probe_response));
+        let url = format!("postgres://postgres@127.0.0.1:{port}/postgres?sslmode=disable");
+        let pool = connect_with_optional_local_timezone(&url, Duration::from_secs(2), None).await.unwrap();
+        (pool, server)
+    }
+
+    #[tokio::test]
+    async fn gaussdb_probe_classifies_deterministic_sqlstate_as_not_supported() {
+        let (pool, server) = connect_pool_against_mock_gaussdb(GaussdbProbeMockResponse::Error("42501")).await;
+        let probe = gaussdb_reserved_keywords(&pool).await;
+        assert!(matches!(probe, GaussdbReservedKeywordsProbe::NotSupported), "insufficient_privilege is deterministic");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gaussdb_probe_classifies_query_canceled_as_retryable() {
+        let (pool, server) = connect_pool_against_mock_gaussdb(GaussdbProbeMockResponse::Error("57014")).await;
+        let probe = gaussdb_reserved_keywords(&pool).await;
+        assert!(
+            matches!(probe, GaussdbReservedKeywordsProbe::Retryable),
+            "query_canceled is transient, not NotSupported"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gaussdb_probe_classifies_connection_exception_as_retryable() {
+        let (pool, server) = connect_pool_against_mock_gaussdb(GaussdbProbeMockResponse::Error("08006")).await;
+        let probe = gaussdb_reserved_keywords(&pool).await;
+        assert!(
+            matches!(probe, GaussdbReservedKeywordsProbe::Retryable),
+            "connection_failure is transient, not NotSupported"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gaussdb_probe_classifies_dropped_connection_as_retryable() {
+        let (pool, server) = connect_pool_against_mock_gaussdb(GaussdbProbeMockResponse::Disconnect).await;
+        let probe = gaussdb_reserved_keywords(&pool).await;
+        assert!(matches!(probe, GaussdbReservedKeywordsProbe::Retryable));
+        server.await.unwrap();
     }
 
     async fn serve_tls_handshake_failure_then_plaintext(listener: TcpListener) {

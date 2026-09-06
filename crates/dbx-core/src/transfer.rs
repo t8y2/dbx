@@ -16,6 +16,7 @@ use crate::query::{
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
     normalize_len_params, qualified_transfer_table, quote_transfer_identifier, transfer_column_identifier,
+    TransferColumnQuoting,
 };
 
 static CANCELLED: std::sync::LazyLock<RwLock<HashSet<String>>> =
@@ -204,6 +205,24 @@ pub struct TransferRequest {
 
 fn default_quote_target_column_names() -> bool {
     true
+}
+
+/// Live `pg_get_keywords()` reserved-word catalog for the transfer target, so
+/// that opted-out column quoting reflects the actual GaussDB/openGauss server
+/// version (t8y2/dbx#6283). Only probed when it can influence the generated
+/// SQL — a GaussDB/openGauss target with `quote_target_column_names` off; the
+/// default always-quoted mode never pays the round trip. `None` means the
+/// static keyword lists are used instead.
+async fn transfer_gaussdb_keywords(
+    state: &AppState,
+    request: &TransferRequest,
+    target_db_type: &DatabaseType,
+    target_pool_key: &str,
+) -> Option<Arc<HashSet<String>>> {
+    if request.quote_target_column_names || !matches!(target_db_type, DatabaseType::Gaussdb | DatabaseType::OpenGauss) {
+        return None;
+    }
+    state.gaussdb_reserved_keywords(target_pool_key).await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3312,7 +3331,7 @@ pub fn generate_create_table_ddl(
         source_db,
         table_comment,
         catalog,
-        true,
+        TransferColumnQuoting::QUOTED,
     )
 }
 
@@ -3326,7 +3345,7 @@ fn generate_create_table_ddl_with_column_quoting(
     source_db: &DatabaseType,
     table_comment: Option<&str>,
     catalog: Option<&str>,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> String {
     let full_table = qualified_table(table, schema, target_db, catalog);
 
@@ -3343,11 +3362,7 @@ fn generate_create_table_ddl_with_column_quoting(
     for c in columns {
         col_lines.push({
             let mapped_type = postgres_column_type_sql(c, source_schema, schema, source_db, target_db);
-            let mut line = format!(
-                "  {} {}",
-                transfer_column_identifier(&c.name, target_db, quote_target_column_names),
-                mapped_type
-            );
+            let mut line = format!("  {} {}", transfer_column_identifier(&c.name, target_db, quoting), mapped_type);
             if let Some(default_clause) = column_default_clause(c, source_schema, schema, source_db, target_db) {
                 line.push(' ');
                 line.push_str(&default_clause);
@@ -3383,7 +3398,7 @@ fn generate_create_table_ddl_with_column_quoting(
     if !matches!(target_db, DatabaseType::Hive | DatabaseType::Kyuubi | DatabaseType::Impala | DatabaseType::Argo) {
         for c in columns {
             if c.is_primary_key {
-                let qname = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
+                let qname = transfer_column_identifier(&c.name, target_db, quoting);
                 if is_mysql_family {
                     let mapped = map_column_type(&c.data_type, source_db, target_db);
                     if mysql_type_needs_key_prefix(&mapped) {
@@ -3455,7 +3470,14 @@ pub fn generate_comment_ddl(
     target_db: &DatabaseType,
     table_comment: Option<&str>,
 ) -> Vec<String> {
-    generate_comment_ddl_with_column_quoting(columns, table, schema, target_db, table_comment, true)
+    generate_comment_ddl_with_column_quoting(
+        columns,
+        table,
+        schema,
+        target_db,
+        table_comment,
+        TransferColumnQuoting::QUOTED,
+    )
 }
 
 fn generate_comment_ddl_with_column_quoting(
@@ -3464,7 +3486,7 @@ fn generate_comment_ddl_with_column_quoting(
     schema: &str,
     target_db: &DatabaseType,
     table_comment: Option<&str>,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Vec<String> {
     if !(supports_comment_on_transfer_ddl(target_db) || matches!(target_db, DatabaseType::ClickHouse)) {
         return Vec::new();
@@ -3491,7 +3513,7 @@ fn generate_comment_ddl_with_column_quoting(
                 continue;
             }
             let escaped = trimmed.replace('\'', "''");
-            let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
+            let qcol = transfer_column_identifier(&c.name, target_db, quoting);
 
             match target_db {
                 target_db if supports_comment_on_transfer_ddl(target_db) => {
@@ -3561,7 +3583,15 @@ impl InsertSqlTemplate {
         catalog: Option<&str>,
         overrides_postgres_system_values: bool,
     ) -> Self {
-        Self::new_with_column_quoting(columns, table, schema, db_type, catalog, overrides_postgres_system_values, true)
+        Self::new_with_column_quoting(
+            columns,
+            table,
+            schema,
+            db_type,
+            catalog,
+            overrides_postgres_system_values,
+            TransferColumnQuoting::QUOTED,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3572,12 +3602,12 @@ impl InsertSqlTemplate {
         db_type: &DatabaseType,
         catalog: Option<&str>,
         overrides_postgres_system_values: bool,
-        quote_target_column_names: bool,
+        quoting: TransferColumnQuoting<'_>,
     ) -> Self {
         let full_table = qualified_table(table, schema, db_type, catalog);
         let col_list = columns
             .iter()
-            .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+            .map(|column| transfer_column_identifier(column, db_type, quoting))
             .collect::<Vec<_>>()
             .join(", ");
         let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
@@ -3713,7 +3743,7 @@ pub fn generate_upsert_typed(
         catalog,
         false,
         false,
-        true,
+        TransferColumnQuoting::QUOTED,
     )
 }
 
@@ -3729,7 +3759,7 @@ fn generate_upsert_typed_for_transfer(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> String {
     if rows.is_empty() || pk_columns.is_empty() {
         return String::new();
@@ -3738,7 +3768,7 @@ fn generate_upsert_typed_for_transfer(
     let full_table = qualified_table(table, schema, db_type, catalog);
     let col_list = columns
         .iter()
-        .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+        .map(|column| transfer_column_identifier(column, db_type, quoting))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -3758,7 +3788,7 @@ fn generate_upsert_typed_for_transfer(
         {
             let pk_list = pk_columns
                 .iter()
-                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .map(|column| transfer_column_identifier(column, db_type, quoting))
                 .collect::<Vec<_>>()
                 .join(", ");
             let overriding = if overrides_postgres_system_values && matches!(db_type, DatabaseType::Postgres) {
@@ -3774,7 +3804,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                        let qc = transfer_column_identifier(c, db_type, quoting);
                         format!("{qc} = EXCLUDED.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3787,13 +3817,13 @@ fn generate_upsert_typed_for_transfer(
             let mut sql = format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"));
             if non_pk_columns.is_empty() {
                 sql.push_str("\nON DUPLICATE KEY UPDATE ");
-                let first_pk = transfer_column_identifier(&pk_columns[0], db_type, quote_target_column_names);
+                let first_pk = transfer_column_identifier(&pk_columns[0], db_type, quoting);
                 sql.push_str(&format!("{first_pk} = {first_pk}"));
             } else {
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                        let qc = transfer_column_identifier(c, db_type, quoting);
                         format!("{qc} = VALUES({qc})")
                     })
                     .collect::<Vec<_>>()
@@ -3805,13 +3835,13 @@ fn generate_upsert_typed_for_transfer(
         DatabaseType::SqlServer => {
             let src_col_list = columns
                 .iter()
-                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .map(|column| transfer_column_identifier(column, db_type, quoting))
                 .collect::<Vec<_>>()
                 .join(", ");
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                    let qc = transfer_column_identifier(c, db_type, quoting);
                     format!("target.{qc} = src.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3826,7 +3856,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                        let qc = transfer_column_identifier(c, db_type, quoting);
                         format!("target.{qc} = src.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3836,12 +3866,12 @@ fn generate_upsert_typed_for_transfer(
 
             let insert_cols = columns
                 .iter()
-                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .map(|column| transfer_column_identifier(column, db_type, quoting))
                 .collect::<Vec<_>>()
                 .join(", ");
             let insert_vals = columns
                 .iter()
-                .map(|column| format!("src.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .map(|column| format!("src.{}", transfer_column_identifier(column, db_type, quoting)))
                 .collect::<Vec<_>>()
                 .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals});"));
@@ -3855,7 +3885,7 @@ fn generate_upsert_typed_for_transfer(
                     vals.push(format!(
                         "{} AS {}",
                         escape_value_typed(v, db_type, column_types.get(index).and_then(|value| value.as_deref())),
-                        transfer_column_identifier(c, db_type, quote_target_column_names)
+                        transfer_column_identifier(c, db_type, quoting)
                     ));
                 }
                 using_rows.push(format!("SELECT {} FROM dual", vals.join(", ")));
@@ -3864,7 +3894,7 @@ fn generate_upsert_typed_for_transfer(
             let on_clause = pk_columns
                 .iter()
                 .map(|c| {
-                    let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                    let qc = transfer_column_identifier(c, db_type, quoting);
                     format!("t.{qc} = s.{qc}")
                 })
                 .collect::<Vec<_>>()
@@ -3877,7 +3907,7 @@ fn generate_upsert_typed_for_transfer(
                 let update_set = non_pk_columns
                     .iter()
                     .map(|c| {
-                        let qc = transfer_column_identifier(c, db_type, quote_target_column_names);
+                        let qc = transfer_column_identifier(c, db_type, quoting);
                         format!("t.{qc} = s.{qc}")
                     })
                     .collect::<Vec<_>>()
@@ -3887,27 +3917,20 @@ fn generate_upsert_typed_for_transfer(
 
             let insert_cols = columns
                 .iter()
-                .map(|column| transfer_column_identifier(column, db_type, quote_target_column_names))
+                .map(|column| transfer_column_identifier(column, db_type, quoting))
                 .collect::<Vec<_>>()
                 .join(", ");
             let insert_vals = columns
                 .iter()
-                .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quote_target_column_names)))
+                .map(|column| format!("s.{}", transfer_column_identifier(column, db_type, quoting)))
                 .collect::<Vec<_>>()
                 .join(", ");
             sql.push_str(&format!("\nWHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})"));
             sql
         }
         _ => {
-            let template = InsertSqlTemplate::new_with_column_quoting(
-                columns,
-                table,
-                schema,
-                db_type,
-                catalog,
-                false,
-                quote_target_column_names,
-            );
+            let template =
+                InsertSqlTemplate::new_with_column_quoting(columns, table, schema, db_type, catalog, false, quoting);
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
     }
@@ -4097,7 +4120,7 @@ fn generate_transfer_write_sql(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> String {
     match mode {
         TransferMode::Upsert => generate_upsert_typed_for_transfer(
@@ -4111,7 +4134,7 @@ fn generate_transfer_write_sql(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
-            quote_target_column_names,
+            quoting,
         ),
         _ => {
             if rows.is_empty() {
@@ -4124,7 +4147,7 @@ fn generate_transfer_write_sql(
                 db_type,
                 catalog,
                 overrides_postgres_system_values,
-                quote_target_column_names,
+                quoting,
             );
             template.build(&value_rows_sql(rows, column_types, db_type, mysql_spatial_markers))
         }
@@ -4158,7 +4181,15 @@ pub(crate) fn generate_insert_typed_sql_batches_from_value_rows(
     limits: SqlBatchLimits,
 ) -> Result<Vec<(String, usize)>, String> {
     generate_insert_sql_batches_from_value_rows(
-        columns, value_rows, table, schema, db_type, catalog, limits, false, true,
+        columns,
+        value_rows,
+        table,
+        schema,
+        db_type,
+        catalog,
+        limits,
+        false,
+        TransferColumnQuoting::QUOTED,
     )
 }
 
@@ -4174,7 +4205,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Result<Vec<(String, usize)>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -4190,7 +4221,7 @@ fn generate_insert_typed_sql_batches_for_transfer(
         catalog,
         limits,
         overrides_postgres_system_values,
-        quote_target_column_names,
+        quoting,
     )
 }
 
@@ -4204,7 +4235,7 @@ fn generate_insert_sql_batches_from_value_rows(
     catalog: Option<&str>,
     limits: SqlBatchLimits,
     overrides_postgres_system_values: bool,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Result<Vec<(String, usize)>, String> {
     if value_rows.is_empty() {
         return Ok(Vec::new());
@@ -4224,7 +4255,7 @@ fn generate_insert_sql_batches_from_value_rows(
         db_type,
         catalog,
         overrides_postgres_system_values,
-        quote_target_column_names,
+        quoting,
     );
     let value_row_bytes = value_rows.iter().map(|row| sql_text_bytes(row, db_type)).collect::<Vec<_>>();
     let mut statements = Vec::new();
@@ -4289,7 +4320,7 @@ fn generate_transfer_write_sql_batches(
         catalog,
         overrides_postgres_system_values,
         mysql_spatial_markers,
-        true,
+        TransferColumnQuoting::QUOTED,
     )
 }
 
@@ -4306,7 +4337,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
     catalog: Option<&str>,
     overrides_postgres_system_values: bool,
     mysql_spatial_markers: bool,
-    quote_target_column_names: bool,
+    quoting: TransferColumnQuoting<'_>,
 ) -> Result<Vec<String>, String> {
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -4324,7 +4355,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
             SqlBatchLimits::for_database(db_type, max_transfer_write_rows(db_type, mode)),
             overrides_postgres_system_values,
             mysql_spatial_markers,
-            quote_target_column_names,
+            quoting,
         )?
         .into_iter()
         .map(|(sql, _)| sql)
@@ -4353,7 +4384,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
             catalog,
             overrides_postgres_system_values,
             mysql_spatial_markers,
-            quote_target_column_names,
+            quoting,
         );
 
         while end < rows.len() && end - start < max_rows {
@@ -4369,7 +4400,7 @@ fn generate_transfer_write_sql_batches_with_column_quoting(
                 catalog,
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
-                quote_target_column_names,
+                quoting,
             );
             if candidate.len() > max_sql_bytes && !accepted.is_empty() {
                 break;
@@ -7011,6 +7042,8 @@ where
             request.target_catalog.as_deref(),
         )
         .await;
+    let gaussdb_keywords = transfer_gaussdb_keywords(state, request, target_db_type, target_pool_key).await;
+    let column_quoting = TransferColumnQuoting::new(request.quote_target_column_names, gaussdb_keywords.as_deref());
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
@@ -7151,7 +7184,7 @@ where
                             source_db_type,
                             None,
                             request.target_catalog.as_deref(),
-                            request.quote_target_column_names,
+                            column_quoting,
                         );
                         let target_table_created = transfer_create_table_created(
                             execute_on_pool(state, target_pool_key, &ddl).await.map(|_| ()),
@@ -7164,7 +7197,7 @@ where
                                 &request.target_schema,
                                 target_db_type,
                                 None,
-                                request.quote_target_column_names,
+                                column_quoting,
                             ) {
                                 if let Err(e) = execute_on_pool(state, target_pool_key, &stmt).await {
                                     log::warn!(
@@ -7221,7 +7254,7 @@ where
                 request.target_catalog.as_deref(),
                 false,
                 false,
-                request.quote_target_column_names,
+                column_quoting,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_on_pool(state, target_pool_key, batch_sql).await.map_err(|e| {
@@ -7389,6 +7422,8 @@ where
         )
         .await;
     let preserves_target_table_name = target_table == table;
+    let gaussdb_keywords = transfer_gaussdb_keywords(state, request, target_db_type, target_pool_key).await;
+    let column_quoting = TransferColumnQuoting::new(request.quote_target_column_names, gaussdb_keywords.as_deref());
 
     // Get source columns (deduplicate by name)
     let columns = {
@@ -7559,7 +7594,7 @@ where
                                     source_db_type,
                                     table_comment.as_deref(),
                                     request.target_catalog.as_deref(),
-                                    request.quote_target_column_names,
+                                    column_quoting,
                                 ),
                                 false,
                             )
@@ -7587,7 +7622,7 @@ where
                                 source_db_type,
                                 table_comment.as_deref(),
                                 request.target_catalog.as_deref(),
-                                request.quote_target_column_names,
+                                column_quoting,
                             ),
                             false,
                         ),
@@ -7605,7 +7640,7 @@ where
                         source_db_type,
                         table_comment.as_deref(),
                         request.target_catalog.as_deref(),
-                        request.quote_target_column_names,
+                        column_quoting,
                     )
                 } else {
                     reused_source_ddl = source_ddl_was_read;
@@ -7627,7 +7662,7 @@ where
                     source_db_type,
                     table_comment.as_deref(),
                     request.target_catalog.as_deref(),
-                    request.quote_target_column_names,
+                    column_quoting,
                 )
             };
             // MySQL-family targets: create the bare table first and add any foreign
@@ -7694,7 +7729,7 @@ where
                     &request.target_schema,
                     target_db_type,
                     table_comment.as_deref(),
-                    request.quote_target_column_names,
+                    column_quoting,
                 );
                 for stmt in &comment_stmts {
                     if let Err(e) = execute_on_pool(state, target_pool_key, stmt).await {
@@ -7918,7 +7953,7 @@ where
                 request.target_catalog.as_deref(),
                 overrides_postgres_system_values,
                 mysql_spatial_markers,
-                request.quote_target_column_names,
+                column_quoting,
             )?;
             for (statement_index, batch_sql) in write_statements.iter().enumerate() {
                 execute_transfer_write_statement(
@@ -10364,12 +10399,25 @@ mod tests {
         assert!(ddl.contains("PRIMARY KEY (`id`)"));
     }
 
+    const UNQUOTED_COLUMNS: TransferColumnQuoting<'static> =
+        TransferColumnQuoting { quote_target_column_names: false, gaussdb_keywords: None };
+
     #[test]
     fn gaussdb_transfer_can_leave_safe_target_columns_unquoted() {
+        // t8y2/dbx#6205: with `quote_target_column_names` off, plain lowercase
+        // column names are emitted bare so GaussDB folds them the same way a
+        // later unquoted query will. Anything that would be case-folded or is
+        // a reserved word keeps its quotes (t8y2/dbx#6283): `CamelName` and
+        // `UPPER_ID` unquoted would silently become `camelname`/`upper_id` on
+        // the server, and `compact` is reserved on GaussDB even though it is
+        // not a PostgreSQL keyword.
         let columns = vec![
-            db::ColumnInfo { is_primary_key: true, ..test_column("USER_ID", "int") },
+            db::ColumnInfo { is_primary_key: true, ..test_column("id", "int") },
+            test_column("created_at", "datetime"),
             test_column("CamelName", "varchar(32)"),
+            test_column("UPPER_ID", "int"),
             test_column("select", "varchar(32)"),
+            test_column("compact", "int"),
             test_column("has space", "varchar(32)"),
         ];
 
@@ -10382,14 +10430,17 @@ mod tests {
             &DatabaseType::Mysql,
             None,
             None,
-            false,
+            UNQUOTED_COLUMNS,
         );
 
-        assert!(ddl.contains("USER_ID INTEGER"), "ddl: {ddl}");
-        assert!(ddl.contains("CamelName VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("  id INTEGER"), "ddl: {ddl}");
+        assert!(ddl.contains("  created_at "), "ddl: {ddl}");
+        assert!(ddl.contains("\"CamelName\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"UPPER_ID\" INTEGER"), "ddl: {ddl}");
         assert!(ddl.contains("\"select\" VARCHAR(32)"), "ddl: {ddl}");
+        assert!(ddl.contains("\"compact\" INTEGER"), "ddl: {ddl}");
         assert!(ddl.contains("\"has space\" VARCHAR(32)"), "ddl: {ddl}");
-        assert!(ddl.contains("PRIMARY KEY (USER_ID)"), "ddl: {ddl}");
+        assert!(ddl.contains("PRIMARY KEY (id)"), "ddl: {ddl}");
 
         let quoted = generate_create_table_ddl_with_column_quoting(
             &columns,
@@ -10400,17 +10451,24 @@ mod tests {
             &DatabaseType::Mysql,
             None,
             None,
-            true,
+            TransferColumnQuoting::QUOTED,
         );
-        assert!(quoted.contains("\"USER_ID\" INTEGER"), "ddl: {quoted}");
-        assert!(quoted.contains("\"CamelName\" VARCHAR(32)"), "ddl: {quoted}");
+        assert!(quoted.contains("\"id\" INTEGER"), "ddl: {quoted}");
+        assert!(quoted.contains("\"created_at\" "), "ddl: {quoted}");
+        assert!(quoted.contains("PRIMARY KEY (\"id\")"), "ddl: {quoted}");
     }
 
     #[test]
     fn gaussdb_transfer_writes_use_the_same_target_column_quoting_policy() {
-        let columns = vec!["USER_ID".to_string(), "CamelName".to_string(), "select".to_string()];
-        let column_types = vec![Some("int".to_string()), Some("varchar".to_string()), Some("varchar".to_string())];
-        let rows = vec![vec![serde_json::json!(1), serde_json::json!("Alice"), serde_json::json!("ok")]];
+        let columns = vec!["user_id".to_string(), "CamelName".to_string(), "select".to_string(), "rownum".to_string()];
+        let column_types = vec![
+            Some("int".to_string()),
+            Some("varchar".to_string()),
+            Some("varchar".to_string()),
+            Some("int".to_string()),
+        ];
+        let rows =
+            vec![vec![serde_json::json!(1), serde_json::json!("Alice"), serde_json::json!("ok"), serde_json::json!(2)]];
 
         let statements = generate_transfer_write_sql_batches_with_column_quoting(
             &TransferMode::Append,
@@ -10424,16 +10482,80 @@ mod tests {
             None,
             false,
             false,
-            false,
+            UNQUOTED_COLUMNS,
         )
         .unwrap();
 
         assert_eq!(statements.len(), 1);
         assert!(
-            statements[0].starts_with("INSERT INTO \"public\".\"case_target\" (USER_ID, CamelName, \"select\") VALUES"),
+            statements[0].starts_with(
+                "INSERT INTO \"public\".\"case_target\" (user_id, \"CamelName\", \"select\", \"rownum\") VALUES"
+            ),
             "sql: {}",
             statements[0]
         );
+    }
+
+    #[test]
+    fn gaussdb_transfer_column_quoting_follows_the_live_keyword_catalog() {
+        // t8y2/dbx#6283: `maxvalue` is RESERVED_KEYWORD on openGauss 5.0 but
+        // UNRESERVED_KEYWORD on current openGauss, so no static list can be
+        // right for both. With a live `pg_get_keywords()` catalog for the
+        // connected server the same column is quoted on 5.0 and left bare on
+        // current; without one the static fallback still quotes it. All
+        // write paths (CREATE TABLE, and INSERT in both Append and Upsert
+        // mode) must agree.
+        let opengauss_5_0: HashSet<String> = ["maxvalue".to_string()].into_iter().collect();
+        let opengauss_current: HashSet<String> = ["compact".to_string()].into_iter().collect();
+        let cols = vec![db::ColumnInfo { is_primary_key: true, ..test_column("maxvalue", "int") }];
+        let columns = vec!["maxvalue".to_string()];
+        let column_types = vec![Some("int".to_string())];
+        let rows = vec![vec![serde_json::json!(1)]];
+
+        for (catalog, expected, label) in [
+            (Some(&opengauss_5_0), "\"maxvalue\"", "openGauss 5.0 live catalog reserves maxvalue"),
+            (Some(&opengauss_current), "maxvalue", "current openGauss live catalog does not reserve maxvalue"),
+            (None, "\"maxvalue\"", "static fallback without a live catalog"),
+        ] {
+            let quoting = TransferColumnQuoting::new(false, catalog);
+            let ddl = generate_create_table_ddl_with_column_quoting(
+                &cols,
+                "t",
+                "",
+                "public",
+                &DatabaseType::OpenGauss,
+                &DatabaseType::Mysql,
+                None,
+                None,
+                quoting,
+            );
+            assert!(ddl.contains(&format!("  {expected} INTEGER")), "{label}: ddl: {ddl}");
+            assert!(ddl.contains(&format!("PRIMARY KEY ({expected})")), "{label}: ddl: {ddl}");
+
+            for mode in [TransferMode::Append, TransferMode::Upsert] {
+                let statements = generate_transfer_write_sql_batches_with_column_quoting(
+                    &mode,
+                    &columns,
+                    &column_types,
+                    &rows,
+                    "t",
+                    "public",
+                    &DatabaseType::OpenGauss,
+                    &columns,
+                    None,
+                    false,
+                    false,
+                    quoting,
+                )
+                .unwrap();
+                assert_eq!(statements.len(), 1);
+                assert!(
+                    statements[0].starts_with(&format!("INSERT INTO \"public\".\"t\" ({expected}) VALUES")),
+                    "{label} ({mode:?}): sql: {}",
+                    statements[0]
+                );
+            }
+        }
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub use identifiers::{
 };
 pub(crate) use identifiers::{
     parse_sqlserver_linked_schema_ref, qualified_transfer_table, quote_iris_identifier, quote_transfer_identifier,
-    transfer_column_identifier,
+    transfer_column_identifier, TransferColumnQuoting,
 };
 pub use table_select::{
     build_count_table_sql, build_table_data_select_sql, build_table_data_select_sql_with_database,

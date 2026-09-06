@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::models::connection::DatabaseType;
 
@@ -95,6 +97,184 @@ fn quotes_gaussdb_jdbc_identifiers_selectively() {
     ] {
         assert_eq!(quote_table_data_identifier(Some(DatabaseType::Gaussdb), name, Some("`")), expected);
     }
+}
+
+#[test]
+fn quotes_gaussdb_only_reserved_words_not_shared_with_postgres() {
+    // t8y2/dbx#6283: `compact` and friends are reserved in GaussDB/openGauss
+    // but are not PostgreSQL keywords, so a check that only consults the
+    // Postgres reserved-word set misses them and would emit invalid unquoted
+    // DDL on the real target. This word list is cross-checked against a
+    // writable openGauss 5.0.0 instance's own `pg_get_keywords()` (not just
+    // Huawei's GaussDB(DWS) doc) — see the comment on
+    // `is_gaussdb_only_reserved_identifier` for how the DWS-derived list was
+    // trimmed down to these instance-confirmed words. `csn` through `verify`
+    // below were caught by diffing against the instance's full 653-row
+    // keyword catalog rather than spot-checking individual words.
+    for name in [
+        "authid",
+        "buckets",
+        "compact",
+        "csn",
+        "deltamerge",
+        "excluded",
+        "groupparent",
+        "hdfsdirectory",
+        "less",
+        "maxvalue",
+        "minus",
+        "modify",
+        "nocycle",
+        "performance",
+        "procedure",
+        "recyclebin",
+        "reject",
+        "rownum",
+        "shrink",
+        "sysdate",
+        "timecapsule",
+        "verify",
+    ] {
+        assert_eq!(
+            quote_table_data_identifier(Some(DatabaseType::Gaussdb), name, Some("\"")),
+            format!("\"{name}\""),
+            "GaussDB must quote target-only reserved word `{name}`"
+        );
+        assert_eq!(
+            quote_table_data_identifier(Some(DatabaseType::OpenGauss), name, Some("\"")),
+            format!("\"{name}\""),
+            "OpenGauss must quote target-only reserved word `{name}`"
+        );
+    }
+
+    // The same words are not reserved in real PostgreSQL, so the dialect-aware
+    // check must not over-quote a genuine Postgres target.
+    for name in ["compact", "buckets", "sysdate", "minus", "modify", "excluded", "rownum", "verify"] {
+        assert_eq!(
+            quote_table_data_identifier(Some(DatabaseType::Postgres), name, Some("\"")),
+            name,
+            "plain Postgres must not quote `{name}` — it is not a Postgres keyword"
+        );
+    }
+
+    // Words that were in the original DWS-derived list but turned out not to
+    // be reserved on a real GaussDB/openGauss instance must not be quoted —
+    // over-quoting them would reintroduce the case-locking bug this PR fixes.
+    for name in ["fenced", "hot", "internal", "nlssort", "plan", "tsfield", "tstag", "tstime", "warmup"] {
+        assert_eq!(
+            quote_table_data_identifier(Some(DatabaseType::Gaussdb), name, Some("\"")),
+            name,
+            "GaussDB must not quote `{name}` — confirmed not reserved on a real instance"
+        );
+    }
+}
+
+#[test]
+fn transfer_column_identifier_opt_out_only_unquotes_safe_lowercase_names() {
+    // t8y2/dbx#6283: with `quote_target_column_names` off on a GaussDB
+    // target, only a plain lowercase, non-reserved name may go unquoted.
+    // Mixed/upper case must keep its quotes — unquoted it would be silently
+    // case-folded by the server — and so must GaussDB-only reserved words
+    // like `compact`, which are not PostgreSQL keywords.
+    let unquoted = TransferColumnQuoting::new(false, None);
+    for db in [DatabaseType::Gaussdb, DatabaseType::OpenGauss] {
+        assert_eq!(transfer_column_identifier("user_id", &db, unquoted), "user_id");
+        assert_eq!(transfer_column_identifier("col$2", &db, unquoted), "col$2");
+        assert_eq!(transfer_column_identifier("CamelName", &db, unquoted), "\"CamelName\"");
+        assert_eq!(transfer_column_identifier("USER_ID", &db, unquoted), "\"USER_ID\"");
+        assert_eq!(transfer_column_identifier("has space", &db, unquoted), "\"has space\"");
+        assert_eq!(transfer_column_identifier("select", &db, unquoted), "\"select\"");
+        assert_eq!(transfer_column_identifier("compact", &db, unquoted), "\"compact\"");
+        assert_eq!(transfer_column_identifier("rownum", &db, unquoted), "\"rownum\"");
+        // Not reserved on a real GaussDB/openGauss instance, so must stay bare.
+        assert_eq!(transfer_column_identifier("plan", &db, unquoted), "plan");
+    }
+
+    // The default (quote everything) is unchanged, and the opt-out is a
+    // GaussDB/openGauss-only behaviour: plain Postgres keeps quoting.
+    assert_eq!(
+        transfer_column_identifier("user_id", &DatabaseType::Gaussdb, TransferColumnQuoting::QUOTED),
+        "\"user_id\""
+    );
+    assert_eq!(transfer_column_identifier("user_id", &DatabaseType::Postgres, unquoted), "\"user_id\"");
+    assert_eq!(transfer_column_identifier("user_id", &DatabaseType::Mysql, unquoted), "`user_id`");
+}
+
+#[test]
+fn transfer_column_identifier_live_catalog_overrides_static_list() {
+    // t8y2/dbx#6283: `maxvalue` is RESERVED_KEYWORD on openGauss 5.0 (per
+    // its kwlist.h) but UNRESERVED_KEYWORD on current/master openGauss — so
+    // a live pg_get_keywords() catalog from each version must produce
+    // different quoting for the exact same word, unlike the static fallback
+    // (which permanently quotes `maxvalue`).
+    let opengauss_5_0: HashSet<String> = ["maxvalue".to_string()].into_iter().collect();
+    assert_eq!(
+        transfer_column_identifier(
+            "maxvalue",
+            &DatabaseType::OpenGauss,
+            TransferColumnQuoting::new(false, Some(&opengauss_5_0))
+        ),
+        "\"maxvalue\"",
+        "openGauss 5.0's live catalog reserves maxvalue"
+    );
+
+    // A live catalog from current/master openGauss would not list `maxvalue`
+    // as reserved (some unrelated word stands in for "the rest of the real
+    // catalog" here).
+    let opengauss_current: HashSet<String> = ["compact".to_string()].into_iter().collect();
+    assert_eq!(
+        transfer_column_identifier(
+            "maxvalue",
+            &DatabaseType::OpenGauss,
+            TransferColumnQuoting::new(false, Some(&opengauss_current))
+        ),
+        "maxvalue",
+        "current openGauss's live catalog does not reserve maxvalue — must stay unquoted"
+    );
+
+    // No live catalog (probe failed, or a pool kind without one): the static
+    // list still classifies `maxvalue` as GaussDB-only reserved.
+    assert_eq!(
+        transfer_column_identifier("maxvalue", &DatabaseType::Gaussdb, TransferColumnQuoting::new(false, None)),
+        "\"maxvalue\""
+    );
+
+    // The live catalog never affects the default quoted mode.
+    assert_eq!(
+        transfer_column_identifier(
+            "maxvalue",
+            &DatabaseType::OpenGauss,
+            TransferColumnQuoting::new(true, Some(&opengauss_current))
+        ),
+        "\"maxvalue\""
+    );
+}
+
+#[test]
+fn transfer_column_identifier_live_catalog_is_sole_authority() {
+    // A real `pg_get_keywords()` probe reports the server's *complete*
+    // reserved-word set — Postgres-inherited words like `select` included,
+    // not just the GaussDB-only additions — so a live catalog is trusted
+    // alone, with no static list unioned in on top of it (unioning the
+    // static Postgres list back in would reintroduce exactly the
+    // stale-snapshot problem for a word Postgres reserves but this server's
+    // build does not).
+    let live: HashSet<String> = ["select".to_string(), "compact".to_string()].into_iter().collect();
+    let quoting = TransferColumnQuoting::new(false, Some(&live));
+    assert_eq!(
+        transfer_column_identifier("select", &DatabaseType::Gaussdb, quoting),
+        "\"select\"",
+        "select is genuinely reserved on every real GaussDB/openGauss build, so the live catalog quotes it too"
+    );
+    // `sysdate` is in the static GaussDB-only list but not in this live
+    // catalog, so it must NOT be quoted: the live catalog wins outright.
+    assert_eq!(transfer_column_identifier("sysdate", &DatabaseType::Gaussdb, quoting), "sysdate");
+
+    // A pathological empty/incomplete live catalog is not something this
+    // function needs to defend against: `gaussdb_reserved_keywords` (see
+    // db/postgres.rs) treats an empty `pg_get_keywords()` result as
+    // `NotSupported`, so an `Available` catalog reaching here is always
+    // non-empty and sourced directly from the live server.
 }
 
 #[test]

@@ -5928,6 +5928,8 @@ export default withEnglishFallback({
       cascadeDelete: "Use CASCADE delete",
       sequenceLastValues: "Compare sequence last values",
       compareColumnOrder: "Compare column order",
+      ignoreTableNameCase: "Ignorar mayúsculas y minúsculas del nombre de la tabla",
+      ignoreColumnNameCase: "Ignorar mayúsculas y minúsculas del nombre de la columna",
       detectRenames: "Detectar renombrados",
       detectTableRenames: "Detectar renombrados de tabla",
       enableRollback: "Habilitar reversión",

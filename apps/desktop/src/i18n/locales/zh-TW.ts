@@ -5248,6 +5248,8 @@ export default withEnglishFallback({
       cascadeDelete: "使用級聯刪除",
       sequenceLastValues: "比較序列最後值",
       compareColumnOrder: "比較欄位順序",
+      ignoreTableNameCase: "忽略資料表名稱大小寫",
+      ignoreColumnNameCase: "忽略欄位名稱大小寫",
       detectRenames: "檢測重新命名",
       detectTableRenames: "檢測表重新命名",
       enableRollback: "啟用回溯",

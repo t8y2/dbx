@@ -6235,6 +6235,8 @@ export default withEnglishFallback({
       cascadeDelete: "使用级联删除",
       sequenceLastValues: "比较序列最后值",
       compareColumnOrder: "比较字段顺序",
+      ignoreTableNameCase: "忽略表名大小写",
+      ignoreColumnNameCase: "忽略字段名大小写",
       detectRenames: "检测重命名",
       detectTableRenames: "检测表重命名",
       enableRollback: "启用回滚",

@@ -5966,6 +5966,8 @@ export default withEnglishFallback({
       cascadeDelete: "CASCADE削除を使用",
       sequenceLastValues: "シーケンス最終値を比較",
       compareColumnOrder: "列順序を比較",
+      ignoreTableNameCase: "テーブル名の大文字小文字を無視",
+      ignoreColumnNameCase: "列名の大文字小文字を無視",
       detectRenames: "名前変更を検出",
       detectTableRenames: "テーブル名変更を検出",
       enableRollback: "ロールバックを有効化",

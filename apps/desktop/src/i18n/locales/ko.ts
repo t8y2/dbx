@@ -5669,6 +5669,8 @@ export default withEnglishFallback({
       cascadeDelete: "CASCADE 삭제 사용",
       sequenceLastValues: "시퀀스 마지막 값 비교",
       compareColumnOrder: "컬럼 순서 비교",
+      ignoreTableNameCase: "테이블 이름 대소문자 무시",
+      ignoreColumnNameCase: "컬럼 이름 대소문자 무시",
       detectRenames: "이름 변경 감지",
       detectTableRenames: "테이블 이름 변경 감지",
       enableRollback: "롤백 활성화",

@@ -223,6 +223,8 @@ export interface SchemaDiffPreparationOptions {
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
   compareColumnOrder?: boolean;
+  ignoreTableNameCase?: boolean;
+  ignoreColumnNameCase?: boolean;
   detectRenames?: boolean;
   detectTableRenames?: boolean;
   renameThreshold?: number;

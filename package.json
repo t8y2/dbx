@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -40,6 +40,7 @@
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",
     "pretest": "pnpm generate:connection-types",
     "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview --config apps/desktop/vite.config.ts",
     "tauri": "tauri",
     "prepare": "husky"

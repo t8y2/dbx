@@ -1010,10 +1010,11 @@ async fn try_export_native_table_stream(
                 &cancelled,
                 cancel_token.clone(),
                 |row| {
-                    let formatted = crate::temporal_format::format_temporal_export_row_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_for_csv_cow(
                         row,
                         column_types,
                         request.date_time_format.as_deref(),
+                        request.format.eq_ignore_ascii_case("csv"),
                     );
                     write_table_text_row(&mut file, true, formatted.as_ref(), &mut row_buffer, request.csv_quote_mode)?;
                     rows_exported += 1;
@@ -1616,10 +1617,11 @@ async fn export_table_data_core_inner(
                 if row_count == 0 {
                     break;
                 }
-                let formatted_rows = crate::temporal_format::format_temporal_export_rows_cow(
+                let formatted_rows = crate::temporal_format::format_temporal_export_rows_for_csv_cow(
                     &result.rows,
                     &column_types,
                     request.date_time_format.as_deref(),
+                    request.format.eq_ignore_ascii_case("csv"),
                 );
 
                 if is_first_batch {

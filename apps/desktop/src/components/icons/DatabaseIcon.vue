@@ -113,6 +113,7 @@ const assetIcons: Record<string, string> = {
   nacos: "nacos.png",
   consul: "consul",
   iris: "iris",
+  cache: "iris",
   influxdb: "influxdb",
   influxdb3: "influxdb",
   victoriametrics: "victoriametrics.png",

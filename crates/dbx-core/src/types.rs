@@ -461,6 +461,14 @@ pub struct IndexInfo {
     /// `None` means the default operator class is used (can be omitted in DDL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_opclasses: Vec<Option<String>>,
+    /// `true` when this index is the object *behind* a table constraint (PRIMARY KEY or
+    /// UNIQUE) rather than a standalone index. Dameng lists both kinds in `ALL_INDEXES`
+    /// but only a standalone ("real") index accepts index-level DDL: a constraint-backed
+    /// ("virtual") one must be changed through `ALTER TABLE ... ADD/DROP CONSTRAINT`
+    /// (#7959). Defaults to `false` for every introspection source that does not report
+    /// it, which keeps those indexes on the index-level DDL path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub constraint_backed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

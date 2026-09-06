@@ -3166,12 +3166,12 @@ mod tests {
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         ephemeral_agent_metadata_session_id, external_driver_statistics_dialect, external_driver_statistics_query_plan,
-        external_driver_uses_mysql_ddl, filter_mongodb_agent_collections, filter_mysql_system_databases_for_config,
-        filter_object_infos, filter_table_infos, filter_visible_schema_names, finalize_object_source,
-        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
-        is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
-        metadata_error_action, metadata_name_or_comment_matches, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        external_driver_uses_generic_ddl, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
+        filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
+        finalize_object_source, gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql,
+        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_oracle_external_driver_config,
+        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_current_schema_from_query_result,
@@ -3214,6 +3214,7 @@ mod tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         };
         let mut filtered = index("uq_active_code", &["active_code"], true, false);
         filtered.filter = Some("active = true".to_string());
@@ -3601,6 +3602,30 @@ mod tests {
 
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
+    }
+
+    #[test]
+    fn external_driver_generic_ddl_applies_to_unmatched_jdbc_connections() {
+        // JDBCX-style wrappers match no vendor DDL dialect and fall back to the
+        // plugin's generic DatabaseMetaData renderer.
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some("jdbcx:wrap-jdbc:jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = Some("io.github.jdbcx.WrappedDriver".to_string());
+        assert!(external_driver_uses_generic_ddl(&config));
+        assert!(!external_driver_uses_mysql_ddl(&config));
+        assert!(!is_oracle_external_driver_config(&config));
+
+        // Vendor dialects keep their dedicated SQL paths.
+        config.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = None;
+        assert!(!external_driver_uses_generic_ddl(&config));
+
+        config.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/ORCL".to_string());
+        assert!(!external_driver_uses_generic_ddl(&config));
+
+        // Vendor-typed database never routes through the generic renderer.
+        let oracle = test_connection_config(DatabaseType::Oracle);
+        assert!(!external_driver_uses_generic_ddl(&oracle));
     }
 
     #[test]
@@ -7804,6 +7829,11 @@ async fn get_table_ddl_once(
                 let session = session.clone();
                 return external_driver_mysql_ddl(session, config.as_ref(), database, schema, table).await;
             }
+            if external_driver_uses_generic_ddl(config.as_ref()) {
+                let config = config.clone();
+                let session = session.clone();
+                return external_driver_jdbc_ddl(session, config.as_ref(), database, schema, table).await;
+            }
         }
         #[cfg(feature = "duckdb-sidecar")]
         if let Some(client) = extract_pool!(pool_handle.as_ref(), DuckDbWorker) {
@@ -8212,6 +8242,7 @@ async fn external_driver_gaussdb_m_indexes(
                     comment: current_comment.clone(),
                     key_is_expression: current_is_expression.clone(),
                     column_opclasses: vec![],
+                    constraint_backed: false,
                 });
             }
             // Start new index
@@ -8282,6 +8313,7 @@ async fn external_driver_gaussdb_m_indexes(
             comment: current_comment,
             key_is_expression: current_is_expression,
             column_opclasses: vec![],
+            constraint_backed: false,
         });
     }
 
@@ -10288,6 +10320,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            constraint_backed: false,
         }];
 
         let ddl = render_postgres_table_ddl("public", "users", &[id], &indexes, &[], None);
@@ -10313,6 +10346,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -10364,6 +10398,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -10999,6 +11034,44 @@ async fn external_driver_oracle_ddl(
         .filter(|source| !source.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| "JDBC Oracle plugin returned no table DDL".to_string())
+}
+
+/// External JDBC connections that match no vendor DDL dialect (JDBCX wrappers,
+/// custom protocol drivers, …) have table DDL rendered by the plugin from
+/// plain `DatabaseMetaData` via `getObjectSource`, mirroring the agent-side
+/// `DdlBuilder` output.
+fn external_driver_uses_generic_ddl(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Jdbc
+        && !is_oracle_external_driver_config(config)
+        && !external_driver_uses_mysql_ddl(config)
+}
+
+async fn external_driver_jdbc_ddl(
+    session: std::sync::Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let result: serde_json::Value = session
+        .invoke_with_timeout(
+            "getObjectSource",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "name": table,
+                "object_type": "TABLE",
+            }),
+            agent_metadata_timeout(Some(config)),
+        )
+        .await?;
+    result
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| !source.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "JDBC plugin returned no table DDL".to_string())
 }
 
 fn normalize_mysql_display_ddl(sql: String) -> String {

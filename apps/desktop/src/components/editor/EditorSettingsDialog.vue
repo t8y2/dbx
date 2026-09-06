@@ -5467,6 +5467,7 @@ onUnmounted(() => {
                       <SelectContent>
                         <SelectItem value="none">{{ t("settings.tabGroupNone") }}</SelectItem>
                         <SelectItem value="database-type">{{ t("settings.tabGroupDatabaseType") }}</SelectItem>
+                        <SelectItem value="database">{{ t("settings.tabGroupDatabase") }}</SelectItem>
                         <SelectItem value="connection">{{ t("settings.tabGroupConnection") }}</SelectItem>
                       </SelectContent>
                     </Select>

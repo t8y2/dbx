@@ -207,7 +207,7 @@ watch(
 <template>
   <Dialog v-model:open="open">
     <DialogContent class="w-[94vw] max-w-[94vw] sm:max-w-[94vw] md:max-w-[94vw] lg:max-w-[94vw] xl:max-w-[94vw] h-[86vh] max-h-[86vh] gap-0 p-0 overflow-hidden flex flex-col">
-      <DialogHeader class="px-4 py-3 border-b">
+      <DialogHeader class="px-4 py-3 border-b pr-12">
         <DialogTitle class="flex items-center gap-2">
           <span>{{ t("docs.title") }}</span>
           <span v-if="statusLabel" class="text-xs font-normal" :class="status.state === 'failed' ? 'text-destructive' : 'text-muted-foreground'">

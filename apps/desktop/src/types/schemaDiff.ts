@@ -1,5 +1,10 @@
 export type SchemaDiffTableFilterPriority = "include" | "exclude";
 
+export interface SchemaDiffTableMapping {
+  sourceTable: string;
+  targetTable: string;
+}
+
 export interface SchemaDiffCompareOptions {
   tables: boolean;
   primaryKeys: boolean;
@@ -30,6 +35,7 @@ export interface SchemaDiffCompareOptions {
    * list so newly added tables keep entering unrestricted comparisons and configs stay small.
    */
   selectedTables: string[] | undefined;
+  tableMappings?: SchemaDiffTableMapping[];
   detectRenames: boolean;
   renameThreshold: number;
   detectTableRenames: boolean;
@@ -72,7 +78,7 @@ export interface SchemaDiffOptionItem {
 }
 
 export type BooleanSchemaDiffCompareOptionKey = {
-  [K in keyof SchemaDiffCompareOptions]: SchemaDiffCompareOptions[K] extends boolean ? K : never;
+  [K in keyof SchemaDiffCompareOptions]-?: NonNullable<SchemaDiffCompareOptions[K]> extends boolean ? K : never;
 }[keyof SchemaDiffCompareOptions];
 
 export type SchemaDiffOptionsMap = Partial<Record<string, SchemaDiffOptionItem[]>>;
@@ -98,6 +104,7 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
   selectedTables: undefined,
+  tableMappings: [],
   detectRenames: false,
   renameThreshold: 0.5,
   detectTableRenames: false,
@@ -130,6 +137,7 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
   selectedTables: undefined,
+  tableMappings: [],
   detectRenames: false,
   renameThreshold: 0.5,
   detectTableRenames: false,
@@ -149,9 +157,11 @@ export function getDefaultOptionsForDbType(dbType: string): SchemaDiffCompareOpt
 }
 
 export function normalizeSchemaDiffCompareOptions(options: Partial<SchemaDiffCompareOptions> | null | undefined, dbType = "postgres"): SchemaDiffCompareOptions {
+  const defaults = getDefaultOptionsForDbType(dbType);
   return {
-    ...getDefaultOptionsForDbType(dbType),
+    ...defaults,
     ...options,
+    tableMappings: Array.isArray(options?.tableMappings) ? options.tableMappings.map((mapping) => ({ ...mapping })) : defaults.tableMappings,
   };
 }
 

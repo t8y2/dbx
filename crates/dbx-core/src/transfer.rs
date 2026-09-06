@@ -11671,6 +11671,7 @@ mod tests {
             comment: Some("lookup index".to_string()),
             key_is_expression: vec![true],
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
         let foreign_keys = vec![
             db::ForeignKeyInfo {
@@ -11724,6 +11725,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            constraint_backed: false,
         }];
 
         let sql = generate_postgres_index_ddl(&indexes, "users", "public");
@@ -11747,6 +11749,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![None, None],
+            constraint_backed: false,
         }];
 
         let sql = generate_postgres_index_ddl(&indexes, "users", "public");
@@ -11776,6 +11779,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            constraint_backed: false,
         }];
 
         let sql = generate_postgres_index_ddl(&indexes, "users", "public");
@@ -11800,6 +11804,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![Some("text_pattern_ops".to_string()), None],
+            constraint_backed: false,
         }];
 
         let sql = generate_postgres_index_ddl(&indexes, "users", "public");
@@ -11823,6 +11828,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
 
         let sql = generate_postgres_index_ddl(&indexes, "users", "public");

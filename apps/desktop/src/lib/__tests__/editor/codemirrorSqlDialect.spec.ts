@@ -75,4 +75,56 @@ describe("codemirrorSqlDialect", () => {
       expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.doubleQuotedStrings, databaseType).toBe(false);
     }
   });
+
+  it("highlights core keywords for StandardSQL-based dialects (#8123)", () => {
+    // IRIS/Caché (and every other StandardSQL-based type) previously resolved
+    // with an empty keyword set, so SELECT/FROM/WHERE/AND rendered as plain
+    // identifiers — exactly the highlighting the #8123 report shows.
+    const reporterStatement = "select di.MR_ADM\nfrom SQLUser.DHCMRInfo di\nwhere di.MR_BAH = 1942487\n  and di.MR_RYRQ >= '2023-01-01'";
+    for (const databaseType of ["iris", "jdbc", "h2", "db2", "hive"] as DatabaseType[]) {
+      const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType);
+      for (const keyword of ["select", "from", "where", "and"]) {
+        expect(nodeNameAt(dialect, reporterStatement, keyword), `${databaseType}:${keyword}`).toBe("Keyword");
+      }
+    }
+
+    // Standard-SQL types gain a vocabulary too, while ClickHouse keeps its
+    // pre-existing standard-vocabulary treatment unchanged.
+    expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", "iris").spec.types).toBe("array binary bit boolean char character clob date decimal double float int integer interval large national nchar nclob numeric object precision real smallint time timestamp varchar varying");
+    const clickhouseDialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "clickhouse");
+    expect(nodeNameAt(clickhouseDialect, "SELECT x FROM t WHERE y > 1", "WHERE")).toBe("Keyword");
+  });
+
+  it("enables backslashEscapes for MySQL-family dialects and ClickHouse while keeping it disabled for standard dialects", () => {
+    const backslashEscapesTypes: DatabaseType[] = ["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase", "clickhouse", "hive", "spark", "impala", "argo", "databend"];
+    for (const databaseType of backslashEscapesTypes) {
+      expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.backslashEscapes, databaseType).toBe(true);
+    }
+
+    const standardTypes: DatabaseType[] = ["postgres", "sqlserver", "sqlite", "oracle", "dameng"];
+    for (const databaseType of standardTypes) {
+      expect(createDbxCodeMirrorSqlDialect(langSql, "mysql", databaseType).spec.backslashEscapes, databaseType).toBeUndefined();
+    }
+  });
+
+  it("correctly tokenizes string literals containing escaped quotes in MySQL statements without corrupting trailing code", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    const statement = ["SELECT CONCAT('\\'', sl.id) id, sl.settlement_price_tax '本次结算金额含税',", "CASE sc.`type`", "    WHEN 0 THEN '物资'", "    WHEN 1 THEN '设备'", "    ELSE ''", "END AS '合同类型'"].join("\n");
+
+    expect(nodeNameAt(dialect, statement, "'\\''")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "'本次结算金额含税'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "CASE")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "`type`")).toBe("QuotedIdentifier");
+    expect(nodeNameAt(dialect, statement, "WHEN")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "THEN")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "'物资'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "'设备'")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "''")).toBe("String");
+    expect(nodeNameAt(dialect, statement, "END")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "'合同类型'")).toBe("String");
+
+    const doubleQuoteStatement = 'SELECT "escaped\\"quote", col FROM tbl';
+    expect(nodeNameAt(dialect, doubleQuoteStatement, '"escaped\\"quote"')).toBe("String");
+    expect(nodeNameAt(dialect, doubleQuoteStatement, "col")).toBe("Identifier");
+  });
 });

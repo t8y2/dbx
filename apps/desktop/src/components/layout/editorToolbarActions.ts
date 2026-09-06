@@ -9,6 +9,15 @@ import type { InjectionKey, Ref } from "vue";
  * the acting tab from the explicit tabId argument (never re-reading the global
  * active tab after an await).
  */
+/** Open/active state of the App-level special pages (settings / driver store). */
+export interface SpecialPageTabsState {
+  settingsOpen: boolean;
+  settingsActive: boolean;
+  driverStoreOpen: boolean;
+  driverStoreActive: boolean;
+  driverUpdateCount: number;
+}
+
 export interface EditorToolbarActions {
   explainMode: Ref<"explain" | "autotrace">;
   blockDangerousRedisCommands: Ref<boolean>;
@@ -34,6 +43,12 @@ export interface EditorToolbarActions {
   changeSchema(tabId: string, schema: string | undefined): void;
   setDefaultDatabase(tabId: string): void;
   clearDefaultDatabase(tabId: string): void;
+  /** Special pages appended to the focused group's tab strip while open but inactive. */
+  specialPageTabs: Ref<SpecialPageTabsState>;
+  activateSettingsPage(): void;
+  closeSettingsPage(): void;
+  activateDriverStore(): void;
+  closeDriverStore(): void;
 }
 
 export const EDITOR_TOOLBAR_ACTIONS: InjectionKey<EditorToolbarActions> = Symbol("dbx:editor-toolbar-actions");
@@ -47,6 +62,9 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
   const noop = () => undefined;
   const mode = { value: "explain" } as Ref<"explain" | "autotrace">;
   const flag = { value: true } as Ref<boolean>;
+  const specialPageTabs = {
+    value: { settingsOpen: false, settingsActive: false, driverStoreOpen: false, driverStoreActive: false, driverUpdateCount: 0 },
+  } as Ref<SpecialPageTabsState>;
   return {
     explainMode: mode,
     blockDangerousRedisCommands: flag,
@@ -70,5 +88,10 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     changeSchema: noop,
     setDefaultDatabase: noop,
     clearDefaultDatabase: noop,
+    specialPageTabs,
+    activateSettingsPage: noop,
+    closeSettingsPage: noop,
+    activateDriverStore: noop,
+    closeDriverStore: noop,
   };
 }

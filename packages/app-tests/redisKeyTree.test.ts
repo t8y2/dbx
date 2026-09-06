@@ -2,6 +2,7 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import {
   appendRedisKeysToTreeIndex,
+  buildRedisKeySnapshotCooperatively,
   buildRedisKeyTree,
   canBuildRedisFuzzyTree,
   collectRedisGroupKeyRaws,
@@ -113,6 +114,75 @@ test("flattenVisibleRedisKeyTree handles very large expanded groups without stac
   assert.equal(rows[1]?.depth, 1);
   assert.equal(rows.at(-1)?.depth, 1);
   assert.ok(rows.every((row) => row.id === row.node.id));
+});
+
+test("cooperative snapshot matches the synchronous hierarchy, ordering, rows, and indexes", async () => {
+  const keys = [makeKey("team:web:home", "k2"), makeKey("zulu", "k5"), makeKey("team:api:v2", "k3"), makeKey("alpha", "k4"), makeKey("team:api:v1", "k1"), makeKey("team:api:v1", "k1")];
+  let yields = 0;
+
+  const snapshot = await buildRedisKeySnapshotCooperatively([keys.slice(0, 2), keys.slice(2)], { db: 3, flatRows: false, expandAll: true, expandedGroupIds: new Set() }, { workChunkSize: 2, yieldControl: async () => void yields++ });
+
+  assert.ok(snapshot);
+  const referenceIndex = createRedisKeyTreeIndex(keys, 3);
+  const referenceRows = flattenVisibleRedisKeyTree(referenceIndex.root, collectExpandedGroupIds(referenceIndex.root));
+  assert.deepEqual(snapshot.treeIndex?.root, referenceIndex.root);
+  assert.deepEqual(snapshot.visibleRows, referenceRows);
+  assert.deepEqual(
+    snapshot.flatKeys.map((key) => key.key_raw),
+    ["k2", "k5", "k3", "k4", "k1"],
+  );
+  assert.equal(snapshot.flatKeyByRaw.size, 5);
+  assert.equal(snapshot.treeIndex?.leafByKeyRaw.size, 5);
+  assert.deepEqual(snapshot.treeIndex?.ancestorGroupIdsByKeyRaw.get("k1"), referenceIndex.ancestorGroupIdsByKeyRaw.get("k1"));
+  assert.ok(yields > 3);
+});
+
+test("cooperative snapshot sorts a sibling collection across work slices", async () => {
+  const keys = Array.from({ length: 101 }, (_, index) => {
+    const reversed = String(100 - index).padStart(3, "0");
+    return makeKey(`bucket:${reversed}`, `raw-${reversed}`);
+  });
+
+  const snapshot = await buildRedisKeySnapshotCooperatively([keys], { db: 0, flatRows: false, expandAll: true, expandedGroupIds: new Set() }, { workChunkSize: 7, yieldControl: async () => undefined });
+
+  assert.ok(snapshot?.treeIndex);
+  const bucket = findGroup(snapshot.treeIndex.root, "bucket");
+  assert.deepEqual(
+    bucket.children.map((node) => node.label),
+    Array.from({ length: 101 }, (_, index) => String(index).padStart(3, "0")),
+  );
+});
+
+test("cooperative snapshot supports flat filtered rows without building a hierarchy", async () => {
+  const snapshot = await buildRedisKeySnapshotCooperatively([[makeKey("a:b", "k1", "string", -1), makeKey("c:d", "k2", "string", 60)]], { db: 2, flatRows: true, expandAll: false, expandedGroupIds: new Set(), noExpiryOnly: true }, { workChunkSize: 1, yieldControl: async () => undefined });
+
+  assert.ok(snapshot);
+  assert.equal(snapshot.treeIndex, null);
+  assert.deepEqual(
+    snapshot.visibleRows.map((row) => row.node.label),
+    ["a:b"],
+  );
+  assert.equal(snapshot.flatKeys.length, 2);
+});
+
+test("cooperative snapshot aborts between bounded work slices", async () => {
+  let active = true;
+  let yields = 0;
+  const snapshot = await buildRedisKeySnapshotCooperatively(
+    [Array.from({ length: 20 }, (_, index) => makeKey(`key:${index}`, `raw-${index}`))],
+    { db: 0, flatRows: false, expandAll: true, expandedGroupIds: new Set() },
+    {
+      workChunkSize: 3,
+      shouldContinue: () => active,
+      yieldControl: async () => {
+        yields++;
+        active = yields < 2;
+      },
+    },
+  );
+
+  assert.equal(snapshot, null);
+  assert.equal(yields, 2);
 });
 
 test("redisKeyToFlatTreeRow keeps search results flat with the full key label", () => {

@@ -712,7 +712,8 @@ test("selected query result CSV export formats only typed temporal columns", asy
 
   await composable.exportCsv([1]);
 
-  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [["2024/2/25 13:02:15", rawDateTime]]);
+  // Temporal columns are wrapped as `="..."` so spreadsheet apps keep them as text; plain columns are untouched.
+  assert.deepEqual(apiMock.exportQueryResultCsv.mock.calls[0][2], [['="2024/2/25 13:02:15"', rawDateTime]]);
 });
 
 test("selected query result XLSX export uses the current source label as the sheet name", async () => {
@@ -745,6 +746,32 @@ test("selected query result XLSX export forwards the numericColumnRightAlign set
   settingsStore.updateEditorSettings({ numericColumnRightAlign: true });
   await composable.exportXlsx([1]);
   assert.equal(apiMock.exportQueryResultXlsx.mock.calls[1][6], true);
+});
+
+test("selected query result XLSX export forwards the global export pattern so numFmt keeps milliseconds", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "YYYY-MM-DD HH:mm:ss.SSS" });
+  const { composable } = buildExportHarness({
+    columns: ["id", "ts", "note"],
+    columnTypes: ["int", "datetime(3)", "varchar(32)"],
+    rows: [[1, "2026-07-25 13:02:15.456", "with-ms"]],
+  });
+
+  await composable.exportXlsx([1]);
+
+  // The rows already carry the formatted value, but without argument 8 the
+  // workbook falls back to a `yyyy-mm-dd hh:mm:ss` numFmt and hides the
+  // milliseconds it just wrote.
+  assert.deepEqual(apiMock.exportQueryResultXlsx.mock.calls[0][5], [[1, "2026-07-25 13:02:15.456", "with-ms"]]);
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][8], "YYYY-MM-DD HH:mm:ss.SSS");
+});
+
+test("selected query result XLSX export omits the export pattern when none is configured", async () => {
+  useSettingsStore().updateEditorSettings({ globalDateTimeExportFormat: "" });
+  const { composable } = buildExportHarness({ columnTypes: ["bigint(20)", "varchar(64)"] });
+
+  await composable.exportXlsx([1]);
+
+  assert.equal(apiMock.exportQueryResultXlsx.mock.calls[0][8], undefined);
 });
 
 test("streaming query result XLSX export carries numericColumnRightAlign in the backend request", async () => {

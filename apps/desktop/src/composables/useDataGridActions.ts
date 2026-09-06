@@ -177,7 +177,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return true;
   }
 
-  async function onExecuteSql(sql: string, tabId?: string) {
+  async function onExecuteSql(tabId: string, sql: string) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
     queryStore.updateSql(tab.id, sql);

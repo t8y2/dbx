@@ -2,6 +2,7 @@ package com.dbx.agent.dameng;
 
 import com.dbx.agent.ColumnInfo;
 import com.dbx.agent.DatabaseInfo;
+import com.dbx.agent.IndexInfo;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
@@ -79,6 +80,53 @@ class DamengAgentMetadataTest {
             .findFirst()
             .orElseThrow();
         Assertions.assertTrue(indexesSql.startsWith("SELECT /*+ PARALLEL(1) */"), indexesSql);
+    }
+
+    @Test
+    void identifiesUniqueConstraintBackingIndexesInIndexMetadataQuery() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, JdbcMetadataSqlFake.connection());
+
+        agent.listIndexes("APP", "USERS");
+
+        String indexesSql = JdbcMetadataSqlFake.statements.stream()
+            .filter(sql -> sql.contains("ALL_INDEXES") && sql.contains("ALL_CONSTRAINTS"))
+            .findFirst()
+            .orElseThrow();
+        Assertions.assertTrue(indexesSql.contains("AND c.CONSTRAINT_TYPE IN ('P', 'U')"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("AS CONSTRAINT_BACKED"), indexesSql);
+        Assertions.assertTrue(indexesSql.contains("CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK"), indexesSql);
+    }
+
+    @Test
+    void marksOnlyConstraintBackedIndexesAsConstraintBacked() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, indexMetadataConnection(List.of(
+            // UNIQUE constraint (虚索引) / standalone CREATE UNIQUE INDEX (实索引) / plain index.
+            Arrays.asList("UX_USERS_EMAIL", "EMAIL", "UNIQUE", "0", "NORMAL", "1"),
+            Arrays.asList("UX_USERS_CODE", "CODE", "UNIQUE", "0", "NORMAL", "0"),
+            Arrays.asList("IDX_USERS_NAME", "NAME", "NONUNIQUE", "0", "NORMAL", "0"),
+            Arrays.asList("PK_USERS", "ID", "UNIQUE", "1", "NORMAL", "1")
+        )));
+
+        List<IndexInfo> indexes = agent.listIndexes("APP", "USERS");
+
+        Assertions.assertEquals(
+            List.of("UX_USERS_EMAIL", "UX_USERS_CODE", "IDX_USERS_NAME", "PK_USERS"),
+            indexes.stream().map(IndexInfo::getName).toList()
+        );
+        Assertions.assertEquals(
+            List.of(true, false, false, true),
+            indexes.stream().map(IndexInfo::getConstraint_backed).toList()
+        );
+        Assertions.assertEquals(
+            List.of(false, false, false, true),
+            indexes.stream().map(IndexInfo::getIs_primary).toList()
+        );
+        Assertions.assertEquals(
+            List.of(true, true, false, true),
+            indexes.stream().map(IndexInfo::getIs_unique).toList()
+        );
     }
 
     @Test
@@ -1426,6 +1474,24 @@ class DamengAgentMetadataTest {
             null,
             allColumnComment
         ));
+    }
+
+    // Serves every metadata query with the same positional rows; the index metadata query is
+    // the only one these tests run against it.
+    private static Connection indexMetadataConnection(List<List<Object>> rows) {
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("prepareStatement".equals(name)) {
+                return metadataStatement(rows);
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("isClosed".equals(name)) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
     }
 
     private static List<Object> indexRow(String name, String columns, String uniqueness, String indexType) {

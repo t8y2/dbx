@@ -1818,16 +1818,24 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
+            // The LEFT JOIN also matches 'U': a UNIQUE constraint owns its backing index the same
+            // way a primary key does, and neither can be altered with index-level DDL (#7959).
+            // The constraint type therefore drives two flags — IS_PK (only 'P') and
+            // CONSTRAINT_BACKED ('P' or 'U'), the same split `independentIndexes` already uses to
+            // keep constraint-backed indexes out of the generated table DDL. A unique index
+            // created with CREATE UNIQUE INDEX has no ALL_CONSTRAINTS row, so it stays false and
+            // keeps the index-level DDL path.
             String sql = """
                 SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                     LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                     i.UNIQUENESS,
                     CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
-                    i.INDEX_TYPE
+                    i.INDEX_TYPE,
+                    CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
                 LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
-                    AND c.CONSTRAINT_TYPE = 'P'
+                    AND c.CONSTRAINT_TYPE IN ('P', 'U')
                 WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
                 GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
                 ORDER BY i.INDEX_NAME
@@ -1837,7 +1845,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new IndexInfo(
+                        IndexInfo index = new IndexInfo(
                             rs.getString(1),
                             splitNonEmpty(coalesce(rs.getString(2)), ","),
                             "UNIQUE".equals(rs.getString(3)),
@@ -1846,7 +1854,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                             rs.getString(5),
                             null,
                             null
-                        ));
+                        );
+                        index.setConstraint_backed("1".equals(rs.getString(6)));
+                        result.add(index);
                     }
                 }
             }

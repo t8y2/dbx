@@ -699,6 +699,13 @@ profiles:
     port: 1972
     user: _SYSTEM
     category: sql
+  - id: cache
+    dbType: iris
+    label: InterSystems Caché
+    icon: cache
+    port: 1972
+    user: _SYSTEM
+    category: sql
   - id: influxdb
     dbType: influxdb
     label: InfluxDB

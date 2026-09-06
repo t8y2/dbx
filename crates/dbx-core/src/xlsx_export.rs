@@ -451,7 +451,7 @@ impl<W: Write + Seek> StreamingXlsxWriter<W> {
                 rows: &sheet.rows,
                 numeric_column_right_align: sheet.numeric_column_right_align,
             };
-            write_worksheet_xml(&mut self.zip, &segment, self.auto_filter)?;
+            write_worksheet_xml(&mut self.zip, &segment, self.auto_filter, self.date_time_format.as_deref())?;
         }
 
         // 3. Write metadata files. These appear AFTER sheet data in the ZIP
@@ -779,7 +779,12 @@ fn push_typed_cell_xml(
     push_cell_xml(output, value, row_index, col_index, style);
 }
 
-fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment, auto_filter: bool) -> Result<(), String> {
+fn write_worksheet_xml<W: Write>(
+    writer: &mut W,
+    segment: &WorksheetSegment,
+    auto_filter: bool,
+    date_time_format: Option<&str>,
+) -> Result<(), String> {
     let total_rows = segment.rows.len() + 1;
     let range = sheet_range(segment.columns.len(), total_rows);
     let widths = estimate_column_widths(segment.columns, segment.column_comments, segment.rows);
@@ -816,7 +821,7 @@ fn write_worksheet_xml<W: Write>(writer: &mut W, segment: &WorksheetSegment, aut
             segment.columns,
             segment.column_types,
             row,
-            None,
+            date_time_format,
             segment.numeric_column_right_align,
         );
         writer.write_all(row_buffer.as_bytes()).map_err(|err| err.to_string())?;
@@ -1081,25 +1086,30 @@ fn split_sheets_for_max_rows<'a>(
 }
 
 pub fn build_xlsx_workbook(data: &XlsxWorksheetData) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_with_auto_filter(data, true)
+    build_xlsx_workbook_with_auto_filter(data, true, None)
 }
 
 pub fn build_xlsx_workbook_multi(sheets: &[XlsxWorksheetData]) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_multi_with_auto_filter(sheets, true)
+    build_xlsx_workbook_multi_with_auto_filter(sheets, true, None)
 }
 
-pub fn build_xlsx_workbook_with_auto_filter(data: &XlsxWorksheetData, auto_filter: bool) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_multi_with_auto_filter(std::slice::from_ref(data), auto_filter)
+pub fn build_xlsx_workbook_with_auto_filter(
+    data: &XlsxWorksheetData,
+    auto_filter: bool,
+    date_time_format: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    build_xlsx_workbook_multi_with_auto_filter(std::slice::from_ref(data), auto_filter, date_time_format)
 }
 
 pub fn build_xlsx_workbook_multi_with_auto_filter(
     sheets: &[XlsxWorksheetData],
     auto_filter: bool,
+    date_time_format: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     if auto_filter {
-        return build_xlsx_workbook_multi_with_max_rows(sheets, XLSX_MAX_DATA_ROWS);
+        return build_xlsx_workbook_multi_with_max_rows(sheets, XLSX_MAX_DATA_ROWS, date_time_format);
     }
-    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, XLSX_MAX_DATA_ROWS, auto_filter)
+    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, XLSX_MAX_DATA_ROWS, auto_filter, date_time_format)
 }
 
 /// Build an in-memory XLSX workbook with an explicit per-sheet data-row limit.
@@ -1109,14 +1119,16 @@ pub fn build_xlsx_workbook_multi_with_auto_filter(
 pub(crate) fn build_xlsx_workbook_multi_with_max_rows(
     sheets: &[XlsxWorksheetData],
     max_data_rows_per_sheet: usize,
+    date_time_format: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, max_data_rows_per_sheet, true)
+    build_xlsx_workbook_multi_with_max_rows_and_auto_filter(sheets, max_data_rows_per_sheet, true, date_time_format)
 }
 
 fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
     sheets: &[XlsxWorksheetData],
     max_data_rows_per_sheet: usize,
     auto_filter: bool,
+    date_time_format: Option<&str>,
 ) -> Result<Vec<u8>, String> {
     if sheets.is_empty() {
         return Err("At least one worksheet is required".to_string());
@@ -1128,7 +1140,7 @@ fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
         ("_rels/.rels", root_rels_xml().to_string()),
         ("xl/workbook.xml", workbook_xml_for_sheets(&sheet_names)),
         ("xl/_rels/workbook.xml.rels", workbook_rels_xml_for_sheet_count(segments.len())),
-        ("xl/styles.xml", styles_xml(None)),
+        ("xl/styles.xml", styles_xml(date_time_format)),
     ];
 
     let cursor = Cursor::new(Vec::<u8>::new());
@@ -1141,7 +1153,7 @@ fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
     }
     for (index, segment) in segments.iter().enumerate() {
         zip.start_file(format!("xl/worksheets/sheet{}.xml", index + 1), options).map_err(|err| err.to_string())?;
-        write_worksheet_xml(&mut zip, segment, auto_filter)?;
+        write_worksheet_xml(&mut zip, segment, auto_filter, date_time_format)?;
     }
 
     let output = zip.finish().map_err(|err| err.to_string())?;
@@ -1152,9 +1164,10 @@ fn build_xlsx_workbook_multi_with_max_rows_and_auto_filter(
 mod tests {
     use super::{
         build_xlsx_workbook, build_xlsx_workbook_multi, build_xlsx_workbook_multi_with_auto_filter,
-        build_xlsx_workbook_multi_with_max_rows, is_numeric_column_type, start_streaming_xlsx_workbook,
-        start_streaming_xlsx_workbook_with_max_rows, start_streaming_xlsx_workbook_with_options,
-        start_streaming_xlsx_workbook_with_trailing_sheets, write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
+        build_xlsx_workbook_multi_with_max_rows, build_xlsx_workbook_with_auto_filter, is_numeric_column_type,
+        start_streaming_xlsx_workbook, start_streaming_xlsx_workbook_with_max_rows,
+        start_streaming_xlsx_workbook_with_options, start_streaming_xlsx_workbook_with_trailing_sheets,
+        write_worksheet_xml, WorksheetSegment, XlsxWorksheetData,
     };
     use calamine::{open_workbook_auto, Reader};
     use serde_json::{json, Value};
@@ -1241,7 +1254,7 @@ mod tests {
             rows: vec![vec![json!(1)]],
             numeric_column_right_align: false,
         };
-        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[worksheet], false).expect("build workbook");
+        let workbook = build_xlsx_workbook_multi_with_auto_filter(&[worksheet], false, None).expect("build workbook");
 
         assert!(!read_zip_entry(&workbook, "xl/worksheets/sheet1.xml").contains("<autoFilter"));
     }
@@ -1342,6 +1355,34 @@ mod tests {
         assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\"><is><t>2024-02-25T13:02:15+08:00</t></is></c>"));
         assert!(styles.contains("numFmtId=\"164\" formatCode=\"yyyy-mm-dd\""));
         assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss\""));
+    }
+
+    #[test]
+    fn in_memory_temporal_cells_keep_the_configured_excel_display_format() {
+        // The current-page export builds the whole workbook in memory instead of
+        // streaming it. It used to hardcode `styles_xml(None)`, so a millisecond
+        // pattern produced serials that carried the fraction but a numFmt that
+        // displayed only whole seconds.
+        let data = XlsxWorksheetData {
+            sheet_name: Some("Temporal".to_string()),
+            columns: vec!["ts".to_string()],
+            column_types: vec!["datetime(3)".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!("2026-07-25 13:02:15.456")]],
+            numeric_column_right_align: false,
+        };
+
+        let workbook =
+            build_xlsx_workbook_with_auto_filter(&data, true, Some("YYYY-MM-DD HH:mm:ss.SSS")).expect("build workbook");
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        let styles = read_zip_entry(&workbook, "xl/styles.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"3\"><v>46228.54323444444</v></c>"), "sheet={sheet}");
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss.000\""), "styles={styles}");
+
+        // No configured pattern keeps the historical default.
+        let workbook = build_xlsx_workbook_with_auto_filter(&data, true, None).expect("build workbook");
+        let styles = read_zip_entry(&workbook, "xl/styles.xml");
+        assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss\""), "styles={styles}");
     }
 
     #[test]
@@ -1920,6 +1961,7 @@ mod tests {
                 numeric_column_right_align: false,
             }],
             2,
+            None,
         )
         .expect("build workbook");
 
@@ -1991,7 +2033,7 @@ mod tests {
         };
         let mut stats = WriteStats::default();
 
-        write_worksheet_xml(&mut stats, &segment, true).expect("write large worksheet");
+        write_worksheet_xml(&mut stats, &segment, true, None).expect("write large worksheet");
 
         assert!(stats.bytes_written > 10_000_000, "expected realistic worksheet size, got {}", stats.bytes_written);
         assert!(
@@ -2022,7 +2064,7 @@ mod tests {
             rows: (100..102).map(|i| vec![json!(i)]).collect(),
             numeric_column_right_align: false,
         };
-        let data = build_xlsx_workbook_multi_with_max_rows(&[sheet_a, sheet_b], 3).expect("build workbook");
+        let data = build_xlsx_workbook_multi_with_max_rows(&[sheet_a, sheet_b], 3, None).expect("build workbook");
 
         let workbook_xml = read_zip_entry(&data, "xl/workbook.xml");
         assert!(workbook_xml.contains("name=\"A\""), "workbook: {workbook_xml}");
@@ -2056,6 +2098,7 @@ mod tests {
                 numeric_column_right_align: false,
             }],
             100,
+            None,
         )
         .expect("build workbook");
 

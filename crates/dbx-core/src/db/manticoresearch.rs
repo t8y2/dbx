@@ -211,6 +211,7 @@ fn index_info_from_row(row: &mysql_async::Row) -> IndexInfo {
         comment: (!comment_parts.is_empty()).then(|| comment_parts.join(", ")),
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     }
 }
 

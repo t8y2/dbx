@@ -10,11 +10,44 @@ export const SINGLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_$-]+$/;
 const LEADING_SEPARATOR_PATTERN = /^[_$-]+/;
 const TRAILING_SEPARATOR_PATTERN = /[_$-]+$/;
 const SEPARATOR_RUN_PATTERN = /[_$-]+/;
-// Word boundaries inside an identifier segment: lower→Upper (userName),
-// UPPER→Upper+lower (HTTPServer), and digit→letter (user2Name / sha256Hash).
-// Letter→digit is deliberately NOT a boundary so digit runs stay attached to
-// the preceding word (ipv4, sha256, field1).
-const WORD_BOUNDARY_PATTERN = /(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[0-9])(?=[A-Za-z])/;
+
+function isLower(letter: string): boolean {
+  return letter >= "a" && letter <= "z";
+}
+
+function isUpper(letter: string): boolean {
+  return letter >= "A" && letter <= "Z";
+}
+
+function isDigit(letter: string): boolean {
+  return letter >= "0" && letter <= "9";
+}
+
+/**
+ * Split a separator-free segment on its internal word boundaries: lower→Upper
+ * (userName), UPPER→Upper+lower (HTTPServer), and digit→letter (user2Name /
+ * sha256Hash). Letter→digit is deliberately NOT a boundary so digit runs stay
+ * attached to the preceding word (ipv4, sha256, field1).
+ *
+ * Implemented as a character scan instead of a zero-width lookbehind regex
+ * because lookbehind throws at module-parse time on WebViews older than
+ * Safari 16.4 and crashed the whole app there (issue #8202 / #6521 class).
+ */
+function splitSegmentOnWordBoundaries(segment: string): string[] {
+  const words: string[] = [];
+  let start = 0;
+  for (let index = 1; index < segment.length; index++) {
+    const previous = segment[index - 1];
+    const current = segment[index];
+    const next = segment[index + 1];
+    const boundary = (isLower(previous) && isUpper(current)) || (isUpper(previous) && isUpper(current) && isLower(next)) || (isDigit(previous) && (isLower(current) || isUpper(current)));
+    if (!boundary) continue;
+    words.push(segment.slice(start, index));
+    start = index;
+  }
+  words.push(segment.slice(start));
+  return words;
+}
 
 interface IdentifierParts {
   leading: string;
@@ -30,7 +63,7 @@ function splitIntoWords(core: string): IdentifierParts {
   const inner = core.slice(leading.length, core.length - trailing.length);
   const words = inner
     .split(SEPARATOR_RUN_PATTERN)
-    .flatMap((segment) => segment.split(WORD_BOUNDARY_PATTERN))
+    .flatMap(splitSegmentOnWordBoundaries)
     .filter((word) => word.length > 0);
   return { leading, words, trailing };
 }

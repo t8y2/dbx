@@ -3858,6 +3858,7 @@ async fn list_indexes_for_relations_with_sql(
             comment: row.try_get::<_, Option<String>>(10).ok().flatten(),
             key_is_expression,
             column_opclasses: key_opclasses,
+            constraint_backed: false,
         });
     }
     Ok(result)
@@ -7572,6 +7573,7 @@ async fn list_indexes_with_sql(
                 comment: row.try_get::<_, Option<String>>(9).ok().flatten(),
                 key_is_expression,
                 column_opclasses: key_opclasses,
+                constraint_backed: false,
             }
         })
         .collect())

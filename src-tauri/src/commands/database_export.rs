@@ -59,6 +59,8 @@ pub async fn export_database_sql(
                     status: ExportStatus::Error,
                     error: Some(e),
                     preparing: false,
+                    error_count: 0,
+                    error_summary: None,
                 },
             );
         }

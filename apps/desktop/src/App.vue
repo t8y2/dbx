@@ -25,6 +25,7 @@ import { useAppUpdater } from "@/composables/useAppUpdater";
 import { useMcpUpdateBadge } from "@/composables/useMcpUpdateBadge";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { useFileDrop } from "@/composables/useFileDrop";
+import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
 import { usePanelResize } from "@/composables/usePanelResize";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
 import { useSqlExecution } from "@/composables/useSqlExecution";
@@ -220,6 +221,7 @@ const {
   getActiveTaskCount: () => trackedUpdateTaskCount.value,
 });
 const { setupFileDrop } = useFileDrop();
+const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
 const isDesktop = isTauriRuntime();
 const windowContext = resolveWindowContext();
@@ -779,6 +781,15 @@ function requestActiveEditorExecuteInNewResultTab() {
 // Per-group editor toolbars call back into this App-owned orchestration. The
 // group focuses itself on pointerdown/focusin before any toolbar event, so the
 // acting tab is passed explicitly instead of relying on the focused group.
+// Declared above the provide: the object references the variable itself, while
+// the lazy getter safely reads later-declared update-count refs at render time.
+const specialPageTabs = computed(() => ({
+  settingsOpen: settingsPageTabOpen.value,
+  settingsActive: settingsStore.settingsPageActive,
+  driverStoreOpen: driverStoreTabOpen.value,
+  driverStoreActive: driverStoreActive.value,
+  driverUpdateCount: toolbarAgentDriverUpdateCount.value,
+}));
 provide(EDITOR_TOOLBAR_ACTIONS, {
   explainMode,
   blockDangerousRedisCommands,
@@ -802,6 +813,11 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   changeSchema: changeActiveSchema,
   setDefaultDatabase: setActiveDatabaseAsDefault,
   clearDefaultDatabase: clearActiveDefaultDatabase,
+  specialPageTabs,
+  activateSettingsPage,
+  closeSettingsPage,
+  activateDriverStore: () => openDriverStorePage(),
+  closeDriverStore: closeDriverStorePage,
 });
 
 // Upstream "preview changes" entry: dormant until the group toolbar wires the
@@ -1970,6 +1986,7 @@ function applyExternalSqlFileTarget(tab: QueryTab, path: string) {
 async function openSqlFile() {
   const tab = activeTab.value;
   if (!tab) return;
+  let openedSqlPath: string | undefined;
   try {
     if (isTauriRuntime()) {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -1979,6 +1996,7 @@ async function openSqlFile() {
       });
       if (path) {
         const sqlPath = path as string;
+        openedSqlPath = sqlPath;
         const snapshot = await api.readExternalSqlFileSnapshot(sqlPath);
         queryStore.updateSql(tab.id, snapshot.content);
         queryStore.linkExternalSqlPath(tab.id, sqlPath, sqlFileTitleFromPath(sqlPath), snapshot.version);
@@ -2000,7 +2018,9 @@ async function openSqlFile() {
       input.click();
     }
   } catch (e: any) {
-    toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+    if (!openInStreamingExecutorOnTooLarge(openedSqlPath, e)) {
+      toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+    }
   }
 }
 
@@ -2485,7 +2505,7 @@ function onQueryEditorObjectSourceSaved() {
   contentAreaRef.value?.refreshQueryEditorCompletionCache();
 }
 
-async function changeActiveConnection(connectionId: string, tabId?: string) {
+async function changeActiveConnection(tabId: string, connectionId: string) {
   const tab = resolveToolbarTab(tabId);
   if (!tab) return;
   const connection = connectionStore.getConfig(connectionId);
@@ -2524,7 +2544,7 @@ async function changeActiveConnection(connectionId: string, tabId?: string) {
   }
 }
 
-function changeActiveDatabase(database: string, tabId?: string) {
+function changeActiveDatabase(tabId: string, database: string) {
   const tab = resolveToolbarTab(tabId);
   if (tab) {
     queryStore.updateDatabase(tab.id, database);
@@ -2535,7 +2555,7 @@ function changeActiveDatabase(database: string, tabId?: string) {
   }
 }
 
-function changeActiveCatalog(catalog: string | undefined, database: string, tabId?: string) {
+function changeActiveCatalog(tabId: string, catalog: string | undefined, database: string) {
   const tab = resolveToolbarTab(tabId);
   if (tab) {
     queryStore.updateCatalog(tab.id, catalog, database);
@@ -2555,7 +2575,7 @@ async function clearActiveDefaultDatabase(tabId?: string) {
   await connectionStore.clearDefaultDatabase(tab.connectionId);
 }
 
-function changeActiveSchema(schema: string | undefined, tabId?: string) {
+function changeActiveSchema(tabId: string, schema: string | undefined) {
   const tab = resolveToolbarTab(tabId);
   if (!tab) return;
   queryStore.updateSchema(tab.id, schema);
@@ -3439,6 +3459,7 @@ onUnmounted(() => {
                 :can-detach-tabs="isDesktop"
                 @activate-driver-store="openDriverStorePage"
                 @activate-settings-page="activateSettingsPage"
+                @activate-tab="activateQueryTab"
                 @close-driver-store="closeDriverStorePage"
                 @close-settings-page="closeSettingsPage"
                 @save-tab="handleSaveTab"

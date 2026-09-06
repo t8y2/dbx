@@ -48,6 +48,7 @@ import {
   Maximize2,
   Minimize2,
   Network,
+  Package,
   PanelTop,
   Pencil,
   PencilRuler,
@@ -55,6 +56,7 @@ import {
   RotateCcw,
   RotateCw,
   Search,
+  Settings,
   ShieldCheck,
   Table2,
   TableProperties,
@@ -97,6 +99,8 @@ const props = defineProps<{
   canDetachTabs?: boolean;
   /** A detached tab is being dragged over this bar — highlight it as the drop target. */
   detachedDropTarget?: boolean;
+  /** App-level special pages (settings / driver store) appended after the tabs. */
+  specialPageTabs?: { settingsOpen: boolean; settingsActive: boolean; driverStoreOpen: boolean; driverStoreActive: boolean; driverUpdateCount: number };
 }>();
 
 const emit = defineEmits<{
@@ -106,6 +110,10 @@ const emit = defineEmits<{
   "start-resize": [event: MouseEvent];
   "toggle-collapse": [];
   "detach-tab": [tab: QueryTab];
+  "activate-settings": [];
+  "close-settings": [];
+  "activate-driver-store": [];
+  "close-driver-store": [];
 }>();
 
 const { t } = useI18n();
@@ -122,6 +130,21 @@ const editingTitle = ref("");
 // with the drag state. A fresh pointerdown always resets it.
 const suppressNextTabClick = ref(false);
 const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
+// Special pages append to the focused group's strip only: one instance at a
+// time, in the pane the user is working in (v0.6.2 kept them in the single strip).
+const showSpecialPageTabs = computed(() => !!props.specialPageTabs && (props.specialPageTabs.settingsOpen || props.specialPageTabs.driverStoreOpen) && queryStore.focusedGroupId === props.groupId);
+
+function specialPageTabClass(active: boolean): string[] {
+  if (isClassicLayout.value) {
+    return ["h-full border-r border-border/80 font-medium dark:border-border/45", active ? "bg-background text-foreground" : "text-foreground/70 hover:text-foreground/90"];
+  }
+  return ["h-7 rounded-md border", active ? "border-ring font-medium text-foreground" : "border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90"];
+}
+
+function specialPageTabStyle(active: boolean) {
+  if (!isClassicLayout.value) return undefined;
+  return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;
+}
 const isVerticalLayout = computed(() => settingsStore.editorSettings.tabPlacement === "left" || settingsStore.editorSettings.tabPlacement === "right");
 const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.editorSettings.tabLayout === "wrap");
 // The icon-only collapse only exists in the vertical toolbar; horizontal
@@ -176,9 +199,16 @@ const tabScrollbarThumbStyle = computed<CSSProperties>(() => ({
 // Overflow search lists this group's tabs (mirrors the legacy AppTabBar
 // overflow popover, scoped to the group that owns the strip).
 const tabOverflowOpen = ref(false);
+// The overflow popover's "search opened tabs" query is scoped to the popover
+// list only. It must not reach the strip: with a shared query, typing a term
+// with no match would empty the always-visible top tab bar while the active
+// tab's content stays on screen.
+const tabOverflowSearchQuery = ref("");
+// The strip's own search box lives only in the vertical toolbar, where
+// filtering the strip itself is the point of the search.
 const tabSearchQuery = ref("");
 const filteredGroupTabs = computed(() => {
-  const query = tabSearchQuery.value.trim().toLocaleLowerCase();
+  const query = tabOverflowSearchQuery.value.trim().toLocaleLowerCase();
   if (!query) {
     return props.tabs;
   }
@@ -186,7 +216,7 @@ const filteredGroupTabs = computed(() => {
 });
 
 watch(tabOverflowOpen, (open) => {
-  tabSearchQuery.value = "";
+  tabOverflowSearchQuery.value = "";
   if (open) {
     nextTick(() => document.querySelector<HTMLInputElement>("[data-group-tab-search-input]")?.focus());
   }
@@ -214,6 +244,7 @@ watch(
 const tabGroupItems = computed(() => [
   { value: "none", label: t("settings.tabGroupNone") },
   { value: "database-type", label: t("settings.tabGroupDatabaseType") },
+  { value: "database", label: t("settings.tabGroupDatabase") },
   { value: "connection", label: t("settings.tabGroupConnection") },
 ]);
 const tabSortItems = computed(() => [
@@ -239,7 +270,7 @@ async function persistTabPreferences(partial: TabPreferencePatch) {
 }
 
 function updateTabGroupMode(value: string) {
-  if (value === "none" || value === "database-type" || value === "connection") void persistTabPreferences({ tabGroupMode: value });
+  if (value === "none" || value === "database-type" || value === "database" || value === "connection") void persistTabPreferences({ tabGroupMode: value });
 }
 
 function updateTabSortMode(value: string) {
@@ -250,15 +281,58 @@ function updateTabPlacement(value: string) {
   if (value === "top" || value === "bottom" || value === "left" || value === "right") void persistTabPreferences({ tabPlacement: value });
 }
 
+function databaseTabGroupKey(tab: QueryTab) {
+  const database = tab.database || "";
+  // A connection-level tab has no database scope, so its catalog cannot split the group.
+  return JSON.stringify([tab.connectionId, database ? tab.catalog || "" : "", database]);
+}
+
 function tabGroupKey(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
   if (settingsStore.editorSettings.tabGroupMode === "connection") return tab.connectionId;
+  if (settingsStore.editorSettings.tabGroupMode === "database") return databaseTabGroupKey(tab);
   return connection?.driver_profile || connection?.db_type || tab.connectionId || "unknown";
+}
+
+function compareTabGroupKeys(left: string, right: string) {
+  if (left === right) return 0;
+  const localized = left.localeCompare(right, undefined, { sensitivity: "base", numeric: true });
+  // Collation may consider case-distinct identities equal; the raw tie-break keeps clusters contiguous.
+  return localized || (left < right ? -1 : 1);
 }
 
 function tabTitleText(tab: QueryTab) {
   return tabDisplayTitle(tab, t);
 }
+
+function tabConnectionLabel(tab: QueryTab) {
+  return connectionStore.getConfig(tab.connectionId)?.name || tab.connectionId;
+}
+
+function tabConnectionTargetLabel(tab: QueryTab) {
+  const connection = connectionStore.getConfig(tab.connectionId);
+  const host = connection?.host.trim();
+  return connection && host ? `${host}:${connection.port}` : tab.connectionId;
+}
+
+function databaseTabGroupBaseLabel(tab: QueryTab) {
+  if (!tab.database) return tabConnectionLabel(tab);
+  return [tab.database, ...(tab.catalog ? [tab.catalog] : [])].join(" · ");
+}
+
+const databaseTabGroupIdentityDisplaysByLabel = computed(() => {
+  const identitiesByLabel = new Map<string, Map<string, { connectionLabel: string; connectionTargetLabel: string }>>();
+  for (const tab of props.tabs) {
+    const label = databaseTabGroupBaseLabel(tab);
+    const identities = identitiesByLabel.get(label) ?? new Map<string, { connectionLabel: string; connectionTargetLabel: string }>();
+    identities.set(databaseTabGroupKey(tab), {
+      connectionLabel: tabConnectionLabel(tab),
+      connectionTargetLabel: tabConnectionTargetLabel(tab),
+    });
+    identitiesByLabel.set(label, identities);
+  }
+  return identitiesByLabel;
+});
 
 /**
  * Sorts a section of this pane's tabs for display. With a group mode active,
@@ -272,7 +346,7 @@ function sortDisplayedTabs(tabs: QueryTab[]) {
     .map((tab, index) => ({ tab, index }))
     .sort((left, right) => {
       if (groupMode !== "none") {
-        const group = tabGroupKey(left.tab).localeCompare(tabGroupKey(right.tab), undefined, { sensitivity: "base", numeric: true });
+        const group = compareTabGroupKeys(tabGroupKey(left.tab), tabGroupKey(right.tab));
         if (group) return group;
       }
       if (sortMode === "manual") return left.index - right.index;
@@ -303,6 +377,17 @@ const editingTabGroupFallbackColor = ref(tabGroupPalette[0]!);
 function tabGroupDefaultLabel(tab: QueryTab) {
   const connection = connectionStore.getConfig(tab.connectionId);
   if (settingsStore.editorSettings.tabGroupMode === "connection") return connection?.name || tab.connectionId;
+  if (settingsStore.editorSettings.tabGroupMode === "database") {
+    const baseLabel = databaseTabGroupBaseLabel(tab);
+    const identityDisplays = databaseTabGroupIdentityDisplaysByLabel.value.get(baseLabel);
+    if ((identityDisplays?.size ?? 0) <= 1) return baseLabel;
+    const connectionLabel = tabConnectionLabel(tab);
+    const sameNameDisplays = [...identityDisplays!.values()].filter((display) => display.connectionLabel === connectionLabel);
+    if (sameNameDisplays.length <= 1) return `${baseLabel} · ${connectionLabel}`;
+    const connectionTargetLabel = tabConnectionTargetLabel(tab);
+    if (sameNameDisplays.filter((display) => display.connectionTargetLabel === connectionTargetLabel).length <= 1) return `${baseLabel} · ${connectionLabel} · ${connectionTargetLabel}`;
+    return `${baseLabel} · ${connectionLabel} · ${connectionTargetLabel} · ${tab.connectionId}`;
+  }
   return connection?.driver_label || connection?.driver_profile || connection?.db_type || tab.connectionId;
 }
 
@@ -320,7 +405,7 @@ function tabGroupLabel(tab: QueryTab) {
 
 // Pinned and regular tabs form separate clusters even under the same key.
 function tabGroupId(tab: QueryTab) {
-  return `${tab.pinned ? "fixed" : "regular"}:${tabGroupKey(tab)}`;
+  return `${tab.pinned ? "fixed" : "regular"}:${settingsStore.editorSettings.tabGroupMode}:${tabGroupKey(tab)}`;
 }
 
 function isTabGroupCollapsed(tab: QueryTab) {
@@ -369,7 +454,6 @@ function groupColorStyle(color: string): CSSProperties {
   return {
     "--tab-group-color": color,
     "--tab-group-soft": hexToRgba(color, 0.12),
-    "--tab-group-rail": hexToRgba(color, 0.3),
   } as CSSProperties;
 }
 
@@ -523,8 +607,9 @@ function tabMatchesSearch(tab: QueryTab, query: string) {
 }
 
 /**
- * The strips apply the search box (overflow popover and vertical toolbar
- * share it): sections filter by title before clustering.
+ * The strips apply the vertical toolbar search box: sections filter by title
+ * before clustering. The overflow popover's query (tabOverflowSearchQuery) is
+ * scoped to the popover list and deliberately does not reach the strip.
  */
 const filteredPinnedTabs = computed(() => {
   const query = tabSearchQuery.value.trim().toLocaleLowerCase();
@@ -1188,6 +1273,47 @@ watch(
               </div>
             </CustomContextMenu>
           </template>
+          <!-- Settings / driver store append to the focused strip like v0.6.2
+               (vertical strips get them with the #8213 column-mode redesign) -->
+          <template v-if="showSpecialPageTabs && !isVerticalLayout">
+            <div
+              v-if="specialPageTabs?.settingsOpen"
+              data-settings-page-tab
+              class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+              :class="specialPageTabClass(!!specialPageTabs?.settingsActive)"
+              :style="specialPageTabStyle(!!specialPageTabs?.settingsActive)"
+              :data-active-tab="specialPageTabs?.settingsActive"
+              :title="t('settings.title')"
+              @click="emit('activate-settings')"
+              @mousedown.middle.prevent="emit('close-settings')"
+            >
+              <Settings class="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+              <span class="min-w-0 flex-1 truncate">{{ t("settings.title") }}</span>
+              <button class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-settings')">
+                <X class="h-3 w-3" />
+              </button>
+            </div>
+            <div
+              v-if="specialPageTabs?.driverStoreOpen"
+              data-driver-store-tab
+              class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+              :class="specialPageTabClass(!!specialPageTabs?.driverStoreActive)"
+              :style="specialPageTabStyle(!!specialPageTabs?.driverStoreActive)"
+              :data-active-tab="specialPageTabs?.driverStoreActive"
+              :title="t('toolbar.driverManager')"
+              @click="emit('activate-driver-store')"
+              @mousedown.middle.prevent="emit('close-driver-store')"
+            >
+              <Package class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+              <span class="min-w-0 flex-1 truncate">{{ t("toolbar.driverManager") }}</span>
+              <span v-if="(specialPageTabs?.driverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+                {{ (specialPageTabs?.driverUpdateCount ?? 0) > 99 ? "99+" : specialPageTabs?.driverUpdateCount }}
+              </span>
+              <button class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-driver-store')">
+                <X class="h-3 w-3" />
+              </button>
+            </div>
+          </template>
           <div :class="tabTailDragRegionClass" data-tauri-drag-region />
         </div>
       </div>
@@ -1201,7 +1327,7 @@ watch(
           <PopoverContent align="end" class="w-auto min-w-56 max-w-80 gap-0 rounded-[6px] p-1" @click.stop @keydown.stop>
             <div class="relative border-b px-1 pb-1">
               <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-              <Input v-model="tabSearchQuery" data-group-tab-search-input type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
+              <Input v-model="tabOverflowSearchQuery" data-group-tab-search-input type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 pl-7 text-sm" />
             </div>
             <div class="max-h-[min(70vh,28rem)] overflow-y-auto pt-1">
               <CustomContextMenu v-for="tab in filteredGroupTabs" :key="tab.id" :items="getTabMenuItems(tab)" v-slot="{ onContextMenu }">

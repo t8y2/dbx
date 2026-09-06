@@ -49,6 +49,8 @@ DBX 的 Agent 驱动 —— 通过 JDBC 和原生数据库驱动支持各种数�
 | zookeeper | Apache ZooKeeper | go-zookeeper 原生 Agent |
 | rabbitmq | RabbitMQ | amqp091-go 原生 agent |
 | rocketmq | Apache RocketMQ | rocketmq-admin-go 原生 agent |
+| iris | InterSystems IRIS | InterSystems IRIS JDBC |
+| cache | InterSystems Caché | InterSystems Caché JDBC (CacheDB) |
 
 
 ## 多 JRE 支持

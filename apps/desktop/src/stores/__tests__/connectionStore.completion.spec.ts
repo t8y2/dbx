@@ -60,6 +60,19 @@ function oracleConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function jdbcOracleConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "jdbc-oracle-1",
+    name: "Oracle via JDBC",
+    db_type: "jdbc",
+    port: 1521,
+    username: "APP",
+    database: "ORCL",
+    connection_string: "jdbc:oracle:thin:@127.0.0.1:1521/ORCL",
+  } as ConnectionConfig;
+}
+
 function oceanBaseOracleConnection(): ConnectionConfig {
   return {
     ...oracleConnection(),
@@ -611,6 +624,36 @@ describe("connectionStore completion assistant", () => {
     expect(getColumns).toHaveBeenCalledWith("oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
     expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
+  });
+
+  it("lets a JDBC connection to Oracle resolve CURRENT_SCHEMA for unqualified column completion, same as the native Oracle driver", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const getColumns = vi.fn().mockResolvedValue([{ name: "REPORT_ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [jdbcOracleConnection()];
+    store.connectedIds.add("jdbc-oracle-1");
+
+    // No schema is selected (undefined) — before the fix this fell through
+    // both the Oracle current-schema completion path and the schema-required
+    // guard, silently returning [] without ever calling getColumns.
+    const columns = await store.listCompletionColumns("jdbc-oracle-1", "ORCL", "ORDERS", undefined, { clientSessionId: "tab-a", version: 0 });
+
+    expect(completionAssistantSearch).not.toHaveBeenCalled();
+    expect(getColumns).toHaveBeenCalledWith("jdbc-oracle-1", "ORCL", "", "ORDERS", undefined, "tab-a");
+    expect(columns).toEqual([expect.objectContaining({ name: "REPORT_ID", table: "ORDERS", schema: undefined, dataType: "NUMBER" })]);
   });
 
   it("uses the Dameng login schema for unqualified column completion", async () => {

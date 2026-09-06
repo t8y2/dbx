@@ -167,6 +167,20 @@ describe("useDataGridActions", () => {
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
   });
 
+  it("executes the WHERE apply SQL on the emitting tab (#8216)", async () => {
+    // ContentArea 的 executeSql 事件契约是 (tabId, sql)，App.vue 按此顺序透传；
+    // 签名若仍是 sql-first，resolveActionTab 会拿 SQL 文本当 tab id 匹配失败，
+    // 数据页筛选应用就静默不执行任何查询（只剩手动刷新可用）。
+    const tab = tableDataTab();
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onExecuteSql(tab.id, "SELECT * FROM public.users WHERE (status = 'active')");
+
+    expect(mocks.updateSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users WHERE (status = 'active')");
+    expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users WHERE (status = 'active')", { preserveResultDuringExecution: true });
+  });
+
   it("keeps the restored filter and sort when the no-data placeholder refresh runs (#7963)", async () => {
     // 重启后恢复的数据标签页没有 result，刷新走的是 ContentArea 空态占位符那条
     // 不带参数的入口；它必须回带标签页自身的 whereInput/orderByInput，

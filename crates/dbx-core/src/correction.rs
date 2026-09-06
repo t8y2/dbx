@@ -446,6 +446,7 @@ mod tests {
             diff_type: diff_type.to_string(),
             object_type: Some("table".to_string()),
             name: name.to_string(),
+            target_name: None,
             columns: None,
             indexes: None,
             foreign_keys: None,

@@ -62,6 +62,7 @@ fn prepare_schema_diff_function_signature() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     };
     let _result: SchemaDiffPreparation = prepare_schema_diff(options);
 }
@@ -139,6 +140,7 @@ fn schema_diff_preparation_field_names() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     });
 
     let json = serde_json::to_value(&result).unwrap();

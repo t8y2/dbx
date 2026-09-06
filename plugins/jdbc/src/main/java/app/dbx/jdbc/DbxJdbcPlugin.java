@@ -4028,7 +4028,74 @@ public final class DbxJdbcPlugin {
             throw new SQLException("Object source not found");
         }
 
+        if ("TABLE".equals(normalizeObjectType(objectType))) {
+            return genericTableObjectSource(connection, database, schema, name);
+        }
+
         throw new SQLException("Object source is not supported by this JDBC driver");
+    }
+
+    /**
+     * Table source for generic external JDBC drivers (JDBCX wrappers, custom
+     * protocol drivers) that expose no vendor DDL statement: assemble CREATE
+     * TABLE from {@code DatabaseMetaData} via the same readers the browse RPCs
+     * use, so driver quirks (catalog fallback, PK marking, tolerance of
+     * unimplemented metadata methods) apply identically.
+     */
+    private static JsonNode genericTableObjectSource(JsonNode connection, String database, String schema, String table)
+        throws SQLException {
+        JsonNode columns = getColumns(connection, database, schema, table);
+        if (!columns.isArray() || columns.isEmpty()) {
+            throw new SQLException("Object source not found");
+        }
+        JsonNode indexes = listIndexes(connection, database, schema, table);
+
+        JsonNode foreignKeys;
+        try (Connection conn = openConnection(connection)) {
+            DatabaseMetaData meta = conn.getMetaData();
+            JdbcDriverQuirks quirks = driverQuirks(connection);
+            String catalog = metadataCatalog(database, quirks);
+            String schemaPattern = resolveSchemaPattern(meta, database, schema, quirks);
+            foreignKeys = listGenericForeignKeys(meta, catalog, schemaPattern, table);
+        }
+
+        String source = GenericJdbcDdlBuilder.buildTableDdl(
+            emptyToNull(schema) != null ? schema : emptyToNull(database),
+            table,
+            columns,
+            indexes,
+            foreignKeys
+        );
+        ObjectNode item = MAPPER.createObjectNode();
+        item.put("name", table);
+        item.put("object_type", "TABLE");
+        putNullable(item, "schema", emptyToNull(schema));
+        item.put("source", source);
+        return item;
+    }
+
+    private static JsonNode listGenericForeignKeys(DatabaseMetaData meta, String catalog, String schemaPattern, String table) {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (ResultSet rs = meta.getImportedKeys(catalog, schemaPattern, table)) {
+            while (rs != null && rs.next()) {
+                String column = rs.getString("FKCOLUMN_NAME");
+                String refTable = rs.getString("PKTABLE_NAME");
+                String refColumn = rs.getString("PKCOLUMN_NAME");
+                if (column == null || column.isBlank() || refTable == null || refTable.isBlank()
+                    || refColumn == null || refColumn.isBlank()) {
+                    continue;
+                }
+                ObjectNode item = MAPPER.createObjectNode();
+                item.put("name", rs.getString("FK_NAME"));
+                item.put("column", column);
+                item.put("ref_table", refTable);
+                item.put("ref_column", refColumn);
+                result.add(item);
+            }
+        } catch (SQLException | AbstractMethodError | UnsupportedOperationException ignored) {
+            // Foreign keys are optional detail; generic DDL must still succeed.
+        }
+        return result;
     }
 
     private static JsonNode hive2ShowCreateObjectSource(

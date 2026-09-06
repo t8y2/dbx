@@ -137,12 +137,17 @@ const groupExecutableSql = computed(() => {
       :tab-bar-collapsed="tabBarCollapsed"
       :can-detach-tabs="canDetachTabs"
       :detached-drop-target="detachedDropTarget"
+      :special-page-tabs="toolbar.specialPageTabs.value"
       @activate-tab="$emit('activate-tab', $event)"
       @locate-tab="$emit('locate-tab', $event)"
       @toggle-zen-mode="$emit('toggle-zen-mode')"
       @start-resize="$emit('start-resize', $event)"
       @toggle-collapse="$emit('toggle-collapse')"
       @detach-tab="$emit('detach-tab', $event)"
+      @activate-settings="toolbar.activateSettingsPage()"
+      @close-settings="toolbar.closeSettingsPage()"
+      @activate-driver-store="toolbar.activateDriverStore()"
+      @close-driver-store="toolbar.closeDriverStore()"
     />
     <!-- The toolbar stays at the top of the pane's content column in every
          placement; only the tab bar moves around it. -->

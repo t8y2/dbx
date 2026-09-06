@@ -613,7 +613,7 @@ function isSelectStar(body: string, alias: string | undefined): boolean {
 }
 
 function parseFromSources(body: string): EditableQuerySource[] {
-  if (!body || /[()]/.test(body)) return [];
+  if (!body) return [];
   const sources: EditableQuerySource[] = [];
   let pos = 0;
   const first = parseTableSourceAt(body, pos, sources.length);

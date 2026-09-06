@@ -1862,6 +1862,7 @@ defineExpose({
                 :loading="activeResultIsLoading"
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
+                :joined-write-targets="activeTab.queryWriteTargets"
                 :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="activeTab.resultColumnComments"
                 :query-display-source-columns="activeTab.queryDisplaySourceColumns"

@@ -81,7 +81,7 @@ describe("MCP policy settings state", () => {
   it("guards the mutation entry point and wires the shared disabled state to policy controls", () => {
     expect(settingsDialogSource).toContain("if (mcpPolicyControlsDisabled.value) return;");
     expect(settingsDialogSource).toContain(':disabled="mcpPolicyControlsDisabled"');
-    expect(settingsDialogSource).toContain('@update:allowed-connection-ids="onMcpAllowedConnectionIdsChange"');
+    expect(settingsDialogSource).toContain('@update:scope="onMcpResourceScopeChange"');
 
     const loadingStart = settingsDialogSource.indexOf("mcpPolicyLoading.value = true;");
     const policyLoad = settingsDialogSource.indexOf("await settingsStore.initMcpGlobalPolicy(true);");
@@ -91,23 +91,21 @@ describe("MCP policy settings state", () => {
     expect(loadingEnd).toBeGreaterThan(policyLoad);
   });
 
-  it("keeps translated mode descriptions in one responsive layout track", () => {
-    const descriptionStart = settingsDialogSource.indexOf("data-mcp-execution-mode-description");
-    const descriptionEnd = settingsDialogSource.indexOf("settings.mcpCapabilityTitle", descriptionStart);
-    const descriptionSource = settingsDialogSource.slice(descriptionStart, descriptionEnd);
-
-    expect(descriptionStart).toBeGreaterThan(-1);
-    expect(descriptionEnd).toBeGreaterThan(descriptionStart);
-    expect(descriptionSource).toContain('class="grid text-xs"');
-    expect(descriptionSource.match(/col-start-1 row-start-1/g)).toHaveLength(3);
-    expect(descriptionSource.match(/\? 'visible' : 'invisible'/g)).toHaveLength(3);
+  it("renders one static mode hint in place of stacked per-mode description tracks", () => {
+    expect(settingsDialogSource).not.toContain("data-mcp-execution-mode-description");
+    const groupStart = settingsDialogSource.indexOf('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
+    const hintIndex = settingsDialogSource.indexOf("settings.mcpPermissionGlobalDefaultHint");
+    expect(groupStart).toBeGreaterThan(-1);
+    expect(hintIndex).toBeGreaterThan(groupStart);
   });
 
   it("keeps execution mode cards accessible as a keyboard radio group", () => {
     expect(settingsDialogSource).toContain('role="radiogroup" aria-labelledby="mcp-execution-mode-label"');
-    expect(settingsDialogSource.match(/role="radio"/g)).toHaveLength(3);
-    expect(settingsDialogSource).toContain(":aria-checked=\"mcpExecutionMode === 'safe_write'\"");
-    expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, 'safe_write')");
+    expect(settingsDialogSource).toContain('v-for="mode in mcpExecutionModeOptions"');
+    expect(settingsDialogSource.match(/role="radio"/g)).toHaveLength(1);
+    expect(settingsDialogSource).toContain(':aria-checked="mcpExecutionMode === mode"');
+    expect(settingsDialogSource).toContain(':tabindex="mcpExecutionMode === mode ? 0 : -1"');
+    expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, mode)");
   });
 
   it("keeps MCP client config tabs on a single scrollable row", () => {

@@ -417,10 +417,8 @@ impl DbxMcpServer {
                     .iter()
                     .map(|connection| {
                         let mut summary = ConnectionSummary::from(connection);
-                        summary.group_path = group_paths
-                            .get(&connection.id)
-                            .map(|path| path.names.clone())
-                            .unwrap_or_default();
+                        summary.group_path =
+                            group_paths.get(&connection.id).map(|path| path.names.clone()).unwrap_or_default();
                         summary
                     })
                     .collect::<Vec<_>>();
@@ -634,12 +632,8 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let policy = effective_policy_for_database_with_groups(
-            &resolved.policy,
-            &resolved.group_ids,
-            connection,
-            &database,
-        );
+        let policy =
+            effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
         if let Some(session) = &session {
             if session.database != database {
                 return tool_error(
@@ -785,12 +779,8 @@ impl DbxMcpServer {
         // A pinned session makes USE/SET CATALOG meaningful, so database
         // switching is allowed — unless a hard database scope is configured.
         let allow_database_switch = session.is_some() && self.scope.database.is_none();
-        let policy = effective_policy_for_database_with_groups(
-            &resolved.policy,
-            &resolved.group_ids,
-            connection,
-            &database,
-        );
+        let policy =
+            effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
         if let Err(error) = ensure_sql_database_scope(&resolved.database_scope, connection, &database, sql) {
             return error;
         }
@@ -849,8 +839,7 @@ impl DbxMcpServer {
         // Classify the whole script as a unit so a single write/DDL statement in
         // the batch fails closed under read-only / dangerous-SQL / production
         // policy, exactly as the Web /api/query/execute-multi route does.
-        let permissions = match validate_sql_policy(connection, &policy, &database, sql, allow_database_switch)
-        {
+        let permissions = match validate_sql_policy(connection, &policy, &database, sql, allow_database_switch) {
             Ok(permissions) => permissions,
             Err(error) => return error,
         };
@@ -1435,12 +1424,8 @@ impl DbxMcpServer {
             Ok(database) => database,
             Err(error) => return error,
         };
-        let policy = effective_policy_for_database_with_groups(
-            &resolved.policy,
-            &resolved.group_ids,
-            connection,
-            &database,
-        );
+        let policy =
+            effective_policy_for_database_with_groups(&resolved.policy, &resolved.group_ids, connection, &database);
         if connection.db_type != DatabaseType::MongoDb {
             if let Err(error) = ensure_sql_database_scope(&resolved.database_scope, connection, &database, &request.sql)
             {
@@ -1461,16 +1446,14 @@ impl DbxMcpServer {
             }
         };
         if connection.db_type == DatabaseType::MongoDb {
-            if let Err(error) =
-                validate_mongo_command_with_groups(
-                    connection,
-                    &resolved.policy,
-                    &resolved.group_ids,
-                    &resolved.database_scope,
-                    &database,
-                    &request.sql,
-                )
-            {
+            if let Err(error) = validate_mongo_command_with_groups(
+                connection,
+                &resolved.policy,
+                &resolved.group_ids,
+                &resolved.database_scope,
+                &database,
+                &request.sql,
+            ) {
                 return error;
             }
         }
@@ -1907,6 +1890,7 @@ fn format_database_names(databases: &[String]) -> String {
 /// connection default, which in turn overrides the global default. Connection
 /// read-only protection and production-database protections are enforced
 /// separately and cannot be bypassed by these defaults.
+#[cfg(test)]
 fn effective_policy_for_database(
     policy: &McpGlobalPolicy,
     connection: &dbx_core::models::connection::ConnectionConfig,
@@ -2052,6 +2036,7 @@ fn validate_sql_policy(
 }
 
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 fn validate_mongo_command(
     connection: &dbx_core::models::connection::ConnectionConfig,

@@ -23,7 +23,7 @@ https://example.com/dbx/api/auth/check
 
 ## 认证
 
-受保护的路由需要名为 `dbx_session` 的会话 Cookie。
+受保护的路由需要名为 `dbx_session` 的会话 Cookie。账号仅用于登录鉴权：连接与设置保存在服务端，并在所有已登录账号之间共享。
 
 ### 检查认证状态
 
@@ -44,19 +44,24 @@ GET /api/auth/check
 | 字段 | 含义 |
 | --- | --- |
 | `required` | 已启用密码保护 |
-| `setup_required` | 仍需首次设置密码 |
+| `setup_required` | 仍需首次创建账号 |
 | `authenticated` | 当前请求已持有有效会话 |
+| `username` | 已登录的账号名，仅在已认证时返回 |
+| `is_admin` | 已登录账号可以管理用户账号 |
 
-### 首次设置密码
+### 首次设置账号
 
 ```http
 POST /api/auth/setup
 Content-Type: application/json
 
 {
+  "username": "admin",
   "password": "your-password"
 }
 ```
+
+首次设置会创建第一个用户账号，仅在尚无任何账号时可用。第一个账号会成为管理员；之后通过用户管理创建的账号为普通账号。
 
 ### 登录
 
@@ -65,13 +70,31 @@ POST /api/auth/login
 Content-Type: application/json
 
 {
+  "username": "admin",
   "password": "your-password"
 }
 ```
 
+`username` 可省略，默认为 `admin`，因此旧的仅携带密码的客户端仍然可用。
+
 登录成功后，响应会返回 `Set-Cookie: dbx_session=...`。后续请求带上这个 Cookie 即可。
 
-连续 5 次登录失败会触发约 60 秒锁定。会话保存在当前 Web 进程内，进程重启后需要重新登录；Cookie 使用 `HttpOnly` 和 `SameSite=Lax`，路径会跟随 `DBX_PUBLIC_BASE_PATH`。
+同一账号在同一来源 IP 上连续 5 次登录失败，会锁定该账号与该地址约 60 秒，不影响其他账号或其他地址。对不存在账号的失败登录同样计入锁定，且每次尝试都会执行相同的密码哈希校验，因此响应内容和响应时间都不会泄露账号是否存在。会话保存在当前 Web 进程内，进程重启后需要重新登录；部署者还可以通过 `DBX_COOKIE_SECURE=1` 为 Cookie 加上 `Secure` 属性，并用 `DBX_SESSION_IDLE_TIMEOUT_MINUTES` 设置空闲会话过期时间。Cookie 使用 `HttpOnly` 和 `SameSite=Lax`，路径会跟随 `DBX_PUBLIC_BASE_PATH`。
+
+### 修改密码
+
+```http
+POST /api/auth/change-password
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "old_password": "current-password",
+  "new_password": "new-password"
+}
+```
+
+任何已登录账号都可以凭旧密码修改自己的密码，且请求只能针对当前会话自己的账号（管理员如需修改其他账号，请使用用户管理中的重置密码）。新密码至少 8 个字符；旧密码校验失败会与登录共享锁定。修改成功后，该账号的其他会话全部失效，发起修改的会话保持登录。
 
 ### 退出登录
 
@@ -80,12 +103,61 @@ POST /api/auth/logout
 Cookie: dbx_session=...
 ```
 
+### 用户管理
+
+只有管理员账号可以管理用户：首次设置创建的账号即为管理员，通过 `DBX_PASSWORD`/`DBX_USERNAME` 环境变量配置的账号始终视为管理员。管理员可以在创建账号时授予管理员权限（`is_admin: true`）。环境变量账号会以 `managedByEnv: true` 列出，无法通过 API 修改；与环境变量账号同名的数据库账号会被其遮蔽，不再列出（同名时以环境变量账号为准）。此处设置的密码至少 8 个字符。修改密码会使该账号的其他会话失效；重置其他账号的密码会使其全部会话失效。
+
+```http
+GET /api/auth/users
+Cookie: dbx_session=...
+```
+
+```json
+[
+  { "id": 1, "username": "admin", "createdAt": 1754800000000, "managedByEnv": false, "isAdmin": true }
+]
+```
+
+```http
+POST /api/auth/users
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "username": "alice",
+  "password": "her-password",
+  "is_admin": false
+}
+```
+
+`is_admin` 可省略，默认为 `false`；管理员可传入 `true` 创建新的管理员。
+
+```http
+POST /api/auth/users/{id}/password
+Content-Type: application/json
+Cookie: dbx_session=...
+
+{
+  "password": "new-password"
+}
+```
+
+```http
+DELETE /api/auth/users/{id}
+Cookie: dbx_session=...
+```
+
+删除当前登录账号、最后一个账号或最后一个管理员账号会被拒绝（存在环境变量配置的账号时不受管理员数量限制）。
+
 ### 环境变量
 
 | 变量 | 作用 |
 | --- | --- |
-| `DBX_PASSWORD` | 容器启动时设置初始密码 |
+| `DBX_PASSWORD` | 容器启动时预配置登录账号（密码） |
+| `DBX_USERNAME` | `DBX_PASSWORD` 账号的用户名，默认为 `admin` |
 | `DBX_DISABLE_PASSWORD=1` | 完全关闭密码保护 |
+| `DBX_COOKIE_SECURE` | `1`/`true` 时会话 Cookie 带有 `Secure` 属性，用于 HTTPS 部署 |
+| `DBX_SESSION_IDLE_TIMEOUT_MINUTES` | 空闲超过该分钟数后会话过期；不设置或为 `0` 时会话保持到退出登录或进程重启。打开的 SSE 流和 WebSocket 连接会计为活跃，过期会话由后台任务每分钟清理一次 |
 | `DBX_PORT` | 修改监听端口，默认 `4224` |
 | `DBX_DATA_DIR` | 存放 `dbx.db` 的数据目录 |
 | `DBX_PUBLIC_BASE_PATH` | 在子路径下提供服务，例如 `/dbx` |

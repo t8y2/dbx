@@ -41,3 +41,6 @@ aes-gcm = "0.10"
 base64 = "0.22"
 pbkdf2 = "0.12"
 sha2 = "0.10"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

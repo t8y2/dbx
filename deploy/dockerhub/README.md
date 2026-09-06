@@ -22,7 +22,7 @@ docker run -d \
   t8y2/dbx:latest
 ```
 
-Open `http://localhost:4224` and sign in with the value of `DBX_PASSWORD`.
+Open `http://localhost:4224` and sign in with username `admin` (or the value of `DBX_USERNAME`) and the value of `DBX_PASSWORD`.
 
 The image supports `linux/amd64` and `linux/arm64`.
 
@@ -55,7 +55,8 @@ docker compose up -d --pull always
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DBX_PASSWORD` | Not set | Access password for the DBX Web login page. Set a strong value for server deployments. |
+| `DBX_PASSWORD` | Not set | Password of the pre-configured DBX Web login account. Set a strong value for server deployments. |
+| `DBX_USERNAME` | `admin` | Username of the pre-configured account (used with `DBX_PASSWORD`). |
 | `DBX_DISABLE_PASSWORD` | `false` | Disables login protection when set to `true`. Do not use this on an untrusted network. |
 | `DBX_DATA_DIR` | `/app/data` | Directory containing the DBX database, plugins, drivers, and other persistent data. |
 | `DBX_PORT` | `4224` | HTTP port inside the container. |
@@ -64,6 +65,8 @@ docker compose up -d --pull always
 | `DBX_WEB_MCP_TOKEN_FILE` | Not set | Read the native MCP bearer token from a file, for example a mounted Docker secret. Cannot be combined with `DBX_WEB_MCP_TOKEN`. |
 | `DBX_WEB_MCP_ALLOWED_HOSTS` | Not set | Required when native MCP is enabled. Comma-separated public Host authorities, including ports when present. |
 | `DBX_WEB_MCP_ALLOWED_ORIGINS` | Not set | Comma-separated browser Origins allowed to call native MCP. Optional for non-browser MCP clients. |
+
+Without `DBX_PASSWORD`, the first visit shows a setup page that creates the initial username and password. Signed-in users can create and manage additional accounts under **Settings → Security**.
 
 Persist `/app/data` with a named volume or bind mount. Removing this data removes saved connections and other DBX application data.
 

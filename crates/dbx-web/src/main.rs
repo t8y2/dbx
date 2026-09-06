@@ -5,7 +5,7 @@ mod sse;
 mod ssh_prompt;
 mod state;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -338,13 +338,83 @@ async fn main() {
         .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
 
-    let password_hash = if password_disabled {
-        None
-    } else if let Ok(pw) = std::env::var("DBX_PASSWORD") {
-        let salt = SaltString::generate(&mut OsRng);
-        Some(Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string())
-    } else {
-        app_state.storage.load_password_hash().await.unwrap_or(None)
+    // Host-provided account via env (username defaults to "admin"). Hashed in
+    // memory at boot and never persisted — same semantics as the legacy
+    // DBX_PASSWORD-only mode.
+    let mut bootstrap_users = HashMap::new();
+    if !password_disabled {
+        if let Ok(pw) = std::env::var("DBX_PASSWORD") {
+            let username = std::env::var("DBX_USERNAME")
+                .ok()
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .unwrap_or_else(|| "admin".to_string());
+            let salt = SaltString::generate(&mut OsRng);
+            let hash =
+                Argon2::default().hash_password(pw.as_bytes(), &salt).expect("Failed to hash password").to_string();
+            bootstrap_users.insert(username, hash);
+        }
+    }
+
+    // One-time migration: seed an "admin" user from the legacy single-password
+    // hash stored in app_settings so existing installs keep their password.
+    if bootstrap_users.is_empty() && !password_disabled {
+        match app_state.storage.count_users().await {
+            Ok(0) => {
+                if let Ok(Some(hash)) = app_state.storage.load_password_hash().await {
+                    match app_state.storage.create_first_user_if_empty("admin", &hash).await {
+                        Ok(Some(_)) => {
+                            log::info!("Migrated legacy web password to the 'admin' user account");
+                            // The users table now gates login; drop the
+                            // superseded single-password hash.
+                            if let Err(e) = app_state.storage.clear_password_hash().await {
+                                log::warn!("Failed to clear the legacy web password hash: {e}");
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => log::error!("Failed to migrate legacy web password: {e}"),
+                    }
+                }
+            }
+            Ok(_) => {
+                // Databases created before admin roles existed have no admin;
+                // promote the oldest account so user management stays reachable.
+                match app_state.storage.promote_oldest_user_if_no_admin().await {
+                    Ok(true) => log::info!("Promoted the oldest web user account to admin"),
+                    Ok(false) => {}
+                    Err(e) => log::error!("Failed to promote a web user to admin: {e}"),
+                }
+                // Installs migrated by earlier builds still carry the legacy
+                // hash; accounts already gate login, so drop it.
+                if let Ok(Some(_)) = app_state.storage.load_password_hash().await {
+                    if let Err(e) = app_state.storage.clear_password_hash().await {
+                        log::warn!("Failed to clear the legacy web password hash: {e}");
+                    }
+                }
+            }
+            Err(e) => log::error!("Failed to count web users: {e}"),
+        }
+    }
+    let has_db_users = app_state.storage.count_users().await.unwrap_or(0) > 0;
+
+    // `DBX_COOKIE_SECURE=1` marks session cookies Secure (HTTPS deployments).
+    let cookie_secure = std::env::var("DBX_COOKIE_SECURE")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    // `DBX_SESSION_IDLE_TIMEOUT_MINUTES=30` expires sessions idle longer than
+    // that; unset/0 means sessions live until logout or process restart.
+    let session_idle_timeout = match std::env::var("DBX_SESSION_IDLE_TIMEOUT_MINUTES") {
+        Ok(value) => match value.trim().parse::<u64>() {
+            Ok(0) => None,
+            Ok(minutes) => Some(std::time::Duration::from_secs(minutes.saturating_mul(60))),
+            Err(_) => {
+                tracing::warn!(
+                    "Ignoring invalid DBX_SESSION_IDLE_TIMEOUT_MINUTES value {value:?}; idle session expiry is disabled"
+                );
+                None
+            }
+        },
+        Err(_) => None,
     };
 
     let public_base_path = normalize_public_base_path(std::env::var("DBX_PUBLIC_BASE_PATH").ok());
@@ -354,19 +424,25 @@ async fn main() {
         data_dir,
         public_base_path: public_base_path.clone(),
         password_disabled,
-        password_hash: RwLock::new(password_hash),
-        sessions: RwLock::new(HashSet::new()),
+        cookie_secure,
+        session_idle_timeout,
+        bootstrap_users,
+        has_db_users: RwLock::new(has_db_users),
+        sessions: RwLock::new(HashMap::new()),
         sse_channels: RwLock::new(HashMap::new()),
         transfer_progress_channels: RwLock::new(HashMap::new()),
         table_import_channels: RwLock::new(HashMap::new()),
         sql_file_executions: RwLock::new(HashMap::new()),
         nacos_imports: RwLock::new(HashMap::new()),
-        login_rate_limit: tokio::sync::Mutex::new(state::LoginRateLimit { fail_count: 0, locked_until: None }),
+        login_rate_limit: tokio::sync::Mutex::new(HashMap::new()),
         export_files: RwLock::new(HashMap::new()),
         ssh_prompts: Arc::new(ssh_prompt::SshPromptHub::new()),
     });
 
     ssh_prompt::install_web_ssh_prompt_bridge(web_state.ssh_prompts.clone());
+    // Drops idle-expired sessions in the background so the session map stays
+    // bounded (no-op unless DBX_SESSION_IDLE_TIMEOUT_MINUTES is set).
+    auth::spawn_session_sweeper(web_state.clone());
 
     // API routes
     let api = Router::new()
@@ -376,6 +452,9 @@ async fn main() {
         .route("/auth/setup", post(auth::setup))
         .route("/auth/change-password", post(auth::change_password))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/users", get(auth::list_users).post(auth::create_user))
+        .route("/auth/users/{id}", delete(auth::delete_user))
+        .route("/auth/users/{id}/password", post(auth::reset_user_password))
         // Connection
         .route("/connection/test", post(routes::connection::test_connection))
         .route("/connection/test-info", post(routes::connection::test_connection_with_info))
@@ -1124,7 +1203,7 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.expect("Failed to bind address");
     let shutdown_state = web_state.app.clone();
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             if let Err(error) = tokio::signal::ctrl_c().await {
                 tracing::warn!("Failed to listen for shutdown signal: {error}");

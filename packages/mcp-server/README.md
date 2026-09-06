@@ -207,7 +207,7 @@ Set `DBX_WEB_URL` to use a deployed DBX Web backend instead of local desktop sto
 }
 ```
 
-`DBX_WEB_PASSWORD` is the password used on the DBX Web login page. Desktop-local mode does not use it. Desktop UI tools are hidden in Web mode.
+`DBX_WEB_PASSWORD` is the password of the DBX Web login account; set `DBX_WEB_USERNAME` when the account name is not `admin`. Desktop-local mode does not use them. Desktop UI tools are hidden in Web mode.
 
 DBX Web requests honor the standard system proxy environment variables (`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`, bypass via `NO_PROXY`); an empty value means no proxy. Proxies requiring authentication use the `http://user:pass@host:port` URL form. Extra headers can be attached via `DBX_WEB_HEADERS` (a JSON object, e.g. `{"Authorization":"Bearer <token>"}`) — applied to every request, including authentication. For self-signed HTTPS backends, set `DBX_WEB_INSECURE_SKIP_VERIFY=1` to skip certificate verification, or `DBX_WEB_CA_CERT` to trust a private CA (verification is on by default).
 
@@ -311,6 +311,7 @@ SQL text is not included in normal MCP errors or logged by default. Enable tempo
 | `DBX_DATA_DIR` | Override the local DBX data directory |
 | `DBX_WEB_URL` | Use a DBX Web/Docker backend |
 | `DBX_WEB_PASSWORD` | Authenticate to the DBX Web backend |
+| `DBX_WEB_USERNAME` | Web account name for authentication (defaults to `admin`) |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | Standard system proxy variables for DBX Web requests; empty value means no proxy. Auth via `http://user:pass@host:port` |
 | `NO_PROXY` | Standard comma-separated bypass list for the proxy above |
 | `DBX_WEB_HEADERS` | JSON object of extra HTTP headers for DBX Web requests, e.g. `{"Authorization":"Bearer token"}` |
@@ -650,6 +651,7 @@ MongoDB 更新和删除在未启用完全访问时必须提供可验证有效的
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | DBX Web 登录密码 |
+| `DBX_WEB_USERNAME` | 登录使用的账号名（默认为 `admin`） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
 | `NO_PROXY` | 上述代理的标准逗号分隔绕过列表 |
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |

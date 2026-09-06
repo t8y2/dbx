@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::State;
 use axum::extract::{Query, WebSocketUpgrade};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -19,9 +20,19 @@ pub async fn ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<PubSubWsParams>,
     State(state): State<Arc<WebState>>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let connection_id = params.connection_id;
-    ws.on_upgrade(move |socket| handle_pubsub_socket(socket, state, connection_id))
+    // An open WebSocket counts as activity: the guard refreshes the session's
+    // activity until the connection closes (no-op without an idle timeout).
+    let keep_alive = crate::auth::session_keep_alive_from_headers(&state, &headers);
+    ws.on_upgrade(move |socket| {
+        let keep_alive = keep_alive;
+        async move {
+            let _keep_alive = keep_alive;
+            handle_pubsub_socket(socket, state, connection_id).await
+        }
+    })
 }
 
 async fn handle_pubsub_socket(socket: WebSocket, state: Arc<WebState>, connection_id: String) {

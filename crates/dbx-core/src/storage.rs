@@ -569,6 +569,34 @@ fn default_sidebar_table_page_size() -> usize {
     1000
 }
 
+/// A web user account (only used by dbx-web; the desktop app never reads the
+/// `users` table). `created_at`/`updated_at` are unix epoch milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserRecord {
+    pub id: i64,
+    pub username: String,
+    pub password_hash: String,
+    /// Admins manage other accounts (create/delete/reset passwords). The
+    /// first account created via setup is always an admin.
+    pub is_admin: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Outcome of [`Storage::delete_user_if_not_last`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteUserResult {
+    /// The user was deleted; `remaining` is the account count after deletion.
+    Deleted { remaining: i64 },
+    /// No user with the requested id exists (anymore).
+    NotFound,
+    /// Refused: the user is the last remaining account.
+    LastUser,
+    /// Refused: the user is the last remaining admin account.
+    LastAdmin,
+}
+
 pub const DUCKDB_WORKER_MAX_PROCESSES_MIN: usize = 1;
 pub const DUCKDB_WORKER_MAX_PROCESSES_MAX: usize = 16;
 pub const DUCKDB_WORKER_MAX_PROCESSES_DEFAULT: usize = 4;
@@ -803,6 +831,14 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
+    "CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        password_hash TEXT NOT NULL,
+        is_admin INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+    )",
 ];
 
 impl Storage {
@@ -883,6 +919,7 @@ impl Storage {
             ensure_state_store_columns_sync(conn)?;
             ensure_ai_conversations_columns_sync(conn)?;
             ensure_ai_runs_columns_sync(conn)?;
+            ensure_users_columns_sync(conn)?;
             Ok(())
         })
     }
@@ -1094,6 +1131,12 @@ fn ensure_history_columns_sync(conn: &Connection) -> Result<(), String> {
         conn.execute(&format!("ALTER TABLE history ADD COLUMN {name} {definition}"), []).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Adds columns introduced after the `users` table first shipped on the
+/// multi-user branch (idempotent, for databases created by earlier builds).
+fn ensure_users_columns_sync(conn: &Connection) -> Result<(), String> {
+    ensure_table_columns(conn, "users", &[("is_admin", "INTEGER NOT NULL DEFAULT 0")])
 }
 
 fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
@@ -2018,6 +2061,181 @@ impl Storage {
     pub async fn load_password_hash(&self) -> Result<Option<String>, String> {
         let settings = self.load_app_settings_json().await?;
         Ok(settings.get("password_hash").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    }
+
+    /// Drops the legacy single-password hash once a row in the `users` table
+    /// gates web login, so the superseded credential is not kept around.
+    pub async fn clear_password_hash(&self) -> Result<(), String> {
+        let mut settings = self.load_app_settings_json().await?;
+        if settings.remove("password_hash").is_some() {
+            self.save_app_settings_json(&settings).await?;
+        }
+        Ok(())
+    }
+
+    // Web user accounts (only used by dbx-web; the desktop app never reads this table)
+
+    pub async fn list_users(&self) -> Result<Vec<UserRecord>, String> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT id, username, password_hash, is_admin, created_at, updated_at FROM users ORDER BY username COLLATE NOCASE")
+                .map_err(|e| e.to_string())?;
+            let users = stmt
+                .query_map([], |row| {
+                    Ok(UserRecord {
+                        id: row.get(0)?,
+                        username: row.get(1)?,
+                        password_hash: row.get(2)?,
+                        is_admin: row.get::<_, i64>(3)? != 0,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(users)
+        })
+        .await
+    }
+
+    pub async fn count_users(&self) -> Result<i64, String> {
+        self.with_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0)).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_user_by_username(&self, username: &str) -> Result<Option<UserRecord>, String> {
+        let username = username.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "SELECT id, username, password_hash, is_admin, created_at, updated_at FROM users WHERE username = ?1 COLLATE NOCASE",
+                [username],
+                |row| {
+                    Ok(UserRecord {
+                        id: row.get(0)?,
+                        username: row.get(1)?,
+                        password_hash: row.get(2)?,
+                        is_admin: row.get::<_, i64>(3)? != 0,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn create_user(&self, username: &str, password_hash: &str, is_admin: bool) -> Result<i64, String> {
+        let username = username.to_string();
+        let password_hash = password_hash.to_string();
+        self.with_conn(move |conn| {
+            let now = unix_timestamp_millis();
+            conn.execute(
+                "INSERT INTO users (username, password_hash, is_admin, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![username, password_hash, is_admin, now],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(conn.last_insert_rowid())
+        })
+        .await
+    }
+
+    /// Atomically creates the first account (always an admin) when the users
+    /// table is empty. Returns `None` when any user already exists, so
+    /// concurrent first-run setups cannot create more than one account.
+    pub async fn create_first_user_if_empty(&self, username: &str, password_hash: &str) -> Result<Option<i64>, String> {
+        let username = username.to_string();
+        let password_hash = password_hash.to_string();
+        self.with_conn(move |conn| {
+            let now = unix_timestamp_millis();
+            let inserted = conn
+                .execute(
+                    "INSERT INTO users (username, password_hash, is_admin, created_at, updated_at)
+                     SELECT ?1, ?2, 1, ?3, ?3 WHERE NOT EXISTS (SELECT 1 FROM users)",
+                    params![username, password_hash, now],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok((inserted > 0).then(|| conn.last_insert_rowid()))
+        })
+        .await
+    }
+
+    pub async fn update_user_password(&self, id: i64, password_hash: &str) -> Result<(), String> {
+        let password_hash = password_hash.to_string();
+        self.with_conn(move |conn| {
+            let now = unix_timestamp_millis();
+            conn.execute(
+                "UPDATE users SET password_hash = ?1, updated_at = ?2 WHERE id = ?3",
+                params![password_hash, now, id],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Atomically deletes a user only when the account-count invariants hold:
+    /// at least one account must remain, and — unless `allow_delete_last_admin`
+    /// (an admin exists outside the users table, e.g. env-provisioned) — the
+    /// target may not be the last admin. Single statements, so concurrent
+    /// deletions cannot race past the guards.
+    pub async fn delete_user_if_not_last(
+        &self,
+        id: i64,
+        allow_delete_last_admin: bool,
+    ) -> Result<DeleteUserResult, String> {
+        self.with_conn(move |conn| {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM users WHERE id = ?1
+                     AND (SELECT COUNT(*) FROM users) > 1
+                     AND (?2 OR COALESCE((SELECT is_admin FROM users WHERE id = ?1), 0) = 0
+                          OR (SELECT COUNT(*) FROM users WHERE is_admin = 1) > 1)",
+                    params![id, allow_delete_last_admin],
+                )
+                .map_err(|e| e.to_string())?;
+            if deleted > 0 {
+                let remaining: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+                return Ok(DeleteUserResult::Deleted { remaining });
+            }
+            // Diagnose which guard refused: the row is gone (a concurrent
+            // delete won), it is the last account, or the last admin.
+            let exists: i64 = conn
+                .query_row("SELECT COUNT(*) FROM users WHERE id = ?1", [id], |row| row.get(0))
+                .map_err(|e| e.to_string())?;
+            if exists == 0 {
+                return Ok(DeleteUserResult::NotFound);
+            }
+            let total: i64 =
+                conn.query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+            if total <= 1 {
+                return Ok(DeleteUserResult::LastUser);
+            }
+            Ok(DeleteUserResult::LastAdmin)
+        })
+        .await
+    }
+
+    /// Promotes the oldest account to admin when no admin exists (installs
+    /// created before roles were introduced). Returns true when promoted.
+    pub async fn promote_oldest_user_if_no_admin(&self) -> Result<bool, String> {
+        self.with_conn(move |conn| {
+            let now = unix_timestamp_millis();
+            let updated = conn
+                .execute(
+                    "UPDATE users SET is_admin = 1, updated_at = ?1
+                     WHERE id = (SELECT MIN(id) FROM users) AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin = 1)",
+                    [now],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(updated > 0)
+        })
+        .await
     }
 
     pub async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicyState, String> {
@@ -5096,8 +5314,8 @@ fn map_from_sql_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        maybe_import_user_data_db, DataDbImportResult, DesktopIconTheme, DesktopSettings, McpGlobalPolicy,
-        McpGlobalPolicyState, Storage, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
+        maybe_import_user_data_db, DataDbImportResult, DeleteUserResult, DesktopIconTheme, DesktopSettings,
+        McpGlobalPolicy, McpGlobalPolicyState, Storage, KEEP_TERMINAL_AI_RUNS_PER_CONVERSATION, MCP_GLOBAL_POLICY_KEY,
     };
     use crate::ai::{
         AiActiveModelSelection, AiAssistantMode, AiChatMessage, AiChatSelectionState, AiConversation,
@@ -7157,6 +7375,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_password_hash_drops_only_the_legacy_hash() {
+        let path = temp_db_path("password-hash-clear");
+        let storage = Storage::open(&path).await.unwrap();
+
+        // Absent hash: clearing is a no-op.
+        storage.clear_password_hash().await.unwrap();
+        assert_eq!(storage.load_password_hash().await.unwrap(), None);
+
+        storage.save_password_hash("hash-5").await.unwrap();
+        storage.save_pinned_tree_node_ids(&["conn-1".to_string()]).await.unwrap();
+
+        storage.clear_password_hash().await.unwrap();
+
+        assert_eq!(storage.load_password_hash().await.unwrap(), None);
+        assert_eq!(storage.load_pinned_tree_node_ids().await.unwrap(), vec!["conn-1".to_string()]);
+    }
+
+    #[tokio::test]
     async fn app_state_roundtrips_without_polluting_app_settings() {
         let path = temp_db_path("app-state-roundtrip");
         let storage = Storage::open(&path).await.unwrap();
@@ -8235,6 +8471,191 @@ mod tests {
         assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_some());
         assert!(storage.clear_snippet_pending_cleanup_if_matches("github", &pending).await.unwrap());
         assert!(storage.load_snippet_sync_state("github").await.unwrap().pending_cleanup.is_none());
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn users_crud_roundtrip() {
+        let db = temp_db_path("users-crud");
+        let storage = Storage::open(&db).await.unwrap();
+
+        assert_eq!(storage.count_users().await.unwrap(), 0);
+        assert!(storage.list_users().await.unwrap().is_empty());
+        assert!(storage.load_user_by_username("admin").await.unwrap().is_none());
+
+        let admin_id = storage.create_user("admin", "hash-1", true).await.unwrap();
+        let alice_id = storage.create_user("alice", "hash-2", false).await.unwrap();
+        assert_eq!(storage.count_users().await.unwrap(), 2);
+
+        let admin = storage.load_user_by_username("admin").await.unwrap().unwrap();
+        assert_eq!(admin.id, admin_id);
+        assert_eq!(admin.username, "admin");
+        assert_eq!(admin.password_hash, "hash-1");
+        assert!(admin.is_admin);
+        assert!(admin.created_at > 0);
+        assert_eq!(admin.created_at, admin.updated_at);
+        assert!(!storage.load_user_by_username("alice").await.unwrap().unwrap().is_admin);
+
+        // Username lookup is case-insensitive
+        let admin_upper = storage.load_user_by_username("ADMIN").await.unwrap().unwrap();
+        assert_eq!(admin_upper.id, admin_id);
+
+        let users = storage.list_users().await.unwrap();
+        assert_eq!(users.iter().map(|u| u.username.as_str()).collect::<Vec<_>>(), vec!["admin", "alice"]);
+
+        storage.update_user_password(admin_id, "hash-3").await.unwrap();
+        let admin = storage.load_user_by_username("admin").await.unwrap().unwrap();
+        assert_eq!(admin.password_hash, "hash-3");
+        assert!(admin.updated_at >= admin.created_at);
+
+        let result = storage.delete_user_if_not_last(alice_id, false).await.unwrap();
+        assert_eq!(result, DeleteUserResult::Deleted { remaining: 1 });
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+        assert!(storage.load_user_by_username("alice").await.unwrap().is_none());
+
+        // The last remaining account cannot be deleted.
+        assert_eq!(storage.delete_user_if_not_last(admin_id, false).await.unwrap(), DeleteUserResult::LastUser);
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+        // An id that does not exist reports NotFound.
+        assert_eq!(storage.delete_user_if_not_last(9999, false).await.unwrap(), DeleteUserResult::NotFound);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn users_username_unique_case_insensitive() {
+        let db = temp_db_path("users-unique");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.create_user("admin", "hash-1", true).await.unwrap();
+        assert!(storage.create_user("ADMIN", "hash-2", false).await.is_err());
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn create_first_user_makes_admin_and_rejects_when_not_empty() {
+        let db = temp_db_path("users-first");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let id = storage.create_first_user_if_empty("admin", "hash-1").await.unwrap().expect("first user is created");
+        let admin = storage.load_user_by_username("admin").await.unwrap().unwrap();
+        assert_eq!(admin.id, id);
+        assert!(admin.is_admin);
+
+        // A second first-user attempt is rejected, even with another name.
+        assert_eq!(storage.create_first_user_if_empty("other", "hash-2").await.unwrap(), None);
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn create_first_user_if_empty_is_atomic_under_concurrency() {
+        let db = temp_db_path("users-first-race");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let storage = storage.clone();
+            tasks.push(tokio::spawn(async move {
+                storage.create_first_user_if_empty(&format!("user-{index}"), "hash").await.unwrap()
+            }));
+        }
+        let mut created = 0;
+        for task in tasks {
+            if task.await.unwrap().is_some() {
+                created += 1;
+            }
+        }
+        assert_eq!(created, 1);
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+        assert!(storage.list_users().await.unwrap()[0].is_admin);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn delete_user_if_not_last_is_atomic_under_concurrency() {
+        let db = temp_db_path("users-delete-race");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let first = storage.create_user("first", "hash-1", false).await.unwrap();
+        let second = storage.create_user("second", "hash-2", false).await.unwrap();
+
+        // Concurrently deleting the last two accounts must keep exactly one.
+        let mut tasks = Vec::new();
+        for id in [first, second] {
+            let storage = storage.clone();
+            tasks.push(tokio::spawn(async move { storage.delete_user_if_not_last(id, false).await.unwrap() }));
+        }
+        let mut deleted = 0;
+        let mut last_user = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                DeleteUserResult::Deleted { remaining } => {
+                    deleted += 1;
+                    assert_eq!(remaining, 1);
+                }
+                DeleteUserResult::LastUser => last_user += 1,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(deleted, 1);
+        assert_eq!(last_user, 1);
+        assert_eq!(storage.count_users().await.unwrap(), 1);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn delete_user_protects_last_admin_unless_external_admin_exists() {
+        let db = temp_db_path("users-delete-admin");
+        let storage = Storage::open(&db).await.unwrap();
+
+        let admin_id = storage.create_user("admin", "hash-1", true).await.unwrap();
+        let alice_id = storage.create_user("alice", "hash-2", false).await.unwrap();
+
+        // The only admin cannot be deleted while ordinary accounts remain.
+        assert_eq!(storage.delete_user_if_not_last(admin_id, false).await.unwrap(), DeleteUserResult::LastAdmin);
+        // ...unless an out-of-band admin exists (env-provisioned accounts).
+        assert_eq!(
+            storage.delete_user_if_not_last(admin_id, true).await.unwrap(),
+            DeleteUserResult::Deleted { remaining: 1 }
+        );
+        // With two admins present, deleting one of them passes the guard.
+        let bob_id = storage.create_user("bob", "hash-3", true).await.unwrap();
+        let carol_id = storage.create_user("carol", "hash-4", true).await.unwrap();
+        assert_eq!(
+            storage.delete_user_if_not_last(bob_id, false).await.unwrap(),
+            DeleteUserResult::Deleted { remaining: 2 }
+        );
+        // Ordinary accounts are unaffected by the admin guard.
+        assert_eq!(
+            storage.delete_user_if_not_last(alice_id, false).await.unwrap(),
+            DeleteUserResult::Deleted { remaining: 1 }
+        );
+        // The last account (here also the last admin) reports LastUser.
+        assert_eq!(storage.delete_user_if_not_last(carol_id, false).await.unwrap(), DeleteUserResult::LastUser);
+
+        std::fs::remove_file(&db).ok();
+    }
+
+    #[tokio::test]
+    async fn promote_oldest_user_if_no_admin_only_fills_the_gap() {
+        let db = temp_db_path("users-promote");
+        let storage = Storage::open(&db).await.unwrap();
+
+        storage.create_user("alice", "hash-1", false).await.unwrap();
+        storage.create_user("bob", "hash-2", false).await.unwrap();
+        assert!(storage.promote_oldest_user_if_no_admin().await.unwrap());
+        assert!(storage.load_user_by_username("alice").await.unwrap().unwrap().is_admin);
+        assert!(!storage.load_user_by_username("bob").await.unwrap().unwrap().is_admin);
+
+        // With an admin present, promotion is a no-op.
+        assert!(!storage.promote_oldest_user_if_no_admin().await.unwrap());
 
         std::fs::remove_file(&db).ok();
     }

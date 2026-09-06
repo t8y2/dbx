@@ -3053,6 +3053,146 @@ const passwordMessage = ref("");
 const passwordError = ref(false);
 const changingPassword = ref(false);
 
+// Web user account management (web mode only)
+interface WebUserAccount {
+  id?: number;
+  username: string;
+  createdAt?: number;
+  managedByEnv: boolean;
+  isAdmin?: boolean;
+}
+
+const webUsers = ref<WebUserAccount[]>([]);
+const webUsersLoading = ref(false);
+const webUsersMessage = ref("");
+const webUsersError = ref(false);
+const currentWebUsername = ref("");
+const currentWebUserIsAdmin = ref(false);
+const newUsername = ref("");
+const newUserPassword = ref("");
+const newUserIsAdmin = ref(false);
+const addingUser = ref(false);
+const resettingUserId = ref<number | null>(null);
+const resetPasswordInput = ref("");
+const resettingPassword = ref(false);
+const userDeleteTarget = ref<WebUserAccount | null>(null);
+const userDeleteConfirmOpen = ref(false);
+
+async function readAuthApiError(res: Response): Promise<string> {
+  try {
+    const parsed = await res.json();
+    if (parsed && typeof parsed.error === "string") return parsed.error;
+  } catch {
+    // not JSON — use the fallback
+  }
+  return t("auth.userActionFailed");
+}
+
+async function loadWebUsers() {
+  if (!isWeb) return;
+  webUsersLoading.value = true;
+  try {
+    // User management is admin-only; non-admins skip the users request entirely.
+    const checkRes = await fetch(apiUrl("/api/auth/check"));
+    if (checkRes.ok) {
+      const check = await checkRes.json();
+      currentWebUsername.value = check.username || "";
+      currentWebUserIsAdmin.value = check.is_admin === true;
+    }
+    if (currentWebUserIsAdmin.value) {
+      const usersRes = await fetch(apiUrl("/api/auth/users"));
+      if (usersRes.ok) webUsers.value = await usersRes.json();
+    } else {
+      webUsers.value = [];
+    }
+  } catch {
+    // keep the previous list
+  } finally {
+    webUsersLoading.value = false;
+  }
+}
+
+async function addWebUser() {
+  addingUser.value = true;
+  webUsersMessage.value = "";
+  try {
+    const res = await fetch(apiUrl("/api/auth/users"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: newUsername.value.trim(), password: newUserPassword.value, is_admin: newUserIsAdmin.value }),
+    });
+    if (res.ok) {
+      webUsersMessage.value = t("auth.userCreated");
+      webUsersError.value = false;
+      newUsername.value = "";
+      newUserPassword.value = "";
+      newUserIsAdmin.value = false;
+      await loadWebUsers();
+    } else {
+      webUsersMessage.value = await readAuthApiError(res);
+      webUsersError.value = true;
+    }
+  } catch {
+    webUsersMessage.value = t("auth.connectFailed");
+    webUsersError.value = true;
+  } finally {
+    addingUser.value = false;
+  }
+}
+
+function isCurrentWebUser(user: WebUserAccount): boolean {
+  return user.username.toLowerCase() === currentWebUsername.value.toLowerCase();
+}
+
+async function resetWebUserPassword(user: WebUserAccount) {
+  if (user.id == null) return;
+  resettingPassword.value = true;
+  webUsersMessage.value = "";
+  try {
+    const res = await fetch(apiUrl(`/api/auth/users/${user.id}/password`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: resetPasswordInput.value }),
+    });
+    if (res.ok) {
+      webUsersMessage.value = t("auth.passwordReset");
+      webUsersError.value = false;
+      resettingUserId.value = null;
+      resetPasswordInput.value = "";
+    } else {
+      webUsersMessage.value = await readAuthApiError(res);
+      webUsersError.value = true;
+    }
+  } catch {
+    webUsersMessage.value = t("auth.connectFailed");
+    webUsersError.value = true;
+  } finally {
+    resettingPassword.value = false;
+  }
+}
+
+async function confirmDeleteWebUser() {
+  const target = userDeleteTarget.value;
+  if (!target || target.id == null) return;
+  webUsersMessage.value = "";
+  try {
+    const res = await fetch(apiUrl(`/api/auth/users/${target.id}`), { method: "DELETE" });
+    if (res.ok) {
+      webUsersMessage.value = t("auth.userDeleted");
+      webUsersError.value = false;
+      await loadWebUsers();
+    } else {
+      webUsersMessage.value = await readAuthApiError(res);
+      webUsersError.value = true;
+    }
+  } catch {
+    webUsersMessage.value = t("auth.connectFailed");
+    webUsersError.value = true;
+  } finally {
+    userDeleteTarget.value = null;
+  }
+}
+
 async function scrollToInitialSettingsSection() {
   await nextTick();
   if (props.initialSection === "tableColumnTemplates") {
@@ -3086,6 +3226,13 @@ watch(
       oldPassword.value = "";
       newPassword.value = "";
       confirmNewPassword.value = "";
+      webUsersMessage.value = "";
+      newUsername.value = "";
+      newUserPassword.value = "";
+      newUserIsAdmin.value = false;
+      resettingUserId.value = null;
+      resetPasswordInput.value = "";
+      void loadWebUsers();
       try {
         await settingsStore.initMcpGlobalPolicy(true);
         await loadMcpHttpSettings();
@@ -8566,6 +8713,53 @@ LIMIT 100;</pre
                   {{ passwordMessage }}
                 </p>
               </div>
+
+              <div v-if="currentWebUserIsAdmin" class="space-y-3">
+                <Label class="text-base">{{ t("auth.users") }}</Label>
+                <p class="text-sm text-muted-foreground">
+                  {{ t("auth.usersDescription") }}
+                </p>
+                <div class="space-y-2">
+                  <div v-for="user in webUsers" :key="user.username" class="space-y-2 rounded-md border px-3 py-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <div class="flex min-w-0 items-center gap-2">
+                        <span class="truncate text-sm font-medium">{{ user.username }}</span>
+                        <span v-if="isCurrentWebUser(user)" class="shrink-0 text-xs text-muted-foreground">({{ t("auth.currentUserBadge") }})</span>
+                        <span v-if="user.managedByEnv" class="shrink-0 text-xs text-muted-foreground">{{ t("auth.envManaged") }}</span>
+                        <span v-if="user.isAdmin" class="shrink-0 text-xs text-muted-foreground">{{ t("auth.adminBadge") }}</span>
+                      </div>
+                      <div v-if="!user.managedByEnv && !isCurrentWebUser(user)" class="flex shrink-0 items-center gap-1">
+                        <Button type="button" variant="outline" size="sm" @click="((resettingUserId = resettingUserId === user.id ? null : (user.id ?? null)), (resetPasswordInput = ''))">
+                          {{ t("auth.resetPassword") }}
+                        </Button>
+                        <Button type="button" variant="outline" size="sm" class="text-destructive" @click="((userDeleteTarget = user), (userDeleteConfirmOpen = true))">
+                          {{ t("common.delete") }}
+                        </Button>
+                      </div>
+                    </div>
+                    <div v-if="resettingUserId != null && resettingUserId === user.id" class="flex items-center gap-2">
+                      <PasswordInput v-model="resetPasswordInput" :placeholder="t('auth.newPassword')" inputClass="h-8" autocomplete="off" />
+                      <Button type="button" size="sm" :disabled="resettingPassword || !resetPasswordInput" @click="resetWebUserPassword(user)">
+                        {{ t("common.confirm") }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <Input v-model="newUsername" :placeholder="t('auth.enterUsername')" class="h-9" autocomplete="off" />
+                  <PasswordInput v-model="newUserPassword" :placeholder="t('auth.newPassword')" inputClass="h-9" autocomplete="off" />
+                  <label class="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+                    <input v-model="newUserIsAdmin" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+                    {{ t("auth.adminBadge") }}
+                  </label>
+                  <Button type="button" size="sm" class="shrink-0" :disabled="addingUser || !newUsername.trim() || !newUserPassword" @click="addWebUser">
+                    {{ t("auth.addUser") }}
+                  </Button>
+                </div>
+                <p v-if="webUsersMessage" class="text-xs" :class="webUsersError ? 'text-destructive' : 'text-green-500'">
+                  {{ webUsersMessage }}
+                </p>
+              </div>
             </section>
 
             <section v-else-if="activeSettingsTab === 'tunnels'" data-settings-search-id="tunnels" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('tunnels')]">
@@ -8935,6 +9129,7 @@ LIMIT 100;</pre
 
     <!-- AI Config Delete Confirmation -->
     <DangerConfirmDialog v-model:open="aiDeleteConfirmOpen" :title="t('ai.deleteConfigTitle')" :message="t('ai.deleteConfigConfirm')" :confirm-label="t('common.delete')" @confirm="aiConfirmDeleteConfig" />
+    <DangerConfirmDialog v-model:open="userDeleteConfirmOpen" :title="t('auth.deleteUserTitle')" :message="t('auth.deleteUserConfirm', { username: userDeleteTarget?.username ?? '' })" :confirm-label="t('common.delete')" @confirm="confirmDeleteWebUser" />
     <DangerConfirmDialog
       v-model:open="templateDeleteConfirmOpen"
       :title="t('ai.promptTemplateDeleteTitle')"

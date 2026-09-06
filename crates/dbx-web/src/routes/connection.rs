@@ -1473,8 +1473,8 @@ mod tests {
         std::fs::File::create(&db_path).unwrap();
         {
             let mut sessions = state.sessions.write().await;
-            sessions.insert("token-a".to_string());
-            sessions.insert("token-b".to_string());
+            sessions.insert("token-a".to_string(), crate::state::SessionInfo::new("user".to_string()));
+            sessions.insert("token-b".to_string(), crate::state::SessionInfo::new("user".to_string()));
         }
         let headers_a = cookie_headers("token-a");
 
@@ -1493,7 +1493,7 @@ mod tests {
             .await
         })
         .await;
-        assert!(result.is_ok());
+        assert!(result.is_ok(), "{result:?}");
 
         // 全局运行态配置不含明文密码（泄露面消除）。
         let stored = state.app.configs.read().await.get("conn-a").cloned().unwrap();

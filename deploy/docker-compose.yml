@@ -7,6 +7,12 @@ services:
       - "4224:4224"
     environment:
       - DBX_PASSWORD=changeme
+      # Username of the pre-configured login account (defaults to admin)
+      # - DBX_USERNAME=admin
+      # Mark session cookies Secure when serving over HTTPS
+      # - DBX_COOKIE_SECURE=1
+      # Expire sessions after N idle minutes (default: never expire while running)
+      # - DBX_SESSION_IDLE_TIMEOUT_MINUTES=720
       # Native Streamable HTTP MCP is served by this same Web listener at /mcp.
       # Set the host authority clients use (including its externally mapped port).
       # - DBX_WEB_MCP_TOKEN=replace-with-a-long-random-secret

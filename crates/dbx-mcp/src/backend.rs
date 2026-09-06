@@ -411,6 +411,7 @@ struct WebAuthState {
 
 pub struct WebBackend {
     base_url: String,
+    username: String,
     password: String,
     client: reqwest::Client,
     headers: HeaderMap,
@@ -432,7 +433,7 @@ impl std::fmt::Debug for WebBackend {
 }
 
 impl WebBackend {
-    pub fn new(base_url: String, password: String) -> Result<Self, String> {
+    pub fn new(base_url: String, password: String, username: Option<String>) -> Result<Self, String> {
         let (proxy, no_proxy) = standard_web_proxy(&base_url);
         let tls_skip_verify = std::env::var("DBX_WEB_INSECURE_SKIP_VERIFY")
             .ok()
@@ -441,6 +442,7 @@ impl WebBackend {
         Self::new_with_config(
             base_url,
             password,
+            username,
             proxy,
             no_proxy,
             std::env::var("DBX_WEB_HEADERS").ok(),
@@ -453,6 +455,7 @@ impl WebBackend {
     fn new_with_config(
         base_url: String,
         password: String,
+        username: Option<String>,
         proxy: Option<String>,
         no_proxy: Option<String>,
         headers_json: Option<String>,
@@ -463,6 +466,8 @@ impl WebBackend {
         if base_url.is_empty() {
             return Err("DBX_WEB_URL cannot be empty.".to_string());
         }
+        let username =
+            username.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| "admin".to_string());
         let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
         if let Some(proxy_url) = proxy.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
             let mut proxy = reqwest::Proxy::all(proxy_url)
@@ -495,6 +500,7 @@ impl WebBackend {
         let client = builder.build().map_err(|error| error.to_string())?;
         Ok(Self {
             base_url,
+            username,
             password,
             client,
             headers: parse_custom_headers(headers_json.as_deref())?,
@@ -538,7 +544,7 @@ impl WebBackend {
             request = request.header(name, value);
         }
         let response = request
-            .json(&json!({ "password": self.password }))
+            .json(&json!({ "username": self.username, "password": self.password }))
             .send()
             .await
             .map_err(|error| format!("Authentication failed: {error}"))?;
@@ -2370,7 +2376,7 @@ mod tests {
             .unwrap();
         });
 
-        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        let backend = WebBackend::new(format!("http://{address}"), String::new(), None).unwrap();
         backend.auth.lock().await.checked = true;
         let paths = backend.load_connection_group_paths().await.unwrap();
 
@@ -2471,7 +2477,7 @@ mod tests {
             }
         });
 
-        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        let backend = WebBackend::new(format!("http://{address}"), String::new(), None).unwrap();
         backend.auth.lock().await.checked = true;
         let mut connection = new_connection_config(
             "web-timeout".to_string(),
@@ -2573,9 +2579,17 @@ mod tests {
 
         // The mock is a loopback server, so it must not inherit a contributor's
         // outbound proxy configuration.
-        let backend =
-            WebBackend::new_with_config(format!("http://{address}"), String::new(), None, None, None, false, None)
-                .unwrap();
+        let backend = WebBackend::new_with_config(
+            format!("http://{address}"),
+            String::new(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
         backend.auth.lock().await.checked = true;
         let connection = new_connection_config(
             "web-batch".to_string(),
@@ -2755,7 +2769,7 @@ mod tests {
             .unwrap();
         });
 
-        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        let backend = WebBackend::new(format!("http://{address}"), String::new(), None).unwrap();
         backend.auth.lock().await.checked = true;
         let connection = new_connection_config(
             "legacy".to_string(),
@@ -2858,7 +2872,7 @@ mod tests {
             .unwrap();
         });
 
-        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        let backend = WebBackend::new(format!("http://{address}"), String::new(), None).unwrap();
         backend.auth.lock().await.checked = true;
         let connection = new_connection_config(
             "legacy".to_string(),
@@ -2934,7 +2948,7 @@ mod tests {
             .unwrap();
         });
 
-        let backend = WebBackend::new(format!("http://{address}"), String::new()).unwrap();
+        let backend = WebBackend::new(format!("http://{address}"), String::new(), None).unwrap();
         backend.auth.lock().await.checked = true;
         let connection = new_connection_config(
             "legacy".to_string(),
@@ -3031,6 +3045,7 @@ mod tests {
         let backend = WebBackend::new_with_config(
             base_url,
             String::new(),
+            None,
             Some(format!("http://{proxy_address}")),
             // Target host matches NO_PROXY: the request must go direct.
             Some("127.0.0.1".to_string()),
@@ -3093,6 +3108,7 @@ mod tests {
             String::new(),
             None,
             None,
+            None,
             Some(r#"{"X-API-Key":"secret","X-Tenant":"acme"}"#.to_string()),
             false,
             None,
@@ -3120,6 +3136,7 @@ mod tests {
         let backend = WebBackend::new_with_config(
             "http://127.0.0.1:8976".to_string(),
             "super-secret-password".to_string(),
+            None,
             None,
             None,
             Some(r#"{"Authorization":"Bearer secret-token","X-Tenant":"acme"}"#.to_string()),
@@ -3175,6 +3192,7 @@ mod tests {
         let backend = WebBackend::new_with_config(
             base_url,
             String::new(),
+            None,
             Some(format!("http://{proxy_address}")),
             None,
             None,
@@ -3232,6 +3250,7 @@ mod tests {
         let backend = WebBackend::new_with_config(
             base_url,
             String::new(),
+            None,
             Some(format!("http://admin:admin123@{proxy_address}")),
             None,
             None,
@@ -3256,6 +3275,7 @@ mod tests {
         let error = WebBackend::new_with_config(
             "http://127.0.0.1:1".to_string(),
             String::new(),
+            None,
             Some("not a url".to_string()),
             None,
             None,
@@ -3270,6 +3290,7 @@ mod tests {
             String::new(),
             None,
             None,
+            None,
             Some("not json".to_string()),
             false,
             None,
@@ -3282,6 +3303,7 @@ mod tests {
             String::new(),
             None,
             None,
+            None,
             Some(r#"{"Bad Header Name":"v"}"#.to_string()),
             false,
             None,
@@ -3292,6 +3314,7 @@ mod tests {
         let error = WebBackend::new_with_config(
             "http://127.0.0.1:1".to_string(),
             String::new(),
+            None,
             None,
             None,
             Some(r#"{"X-Num":42}"#.to_string()),
@@ -3307,6 +3330,7 @@ mod tests {
             String::new(),
             None,
             None,
+            None,
             Some(r#"{"Cookie":"session=1"}"#.to_string()),
             false,
             None,
@@ -3317,6 +3341,7 @@ mod tests {
         let error = WebBackend::new_with_config(
             "http://127.0.0.1:1".to_string(),
             String::new(),
+            None,
             None,
             None,
             Some(r#"{"x-dbx-mcp-request":"1"}"#.to_string()),
@@ -3462,7 +3487,8 @@ mod tests {
     #[tokio::test]
     async fn web_backend_rejects_self_signed_certificate_by_default() {
         let (base_url, _cert, _dir) = spawn_self_signed_https_server().await;
-        let backend = WebBackend::new_with_config(base_url, String::new(), None, None, None, false, None).unwrap();
+        let backend =
+            WebBackend::new_with_config(base_url, String::new(), None, None, None, None, false, None).unwrap();
         backend.auth.lock().await.checked = true;
 
         let error = backend.load_connections().await.unwrap_err();
@@ -3473,7 +3499,7 @@ mod tests {
     #[tokio::test]
     async fn web_backend_skips_verification_when_configured() {
         let (base_url, _cert, _dir) = spawn_self_signed_https_server().await;
-        let backend = WebBackend::new_with_config(base_url, String::new(), None, None, None, true, None).unwrap();
+        let backend = WebBackend::new_with_config(base_url, String::new(), None, None, None, None, true, None).unwrap();
         backend.auth.lock().await.checked = true;
 
         let connections = backend.load_connections().await.unwrap();
@@ -3486,6 +3512,7 @@ mod tests {
         let backend = WebBackend::new_with_config(
             base_url,
             String::new(),
+            None,
             None,
             None,
             None,

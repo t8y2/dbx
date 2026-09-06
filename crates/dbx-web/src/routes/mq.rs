@@ -1526,14 +1526,14 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::{create_exchange, delete_user, list_tenants, send_message, ConnReq, CreateExchangeReq, SendMessageReq};
-    use crate::state::{LoginRateLimit, WebState};
+    use crate::state::WebState;
     use axum::extract::State;
     use axum::http::{HeaderMap, HeaderValue};
     use axum::Json;
     use dbx_core::connection::AppState;
     use dbx_core::models::connection::ConnectionConfig;
     use dbx_core::storage::{McpGlobalPolicy, Storage};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
 
@@ -1561,14 +1561,17 @@ mod tests {
             data_dir: dir.clone(),
             public_base_path: "/".to_string(),
             password_disabled: false,
-            password_hash: RwLock::new(None),
-            sessions: RwLock::new(HashSet::new()),
+            cookie_secure: false,
+            session_idle_timeout: None,
+            bootstrap_users: HashMap::new(),
+            has_db_users: RwLock::new(false),
+            sessions: RwLock::new(HashMap::new()),
             sse_channels: RwLock::new(HashMap::new()),
             transfer_progress_channels: RwLock::new(HashMap::new()),
             table_import_channels: RwLock::new(HashMap::new()),
             sql_file_executions: RwLock::new(HashMap::new()),
             nacos_imports: RwLock::new(HashMap::new()),
-            login_rate_limit: Mutex::new(LoginRateLimit { fail_count: 0, locked_until: None }),
+            login_rate_limit: Mutex::new(HashMap::new()),
             export_files: RwLock::new(HashMap::new()),
             ssh_prompts: Arc::new(crate::ssh_prompt::SshPromptHub::new()),
         });

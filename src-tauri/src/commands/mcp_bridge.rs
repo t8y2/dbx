@@ -654,6 +654,7 @@ fn mcp_policy_unavailable(error: String) -> String {
     }
 }
 
+#[cfg(test)]
 fn ensure_connection_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str) -> Result<(), String> {
     ensure_connection_in_mcp_scope_with_groups(policy, None, connection_id)
 }
@@ -689,6 +690,7 @@ fn ensure_database_in_mcp_scope(policy: &McpGlobalPolicy, connection_id: &str, d
     }
 }
 
+#[cfg(test)]
 fn effective_database_execution_policy(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> (bool, bool) {
     effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
 }

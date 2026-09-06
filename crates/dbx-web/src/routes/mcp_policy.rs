@@ -283,6 +283,7 @@ fn ensure_database_in_scope(policy: &McpGlobalPolicy, connection_id: &str, datab
 /// configured connection default, then the nearest configured group and the
 /// global default.
 /// Connection read-only and production protections are checked separately.
+#[cfg(test)]
 fn effective_database_execution_policy(policy: &McpGlobalPolicy, connection_id: &str, database: &str) -> (bool, bool) {
     effective_database_execution_policy_with_groups(policy, &[], connection_id, database)
 }

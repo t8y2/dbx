@@ -106,6 +106,7 @@ describe("MCP policy settings state", () => {
     expect(settingsDialogSource).toContain(':aria-checked="mcpExecutionMode === mode"');
     expect(settingsDialogSource).toContain(':tabindex="mcpExecutionMode === mode ? 0 : -1"');
     expect(settingsDialogSource).toContain("onMcpExecutionModeKeydown($event, mode)");
+    expect(settingsDialogSource).toContain('@keydown="onMcpExecutionModeKeydown($event, mode)"');
   });
 
   it("keeps MCP client config tabs on a single scrollable row", () => {

@@ -10502,7 +10502,7 @@ mod tests {
         )
         .await;
 
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
     }
 
     #[test]

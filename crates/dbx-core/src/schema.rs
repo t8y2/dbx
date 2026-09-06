@@ -4097,7 +4097,7 @@ mod tests {
 
         replace_metadata_runtime(&state, "conn", Some("analytics"), None).await;
 
-        assert!(!state.pool_handle("conn:analytics:role:metadata").await.is_some());
+        assert!(state.pool_handle("conn:analytics:role:metadata").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4126,7 +4126,7 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "Agent RPC call timed out (30s)");
         assert_eq!(attempts, 1);
-        assert!(!state.pool_handle("conn:role:metadata").await.is_some());
+        assert!(state.pool_handle("conn:role:metadata").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4159,7 +4159,7 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), quarantine);
         assert_eq!(attempts, 2);
-        assert!(!state.pool_handle("conn").await.is_some());
+        assert!(state.pool_handle("conn").await.is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -4235,7 +4235,7 @@ for line in sys.stdin:
             Some(crate::db::agent_driver::AgentErrorCategory::Timeout)
         );
         assert_eq!(std::fs::read_to_string(call_count_path).unwrap(), "1");
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
         runtime.kill();
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -2038,6 +2038,7 @@ fn validate_sql_policy(
 // CallToolResult is the transport-native error payload; boxing it would complicate every MCP call site.
 #[cfg(test)]
 #[allow(clippy::result_large_err)]
+#[cfg(test)]
 fn validate_mongo_command(
     connection: &dbx_core::models::connection::ConnectionConfig,
     policy: &McpGlobalPolicy,

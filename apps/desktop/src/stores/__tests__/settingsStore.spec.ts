@@ -808,8 +808,10 @@ describe("settingsStore MCP policy persistence", () => {
       readOnly: true,
       allowDangerousSql: false,
       allowedConnectionIds: ["connection-1"],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     };

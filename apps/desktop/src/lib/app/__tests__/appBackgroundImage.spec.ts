@@ -44,8 +44,9 @@ describe("normalizeBackgroundImageSettings", () => {
       fileName: "wall.png",
       opacity: 0.75,
       blur: 8,
+      displayMode: "tile",
     });
-    expect(settings).toEqual({ filePath: "/data/background-image.png", fileName: "wall.png", opacity: 0.75, blur: 8 });
+    expect(settings).toEqual({ filePath: "/data/background-image.png", fileName: "wall.png", opacity: 0.75, blur: 8, displayMode: "tile" });
 
     const clamped = normalizeBackgroundImageSettings({ opacity: 5, blur: -3 });
     expect(clamped.opacity).toBe(1);
@@ -56,6 +57,12 @@ describe("normalizeBackgroundImageSettings", () => {
     expect(belowMin.blur).toBe(20);
   });
 
+  it("falls back to the default display mode for unknown values", () => {
+    expect(normalizeBackgroundImageSettings({ displayMode: "diagonal" }).displayMode).toBe("fill");
+    expect(normalizeBackgroundImageSettings({ displayMode: 42 }).displayMode).toBe("fill");
+    expect(normalizeBackgroundImageSettings({ displayMode: "tile" }).displayMode).toBe("tile");
+  });
+
   it("treats blank or non-string paths as unset", () => {
     expect(normalizeBackgroundImageSettings({ filePath: "  " }).filePath).toBeNull();
     expect(normalizeBackgroundImageSettings({ filePath: 42 }).filePath).toBeNull();
@@ -64,12 +71,31 @@ describe("normalizeBackgroundImageSettings", () => {
 });
 
 describe("backgroundImageStyle", () => {
-  it("emits nothing when blur is zero (the image itself renders fully opaque)", () => {
-    expect(backgroundImageStyle({ blur: 0 })).toEqual({});
+  const url = "blob:http://localhost/abc";
+
+  it("emits nothing without an object URL", () => {
+    expect(backgroundImageStyle({ displayMode: "fill", blur: 0 }, null)).toEqual({});
+  });
+
+  it("paints fill mode as cover by default", () => {
+    expect(backgroundImageStyle({ displayMode: "fill", blur: 0 }, url)).toEqual({
+      backgroundImage: `url("${url}")`,
+      backgroundSize: "cover",
+      backgroundPosition: "center",
+      backgroundRepeat: "no-repeat",
+    });
+    expect(backgroundImageStyle({ displayMode: "nonsense" as never, blur: 0 }, url).backgroundSize).toBe("cover");
+  });
+
+  it("maps the other display modes to their background properties", () => {
+    expect(backgroundImageStyle({ displayMode: "fit", blur: 0 }, url)).toMatchObject({ backgroundSize: "contain", backgroundRepeat: "no-repeat" });
+    expect(backgroundImageStyle({ displayMode: "stretch", blur: 0 }, url)).toMatchObject({ backgroundSize: "100% 100%" });
+    expect(backgroundImageStyle({ displayMode: "center", blur: 0 }, url)).not.toHaveProperty("backgroundSize");
+    expect(backgroundImageStyle({ displayMode: "tile", blur: 0 }, url)).toMatchObject({ backgroundRepeat: "repeat" });
   });
 
   it("adds blur and a slight scale to hide transparent blur edges", () => {
-    expect(backgroundImageStyle({ blur: 12 })).toEqual({
+    expect(backgroundImageStyle({ displayMode: "fill", blur: 12 }, url)).toMatchObject({
       filter: "blur(12px)",
       transform: "scale(1.06)",
     });

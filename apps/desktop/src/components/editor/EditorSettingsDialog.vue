@@ -196,7 +196,7 @@ import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepp
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_CUSTOM_UI_COLOR_DEFS, APP_THEME_PALETTES, type AppCornerStyle, type AppCustomUiColors, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { BACKGROUND_IMAGE_STORAGE_LIMIT_BYTES, defaultBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
+import { BACKGROUND_IMAGE_DISPLAY_MODES, BACKGROUND_IMAGE_STORAGE_LIMIT_BYTES, defaultBackgroundImageSettings, normalizeBackgroundImageDisplayMode, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -774,6 +774,7 @@ async function pickBackgroundImage() {
       ...defaultBackgroundImageSettings(),
       opacity: editBackgroundImage.value.opacity,
       blur: editBackgroundImage.value.blur,
+      displayMode: editBackgroundImage.value.displayMode,
       filePath: info.storedPath,
       fileName: info.fileName,
     };
@@ -792,9 +793,14 @@ function clearBackgroundImageDraft() {
     ...defaultBackgroundImageSettings(),
     opacity: editBackgroundImage.value.opacity,
     blur: editBackgroundImage.value.blur,
+    displayMode: editBackgroundImage.value.displayMode,
   };
   backgroundImageFileMissing.value = false;
   if (previousPath) pendingBackgroundImageCleanup = previousPath;
+}
+
+function updateBackgroundImageDisplayMode(mode: unknown) {
+  editBackgroundImage.value = { ...editBackgroundImage.value, displayMode: normalizeBackgroundImageDisplayMode(mode) };
 }
 
 // Slider shows surface transparency (100% = wallpaper most visible); the stored
@@ -5693,6 +5699,19 @@ onUnmounted(() => {
                 <p v-if="backgroundImageFileMissing" class="text-xs text-destructive">
                   {{ t("settings.backgroundImageMissing") }}
                 </p>
+                <div class="space-y-1">
+                  <Label for="background-image-display-mode">{{ t("settings.backgroundImageDisplayMode") }}</Label>
+                  <Select :model-value="editBackgroundImage.displayMode" @update:model-value="updateBackgroundImageDisplayMode">
+                    <SelectTrigger id="background-image-display-mode" class="h-8 w-48">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem v-for="mode in BACKGROUND_IMAGE_DISPLAY_MODES" :key="mode" :value="mode">
+                        {{ t(`settings.backgroundImageMode${mode.charAt(0).toUpperCase()}${mode.slice(1)}`) }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div class="grid gap-3 sm:grid-cols-2">
                   <div class="space-y-1">
                     <div class="flex items-center justify-between gap-2">

@@ -107,6 +107,6 @@ export function useBackgroundImage(settingsStore: SettingsStoreLike): Background
     backgroundObjectUrl,
     backgroundSettings,
     active,
-    backgroundImageStyle: computed(() => backgroundImageStyle(backgroundSettings.value)),
+    backgroundImageStyle: computed(() => backgroundImageStyle(backgroundSettings.value, backgroundObjectUrl.value)),
   };
 }

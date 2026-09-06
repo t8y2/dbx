@@ -10,11 +10,17 @@ export const BACKGROUND_IMAGE_DEFAULT_BLUR_PX = 0;
 
 export const BACKGROUND_IMAGE_FILE_EXTENSIONS = ["png", "jpg", "jpeg", "webp", "bmp", "gif"] as const;
 
+/** Classic desktop-wallpaper presets; default "fill" crops to cover the window. */
+export const BACKGROUND_IMAGE_DISPLAY_MODES = ["fill", "fit", "stretch", "center", "tile"] as const;
+export type BackgroundImageDisplayMode = (typeof BACKGROUND_IMAGE_DISPLAY_MODES)[number];
+export const BACKGROUND_IMAGE_DEFAULT_DISPLAY_MODE: BackgroundImageDisplayMode = "fill";
+
 export type BackgroundImageSettings = {
   filePath: string | null;
   fileName: string | null;
   opacity: number;
   blur: number;
+  displayMode: BackgroundImageDisplayMode;
 };
 
 export function defaultBackgroundImageSettings(): BackgroundImageSettings {
@@ -23,6 +29,7 @@ export function defaultBackgroundImageSettings(): BackgroundImageSettings {
     fileName: null,
     opacity: BACKGROUND_IMAGE_DEFAULT_OPACITY,
     blur: BACKGROUND_IMAGE_DEFAULT_BLUR_PX,
+    displayMode: BACKGROUND_IMAGE_DEFAULT_DISPLAY_MODE,
   };
 }
 
@@ -36,6 +43,10 @@ function normalizeOptionalText(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+export function normalizeBackgroundImageDisplayMode(value: unknown): BackgroundImageDisplayMode {
+  return (BACKGROUND_IMAGE_DISPLAY_MODES as readonly string[]).includes(value as string) ? (value as BackgroundImageDisplayMode) : BACKGROUND_IMAGE_DEFAULT_DISPLAY_MODE;
+}
+
 export function normalizeBackgroundImageSettings(value: unknown): BackgroundImageSettings {
   const source = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
   return {
@@ -43,6 +54,7 @@ export function normalizeBackgroundImageSettings(value: unknown): BackgroundImag
     fileName: normalizeOptionalText(source.fileName),
     opacity: clampNumber(source.opacity, BACKGROUND_IMAGE_MIN_OPACITY, BACKGROUND_IMAGE_MAX_OPACITY, BACKGROUND_IMAGE_DEFAULT_OPACITY),
     blur: clampNumber(source.blur, 0, BACKGROUND_IMAGE_MAX_BLUR_PX, BACKGROUND_IMAGE_DEFAULT_BLUR_PX),
+    displayMode: normalizeBackgroundImageDisplayMode(source.displayMode),
   };
 }
 
@@ -54,12 +66,44 @@ export function backgroundImageFileExtension(fileName: string): string | null {
   return (BACKGROUND_IMAGE_FILE_EXTENSIONS as readonly string[]).includes(extension) ? extension : null;
 }
 
-/** Blur softens edges outward, which would reveal transparent margins: scale slightly to cover. */
-export function backgroundImageStyle(settings: Pick<BackgroundImageSettings, "blur">): Record<string, string> {
-  if (settings.blur > 0) {
-    return { filter: `blur(${settings.blur}px)`, transform: "scale(1.06)" };
+/**
+ * Paint style for the wallpaper layer. Modes follow the classic desktop
+ * wallpaper presets: fill/fit/stretch scale the image, center paints it at
+ * its natural size, tile repeats it. Blur always scales the layer slightly
+ * so blurred edges never reveal transparent margins.
+ */
+export function backgroundImageStyle(settings: Pick<BackgroundImageSettings, "displayMode" | "blur">, objectUrl: string | null): Record<string, string> {
+  if (!objectUrl) return {};
+  const style: Record<string, string> = { backgroundImage: `url("${objectUrl}")` };
+  switch (settings.displayMode) {
+    case "fit":
+      style.backgroundSize = "contain";
+      style.backgroundPosition = "center";
+      style.backgroundRepeat = "no-repeat";
+      break;
+    case "stretch":
+      style.backgroundSize = "100% 100%";
+      style.backgroundRepeat = "no-repeat";
+      break;
+    case "center":
+      style.backgroundPosition = "center";
+      style.backgroundRepeat = "no-repeat";
+      break;
+    case "tile":
+      style.backgroundRepeat = "repeat";
+      break;
+    case "fill":
+    default:
+      style.backgroundSize = "cover";
+      style.backgroundPosition = "center";
+      style.backgroundRepeat = "no-repeat";
+      break;
   }
-  return {};
+  if (settings.blur > 0) {
+    style.filter = `blur(${settings.blur}px)`;
+    style.transform = "scale(1.06)";
+  }
+  return style;
 }
 
 /**

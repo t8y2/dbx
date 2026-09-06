@@ -11,9 +11,9 @@ describe("normalizeEditorSettings backgroundImage", () => {
 
   it("keeps configured background image values and clamps invalid ones", () => {
     const normalized = normalizeEditorSettings({
-      backgroundImage: { filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.4, blur: 6 },
+      backgroundImage: { filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.4, blur: 6, displayMode: "tile" },
     } as never);
-    expect(normalized.backgroundImage).toEqual({ filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.4, blur: 6 });
+    expect(normalized.backgroundImage).toEqual({ filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.4, blur: 6, displayMode: "tile" });
 
     const clamped = normalizeEditorSettings({ backgroundImage: { opacity: 12, blur: -1 } } as never);
     expect(clamped.backgroundImage.opacity).toBe(1);
@@ -24,7 +24,7 @@ describe("normalizeEditorSettings backgroundImage", () => {
     const normalized = normalizeEditorSettings({
       backgroundImage: { filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.5, blur: 0, showOnWelcome: true, showOnEditor: true },
     } as never);
-    expect(normalized.backgroundImage).toEqual({ filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.5, blur: 0 });
+    expect(normalized.backgroundImage).toEqual({ filePath: "/data/background-image.jpg", fileName: "a.jpg", opacity: 0.5, blur: 0, displayMode: "fill" });
   });
 
   it("uses default settings for a brand-new store baseline", () => {

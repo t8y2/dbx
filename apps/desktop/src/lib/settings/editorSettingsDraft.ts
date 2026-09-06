@@ -1,4 +1,5 @@
 import type { EditorSettings } from "@/stores/settingsStore";
+import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
@@ -11,6 +12,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "uiFontFamily",
   "uiScale",
   "theme",
+  "backgroundImage",
   "customThemes",
   "activeCustomThemeId",
   "executeMode",
@@ -129,6 +131,7 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
+  if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }
 

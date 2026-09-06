@@ -732,6 +732,27 @@ export async function saveEditorSettings(settings: unknown): Promise<void> {
   return invoke("save_editor_settings", { settings });
 }
 
+export interface BackgroundImageInfo {
+  storedPath: string;
+  fileName: string;
+}
+
+export async function saveBackgroundImage(sourcePath: string): Promise<BackgroundImageInfo> {
+  return invoke("save_background_image", { sourcePath });
+}
+
+export async function clearBackgroundImage(storedPath: string): Promise<void> {
+  return invoke("clear_background_image", { storedPath });
+}
+
+export async function readBackgroundImage(storedPath: string): Promise<string> {
+  return invoke("read_background_image", { storedPath });
+}
+
+export async function checkBackgroundImage(storedPath: string): Promise<boolean> {
+  return invoke("check_background_image", { storedPath });
+}
+
 export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> {
   return invoke("load_open_tabs_state");
 }

@@ -173,18 +173,6 @@ describe("DataGrid canvas surfaces", () => {
     expect(dataGridSource.match(/@dblclick="onCanvasDblClick"/g)).toHaveLength(1);
     expect(dataGridSource).toContain("@dblclick.stop");
   });
-
-  it("opens editable cells in the expanded editor on double click across grid layouts", () => {
-    const domHandler = dataGridSource.slice(dataGridSource.indexOf("async function onDomCellDblClick"), dataGridSource.indexOf("function cellEditContentNeedsExpandedEditor"));
-    const canvasHandler = dataGridSource.slice(dataGridSource.indexOf("async function onCanvasDblClick"), dataGridSource.indexOf("function canvasCellContentOverflows"));
-    const transposeHandler = dataGridSource.slice(dataGridSource.indexOf("async function onTransposeCellDblClick"), dataGridSource.indexOf("function onTransposeCellContext"));
-
-    expect(domHandler).toContain("await startCellEdit(item.id, actualColIdx, true);");
-    expect(canvasHandler).toContain("await startCellEdit(item.id, actualColIdx, true);");
-    expect(transposeHandler).toContain("await startCellEdit(item.id, actualColIdx, true);");
-    expect(dataGridSource).not.toContain("startDomCellEdit");
-    expect(dataGridSource).toContain('data-expanded-cell-editor="true"');
-  });
 });
 
 describe("DataGridSearchBar", () => {

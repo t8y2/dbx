@@ -1,7 +1,9 @@
 use chrono::{Local, NaiveDateTime};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 #[path = "data_grid_neo4j_sql.rs"]
 mod data_grid_neo4j_sql;
@@ -2158,6 +2160,11 @@ pub(crate) fn format_grid_sql_literal_with_identifier_quote(
             return timestamp.to_string();
         }
     }
+    if (database_type == Some(DatabaseType::InfluxDb) || database_type == Some(DatabaseType::InfluxDb3))
+        && column_info.is_some_and(|column| column.data_type.eq_ignore_ascii_case("timestamp"))
+    {
+        return normalize_influxdb_time_expr(&text);
+    }
     if is_mysql_binary_literal_column(database_type, column_info) {
         if let Some(literal) = format_mysql_binary_literal_text(&text) {
             // DBX result values expose binary columns as prefixed hex; keep them
@@ -3417,6 +3424,84 @@ fn is_numeric_literal(text: &str) -> bool {
     text.parse::<f64>().is_ok_and(f64::is_finite)
         && text.chars().all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-' | '.' | 'e' | 'E'))
         && text.chars().any(|ch| ch.is_ascii_digit())
+}
+
+fn influx_time_re() -> &'static Regex {
+    static NUM_RE: OnceLock<Regex> = OnceLock::new();
+    NUM_RE.get_or_init(|| Regex::new(r"^[+-]?\d+$").unwrap())
+}
+
+fn influx_time_expr_re() -> &'static Regex {
+    static LEGAL_RE: OnceLock<Regex> = OnceLock::new();
+    LEGAL_RE.get_or_init(|| {
+        let unit = r"(?:ns|u|µ|ms|w|d|h|m|s)";
+        let dur = format!(r"(?:[0-9]+{})+", unit);
+        let offset = format!(r"(?:[+-]\s*)?{}(?:\s*[+-]\s*{})*", dur, dur);
+        let abs = format!(r"'[^']*'(?:\s*{})?", offset);
+        let now = format!(r"(?i)now\s*\(\s*\)(?:\s*{})?", offset);
+        let pattern = format!(r"^(?:{}|{}|{})$", abs, now, offset);
+        Regex::new(&pattern).expect("invalid legal regex")
+    })
+}
+
+fn influx_rfc3339_like_re() -> &'static Regex {
+    static RFC3339_LIKE_RE: OnceLock<Regex> = OnceLock::new();
+    RFC3339_LIKE_RE.get_or_init(|| {
+        // RFC3339‑like：日期（必选）+ 可选时间及时区
+        let pattern = r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?";
+        Regex::new(pattern).expect("invalid RFC3339-like time regex")
+    })
+}
+
+/// InfluxQL 时间表达式处理
+///
+/// 处理规则：
+/// 1. 纯数字（可带 +/-） → 原样返回（作为时间戳）。
+/// 2. 已合法的表达式（带引号的RFC3339、绝对时间、now()、纯偏移量）→ 原样返回。
+/// 3. 包含未加单引号的 RFC3339‑like 时间 → 为该部分加上单引号，其余部分保留。
+///
+/// 支持的RFC3339绝对时间格式：
+/// - YYYY-MM-DD
+/// - YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]
+/// - YYYY-MM-DD HH:MM:SS[.frac][Z|±HH:MM]
+///
+/// 支持的偏移量单位：ns, u, µ, ms, w, d, h, m, s
+/// 偏移量可连续拼接，如 1h30m。
+pub fn normalize_influxdb_time_expr(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    // 纯数字（时间戳）
+    if influx_time_re().is_match(trimmed) {
+        return trimmed.to_string();
+    }
+
+    // 合法表达式（带引号的RFC3339 / 绝对时间 / now() / 偏移）
+    if influx_time_expr_re().is_match(trimmed) {
+        return trimmed.to_string();
+    }
+
+    // 查找未加引号的绝对时间并添加单引号
+    if let Some(m) = influx_rfc3339_like_re().find(trimmed) {
+        let matched = m.as_str();
+        let start = m.start();
+        let end = m.end();
+
+        // 检查该匹配是否已被单引号括起
+        let prev = if start > 0 { trimmed.chars().nth(start - 1) } else { None };
+        let next = if end < trimmed.len() { trimmed.chars().nth(end) } else { None };
+
+        if !(prev == Some('\'') && next == Some('\'')) {
+            let quoted = format!("'{}'", matched);
+            let new_expr = format!("{}{}{}", &trimmed[..start], quoted, &trimmed[end..]);
+            return new_expr;
+        }
+    }
+
+    // 其他情况：原样返回（不处理）
+    input.to_string()
 }
 
 fn uses_keyless_row_predicate(database_type: Option<DatabaseType>) -> bool {
@@ -5407,6 +5492,98 @@ mod tests {
                 Some(&raw_text)
             ),
             "N'2026-06-29 10:11:12.896666666'"
+        );
+    }
+
+    #[test]
+    fn formats_influxdb_timestamp_copy_literals_with_supported_syntax() {
+        let datetime = column("time", "timestamp", true, None);
+
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000000000"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "1788422000000000000"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000ms"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "1788422000000ms"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000ms  +  100s"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "1788422000000ms  +  100s"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("'2026-09-03T07:03:14.77Z'"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "'2026-09-03T07:03:14.77Z'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("'2026-09-03T07:03:14.77Z' + 1d"),
+                Some(DatabaseType::InfluxDb),
+                Some(&datetime)
+            ),
+            "'2026-09-03T07:03:14.77Z' + 1d"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-09-03T07:03:14.77Z"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "'2026-09-03T07:03:14.77Z'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-09-03T07:03:14.77Z + 1d"),
+                Some(DatabaseType::InfluxDb),
+                Some(&datetime)
+            ),
+            "'2026-09-03T07:03:14.77Z' + 1d"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("now()-10m"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "now()-10m"
+        );
+
+        // InfluxDB3
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000000000"), Some(DatabaseType::InfluxDb), Some(&datetime)),
+            "1788422000000000000"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000ms"), Some(DatabaseType::InfluxDb3), Some(&datetime)),
+            "1788422000000ms"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("1788422000000ms  +  100s"), Some(DatabaseType::InfluxDb3), Some(&datetime)),
+            "1788422000000ms  +  100s"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("'2026-09-03T07:03:14.77Z'"),
+                Some(DatabaseType::InfluxDb3),
+                Some(&datetime)
+            ),
+            "'2026-09-03T07:03:14.77Z'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("'2026-09-03T07:03:14.77Z' + 1d"),
+                Some(DatabaseType::InfluxDb3),
+                Some(&datetime)
+            ),
+            "'2026-09-03T07:03:14.77Z' + 1d"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("2026-09-03T07:03:14.77Z"), Some(DatabaseType::InfluxDb3), Some(&datetime)),
+            "'2026-09-03T07:03:14.77Z'"
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!("2026-09-03T07:03:14.77Z + 1d"),
+                Some(DatabaseType::InfluxDb3),
+                Some(&datetime)
+            ),
+            "'2026-09-03T07:03:14.77Z' + 1d"
+        );
+        assert_eq!(
+            format_grid_sql_literal(&json!("now()-10m"), Some(DatabaseType::InfluxDb3), Some(&datetime)),
+            "now()-10m"
         );
     }
 

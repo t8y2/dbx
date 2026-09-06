@@ -1,12 +1,24 @@
-export type InstallLang = "en" | "cn";
+import type { DocsLang } from "./i18n";
+
+export type InstallLang = DocsLang;
+export type BrowserStaticArch = "x64" | "arm64";
+
+export type BrowserStaticDownload = {
+  arch: BrowserStaticArch;
+  href: string;
+};
 
 export type InstallOption = {
   id: string;
   iconId: string;
   label: string;
   description?: string;
+  driverLinkLabel?: string;
+  descriptionSuffix?: string;
   badge?: string;
   href: string;
+  action?: "download" | "instructions";
+  browserStaticDownloads?: BrowserStaticDownload[];
 };
 
 type DownloadArtifact = {
@@ -14,8 +26,12 @@ type DownloadArtifact = {
   iconId: string;
   labels: Record<InstallLang, string>;
   descriptions?: Record<InstallLang, string>;
+  driverLinkLabels?: Record<InstallLang, string>;
+  descriptionSuffixes?: Record<InstallLang, string>;
   badges?: Record<InstallLang, string>;
   suffix: string;
+  action?: "download" | "instructions";
+  browserStaticSuffixes?: Record<BrowserStaticArch, string>;
 };
 
 const DOWNLOAD_BASE_URL = "https://dl.dbxio.com/releases";
@@ -24,50 +40,65 @@ const downloadArtifacts: DownloadArtifact[] = [
   {
     id: "macos-arm",
     iconId: "macos-arm",
-    labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)" },
-    suffix: "aarch64.dmg",
+    labels: { en: "For macOS (Apple Silicon)", cn: "适用于 macOS (Apple Silicon)", tr: "macOS için (Apple Silicon)" },
+    suffix: "arm64.dmg",
   },
   {
     id: "macos-intel",
     iconId: "macos-intel",
-    labels: { en: "For macOS (Intel)", cn: "适用于 macOS (Intel)" },
+    labels: { en: "For macOS (Intel)", cn: "适用于 macOS (Intel)", tr: "macOS için (Intel)" },
     suffix: "x64.dmg",
   },
   {
     id: "windows",
     iconId: "windows",
-    labels: { en: "Windows 10/11 (x64)", cn: "Windows 10/11 (x64)" },
-    descriptions: { en: "Standard online installer", cn: "标准在线安装包" },
-    badges: { en: "Recommended", cn: "推荐" },
+    labels: { en: "Windows 10/11 (x64)", cn: "Windows 10/11 (x64)", tr: "Windows 10/11 (x64)" },
+    descriptions: { en: "Standard online installer", cn: "标准在线安装包", tr: "Standart çevrimiçi yükleyici" },
+    badges: { en: "Recommended", cn: "推荐", tr: "Önerilen" },
     suffix: "x64-setup.exe",
   },
   {
     id: "windows-offline",
     iconId: "windows",
-    labels: { en: "Windows complete offline installer", cn: "Windows 完整离线安装包" },
-    descriptions: { en: "Includes WebView2 · For offline deployment or missing runtime", cn: "内置 WebView2 · 适用于内网部署或运行库缺失" },
-    badges: { en: "Offline", cn: "离线" },
-    suffix: "x64-webview2-offline-setup.exe",
+    labels: { en: "Windows 10 intranet environment installer", cn: "Windows10内网环境安装包", tr: "Windows 10 iç ağ ortamı yükleyicisi" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含", tr: "WebView2 çevrimdışı çalışma zamanını içerir · İçermez:" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动", tr: "çevrimdışı veritabanı sürücüleri" },
+    badges: { en: "Intranet", cn: "内网", tr: "İç ağ" },
+    suffix: "x64-offline-setup.exe",
   },
   {
     id: "windows-7-offline",
-    iconId: "windows",
-    labels: { en: "Windows 7 / Server 2012 R2 offline installer", cn: "Windows 7 / Server 2012 R2 离线安装包" },
-    descriptions: { en: "Includes WebView2 109 · x64 only", cn: "内置 WebView2 109 · 仅支持 x64" },
-    badges: { en: "Legacy", cn: "旧系统" },
-    suffix: "x64-win7-server2012r2-webview2-109-offline-setup.exe",
+    iconId: "windows-legacy",
+    labels: { en: "Windows 7 / Server\u00a02012\u00a0R2 package", cn: "Windows 7 / Server\u00a02012\u00a0R2 专用包", tr: "Windows 7 / Server\u00a02012\u00a0R2 paketi" },
+    descriptions: { en: "Includes WebView2 offline runtime · Does not include", cn: "内置 WebView2 离线运行库 · 不含", tr: "WebView2 çevrimdışı çalışma zamanını içerir · İçermez:" },
+    driverLinkLabels: { en: "offline database drivers", cn: "数据库离线驱动", tr: "çevrimdışı veritabanı sürücüleri" },
+    badges: { en: "Legacy", cn: "旧系统", tr: "Eski sistem" },
+    suffix: "x64-win7-server2012r2-offline-setup.exe",
   },
   {
     id: "linux",
     iconId: "linux",
-    labels: { en: "For Linux x64", cn: "适用于 Linux x64" },
+    labels: { en: "For Linux x64", cn: "适用于 Linux x64", tr: "Linux x64 için" },
     suffix: "amd64.AppImage",
   },
   {
     id: "linux-arm",
     iconId: "linux-arm",
-    labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64" },
-    suffix: "aarch64.AppImage",
+    labels: { en: "For Linux ARM64", cn: "适用于 Linux ARM64", tr: "Linux ARM64 için" },
+    suffix: "arm64.AppImage",
+  },
+  {
+    id: "linux-browser",
+    iconId: "linux",
+    labels: { en: "Linux browser package", cn: "Linux 浏览器版", tr: "Linux tarayıcı paketi" },
+    descriptions: { en: "For Kylin, UnionTech UOS, and other Linux distributions", cn: "适用于麒麟、统信 UOS 等 Linux 发行版", tr: "Kylin, UnionTech UOS ve diğer Linux dağıtımları için" },
+    badges: { en: "Guide", cn: "安装说明", tr: "Kurulum kılavuzu" },
+    suffix: "x64-browser-static.tar.gz",
+    action: "instructions",
+    browserStaticSuffixes: {
+      x64: "x64-browser-static.tar.gz",
+      arm64: "arm64-browser-static.tar.gz",
+    },
   },
 ];
 
@@ -77,7 +108,16 @@ export function createInstallOptions(lang: InstallLang, version: string): Instal
     iconId: artifact.iconId,
     label: artifact.labels[lang],
     description: artifact.descriptions?.[lang],
+    driverLinkLabel: artifact.driverLinkLabels?.[lang],
+    descriptionSuffix: artifact.descriptionSuffixes?.[lang],
     badge: artifact.badges?.[lang],
     href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${artifact.suffix}?v=${version}`,
+    action: artifact.action ?? "download",
+    browserStaticDownloads: artifact.browserStaticSuffixes
+      ? Object.entries(artifact.browserStaticSuffixes).map(([arch, suffix]) => ({
+          arch: arch as BrowserStaticArch,
+          href: `${DOWNLOAD_BASE_URL}/v${version}/DBX_${version}_${suffix}?v=${version}`,
+        }))
+      : undefined,
   }));
 }

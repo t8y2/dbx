@@ -1,0 +1,304 @@
+---
+title: JDBC Eklentisi
+description: DBX JDBC eklentisini kurun, üreticinin JDBC sürücü JAR dosyalarını içe aktarın ve JDBC bağlantıları oluşturun.
+---
+
+DBX varsayılan olarak yerel Rust veritabanı sürücülerini kullanır. JDBC isteğe bağlıdır: DBX'in yerel olarak desteklemediği bir veritabanına bağlanmanız ya da özellikle üreticinin JDBC sürücüsüne ihtiyacınız olduğunda JDBC eklentisini kurun.
+
+<Callout type="info">JDBC eklentisi ana DBX uygulamasıyla birlikte gelmez ve üreticinin JDBC sürücülerini içermez. Önce DBX JDBC eklentisini kurun, ardından veritabanı üreticisinin JDBC sürücü JAR dosyasını içe aktarın.</Callout>
+
+<Callout type="warn">Başarılı bir JDBC bağlantısı, yerel bir DBX profilinin her yeteneğini kapsadığı anlamına gelmez. Nesne ağaçları, kaynak tanımları, yapı düzenleme, içe aktarma, aktarım ve yönetim görünümleri; JDBC meta verisine, algılanan geçerli veritabanı türüne ve sürücü yetenek bildirimine bağlıdır. Bilinmeyen motorlar genel JDBC yetenekleriyle çalışır.</Callout>
+
+Masaüstü, JAR dosyalarını yerel makineden içe aktarır. Docker/Web, JAR dosyalarını ve eklentiyi sunucu veri dizinine kurar; tarayıcının bulunduğu makinedeki yollar sunucu tarafından doğrudan okunamaz ve yapılandırma taşıması sürücü dosyalarını otomatik taşımaz.
+
+## JDBC Ne Zaman Kullanılır
+
+Önce MySQL, PostgreSQL, SQLite, Redis, MongoDB, DuckDB, ClickHouse, SQL Server, Oracle, DM ve GaussDB gibi yerleşik DBX veritabanı türlerini tercih edin.
+
+JDBC'yi şu durumlarda kullanın:
+
+- Hedef veritabanı DBX'e yerleşik değilse
+- Yerel sürücü, üreticiye özgü bir davranışı kapsamıyorsa
+- Kurumunuz üreticinin JDBC sürücüsünü standart olarak kullanıyorsa
+- Dameng DM, H2, DB2, Snowflake ya da SQLite gibi veritabanlarına JDBC üzerinden bağlanmak istiyorsanız
+
+## Gereksinimler
+
+| Öğe                   |         Zorunlu | Notlar                                                                                  |
+| ---------------------- | ---------------: | -------------------------------------------------------------------------------------- |
+| DBX JDBC eklentisi        |              Evet | DBX ayarlarından kurulur; DBX'in JDBC çağırmasını sağlar                                        |
+| Java çalışma zamanı           |              Evet | Yerel makine `java` çalıştırabilmelidir; Java 17 ya da üstü önerilir          |
+| Üreticinin JDBC sürücü JAR'ı |              Evet | Örneğin PostgreSQL, MySQL, Dameng DM, Oracle, H2, SQLite ya da başka bir üretici sürücüsü |
+| JDBC URL'si               |              Evet | URL genellikle sunucu, port, veritabanı adı ve parametreleri içerir                     |
+| Kullanıcı adı/parola      |          Duruma göre | Dosya veritabanları ya da bazı kimlik doğrulama modları bunlara ihtiyaç duymayabilir                                    |
+| Sürücü sınıfı           | Genellikle isteğe bağlı | Modern JDBC sürücülerinin çoğu kendini kaydeder; yalnızca otomatik keşif başarısız olduğunda girin        |
+
+## 1. Adım: Java Kurun
+
+JDBC eklentisi bir Java programıdır, bu yüzden makinenizde bir Java çalışma zamanı gerekir. Kurulumdan sonra bir terminalde doğrulayın:
+
+```bash
+java -version
+```
+
+Komut bulunamıyorsa önce Java kurun. DBX önce `JAVA_HOME` değişkenine, sonra yaygın sistem konumlarına ve `PATH` üzerindeki `java` komutuna bakar.
+
+<Tabs groupId="java-install" items={['macOS', 'Windows', 'Linux']}>
+  <Tab value="macOS">
+    Homebrew ile kurun:
+
+    ```bash
+    brew install openjdk
+    ```
+
+    `java -version` hâlâ çalışmıyorsa `PATH` ya da `JAVA_HOME` ayarını yapılandırmak için Homebrew çıktısını izleyin.
+
+  </Tab>
+  <Tab value="Windows">
+    Temurin, Oracle JDK ya da Microsoft Build of OpenJDK kurun. Kurulumdan sonra DBX'i yeniden başlatın ve doğrulayın:
+
+    ```powershell
+    java -version
+    ```
+
+  </Tab>
+  <Tab value="Linux">
+    Debian / Ubuntu:
+
+    ```bash
+    sudo apt install openjdk-17-jre
+    ```
+
+    Fedora:
+
+    ```bash
+    sudo dnf install java-17-openjdk
+    ```
+
+  </Tab>
+</Tabs>
+
+## 2. Adım: DBX JDBC Eklentisini Kurun
+
+DBX Masaüstü'nde:
+
+1. **Ayarlar**'ı açın
+2. **JDBC Sürücüleri** bölümüne gidin
+3. **JDBC Eklentisini Kur**'a tıklayın
+
+Kurulumdan sonra DBX şuna benzer bir durum gösterir:
+
+```text
+Kurulu: v0.1.0
+```
+
+DBX JDBC eklentisinin kendi sürümü vardır. DBX uygulama sürümüyle eşleşmesi gerekmez. DBX'i güncellemek JDBC eklentisini otomatik kurmaz ve eklentiyi elle kaldırırsanız DBX bunu arkanızdan yeniden kurmaz.
+
+## 3. Adım: Üreticinin JDBC Sürücüsünü İndirin
+
+DBX üreticilerin JDBC sürücülerini otomatik indirmez. `.jar` dosyasını veritabanı üreticisinin web sitesinden ya da bir Maven deposundan indirin.
+
+Yaygın örnekler:
+
+| Veritabanı   | Yaygın Maven Dosyası                  | Sürücü Sınıfı                                   | JDBC URL Örneği                                                  |
+| ---------- | -------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------- |
+| PostgreSQL | `org.postgresql:postgresql`            | `org.postgresql.Driver`                        | `jdbc:postgresql://localhost:5432/postgres`                       |
+| MySQL      | `com.mysql:mysql-connector-j`          | `com.mysql.cj.jdbc.Driver`                     | `jdbc:mysql://localhost:3306/test`                                |
+| MariaDB    | `org.mariadb.jdbc:mariadb-java-client` | `org.mariadb.jdbc.Driver`                      | `jdbc:mariadb://localhost:3306/test`                              |
+| Dameng DM  | `com.dameng:DmJdbcDriver8`             | `dm.jdbc.driver.DmDriver`                      | `jdbc:dm://localhost:5236`                                        |
+| SQL Server | `com.microsoft.sqlserver:mssql-jdbc`   | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `jdbc:sqlserver://localhost:1433;databaseName=master`             |
+| Oracle     | `com.oracle.database.jdbc:ojdbc11`     | `oracle.jdbc.OracleDriver`                     | `jdbc:oracle:thin:@//localhost:1521/ORCLPDB1`                     |
+| H2         | `com.h2database:h2`                    | `org.h2.Driver`                                | `jdbc:h2:/tmp/dbx-h2-test`                                        |
+| SQLite     | `org.xerial:sqlite-jdbc`               | `org.sqlite.JDBC`                              | `jdbc:sqlite:/Users/me/test.db`                                   |
+| ClickHouse | `com.clickhouse:clickhouse-jdbc`       | `com.clickhouse.jdbc.ClickHouseDriver`         | `jdbc:clickhouse://localhost:8123/default`                        |
+| DB2        | `com.ibm.db2:jcc`                      | `com.ibm.db2.jcc.DB2Driver`                    | `jdbc:db2://localhost:50000/SAMPLE`                               |
+| Snowflake  | `net.snowflake:snowflake-jdbc`         | `net.snowflake.client.jdbc.SnowflakeDriver`    | `jdbc:snowflake://account.region.snowflakecomputing.com/?db=DEMO` |
+
+<Callout type="warn">JDBC URL parametreleri veritabanına ve sürücü sürümüne göre değişir. Üreticinin belgelerini izleyin. Bir sürücü birden çok JAR'a bağlıysa gereken tüm JAR yollarını içe aktarın ya da listeleyin.</Callout>
+
+<Callout type="info">Oracle için `com.oracle.database.nls:orai18n` paketini de `ojdbc` ile aynı sürümde içe aktarın. Temel ojdbc jar dosyası `ZHS16GBK` gibi çok baytlı karakter kümelerini dönüştüremez, bu yüzden onsuz tablo ve sütun açıklamaları yüklenemez. `com.oracle.database.jdbc:ojdbc*` paketinin Maven kurulumları uygun `orai18n` jar dosyasını otomatik indirir. DBX'in yerleşik Oracle bağlantısı (varsayılan sürücü) bu karakter kümelerini ek bir JAR olmadan destekler.</Callout>
+
+## 4. Adım: JDBC Sürücü JAR'larını İçe Aktarın
+
+DBX'te:
+
+1. **Ayarlar**'ı açın
+2. **JDBC Sürücüleri** bölümüne gidin
+3. **JDBC sürücü JAR'ları** bölümünde indirdiğiniz `.jar` dosyasını seçin
+
+Ayrıca yerel bir JAR yolunu yapıştırıp içe aktarabilirsiniz. DBX, içe aktarılan JAR dosyalarını uygulama veri dizinine kopyalar ve yeni JDBC bağlantıları bunları sürücü açılır listesinden seçebilir.
+
+Bir sürücüyü içe aktarmak yalnızca yerel dosyaları kopyalar. Sistem Java kurulumunuzu değiştirmez, veritabanı istemcileri kurmaz ve sürücüyü hiçbir yere yüklemez.
+
+## 5. Adım: Bir JDBC Bağlantısı Oluşturun
+
+Yeni bir bağlantı oluşturup **JDBC**'yi seçin.
+
+| Alan                   | Ne girilir                                                          |
+| ----------------------- | ---------------------------------------------------------------------- |
+| Ad                    | `H2 Test`, `DM Dev` ya da `Oracle Dev` gibi görünen ad             |
+| JDBC URL'si                | Tam JDBC URL'si, örneğin `jdbc:postgresql://localhost:5432/postgres`     |
+| Kullanıcı adı                | Veritabanı kullanıcı adı; gerekmiyorsa boş bırakın                           |
+| Parola                | Veritabanı parolası; gerekmiyorsa boş bırakın                           |
+| Sürücü Sınıfı (isteğe bağlı) | Yalnızca otomatik keşif başarısız olursa girin, örneğin `org.postgresql.Driver` |
+| Sürücü JAR'ları             | Açılır listeden içe aktarılmış bir sürücüyü seçin ya da yerel JAR yollarını girin  |
+
+JDBC URL'leri genellikle sunucuyu, portu ve veritabanı adını zaten içerir, bu yüzden JDBC formu ayrı sunucu ve port alanları göstermez.
+
+Formu doldurduktan sonra **Test Et**'e tıklayın. Test başarılıysa **Kaydet**'e tıklayın; bağlantı kenar çubuğunda görünür.
+
+## Örnek: Dameng DM
+
+DBX'te yerleşik bir DM ODBC bağlantı türü zaten var. Resmî Dameng JDBC sürücüsünü tercih ederseniz JDBC eklentisini kullanın.
+
+1. DBX JDBC eklentisini kurun
+2. Java'yı kurun
+3. Dameng JDBC sürücü JAR dosyasını DM kurulum dizininizden ya da Maven deposundan alın, örneğin `DmJdbcDriver8.jar` veya `DmJdbcDriver11.jar`
+4. JAR dosyasını **Ayarlar → JDBC Sürücüleri** bölümünde içe aktarın
+5. Yeni bir bağlantı oluşturup **JDBC**'yi seçin
+6. Şunları doldurun:
+
+| Alan                   | Değer                           |
+| ----------------------- | ------------------------------- |
+| JDBC URL'si                | `jdbc:dm://127.0.0.1:5236`      |
+| Kullanıcı adı                | `SYSDBA`                        |
+| Parola                | DM parolanız                |
+| Sürücü Sınıfı (isteğe bağlı) | `dm.jdbc.driver.DmDriver`       |
+| Sürücü JAR'ları             | İçe aktarılan DM JDBC JAR'ını seçin |
+
+DM için `dm.jdbc.driver.DmDriver` değerini girmeniz önerilir; böylece bağlantı otomatik sürücü keşfi meta verisine bağlı kalmaz.
+
+## Örnek: H2 Yerel Dosya Veritabanı
+
+H2, JDBC akışını doğrulamak için iyi bir yoldur.
+
+1. DBX JDBC eklentisini kurun
+2. H2 JDBC sürücü JAR dosyasını indirin
+3. Ayarlarda `h2-*.jar` dosyasını içe aktarın
+4. Yeni bir bağlantı oluşturup **JDBC**'yi seçin
+5. Şunları doldurun:
+
+| Alan                   | Değer                      |
+| ----------------------- | -------------------------- |
+| JDBC URL'si                | `jdbc:h2:/tmp/dbx-h2-demo` |
+| Kullanıcı adı                | `sa`                       |
+| Parola                | Boş bırakın                |
+| Sürücü Sınıfı (isteğe bağlı) | `org.h2.Driver`            |
+| Sürücü JAR'ları             | İçe aktarılan H2 JAR'ını seçin |
+
+Kaydettikten sonra şunu deneyin:
+
+```sql
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name VARCHAR(100)
+);
+
+INSERT INTO users VALUES (1, 'Alice');
+
+SELECT * FROM users;
+```
+
+## Örnek: PostgreSQL
+
+1. PostgreSQL JDBC sürücü JAR dosyasını indirin
+2. Ayarlarda içe aktarın
+3. Yeni bir JDBC bağlantısı oluşturun
+4. Şunları doldurun:
+
+| Alan                   | Değer                                       |
+| ----------------------- | ------------------------------------------- |
+| JDBC URL'si                | `jdbc:postgresql://localhost:5432/postgres` |
+| Kullanıcı adı                | `postgres`                                  |
+| Parola                | PostgreSQL parolanız                    |
+| Sürücü Sınıfı (isteğe bağlı) | `org.postgresql.Driver`                     |
+| Sürücü JAR'ları             | İçe aktarılan PostgreSQL JAR'ını seçin          |
+
+SSL gerekiyorsa JDBC URL'sine parametre ekleyin:
+
+```text
+jdbc:postgresql://localhost:5432/postgres?sslmode=require
+```
+
+## Sorun Giderme
+
+### JDBC eklentisi kurulumu başarısız oluyor
+
+Ağınızın DBX GitHub Releases adresine erişip erişemediğini denetleyin. DBX proxy URL'lerini ve özgün GitHub URL'sini dener, ancak herkese açık proxy'ler yine de erişilemez olabilir. GitHub engelliyse başka bir ağ deneyin.
+
+### Java bulunamıyor
+
+Bir terminalde doğrulayın:
+
+```bash
+java -version
+```
+
+Terminal çalışıyor ama DBX çalışmıyorsa DBX'i yeniden başlatın. macOS'ta Java yalnızca bir Homebrew yolunda kuruluysa `JAVA_HOME` ayarını yapılandırın.
+
+### `No JDBC driver was discovered`
+
+Sürücü JAR'ı otomatik keşfedilemedi. Sürücü sınıfını elle girin, örneğin:
+
+```text
+org.postgresql.Driver
+com.mysql.cj.jdbc.Driver
+dm.jdbc.driver.DmDriver
+oracle.jdbc.OracleDriver
+```
+
+### `No suitable driver`
+
+JDBC URL'si ile sürücü büyük olasılıkla uyuşmuyor. Şunları denetleyin:
+
+- Seçili sürücü JAR'ı hedef veritabanına ait mi
+- JDBC URL öneki doğru mu; örneğin `jdbc:postgresql:`, `jdbc:mysql:`, `jdbc:dm:` ya da `jdbc:oracle:`
+- Sürücü sınıfının elle girilmesi gerekiyor olabilir
+
+### Bağlantı çalışıyor ama tablolar görünmüyor
+
+JDBC meta verisi; veritabanı sürücüsüne ve hesap yetkilerine bağlıdır. Şunları denetleyin:
+
+- Hesap meta veriyi okuyabiliyor mu
+- JDBC URL'si beklenen veritabanını ya da şemayı gösteriyor mu
+- Tablolar farklı bir şemada olabilir
+- Sürücü, beklediğiniz nesneler için `DatabaseMetaData` destekliyor mu
+
+### Bir sürücü birden çok JAR gerektiriyor
+
+**Sürücü JAR'ları** alanına her satıra bir JAR yolu girin ya da gereken her JAR'ı ayarlarda içe aktarıp kalan yolları elle ekleyin.
+
+## Kaldırma
+
+**Ayarlar → JDBC Sürücüleri** bölümünde **Kaldır**'a tıklayın. DBX yalnızca JDBC eklentisini kaldırır, içe aktardığınız üretici sürücü JAR'larını korur; böylece eklentiyi daha sonra yeniden kurarsanız bunları tekrar içe aktarmanız gerekmez.
+
+## Geliştiriciler için: Eklenti Protokolü
+
+DBX, eklenti çalıştırılabilirini başlatır ve stdin/stdout üzerinden JSON Lines istek ve yanıtları alışverişi yapar. Bir bağlantı kurulduktan sonra DBX, o bağlantıdaki sorgular ve meta veri istekleri için aynı eklenti işlemini yeniden kullanır.
+
+Eklenti dizini bir `manifest.json` dosyası içermelidir:
+
+```json
+{
+  "id": "jdbc",
+  "name": "DBX JDBC Plugin",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "description": "Adds JDBC driver support.",
+  "executable": "bin/dbx-jdbc-plugin",
+  "drivers": [
+    {
+      "id": "jdbc",
+      "label": "JDBC",
+      "kind": "external",
+      "database_type": "jdbc"
+    }
+  ]
+}
+```
+
+Geçerli DBX uygulaması eklenti protokolü sürüm `1` destekler. DBX, bildiriminde farklı bir protokol sürümü belirten bir eklentiyi reddeder ve her eklenti isteğinin 30 saniyelik bir zaman aşımı vardır; böylece takılan bir sürücü işlemi uygulamayı süresiz engellemez.
+
+İlk protokol; `testConnection`, `connect`, `executeQuery`, `listDatabases`, `listSchemas`, `listTables` ve `getColumns` işlemlerini destekler.
+
+<Callout type="info">JDBC bağlantı yapılandırmaları `jdbc_driver_class` ve `jdbc_driver_paths` değerlerini saklar. Bir sürücü birkaç JAR gerektiriyorsa tüm yolları bağlantıya ekli tutun; böylece meta veri ve sorgu çağrıları aynı classpath'i kullanır.</Callout>

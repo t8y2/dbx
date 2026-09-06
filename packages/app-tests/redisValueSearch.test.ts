@@ -66,8 +66,8 @@ test("content find is for STRING + RedisJSON + member detail; hash toolbar searc
   // STRING, RedisJSON, or member detail.
   assert.match(viewer, /showMemberDetail\.value \|\| isStringLikeKind\.value \|\| redisKind\.value === "json"/);
   assert.match(viewer, /function openValueSearch/);
-  assert.match(viewer, /function onHashSearch/);
-  assert.match(viewer, /v-model="hashSearchQuery"/);
+  assert.match(viewer, /function onCollectionSearch/);
+  assert.match(viewer, /v-model="collectionSearchQuery"/);
   assert.match(viewer, /data-redis-member-detail/);
   assert.match(viewer, /v-if="valueSearchOpen && showMemberDetail"/);
   assert.match(viewer, /ref="redisJsonEditorRef"/);

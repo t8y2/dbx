@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import { ArrowDown, ArrowUp, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search, X } from "@lucide/vue";
+import { ArrowDown, ArrowUp, Check, Database, GripVertical, LayoutGrid, List, Loader2, RefreshCw, Search, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
+import { DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
+import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import * as api from "@/lib/backend/api";
 import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
@@ -57,6 +60,14 @@ const hasComment = computed(() => rows.value.some((row) => !!row.comment?.trim()
 const hasDefaultCharset = computed(() => rows.value.some((row) => !!row.defaultCharset?.trim()));
 const hasDefaultCollation = computed(() => rows.value.some((row) => !!row.defaultCollation?.trim()));
 const isListView = computed(() => settingsStore.editorSettings.objectBrowserViewMode !== "grid");
+// Measured condensation for the header row: tier 1 moves the sort/view
+// controls into the overflow menu, tier 2 drops the connection chip (the tab
+// title already carries it). See useToolbarOverflow for the tier contract.
+const toolbarRef = ref<HTMLElement | null>(null);
+const { tier: toolbarTier } = useToolbarOverflow(toolbarRef, [() => props.connection.id]);
+const showToolbarOverflow = computed(() => toolbarTier.value >= 1);
+const showConnectionChip = computed(() => toolbarTier.value < 2);
+const showInlineSortAndView = computed(() => toolbarTier.value < 1);
 
 const columns = computed<DatabaseBrowserColumnKey[]>(() => {
   const next: DatabaseBrowserColumnKey[] = ["name"];
@@ -238,18 +249,18 @@ defineExpose({ focusSearch, refresh });
 
 <template>
   <section class="flex h-full min-h-0 min-w-0 flex-col bg-background">
-    <div class="flex h-10 shrink-0 items-center gap-2 border-b px-3">
-      <span class="inline-flex max-w-[14rem] min-w-0 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="connection.name">
+    <div ref="toolbarRef" class="flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b px-3">
+      <span v-if="showConnectionChip" class="inline-flex max-w-[14rem] min-w-12 items-center truncate rounded border border-border bg-muted/50 px-2 py-0.5 text-xs font-medium" :title="connection.name">
         {{ connection.name }}
       </span>
-      <div class="relative min-w-0 flex-1">
+      <div class="relative min-w-24 flex-1">
         <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input ref="searchInput" v-model="search" class="h-7 pl-8 pr-6 text-xs" :placeholder="t('databaseBrowser.search')" />
         <button v-if="search" type="button" class="absolute right-1.5 top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" :aria-label="t('common.clear')" @click="clearDatabaseSearch">
           <X class="h-3 w-3" />
         </button>
       </div>
-      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <select
           class="h-6 cursor-pointer appearance-none rounded-sm bg-transparent px-1.5 text-xs text-muted-foreground outline-none hover:text-foreground focus:text-foreground"
           :value="sortKey"
@@ -263,7 +274,7 @@ defineExpose({ focusSearch, refresh });
           <ArrowDown v-else class="h-3 w-3" />
         </button>
       </div>
-      <div class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
+      <div v-if="showInlineSortAndView" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
         <button type="button" class="flex h-6 w-6 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': isListView }" :title="t('objects.viewList')" @click="setViewMode('list')">
           <List class="h-3.5 w-3.5" />
         </button>
@@ -274,6 +285,34 @@ defineExpose({ focusSearch, refresh });
       <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('contextMenu.refreshTab')" :disabled="loading" @click="refresh">
         <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': loading }" />
       </Button>
+      <ToolbarOverflowMenu v-if="showToolbarOverflow" :label="t('toolbar.moreActions')" button-class="h-7 w-7">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
+            <ArrowDown class="h-3.5 w-3.5" />
+            {{ t("objects.sortBy") }}
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            <DropdownMenuItem v-for="key in sortKeyOptions" :key="key" @select="toggleSort(key)">
+              <Check v-if="sortKey === key" class="h-3.5 w-3.5" />
+              {{ columnLabel(key) }}
+            </DropdownMenuItem>
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuItem @select="sortDirection = sortDirection === 'asc' ? 'desc' : 'asc'">
+          <ArrowUp v-if="sortDirection === 'asc'" class="h-3.5 w-3.5" />
+          <ArrowDown v-else class="h-3.5 w-3.5" />
+          {{ sortDirection === "asc" ? t("objects.sortDesc") : t("objects.sortAsc") }}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem @select="setViewMode('list')">
+          <List class="h-3.5 w-3.5" />
+          {{ t("objects.viewList") }}
+        </DropdownMenuItem>
+        <DropdownMenuItem @select="setViewMode('grid')">
+          <LayoutGrid class="h-3.5 w-3.5" />
+          {{ t("objects.viewGrid") }}
+        </DropdownMenuItem>
+      </ToolbarOverflowMenu>
     </div>
 
     <div v-if="loading && rows.length === 0" class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t("objects.loading") }}</div>

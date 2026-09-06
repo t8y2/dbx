@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   updateRedisDbKeyStats: vi.fn(),
   listRedisCompletionCommandDocs: vi.fn(),
   listRedisCompletionKeys: vi.fn(),
+  copyToClipboard: vi.fn(),
   redisScanPageSize: 100,
   infiniteScroll: false,
   queryResultMaxRowsEnabled: true,
@@ -79,6 +80,10 @@ vi.mock("@/composables/useEditorFontFamilyStyle", () => ({
 
 vi.mock("@/composables/useToast", () => ({
   useToast: () => ({ toast: mocks.toast }),
+}));
+
+vi.mock("@/lib/common/clipboard", () => ({
+  copyToClipboard: mocks.copyToClipboard,
 }));
 
 vi.mock("@/components/ui/button", async () => {
@@ -202,8 +207,26 @@ vi.mock("@/components/ui/CustomContextMenu.vue", async () => {
   const { defineComponent, h } = await import("vue");
   return {
     default: defineComponent({
-      setup(_, { slots }) {
-        return () => h("div", slots.default?.({ onContextMenu: () => undefined }));
+      props: { items: { type: [Array, Function], required: true } },
+      setup(props, { slots }) {
+        return () => {
+          const items = typeof props.items === "function" ? props.items() : props.items;
+          return h("div", [
+            slots.default?.({ onContextMenu: () => undefined }),
+            ...items.map((item: any) =>
+              h(
+                "button",
+                {
+                  type: "button",
+                  "data-context-menu-item": item.label,
+                  disabled: typeof item.disabled === "function" ? item.disabled() : item.disabled,
+                  onClick: item.action,
+                },
+                item.label,
+              ),
+            ),
+          ]);
+        };
       },
     }),
   };
@@ -307,6 +330,7 @@ function expandGroup(host: HTMLElement, segments: string[]) {
   expect(checkbox, `group row for ${segments.join(":")}`).toBeDefined();
   const row = checkbox!.closest<HTMLElement>("div.cursor-pointer");
   expect(row?.className).toContain("cursor-pointer");
+  expect(row?.className).toContain("select-none");
   row!.click();
 }
 
@@ -502,5 +526,45 @@ describe("RedisKeyBrowser expansion persistence across refresh (issue #7173)", (
 
     expect(host.textContent).toContain("redis.noKeys");
     expect(mocks.toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("RedisKeyBrowser directory context menu (issue #8068)", () => {
+  it("prefills a new key and copies the directory path", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("folder:child")], total_keys: 1 });
+
+    const host = mountBrowser();
+    await settle();
+
+    const create = host.querySelector<HTMLButtonElement>('button[data-context-menu-item="redis.createKey"]');
+    const copyPath = host.querySelector<HTMLButtonElement>('button[data-context-menu-item="redis.copyKeyPath"]');
+    const deleteKeys = host.querySelector<HTMLButtonElement>('button[data-context-menu-item="redis.deleteGroupKeys"]');
+    expect(create).not.toBeNull();
+    expect(copyPath).not.toBeNull();
+    expect(deleteKeys?.disabled).toBe(false);
+
+    create!.click();
+    await settle();
+    expect(host.querySelector<HTMLInputElement>('input[placeholder="redis.createKeyNamePlaceholder"]')?.value).toBe("folder:");
+
+    copyPath!.click();
+    await settle();
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith("folder");
+  });
+
+  it("hides directory deletion for fuzzy hierarchy results", async () => {
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [keyInfo("folder:child")], total_keys: 1 });
+
+    const host = mountBrowser();
+    await settle();
+
+    const input = host.querySelector<HTMLInputElement>("[data-redis-search-input]")!;
+    input.value = "folder";
+    input.dispatchEvent(new Event("input"));
+    await nextTick();
+    host.querySelector<HTMLButtonElement>('button[title="redis.fuzzyMatchTitle"]')!.click();
+    await settle();
+
+    expect(host.querySelector('button[data-context-menu-item="redis.deleteGroupKeys"]')).toBeNull();
   });
 });

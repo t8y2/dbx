@@ -47,7 +47,7 @@ jobs:
           TAG="${{ steps.version.outputs.tag }}"
 
           ASSETS=(
-            "${PRODUCT_NAME}_${VERSION}_aarch64.dmg"
+            "${PRODUCT_NAME}_${VERSION}_arm64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64.dmg"
             "${PRODUCT_NAME}_${VERSION}_x64-setup.exe"
             "${PRODUCT_NAME}_${VERSION}_arm64-setup.exe"
@@ -83,7 +83,7 @@ jobs:
           }
 
           echo "SHA256 hashes:"
-          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_aarch64.dmg" "sha_dmg_arm64"
+          compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_arm64.dmg" "sha_dmg_arm64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64.dmg" "sha_dmg_x64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_x64-setup.exe" "sha_exe_x64"
           compute_hash "artifacts/${PRODUCT_NAME}_${VERSION}_arm64-setup.exe" "sha_exe_arm64"
@@ -104,7 +104,7 @@ jobs:
 
           cat > Casks/dbx.rb <<'RUBY_EOF'
           cask "dbx" do
-            arch arm: "aarch64", intel: "x64"
+            arch arm: "arm64", intel: "x64"
 
             version "__VERSION__"
             sha256 arm:   "__SHA_ARM64__",

@@ -254,6 +254,7 @@ fn rollback_graph_direct_consistency_check() {
         diff_type: "added".to_string(),
         object_type: None,
         name: "users".to_string(),
+        target_name: None,
         columns: Some(vec![]),
         indexes: None,
         foreign_keys: None,

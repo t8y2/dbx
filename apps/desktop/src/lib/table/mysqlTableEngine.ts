@@ -13,7 +13,9 @@ export interface MysqlTableEngineDraft {
 
 export const MYSQL_STORAGE_ENGINES_SQL = "SHOW ENGINES";
 
-function mysqlUtf8Literal(value: string): string {
+/** Encodes a schema/table name as a byte literal so non-ASCII names survive whatever
+ *  charset the session happens to use. Shared with the table collation lookup. */
+export function mysqlUtf8Literal(value: string): string {
   const bytes = new TextEncoder().encode(value);
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `CONVERT(X'${hex}' USING utf8mb4)`;

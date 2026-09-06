@@ -26,6 +26,15 @@ describe("ObjectBrowser XLSX export", () => {
     expect(exportDataXlsx.indexOf("await showObjectBrowserXlsxHeaderDialog(")).toBeLessThan(exportDataXlsx.indexOf('await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter)'));
   });
 
+  it("asks for the SQL INSERT mode before opening the save dialog", () => {
+    const exportData = functionBody("exportData");
+    const exportTableData = functionBody("exportTableData");
+
+    expect(exportData).toContain("await showSqlInsertModeDialog()");
+    expect(exportData.indexOf("await showSqlInsertModeDialog()")).toBeLessThan(exportData.indexOf("await exportTableData("));
+    expect(exportTableData).toContain('...(format === "sql" ? { insertMode } : {})');
+  });
+
   it("falls back to field-name headers when column metadata is unavailable", () => {
     const exportDataXlsx = functionBody("exportDataXlsx");
 

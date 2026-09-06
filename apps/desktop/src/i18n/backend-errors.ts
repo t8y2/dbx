@@ -1,4 +1,4 @@
-import { normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
+import { GENERIC_TRANSPORT_FAILURE_MESSAGE, normalizeBackendError, sanitizeBackendErrorMessage, type BackendError } from "@/lib/backend/errorUtils";
 import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 /**
@@ -181,19 +181,32 @@ function backendErrorMessage(error: unknown): string {
   return sanitizeBackendErrorMessage(String(error));
 }
 
-function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError): string {
+function usableFallbackDetail(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const detail = sanitizeBackendErrorMessage(value).trim();
+  if (!detail || detail === GENERIC_TRANSPORT_FAILURE_MESSAGE) return undefined;
+  return detail;
+}
+
+function translateStructuredBackendError(t: BackendErrorTranslate, error: BackendError, fallbackDetail?: unknown): string {
   const translated = t(error.messageKey, error.messageParams);
   const summary = translated !== error.messageKey ? translated : t("backendErrors.unknown");
-  const detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : undefined;
+  let detail = error.detail ? sanitizeBackendErrorMessage(error.detail).trim() : usableFallbackDetail(fallbackDetail);
+  // Callers may pass an already-composited "summary\n\noriginal" cell as the
+  // fallback (query history re-translation of a failed result grid); strip the
+  // repeated summary so the message stays singular.
+  if (detail && detail.startsWith(`${summary}\n\n`)) {
+    detail = detail.slice(summary.length + 2).trim() || undefined;
+  }
   const rawAdapterCode = error.diagnostics?.adapterCode;
   const adapterCode = typeof rawAdapterCode === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(rawAdapterCode) ? rawAdapterCode : undefined;
   const diagnosticDetail = detail && adapterCode ? `[${adapterCode}] ${detail}` : (detail ?? adapterCode);
   return diagnosticDetail && diagnosticDetail !== summary ? `${summary}\n\n${diagnosticDetail}` : summary;
 }
 
-export function translateBackendError(t: BackendErrorTranslate, error: unknown): string {
+export function translateBackendError(t: BackendErrorTranslate, error: unknown, fallbackDetail?: unknown): string {
   const structured = normalizeBackendError(error);
-  if (structured) return translateStructuredBackendError(t, structured);
+  if (structured) return translateStructuredBackendError(t, structured, fallbackDetail);
 
   const message = backendErrorMessage(error);
   const exactKey = exactMessageKeys[message];

@@ -306,6 +306,12 @@ func (s *server) closeAllQuerySessions() error {
 }
 
 func (s *server) executeStatements(params map[string]json.RawMessage, transaction bool) (queryResult, error) {
+	if transaction {
+		// IoTDB executes statements independently and exposes no rollbackable
+		// transaction boundary. Reject the RPC before obtaining a client so a
+		// requested atomic batch can never leave partial writes behind.
+		return queryResult{}, errors.New("IoTDB does not support transactions")
+	}
 	started := time.Now()
 	statements := stringSliceParam(params, "statements")
 	if len(statements) == 0 {
@@ -490,6 +496,16 @@ func isTimeAggregationColumn(column string) bool {
 	trimmed := strings.TrimSpace(column)
 	for _, prefix := range []string{"max_time(", "min_time("} {
 		if len(trimmed) > len(prefix) && strings.EqualFold(trimmed[:len(prefix)], prefix) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"max_by(", "min_by("} {
+		if len(trimmed) <= len(prefix) || !strings.EqualFold(trimmed[:len(prefix)], prefix) {
+			continue
+		}
+		arguments := trimmed[len(prefix):]
+		comma := strings.IndexByte(arguments, ',')
+		if comma > 0 && strings.EqualFold(strings.TrimSpace(arguments[:comma]), "time") {
 			return true
 		}
 	}

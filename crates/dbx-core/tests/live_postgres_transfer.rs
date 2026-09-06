@@ -199,8 +199,12 @@ async fn live_postgres_transfer_upserts_generated_always_identity_values() {
     let target_connection_id = "live-always-target";
     let source_pool_key = format!("{source_connection_id}:{source_database}");
     let target_pool_key = format!("{target_connection_id}:{target_database}");
-    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
-    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     state
         .configs
         .write()
@@ -363,8 +367,12 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
     let target_connection_id = "live-structure-only-target";
     let source_pool_key = format!("{source_connection_id}:{source_database}");
     let target_pool_key = format!("{target_connection_id}:{target_database}");
-    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
-    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     state
         .configs
         .write()
@@ -608,8 +616,12 @@ async fn live_postgres_transfer_preserves_data_and_schema_objects() {
     let source_pool_key = format!("{source_connection_id}:{source_database}");
     let target_pool_key = format!("{target_connection_id}:{target_database}");
 
-    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
-    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     state
         .configs
         .write()
@@ -896,8 +908,12 @@ async fn live_postgres_transfer_skips_create_ddl_for_existing_target_table() {
     let source_pool_key = format!("{source_connection_id}:{source_database}");
     let target_pool_key = format!("{target_connection_id}:{target_database}");
 
-    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
-    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     state
         .configs
         .write()
@@ -1013,8 +1029,12 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
     let target_connection_id = "live-sequence-target";
     let source_pool_key = format!("{source_connection_id}:{source_database}");
     let target_pool_key = format!("{target_connection_id}:{target_database}");
-    state.connections.write().await.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
-    state.connections.write().await.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     state
         .configs
         .write()

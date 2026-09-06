@@ -2765,7 +2765,7 @@ func (s *server) getColumns(schema, table string) ([]columnInfo, error) {
 		item.DataType = normalizeXuguColumnType(item.DataType, varying)
 		item.IsNullable = !truthy(notNull)
 		item.DefaultOnNull = xuguInt(onNull)
-		item.IsPrimaryKey = primaryKeys[item.Name]
+		item.IsPrimaryKey = xuguPrimaryKeyMatches(item.Name, primaryKeys)
 		item.NumericPrecision, item.NumericScale, item.CharacterMaximumLength = decodeXuguScale(item.DataType, scale)
 		result = append(result, item)
 	}
@@ -2802,7 +2802,7 @@ func (s *server) columnsFromSelect(schema, table string, primaryKeys map[string]
 		item := columnInfo{
 			Name:         columnType.Name(),
 			DataType:     columnType.DatabaseTypeName(),
-			IsPrimaryKey: primaryKeys[columnType.Name()],
+			IsPrimaryKey: xuguPrimaryKeyMatches(columnType.Name(), primaryKeys),
 		}
 		if nullable, ok := columnType.Nullable(); ok {
 			item.IsNullable = nullable
@@ -2858,6 +2858,24 @@ func (s *server) primaryKeyColumns(schema, table string) (map[string]bool, error
 		}
 	}
 	return result, rows.Err()
+}
+
+// Xugu may report an unquoted primary-key name with a different case from
+// ALL_COLUMNS (for example, DEFINE contains "ID" while COL_NAME is "id").
+// Exact matches always win so quoted identifiers that differ only by case stay
+// distinct; a case-insensitive fallback is used only when it identifies one
+// primary-key column.
+func xuguPrimaryKeyMatches(columnName string, primaryKeys map[string]bool) bool {
+	if primaryKeys[columnName] {
+		return true
+	}
+	matches := 0
+	for primaryKey := range primaryKeys {
+		if strings.EqualFold(primaryKey, columnName) {
+			matches++
+		}
+	}
+	return matches == 1
 }
 
 func (s *server) listIndexes(schema, table string) ([]indexInfo, error) {
@@ -5984,13 +6002,27 @@ func quoteIdentifier(value string) string {
 }
 
 func normalizeValue(value any) any {
+	return normalizeValueWithType(value, "")
+}
+
+// normalizeValueWithType converts a scanned driver value into a JSON-friendly
+// value. columnTypeName drives temporal formatting: XuguDB rejects the ISO
+// "T"/"Z" literal (E19138 时间值常数错误) that time.RFC3339Nano produces, so
+// the round-trippable form is a space-separated wall-clock string. Timezone-
+// aware Xugu types keep the numeric offset; timezone-less ones (DATE/DATETIME/
+// TIME/TIMESTAMP) drop it so clients do not double-apply a shift. Mirrors the
+// oracle-go/kingbase-go timezone-less handling, adapted to Xugu's space rule.
+func normalizeValueWithType(value any, columnTypeName string) any {
 	switch v := value.(type) {
 	case nil:
 		return nil
 	case []byte:
 		return string(v)
 	case time.Time:
-		return v.Format(time.RFC3339Nano)
+		if isXuguTimezoneAwareTemporal(columnTypeName) {
+			return v.Format("2006-01-02 15:04:05.999999999 -07:00")
+		}
+		return v.Format("2006-01-02 15:04:05.999999999")
 	case int:
 		return int64(v)
 	case int8:
@@ -6020,6 +6052,13 @@ func normalizeValue(value any) any {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+// isXuguTimezoneAwareTemporal reports whether the column type carries a real
+// timezone (…WITH TIME ZONE), so its formatted literal must keep the offset.
+func isXuguTimezoneAwareTemporal(columnTypeName string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(columnTypeName))
+	return strings.Contains(normalized, "WITH TIME ZONE")
 }
 
 func emptyIfNil[T any](values []T) []T {

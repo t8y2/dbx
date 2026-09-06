@@ -1,0 +1,180 @@
+---
+title: Veri Izgarası
+description: DBX'te sorgu sonuçlarına veya tablo verisine gözatın; filtreleyin, düzenleyin, doğrulayın, kopyalayın ve dışa aktarın.
+---
+
+Veri ızgarası sorgu sonuçlarını ve tablo verisini gösterir. Hem salt okunur analizi hem de küçük, denetimli değişiklikleri kapsar: büyük sonuç kümelerine gözatma, filtreleme ve sıralama, karmaşık değerleri inceleme, toplu kopyalama ve DBX hedef satırları güvenilir biçimde belirleyebildiğinde önizlenebilir `INSERT`, `UPDATE` ya da `DELETE` ifadeleri üretme.
+
+<Callout type="info">Redis, MongoDB, vektör veritabanları, HBase ve diğer sistemler kendi özel veri arayüzlerini kullanır. Bu sayfa ilişkisel ve SQL uyumlu sonuç ızgaralarına odaklanır.</Callout>
+
+## Gözatma ve Düzen
+
+DBX sanal kaydırma kullanır ve yalnızca görünür alanı çizer. Yaygın gözatma işlemleri şunlardır:
+
+- Yeniden boyutlandırmak için sütun kenarlarını sürükleme ya da içeriğe sığdırmak için çift tıklama
+- Sütunları yeniden sıralamak için başlıkları sürükleme ve düzeni tablo ya da sorgu başına kaydetme
+- Yatay kaydırırken sütunları solda veya sağda dondurma
+- Sütunları ada ya da açıklamaya göre gösterme, gizleme ve arama
+- Izgara yazı tipini, boyutunu, satır yüksekliğini ve sütun genişliği yoğunluğunu ayarlama
+- Standart ile devrik görünüm arasında geçiş yapma
+- Bağlantı adını, sonuç kaynağını, veri türlerini ve sütun açıklamalarını inceleme
+
+Sütun genişlikleri, sırası, dondurulma durumu ve bazı görüntüleme tercihleri oturumlar arasında korunabilir. Geçerli ızgara düzenini sıfırlamak için görünüm seçeneklerini kullanın.
+
+## Filtreleme, Arama ve Sıralama
+
+| Yöntem | Çalıştırma yeri | Ne için uygundur |
+| --- | --- | --- |
+| Izgara araması | Yüklenmiş sonuç | Metni, değerleri ya da sütun açıklamalarını hızlıca bulma |
+| Yerel değer filtresi | Yüklenmiş sonuç | Yeni bir veritabanı sorgusu olmadan geçici değer, liste ya da aralık filtreleme |
+| `WHERE` | Veritabanı | Büyük tablolar, kesin koşullar ve dizin destekli filtreleme |
+| `ORDER BY` | Veritabanı | Sayfalar arası kararlı sıralama ve yinelenebilir sonuçlar |
+| Geçerli sayfa sıralaması | İstemci sayfası | Sorguyu değiştirmeden yüklenmiş satırları geçici olarak karşılaştırma |
+
+`WHERE` ve `ORDER BY` girdileri uzun ifadeleri, daraltma/genişletme davranışını ve meta veriye dayalı koşul önerilerini destekler. Tablolar açılırken kullanılan varsayılan sıralama ayarlardan yapılandırılabilir.
+
+<Callout type="info">Büyük tablolarda veritabanı tarafındaki `WHERE` ve `ORDER BY` ifadelerini tercih edin. İstemci araması, değer filtreleri ve geçerli sayfa sıralaması, veritabanının döndürdüğü veri miktarını azaltmaz.</Callout>
+
+## Sonuçlar Ne Zaman Düzenlenebilir
+
+Sonuçlar yalnızca DBX hedef tabloyu belirleyebildiğinde ve incelenebilir SQL üretmek için yeterli anahtar ya da satır kimliği bilgisine sahip olduğunda düzenlenebilir.
+
+| Sonuç türü | Tipik davranış |
+| --- | --- |
+| Nesne ağacından açılan tablo verisi | Veritabanı ve tablo destekliyorsa düzenlenebilir |
+| Basit `SELECT` | Tek bir hedef tablo ve güvenilir satır kimliği çözülebildiğinde düzenlenebilir |
+| Join'ler, toplamalar, ifadeler, hesaplanan sütunlar | Genellikle salt okunur |
+| Birincil anahtar ya da güvenilir benzersiz kimlik yok | Güvensiz koşullardan kaçınmak için genellikle salt okunur |
+| Salt okunur işaretli bağlantı | Tanınan tüm değişiklikler reddedilir |
+
+Salt okunur hücreler yine ayrıntı açabilir, kopyalanabilir ve dışa aktarılabilir. Bir sonucun neden düzenlenemediğini görmek için veri başlığını ya da hücre ayrıntılarını denetleyin.
+
+## Düzenleme, Ekleme ve Silme
+
+- Uzun içerik için çift tıklayarak ya da ayrıntı panelini kullanarak **bir hücreyi düzenleyin**
+- Bir veya daha fazla bekleyen ekleme olarak **satır ekleyin**
+- Sekmeyle ayrılmış pano verisinden yeni satırlara **toplu yapıştırın**
+- Satırları, isteğe bağlı olarak birincil anahtarları hariç tutarak yeni kayıtlar olarak **çoğaltın**
+- Seçili kayıtları silinmek üzere işaretleyerek **satırları silin**
+- Boş dize yazmak yerine açıkça **NULL yapın**
+- Veritabanı ve sütun destekliyorsa yeni alanlarda **varsayılanları kullanın**
+- Seçili hücreler için yerleşik test verisi üreteçleriyle **değer üretin**
+- MySQL tablo verisi görünümlerinde, girdiğiniz bir koşulla eşleşen her veritabanı satırında yazılabilir bir sütunu ayarlamak için **`WHERE` ile güncelleyin**; buna yüklenmiş sayfanın dışındaki satırlar da dâhildir
+
+DBX; tanınan tarih/saat, enum, JSON ve ilgili türler için özel denetimler kullanır. Toplu düzenlemeden önce seçili bölgenin hedef sütun türleriyle eşleştiğini doğrulayın.
+
+## SQL Önizlemesi ve Kaydetme
+
+Satır düzeyindeki ilişkisel değişiklikler kaydedilene kadar yerelde kalır. DBX ardından üretilen `INSERT`, `UPDATE` ve `DELETE` ifadelerini gösterir.
+
+MySQL'deki koşul genelinde toplu güncelleme farklıdır, çünkü eşleşen satırların tümü ızgaraya yüklenmiş olmayabilir. Toplu düzenleme iletişim kutusunda geçerli tablo filtresini kullanın ya da sütunları, işleçleri ve değerleri seçerek eşleşme koşulları oluşturun; birden çok kuralı `AND` veya `OR` ile birleştirin. Gelişmiş bir seçenek olarak özel bir `WHERE` ifadesi de kullanılabilir. Devam etmeden önce tahmini etkilenen satır sayısını önizleyebilirsiniz; bu bir anlık görüntüdür ve güncelleme çalıştığında gerçek sayı farklı olabilir. DBX, tam `UPDATE ... WHERE ...` ifadesini bir tehlike onayında gösterir ve onaydan hemen sonra çalıştırır. Koşulu veritabanı çalıştırma anında değerlendirir ve DBX yüklenmemiş satırlar için güvenilir geri alma SQL'i üretemez.
+
+Kaydetmeden önce şu ayrıntıları inceleyin:
+
+- `UPDATE` ve `DELETE` koşullarının yalnızca amaçlanan satırları belirleyip belirlemediği
+- Yeni satırların zorunlu her alanı içerip içermediği
+- `NULL`, boş dizeler, varsayılanlar ve üretilen değerlerin doğru olup olmadığı
+- Toplu bir seçimin fark edilmemiş satırlar içerip içermediği
+- Etkin bağlantı ve veritabanının doğru olup olmadığı
+
+Üretim koruması etkinken kaydetme yine ortak üretim yazma onay akışına girer. Bkz. [Üretim ve Yazma Güvenliği](/tr/docs/production-safety).
+
+<Callout type="warn">SQL önizlemesi son bir inceleme noktasıdır; bir değişiklik onay sistemi değildir. Önemli üretim değişiklikleri yine en az yetkili hesaplar, yedekler ve ekip süreçleri gerektirir.</Callout>
+
+## Hücre Ayrıntıları ve Karmaşık Değer Önizlemesi
+
+Hücre ayrıntıları, ızgaraya iyi sığmayan değerleri ele alır:
+
+- Uzun ya da çok satırlı metin, SQL ve sözdizimi vurgulu JSON
+- JSON biçimlendirme, sıkıştırma ve yol inceleme
+- Onaltılık ve ASCII olarak gösterilen ikili veri
+- Görsel URL'leri, görsel ikili verileri ve tanınan görsel verileri
+- Tarihler, saatler ve saat dilimi farkındalıklı değerler için özel düzenleme ve biçimlendirme
+- Tanınan SRID'ler dâhil geometri/uzamsal değerler için metin, koordinat ve harita önizlemeleri
+- Kısaltılmış değerler, salt okunur açıklamaları ve sütun meta verisi
+
+Biçimlendirme ve önizleme işlemleri genellikle yalnızca görünümü etkiler. Gerçek düzenlemeler yine bekleyen değişiklik olur ve SQL üretir.
+
+## Devrik Görünüm
+
+Devrik görünüm satırlarla sütunları yer değiştirir ve şunlar için uygundur:
+
+- Çok alanı olan tek bir kayıt
+- Veri türlerini, açıklamaları, varsayılanları ve boş olabilirliği karşılaştırma
+- Geniş değerleri olan birkaç kaydı inceleme
+
+Seçim, kopyalama, ayrıntılar, düzenleme ve gezinme kullanılabilir kalır. Veritabanı tarafındaki sıralama ve filtreleme yine özgün sonuç yönelimini kullanır.
+
+## Sütun Biçimlendiricileri
+
+Sütun biçimlendiricileri veriyi değiştirmeden görünümü değiştirir. Seçenekler şunlardır:
+
+- Genel ya da sütuna özgü tarih/saat biçimleri
+- JSON yolu çıkarma
+- Değer maskeleme
+- Özel görüntüleme şablonları
+- Sayısal, boole ve veritabanı türüne özgü sunum
+
+Özgün değer görünümüne dönmek için biçimlendiriciyi temizleyin.
+
+## Seçim, Kopyalama ve Gezinme
+
+Izgara; tek tek hücreleri, dikdörtgen aralıkları, tam satırları ve çoklu satır seçimlerini destekler. Ardından şunları yapabilirsiniz:
+
+- Uyumlu değerler için sayı ya da toplam gibi seçim özetlerini görüntüleme
+- TSV, CSV, JSON, Markdown, SQL `INSERT` ya da `UPDATE` olarak kopyalama
+- Hücreleri, aralıkları, satırları ya da sonuçları başlıklarla kopyalama
+- Kopyalanan sütun adları için tanımlayıcı tırnaklamasını seçme
+- İş birimlerine yönelik çıkarımlarda kopyalanan adlar olarak sütun açıklamalarını kullanma
+- Tek bir çok satırlı `INSERT` ya da ayrı `INSERT` ifadeleri üretme
+- Yeni kayıtlar için şablon oluştururken birincil anahtarları hariç tutma
+
+DBX bir yabancı anahtar ilişkisini çözebildiğinde bir hücre, başvurulan kayda gidebilir. Bu, meta veriye ve hedef bağlantı yetkilerine bağlıdır.
+
+## Dışa Aktarma
+
+| Biçim | Ne için uygundur |
+| --- | --- |
+| CSV / TSV | Elektronik tablolar, betikler ve metin değiş tokuşu |
+| JSON | API hata ayıklama ve programatik işleme |
+| Markdown | Issue'lar, pull request'ler, dokümantasyon ve sohbet |
+| XLSX | Excel teslimi; bir sayfa sınırına ulaşıldığında ek çalışma sayfaları oluşturulur |
+| SQL | Seçili veriyi `INSERT` ya da `UPDATE` ifadeleri olarak yeniden kullanma |
+
+Sorgu sonucu dışa aktarımı geçerli sonucu ve seçim kapsamını izler. Dışa aktarmadan önce geçerli sayfayı, filtreleri, sıralamayı ve seçimi doğrulayın; böylece görünen veri tablonun tamamı sanılmaz.
+
+## Otomatik Yenileme, Sayfalama ve Büyük Sonuçlar
+
+- Tablolar açılırken kullanılan sayfa boyutu yapılandırılabilir ve kalıcıdır
+- Otomatik yenileme, küçük ve sık değişen sonuç kümeleri için kullanışlıdır
+- Sorgu sonuçları birden çok çalıştırmayı saklayabilir ya da karşılaştırma için sonuçları sabitleyebilir
+- Sanal çizim arayüzü akıcı tutar, ancak veritabanı ve aktarım maliyeti yine döndürülen satır sayısına bağlıdır
+- Sıralama, filtreleme ya da yenileme veriyi yeniden yükleyebilir; kaydedilmemiş düzenlemeler bunu engelleyebilir ya da etkileyebilir
+
+<Callout type="warn">Veri düzenlerken otomatik yenilemeyi kullanmayın ve bunu bir izleme sistemi olarak görmeyin. Yenileme sıklığını artırmadan önce büyük sorguları daraltın.</Callout>
+
+## Sorun Giderme
+
+| Belirti | Denetleyin |
+| --- | --- |
+| Sonuç yalnızca görüntülenebiliyor | Join ya da toplama, eksik birincil anahtar, salt okunur bağlantı ya da sürücünün düzenlemeyi desteklememesi |
+| Filtrelemeden sonra satır sayısı azalmıyor | Veritabanı tarafındaki `WHERE` yerine istemci araması/filtresi kullanılmış |
+| Sıralama yalnızca geçerli sayfayı etkiliyor | Yerel sıralama etkin; sayfalar arası kararlı sıralama için `ORDER BY` kullanın |
+| Yapıştırılan sütunlar kaymış | Pano sütun sayısı, seçili başlangıç sütunu, gizli sütunlar ve alan sırası |
+| Görsel ya da uzamsal önizleme kullanılamıyor | Değer kodlaması, MIME/ikili türü, geometri kodlaması ya da bilinmeyen SRID |
+| Dışa aktarma sayısı beklenenden farklı | Geçerli sayfa, seçim, istemci filtresi ve veritabanı sorgu kapsamı |
+
+<Cards>
+  <Card title="Sorgu yazın" href="/tr/docs/query-editor">
+    Izgara üretmek için tamamlamayı, yürütme hedeflerini, çoklu sonuçları ve geçmişi kullanın.
+  </Card>
+  <Card title="Toplu içe aktarın" href="/tr/docs/table-import">
+    CSV, TSV, JSON ya da Excel'den büyük veri kümelerini içe aktarın.
+  </Card>
+  <Card title="Veritabanları arasında aktarın" href="/tr/docs/data-transfer">
+    Tablo verisini bağlantılar ya da veritabanı motorları arasında kopyalayın.
+  </Card>
+  <Card title="Üretim yazmalarını koruyun" href="/tr/docs/production-safety">
+    Salt okunur bağlantıları, üretim onayını ve MCP yetkilerini yapılandırın.
+  </Card>
+</Cards>

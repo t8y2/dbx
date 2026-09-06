@@ -101,6 +101,7 @@ import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
 const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
 const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
@@ -1365,6 +1366,32 @@ describe("DataGridTextFilterWorkbench", () => {
 });
 
 describe("cell detail surfaces", () => {
+  it("keeps detail tabs and editor actions usable when the panel narrows", () => {
+    const tabsStart = dataGridSource.indexOf('<Tabs v-model="activeCellDetailTab"');
+    const panelStart = dataGridSource.indexOf("<DataGridCellDetailPanel", tabsStart);
+    const tabsHeader = dataGridSource.slice(tabsStart, panelStart);
+    const tabViewport = tabsHeader.match(/<div class="([^"]*overflow-x-auto[^"]*)">\s*<TabsList/);
+    const tabList = tabsHeader.match(/<TabsList class="([^"]+)">/);
+    const triggerClasses = Array.from(tabsHeader.matchAll(/<TabsTrigger\b[^>]*class="([^"]+)"/g), ([, classes]) => classes.split(/\s+/));
+
+    expect(tabViewport?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["min-w-0", "flex-1", "overflow-x-auto"]));
+    expect(tabList?.[1]?.split(/\s+/)).toEqual(expect.arrayContaining(["flex", "w-max", "min-w-full"]));
+    expect(triggerClasses).toHaveLength(3);
+    for (const classes of triggerClasses) {
+      expect(classes).toEqual(expect.arrayContaining(["min-w-max", "flex-1", "shrink-0"]));
+    }
+    expect(dataGridSource).not.toContain("activeCellDetailTabsGridClass");
+
+    const valueEditorStart = dataGridSource.indexOf("<TabsContent v-if=\"activeCellDetailTabs.includes('valueEditor')\"");
+    const valueEditorEnd = dataGridSource.indexOf("</TabsContent>", valueEditorStart);
+    const valueEditor = dataGridSource.slice(valueEditorStart, valueEditorEnd);
+    expect(valueEditor).toMatch(/<TabsContent[^>]*class="[^"]*\bmin-w-0\b[^"]*">/);
+    expect(valueEditor).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
+
+    expect(cellDetailPanelSource).toMatch(/<TabsContent value="details" class="[^"]*\bmin-w-0\b[^"]*">/);
+    expect(cellDetailPanelSource).toMatch(/<div class="[^"]*\bmin-w-0\b[^"]*\bflex-wrap\b[^"]*">/);
+  });
+
   it("presents printable LONG BLOB bytes as text and copies the presented value", async () => {
     const copyText = vi.fn();
     const blobDetail = detail({

@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH,
+  DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER,
   dataGridDeleteRowToolbarState,
+  dataGridToolbarActionCollapseCount,
   dataGridToolbarCompactBreakpoint,
   dataGridToolbarIntervalOptions,
+  isDataGridToolbarActionCompact,
   isDataGridToolbarCompact,
   selectDataGridToolbarAddRowItem,
   selectDataGridToolbarAutoRefreshInterval,
@@ -61,6 +64,29 @@ describe("data grid toolbar capabilities", () => {
     expect(dataGridToolbarCompactBreakpoint(1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1050);
     expect(isDataGridToolbarCompact(1000, 1100, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(true);
     expect(isDataGridToolbarCompact(1000, 1100)).toBe(false);
+  });
+
+  it("progressively compacts toolbar actions as the available width shrinks", () => {
+    expect(dataGridToolbarActionCollapseCount(1050, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(0);
+    expect(dataGridToolbarActionCollapseCount(1049, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1);
+    expect(dataGridToolbarActionCollapseCount(1010, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(1);
+    expect(dataGridToolbarActionCollapseCount(1009, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(2);
+    expect(dataGridToolbarActionCollapseCount(0, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(0);
+    expect(dataGridToolbarActionCollapseCount(100, 1440, DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH)).toBe(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length);
+  });
+
+  it("compacts visible actions from left to right while skipping unavailable actions", () => {
+    const visibleActions = ["refresh", "navigation", "addRow", "preview", "save", "rollback"] as const;
+
+    expect(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.slice(-3)).toEqual(["preview", "save", "rollback"]);
+    expect(isDataGridToolbarActionCompact("refresh", visibleActions, 3)).toBe(true);
+    expect(isDataGridToolbarActionCompact("navigation", visibleActions, 3)).toBe(true);
+    expect(isDataGridToolbarActionCompact("addRow", visibleActions, 3)).toBe(true);
+    expect(isDataGridToolbarActionCompact("preview", visibleActions, 3)).toBe(false);
+    expect(isDataGridToolbarActionCompact("save", visibleActions, 3)).toBe(false);
+    expect(isDataGridToolbarActionCompact("rollback", visibleActions, 3)).toBe(false);
+    expect(isDataGridToolbarActionCompact("autoRefresh", visibleActions, 3)).toBe(false);
+    expect(isDataGridToolbarActionCompact("rollback", visibleActions, 0, true)).toBe(true);
   });
 
   it("does not invoke hidden or disabled actions", async () => {

@@ -5,11 +5,16 @@ import { LandingFooter } from "@/components/landing/LandingFooter";
 import { LandingNav } from "@/components/landing/LandingNav";
 import type { ContributorActivityData } from "@/lib/contributorActivity";
 import { buildMetadata } from "@/lib/metadata";
+import { resolveLang } from "@/lib/i18n";
 
 const pageMetadata = {
   en: {
     title: "DBX Contributors",
     description: "Explore the people building DBX and download a certificate generated from public GitHub activity.",
+  },
+  tr: {
+    title: "DBX Katkıda Bulunanlar",
+    description: "DBX'i birlikte geliştiren açık kaynak katkıcılarını görün ve herkese açık GitHub etkinliğinden üretilen bir katkı sertifikası indirin.",
   },
   cn: {
     title: "DBX 贡献者",
@@ -19,7 +24,7 @@ const pageMetadata = {
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string }> }): Promise<Metadata> {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const metadata = pageMetadata[locale];
 
   return buildMetadata({
@@ -32,7 +37,7 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
 
 export default async function ContributorsPage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
-  const locale = lang === "cn" ? "cn" : "en";
+  const locale = resolveLang(lang);
   const data = contributorSnapshot as ContributorActivityData;
 
   return (

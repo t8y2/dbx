@@ -627,16 +627,22 @@ fn collect_mapping_columns(
     for (name, definition) in properties {
         let field_name = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
         let field_type = definition.get("type").and_then(Value::as_str);
+        let children = definition.get("properties").and_then(Value::as_object);
 
         if let Some(data_type) = field_type {
             push_mapping_column(&field_name, data_type, seen, columns);
+        } else if children.is_some() {
+            // Elasticsearch infers `object` for a field with `properties` when
+            // the mapping omits an explicit type. Return the parent too because
+            // the document grid renders top-level object values as one column.
+            push_mapping_column(&field_name, "object", seen, columns);
         }
 
         if let Some(fields) = definition.get("fields").and_then(Value::as_object) {
             collect_mapping_columns(&field_name, fields, seen, columns);
         }
 
-        if let Some(children) = definition.get("properties").and_then(Value::as_object) {
+        if let Some(children) = children {
             collect_mapping_columns(&field_name, children, seen, columns);
         }
     }
@@ -2994,6 +3000,25 @@ mod tests {
         );
         // 去掉点前缀内部索引、排序、去重。
         assert_eq!(names, vec!["ngx-log-1".to_string(), "ngx-log-2".to_string()]);
+    }
+
+    #[test]
+    fn mapping_columns_include_implicit_object_parents() {
+        let mapping = json!({
+            "profile": {
+                "properties": {
+                    "name": { "type": "keyword" }
+                }
+            }
+        });
+        let properties = mapping.as_object().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        let mut columns = Vec::new();
+
+        super::collect_mapping_columns("", properties, &mut seen, &mut columns);
+
+        assert!(columns.iter().any(|column| column.name == "profile" && column.data_type == "object"));
+        assert!(columns.iter().any(|column| column.name == "profile.name" && column.data_type == "keyword"));
     }
 
     #[test]

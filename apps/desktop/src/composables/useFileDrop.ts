@@ -4,6 +4,7 @@ import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useToast } from "@/composables/useToast";
+import { useLargeSqlFileStreamingFallback } from "@/composables/useLargeSqlFileFallback";
 import * as api from "@/lib/backend/api";
 import type { ConnectionConfig, ExternalSqlFileVersion } from "@/types/database";
 import { detectDatabaseFileType } from "@/lib/database/databaseFileDetection";
@@ -23,6 +24,7 @@ export function useFileDrop() {
   const connectionStore = useConnectionStore();
   const queryStore = useQueryStore();
   const { toast } = useToast();
+  const { openInStreamingExecutorOnTooLarge } = useLargeSqlFileStreamingFallback();
 
   async function openDroppedSqlFile(name: string, content: string, path?: string, version?: ExternalSqlFileVersion) {
     if (path) {
@@ -88,7 +90,9 @@ export function useFileDrop() {
               const snapshot = await api.readExternalSqlFileSnapshot(path);
               await openDroppedSqlFile(name, snapshot.content, path, snapshot.version);
             } catch (e: any) {
-              toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+              if (!openInStreamingExecutorOnTooLarge(path, e)) {
+                toast(t("toolbar.sqlOpenFailed", { message: externalSqlFileOpenErrorMessage(e, (key, params) => t(key, params)) }), 5000);
+              }
             }
             continue;
           }

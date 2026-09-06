@@ -385,6 +385,34 @@ export const meilisearchManagementMessages = {
     deleteTaskHistory: "Excluir histórico",
     readOnlyDisabled: "As ações ficam desativadas em conexões somente leitura.",
   },
+  tr: {
+    ...en,
+    systemManagement: "Sistem yönetimi",
+    overview: "Genel bakış",
+    apiKeys: "API Anahtarları",
+    tasks: "Görevler",
+    health: "Sağlık",
+    version: "Sürüm",
+    indexCount: "Dizinler",
+    totalDocuments: "Toplam belge",
+    keyCount: "Anahtarlar",
+    refresh: "Yenile",
+    rowActions: "İşlemler",
+    previous: "Önceki",
+    next: "Sonraki",
+    createKey: "Anahtar oluştur",
+    editKey: "Anahtarı düzenle",
+    deleteKey: "Anahtarı sil",
+    noKeys: "API anahtarı yok",
+    filters: "Filtreler",
+    applyFilters: "Filtreleri uygula",
+    receivedDocuments: "Alınan belgeler",
+    indexedDocuments: "Dizinlenen belgeler",
+    noTasks: "Görev yok",
+    cancelTask: "Görevi iptal et",
+    deleteTaskHistory: "Geçmişi sil",
+    readOnlyDisabled: "Salt okunur bağlantılarda işlemler devre dışıdır.",
+  },
 } as const;
 
 export const meilisearchManagementEn = meilisearchManagementMessages.en;
@@ -395,3 +423,4 @@ export const meilisearchManagementKo = meilisearchManagementMessages.ko;
 export const meilisearchManagementEs = meilisearchManagementMessages.es;
 export const meilisearchManagementIt = meilisearchManagementMessages.it;
 export const meilisearchManagementPtBR = meilisearchManagementMessages["pt-BR"];
+export const meilisearchManagementTr = meilisearchManagementMessages.tr;

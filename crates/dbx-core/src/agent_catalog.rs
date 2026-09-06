@@ -87,6 +87,18 @@ mod tests {
     }
 
     #[test]
+    fn etcd_v2_profile_uses_dedicated_agent() {
+        assert_eq!(agent_key(&DatabaseType::Etcd, None), Some("etcd"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd")), Some("etcd"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd-v2")), Some("etcd2"));
+        assert_eq!(agent_key(&DatabaseType::Etcd, Some("etcd-custom")), Some("etcd"));
+        assert_eq!(label_for_key("etcd2"), Some("etcd 2.x (v2 API)"));
+        // etcd2 ships its own binary, version, and registry entry, so it must
+        // stay visible in the driver store for install/upgrade/uninstall.
+        assert!(driver_store_entries().any(|(key, label)| key == "etcd2" && label == "etcd 2.x (v2 API)"));
+    }
+
+    #[test]
     fn duckdb_is_available_in_driver_store_without_using_agent_runtime() {
         assert!(driver_store_entries().any(|(key, label)| key == "duckdb" && label == "DuckDB"));
         assert_eq!(label_for_key("duckdb"), Some("DuckDB"));
@@ -110,6 +122,17 @@ mod tests {
     fn kyuubi_reuses_hive_agent_without_duplicate_store_entry() {
         assert_eq!(agent_key(&DatabaseType::Kyuubi, None), Some("hive"));
         assert_eq!(driver_store_entries().filter(|(key, _)| *key == "hive").count(), 1);
+    }
+
+    #[test]
+    fn cache_profile_uses_dedicated_agent_under_iris() {
+        assert_eq!(agent_key(&DatabaseType::Iris, None), Some("iris"));
+        assert_eq!(agent_key(&DatabaseType::Iris, Some("iris")), Some("iris"));
+        assert_eq!(agent_key(&DatabaseType::Iris, Some("cache")), Some("cache"));
+        assert_eq!(label_for_key("cache"), Some("InterSystems Caché"));
+        // The Caché agent ships its own shaded CacheDB driver, so it needs its
+        // own driver store entry for install/upgrade/uninstall.
+        assert!(driver_store_entries().any(|(key, label)| key == "cache" && label == "InterSystems Caché"));
     }
 
     #[test]

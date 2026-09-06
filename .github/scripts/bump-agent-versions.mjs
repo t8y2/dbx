@@ -52,6 +52,7 @@ const nativeDriverDirectories = {
   cassandra: "cassandra-go",
   duckdb: "duckdb",
   hive: "hive-go",
+  argo: "argo-go",
   oracle: "oracle-go",
   kingbase: "kingbase-go",
   iotdb: "iotdb",
@@ -61,13 +62,20 @@ const nativeDriverDirectories = {
   rocketmq: "rocketmq",
   zookeeper: "zookeeper",
   tdengine: "tdengine",
+  etcd: "etcd-go",
+  etcd2: "etcd2-go",
 };
 const crateNativeDriverDirectories = {
   "sqlite-worker": "crates/dbx-sqlite-worker",
 };
-const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "sqlite-worker"]);
+const nativeDriverModules = new Set(["cassandra", "duckdb", "hive", "argo", "oracle", "xugu", "kingbase", "iotdb", "neo4j", "vastbase", "rabbitmq", "rocketmq", "zookeeper", "tdengine", "etcd", "etcd2", "sqlite-worker"]);
 const nativeDriverSharedPaths = {
   hive: [
+    "agents/go-common/go-gssapi",
+    "agents/go-common/gohive",
+    "agents/go-common/gosasl",
+  ],
+  argo: [
     "agents/go-common/go-gssapi",
     "agents/go-common/gohive",
     "agents/go-common/gosasl",
@@ -75,6 +83,9 @@ const nativeDriverSharedPaths = {
   zookeeper: [
     "agents/go-common/go-gssapi",
     "agents/go-common/gosasl",
+  ],
+  etcd: [
+    "agents/go-common/go-semver",
   ],
 };
 

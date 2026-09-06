@@ -10,9 +10,14 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use crate::connection::{AppState, PoolKind};
-use crate::csv_export::{format_query_result_csv, format_tsv, push_query_result_csv_row, push_tsv_row};
+use crate::csv_export::{
+    format_query_result_csv_with_quote_mode, format_tsv, push_query_result_csv_row_with_quote_mode, push_tsv_row,
+    CsvQuoteMode,
+};
 pub use crate::database_export::ExportStatus;
-use crate::database_export::{build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions};
+use crate::database_export::{
+    build_export_insert_statements, is_export_cancelled, BuildExportInsertStatementsOptions, SqlInsertMode,
+};
 use crate::models::connection::DatabaseType;
 use crate::query::{
     await_stream_with_progress_timeout, canceled_error, close_query_session, execute_sql_statement_with_options,
@@ -78,6 +83,10 @@ pub struct QueryResultExportRequest {
     pub use_agent_cursor: bool,
     pub file_path: String,
     pub format: String,
+    #[serde(default)]
+    pub insert_mode: SqlInsertMode,
+    #[serde(default)]
+    pub csv_quote_mode: CsvQuoteMode,
     #[serde(default)]
     pub include_sql_sheet: bool,
     pub page_size: usize,
@@ -295,8 +304,9 @@ fn sql_insert_column_types(request: &QueryResultExportRequest, column_types: &[S
 
 /// Bounded SQL INSERT writer with staged-file replacement safety.
 ///
-/// Rows are buffered and flushed to a temp file every [`SQL_INSERT_BATCH_SIZE`]
-/// rows, so memory stays bounded regardless of the query page size. The unique
+/// Batch mode buffers rows up to [`SQL_INSERT_BATCH_SIZE`], while single mode
+/// flushes each row immediately. Both modes keep memory bounded regardless of
+/// the query page size. The unique
 /// temp file lives alongside the target and replaces it only after
 /// [`SqlInsertWriter::finish`] flushes and synchronizes the complete output.
 struct SqlInsertWriter {
@@ -304,6 +314,7 @@ struct SqlInsertWriter {
     target: Option<StagedExportTarget>,
     pending_rows: Vec<Vec<Value>>,
     pending_spatial_values: Vec<Vec<Option<u32>>>,
+    insert_mode: SqlInsertMode,
     columns: Vec<String>,
     column_types: Vec<Option<String>>,
     spatial_columns: Vec<SpatialColumn>,
@@ -332,6 +343,7 @@ impl SqlInsertWriter {
             target: Some(target),
             pending_rows: Vec::new(),
             pending_spatial_values: Vec::new(),
+            insert_mode: request.insert_mode,
             columns: Vec::new(),
             column_types: Vec::new(),
             spatial_columns: Vec::new(),
@@ -360,7 +372,7 @@ impl SqlInsertWriter {
     fn write_row(&mut self, row: Vec<Value>, spatial_values: Option<Vec<Option<u32>>>) -> Result<(), String> {
         self.pending_rows.push(row);
         self.pending_spatial_values.push(spatial_values.unwrap_or_default());
-        if self.pending_rows.len() >= SQL_INSERT_BATCH_SIZE {
+        if self.insert_mode.flush_each_row() || self.pending_rows.len() >= SQL_INSERT_BATCH_SIZE {
             self.flush_batch()?;
         }
         Ok(())
@@ -382,7 +394,7 @@ impl SqlInsertWriter {
             spatial_columns: self.spatial_columns.clone(),
             spatial_values: mem::take(&mut self.pending_spatial_values),
             rows: mem::take(&mut self.pending_rows),
-            batch_size: Some(SQL_INSERT_BATCH_SIZE),
+            batch_size: Some(self.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
         })?;
         let file = self.file.as_mut().ok_or_else(|| "SQL export file already closed".to_string())?;
         for stmt in &stmts {
@@ -410,8 +422,12 @@ fn effective_row_limit(request: &QueryResultExportRequest) -> Option<usize> {
     request.row_limit
 }
 
-fn format_text_export_header(format: &str, columns: &[String]) -> String {
-    let content = if format == "csv" { format_query_result_csv(columns, &[]) } else { format_tsv(columns, &[]) };
+fn format_text_export_header(format: &str, columns: &[String], csv_quote_mode: CsvQuoteMode) -> String {
+    let content = if format == "csv" {
+        format_query_result_csv_with_quote_mode(columns, &[], csv_quote_mode)
+    } else {
+        format_tsv(columns, &[])
+    };
     content.strip_suffix('\n').unwrap_or(&content).to_string()
 }
 
@@ -420,11 +436,12 @@ fn write_text_export_row<W: Write>(
     format: &str,
     row: &[Value],
     buffer: &mut String,
+    csv_quote_mode: CsvQuoteMode,
 ) -> Result<(), String> {
     buffer.clear();
     buffer.push('\n');
     if format == "csv" {
-        push_query_result_csv_row(buffer, row);
+        push_query_result_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
     } else {
         push_tsv_row(buffer, row);
     }
@@ -436,12 +453,13 @@ fn write_text_export_rows<W: Write>(
     format: &str,
     rows: &[Vec<Value>],
     buffer: &mut String,
+    csv_quote_mode: CsvQuoteMode,
 ) -> Result<(), String> {
     buffer.clear();
     for row in rows {
         buffer.push('\n');
         if format == "csv" {
-            push_query_result_csv_row(buffer, row);
+            push_query_result_csv_row_with_quote_mode(buffer, row, csv_quote_mode);
         } else {
             push_tsv_row(buffer, row);
         }
@@ -896,23 +914,36 @@ async fn export_query_result_core_inner(
             result.rows.truncate(this_page);
         }
         let row_count = result.rows.len();
-        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_cow(
+        let formatted_rows = crate::temporal_format::format_temporal_export_rows_with_string_types_for_csv_cow(
             &result.rows,
             &column_types,
             request.date_time_format.as_deref(),
+            format == "csv",
         );
 
         if format == "csv" || format == "txt" {
             if let Some(file) = text_file.as_mut() {
                 if !wrote_text_header {
-                    let header = format_text_export_header(&format, &columns);
+                    let header = format_text_export_header(&format, &columns, request.csv_quote_mode);
                     file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     if row_count > 0 {
-                        write_text_export_rows(file, &format, formatted_rows.as_ref(), &mut text_buffer)?;
+                        write_text_export_rows(
+                            file,
+                            &format,
+                            formatted_rows.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     }
                     wrote_text_header = true;
                 } else if row_count > 0 {
-                    write_text_export_rows(file, &format, formatted_rows.as_ref(), &mut text_buffer)?;
+                    write_text_export_rows(
+                        file,
+                        &format,
+                        formatted_rows.as_ref(),
+                        &mut text_buffer,
+                        request.csv_quote_mode,
+                    )?;
                 }
             }
         } else if format == "sql" {
@@ -981,7 +1012,7 @@ async fn export_query_result_core_inner(
 
     if format == "csv" || format == "txt" {
         if !wrote_text_header {
-            let header = format_text_export_header(&format, &columns);
+            let header = format_text_export_header(&format, &columns, request.csv_quote_mode);
             if let Some(file) = text_file.as_mut() {
                 file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
             }
@@ -1037,14 +1068,13 @@ async fn try_export_postgres_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some(pool) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(pool) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::Postgres(pool) => Some(pool.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1093,7 +1123,7 @@ async fn try_export_postgres_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1107,15 +1137,22 @@ async fn try_export_postgres_query_result_stream(
                     }
                 }
                 crate::db::postgres::PostgresQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
+                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1212,14 +1249,13 @@ async fn try_export_mysql_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some((pool, bare)) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some((pool, bare)) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::Mysql(pool, mode) => Some((pool.clone(), *mode == crate::connection::MysqlMode::Bare)),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1329,7 +1365,7 @@ async fn try_export_mysql_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1343,15 +1379,22 @@ async fn try_export_mysql_query_result_stream(
                     }
                 }
                 crate::db::mysql::MySqlQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
+                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1487,14 +1530,13 @@ async fn try_export_clickhouse_query_result_stream(
             )
             .await?
     };
-    let connections = state.connections.read().await;
-    let Some(client) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(client) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::ClickHouse(client) => Some(client.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key.clone());
@@ -1544,7 +1586,7 @@ async fn try_export_clickhouse_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1558,15 +1600,22 @@ async fn try_export_clickhouse_query_result_stream(
                     }
                 }
                 crate::db::clickhouse_driver::ClickHouseQueryStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
                         &row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
+                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1659,14 +1708,13 @@ async fn try_export_sqlserver_query_result_stream(
     }
 
     let pool_key = state.get_or_create_pool(&request.connection_id, Some(&request.database)).await?;
-    let connections = state.connections.read().await;
-    let Some(client) = connections.get(&pool_key).and_then(|pool| match pool {
+    let pool_handle = state.pool_handle(&pool_key).await;
+    let Some(client) = pool_handle.as_ref().and_then(|pool| match pool {
         PoolKind::SqlServer(client) => Some(client.clone()),
         _ => None,
     }) else {
         return Ok(false);
     };
-    drop(connections);
 
     if let Some(execution_id) = request.execution_id.as_deref() {
         state.running_queries.set_pool_key(execution_id, pool_key);
@@ -1728,7 +1776,7 @@ async fn try_export_sqlserver_query_result_stream(
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.set_columns(columns.clone(), &temporal_column_types, &[], request);
                     } else if let Some(file) = text_file.as_mut() {
-                        let header = format_text_export_header(format, &columns);
+                        let header = format_text_export_header(format, &columns, request.csv_quote_mode);
                         file.write_all(header.as_bytes()).map_err(|e| format!("Failed to write export header: {e}"))?;
                     } else {
                         let xlsx_file =
@@ -1738,15 +1786,22 @@ async fn try_export_sqlserver_query_result_stream(
                     }
                 }
                 crate::db::sqlserver::SqlServerStreamItem::Row(row) => {
-                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_cow(
+                    let formatted = crate::temporal_format::format_temporal_export_row_with_string_types_for_csv_cow(
                         row,
                         &temporal_column_types,
                         request.date_time_format.as_deref(),
+                        format == "csv",
                     );
                     if let Some(writer) = sql_writer.as_mut() {
                         writer.write_row(formatted.into_owned(), None)?;
                     } else if let Some(file) = text_file.as_mut() {
-                        write_text_export_row(file, format, formatted.as_ref(), &mut text_buffer)?;
+                        write_text_export_row(
+                            file,
+                            format,
+                            formatted.as_ref(),
+                            &mut text_buffer,
+                            request.csv_quote_mode,
+                        )?;
                     } else if let Some(writer) = xlsx.as_mut() {
                         writer.write_row(formatted.as_ref()).map_err(|e| format!("Failed to write XLSX row: {e}"))?;
                     } else {
@@ -1917,6 +1972,7 @@ mod tests {
             use_agent_cursor: false,
             file_path: "out.csv".to_string(),
             format: format.to_string(),
+            insert_mode: SqlInsertMode::default(),
             include_sql_sheet: false,
             page_size: 1000,
             row_limit,
@@ -1926,6 +1982,7 @@ mod tests {
             client_session_id: None,
             execution_id: None,
             date_time_format: None,
+            csv_quote_mode: CsvQuoteMode::All,
             export_table_name: None,
             export_column_types: None,
             numeric_column_right_align: false,
@@ -1933,6 +1990,55 @@ mod tests {
             auto_filter: None,
             identifier_quote: None,
         }
+    }
+
+    fn rendered_sql_insert_output(mode: SqlInsertMode) -> String {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let destination = dir.path().join("users.sql");
+        let mut req = request("sql", None, None);
+        req.database_type = DatabaseType::Mysql;
+        req.file_path = destination.to_string_lossy().into_owned();
+        req.export_table_name = Some("users".to_string());
+        req.insert_mode = mode;
+
+        let mut writer = SqlInsertWriter::create(&req).expect("create SQL writer");
+        writer.set_columns(
+            vec!["id".to_string(), "name".to_string()],
+            &["int".to_string(), "text".to_string()],
+            &[],
+            &req,
+        );
+        writer.write_row(vec![serde_json::json!(1), serde_json::json!("Ada")], None).expect("write first row");
+        writer.write_row(vec![serde_json::json!(2), serde_json::json!("Lin")], None).expect("write second row");
+        writer.finish().expect("finish SQL writer");
+
+        std::fs::read_to_string(destination).expect("read SQL output")
+    }
+
+    #[test]
+    fn sql_insert_mode_defaults_to_batch_when_request_field_is_missing() {
+        let mut serialized = serde_json::to_value(request("sql", None, None)).expect("serialize request");
+        serialized.as_object_mut().expect("request object").remove("insertMode");
+        let decoded: QueryResultExportRequest = serde_json::from_value(serialized).expect("deserialize request");
+
+        assert_eq!(decoded.insert_mode, SqlInsertMode::Batch);
+    }
+
+    #[test]
+    fn sql_insert_writer_uses_one_batched_statement_by_default() {
+        let output = rendered_sql_insert_output(SqlInsertMode::Batch);
+
+        assert_eq!(output.matches("INSERT INTO").count(), 1);
+        assert!(output.contains("VALUES (1, 'Ada'), (2, 'Lin');"));
+    }
+
+    #[test]
+    fn sql_insert_writer_emits_one_complete_statement_per_row_in_single_mode() {
+        let output = rendered_sql_insert_output(SqlInsertMode::Single);
+
+        assert_eq!(output.matches("INSERT INTO").count(), 2);
+        assert!(output.contains("VALUES (1, 'Ada');\nINSERT INTO `users` (`id`, `name`) VALUES (2, 'Lin');"));
+        assert!(!output.contains("), ("));
     }
 
     #[test]
@@ -1973,7 +2079,10 @@ mod tests {
 
     #[test]
     fn txt_export_header_keeps_columns_for_empty_results() {
-        assert_eq!(format_text_export_header("txt", &["id".to_string(), "note".to_string()]), "id\tnote");
+        assert_eq!(
+            format_text_export_header("txt", &["id".to_string(), "note".to_string()], CsvQuoteMode::All),
+            "id\tnote"
+        );
     }
 
     #[test]
@@ -1982,7 +2091,7 @@ mod tests {
         let mut output = Vec::new();
         let mut buffer = String::new();
 
-        write_text_export_row(&mut output, "csv", &row, &mut buffer).expect("write csv row");
+        write_text_export_row(&mut output, "csv", &row, &mut buffer, CsvQuoteMode::All).expect("write csv row");
         assert_eq!(String::from_utf8(output).expect("utf8 csv"), "\n,\"\",\"line\n\"\"two\"\"\"");
     }
 

@@ -25,6 +25,11 @@ describe("data grid type visual kind", () => {
     ["UUID", "identifier"],
     ["BYTEA", "binary"],
     ["SDO_GEOMETRY", "spatial"],
+    ["keyword", "string"],
+    ["unsigned_long", "integer"],
+    ["scaled_float", "numeric"],
+    ["date_nanos", "temporal"],
+    ["nested", "structured"],
     ["inet", "unknown"],
   ])("maps %s to %s", (dataType, expected) => {
     expect(resolveDataGridTypeVisualKind(dataType)).toBe(expected);
@@ -40,6 +45,10 @@ describe("data grid type visual kind", () => {
     ["rowversion", "sqlserver", "binary"],
     ["bit(8)", "postgres", "binary"],
     ["bit varying(8)", "postgres", "binary"],
+    ["long", "elasticsearch", "integer"],
+    ["long", "easysearch", "integer"],
+    ["byte", "elasticsearch", "integer"],
+    ["short", "elasticsearch", "integer"],
   ] as const)("maps %s for %s to %s", (dataType, databaseType, expected) => {
     expect(resolveDataGridTypeVisualKind(dataType, databaseType)).toBe(expected);
   });
@@ -49,6 +58,10 @@ describe("data grid type visual kind", () => {
     expect(resolveDataGridTypeVisualKind("timestamp", "postgres")).toBe("temporal");
     expect(resolveDataGridTypeVisualKind("bit")).toBe("boolean");
     expect(resolveDataGridTypeVisualKind("bit", "sqlserver")).toBe("boolean");
+    expect(resolveDataGridTypeVisualKind("long")).toBe("string");
+    expect(resolveDataGridTypeVisualKind("long", "oracle")).toBe("string");
+    expect(resolveDataGridTypeVisualKind("byte")).toBe("unknown");
+    expect(resolveDataGridTypeVisualKind("short")).toBe("unknown");
   });
 });
 

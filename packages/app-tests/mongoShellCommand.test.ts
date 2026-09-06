@@ -35,6 +35,7 @@ import {
 } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 import type { MongoWriteCommand } from "../../apps/desktop/src/lib/mongo/mongoShellCommand.ts";
 import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { normalizeJsonArgument } from "../mongo-shell/src/json.ts";
 
 test("parseMongoFindCommand parses db collection find with an empty JSON filter", () => {
   assert.deepEqual(parseMongoFindCommand("db.users.find({})"), {
@@ -594,6 +595,87 @@ test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
       many: true,
     },
   );
+});
+
+test("parseMongoWriteCommand accepts Mongo shell regex literals", () => {
+  const command = parseMongoWriteCommand(`db.code_info.updateMany(
+    { level: "SECOND_LAYER", position: "B", packagingRatio: /^[^:：]*盒/, type: { $ne: "PACK_IN" } },
+    { $set: { type: "PACK_IN" }, $currentDate: { lastUpdateTime: true } }
+  )`);
+
+  assert.equal(command?.kind, "update");
+  if (command?.kind !== "update") return;
+  assert.equal(command.collection, "code_info");
+  assert.equal(command.many, true);
+  assert.deepEqual(JSON.parse(command.filter), {
+    level: "SECOND_LAYER",
+    position: "B",
+    packagingRatio: { $regularExpression: { pattern: "^[^:：]*盒", options: "" } },
+    type: { $ne: "PACK_IN" },
+  });
+});
+
+test("parseMongoWriteCommand ignores delimiters inside Mongo shell regex literals", () => {
+  const command = parseMongoWriteCommand(String.raw`db.items.updateMany({ value: /a\),b/ }, { $set: { matched: true } })`);
+
+  assert.equal(command?.kind, "update");
+  if (command?.kind !== "update") return;
+  assert.deepEqual(JSON.parse(command.filter), {
+    value: { $regularExpression: { pattern: "a\\),b", options: "" } },
+  });
+});
+
+test("normalizeJsonArgument handles regex escapes, character classes, flags, strings, and comments", () => {
+  const normalized = normalizeJsonArgument(`{
+    pattern: /a\\/b[/:：]/mi,
+    url: "https://example.com/a/b",
+    note: "// remains text",
+    // slash comments remain comments
+    active: true
+  }`);
+
+  assert.ok(normalized);
+  assert.deepEqual(JSON.parse(normalized), {
+    pattern: { $regularExpression: { pattern: "a\\/b[/:：]", options: "im" } },
+    url: "https://example.com/a/b",
+    note: "// remains text",
+    active: true,
+  });
+});
+
+test("normalizeJsonArgument accepts a regex literal after comments", () => {
+  const normalized = normalizeJsonArgument(`{
+    block: /* explain the pattern */ /block/i,
+    line: // explain the next pattern
+      /line/m
+  }`);
+
+  assert.ok(normalized);
+  assert.deepEqual(JSON.parse(normalized), {
+    block: { $regularExpression: { pattern: "block", options: "i" } },
+    line: { $regularExpression: { pattern: "line", options: "m" } },
+  });
+});
+
+test("normalizeJsonArgument drops JS-only regex literal flags", () => {
+  const normalized = normalizeJsonArgument(`{
+    global: /value/g,
+    sticky: /value/yd,
+    verbose: /value/givs
+  }`);
+
+  assert.ok(normalized);
+  assert.deepEqual(JSON.parse(normalized), {
+    global: { $regularExpression: { pattern: "value", options: "" } },
+    sticky: { $regularExpression: { pattern: "value", options: "" } },
+    verbose: { $regularExpression: { pattern: "value", options: "is" } },
+  });
+});
+
+test("normalizeJsonArgument rejects malformed Mongo shell regex literals", () => {
+  for (const source of ["{pattern: /unterminated}", "{pattern: /value/ii}", "{pattern: /value/q}"]) {
+    assert.equal(normalizeJsonArgument(source), null, source);
+  }
 });
 
 test("parseMongoWriteCommand parses createIndex with optional options", () => {

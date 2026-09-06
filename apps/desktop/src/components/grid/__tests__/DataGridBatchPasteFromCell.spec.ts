@@ -7,6 +7,8 @@ import { createPinia, setActivePinia } from "pinia";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import type { QueryResult } from "@/types/database";
+import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
+import { buildMongoUpdateDocument } from "@/lib/mongo/mongoDocumentValues";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 vi.mock("@/composables/useDataGridColumnResize", async (importOriginal) => {
@@ -57,7 +59,16 @@ function defaultResult(): QueryResult {
   };
 }
 
-function mountGrid(options: { result?: QueryResult; quickEntry?: boolean; hideNullColumns?: boolean; readonlyColumnIndexes?: number[] } = {}) {
+interface MountGridOptions {
+  result?: QueryResult;
+  quickEntry?: boolean;
+  hideNullColumns?: boolean;
+  readonlyColumnIndexes?: number[];
+  databaseType?: "dameng" | "mongodb";
+  customSaveHandler?: CustomSaveHandler;
+}
+
+function mountGrid(options: MountGridOptions = {}) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const settingsStore = useSettingsStore();
@@ -76,9 +87,10 @@ function mountGrid(options: { result?: QueryResult; quickEntry?: boolean; hideNu
             default: () =>
               h(DataGrid, {
                 result: gridResult,
-                databaseType: "dameng",
+                databaseType: options.databaseType ?? "dameng",
                 context: "table-data",
                 editable: true,
+                customSaveHandler: options.customSaveHandler,
                 readonlyColumnIndexes: options.readonlyColumnIndexes,
                 tableMeta: {
                   tableName: "paste_target",
@@ -417,6 +429,69 @@ describe("DataGrid multi-row paste from a blank cell", () => {
     await paste(host, "");
 
     expect(pendingRows(host)).toHaveLength(1);
+  });
+
+  it("preserves an ordinary string when a Mongo column selection is pasted and saved", async () => {
+    const result: QueryResult = {
+      columns: ["_id", "status"],
+      rows: [
+        ["1", "pending"],
+        ["2", "queued"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const originals = [
+      { _id: "1", status: "pending" },
+      { _id: "2", status: "queued" },
+    ];
+    const updates: Array<Record<string, unknown>> = [];
+    const customSaveHandler: CustomSaveHandler = {
+      supportsInsert: false,
+      save: async ({ dirtyRows, columns }) => {
+        for (const [rowIndex, changes] of dirtyRows) {
+          updates.push(buildMongoUpdateDocument(changes, columns, originals[rowIndex]));
+        }
+      },
+    };
+    const { host } = mountGrid({ result, databaseType: "mongodb", customSaveHandler });
+    await settle();
+    await selectColumnHeader(host, 1);
+    await paste(host, "Y");
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "s" }));
+    await settle();
+
+    expect(updates).toEqual([{ $set: { status: "Y" } }, { $set: { status: "Y" } }]);
+  });
+
+  it("keeps JSON-looking plain text when a Mongo column paste reaches a missing field", async () => {
+    const result: QueryResult = {
+      columns: ["_id", "status"],
+      rows: [
+        ["1", null],
+        ["2", null],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 0,
+    };
+    const originals = [{ _id: "1" }, { _id: "2" }];
+    const updates: Array<Record<string, unknown>> = [];
+    const customSaveHandler: CustomSaveHandler = {
+      supportsInsert: false,
+      save: async ({ dirtyRows, columns }) => {
+        for (const [rowIndex, changes] of dirtyRows) {
+          updates.push(buildMongoUpdateDocument(changes, columns, originals[rowIndex]));
+        }
+      },
+    };
+    const { host } = mountGrid({ result, databaseType: "mongodb", customSaveHandler });
+    await settle();
+    await selectColumnHeader(host, 1);
+    await paste(host, "{plain text");
+    gridRoot(host).dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "s" }));
+    await settle();
+
+    expect(updates).toEqual([{ $set: { status: "{plain text" } }, { $set: { status: "{plain text" } }]);
   });
 
   it("routes DOM and canvas cell gestures through the same selection preparation", () => {

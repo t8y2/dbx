@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LANGUAGES } from "./languages.mjs";
 
 const outputDirectory = fileURLToPath(new URL("../out/", import.meta.url));
 const scannedExtensions = new Set([".html", ".js", ".txt"]);
@@ -37,9 +38,14 @@ if (violations.length > 0) {
 
 console.log(`Static export verified: ${files.length} files contain no GitHub API endpoints.`);
 
+// `<html lang>` uses BCP 47, which is not always the route segment.
+const HTML_LANG = { en: "en", cn: "zh-CN", tr: "tr" };
+
 const requiredContent = [
-  { file: "en.html", includes: ['<html lang="en"', '"@type":"SoftwareApplication"'] },
-  { file: "cn.html", includes: ['<html lang="zh-CN"', '"@type":"SoftwareApplication"'] },
+  ...LANGUAGES.map((language) => ({
+    file: `${language}.html`,
+    includes: [`<html lang="${HTML_LANG[language] ?? language}"`, '"@type":"SoftwareApplication"'],
+  })),
   { file: "llms.txt", includes: ["90+ database", "20 MB", "Apache-2.0"] },
 ];
 
@@ -61,7 +67,7 @@ console.log("Static export metadata verified for language, software schema, and 
 const localizedHtmlFiles = files.filter(
   (file) =>
     extname(file) === ".html" &&
-    ["en", "cn"].some(
+    LANGUAGES.some(
       (lang) => file === join(outputDirectory, `${lang}.html`) || file.startsWith(`${join(outputDirectory, lang)}${sep}`),
     ),
 );
@@ -80,23 +86,23 @@ for (const file of localizedHtmlFiles) {
 console.log(`Static export semantics verified for ${localizedHtmlFiles.length} localized pages.`);
 
 const sitemap = await readFile(join(outputDirectory, "sitemap.xml"), "utf8");
-for (const localizedHome of ["https://dbxio.com/en", "https://dbxio.com/cn"]) {
+for (const localizedHome of LANGUAGES.map((language) => `https://dbxio.com/${language}`)) {
   if (!sitemap.includes(`<loc>${localizedHome}</loc>`)) {
     throw new Error(`sitemap.xml is missing localized URL: ${localizedHome}`);
   }
 }
 
-for (const privateRoute of ["https://dbxio.com/en/issue", "https://dbxio.com/cn/issue"]) {
+for (const privateRoute of LANGUAGES.map((language) => `https://dbxio.com/${language}/issue`)) {
   if (sitemap.includes(`<loc>${privateRoute}</loc>`)) {
     throw new Error(`sitemap.xml must not advertise direct-only route: ${privateRoute}`);
   }
 }
 
-for (const issuePage of ["en/issue.html", "cn/issue.html"]) {
+for (const issuePage of LANGUAGES.map((language) => `${language}/issue.html`)) {
   const content = await readFile(join(outputDirectory, issuePage), "utf8");
   if (!content.includes('<meta name="robots" content="noindex, nofollow, nocache"')) {
     throw new Error(`${issuePage} must remain excluded from search indexing.`);
   }
 }
 
-console.log("Static export sitemap verified with independent English and Chinese URLs.");
+console.log(`Static export sitemap verified with independent URLs for ${LANGUAGES.join(", ")}.`);

@@ -1,15 +1,18 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App, type ComponentPublicInstance } from "vue";
+import { createApp, defineComponent, h, KeepAlive, nextTick, ref, type App, type ComponentPublicInstance } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NacosConfigItem, NacosConfigKey, NacosConfigList } from "@/types/nacos";
 
 const mocks = vi.hoisted(() => ({
   ensureConnected: vi.fn(),
   nacosDeleteConfig: vi.fn(),
+  nacosGetConfig: vi.fn(),
   nacosListConfigs: vi.fn(),
   nacosListServices: vi.fn(),
   nacosTestConnection: vi.fn(),
+  queryTabs: [] as Array<Record<string, unknown>>,
+  updateNacosConfigEditorViewport: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -17,6 +20,7 @@ vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
 vi.mock("@/lib/backend/api", () => ({
   nacosDeleteConfig: mocks.nacosDeleteConfig,
+  nacosGetConfig: mocks.nacosGetConfig,
   nacosListConfigs: mocks.nacosListConfigs,
   nacosListServices: mocks.nacosListServices,
   nacosTestConnection: mocks.nacosTestConnection,
@@ -34,6 +38,8 @@ vi.mock("@/stores/queryStore", () => ({
   useQueryStore: () => ({
     clearNacosNavigationTarget: vi.fn(),
     openNacosAdmin: vi.fn(),
+    tabs: mocks.queryTabs,
+    updateNacosConfigEditorViewport: mocks.updateNacosConfigEditorViewport,
   }),
 }));
 
@@ -111,6 +117,7 @@ type NacosAdminSetupState = {
   configGroup: string;
   configPageNo: number;
   configPageSize: number;
+  configEditorView: { scrollDOM: HTMLElement } | null;
   configs: NacosConfigItem[];
   deleteConfig: () => Promise<void>;
   deleteSelectedConfigs: () => Promise<void>;
@@ -119,6 +126,7 @@ type NacosAdminSetupState = {
   selectedConfig: NacosConfigItem | null;
   selectedConfigKeys: string[];
   selectedConfigOriginalKey: NacosConfigKey | null;
+  selectConfig: (item: NacosConfigItem) => Promise<void>;
   toggleConfigSelection: (item: NacosConfigItem, checked: boolean) => void;
 };
 
@@ -139,9 +147,16 @@ async function flushUi() {
   }
 }
 
+async function flushAnimationFrames(count: number) {
+  for (let index = 0; index < count; index += 1) {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  }
+}
+
 beforeEach(async () => {
   mocks.ensureConnected.mockReset().mockResolvedValue(undefined);
   mocks.nacosDeleteConfig.mockReset().mockResolvedValue(undefined);
+  mocks.nacosGetConfig.mockReset().mockResolvedValue(configA);
   mocks.nacosListConfigs.mockReset().mockResolvedValue(configList(1, 20, 2, [configA, configB]));
   mocks.nacosListServices.mockReset().mockResolvedValue({ pageNo: 1, pageSize: 20, totalCount: 0, items: [] });
   mocks.nacosTestConnection.mockReset().mockResolvedValue({
@@ -152,6 +167,8 @@ beforeEach(async () => {
     capabilities: { supportsConfigManagement: true, supportsConfigHistory: true, supportsServiceManagement: true, supportsInstanceUpdate: true, supportsRawApi: true },
   });
   mocks.toast.mockReset();
+  mocks.updateNacosConfigEditorViewport.mockReset();
+  mocks.queryTabs.splice(0);
 
   host = document.createElement("div");
   document.body.append(host);
@@ -209,5 +226,78 @@ describe("NacosAdminConsole config deletion", () => {
       { namespace: "public", group: "DEFAULT_GROUP", dataId: "config-b" },
     ]);
     expect(mocks.nacosListConfigs.mock.calls.map(([, query]) => query)).toEqual([expect.objectContaining({ pageNo: 2, pageSize: 50 }), expect.objectContaining({ pageNo: 1, pageSize: 50 })]);
+  });
+});
+
+describe("NacosAdminConsole cached tab restoration", () => {
+  it("does not let a hidden editor overwrite its viewport before reactivation", async () => {
+    app?.unmount();
+    host?.remove();
+    const active = ref(true);
+    const nacosRef = ref<ComponentPublicInstance | null>(null);
+    const CachedNacos = defineComponent({
+      setup() {
+        return () =>
+          h(KeepAlive, null, {
+            default: () => [active.value ? h(NacosAdminConsole, { ref: nacosRef, connectionId: "connection-1", namespace: "public" }) : h("div", "other-tab")],
+          });
+      },
+    });
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(CachedNacos);
+    app.mount(host);
+    await flushUi();
+
+    state = nacosRef.value?.$.setupState as unknown as NacosAdminSetupState;
+    await state.selectConfig(configA);
+    await flushUi();
+    const editor = state.configEditorView;
+    expect(editor).not.toBeNull();
+    if (!editor) throw new Error("Expected the Nacos config editor to mount");
+
+    editor.scrollDOM.scrollTop = 96;
+    editor.scrollDOM.dispatchEvent(new Event("scroll"));
+    await flushAnimationFrames(1);
+
+    active.value = false;
+    await nextTick();
+    editor.scrollDOM.scrollTop = 0;
+    editor.scrollDOM.dispatchEvent(new Event("scroll"));
+    await flushAnimationFrames(1);
+
+    active.value = true;
+    await nextTick();
+    await flushAnimationFrames(9);
+
+    expect(mocks.updateNacosConfigEditorViewport).toHaveBeenLastCalledWith("connection-1", "public", expect.objectContaining({ scrollTop: 96 }));
+    expect(editor.scrollDOM.scrollTop).toBe(96);
+  });
+
+  it("reselects the configuration saved with an evicted tab viewport", async () => {
+    app?.unmount();
+    host?.remove();
+    mocks.queryTabs.push({
+      mode: "nacos",
+      connectionId: "connection-1",
+      nacosNamespace: "public",
+      nacosConfigEditorViewport: {
+        namespace: "public",
+        dataId: "config-a",
+        group: "DEFAULT_GROUP",
+        scrollTop: 96,
+        scrollLeft: 0,
+      },
+    });
+    host = document.createElement("div");
+    document.body.append(host);
+    app = createApp(NacosAdminConsole, { connectionId: "connection-1", namespace: "public" });
+    const instance = app.mount(host) as ComponentPublicInstance;
+    state = instance.$.setupState as unknown as NacosAdminSetupState;
+
+    await flushUi();
+
+    expect(mocks.nacosGetConfig).toHaveBeenCalledWith("connection-1", { namespace: "public", dataId: "config-a", group: "DEFAULT_GROUP" });
+    expect(state.selectedConfig?.dataId).toBe("config-a");
   });
 });

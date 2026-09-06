@@ -141,13 +141,15 @@ function normalizeBackendErrorAtDepth(error: unknown, seen: WeakSet<object>, dep
   return null;
 }
 
+export const GENERIC_TRANSPORT_FAILURE_MESSAGE = "Backend request failed";
+
 export class BackendErrorException extends Error {
   readonly backendError: BackendError;
 
   constructor(error: unknown) {
     const backendError = normalizeRawBackendError(error);
     const fallbackDetail = boundedFallbackText(error);
-    const fallbackMessage = sanitizeBackendErrorMessage(fallbackDetail ?? "Backend request failed");
+    const fallbackMessage = sanitizeBackendErrorMessage(fallbackDetail ?? GENERIC_TRANSPORT_FAILURE_MESSAGE);
     super(backendError?.detail ? sanitizeBackendErrorMessage(backendError.detail) : fallbackMessage);
     this.name = "BackendErrorException";
     this.backendError = backendError ?? {

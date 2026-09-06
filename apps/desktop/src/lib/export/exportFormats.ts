@@ -1,12 +1,13 @@
 import type { DatabaseType, QueryResult } from "@/types/database";
 import * as api from "@/lib/backend/api";
+import { escapeCsvField, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
+import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 export type ExportCellValue = string | number | boolean | null;
 
-export function formatCsv(columns: string[], rows: ExportCellValue[][]): string {
-  const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
-  const header = columns.map(esc).join(",");
-  const body = rows.map((row) => row.map((c) => (c === null ? "" : esc(String(c)))).join(",")).join("\n");
+export function formatCsv(columns: string[], rows: ExportCellValue[][], quoteMode: CsvQuoteMode = "all"): string {
+  const header = columns.map((column) => escapeCsvField(column, quoteMode)).join(",");
+  const body = rows.map((row) => row.map((cell) => (cell === null ? "" : escapeCsvField(String(cell), quoteMode))).join(",")).join("\n");
   return `${header}\n${body}`;
 }
 
@@ -38,11 +39,12 @@ export interface FormatSqlInsertOptions {
   spatialColumns?: QueryResult["spatial_columns"];
   spatialValues?: QueryResult["spatial_values"];
   rows: ExportCellValue[][];
+  insertMode?: SqlInsertMode;
 }
 
-export function formatSqlInsert(options: FormatSqlInsertOptions): Promise<string> {
+export function formatSqlInsert({ insertMode = "batch", ...options }: FormatSqlInsertOptions): Promise<string> {
   return api.buildExportSqlInsert({
     ...options,
-    batchSize: 1,
+    batchSize: insertMode === "single" ? 1 : undefined,
   });
 }

@@ -195,6 +195,21 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(value.value).toBe("name");
   });
 
+  it("selects the first WHERE field suggestion with Enter", async () => {
+    const { value, input } = mountEditor("where", "", { columns: ["customer_id", "customer_name"] });
+    input.focus();
+    input.value = "cus";
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await vi.waitFor(() => expect(document.querySelectorAll('[role="option"]')).toHaveLength(2));
+    expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("customer_id");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await nextTick();
+    expect(value.value).toBe("customer_id");
+  });
+
   it("does not select a suggestion just because the dropdown appears under the mouse", async () => {
     const { value, input } = mountEditor("orderBy", "", { columns: ["name", "namespace"] });
     input.focus();
@@ -243,17 +258,22 @@ describe("DataGridConditionEditor quote completion", () => {
     expect(document.querySelector('[role="listbox"]')).toBeNull();
   });
 
-  it("keeps expanded input first-line indent and wraps long tokens", () => {
+  it("keeps the wrapped input caret aligned with its syntax highlight layer", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedInputCss = source.match(/\.data-grid-topbar-condition-input--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const expandedHighlightCss = source.match(/\.data-grid-condition-highlight--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;
+    const prefixPadding = "calc(var(--data-grid-condition-prefix-indent) + 0.125rem)";
 
     expect(expandedInputCss).toContain("padding:");
-    expect(expandedInputCss).toContain("0.0625rem 0.125rem");
-    expect(expandedInputCss).toContain("text-indent: var(--data-grid-condition-prefix-indent)");
+    expect(expandedInputCss).toContain(prefixPadding);
+    expect(expandedHighlightCss).toContain(prefixPadding);
+    expect(expandedInputCss).not.toContain("text-indent:");
+    expect(expandedHighlightCss).not.toContain("text-indent:");
     expect(expandedInputCss).toContain("overflow-wrap: anywhere");
     expect(source).toContain("white-space:pre-wrap;overflow-wrap:anywhere;");
-    expect(source).toContain("text-indent:${style.textIndent};");
-    expect(source).toContain("textIndent: rect.prefix");
+    expect(source).not.toContain("textIndent: rect.prefix");
+    expect(source).toContain("paddingLeft: rect.prefix + 2");
+    expect(source).toContain("paddingRight: rect.suffix + 8");
     expect(source).toContain("width: Math.max(1, rect.width - 8)");
     expect(source).toContain("function fitExpandedHeightToOverlay()");
     expect(source).toContain("expandedHeight.value + overflow");

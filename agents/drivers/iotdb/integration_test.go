@@ -133,6 +133,37 @@ func TestLiveIoTDBAgentTreeDatabaseConnection(t *testing.T) {
 	}
 }
 
+func TestLiveIoTDBAgentTreeTimeAggregates(t *testing.T) {
+	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
+		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")
+	}
+	database := "root.dbx_go_time_" + strconv.Itoa(os.Getpid())
+	device := database + ".d1"
+	server := liveIoTDBServer(t, connectParams{Database: database})
+	defer server.disconnect()
+	defer func() { _ = server.executeNonQuery("DELETE DATABASE "+database, "", 0) }()
+
+	mustExecuteNonQuery(t, server, "CREATE DATABASE "+database, "")
+	mustExecuteNonQuery(t, server, "CREATE TIMESERIES "+device+".s1 WITH DATATYPE=INT64, ENCODING=RLE", "")
+	mustExecuteNonQuery(t, server, "INSERT INTO "+device+"(time,s1) VALUES(1,10),(2,20)", "")
+
+	result, err := server.executeQuery(queryOptions{
+		SQL:     "SELECT max_time(s1), max_by(time,s1), max_by(s1,time) FROM " + device,
+		MaxRows: 10,
+	})
+	if err != nil || len(result.Rows) != 1 {
+		t.Fatalf("tree time aggregates = %#v, %v", result, err)
+	}
+	wantTypes := []string{"TIMESTAMP(ms)", "TIMESTAMP(ms)", "INT64"}
+	if !reflect.DeepEqual(result.ColumnTypes, wantTypes) {
+		t.Fatalf("tree time aggregate types = %#v, want %#v", result.ColumnTypes, wantTypes)
+	}
+	wantRow := []any{"2", "2", int64(20)}
+	if !reflect.DeepEqual(result.Rows[0], wantRow) {
+		t.Fatalf("tree time aggregate row = %#v, want %#v", result.Rows[0], wantRow)
+	}
+}
+
 func TestLiveIoTDBAgentProcessMultiSessionAndCancellation(t *testing.T) {
 	if os.Getenv("DBX_IOTDB_LIVE") != "1" {
 		t.Skip("set DBX_IOTDB_LIVE=1 to run against a real IoTDB server")

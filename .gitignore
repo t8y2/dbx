@@ -8,6 +8,7 @@ node_modules
 .trellis/
 .worktrees/
 openspec/
+.zcode/
 .mcp.json
 AGENTS.md
 CLAUDE.md
@@ -23,6 +24,8 @@ plugins/jdbc/target/
 plugins/jdbc/dependency-reduced-pom.xml
 plugins/jdbc/lib/*.jar
 agents/drivers/duckdb/target/
+agents/drivers/etcd-go/etcd-go
+agents/drivers/etcd2-go/etcd2-go
 plugins/jdbc/.gradle/
 plugins/jdbc/build/
 plugins/jdbc/dist/

@@ -261,13 +261,27 @@ const DATABASE_SOFT_STATEMENT_KEYWORDS: Partial<Record<DatabaseType, readonly st
 const WITH_MAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "INSERT", "UPDATE", "DELETE", "MERGE"]);
 const EXPLAIN_STATEMENT_KEYWORDS = new Set(["SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "ALTER", "DROP"]);
 const CREATE_BODY_KEYWORDS = new Set(["SELECT", "WITH", "BEGIN", "DECLARE"]);
+const STARROCKS_CREATE_MATERIALIZED_VIEW_REFRESH_MODIFIERS = new Set(["ASYNC", "MANUAL", "SCHEDULE", "DEFERRED", "IMMEDIATE"]);
 const INSERT_BODY_KEYWORDS = new Set(["SELECT", "WITH"]);
 const ALTER_BODY_KEYWORDS = new Set(["ADD", "ALTER", "COMMENT", "DROP", "MODIFY", "RENAME", "SET"]);
 const CLICKHOUSE_ALTER_TABLE_HEADER = /^ALTER\s+TABLE\s+(?:(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")\s*\.\s*)?(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+")(?:\s+ON\s+CLUSTER\s+(?:[A-Za-z_][\w$]*|`(?:``|[^`])+`|"(?:""|[^"])+"|'(?:''|[^'])+'))?\s*$/i;
 const SET_OPERATION_KEYWORDS = new Set(["UNION", "INTERSECT", "EXCEPT", "MINUS"]);
 const SET_OPERATION_MODIFIER_KEYWORDS = new Set(["ALL", "DISTINCT"]);
-const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu"]);
+// Mirrors the backend list in dbx-core/src/sql.rs is_oracle_like_database — keep both
+// in sync. ArgoDB (Transwarp Hive/Inceptor fork) ships a PL/SQL-compatible procedure
+// language (`CREATE [OR REPLACE] PROCEDURE ... IS BEGIN ... END;`), so its statement
+// ranges must stay whole instead of splitting at every body semicolon.
+const ORACLE_LIKE_PL_SQL_DATABASES: ReadonlySet<DatabaseType> = new Set(["oracle", "dameng", "gaussdb", "yashandb", "oscar", "oceanbase-oracle", "xugu", "argo"]);
 const MYSQL_ROUTINE_BLOCK_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb"]);
+// Backslash escaping inside '...'/"..." strings is a MySQL-family extension; in standard SQL '\'
+// is a complete one-char string and quotes are escaped by doubling (''). Treating backslash as an
+// escape unconditionally makes ESCAPE '\' swallow its closing quote and the following statement
+// boundary, so the next statement loses its run button (#8189). Gate it by dialect, matching the
+// tokenizer/completion side.
+export const BACKSLASH_ESCAPE_STRING_DIALECTS: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "hive", "argo", "impala", "spark", "databend"]);
+function allowsBackslashStringEscape(databaseType?: DatabaseType): boolean {
+  return !!databaseType && BACKSLASH_ESCAPE_STRING_DIALECTS.has(databaseType);
+}
 const MYSQL_CREATE_TABLE_OPTION_DATABASES: ReadonlySet<DatabaseType> = new Set(["mysql", "doris", "starrocks", "manticoresearch", "goldendb", "gbase"]);
 const MYSQL_ROUTINE_OBJECT_TYPES = new Set(["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]);
 const MYSQL_NON_ROUTINE_CREATE_TYPES = new Set(["DATABASE", "INDEX", "LOGFILE", "ROLE", "SCHEMA", "SERVER", "SPATIAL", "TABLE", "TEMPORARY", "UNIQUE", "USER", "VIEW"]);
@@ -298,6 +312,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
   const statements: RawStatement[] = [];
   const len = sql.length;
   const supportsDelimiterCommands = databaseType === "mysql";
+  const backslashEscapes = allowsBackslashStringEscape(databaseType);
 
   let statementStart = -1;
   let statementEnd = -1;
@@ -414,8 +429,10 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
 
     if (state === "single") {
       markContent(i);
-      // Backslash escapes the next char (e.g. PostgreSQL standard_conforming_strings=off style).
-      if (ch === "\\" && next) {
+      // Only MySQL-family dialects treat backslash as an escape inside '...' (see
+      // BACKSLASH_ESCAPE_STRING_DIALECTS); in standard SQL '\' is a literal char and must not
+      // consume the next char, otherwise the closing quote is swallowed (#8189).
+      if (ch === "\\" && next && backslashEscapes) {
         i += 2;
         continue;
       }
@@ -762,6 +779,10 @@ function splitStatementRangeAtSoftStarts(sql: string, statement: RawStatement, d
       continue;
     }
 
+    if (currentBodyKeyword === "CREATE" && isStarRocksCreateMaterializedViewRefreshContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType, parameterOptions)) {
+      continue;
+    }
+
     if (currentBodyKeyword === "CREATE" && isMysqlCreateTableOptionContinuation(sql, statement.from, lineStart.from, lineStart.keyword, databaseType)) {
       continue;
     }
@@ -827,6 +848,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
   // Recover soft statement boundaries while the user is still typing an
   // EXPLAIN option list; otherwise its unmatched opener hides every later line.
   const unclosedExplainOptionsStart = explainOptionsStart !== null && skipBalancedParens(sql, explainOptionsStart, databaseType, parameterOptions) === null ? explainOptionsStart : null;
+  const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
   let parenDepth = 0;
@@ -886,7 +908,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
     }
 
     if (state === "single") {
-      if (ch === "\\" && next) {
+      if (ch === "\\" && next && backslashEscapes) {
         i += 2;
         continue;
       }
@@ -1023,6 +1045,14 @@ function isMysqlCreateTableOptionContinuation(sql: string, statementFrom: number
   return next === "=" || next === "'" || next === '"';
 }
 
+function isStarRocksCreateMaterializedViewRefreshContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): boolean {
+  if (databaseType !== "starrocks" || keyword !== "REFRESH") return false;
+  if (!startsWithSqlWords(sql, statementFrom, ["CREATE", "MATERIALIZED", "VIEW"], databaseType, parameterOptions)) return false;
+
+  const modifier = nextSqlWord(sql, lineStartFrom + keyword.length, databaseType, parameterOptions);
+  return modifier !== null && STARROCKS_CREATE_MATERIALIZED_VIEW_REFRESH_MODIFIERS.has(modifier);
+}
+
 function isClickHouseAlterTableUpdateContinuation(sql: string, statementFrom: number, lineStartFrom: number, keyword: string, databaseType?: DatabaseType): boolean {
   if (databaseType !== "clickhouse" || keyword !== "UPDATE") return false;
   return CLICKHOUSE_ALTER_TABLE_HEADER.test(sql.slice(statementFrom, lineStartFrom));
@@ -1041,6 +1071,7 @@ function startsWithMysqlCreateTable(sql: string, statementFrom: number): boolean
 
 function topLevelWordsBefore(sql: string, from: number, to: number, limit: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): string[] {
   const words: string[] = [];
+  const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
   let parenDepth = 0;
@@ -1081,7 +1112,7 @@ function topLevelWordsBefore(sql: string, from: number, to: number, limit: numbe
     }
 
     if (state === "single") {
-      if (ch === "\\" && next) {
+      if (ch === "\\" && next && backslashEscapes) {
         i += 2;
         continue;
       }
@@ -1381,6 +1412,7 @@ function trimRangeEnd(sql: string, from: number, to: number): number {
 }
 
 function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryFrom: number, databaseType?: DatabaseType, parameterOptions?: SqlParameterOptions): number {
+  const backslashEscapes = allowsBackslashStringEscape(databaseType);
   let state: QuoteState | "lineComment" | "blockComment" = "none";
   let dollarTag = "";
   let lastContentEnd = from;
@@ -1424,7 +1456,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
 
     if (state === "single") {
       lastContentEnd = i + 1;
-      if (ch === "\\" && next) {
+      if (ch === "\\" && next && backslashEscapes) {
         i += 2;
         lastContentEnd = i;
         continue;
@@ -1707,6 +1739,8 @@ function mysqlRoutineTokens(sql: string, parameterOptions?: SqlParameterOptions,
       continue;
     }
     if (state === "single") {
+      // mysqlRoutineTokens runs only for MYSQL_ROUTINE_BLOCK_DATABASES (all MySQL-family), so
+      // backslash escaping here (and in the double branch below) is unconditionally correct.
       if (ch === "\\" && next) {
         i += 2;
         continue;

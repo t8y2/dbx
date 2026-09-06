@@ -1,7 +1,12 @@
 const DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH = 900;
 const DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH = 1050;
 const DATA_GRID_COMPACT_TOPBAR_VIEWPORT_RATIO = 0.75;
+const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_STEP = 40;
 export const DATA_GRID_CONDITION_TOOLBAR_MIN_WIDTH = DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
+
+export const DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER = ["refresh", "autoRefresh", "navigation", "copyData", "addRow", "deleteRow", "exportData", "transpose", "tableInfo", "layerPreview", "preview", "save", "rollback"] as const;
+
+export type DataGridToolbarActionKey = (typeof DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER)[number];
 
 export function dataGridToolbarCompactBreakpoint(viewportWidth: number, minimumWidth = DATA_GRID_COMPACT_TOPBAR_MIN_WIDTH): number {
   const normalizedViewportWidth = Number.isFinite(viewportWidth) ? Math.max(0, viewportWidth) : DATA_GRID_COMPACT_TOPBAR_MAX_WIDTH;
@@ -11,6 +16,20 @@ export function dataGridToolbarCompactBreakpoint(viewportWidth: number, minimumW
 
 export function isDataGridToolbarCompact(toolbarWidth: number, viewportWidth: number, minimumWidth?: number): boolean {
   return toolbarWidth > 0 && toolbarWidth < dataGridToolbarCompactBreakpoint(viewportWidth, minimumWidth);
+}
+
+export function dataGridToolbarActionCollapseCount(toolbarWidth: number, viewportWidth: number, minimumWidth?: number): number {
+  if (!Number.isFinite(toolbarWidth) || toolbarWidth <= 0) return 0;
+  const deficit = dataGridToolbarCompactBreakpoint(viewportWidth, minimumWidth) - toolbarWidth;
+  if (deficit <= 0) return 0;
+  return Math.min(DATA_GRID_TOOLBAR_ACTION_COLLAPSE_ORDER.length, Math.ceil(deficit / DATA_GRID_TOOLBAR_ACTION_COLLAPSE_STEP));
+}
+
+export function isDataGridToolbarActionCompact(action: DataGridToolbarActionKey, visibleActions: readonly DataGridToolbarActionKey[], compactActionCount: number, forceCompact = false): boolean {
+  if (forceCompact) return true;
+  const actionIndex = visibleActions.indexOf(action);
+  if (actionIndex < 0) return false;
+  return actionIndex < Math.max(0, Math.floor(compactActionCount));
 }
 
 export type DataGridReloadIntent = "refresh";

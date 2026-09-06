@@ -4541,8 +4541,8 @@ async fn execute_postgres_copy_batch(
     statement_count: &mut usize,
 ) -> Result<(), String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Err("PostgreSQL pool not found for COPY import".to_string()),
         }
@@ -5333,8 +5333,8 @@ async fn kingbase_oracle_compatibility_mode(state: &AppState, pool_key: &str, db
         return false;
     }
     let client = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Agent(client)) => client.clone(),
             _ => return false,
         }
@@ -5350,8 +5350,8 @@ async fn kingbase_oracle_compatibility_mode(state: &AppState, pool_key: &str, db
 
 async fn mysql_import_sql_hard_limit(state: &AppState, pool_key: &str) -> Option<usize> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::Mysql(pool, _)) => pool.clone(),
             _ => return None,
         }
@@ -5480,8 +5480,8 @@ async fn sqlserver_bulk_import_plan_for_pool(
     }
     let import_plan = import_plan?;
     let client = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::SqlServer(client)) => client.clone(),
             _ => return None,
         }
@@ -5722,8 +5722,8 @@ async fn execute_sqlserver_bulk_rows_batch(
         .await
         .map_err(ImportRowsBatchError::before_write)?;
     let client = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(PoolKind::SqlServer(client)) => client.clone(),
             _ => {
                 return Err(ImportRowsBatchError::before_write(
@@ -8735,7 +8735,11 @@ mod tests {
         )
         .await
         .unwrap();
-        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": connection_id,
             "name": "XLSX truncate tail test",
@@ -8823,7 +8827,11 @@ mod tests {
         )
         .await
         .unwrap();
-        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": connection_id,
             "name": "Cancel XLSX validation test",
@@ -8907,7 +8915,11 @@ mod tests {
         )
         .await
         .unwrap();
-        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": connection_id,
             "name": "Cancel truncate first batch test",
@@ -10475,7 +10487,11 @@ mod tests {
         let pool_key = "sqlserver-cleanup-failure";
         let database_path = dir.path().join("target.db");
         let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
-        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(sqlite));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.to_string(), PoolKind::Sqlite(sqlite));
+            })
+            .await;
 
         invalidate_sqlserver_pool_after_staging_cleanup_failure(
             &state,
@@ -10486,7 +10502,7 @@ mod tests {
         )
         .await;
 
-        assert!(!state.connections.read().await.contains_key(pool_key));
+        assert!(!state.pool_handle(pool_key).await.is_some());
     }
 
     #[test]
@@ -10520,7 +10536,11 @@ mod tests {
         let database_path = dir.path().join("target.db");
         let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
         crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (payload TEXT)").await.unwrap();
-        state.connections.write().await.insert(pool_key.to_string(), PoolKind::Sqlite(sqlite.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.to_string(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
 
         let rows =
             vec![vec![serde_json::json!("a".repeat(300 * 1024))], vec![serde_json::json!("b".repeat(300 * 1024))]];
@@ -10736,7 +10756,11 @@ mod tests {
             let sqlite =
                 crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
             crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY)").await.unwrap();
-            state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            state
+                .update_connection_pools(|connections| {
+                    connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+                })
+                .await;
             Self {
                 _dir: dir,
                 state,
@@ -10848,7 +10872,11 @@ mod tests {
         let database_path = dir.path().join("target.db");
         let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
         crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER, name TEXT)").await.unwrap();
-        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            })
+            .await;
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
             "id": connection_id,
             "name": "SQLite delimited append test",

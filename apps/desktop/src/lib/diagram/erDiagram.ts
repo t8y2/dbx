@@ -16,6 +16,7 @@ export function editableStructureIndexes(table: DiagramTable): EditableStructure
 
 export interface DiagramTable {
   name: string;
+  schema?: string;
   columns: ColumnInfo[];
   foreignKeys: ForeignKeyInfo[];
   /** Unique/PK indexes used for FK cardinality; drafts also sync via buildCreateTableSql */
@@ -118,8 +119,12 @@ export interface DiagramLayoutOptions {
   margin?: number;
 }
 
-function relationshipId(sourceTable: string, fk: ForeignKeyInfo): string {
-  return [sourceTable, fk.name || "foreign_key", fk.column, fk.ref_table, fk.ref_column].join(":");
+export function diagramTableId(table: { name: string; schema?: string }, isMultiSchema = false): string {
+  return isMultiSchema && table.schema ? `${table.schema}.${table.name}` : table.name;
+}
+
+function relationshipId(sourceId: string, fk: ForeignKeyInfo, targetId?: string): string {
+  return [sourceId, fk.name || "foreign_key", fk.column, targetId || fk.ref_table, fk.ref_column].join(":");
 }
 
 function columnExists(table: DiagramTable | undefined, columnName: string): boolean {
@@ -176,33 +181,66 @@ export function normalizeCustomDiagramRelationship(input: Omit<CustomDiagramRela
   };
 }
 
-export function buildDiagramRelationships(tables: DiagramTable[], customRelationships: CustomDiagramRelationship[] = []): DiagramRelationship[] {
-  const visibleTableNames = new Set(tables.map((table) => table.name));
-  const tableMap = new Map(tables.map((table) => [table.name, table]));
+export function buildDiagramRelationships(tables: DiagramTable[], customRelationships: CustomDiagramRelationship[] = [], isMultiSchema = false): DiagramRelationship[] {
+  const tableIdMap = new Map(tables.map((table) => [diagramTableId(table, isMultiSchema), table]));
+  const tableBySchemaAndName = new Map<string, DiagramTable>();
+  const tableByName = new Map<string, DiagramTable>();
+  for (const table of tables) {
+    const schemaAndNameKey = `${table.schema ?? ""}\0${table.name}`;
+    if (!tableBySchemaAndName.has(schemaAndNameKey)) tableBySchemaAndName.set(schemaAndNameKey, table);
+    if (!tableByName.has(table.name)) tableByName.set(table.name, table);
+  }
 
-  const foreignKeyRelationships = tables.flatMap((table) =>
-    table.foreignKeys
-      .filter((fk) => visibleTableNames.has(fk.ref_table))
-      .map((fk) => ({
-        id: relationshipId(table.name, fk),
-        name: fk.name,
-        kind: "foreign-key" as const,
-        sourceTable: table.name,
-        sourceColumn: fk.column,
-        targetTable: fk.ref_table,
-        targetColumn: fk.ref_column,
-        sourceCardinality: foreignKeySourceCardinality(table, fk),
-        targetCardinality: "1" as const,
-      })),
-  );
+  const foreignKeyRelationships = tables.flatMap((table) => {
+    const sourceId = diagramTableId(table, isMultiSchema);
+    return table.foreignKeys
+      .map((fk): DiagramRelationship | null => {
+        let targetTable: DiagramTable | undefined;
+        if (fk.ref_schema) {
+          // Specified ref_schema: only match target within that schema
+          targetTable = tableBySchemaAndName.get(`${fk.ref_schema}\0${fk.ref_table}`);
+        } else if (table.schema) {
+          // No ref_schema but source table has schema: only match target in the same schema
+          targetTable = tableBySchemaAndName.get(`${table.schema}\0${fk.ref_table}`);
+          // In multi-schema mode, do not blindly fall back across other schemas
+        } else if (!isMultiSchema) {
+          // Single-schema mode without schema qualification: fall back to bare table name
+          targetTable = tableByName.get(fk.ref_table);
+        }
+        if (!targetTable) return null;
 
-  const custom = customRelationships
-    .filter((relationship) => visibleTableNames.has(relationship.sourceTable) && visibleTableNames.has(relationship.targetTable))
-    .filter((relationship) => columnExists(tableMap.get(relationship.sourceTable), relationship.sourceColumn) && columnExists(tableMap.get(relationship.targetTable), relationship.targetColumn))
-    .map((relationship) => ({
-      ...relationship,
-      kind: "custom" as const,
-    }));
+        const targetId = diagramTableId(targetTable, isMultiSchema);
+        return {
+          id: relationshipId(sourceId, fk, targetId),
+          name: fk.name,
+          kind: "foreign-key" as const,
+          sourceTable: sourceId,
+          sourceColumn: fk.column,
+          targetTable: targetId,
+          targetColumn: fk.ref_column,
+          sourceCardinality: foreignKeySourceCardinality(table, fk),
+          targetCardinality: "1" as const,
+        };
+      })
+      .filter((rel): rel is DiagramRelationship => rel !== null);
+  });
+
+  // Custom relationships may reference tables by plain name or composite `schema.table` id
+  // (match panel uses the latter); normalize both to the canvas node id.
+  const custom = customRelationships.flatMap((relationship) => {
+    const sourceTable = tableIdMap.get(relationship.sourceTable) ?? tables.find((t) => t.name === relationship.sourceTable);
+    const targetTable = tableIdMap.get(relationship.targetTable) ?? tables.find((t) => t.name === relationship.targetTable);
+    if (!sourceTable || !targetTable) return [];
+    if (!columnExists(sourceTable, relationship.sourceColumn) || !columnExists(targetTable, relationship.targetColumn)) return [];
+    return [
+      {
+        ...relationship,
+        sourceTable: diagramTableId(sourceTable, isMultiSchema),
+        targetTable: diagramTableId(targetTable, isMultiSchema),
+        kind: "custom" as const,
+      },
+    ];
+  });
 
   return deduplicateRelationships([...foreignKeyRelationships, ...custom]);
 }
@@ -265,13 +303,15 @@ export function filterDiagramTables(tables: DiagramTable[], query: string): Diag
   if (!q) return tables;
 
   return tables.filter((table) => {
+    if (table.schema?.toLowerCase().includes(q)) return true;
     if (table.name.toLowerCase().includes(q)) return true;
+    if (table.schema && `${table.schema}.${table.name}`.toLowerCase().includes(q)) return true;
     if (table.columns.some((column) => column.name.toLowerCase().includes(q) || column.data_type.toLowerCase().includes(q))) return true;
-    return table.foreignKeys.some((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q));
+    return table.foreignKeys.some((fk) => fk.name.toLowerCase().includes(q) || fk.column.toLowerCase().includes(q) || fk.ref_table.toLowerCase().includes(q) || fk.ref_column.toLowerCase().includes(q) || (fk.ref_schema && fk.ref_schema.toLowerCase().includes(q)));
   });
 }
 
-export function layoutDiagramTables(tables: Pick<DiagramTable, "name" | "columns">[], options: DiagramLayoutOptions = {}): Record<string, DiagramPosition> {
+export function layoutDiagramTables(tables: (Pick<DiagramTable, "name" | "columns"> & { schema?: string })[], options: DiagramLayoutOptions = {}, isMultiSchema = false): Record<string, DiagramPosition> {
   const columnsPerRow = Math.max(1, options.columnsPerRow ?? Math.ceil(Math.sqrt(Math.max(tables.length, 1))));
   const cardWidth = options.cardWidth ?? 260;
   const gapX = options.gapX ?? 56;
@@ -291,10 +331,14 @@ export function layoutDiagramTables(tables: Pick<DiagramTable, "name" | "columns
     const rowTables = tables.slice(start, start + columnsPerRow);
     const rowContentHeight = Math.max(...rowTables.map(measureHeight));
     rowTables.forEach((table, col) => {
-      positions[table.name] = {
+      const pos = {
         x: margin + col * (cardWidth + gapX),
         y,
       };
+      positions[table.name] = pos;
+      if (isMultiSchema && table.schema) {
+        positions[`${table.schema}.${table.name}`] = pos;
+      }
     });
     y += rowContentHeight + gapY;
   }

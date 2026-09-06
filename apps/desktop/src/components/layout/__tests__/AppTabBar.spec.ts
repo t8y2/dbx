@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const tabBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");
+const groupTabBarSource = readFileSync(new URL("../EditorGroupTabBar.vue", import.meta.url), "utf8");
 
 function sourceBetween(start: string, end: string): string {
   const startIndex = tabBarSource.indexOf(start);
@@ -10,6 +11,27 @@ function sourceBetween(start: string, end: string): string {
   expect(endIndex).toBeGreaterThan(startIndex);
   return tabBarSource.slice(startIndex, endIndex);
 }
+
+describe("AppTabBar single production path", () => {
+  it("no longer renders the regular or pinned tab strip", () => {
+    expect(tabBarSource).not.toContain("hideRegularTabs");
+    expect(tabBarSource).not.toContain("regularTabs");
+    expect(tabBarSource).not.toContain("fixedTabsContainerRef");
+    expect(tabBarSource).not.toContain("useTabDrag");
+    expect(tabBarSource).not.toContain("createRenameDuplicateTabItems");
+    expect(groupTabBarSource).toContain("createRenameDuplicateTabItems");
+  });
+
+  it("keeps special pages and the close-confirm dialog as its only surfaces", () => {
+    expect(tabBarSource).toContain("getSpecialRegularTabMenuItems('settings')");
+    expect(tabBarSource).toContain("getSpecialRegularTabMenuItems('driverStore')");
+    expect(tabBarSource).toContain(':open="queryStore.showCloseConfirm"');
+  });
+
+  it("scopes the close-other shortcut to the active tab's owner group", () => {
+    expect(tabBarSource).toContain("closeOtherTabsInGroup(ownerGroup.id, activeTabId)");
+  });
+});
 
 describe("AppTabBar close confirmation layout", () => {
   it("allows long unbroken tab titles to shrink and wrap inside the dialog", () => {
@@ -25,140 +47,125 @@ describe("AppTabBar close confirmation layout", () => {
     expect(tabBarSource).toContain('@click="handleSaveAndClose"');
     expect(tabBarSource).toContain('@click="handleCancelClose"');
   });
-});
 
-describe("AppTabBar HBase presentation", () => {
-  it("uses the table icon in regular, pinned, and overflow tab surfaces", () => {
-    expect(tabBarSource).toContain('if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "redis" || tab.mode === "hbase") return Table2;');
-    expect(tabBarSource.match(/tab\.mode === 'hbase'/g)).toHaveLength(2);
-    expect(tabBarSource).toContain('tab.mode === "hbase" || tab.mode === "structure"');
-  });
-});
-
-describe("AppTabBar object browser presentation", () => {
-  it("uses matching icons and colors for object and database browser tabs", () => {
-    expect(tabBarSource).toContain('if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";');
-    expect(tabBarSource).toContain('if (tab.mode === "databases") return Database;');
-    expect(tabBarSource).toContain('if (tab.mode === "objects") return TableProperties;');
-    expect(tabBarSource.match(/tab\.mode === 'databases'/g)).toHaveLength(2);
-    expect(tabBarSource.match(/:class="tabIconClass\(tab\)"/g)).toHaveLength(2);
-    expect(tabBarSource.match(/tabMenuIcon\(tab\).*tabIconClass\(tab\)/g)).toHaveLength(2);
-  });
-});
-
-describe("AppTabBar locate-in-sidebar action", () => {
-  it("emits the exact right-clicked tab only when it has a sidebar target", () => {
-    const menu = sourceBetween("function getTabMenuItems", "function handleSaveAndClose");
-
-    expect(tabBarSource).toContain('"locate-tab": [tab: QueryTab];');
-    expect(menu).toMatch(/label: t\("sidebar\.locateActiveTab"\),\s*action: \(\) => emit\("locate-tab", tab\),\s*icon: Crosshair,\s*visible: !!activeTabSidebarTarget\(tab\)/);
-    expect(menu).not.toContain("activateTab(tab.id)");
-  });
-
-  it("leaves settings, driver, and existing regular-tab menu actions unchanged", () => {
-    const specialMenu = sourceBetween("function getSpecialRegularTabMenuItems", "function getTabMenuItems");
-    const regularMenu = sourceBetween("function getTabMenuItems", "function handleSaveAndClose");
-
-    expect(specialMenu).not.toContain('t("sidebar.locateActiveTab")');
-    expect(regularMenu).toContain('label: t("contextMenu.copyName")');
-    expect(regularMenu).toContain("action: () => queryStore.togglePinnedTab(tab.id)");
-    expect(regularMenu).toContain("action: () => queryStore.closeTab(tab.id)");
-  });
-});
-
-describe("AppTabBar Zen mode interaction", () => {
-  it("switches Zen mode for data tabs while preserving query-tab renaming", () => {
-    const handler = sourceBetween("function handleTabDoubleClick", "function handleTabMouseDown");
-
-    expect(tabBarSource).toContain('"toggle-zen-mode": [];');
-    expect(handler).toContain('if (tab.mode === "data") {');
-    expect(handler).toContain('emit("toggle-zen-mode");');
-    expect(handler).toContain("startRenameTab(tab);");
-    expect(handler).toContain("event.target instanceof Element && event.target.closest(\"button, input, [role='button']\")");
-    expect(tabBarSource.match(/@dblclick="handleTabDoubleClick\(tab, \$event\)"/g)).toHaveLength(2);
-  });
-});
-
-describe("AppTabBar right-side close action", () => {
-  it("places the action after close-other and disables it when the target has no tabs to its right", () => {
-    expect(tabBarSource).toContain('label: t("contextMenu.closeRightTabs")');
-    expect(tabBarSource).toContain("action: () => closeTabsToRightFromTab(tab)");
-    expect(tabBarSource).toContain("disabled: !hasTabsToRight(tab)");
-
-    const closeOtherPositions = [...tabBarSource.matchAll(/label: closeOtherLabel,/g)].map((match) => match.index);
-    const closeRightPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeRightTabs"\),/g)].map((match) => match.index);
-    const closeAllPositions = [...tabBarSource.matchAll(/label: closeAllLabel,/g)].map((match) => match.index);
-    expect(closeOtherPositions).toHaveLength(2);
-    expect(closeRightPositions).toHaveLength(2);
-    expect(closeAllPositions).toHaveLength(2);
-    closeRightPositions.forEach((position, index) => {
-      expect(position).toBeGreaterThan(closeOtherPositions[index]);
-      expect(position).toBeLessThan(closeAllPositions[index]);
-    });
-  });
-
-  it("waits for query tab confirmation before closing special surfaces", () => {
-    expect(tabBarSource).toMatch(/queryStore\.closeTabsByIds\(tabsToClose, finalActiveTabId, \(\) => \{[\s\S]*closeSpecialRegularSurfaces\(\);/);
-    expect(tabBarSource).toContain("if (shouldActivateTarget) activateTab(tab.id)");
-  });
-
-  it("reactivates settings after closing an active driver store to its right", () => {
-    expect(tabBarSource).toContain("const shouldActivateSettings = !!props.driverStoreActive");
-    expect(tabBarSource).toMatch(/emit\("close-driver-store"\);\s*if \(shouldActivateSettings\) emit\("activate-settings-page"\);/);
-  });
-});
-
-describe("AppTabBar left-side close action", () => {
-  it("places the action after close-other, before close-right, and disables it when the target has no tabs to its left", () => {
-    expect(tabBarSource).toContain('label: t("contextMenu.closeLeftTabs")');
-    expect(tabBarSource).toContain("action: () => closeTabsToLeftFromTab(tab)");
-    expect(tabBarSource).toContain("disabled: !hasTabsToLeft(tab)");
-
-    const closeOtherPositions = [...tabBarSource.matchAll(/label: closeOtherLabel,/g)].map((match) => match.index);
-    const closeLeftPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeLeftTabs"\),/g)].map((match) => match.index);
-    const closeRightPositions = [...tabBarSource.matchAll(/label: t\("contextMenu\.closeRightTabs"\),/g)].map((match) => match.index);
-    expect(closeOtherPositions).toHaveLength(2);
-    // The special-surface menu has no left-side action: settings and the
-    // driver store sit at the rightmost end of the tab bar, so nothing can be
-    // to the left of them. Only the regular/pinned tab menu gets the item.
-    expect(closeLeftPositions).toHaveLength(1);
-    expect(closeRightPositions).toHaveLength(2);
-    const closeLeftPosition = closeLeftPositions[0];
-    expect(closeLeftPosition).toBeGreaterThan(closeOtherPositions[1]);
-    expect(closeLeftPosition).toBeLessThan(closeRightPositions[1]);
+  it("shows the dirty tab list using the shared tab title presentation", () => {
+    const listBlock = sourceBetween('v-for="tab in closeConfirmDirtyTabs"', "</PopoverContent>");
+    expect(listBlock).toContain("tabDisplayTitle(tab, t)");
   });
 });
 
 describe("AppTabBar special page selection", () => {
-  it("shows the active settings or driver-manager tab with the same ring used by regular tabs", () => {
-    expect(tabBarSource).toContain("function specialTabActiveStyle(active: boolean | undefined)");
-    expect(tabBarSource).toContain('return isClassicLayout.value ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : { borderColor: "var(--ring)" };');
-    expect(tabBarSource).toContain(':style="specialTabActiveStyle(settingsPageActive)"');
-    expect(tabBarSource).toContain(':style="specialTabActiveStyle(driverStoreActive)"');
+  it("renders settings and driver store as app-level pills outside the editor groups", () => {
+    expect(tabBarSource).toContain("data-settings-page-tab");
+    expect(tabBarSource).toContain("data-driver-store-tab");
+    expect(tabBarSource).toContain("@click=\"emit('activate-settings-page')\"");
+    expect(tabBarSource).toContain("@click=\"emit('activate-driver-store')\"");
+    expect(tabBarSource).toContain('t("toolbar.driverManager")');
+  });
+
+  it("keeps the driver update badge on the driver store pill", () => {
+    expect(tabBarSource).toContain("agentDriverUpdateCount");
+    expect(tabBarSource).toContain("aria-label=\"t('toolbar.updatableDriverCount')\"");
   });
 });
 
-describe("AppTabBar overflow search", () => {
-  it("filters every open tab by its display and source titles", () => {
-    expect(tabBarSource).toContain('const tabSearchQuery = ref("");');
-    expect(tabBarSource).toContain("const filteredOpenTabs = computed(() => {");
-    expect(tabBarSource).toContain("return displayedTabs.value.filter((tab) => tabMatchesSearch(tab, query));");
-    expect(tabBarSource).toContain("return tabTitleText(tab).toLocaleLowerCase().includes(query) || tab.title.toLocaleLowerCase().includes(query) || connectionName.toLocaleLowerCase().includes(query);");
+describe("AppTabBar layout-aware special tabs", () => {
+  it("mirrors the classic flat tab presentation instead of pills in the classic layout", () => {
+    // 经典布局下普通标签是全高 + 右边框分隔的扁平段；特殊标签必须跟随同一呈现，
+    // 不能永远是分离布局的圆角 pill（v0.6.3 分栏重构后的样式漂移）。
+    expect(tabBarSource).toMatch(/isClassicLayout = computed\(\(\) => settingsStore\.editorSettings\.appLayout === "classic"\)/);
+    expect(tabBarSource).toContain('isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2"');
+    expect(tabBarSource).toContain('isClassicLayout.value ? "h-full items-center overflow-x-auto" : "h-full items-center gap-1.5 overflow-x-auto py-1.5"');
+    expect(tabBarSource).toContain('isClassicLayout.value ? "bg-muted" : `bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`');
+    expect(tabBarSource).toContain('["h-full border-r border-border/80 font-medium dark:border-border/45", active ? "bg-background text-foreground" : "text-foreground/70 hover:text-foreground/90"]');
+    expect(tabBarSource).toMatch(/h-7 \$\{widthClass\} rounded-md border/);
   });
 
-  it("provides the same focused search control and empty state in both overflow menus", () => {
-    expect(tabBarSource.match(/<Input data-tab-search-input=/g)).toHaveLength(2);
-    expect(tabBarSource.match(/v-for="tab in filteredOpenTabs"/g)).toHaveLength(2);
-    expect(tabBarSource.match(/tabs\.noMatchingTabs/g)).toHaveLength(2);
-    expect(tabBarSource).toContain('[data-tab-search-input="regular"]');
-    expect(tabBarSource).toContain('[data-tab-search-input="fixed"]');
+  it("keeps both special tabs on the shared presentation helper", () => {
+    expect(tabBarSource).toContain("specialTabClass(!!settingsPageActive, 'min-w-36')");
+    expect(tabBarSource).toContain("specialTabClass(!!driverStoreActive, 'min-w-38')");
+    // 经典布局激活的特殊标签与普通标签一样显示 inset 下划线指示条。
+    expect(tabBarSource).toContain('return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;');
+    expect(tabBarSource).toContain(':style="specialTabColorStyle(!!settingsPageActive)"');
+    expect(tabBarSource).toContain(':style="specialTabColorStyle(!!driverStoreActive)"');
   });
 });
 
-describe("AppTabBar query execution status", () => {
-  it("replaces the icon through one shared status component in every tab surface", () => {
-    expect(tabBarSource).toContain('import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";');
-    expect(tabBarSource.match(/<TabExecutionStatus :tab="tab">/g)).toHaveLength(4);
-    expect(tabBarSource.match(/<\/TabExecutionStatus>/g)).toHaveLength(4);
+describe("AppTabBar return tabs while a special page is active", () => {
+  // 特殊页激活时工作区被整体隐藏，分组标签条随之消失；必须在特殊条里重渲
+  // 染打开的标签，否则用户没有任何鼠标路径切回编辑器（v0.6.4 回归）。
+  // 未激活的特殊页不再渲染独立条，由分组标签条末尾承载（见 EditorGroupTabBar）。
+  it("renders the app-level strip only while a special page is active", () => {
+    expect(tabBarSource).toContain('v-if="driverStoreActive || settingsPageActive"');
+  });
+
+  it("re-renders the open tabs only while settings or the driver store is active", () => {
+    expect(tabBarSource).toContain("(props.settingsPageActive || props.driverStoreActive ? queryStore.tabs : [])");
+    expect(tabBarSource).toContain('v-for="tab in overlayReturnTabs"');
+    expect(tabBarSource).toContain("data-return-tab");
+    expect(tabBarSource).toContain("@click=\"emit('activate-tab', tab.id)\"");
+    // 普通标签在前，设置/驱动管理追加在末尾（v0.6.2 的顺序；新开的特殊页
+    // 不应插到最前面）。
+    const indices = ['v-for="tab in overlayReturnTabs"', "data-settings-page-tab", "data-driver-store-tab"].map((marker) => tabBarSource.indexOf(marker));
+    expect(indices.every((index) => index >= 0)).toBe(true);
+    expect([...indices].sort((a, b) => a - b)).toEqual(indices);
+  });
+
+  it("keeps return tabs inactive while the special page owns the surface", () => {
+    // 特殊页激活期间只有一个激活面：返回标签不得保留上一个标签的高亮。
+    expect(tabBarSource).toContain(':class="specialTabClass(false)"');
+    expect(tabBarSource).toContain(':style="tabColorStyle(tab, false, isClassicLayout)"');
+    expect(tabBarSource).toContain('data-active-tab="false"');
+  });
+
+  it("gives return tabs the native mode icon", () => {
+    expect(tabBarSource).toContain(':class="tabIconClass(tab)"');
+    expect(tabBarSource).toContain('<TabModeIcon :tab="tab" class="h-3.5 w-3.5" />');
+  });
+
+  it("keeps return tabs closable with the shared dirty-confirm flow", () => {
+    expect(tabBarSource).toContain('@mousedown.middle.prevent="queryStore.closeTab(tab.id)"');
+    expect(tabBarSource).toContain('@click.stop="queryStore.closeTab(tab.id)"');
+  });
+
+  it("wires the return-tab click to the query-surface activation in App", () => {
+    const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
+    expect(appSource).toContain('@activate-tab="activateQueryTab"');
+    // activateQueryTab flips the special surfaces off and switches to the tab.
+    expect(appSource).toMatch(/function activateQueryTab\(tabId: string\): boolean \{[\s\S]*?activateQuerySurface\(\);/);
+  });
+});
+
+describe("Group strip special page tabs", () => {
+  it("appends open special pages to the focused group strip like v0.6.2", () => {
+    expect(groupTabBarSource).toContain("queryStore.focusedGroupId === props.groupId");
+    expect(groupTabBarSource).toContain("data-settings-page-tab");
+    expect(groupTabBarSource).toContain("data-driver-store-tab");
+    expect(groupTabBarSource).toContain("@click=\"emit('activate-settings')\"");
+    expect(groupTabBarSource).toContain("@click=\"emit('activate-driver-store')\"");
+    expect(groupTabBarSource).toContain('t("toolbar.driverManager")');
+    // 经典布局下的激活下划线与普通标签一致。
+    expect(groupTabBarSource).toContain('return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;');
+  });
+
+  it("wires the group strip through the injected special page actions", () => {
+    const groupSource = readFileSync(new URL("../EditorGroup.vue", import.meta.url), "utf8");
+    expect(groupSource).toContain(':special-page-tabs="toolbar.specialPageTabs.value"');
+    expect(groupSource).toContain('@activate-settings="toolbar.activateSettingsPage()"');
+    expect(groupSource).toContain('@close-driver-store="toolbar.closeDriverStore()"');
+  });
+});
+
+describe("Group tabbar inherited presentation", () => {
+  it("imports the shared tab bar stylesheet so pills, scrollbar, and wrap styles apply", () => {
+    expect(groupTabBarSource).toContain('import "./appTabBar.css"');
+    expect(groupTabBarSource).toContain("app-tab-pill");
+    expect(groupTabBarSource).toContain("app-tab-scrollbar");
+    expect(groupTabBarSource).toContain("app-tab-bar");
+  });
+
+  it("keeps the dirty marker and dirty title styling", () => {
+    expect(groupTabBarSource).toContain("dirty-tab-marker");
+    expect(groupTabBarSource).toContain("dirtyTabTitleStyle");
   });
 });

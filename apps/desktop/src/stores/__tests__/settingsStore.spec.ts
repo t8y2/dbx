@@ -23,6 +23,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ refreshDdlOnOpen: "true" } as any).refreshDdlOnOpen).toBe(false);
   });
 
+  it("keeps table-info drawer pinning disabled unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).tableInfoDrawerPinned).toBe(false);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: true }).tableInfoDrawerPinned).toBe(true);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: false }).tableInfoDrawerPinned).toBe(false);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: "true" } as any).tableInfoDrawerPinned).toBe(false);
+  });
+
   it("enables SQL variable substitution by default and only preserves booleans", () => {
     expect(normalizeEditorSettings({}).sqlVariableSubstitutionEnabled).toBe(true);
     expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: true }).sqlVariableSubstitutionEnabled).toBe(true);
@@ -38,11 +45,34 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ dataGridFilterEditorView: "invalid" } as any).dataGridFilterEditorView).toBe("quick");
   });
 
+  it("normalizes persisted tab group names and colors", () => {
+    expect(normalizeEditorSettings({}).tabGroupCustomizations).toEqual({});
+    expect(
+      normalizeEditorSettings({
+        tabGroupCustomizations: {
+          "connection:local": { name: " Local services ", color: "#E11D48" },
+          "database-type:mysql": { name: "", color: "invalid" },
+          broken: "value",
+        },
+      } as any).tabGroupCustomizations,
+    ).toEqual({
+      "connection:local": { name: "Local services", color: "#e11d48" },
+    });
+  });
+
   it("defaults and bounds the persisted text filter panel height", () => {
     expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 20 }).dataGridTextFilterPanelHeight).toBe(96);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 900 }).dataGridTextFilterPanelHeight).toBe(420);
+  });
+
+  it("defaults and bounds the persisted local filter popover width", () => {
+    expect(normalizeEditorSettings({}).localFilterPopoverWidth).toBe(360);
+    expect(normalizeEditorSettings({ localFilterPopoverWidth: 412.6 }).localFilterPopoverWidth).toBe(413);
+    expect(normalizeEditorSettings({ localFilterPopoverWidth: 120 }).localFilterPopoverWidth).toBe(240);
+    expect(normalizeEditorSettings({ localFilterPopoverWidth: 5000 }).localFilterPopoverWidth).toBe(900);
+    expect(normalizeEditorSettings({ localFilterPopoverWidth: "wide" }).localFilterPopoverWidth).toBe(360);
   });
 
   it("keeps data type colors disabled by default and preserves an explicit opt-in", () => {
@@ -486,6 +516,51 @@ describe("normalizeMcpGlobalPolicy", () => {
     expect(normalizeMcpGlobalPolicy({ allowedConnectionIds: [] }).allowedConnectionIds).toEqual([]);
   });
 
+  it("keeps only selected-database execution policies and normalizes their names", () => {
+    const policy = normalizeMcpGlobalPolicy({
+      connectionPolicies: [
+        {
+          connectionId: " connection-1 ",
+          readOnly: false,
+          allowDangerousSql: true,
+          executionModeConfigured: true,
+          executionModePolicyVersion: 1,
+          databaseScope: "selected",
+          allowedDatabases: [" reporting ", "operations"],
+          databasePolicies: [
+            { databaseName: " reporting ", readOnly: true, allowDangerousSql: true },
+            { databaseName: "outside-scope", readOnly: true, allowDangerousSql: false },
+          ],
+        },
+      ],
+    });
+
+    expect(policy.connectionPolicies[0]).toMatchObject({
+      connectionId: "connection-1",
+      executionModePolicyVersion: 1,
+      allowedDatabases: ["reporting", "operations"],
+      databasePolicies: [{ databaseName: "reporting", readOnly: true, allowDangerousSql: false }],
+    });
+  });
+
+  it("leaves legacy connection rules unmarked until the user edits execution permissions", () => {
+    const policy = normalizeMcpGlobalPolicy({
+      connectionPolicies: [
+        {
+          connectionId: "legacy",
+          readOnly: false,
+          allowDangerousSql: true,
+          executionModeConfigured: true,
+          databaseScope: "all",
+          allowedDatabases: [],
+          databasePolicies: [],
+        } as any,
+      ],
+    });
+
+    expect(policy.connectionPolicies[0].executionModePolicyVersion).toBeNull();
+  });
+
   it("round-trips queryTimeoutSecs null, undefined and positive numbers", () => {
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: null }).queryTimeoutSecs).toBeNull();
     expect(normalizeMcpGlobalPolicy({ queryTimeoutSecs: undefined } as any).queryTimeoutSecs).toBeNull();
@@ -623,6 +698,12 @@ describe("settingsStore AI API key normalization", () => {
 
   it("trims API keys when normalizing loaded configurations", () => {
     expect(normalizeAiConfig({ provider: "openai", apiKey: "  secret  " }).apiKey).toBe("secret");
+  });
+  it("preserves and bounds a configured maximum output token budget", () => {
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 32768 }).maxOutputTokens).toBe(32768);
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 1_500_000 }).maxOutputTokens).toBe(1_000_000);
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: 128 }).maxOutputTokens).toBeUndefined();
+    expect(normalizeAiConfig({ provider: "deepseek", maxOutputTokens: Number.NaN }).maxOutputTokens).toBeUndefined();
   });
 
   it("provides Kimi defaults and recognizes legacy Kimi configurations", () => {
@@ -841,6 +922,40 @@ describe("settingsStore persisted settings initialization", () => {
 
     expect(store.editorSettings.openDataTabsNextToActive).toBe(false);
     expect(saveEditorSettings).toHaveBeenLastCalledWith(expect.objectContaining({ openDataTabsNextToActive: false }));
+  });
+
+  it("persists tab placement, grouping, sorting, and group customizations across restart", async () => {
+    let persistedSettings: Record<string, unknown> = {};
+    const loadEditorSettings = vi.fn(async () => JSON.parse(JSON.stringify(persistedSettings)));
+    const saveEditorSettings = vi.fn(async (settings: Record<string, unknown>) => {
+      persistedSettings = JSON.parse(JSON.stringify(settings));
+    });
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const firstStore = useSettingsStore();
+    await firstStore.initEditorSettings();
+    await firstStore.updateEditorSettingsAndPersist({
+      tabPlacement: "left",
+      tabGroupMode: "connection",
+      tabSortMode: "title-asc",
+      tabGroupCustomizations: {
+        "connection:local": { name: "Local services", color: "#2563eb" },
+      },
+    });
+
+    setActivePinia(createPinia());
+    const restartedStore = useSettingsStore();
+    await restartedStore.initEditorSettings();
+
+    expect(restartedStore.editorSettings).toMatchObject({
+      tabPlacement: "left",
+      tabGroupMode: "connection",
+      tabSortMode: "title-asc",
+      tabGroupCustomizations: {
+        "connection:local": { name: "Local services", color: "#2563eb" },
+      },
+    });
   });
 
   it("loads, persists, and reloads the cell detail button visibility", async () => {

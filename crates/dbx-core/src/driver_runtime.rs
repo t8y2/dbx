@@ -147,7 +147,7 @@ async fn collect_runtime_seeds(state: &AppState) -> Vec<RuntimeSeed> {
     }
 
     let configs = state.configs.read().await;
-    let connections = state.connections.read().await;
+    let connections = state.connection_pools_snapshot().await;
     for (pool_key, pool) in connections.iter() {
         match pool {
             PoolKind::Agent(client) => {

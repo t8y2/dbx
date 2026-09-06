@@ -1,0 +1,123 @@
+---
+title: SQL Dosyası Çalıştırma
+description: Bir veya daha fazla SQL dosyasını sırayla önizleyip çalıştırın; dosya başına istatistik, ifade ilerlemesi ve hata bildirimi alın.
+---
+
+SQL Dosyası Çalıştırma; başlangıç betiklerini, veritabanı dışa aktarımlarını, veri yamalarını ve göçleri çalıştırır. DBX önce kısaltılmış bir önizleme gösterir, ardından dosyaları seçim sırasına, ifadeleri betik sırasına göre çalıştırır.
+
+<Callout type="warn">SQL dosyaları çok miktarda veri ve şema oluşturabilir, değiştirebilir ya da kaldırabilir. Önizleme dosyanın tamamı değildir ve bir betiğin güvenli olduğunu kanıtlayamaz. Çalıştırmadan önce hedef bağlantıyı, veritabanını, dosya sırasını ve kaynağı doğrulayın.</Callout>
+
+## Masaüstü ve Docker/Web
+
+| Çalışma zamanı | Dosya konumu ve işlenişi |
+| --- | --- |
+| Masaüstü | Bir veya daha fazla yerel `.sql` dosyasını doğrudan seçer ve yerel dosya adı ya da yol bilgisini gösterebilir |
+| Docker/Web | Tarayıcıdan seçilen dosyaları geçici DBX sunucu deposuna yükler; arayüz sunucudaki UUID yolları yerine seçili adları gösterir |
+
+Docker/Web'de okuma ve çalıştırma sunucuda gerçekleşir. Geçici kaynaklar işlemden sonra serbest bırakılır. Sunucu, tarayıcının çalıştığı bilgisayardaki rastgele yolları doğrudan açamaz.
+
+## İş Akışı
+
+<Steps>
+  <Step>
+    ### Bir veya Daha Fazla Dosya Seçin
+
+    Dosyalar seçim sırasında kalır. Çoklu dosya modu bir yan liste gösterir; önizleme bölmesini değiştirmek için bir öğe seçin.
+
+  </Step>
+  <Step>
+    ### Önizlemeyi ve Dosya Ayrıntılarını İnceleyin
+
+    Her dosya adını, boyutunu, önizleme satırlarını ve kısaltılma durumunu bildirir. Büyük dosyalarda yalnızca sınırlı bir önizleme okunur; çalıştırma yine de içeriğin tamamını akış hâlinde işler.
+
+  </Step>
+  <Step>
+    ### Bağlantı ve Veritabanı Seçin
+
+    Normalde bir hedef veritabanı gereklidir. Betik, örneğin daha önce tanınan bir `USE` ile veritabanı bağlamını kendisi kuruyorsa, DBX desteklenen yollarda önceden seçilmiş bir veritabanı olmadan da çalıştırmaya izin verebilir.
+
+  </Step>
+  <Step>
+    ### Hata Politikasını Seçin ve Onaylayın
+
+    Çalıştırma varsayılan olarak ilk hatada durur. Hatada devam et seçeneği hataları kaydeder ve sonraki ifadelere ve dosyalara geçer. Korumalı üretim bağlamları, çalıştırmadan önce yeni bir onay ister.
+
+  </Step>
+  <Step>
+    ### Çalıştırın ve Sonuçları İnceleyin
+
+    İlerleme; geçerli dosyayı, ifade dizinini, başarı ve hata sayılarını, etkilenen satırları, geçen süreyi, ifade özetini ve hatayı içerir. Çoklu dosya çalıştırmaları, dosya başına istatistikler ve toplamlarla biter.
+
+  </Step>
+</Steps>
+
+## Çoklu Dosya Oturum Anlamı
+
+Seçili dosyalar tek bir yürütme görevi oluşturur ve liste sırasına göre çalışır. MySQL uyumlu yollar, toplu işin tamamında sabitlenmiş tek bir bağlantıyı yeniden kullanır; bu yüzden önceki bir dosyanın kurduğu durum sonraki dosyaları etkileyebilir:
+
+- `USE database`
+- Geçici tablolar
+- Oturum değişkenleri ve ayarları
+- Açık işlemler
+
+Bu, bölünmüş başlangıç ve geri yükleme betiklerini destekler ama sırayı önemli kılar. Oturum durumu birbirine sızabilecekse ilgisiz betikleri aynı toplu işte çalıştırmayın.
+
+## İfade Bölme ve İçe Aktarma Yardımcıları
+
+DBX dosyaları akış olarak okur ve her noktalı virgülde bölmek yerine veritabanı farkındalıklı bölme kullanır:
+
+- Dizelerin, satır yorumlarının ve blok yorumlarının içindeki noktalı virgüller bir ifadeyi sonlandırmaz
+- PostgreSQL dolar işaretiyle tırnaklanmış işlev gövdeleri bozulmaz
+- Tek başına duran SQL Server `GO` satırları toplu işleri böler
+- MySQL yordamlarındaki `DELIMITER` iş akışları tanınır
+- MySQL çalıştırılabilir yorumları uyumlu hedefler için açılır, diğer hedefler için atlanır
+- `ENABLE/DISABLE KEYS`, `LOCK/UNLOCK TABLES` ve belirli oturum durumu geri yükleme yönergeleri gibi içe aktarma yardımcıları, yürütücü politikasına göre işlenir ya da atlanır
+
+Veritabanı lehçeleri ve betik üreticileri birbirinden çok farklıdır. Karmaşık betikleri, özellikle özel ayırıcılar, yalnızca istemcide çalışan komutlar ya da yönetim araçlarının ürettiği meta komutlar içerenleri önce test edin.
+
+## Hata Politikası
+
+### Hatada Dur
+
+Varsayılan davranış, ilk başarısız ifadeden sonra görevi sonlandırır. DBX tamamlanan istatistikleri, başarısız ifadenin özetini ve veritabanı hatasını saklar.
+
+### Hatada Devam Et
+
+Etkinleştirildiğinde DBX bir hata kaydeder ve devam eder. Çoklu dosya görevleri ayrıca sonraki dosyaya geçer ve her dosya için başarı sayısını, hata sayısını, etkilenen satırları ve geçen süreyi bildirir.
+
+<Callout type="info">Hatada devam et yalnızca görev denetim akışını değiştirir. İşlem durumunu onarmaz. Bazı veritabanları bir işlem hatasından sonra açık bir rollback ister, bu yüzden sonraki ifadeler de başarısız olmayı sürdürebilir.</Callout>
+
+## İptal ve İşlemler
+
+İptal, sonraki ifadeleri durdurur; ancak zaten gönderilmiş ya da uygulanmış ifadeler otomatik olarak geri alınmaz. Betiğin atomik olması gerekiyorsa işlemleri açıkça yönetin ve hedef motorun, DDL'in ve içe aktarma ifadelerinin istediğiniz anlamı sağladığını doğrulayın.
+
+Ortak bir çoklu dosya oturumunda açık bir işlem dosya sınırlarını aşarak sürebilir. İletişim kutusunu kapatmanın commit ya da rollback yapacağına güvenmek yerine açık `BEGIN`, `COMMIT` veya `ROLLBACK` ifadeleri kullanın.
+
+## Veritabanı Kapsamı
+
+Bu işlem, sürücünün `sqlFileExecution` yeteneğini izler. SQL odaklı sürücülerin çoğu bunu etkinleştirir. Redis, MongoDB, arama, vektör, HBase, yapılandırma merkezi ve mesaj kuyruğu çalışma alanları ilişkisel SQL dosyalarını çalıştırmaz.
+
+Sorgu çalıştırma desteği, her istemci betik diliyle uyumluluğu garanti etmez. `psql`, `mysql`, `sqlcmd` ya da başka bir istemciye özgü meta komutların, veritabanı sunucusunun doğrudan kabul ettiği SQL'e dönüştürülmesi gerekebilir.
+
+## Çalıştırmadan Önce
+
+- Dosya sırasını ve veritabanı bağlamını doğrulayın
+- Önizlemelerin kısaltılıp kısaltılmadığını denetleyin ve dosyaların tamamını bir düzenleyicide inceleyin
+- `DROP`, `TRUNCATE`, koşulsuz `UPDATE` / `DELETE`, yetki değişiklikleri ya da yapılandırma değişikliklerini arayın
+- Hatada devam etmenin kritik bir hatayı gizleyip gizlemeyeceğine karar verin
+- Hedefteki salt okunur ve üretim korumasını denetleyin
+- Uygun olduğunda önce bir [Veritabanı Dışa Aktarma](/tr/docs/database-export) ya da [Veritabanı Yedekleme](/tr/docs/database-backup) yapın
+
+## İlgili Özellikler
+
+<Cards>
+  <Card title="Veritabanı Dışa Aktarma" href="/tr/docs/database-export">
+    Yapı, veri ve nesne SQL dosyaları üretin.
+  </Card>
+  <Card title="Veritabanı Yedekleme" href="/tr/docs/database-backup">
+    Masaüstü'nde MySQL ve PostgreSQL yedeklerini zamanlayın.
+  </Card>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">
+    Çalıştırma öncesi onayı, salt okunur korumayı ve yetki sınırlarını öğrenin.
+  </Card>
+</Cards>

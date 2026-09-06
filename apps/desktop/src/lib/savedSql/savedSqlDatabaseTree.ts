@@ -71,7 +71,9 @@ export function buildDatabaseSavedSqlRootNode(databaseNode: Pick<TreeNode, "id" 
     connectionId: databaseNode.connectionId,
     catalog: databaseNode.catalog,
     database: databaseNode.database,
-    isExpanded: existingRoot?.isExpanded ?? true,
+    // Default collapsed: opening a connection should not expand the Queries
+    // node until the user asks for it; an existing node's state is preserved.
+    isExpanded: existingRoot?.isExpanded ?? false,
     children: savedSqlFilesForDatabase(source, {
       connectionId: databaseNode.connectionId,
       catalog: databaseNode.catalog,

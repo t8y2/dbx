@@ -123,10 +123,11 @@ describe("MCP policy settings state", () => {
     expect(tabsSource).toContain("overscroll-x-contain");
     expect(tabsSource).not.toContain("flex-wrap");
     expect(tabsSource).not.toContain("grid-cols-");
-    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(12);
+    expect(tabsSource.match(/flex-none shrink-0/g)).toHaveLength(13);
     expect(tabsSource).toContain('<TabsTrigger value="deepseek-harness"');
     expect(tabsSource).toContain('<TabsTrigger value="codebuddy"');
     expect(tabsSource).toContain('<TabsTrigger value="zcode"');
+    expect(tabsSource).toContain('<TabsTrigger value="qoder"');
     expect(tabsSource).not.toContain("min-w-0 px-");
 
     const codeBuddyStart = settingsDialogSource.indexOf('<TabsContent value="codebuddy"', tabsEnd);
@@ -148,6 +149,16 @@ describe("MCP policy settings state", () => {
     expect(zCodeSource).toContain("settings.mcpZCodeConfigPath");
     expect(zCodeSource).toContain("mcpJsonRecommendedConfig");
     expect(zCodeSource).toContain("copyMcpText('zcode-config', mcpJsonRecommendedConfig)");
+
+    const qoderStart = settingsDialogSource.indexOf('<TabsContent value="qoder"', tabsEnd);
+    const qoderEnd = settingsDialogSource.indexOf("</TabsContent>", qoderStart);
+    const qoderSource = settingsDialogSource.slice(qoderStart, qoderEnd);
+
+    expect(qoderStart).toBeGreaterThan(tabsEnd);
+    expect(qoderEnd).toBeGreaterThan(qoderStart);
+    expect(qoderSource).toContain("settings.mcpQoderConfigPath");
+    expect(qoderSource).toContain("mcpQoderRecommendedConfig");
+    expect(qoderSource).toContain("copyMcpText('qoder-config', mcpQoderRecommendedConfig)");
   });
 });
 

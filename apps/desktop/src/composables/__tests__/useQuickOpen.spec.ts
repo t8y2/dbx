@@ -115,6 +115,30 @@ describe("useQuickOpen", () => {
       expect(matchQuickOpenText("cardshoplog", label)?.kind).toBe("fuzzy");
     });
 
+    it("matches Chinese table names by pinyin initials (issue #7912)", () => {
+      // Reported: 全局搜索中文表名输入首字母模糊搜索搜不出来
+      expect(matchQuickOpenText("zzj", "总租金")?.kind).toBe("initials");
+      expect(matchQuickOpenText("yhmx", "用户明细")?.kind).toBe("initials");
+    });
+
+    it("matches Chinese table names by a non-contiguous pinyin-initials subsequence", () => {
+      const match = matchQuickOpenText("zj", "总租金");
+      expect(match?.kind).toBe("fuzzy");
+      expect(match?.indices.map((index) => "总租金"[index]).join("")).toBe("总租金".slice(0, 1) + "总租金".slice(2, 3));
+    });
+
+    it("keeps pinyin-initials highlight indices aligned across unmapped supplementary-plane characters", () => {
+      const match = matchQuickOpenText("bx", "𠮷表x");
+      expect(match?.kind).toBe("fuzzy");
+      expect(match?.indices).toEqual([2, 3]);
+    });
+
+    it("prefers a literal prefix match over pinyin-initials for mixed Han+Latin names", () => {
+      const literal = matchQuickOpenText("abc", "abc表");
+      expect(literal?.kind).toBe("prefix");
+      expect(literal?.score).toBeLessThan(250);
+    });
+
     it("puts the exact shop result before prefixed and containing names", () => {
       vi.mocked(useConnectionStore).mockReturnValue({
         connections: [

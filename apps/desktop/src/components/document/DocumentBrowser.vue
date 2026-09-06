@@ -2,7 +2,7 @@
 import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
-import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette } from "@lucide/vue";
+import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -69,6 +69,7 @@ import {
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
 import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import {
@@ -91,6 +92,7 @@ import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibili
 import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
+import { copyToClipboard } from "@/lib/common/clipboard";
 import JsonEditNode from "./JsonEditNode.vue";
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
@@ -109,11 +111,22 @@ const props = defineProps<{
   collection: string;
   databaseType?: DatabaseType;
   tableMeta?: NonNullable<QueryTab["tableMeta"]>;
+  /** Tab id; query conditions are cached per tab and restored on remount. */
+  stateKey?: string;
 }>();
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
 const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
+
+// This component is keyed by tab in ContentArea and unmounted on every tab
+// switch; without restoring from the per-tab cache, coming back to the tab
+// would silently drop the user's filter/sort conditions. Page position only
+// survives for skip-based paging: cursor stores (DynamoDB/Elasticsearch)
+// cannot resume a page without their cursor stacks, and infinite scroll
+// always restarts from the first segment.
+const restoredDocumentBrowserState = props.stateKey ? restoreDocumentBrowserState(props.stateKey) : undefined;
+const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && (documentStoreProviderFor(props.databaseType).kind === "mongodb" || documentStoreProviderFor(props.databaseType).kind === "meilisearch");
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
@@ -134,7 +147,7 @@ const loading = ref(false);
 const documentLoadExecutionId = ref("");
 const documentLoadCancelling = ref(false);
 const documentLoadingElapsedSeconds = ref("0.0");
-const page = ref(0);
+const page = ref(restoresSkipBasedPage ? Math.max(0, Math.trunc(restoredDocumentBrowserState!.page)) : 0);
 const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.tableOpenPageSize));
 const selectedIdx = ref<number | null>(null);
 const editJson = ref("");
@@ -154,8 +167,8 @@ const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
 });
-const filterInput = ref("");
-const sortInput = ref("");
+const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
+const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -283,9 +296,32 @@ type DocumentGridChanges = {
 const documentFilterBuilderOpen = ref(false);
 const documentFilterFieldPopoverOpen = ref<Record<string, boolean>>({});
 const documentFilterFieldSearch = ref<Record<string, string>>({});
-const documentFilterRules = ref<DocumentFilterRule[]>([]);
-const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
+const documentFilterRules = ref<DocumentFilterRule[]>(restoredDocumentBrowserState?.documentFilterRules ?? []);
+const appliedDocumentFilter = ref<Record<string, unknown> | null>(restoredDocumentBrowserState?.appliedDocumentFilter ?? null);
+
+function persistDocumentBrowserState() {
+  if (!props.stateKey) return;
+  saveDocumentBrowserState(props.stateKey, {
+    filterInput: filterInput.value,
+    sortInput: sortInput.value,
+    appliedDocumentFilter: appliedDocumentFilter.value,
+    documentFilterRules: documentFilterRules.value,
+    page: page.value,
+  });
+}
+
+watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], persistDocumentBrowserState, { deep: true });
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
+function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
+  const mappingTypes = elasticsearchFieldTypes.value;
+  return columns.map((column) => {
+    // Elasticsearch metadata fields are not part of an index mapping, but they
+    // are textual identifiers in the document grid just like mapped keywords.
+    if (column === "_id" || column === "_routing" || column === "_type") return "keyword";
+    return mappingTypes.get(column) ?? "";
+  });
+}
+const elasticsearchGridColumnTypes = computed(() => elasticsearchGridColumnTypesFor(lastGridColumns.value));
 const dynamodbTableDescription = ref<DynamoDbTableDescription | null>(null);
 const dynamodbIndexName = ref("__table__");
 const dynamodbPageCursors = ref<Array<string | undefined>>([undefined]);
@@ -394,14 +430,19 @@ function sameGridColumns(left: string[], right: string[]): boolean {
 function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: JsonRecord[], hasTypePreservingCopyDocuments: boolean, append: boolean, kind: DocumentStoreKind) {
   const previousDocumentCount = documents.value.length;
   const combinedDocuments = append ? [...documents.value, ...nextDocuments] : nextDocuments;
-  const nextColumns = combinedDocuments.length > 0 ? documentGridColumns(combinedDocuments) : lastGridColumns.value;
+  // A collection that has never returned any document (as opposed to one that
+  // returned documents before and is now empty) would otherwise keep
+  // `lastGridColumns` at its initial `[]` forever, which the grid reads as
+  // "no query has completed" and renders without a toolbar/refresh button.
+  const hasEstablishedColumns = lastGridColumns.value.length > 0;
+  const nextColumns = combinedDocuments.length > 0 || !hasEstablishedColumns ? documentGridColumns(combinedDocuments) : lastGridColumns.value;
   const canAppendGridRows = append && gridRows.value.length === previousDocumentCount && sameGridColumns(lastGridColumns.value, nextColumns);
 
   documents.value = combinedDocuments;
   copyDocuments.value = append ? [...copyDocuments.value, ...nextCopyDocuments] : nextCopyDocuments;
   mongoCopyDocumentsAvailable.value = append ? mongoCopyDocumentsAvailable.value && hasTypePreservingCopyDocuments : hasTypePreservingCopyDocuments;
 
-  if (combinedDocuments.length > 0) {
+  if (combinedDocuments.length > 0 || !hasEstablishedColumns) {
     lastGridColumns.value = nextColumns;
     lastGridColumnTypes.value = kind === "mongodb" ? mongoDocumentGridColumnTypes(combinedDocuments, nextColumns) : [];
   }
@@ -418,10 +459,11 @@ function commitLoadedDocuments(nextDocuments: JsonRecord[], nextCopyDocuments: J
 
 const gridResult = computed<QueryResult>(() => {
   const docs = documents.value;
+  const columnTypes = documentStoreProvider.value.kind === "elasticsearch" ? elasticsearchGridColumnTypes.value : lastGridColumnTypes.value;
   if (!docs.length) {
     return {
       columns: lastGridColumns.value,
-      column_types: lastGridColumnTypes.value,
+      column_types: columnTypes,
       rows: [],
       affected_rows: 0,
       execution_time_ms: 0,
@@ -431,7 +473,7 @@ const gridResult = computed<QueryResult>(() => {
 
   return {
     columns: lastGridColumns.value,
-    column_types: lastGridColumnTypes.value,
+    column_types: columnTypes,
     rows: gridRows.value,
     mongo_documents: docs,
     mongo_copy_documents: copyDocuments.value,
@@ -512,7 +554,7 @@ async function exportAllDocumentStoreDocuments(onProgress?: (info: { rowsExporte
 
   const result = mongoDocumentsToQueryResult(exportedDocuments, performance.now() - exportStartedAt, totalRows ?? exportedDocuments.length, exportedCopyDocuments, totalRows !== null);
   if (result.columns.length === 0) result.columns = gridResult.value.columns;
-  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : undefined;
+  result.column_types = kind === "mongodb" ? mongoDocumentGridColumnTypes(exportedDocuments, result.columns) : kind === "elasticsearch" ? elasticsearchGridColumnTypesFor(result.columns) : undefined;
   result.affected_rows = exportedDocuments.length;
   result.truncated = (kind === "dynamodb" || kind === "elasticsearch") && !!cursor && exportedDocuments.length >= rowLimit;
   result.has_more = result.truncated;
@@ -878,7 +920,7 @@ async function applyDocumentStructuredFilters() {
 async function loadElasticsearchMappingFields() {
   if (documentStoreProvider.value.kind !== "elasticsearch") return;
   try {
-    elasticsearchMappingFields.value = await api.getColumns(props.connectionId, props.database, "", props.collection);
+    elasticsearchMappingFields.value = (await api.getColumns(props.connectionId, props.database, "", props.collection)) ?? [];
   } catch {
     elasticsearchMappingFields.value = [];
   }
@@ -2026,6 +2068,15 @@ function docPreview(doc: JsonRecord): string {
   return `${id} - ${preview}`;
 }
 
+async function copyDocument() {
+  try {
+    await copyToClipboard(editJson.value);
+    toast(t("grid.copied"), 1500);
+  } catch (error: unknown) {
+    toast(t("grid.copyFailed", { message: error instanceof Error ? error.message : String(error) }), 3000);
+  }
+}
+
 function handleDocumentViewerDoubleClick(event: MouseEvent) {
   const target = event.target;
   if (!(target instanceof Element)) return;
@@ -2094,6 +2145,7 @@ onMounted(async () => {
   void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
+  persistDocumentBrowserState();
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   unsubscribeElasticsearchIndexCleared?.();
   unsubscribeElasticsearchIndexCleared = undefined;
@@ -2689,6 +2741,9 @@ defineExpose({ focusSearch });
                 <input class="min-w-0 w-full cursor-text select-text appearance-none border-0 bg-transparent p-0 text-inherit outline-none focus:ring-0" :value="selectedDocumentIdLabel" :aria-label="`_id: ${selectedDocumentIdLabel}`" readonly spellcheck="false" />
               </Badge>
               <span class="flex-1" />
+              <Button v-if="!isEditing" variant="ghost" size="icon" class="h-6 w-7" :title="t('grid.copy')" @click="copyDocument">
+                <Copy class="h-3.5 w-3.5" />
+              </Button>
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" :disabled="!documentStoreEditable" :title="documentStoreEditDisabledReason" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
                 <div class="flex items-center border rounded-md overflow-hidden mr-1">
@@ -2722,7 +2777,7 @@ defineExpose({ focusSearch });
               </div>
             </div>
 
-            <div v-else data-document-json-viewer class="flex-1 min-h-0 bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
+            <div v-else data-document-json-viewer class="flex-1 min-h-0 select-text bg-muted/10 outline-none" @dblclick="handleDocumentViewerDoubleClick">
               <RedisJsonEditor ref="documentJsonEditorRef" :model-value="editJson" read-only :line-numbers="false" presentation="viewer" class="h-full" />
             </div>
           </template>

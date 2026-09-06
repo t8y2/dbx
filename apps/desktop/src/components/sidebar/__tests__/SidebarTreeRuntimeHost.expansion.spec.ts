@@ -11,9 +11,12 @@ import SidebarTreeRuntimeHost from "@/components/sidebar/SidebarTreeRuntimeHost.
 const connectionStore = {
   treeNodes: [] as TreeNode[],
   sidebarSearchQuery: "",
+  activeConnectionId: null as string | null,
+  connectedIds: new Set<string>(),
   canUseLoadedTreeNodeToggle: vi.fn(() => true),
   releaseCollapsedTreeNodeChildren: vi.fn(),
   getConfig: vi.fn(() => ({ db_type: "mysql", name: "connection" })),
+  getEtcdAccessCapabilities: vi.fn(() => ({ admin: true, writable: true, writePermissions: null })),
   ensureConnected: vi.fn(async () => undefined),
   loadPackageMembers: vi.fn(async (node: TreeNode) => {
     node.isExpanded = true;
@@ -56,12 +59,48 @@ afterEach(() => {
   document.body.innerHTML = "";
   connectionStore.treeNodes = [];
   connectionStore.sidebarSearchQuery = "";
+  connectionStore.activeConnectionId = null;
+  connectionStore.connectedIds.clear();
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
+  connectionStore.getEtcdAccessCapabilities.mockReturnValue({ admin: true, writable: true, writePermissions: null });
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it("activates the owning connection when a cached node toggles locally", async () => {
+    const group: TreeNode = {
+      id: "mysql:basic:__tables",
+      label: "tree.tables",
+      type: "group-tables",
+      connectionId: "mysql",
+      database: "basic",
+      isExpanded: false,
+      children: [{ id: "mysql:basic:orders", label: "orders", type: "table", connectionId: "mysql", database: "basic" }],
+    };
+    connectionStore.connectedIds.add("mysql");
+    connectionStore.activeConnectionId = "another-connection";
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: group, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.toggleNode(group);
+    await nextTick();
+
+    expect(connectionStore.activeConnectionId).toBe("mysql");
+    expect(group.isExpanded).toBe(true);
+    expect(connectionStore.loadObjectGroupChildren).not.toHaveBeenCalled();
+  });
+
   it("publishes a rendered group collapse and synchronizes the live tree", async () => {
     const liveGroup: TreeNode = {
       id: "connection:database:__tables",
@@ -225,6 +264,96 @@ describe("SidebarTreeRuntimeHost expansion", () => {
     await vi.waitFor(() => expect(connectionStore.ensureConnected).toHaveBeenCalledWith("meili", undefined));
     expect(queryStore.createTab).toHaveBeenCalledWith("meili", "default", expect.any(String), "meilisearch-system");
     expect(systemNode.isExpanded).toBe(true);
+  });
+
+  it("opens etcd workspaces without waiting for a connection health probe", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "etcd", name: "local-etcd-v3" });
+    connectionStore.ensureConnected.mockImplementation(async (...args: any[]) => {
+      const options = args[1] as { verifyHealth?: boolean } | undefined;
+      if (options?.verifyHealth === false) return;
+      await new Promise<void>(() => undefined);
+    });
+    const nodes: TreeNode[] = [
+      { id: "etcd:root", label: "Keys", type: "etcd-root", connectionId: "etcd" },
+      { id: "etcd:access-control", label: "Users & Roles", type: "etcd-access-control", connectionId: "etcd" },
+      { id: "etcd:dashboard", label: "Dashboard", type: "etcd-dashboard", connectionId: "etcd" },
+    ];
+    connectionStore.treeNodes = nodes;
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: nodes[0], depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    for (const [index, node] of nodes.entries()) {
+      host.value!.handleRowClick(node, index + 1);
+      await vi.waitFor(() => expect(queryStore.createTab).toHaveBeenCalledTimes(index + 1));
+    }
+
+    expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(1, "etcd", { verifyHealth: false });
+    expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(2, "etcd", { verifyHealth: false });
+    expect(connectionStore.ensureConnected).toHaveBeenNthCalledWith(3, "etcd", { verifyHealth: false });
+    expect(queryStore.createTab).toHaveBeenNthCalledWith(1, "etcd", "", "local-etcd-v3:keys", "etcd");
+    expect(queryStore.createTab).toHaveBeenNthCalledWith(2, "etcd", "", "local-etcd-v3:access-control", "etcd-access-control");
+    expect(queryStore.createTab).toHaveBeenNthCalledWith(3, "etcd", "", "local-etcd-v3:dashboard", "etcd-dashboard");
+  });
+
+  it("does not let the trailing dblclick cancel a pending etcd navigation", async () => {
+    let resolveConnection!: () => void;
+    const connection = new Promise<void>((resolve) => {
+      resolveConnection = resolve;
+    });
+    connectionStore.ensureConnected.mockReturnValue(connection);
+    connectionStore.getConfig.mockReturnValue({ db_type: "etcd", name: "local-etcd-v3" });
+    const node: TreeNode = { id: "etcd:dashboard", label: "Dashboard", type: "etcd-dashboard", connectionId: "etcd" };
+    connectionStore.treeNodes = [node];
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(
+      defineComponent({
+        setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }),
+      }),
+    );
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    host.value!.handleRowClick(node, 1);
+    host.value!.handleRowDoubleClick(node, new MouseEvent("dblclick", { detail: 2 }));
+    resolveConnection();
+
+    await vi.waitFor(() => expect(queryStore.createTab).toHaveBeenCalledWith("etcd", "", "local-etcd-v3:dashboard", "etcd-dashboard"));
+  });
+
+  it("does not reopen a stale etcd admin node after access becomes restricted", async () => {
+    connectionStore.getConfig.mockReturnValue({ db_type: "etcd", name: "local-etcd-v3" });
+    connectionStore.getEtcdAccessCapabilities.mockReturnValue({ admin: false, writable: true, writePermissions: [] });
+    const node: TreeNode = { id: "etcd:dashboard", label: "Dashboard", type: "etcd-dashboard", connectionId: "etcd" };
+    connectionStore.treeNodes = [node];
+
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+    await nextTick();
+
+    host.value!.handleRowClick(node, 1);
+    await vi.waitFor(() => expect(connectionStore.ensureConnected).toHaveBeenCalled());
+    expect(queryStore.createTab).not.toHaveBeenCalled();
   });
 
   it("expands an unloaded object group without leaking the regex source as a search filter", async () => {

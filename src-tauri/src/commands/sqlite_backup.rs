@@ -54,9 +54,8 @@ async fn sqlite_source_path(state: &Arc<AppState>, connection_id: &str) -> Resul
 }
 
 async fn existing_sqlite_pool(state: &Arc<AppState>, pool_key: &str) -> Result<Option<SqliteHandle>, String> {
-    let connections = state.connections.read().await;
-    match connections.get(pool_key) {
-        Some(PoolKind::Sqlite(pool)) => Ok(Some(pool.clone())),
+    match state.pool_handle(pool_key).await {
+        Some(PoolKind::Sqlite(pool)) => Ok(Some(pool)),
         Some(_) => Err("SQLite backup is only available for SQLite connections".to_string()),
         None => Ok(None),
     }

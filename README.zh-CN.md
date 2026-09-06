@@ -46,6 +46,7 @@
     <img src="https://img.shields.io/badge/InfluxDB-d30971?logo=influxdb&logoColor=white" />
     <img src="https://img.shields.io/badge/JDBC-4B5563?logoColor=white" />
     <img src="https://img.shields.io/badge/and%20more...-555555?logoColor=white" />
+    <a href="https://1panel.cn/" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/1Panel-Partner-005EEB?logo=1panel&amp;logoColor=white" alt="1Panel Partner" /></a>
     <a href="https://cnb.cool/dbxio.com/dbx"><img src="https://img.shields.io/badge/CNB-dbx-F76945?logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAppJREFUOE9tk01rE1EUhs+5H5lJ0iQT3FRX2Yi4avoLkv4CWxBcNt11oZiuFKGmXQhFN6kuRESSgitXKf6A5g+I6cqFLiKCiptOkraZ5H4cuZOkH9oLw+UO8z7nvGfei3DFohoEQLAKCGWyGJCSbQZsD3ei7r+f45WATV6xmjdISyAlYLaDliveux+ti5ozwLAaFPhIlk6G6f18sxuO7l9bBiWbVoncDGCMWMl++PI/gJ7IohkmD0zkBxT5oRn5LTpN7ULqBByEtFywWvRyHz8Fx3dvN0UwuMPyR0uJFycddH7tKPHZRn7BjnwwkQcUud0HO/K7oOENcTYPRCEAFERmsCpyfZDZfpdnBosOUKGx13BC60QTIdjpmSzrEWDR+UagjsgMciLXAwfhc4MNpKfQtOPE6mVh0gEOaeTXtWXXEdADpJAR/GaZ/rrM9Us82wORPd5zHbRp7JVcyxR5PRP5LTPy6uo0HXIlG9awMgLuEUABkBYI7VLyxs+yyPW3+Nyg4zqoG+UV7TDRlMBbWA/D43u3qlbLGmgRWM2BjFxjQjWQGQBuu4bYYvrm14JMnQSXcjBcny9A5DXIiDJp9/8FWCXAAOaFUEfILTgIcttOvf+2NJnLdI0fBFUyskZKBGTEJEAmBuzr9LCSUDwGQAwwgMzu+m9/VWOAeZSsk+YP48C4li/sRok1nlBd5PogBjgxNw70PfHyqBADyEVXicasZXCVpxYiLfO+HxVZDHCVYwvu2ebPT7fOLNAm65AWLnEAzvsEcOi9/lPU1aACXDfOLdhD9kxNszGdweQGYstqXgItJwDFNxKvwrp57G8h0zVwldHuA0IFt8El83yIs2FSDcpgxDJpUUTwK7gTduN3AK5iG7ehc/E2/gUPD3q3eY4awwAAAABJRU5ErkJggg==" alt="CNB" /></a>
     <a href="https://mcptoplist.com/server/io.github.t8y2%2Fdbx"><img src="https://mcptoplist.com/badge/io.github.t8y2%2Fdbx.svg" alt="MCP Toplist" /></a>
   </p>
@@ -63,16 +64,13 @@
   </p>
 </div>
 
-## 赞助商与合作伙伴
+## ❤️ 赞助商
 
 <table>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
       <a href="https://www.rainyun.com/MTE5Mjc4Ng==_" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/rainyun-dark.png" />
-          <img src="https://www.rainyun.com/img/logo.d193755d.png" alt="雨云" height="48" />
-        </picture>
+        <img src="docs/public/sponsors/rainyun-card.png" alt="雨云" width="175" />
       </a>
     </td>
     <td>
@@ -81,37 +79,53 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
-      <a href="https://www.qiniu.com/" target="_blank">
-        <img src="https://www-static.qbox.me/_next/static/media/logo.0fc18feaa621d2068a7180631f742256.jpg" alt="七牛云" height="64" />
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
+        <img src="docs/public/sponsors/trustasia-card.png" alt="TrustAsia" width="175" />
       </a>
     </td>
     <td>
-      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
-      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
+      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
+      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
-      <a href="https://easysearch.cn" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/easysearch-dark.png" />
-          <img src="docs/public/sponsors/easysearch.png" alt="Easysearch" width="150" />
-        </picture>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">
+        <img src="docs/public/sponsors/jalapeno-card.png" alt="Jalapeño Cloud" width="175" />
       </a>
     </td>
     <td>
-      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
-      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
+      Jalapeño Cloud 是 AI 基础设施与 Token 算力平台，通过 DBX 专属入口可享新用户免费额度与充值加赠。
+      <a href="https://www.jalapeno-cloud.ai/DBX" target="_blank">访问 Jalapeño Cloud</a>
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">
+        <img src="docs/public/sponsors/astraflow-card.png" alt="AstraFlow" width="175" />
+      </a>
+    </td>
+    <td>
+      UCloud 优刻得是国内首家公有云科创板上市公司，覆盖国内、亚洲、欧洲、北美等 28 个地域的云主机、数据库、CDN 等服务，注册享新客优惠 0.9 折起；星图 AstraFlow 大模型平台支持主流 200+ 大模型一键调用。
+      <a href="https://www.ucloud.cn/site/active/kuaijiesale.html?ytag=geo_waituo_github_dbx" target="_blank">访问 UCloud 优刻得</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://api.hualong.online/" target="_blank">
+        <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
+      </a>
+    </td>
+    <td>
+      HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。
+      <a href="https://api.hualong.online/" target="_blank">访问 HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/atlas-dark.svg" />
-          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="150" />
-        </picture>
+        <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>
     </td>
     <td>
@@ -120,17 +134,41 @@
     </td>
   </tr>
   <tr>
-    <td align="center" valign="middle" width="220">
-      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">
-        <picture>
-          <source media="(prefers-color-scheme: dark)" srcset="docs/public/sponsors/trustasia-dark.svg" />
-          <img src="docs/public/sponsors/trustasia.png" alt="TrustAsia" height="44" />
-        </picture>
+    <td align="center" valign="middle" width="200">
+      <a href="https://www.qiniu.com/" target="_blank">
+        <img src="docs/public/sponsors/qiniu-card.png" alt="七牛云" width="175" />
       </a>
     </td>
     <td>
-      由 TrustAsia 提供代码签名云签服务，实现 CICD 自动化构建可信软件。
-      <a href="https://www.trustasia.com/ssl/trustasia/code-signing" target="_blank">访问 TrustAsia</a>
+      七牛云为 DBX 提供对象存储、CDN 等云基础设施资源支持。
+      <a href="https://www.qiniu.com/" target="_blank">访问七牛云</a>
+    </td>
+  </tr>
+</table>
+
+## 🤝 合作伙伴
+
+<table>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://1panel.cn/" target="_blank">
+        <img src="docs/public/sponsors/1panel-card.png" alt="1Panel" width="175" />
+      </a>
+    </td>
+    <td>
+      1Panel 是现代化的开源 Linux 服务器运维管理面板与轻量级 AI 管理平台，提供直观易用的 Web 界面，支持 AI 智能体、本地大模型、网站、数据库、容器、文件等核心场景的一站式管理。
+      <a href="https://1panel.cn/" target="_blank">访问 1Panel</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
+      <a href="https://easysearch.cn" target="_blank">
+        <img src="docs/public/sponsors/easysearch-card.png" alt="Easysearch" width="175" />
+      </a>
+    </td>
+    <td>
+      Easysearch 是一款企业级分布式搜索引擎，兼容 ES API、融合全文检索、向量检索、地理空间位置检索、实时分析与 AI 能力，为企业提供统一的数据检索与智能分析基础设施。
+      <a href="https://easysearch.cn" target="_blank">访问 Easysearch</a>
     </td>
   </tr>
 </table>
@@ -141,7 +179,7 @@
   <tr>
     <td width="50%">
       <h3>🪶 20 MB，极致轻量</h3>
-      <p>无需 Java 运行环境，无需 Python 虚拟环境，不内嵌 Chromium。DBX 是单个小巧的二进制文件——下载、安装、连接。DBeaver 依赖 Java；TablePlus 仅限 macOS。DBX 全平台可用，无需额外运行时。</p>
+      <p>无需 Java 运行环境，无需 Python 虚拟环境，不内嵌 Chromium。DBX 是单个小巧的二进制文件——下载、安装、连接。DBeaver 依赖 Java；TablePlus 是 Freemium。DBX 全平台可用，无需额外运行时。</p>
     </td>
     <td width="50%">
       <h3>🤖 AI 原生集成在编辑器里</h3>
@@ -470,6 +508,7 @@ make package
 <a href="https://qm.qq.com/q/1087880322" target="_blank"><img src="https://img.shields.io/badge/QQ%20群-1087880322-EB1923?logo=tencentqq&logoColor=white" alt="QQ 群" /></a>
 <a href="https://docs.qq.com/doc/DVVhMY0h1ekJqc0tz" target="_blank"><img src="https://img.shields.io/badge/微信交流群-点击加入-07C160?logo=wechat&logoColor=white" alt="微信交流群" /></a>
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-社区-blue)](https://linux.do)
+[![1Panel](https://img.shields.io/badge/1Panel-合作伙伴-005EEB?logo=1panel&logoColor=white)](https://1panel.cn)
 
 ## 赞助与捐助
 

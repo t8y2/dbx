@@ -1,3 +1,4 @@
+// @vitest-environment happy-dom
 import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
@@ -10,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   executeConditionalUpdate: vi.fn(),
   cancelConditionalUpdate: vi.fn(),
   executeInTransaction: vi.fn(),
+  executeInManualTransaction: vi.fn(),
   addHistory: vi.fn(),
 }));
 
@@ -19,6 +21,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeConditionalUpdate: mocks.executeConditionalUpdate,
   cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
+  executeInManualTransaction: mocks.executeInManualTransaction,
   unlockConnectionWrites: vi.fn(),
   lockConnectionWrites: vi.fn(),
   connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
@@ -33,7 +36,15 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[], existingRows: CellValue[][] = [], onCellValueChanged?: (rowId: number, columnIndex: number) => void) {
+function createEditor(
+  sourceColumns?: Array<string | undefined>,
+  confirmDangerousRowDeletion = true,
+  cacheKey?: string,
+  readonlyColumnIndexes?: number[],
+  existingRows: CellValue[][] = [],
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void,
+  tableColumns?: Array<{ name: string; data_type: string; extra?: string; column_default?: string }>,
+) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -48,7 +59,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
     database: computed(() => "app"),
     tableMeta: computed(() => ({
       tableName: "people",
-      columns: [
+      columns: tableColumns ?? [
         { name: "first", data_type: "varchar" },
         { name: "hidden", data_type: "varchar" },
         { name: "last", data_type: "varchar" },
@@ -385,6 +396,29 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     expect(editor.hasPendingChanges.value).toBe(true);
   });
 
+  it("clears generated key columns instead of pasting the copied value", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [], undefined, [
+      { name: "first", data_type: "integer", extra: "autoincrement" },
+      { name: "hidden", data_type: "varchar" },
+      { name: "last", data_type: "varchar" },
+    ]);
+
+    const result = editor.appendPastedRowsToNewRow(
+      -1,
+      [
+        ["1", "Lovelace"],
+        ["2", "Hopper"],
+      ],
+      [0, 2],
+    );
+
+    expect(result).toEqual({ ok: true, rowCount: 2 });
+    expect(editor.newRows.value).toEqual([
+      [null, null, "Lovelace"],
+      [null, null, "Hopper"],
+    ]);
+  });
+
   it("keeps explicitly read-only mapped columns out of editing and paste", () => {
     const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
 
@@ -586,11 +620,21 @@ describe("useDataGridEditor saveChanges reload", () => {
     mocks.executeConditionalUpdate.mockReset();
     mocks.cancelConditionalUpdate.mockReset();
     mocks.executeInTransaction.mockReset();
+    mocks.executeInManualTransaction.mockReset();
     mocks.addHistory.mockReset();
     mocks.getConfig.mockReset();
   });
 
-  function createSaveTestEditor(options: { currentPage?: Ref<number>; prepareFullReload?: () => void; customSaveHandler?: { save: ReturnType<typeof vi.fn> } } = {}) {
+  function createSaveTestEditor(
+    options: {
+      currentPage?: Ref<number>;
+      prepareFullReload?: () => void;
+      customSaveHandler?: { save: ReturnType<typeof vi.fn> };
+      manualTransactionSessionId?: string;
+      refreshSavedRows?: ReturnType<typeof vi.fn>;
+      onManualTransactionMutation?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
     const emit = vi.fn();
     const currentPage = options.currentPage ?? ref(1);
     const result = ref<{ columns: string[]; rows: CellValue[][] }>({
@@ -617,6 +661,8 @@ describe("useDataGridEditor saveChanges reload", () => {
       sourceColumns: computed(() => undefined),
       onExecuteSql: computed(() => undefined),
       customSaveHandler: computed(() => options.customSaveHandler),
+      manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
+      onManualTransactionMutation: options.onManualTransactionMutation,
       sql: computed(() => undefined),
       searchText: ref(""),
       whereFilterInput: ref(""),
@@ -629,6 +675,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       cacheKey: computed(() => undefined),
       getRowItem: () => undefined,
       prepareFullReload: options.prepareFullReload,
+      refreshSavedRows: options.refreshSavedRows,
       emit,
     });
     return { editor, emit, currentPage };
@@ -645,6 +692,39 @@ describe("useDataGridEditor saveChanges reload", () => {
 
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("saves query-result edits through the active manual transaction session", async () => {
+    const statement = "UPDATE orders_test SET status='shipped' WHERE id=1";
+    const refreshSavedRows = vi.fn().mockResolvedValue(true);
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: [statement], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockResolvedValue([{ affected_rows: 1 }]);
+
+    const { editor, emit } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", refreshSavedRows, onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeInManualTransaction).toHaveBeenCalledWith("txn-session-1", statement, "app", undefined);
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(refreshSavedRows).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("marks the manual transaction dirty before a result-grid mutation can fail", async () => {
+    const onManualTransactionMutation = vi.fn();
+    mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });
+    mocks.executeInManualTransaction.mockRejectedValue(new Error("Query timed out"));
+
+    const { editor } = createSaveTestEditor({ manualTransactionSessionId: "txn-session-1", onManualTransactionMutation });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(onManualTransactionMutation).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toContain("Query timed out");
   });
 
   it("executes a conditional update immediately, records affected rows, and reloads", async () => {
@@ -824,5 +904,33 @@ describe("useDataGridEditor saveChanges reload", () => {
     expect(customSave).toHaveBeenCalledTimes(1);
     expect(prepareFullReload).not.toHaveBeenCalled();
     expect(emit).not.toHaveBeenCalledWith("reload", expect.anything());
+  });
+});
+
+describe("useDataGridEditor cell edit focus", () => {
+  it("selects the editor value only on the first frame so fast typing is not clobbered (#7336)", async () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [["long json value", "hidden", "last"]]);
+    const select = vi.fn();
+    const setSelectionRange = vi.fn();
+    const focus = vi.fn();
+    const input = { focus, select, setSelectionRange, dataset: {}, value: "long json value" };
+    const rafCallbacks: Array<(time: number) => void> = [];
+    vi.stubGlobal("document", { querySelector: () => input });
+    vi.stubGlobal("requestAnimationFrame", (callback: (time: number) => void) => {
+      rafCallbacks.push(callback);
+      return rafCallbacks.length;
+    });
+
+    editor.startEdit(0, 0);
+    await nextTick();
+    for (let frame = 0; frame < 3; frame += 1) {
+      const callbacks = rafCallbacks.splice(0);
+      callbacks.forEach((callback) => callback(0));
+      await nextTick();
+    }
+
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(setSelectionRange).toHaveBeenCalledTimes(1);
+    vi.unstubAllGlobals();
   });
 });

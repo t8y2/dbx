@@ -80,19 +80,28 @@ describe("queryStore database open state", () => {
     expect(store.tabs.filter((tab) => tab.mode === "dolt-version-control")).toHaveLength(2);
   });
 
-  it("keeps object browser viewport per tab and clears it on schema change", async () => {
+  it("keeps object browser search and viewport per tab", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();
 
     const tabId = store.openObjectBrowser("pg-1", "app", "public");
+    store.updateObjectBrowserSearch(tabId, "orders");
     store.updateObjectBrowserViewport(tabId, { scrollTop: 340, viewMode: "list" });
 
     const tab = store.tabs.find((item) => item.id === tabId);
+    expect(tab?.objectBrowser?.searchQuery).toBe("orders");
     expect(tab?.objectBrowser?.viewport).toEqual({ scrollTop: 340, viewMode: "list" });
+
+    const otherTabId = store.createTab("pg-1", "app", "query");
+    store.switchTab(otherTabId);
+    store.switchTab(tabId);
+    expect(store.tabs.find((item) => item.id === tabId)?.objectBrowser?.searchQuery).toBe("orders");
 
     store.updateSchema(tabId, "archive");
 
     expect(tab?.objectBrowser?.schema).toBe("archive");
+    // The keyword intentionally survives a schema switch: the mounted browser keeps its local search too.
+    expect(tab?.objectBrowser?.searchQuery).toBe("orders");
     expect(tab?.objectBrowser?.viewport).toBeUndefined();
   });
 

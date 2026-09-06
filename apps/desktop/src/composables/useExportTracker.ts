@@ -12,6 +12,20 @@ export interface DataTransferFailure {
   truncated?: boolean;
 }
 
+export interface SqlFileFailure {
+  statementIndex: number;
+  statementSummary: string;
+  error: string;
+  fileIndex?: number;
+  fileName?: string;
+  truncated?: boolean;
+}
+
+export interface SqlFileFailureContext {
+  fileIndex?: number;
+  fileName?: string;
+}
+
 export interface ExportTask {
   exportId: string;
   kind: BackgroundTaskKind;
@@ -46,6 +60,8 @@ export interface ExportTask {
   targetTables?: string[];
   transferFailures?: DataTransferFailure[];
   transferFailuresOmitted?: number;
+  sqlFileFailures?: SqlFileFailure[];
+  sqlFileFailuresOmitted?: number;
   multiDbSourceTabId?: string;
   multiDbTotal?: number;
   multiDbCompleted?: number;
@@ -76,6 +92,11 @@ export interface MultiDbExecutionTaskProgress {
 export const MAX_TRANSFER_FAILURE_DETAILS = 100;
 export const MAX_TRANSFER_FAILURE_DETAIL_BYTES = 128 * 1024;
 export const MAX_TRANSFER_FAILURE_ERROR_BYTES = 8 * 1024;
+export const MAX_SQL_FILE_FAILURE_DETAILS = 500;
+export const MAX_SQL_FILE_FAILURE_DETAIL_BYTES = 2 * 1024 * 1024;
+export const MAX_SQL_FILE_FAILURE_ERROR_BYTES = 8 * 1024;
+export const MAX_SQL_FILE_FAILURE_SUMMARY_BYTES = 2 * 1024;
+const MAX_SQL_FILE_FAILURE_NAME_BYTES = 1024;
 const MAX_TRACKED_OMITTED_FAILURES = 4096;
 
 interface TransferFailureState {
@@ -86,10 +107,18 @@ interface TransferFailureState {
   replayOmittedCount: number;
 }
 
+interface SqlFileFailureState {
+  indexes: Map<string, number>;
+  retainedBytes: number;
+  omittedKeys: Set<string>;
+  omittedCount: number;
+}
+
 const taskMap = reactive<Map<string, ExportTask>>(new Map());
 const activeTransferRuns = new Set<string>();
 const taskCancelHandlers = new Map<string, () => void | Promise<void>>();
 const transferFailureStates = new Map<string, TransferFailureState>();
+const sqlFileFailureStates = new Map<string, SqlFileFailureState>();
 const textEncoder = new TextEncoder();
 
 function utf8ByteLength(value: string): number {
@@ -178,6 +207,82 @@ function recordTransferFailure(task: ExportTask, table: string, error: string) {
   state.indexes.set(table, task.transferFailures.length);
   state.retainedBytes += tableBytes + retainedError.bytes;
   task.transferFailures.push(failure);
+}
+
+function sqlFileFailureKey(statementIndex: number, fileIndex?: number): string {
+  return `${fileIndex ?? -1}:${statementIndex}`;
+}
+
+function sqlFileFailureBytes(failure: SqlFileFailure): number {
+  return utf8ByteLength(failure.statementSummary) + utf8ByteLength(failure.error) + utf8ByteLength(failure.fileName ?? "");
+}
+
+function getSqlFileFailureState(task: ExportTask): SqlFileFailureState {
+  let state = sqlFileFailureStates.get(task.exportId);
+  if (state) return state;
+
+  const failures = task.sqlFileFailures ?? [];
+  state = {
+    indexes: new Map(failures.map((failure, index) => [sqlFileFailureKey(failure.statementIndex, failure.fileIndex), index])),
+    retainedBytes: failures.reduce((total, failure) => total + sqlFileFailureBytes(failure), 0),
+    omittedKeys: new Set(),
+    omittedCount: task.sqlFileFailuresOmitted ?? 0,
+  };
+  sqlFileFailureStates.set(task.exportId, state);
+  return state;
+}
+
+function recordOmittedSqlFileFailure(task: ExportTask, state: SqlFileFailureState, key: string) {
+  if (state.omittedKeys.has(key) || state.omittedKeys.size >= MAX_TRACKED_OMITTED_FAILURES) return;
+  state.omittedKeys.add(key);
+  state.omittedCount += 1;
+  task.sqlFileFailuresOmitted = state.omittedCount;
+}
+
+function buildSqlFileFailure(progress: api.SqlFileProgress, context?: SqlFileFailureContext, availableBytes = MAX_SQL_FILE_FAILURE_DETAIL_BYTES): SqlFileFailure | null {
+  const retainedName = truncateUtf8(context?.fileName ?? progress.fileName ?? "", MAX_SQL_FILE_FAILURE_NAME_BYTES);
+  const retainedSummary = truncateUtf8(progress.statementSummary, MAX_SQL_FILE_FAILURE_SUMMARY_BYTES);
+  const fixedBytes = retainedName.bytes + retainedSummary.bytes;
+  if (fixedBytes >= availableBytes) return null;
+
+  const retainedError = truncateUtf8(progress.error ?? "", Math.min(MAX_SQL_FILE_FAILURE_ERROR_BYTES, availableBytes - fixedBytes));
+  const failure: SqlFileFailure = {
+    statementIndex: progress.statementIndex,
+    statementSummary: retainedSummary.value,
+    error: retainedError.value,
+  };
+  const fileIndex = context?.fileIndex ?? progress.fileIndex;
+  if (fileIndex !== undefined) failure.fileIndex = fileIndex;
+  if (retainedName.value) failure.fileName = retainedName.value;
+  if (retainedName.truncated || retainedSummary.truncated || retainedError.truncated) failure.truncated = true;
+  return failure;
+}
+
+function recordSqlFileFailure(task: ExportTask, progress: api.SqlFileProgress, context?: SqlFileFailureContext) {
+  if (progress.status !== "statementFailed" || !progress.error) return;
+  task.sqlFileFailures ??= [];
+  const state = getSqlFileFailureState(task);
+  const fileIndex = context?.fileIndex ?? progress.fileIndex;
+  const key = sqlFileFailureKey(progress.statementIndex, fileIndex);
+  const existingIndex = state.indexes.get(key);
+  const previousBytes = existingIndex === undefined ? 0 : sqlFileFailureBytes(task.sqlFileFailures[existingIndex]!);
+  const availableBytes = MAX_SQL_FILE_FAILURE_DETAIL_BYTES - state.retainedBytes + previousBytes;
+  const failure = buildSqlFileFailure(progress, context, availableBytes);
+
+  if (!failure || (existingIndex === undefined && task.sqlFileFailures.length >= MAX_SQL_FILE_FAILURE_DETAILS)) {
+    recordOmittedSqlFileFailure(task, state, key);
+    return;
+  }
+
+  if (existingIndex !== undefined) {
+    task.sqlFileFailures[existingIndex] = failure;
+    state.retainedBytes += sqlFileFailureBytes(failure) - previousBytes;
+    return;
+  }
+
+  state.indexes.set(key, task.sqlFileFailures.length);
+  state.retainedBytes += sqlFileFailureBytes(failure);
+  task.sqlFileFailures.push(failure);
 }
 
 function normalizeExportStatus(status: string): BackgroundTaskStatus {
@@ -306,6 +411,7 @@ export function useExportTracker() {
   }
 
   function addSqlFileTask(executionId: string, fileName: string, filePath: string): ExportTask {
+    sqlFileFailureStates.delete(executionId);
     const task = reactive<ExportTask>({
       exportId: executionId,
       kind: "sql-file",
@@ -322,6 +428,8 @@ export function useExportTracker() {
       affectedRows: 0,
       elapsedMs: 0,
       statementSummary: "",
+      sqlFileFailures: [],
+      sqlFileFailuresOmitted: 0,
     });
     taskMap.set(executionId, task);
     return task;
@@ -493,9 +601,10 @@ export function useExportTracker() {
     if (task?.kind === "database-export" && task.status === "Cancelling") task.status = "Running";
   }
 
-  function updateSqlFileTask(executionId: string, progress: api.SqlFileProgress) {
+  function updateSqlFileTask(executionId: string, progress: api.SqlFileProgress, context?: SqlFileFailureContext) {
     const task = taskMap.get(executionId);
     if (!task) return;
+    recordSqlFileFailure(task, progress, context);
     task.status = normalizeSqlFileStatus(progress.status);
     task.errorMessage = progress.error || null;
     task.statementIndex = progress.statementIndex;
@@ -537,6 +646,7 @@ export function useExportTracker() {
     taskMap.delete(exportId);
     taskCancelHandlers.delete(exportId);
     transferFailureStates.delete(exportId);
+    sqlFileFailureStates.delete(exportId);
   }
 
   function clearFinished() {
@@ -545,6 +655,7 @@ export function useExportTracker() {
         taskMap.delete(id);
         taskCancelHandlers.delete(id);
         transferFailureStates.delete(id);
+        sqlFileFailureStates.delete(id);
       }
     }
   }

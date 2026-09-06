@@ -112,8 +112,14 @@ export function supportsClearableQuerySchema(dbType?: DatabaseType): boolean {
   return !!dbType && CLEARABLE_QUERY_SCHEMA_TYPES.has(dbType);
 }
 
+/**
+ * ZooKeeper has no query surface: its agent implements only kv_* operations,
+ * so the sidebar "new query" flow would call list-databases and fail
+ * (issue #8215). It is excluded alongside the other specialized surfaces
+ * (nacos, consul, hbase) whose connection workbench replaces query tabs.
+ */
 export function supportsConnectionQueryActions(dbType?: DatabaseType): boolean {
-  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase";
+  return dbType !== "nacos" && dbType !== "consul" && dbType !== "hbase" && dbType !== "zookeeper";
 }
 
 /**

@@ -1,0 +1,154 @@
+---
+title: Özel Çalışma Alanları
+description: DBX'te Redis, MongoDB, arama ve vektör veritabanlarını, HBase'i, mesaj kuyruklarını, etcd'yi, ZooKeeper'ı, Nacos'u ve Consul KV'yi yönetin.
+---
+
+SQL düzenleyicinin ve veri ızgarasının yanı sıra DBX, belirli bağlantı türleri için özel çalışma alanları açar. Bu arayüzler her sistemin kendi nesne modelini ve yönetim API'lerini kullanır: Redis anahtarları, MongoDB belgeleri, vektör koleksiyonları, mesaj kuyruğu konuları, etcd anahtarları, ZooKeeper ZNode'ları, Nacos yapılandırmaları ve Consul KV girdileri.
+
+<Callout type="info">Özel yetenekler; veritabanı türüne, sunucu sürümüne, sürücüye ve hesap yetkilerine göre dinamik olarak etkinleşir. Bir giriş noktası görünmüyorsa [Veritabanı Desteği](/tr/docs/databases) sayfasını, bağlantı testi sonucunu ve sunucu yetkilerini denetleyin.</Callout>
+
+## Çalışma Alanlarına Genel Bakış
+
+| Kategori | Bağlantı türleri | Başlıca giriş noktaları |
+| --- | --- | --- |
+| Anahtar/değer ve belge | Redis, MongoDB | Anahtar ya da belge gözatma, filtreleme, düzenleme, komutlar ve toplama akışları |
+| Arama ve belge dizinleri | Elasticsearch, Easysearch, Meilisearch, Manticore Search | Dizin/belge gözatma ve motora özgü istekler |
+| Vektör veritabanları | Qdrant, Milvus, Weaviate, ChromaDB | Koleksiyon gözatma, vektör arama, upsert, silme ve istek önizlemesi |
+| Geniş sütun ve sütun ailesi | HBase | Ad alanları, tablo yapısı, sütun aileleri ve satır verisi |
+| Mesaj kuyrukları | Pulsar, Kafka, RocketMQ, RabbitMQ | Konular, abonelikler ya da tüketiciler, mesajlar, izleme, yetkiler, politikalar ve yönetim API'leri |
+| Kayıt ve yapılandırma | etcd, ZooKeeper, Nacos, Consul | Anahtarlar/ZNode'lar, küme durumu, erişim denetimi, yapılandırma, servisler ve örnekler |
+| Çalışma zamanı durumu | MySQL, PostgreSQL, Redis, etcd, Nacos ve diğerleri | Panolar, işlemler ya da oturumlar, metrikler ve veritabanına özgü yönetim görünümleri |
+
+## Redis ve MongoDB
+
+Redis ve MongoDB için ayrı kılavuzlar vardır:
+
+<Cards>
+  <Card title="Redis Gezgini" href="/tr/docs/redis">
+    Anahtarlara gözatın ve arayın, birden çok veri türünü düzenleyin, komut çalıştırın, istatistikleri ve Slowlog'u inceleyin.
+  </Card>
+  <Card title="MongoDB Gezgini" href="/tr/docs/mongodb">
+    Koleksiyonlara ve belgelere gözatın, filtreleyin, sayfalayın, düzenleyin, dizinleri yönetin ve GridFS verisiyle çalışın.
+  </Card>
+</Cards>
+
+Bir bağlantı salt okunur olduğunda DBX; Redis, MongoDB ve GridFS değişikliklerini devre dışı bırakır ya da reddeder. Tehlikeli Redis komutları ayrıca ayrı bir komut güvenliği sınıflandırıcısından geçer.
+
+## Arama ve Belge Dizinleri
+
+Elasticsearch, Easysearch, Meilisearch ve Manticore Search dizin ve belge odaklı gözatma kullanır. DBX, sürücü meta verisinden dizinleri ya da koleksiyonları gösterir ve belgelere gözatmak, sorgulamak ve incelemek için giriş noktaları sunar.
+
+Şu sınırları göz önünde bulundurun:
+
+- Elasticsearch, Easysearch ve Meilisearch, geleneksel veritabanı TCP portları yerine HTTP/HTTPS uç noktalarına bağlanır
+- Meilisearch, DBX'in yerleşik Rust HTTP sürücüsünü kullanır; API anahtarı bağlantının parola alanında saklanır ve varsayılan port `7700`'dür
+- TLS, proxy kullanımı ve kimlik doğrulama; bağlantı türüne ve sunucu yapılandırmasına bağlıdır
+- Belge sorguları ve değişiklikleri sürücüye, sunucu sürümüne ve hesap yetkilerine göre değişir
+- Şema karşılaştırma ya da SQL dosyası çalıştırma gibi SQL iş akışları, yalnızca motor bunları güvenilir biçimde desteklediğinde görünür
+
+## Vektör Veritabanları
+
+Qdrant, Milvus, Weaviate ve ChromaDB bir vektör koleksiyonu çalışma alanı açar. Motora bağlı olarak şunları yapabilir:
+
+- Koleksiyonlara ve kayıtlara gözatma
+- Boyut ya da şema ayrıntılarını gösterme
+- Bir girdi vektörüyle Top K benzerlik araması çalıştırma
+- Ham isteği önizleme ya da düzenleme
+- Vektörleri, yükleri/meta veriyi ya da belgeleri upsert etme
+- Kayıtları kimliğe ya da istek koşuluna göre silme
+
+Ürünler farklı API'ler, koleksiyon modelleri ve arama parametreleri kullanır. DBX motora özgü bir istek şablonu üretir; ancak boyutlar, alan adları, uzaklık ölçütleri ve dizin ayarları hedef veritabanıyla eşleşmelidir.
+
+<Callout type="warn">Vektör upsert ve silme işlemleri birer yazma işlemidir. Üretim bağlantıları; veritabanı yetkilerini, DBX salt okunur/üretim korumasını ve insan tarafından istek incelemesini birlikte kullanmalıdır.</Callout>
+
+## HBase
+
+HBase çalışma alanı; ad alanları, tablolar, sütun aileleri ve satır anahtarları çevresinde düzenlenmiştir. Agent ve sunucu yeteneklerine bağlı olarak tablo yapısına ve satırlara gözatabilir; yazılabilir bağlantılarda oluşturma, değiştirme, truncate etme ya da silme işlemlerini sunabilir.
+
+Tarama aralıkları ve filtreler sunucu yükünü doğrudan etkiler. Büyük tablolarda tam taramayı sıradan bir ilişkisel veri ızgarası gibi görmek yerine satır anahtarı aralıklarını, sayfa boyutunu ve döndürülen sütunları sınırlayın.
+
+## Mesaj Kuyrukları
+
+Pulsar, Kafka, RocketMQ ve RabbitMQ ortak mesaj kuyruğu konsol çerçevesini paylaşır, ancak her sistem yalnızca kendi yeteneklerinin desteklediği panelleri gösterir. Ortak alanlar şunlardır:
+
+- Konular ile ad alanları, kiracılar ya da sanal sunucular
+- Abonelikler, tüketici grupları, üreticiler ve istemciler
+- Mesaj sorgulama, gönderme ve izleme
+- Broker ya da küme izleme
+- Yetkiler, politikalar, kotalar ve ilgili yönetim
+- Sürücünün sunduğu ham API istekleri
+
+Pulsar; kiracıları, ad alanlarını ve abonelikleri öne çıkarır. Kafka konuları, tüketici gruplarını ve broker'ları kullanır. RocketMQ mesaj ve iz akışlarını ekler. RabbitMQ sanal sunucuları, değiş tokuşları/kuyrukları, bağlantıları, politikaları ve yetkileri kullanır.
+
+<Callout type="info">Mesaj kuyruğu panelleri yetenek odaklıdır. Sunucu sürümleri, yönetim API'leri, hesap yetkileri ya da eksik bir yönetim portu, tek tek sekmeleri kullanılamaz kılabilir.</Callout>
+
+## etcd, ZooKeeper, Nacos ve Consul
+
+### etcd
+
+etcd; bir anahtar gezgini, küme panosu ve erişim denetimi çalışma alanı sunar. Kullanılabilir özellikler arasında önek gözatma, değer düzenleme, kira bilgisi, üye ve sağlık durumu, metrikler ile kullanıcı/rol yönetimi bulunur.
+
+### ZooKeeper
+
+ZooKeeper hiyerarşik veriyi bir ZNode ağacı olarak gösterir. Yollara gözatıp düğüm içeriğini inceleyebilir, yetkiler ve bağlantı durumu izin verdiğinde düğüm oluşturabilir, güncelleyebilir ya da silebilirsiniz.
+
+### Nacos
+
+Nacos çalışma alanı yapılandırmayı ve servisleri kapsar; ayrıca ad alanlarını da yönetebilir. Bağlantıya ve konsol API'sine bağlı olarak şunları içerir:
+
+- Yapılandırma oluşturma, düzenleme, silme ve tam metin arama
+- Yapılandırma geçmişi, sürüm karşılaştırması ve geri alma
+- Toplu içe/dışa aktarma ve ad alanları arası kopyalama
+- Servisler, örnekler, ağırlıklar ve sağlık verisi
+- Pano ve Ham API erişimi
+
+Yapılandırma geçmişi ek bir konsol URL'si ve kimlik bilgileri gerektirebilir. Bağlantı çalışıyor ama geçmiş kullanılamıyorsa bağlantı formundaki konsol ayarlarını denetleyin.
+
+### Consul
+
+Consul çalışma alanı; bağımsız olarak yüklenen Genel Bakış, KV, Servisler, Sağlık, Oturumlar, ACL, Kapsam, Service Mesh, Araçlar ve Operator alanlarına ayrılmıştır. Yetenek yoklamaları; desteklenen, desteklenmeyen, yasak ve bilinmeyen uç noktaları ayırt eder; böylece bir alandaki yetki hatası başka bir alanın yüklediği veriyi silmez.
+
+Bağlantılar; bir HTTP veya HTTPS API adresi, ACL Belirteci, Veri merkezi, Ad alanı, Yönetim Bölümü, okuma tutarlılığı, CA sertifikası, mTLS kimliği, sertifika doğrulama geçersiz kılması, zaman aşımı ve DBX Taşıma Katmanı kabul eder. Agent Servis ve Denetim yazmaları ayrıca doğrulanmış ve açık bir Agent hedefi gerektirir; bir yük dengeleyici hedefi belirsizleştiriyorsa DBX bu yazmaları reddeder.
+
+KV; özyinelemeli aramayı, sürümlü önek dışa aktarmayı, değişmez içe aktarma önizlemesini, CAS çakışma işlemeyi, işlemleri, atomik yeniden adlandırma/kopyalamayı, sınırlı işlemsel önek silmeyi ve iptal edilebilir engelleyici sorgu İzleme'yi destekler. Consul işlemleri 64 işlemle sınırlıdır; daha büyük içe aktarmalar ve silmeler belirlenimci biçimde bölünür ve gruplar arasında atomik olmadığı açıkça bildirilir. Bağlantılar arası ya da veri merkezleri arası göç, yerel Consul çoğaltması değil, bir DBX istemci okuma/yazma iş akışıdır.
+
+Katalog ve Sağlık salt okunur keşif görünümleri olarak kalır. Agent Servis/Denetim, Oturum/Kilit, ACL Belirteci/Politikası/Rolü, Enterprise Ad Alanı/Bölümü ve Service Mesh kaynakları alana özgü DTO'lar ve onaylar kullanır. ACL gizli bilgileri ve peering belirteçleri tek seferlik hassas değerler olarak ele alınır; Consul ön yüz önbelleğinde ya da normal dışa aktarma biçimlerinde saklanmaz.
+
+Prepared Query, Event ve Coordinate, Araçlar altında bulunur. Operator okumaları ve anlık görüntü indirme deneyseldir. Anlık görüntü geri yükleme, Autopilot güncellemeleri, Raft değişiklikleri, Keyring değişiklikleri ve Lisans güncellemeleri varsayılan olarak kapalıdır ve ayrı özellik anahtarlarına sahiptir; birini açmak diğerini açmaz.
+
+<Callout type="warn">Consul'da anahtar başına geçmiş API'si ve yerel bir veri merkezleri arası KV çoğaltma API'si yoktur. `ModifyIndex`, engelleyici dizinler ve anlık görüntüler Anahtar geçmişi olarak sunulmaz. Enterprise ve Operator kullanılabilirliği; Consul sürümüne, edisyonuna, Agent rolüne, ACL politikasına ve açıkça etkinleştirilmiş DBX güvenlik ayarlarına bağlıdır.</Callout>
+
+## Panolar ve Yönetim Görünümleri
+
+Bazı bağlantılar, nesne ağacından ya da bir sekmeden çalışma zamanı durum sayfaları sunar:
+
+- MySQL ve PostgreSQL panoları ya da işlem/oturum görünümleri
+- Redis örnek bilgisi, istatistikleri ve Slowlog
+- etcd üyeleri, veritabanı boyutu ve Raft/kira ile ilgili metrikler
+- Nacos ad alanı, yapılandırma, servis ve örnek istatistikleri
+- Mesaj kuyruğu broker, konu, istemci ve tüketim durumu
+
+Bu sayfalar inceleme ve sorun giderme içindir; uzun vadeli izleme için değildir. Uyarılara, geçmiş eğilimlere ve kapasite planlamasına ihtiyacınız olduğunda Prometheus, Grafana ya da bir üreticinin izleme platformunu kullanın.
+
+## Güvenlik ve Uyumluluk Sınırları
+
+- Özel çalışma alanları bağlantının salt okunur durumuna uyar; MCP'ye açılan özel komutlar da genel MCP politikasını izler.
+- Üretim koruması, DBX'in tanıdığı yazmalar için geçerli olmayı sürdürür; son sınır veritabanı yetkileridir.
+- Sürücüler yalnızca güvenilir biçimde uygulayabildikleri yetenekleri sunar, bu yüzden aynı kategori içinde bile sekmeler farklılaşabilir.
+- Yönetim API'leri ve veri protokolleri farklı portlar kullanabilir; örneğin RabbitMQ Yönetim API'si ya da Nacos konsol API'si.
+- Docker/Web'de dosya yolları ve ağ erişilebilirliği tarayıcının çalıştığı bilgisayara değil sunucu ortamına aittir.
+
+<Cards>
+  <Card title="Veritabanı matrisini inceleyin" href="/tr/docs/databases">
+    Bağlantı türlerini, varsayılan portları, sürücü mimarisini ve gelişmiş özellik kapsamını denetleyin.
+  </Card>
+  <Card title="Sürücüleri yapılandırın" href="/tr/docs/driver-management">
+    Agent/JDBC sürücülerini kurun ya da güncelleyin, çalışma zamanı bağımlılıklarını yönetin.
+  </Card>
+  <Card title="Yazma korumasını ayarlayın" href="/tr/docs/production-safety">
+    Salt okunur bağlantıları, üretim korumasını ve MCP yetkilerini yapılandırın.
+  </Card>
+  <Card title="Bağlantı sorunlarını giderin" href="/tr/docs/ssh-tunnel">
+    TLS, SSH, SOCKS5, HTTP proxy ya da HTTP tünelleri yapılandırın.
+  </Card>
+</Cards>

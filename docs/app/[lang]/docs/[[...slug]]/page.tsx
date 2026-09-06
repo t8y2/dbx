@@ -11,7 +11,7 @@ import { ImageZoom } from "fumadocs-ui/components/image-zoom";
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import type { MDXContent } from "mdx/types";
 import type { TOCItemType } from "fumadocs-core/toc";
-import { buildMetadata, SITE_URL } from "@/lib/metadata";
+import { buildMetadata, getHtmlLang, SITE_URL } from "@/lib/metadata";
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string; slug?: string[] }> }): Promise<Metadata> {
   const { lang, slug } = await params;
@@ -80,7 +80,7 @@ export default async function Page({ params }: { params: Promise<{ lang: string;
     "@type": "TechArticle",
     headline: title,
     description,
-    inLanguage: lang === "cn" ? "zh-CN" : "en",
+    inLanguage: getHtmlLang(lang),
     isPartOf: {
       "@type": "WebSite",
       url: SITE_URL,

@@ -72,7 +72,7 @@ import { normalizeRabbitmqAddresses, parseRabbitmqAddress } from "@/lib/connecti
 import { detectMqUiAuthKind, isMqAuthKindAllowedForSystem, type MqUiAuthKind } from "@/lib/connection/mqAuth";
 import { driverInstallProgressChannel, driverInstallProgressPercent, isDriverInstallProgressForOperation, requestAgentInstallCancellation, resolveAgentInstallOutcome, type DriverInstallProgress } from "@/lib/connection/driverInstallProgressUi";
 import { requiresSqlServerLegacyCompatibilityComponent, setSqlServerLegacyCompatibilityConfig, sqlServerUsesLegacyCompatibility, SQLSERVER_LEGACY_COMPATIBILITY_DRIVER_KEY } from "@/lib/connection/sqlServerLegacyCompatibility";
-import { normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
+import { normalizeNacosConsoleUrl, normalizeNacosEndpoint, normalizeNacosMetricsUrl, parseNacosManagedNamespaces } from "@/lib/nacos/nacosAdmin";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity, normalizeNacosNamespaceSelection } from "@/lib/nacos/nacosNamespaceVisibility";
 import {
   ArrowLeft,
@@ -912,6 +912,7 @@ const nacosVersionMode = ref<NacosVersionMode>("v2");
 const nacosApiPlane = ref<NacosApiPlane>("admin");
 const nacosServerAddr = ref("");
 const nacosContextPath = ref("");
+const nacosConsoleUrl = ref("");
 const nacosManagedNamespacesText = ref("");
 const nacosRNacosConsoleAddr = ref("");
 const nacosHistoryEnabled = ref(false);
@@ -970,6 +971,10 @@ const nacosPrimaryAddressPlaceholder = computed(() => {
   if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "console") {
     return "http://127.0.0.1:8080";
   }
+  return "http://127.0.0.1:8848/nacos";
+});
+const nacosWebConsoleUrlPlaceholder = computed(() => {
+  if (nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3") return "http://127.0.0.1:8080";
   return "http://127.0.0.1:8848/nacos";
 });
 const nacosServiceAddressHint = computed(() => {
@@ -1286,6 +1291,7 @@ function resetNacosFields(config?: Partial<NacosAdminConfig>) {
   const contextPath = config?.contextPath?.trim() || "";
   nacosServerAddr.value = serverAddr;
   nacosContextPath.value = contextPath;
+  nacosConsoleUrl.value = config?.consoleUrl?.trim() || "";
   nacosManagedNamespacesText.value = (config?.managedNamespaces || []).join("\n");
   nacosDynamicAllNamespaces.value = !!config && !config.managedNamespaces?.length && !Array.isArray(form.value.visible_databases);
   nacosRNacosConsoleAddr.value = config?.rnacosConsoleAddr?.trim() || "";
@@ -1656,6 +1662,15 @@ function buildNacosAdminConfig(): NacosAdminConfig {
   let rnacosConsoleAuth: NacosRNacosConsoleAuth | undefined;
   const managedNamespaces = nacosImplementation.value === "nacos" && nacosAuthKind.value === "usernamePassword" ? parseNacosManagedNamespaces(nacosManagedNamespacesText.value) : [];
   let metricsUrl: string | undefined;
+  let consoleUrl: string | undefined;
+  const usesIndependentConsoleUrl = nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" && nacosApiPlane.value === "admin";
+  if (usesIndependentConsoleUrl && nacosConsoleUrl.value.trim()) {
+    try {
+      consoleUrl = normalizeNacosConsoleUrl(nacosConsoleUrl.value);
+    } catch {
+      throw new Error(t("connection.nacosWebConsoleUrlInvalid"));
+    }
+  }
   if (nacosMetricsMode.value === "custom") {
     try {
       metricsUrl = normalizeNacosMetricsUrl(nacosMetricsUrl.value);
@@ -1681,6 +1696,7 @@ function buildNacosAdminConfig(): NacosAdminConfig {
     apiPlane: nacosImplementation.value === "nacos" && nacosVersionMode.value === "v3" ? nacosApiPlane.value : undefined,
     serverAddr: normalized.serverAddr,
     contextPath: normalized.contextPath || undefined,
+    consoleUrl,
     managedNamespaces: managedNamespaces.length ? managedNamespaces : undefined,
     rnacosConsoleAddr: rnacosConsoleConfigured ? nacosRNacosConsoleAddr.value.trim() : undefined,
     rnacosHistoryEnabled: nacosImplementation.value === "rnacos" ? nacosHistoryEnabled.value : undefined,
@@ -2786,6 +2802,11 @@ function switchH2ConnectionMode(mode: H2ConnectionMode) {
   resetTestState();
 }
 
+function switchEtcdApiVersion(profile: "etcd" | "etcd-v2") {
+  form.value.driver_profile = profile;
+  resetTestState();
+}
+
 function switchH2DriverProfile(profile: "h2" | "h2-v1" | "h2-v2" | "h2-v3" | "h2-custom") {
   form.value.driver_profile = profile;
   if (profile === "h2-custom") {
@@ -2950,7 +2971,7 @@ const isH2FileMode = computed(() => form.value.db_type === "h2" && h2ConnectionM
 const isH2CustomDriver = computed(() => form.value.db_type === "h2" && form.value.driver_profile === "h2-custom");
 const usesLocalFilePathInput = computed(() => isLocalFileTypeDb(form.value.db_type) && (form.value.db_type !== "h2" || isH2FileMode.value));
 
-const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type));
+const connectionUrlPlaceholder = computed(() => getUrlPlaceholder(form.value.db_type, form.value.driver_profile));
 const jdbcUsernamePlaceholder = computed(() => (form.value.driver_profile === "dremio" || isJdbcProductConnection.value ? "" : "sa"));
 const filePathPlaceholder = computed(() => {
   if (form.value.db_type === "duckdb") return "/path/to/database.duckdb or :memory:";
@@ -6286,6 +6307,9 @@ function openExternalUrl(url: string) {
                       <p v-if="sqliteUsesSsh" class="text-xs text-muted-foreground">
                         {{ t("connection.sqliteRemotePathHint") }}
                       </p>
+                      <p v-if="sqliteUsesSsh" class="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs leading-5 text-amber-700 dark:text-amber-400">
+                        {{ t("connection.sqliteSshCipherUnsupportedHint") }}
+                      </p>
                       <p v-else-if="supportsMemoryDatabasePath" class="text-xs text-muted-foreground">
                         {{ t("connection.memoryDatabasePathHint") }}
                       </p>
@@ -6872,6 +6896,18 @@ function openExternalUrl(url: string) {
 
                 <!-- etcd: endpoints, user, password, TLS -->
                 <template v-else-if="form.db_type === 'etcd'">
+                  <div class="grid grid-cols-4 items-center gap-4">
+                    <Label :class="connectionLabelClass">API</Label>
+                    <div class="col-span-3 space-y-1.5">
+                      <div class="flex flex-wrap gap-2">
+                        <Button size="sm" :variant="!form.driver_profile || form.driver_profile === 'etcd' ? 'default' : 'outline'" @click="switchEtcdApiVersion('etcd')">v3 (etcd 3.x)</Button>
+                        <Button size="sm" :variant="form.driver_profile === 'etcd-v2' ? 'default' : 'outline'" @click="switchEtcdApiVersion('etcd-v2')">v2 (etcd 2.x)</Button>
+                      </div>
+                      <p v-if="form.driver_profile === 'etcd-v2'" class="text-xs text-muted-foreground">
+                        {{ t("connection.etcdV2ApiHint") }}
+                      </p>
+                    </div>
+                  </div>
                   <div class="grid grid-cols-4 items-center gap-4">
                     <Label :class="connectionLabelClass">{{ t("connection.host") }}</Label>
                     <Input v-model="form.host" class="col-span-2" />
@@ -8197,6 +8233,14 @@ function openExternalUrl(url: string) {
                       <Label>{{ t("connection.nacosPageSize") }}</Label>
                       <Input v-model.number="nacosPageSize" type="number" min="1" max="500" />
                       <p class="text-[11px] leading-4 text-muted-foreground">{{ t("nacos.nacosPageSizeHint") }}</p>
+                    </div>
+
+                    <div v-if="isNacosV3AdminPlane" class="grid gap-1.5 border-t pt-4">
+                      <div>
+                        <Label>{{ t("connection.nacosWebConsoleUrl") }}</Label>
+                        <p class="mt-1 text-[11px] leading-4 text-muted-foreground">{{ t("connection.nacosWebConsoleUrlHint") }}</p>
+                      </div>
+                      <Input v-model="nacosConsoleUrl" :placeholder="nacosWebConsoleUrlPlaceholder" />
                     </div>
 
                     <div class="grid gap-2 border-t pt-4">

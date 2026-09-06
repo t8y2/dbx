@@ -999,6 +999,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
     active.original_position = Some(1);
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
         database_type: Some(DatabaseType::SqlServer),
+        driver_profile: None,
         schema: Some(schema.clone()),
         table_name: table.to_string(),
         columns: vec![sku, active],
@@ -1010,6 +1011,7 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         mysql_engine: None,
         partitioned: false,
         is_gaussdb_m_mode: false,
+        table_collation: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1167,10 +1169,11 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
     let connection_id = "live-sqlserver-export";
     let pool_key = format!("{connection_id}:{database}");
     state
-        .connections
-        .write()
-        .await
-        .insert(pool_key, PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(export_client))));
+        .update_connection_pools(|connections| {
+            connections
+                .insert(pool_key, PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(export_client))));
+        })
+        .await;
 
     let file_path = dir.join("result.csv");
     let sql = format!(
@@ -1193,6 +1196,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         use_agent_cursor: false,
         file_path: file_path.to_string_lossy().to_string(),
         format: "csv".to_string(),
+        insert_mode: Default::default(),
         include_sql_sheet: false,
         page_size: 1,
         row_limit: None,
@@ -1202,6 +1206,7 @@ async fn live_sqlserver_query_result_export_streams_cte_query_to_csv() {
         client_session_id: None,
         execution_id: Some(format!("live-sqlserver-export-{suffix}")),
         date_time_format: None,
+        csv_quote_mode: Default::default(),
         export_table_name: None,
         export_column_types: None,
         column_comments: None,
@@ -1258,10 +1263,14 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     config.username = user;
     config.password = password;
     state.configs.write().await.insert(connection_id.to_string(), config);
-    state.connections.write().await.insert(
-        format!("{connection_id}:{database}"),
-        PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
-    );
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(
+                format!("{connection_id}:{database}"),
+                PoolKind::SqlServer(std::sync::Arc::new(tokio::sync::Mutex::new(client))),
+            );
+        })
+        .await;
 
     let script = format!(
         "CREATE TABLE [dbo].[{table}] (id INT NOT NULL);\n\
@@ -1292,8 +1301,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     .expect("execute SQL Server file with GO batches");
 
     let pool_key = format!("{connection_id}:{database}");
-    let connections = state.connections.read().await;
-    let PoolKind::SqlServer(client) = connections.get(&pool_key).expect("SQL Server pool") else {
+    let PoolKind::SqlServer(client) = state.pool_handle(&pool_key).await.expect("SQL Server pool") else {
         panic!("expected SQL Server pool");
     };
     let mut client = client.lock().await;
@@ -1301,7 +1309,6 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
     let cleanup = format!("DROP PROCEDURE [dbo].[{procedure}]; DROP TABLE [dbo].[{table}];");
     let _ = dbx_core::db::sqlserver::execute_batch(&mut client, &cleanup).await;
     drop(client);
-    drop(connections);
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(done_seen.load(Ordering::Relaxed));

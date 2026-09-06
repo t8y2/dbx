@@ -856,13 +856,11 @@ func (c *cursor) executeSync(ctx context.Context, query string) {
 		return
 	}
 	if !success(safeStatus(responseExecute.GetStatus())) {
-		status := safeStatus(responseExecute.GetStatus())
-		c.Err = &Error{
-			Err:       errors.New("Error while executing query: " + status.String()),
-			Message:   status.GetErrorMessage(),
-			ErrorCode: int(status.GetErrorCode()),
-			SQLState:  status.GetSqlState(),
-		}
+		// status.String() dumps raw Thrift struct fields; pointer fields (SqlState,
+		// ErrorMessage) render as hex addresses like 0x2c45f4a70e10. Route through
+		// hiveStatusError so failures surface the server's real diagnostics
+		// (message, SQLState, error code) the way every other call site already does.
+		c.Err = hiveStatusError("executing statement", responseExecute.GetStatus())
 		return
 	}
 

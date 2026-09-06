@@ -17,9 +17,10 @@ use crate::mysql_ddl_normalize::DdlNormalizeOptions;
 use crate::object_source_sql::build_export_object_source_sql;
 use crate::sql_dialect::{qualified_table_name, uses_single_row_insert_statements};
 use crate::transfer::{
-    format_ch_array_sql_literal, format_pg_array_sql_literal, is_identity_column_extra,
-    is_mysql_generated_column_extra, keyset_pagination_sql_with_identifier_quote, quote_identifier,
-    quote_postgres_string_literal, wrap_dameng_identity_insert_sql_for_table,
+    format_ch_array_sql_literal, format_pg_array_sql_literal, format_postgres_vector_sql_literal,
+    is_identity_column_extra, is_mysql_generated_column_extra, is_postgres_vector_type,
+    keyset_pagination_sql_with_identifier_quote, quote_identifier, quote_postgres_string_literal,
+    wrap_dameng_identity_insert_sql_for_table,
 };
 use crate::types::{ObjectSourceKind, SpatialColumn};
 
@@ -39,6 +40,28 @@ pub enum DatabaseExportOutputCompression {
     #[default]
     None,
     Gzip,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlInsertMode {
+    #[default]
+    Batch,
+    Single,
+}
+
+impl SqlInsertMode {
+    pub(crate) const fn flush_each_row(self) -> bool {
+        matches!(self, Self::Single)
+    }
+
+    pub(crate) const fn batch_size(self, default: usize) -> usize {
+        if self.flush_each_row() || default == 0 {
+            1
+        } else {
+            default
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +290,32 @@ pub struct ExportProgress {
     /// True while listing schema / prefetching table metadata — before objects are written.
     #[serde(default)]
     pub preparing: bool,
+    /// Per-object failures written into the file as `-- ERROR` comments in
+    /// lenient mode. Strict mode fails the whole export instead, so this stays
+    /// zero. Without it a partially failed export reports plain success and
+    /// the errors are only discoverable by opening the file (#8184).
+    #[serde(default)]
+    pub error_count: u64,
+    /// First lenient failure, so completion surfaces can show what went wrong
+    /// without opening the exported file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
+}
+
+/// Collects lenient per-object export failures for the terminal progress.
+#[derive(Default)]
+struct LenientExportErrors {
+    count: usize,
+    first: Option<String>,
+}
+
+impl LenientExportErrors {
+    fn record(&mut self, message: String) {
+        if self.first.is_none() {
+            self.first = Some(message.clone());
+        }
+        self.count += 1;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,8 +490,8 @@ fn format_export_sql_literal_typed(
     if is_postgres_json_export_column(database_type, column_type) {
         return format_postgres_json_export_literal(value);
     }
-    if is_postgres_vector_export_column(database_type, column_type) {
-        return format_postgres_vector_export_literal(value);
+    if database_type == Some(DatabaseType::Postgres) && is_postgres_vector_type(column_type) {
+        return format_postgres_vector_sql_literal(value);
     }
     if matches!(database_type, Some(DatabaseType::Mysql)) && column_type.is_some_and(is_mysql_bit_type) {
         return format_mysql_bit_literal(value);
@@ -509,37 +558,14 @@ fn format_postgres_json_export_literal(value: &Value) -> String {
     quote_postgres_string_literal(&text)
 }
 
-fn format_postgres_vector_export_literal(value: &Value) -> String {
-    if value.is_null() {
-        return "NULL".to_string();
-    }
-    let text = match value {
-        // pgvector vector/halfvec are scalar extension types whose importable
-        // literal grammar uses square brackets, unlike PostgreSQL arrays.
-        Value::Array(arr) => format_postgres_vector_export_text(arr),
-        Value::String(text) => text.to_string(),
-        _ => value.to_string(),
-    };
-    quote_postgres_string_literal(&text)
-}
-
-fn format_postgres_vector_export_text(arr: &[Value]) -> String {
-    let elements = arr.iter().map(format_postgres_vector_export_element).collect::<Vec<_>>();
-    format!("[{}]", elements.join(","))
-}
-
-fn format_postgres_vector_export_element(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.trim().to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Null => "NULL".to_string(),
-        _ => value.to_string(),
-    }
-}
-
 fn quote_export_sql_string(text: &str) -> String {
     format!("'{}'", text.replace('\\', "\\\\").replace('\'', "''"))
+}
+
+// OpenGauss exports use standard-conforming strings, so backslashes are
+// literal and only embedded single quotes need doubling.
+fn quote_opengauss_export_sql_string(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
 }
 
 fn is_sqlserver_unicode_export_type(column_type: &str) -> bool {
@@ -551,6 +577,7 @@ fn quote_export_sql_string_for_database(text: &str, database_type: Option<Databa
     match database_type {
         Some(DatabaseType::Dameng) => quote_dameng_export_sql_string(text),
         Some(DatabaseType::Postgres) => quote_postgres_string_literal(text),
+        Some(DatabaseType::OpenGauss) => quote_opengauss_export_sql_string(text),
         database_type if is_mysql_compatible_export_literal_target(database_type) => {
             quote_mysql_compatible_export_sql_string(text)
         }
@@ -1274,17 +1301,6 @@ fn is_postgres_bytea_export_column(database_type: Option<DatabaseType>, column_t
             .unwrap_or(false)
 }
 
-fn is_postgres_vector_export_column(database_type: Option<DatabaseType>, column_type: Option<&str>) -> bool {
-    database_type == Some(DatabaseType::Postgres)
-        && column_type
-            .map(|column_type| {
-                let normalized = column_type.trim().trim_matches('"').to_ascii_lowercase();
-                let base = normalized.split(['(', ' ', '\t', '\n']).next().unwrap_or("").trim_matches('"');
-                matches!(base, "vector" | "halfvec") || base.ends_with(".vector") || base.ends_with(".halfvec")
-            })
-            .unwrap_or(false)
-}
-
 pub fn build_export_sql_insert(options: BuildExportSqlInsertOptions) -> Result<String, String> {
     build_export_insert_statements(options.insert).map(|statements| statements.join("\n"))
 }
@@ -1383,8 +1399,133 @@ fn normalize_export_table_ddl(
 
 fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts: DdlNormalizeOptions) -> String {
     let ddl = normalize_export_table_ddl(ddl, database_type, opts);
+    let ddl =
+        if database_type == Some(DatabaseType::OpenGauss) { normalize_opengauss_table_ddl_comments(&ddl) } else { ddl };
     let ddl = ddl.trim().trim_end_matches(';').trim_end();
     format!("{ddl};")
+}
+
+/// openGauss 6.x `pg_get_tabledef` can concatenate comment text into a
+/// `COMMENT ON` literal without escaping embedded single quotes. Normalize
+/// only those generated comment statements; all other DDL text remains
+/// untouched.
+fn normalize_opengauss_table_ddl_comments(ddl: &str) -> String {
+    let mut normalized = String::with_capacity(ddl.len());
+    for line in ddl.split_inclusive('\n') {
+        let (line_body, line_ending) = match line.strip_suffix('\n') {
+            Some(body) => match body.strip_suffix('\r') {
+                Some(body) => (body, "\r\n"),
+                None => (body, "\n"),
+            },
+            None => (line, ""),
+        };
+        let leading = line_body.len() - line_body.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
+        let statement = &line_body[leading..];
+        if let Some(statement) = normalize_opengauss_comment_statement(statement) {
+            normalized.push_str(&line_body[..leading]);
+            normalized.push_str(&statement);
+        } else {
+            normalized.push_str(line_body);
+        }
+        normalized.push_str(line_ending);
+    }
+    normalized
+}
+
+fn normalize_opengauss_comment_statement(statement: &str) -> Option<String> {
+    let uppercase = statement.to_ascii_uppercase();
+    if !uppercase.starts_with("COMMENT ON ") {
+        return None;
+    }
+
+    let is_pos = find_opengauss_comment_is_keyword(statement, &uppercase)?;
+    let value_start = is_pos + " IS ".len();
+    let value = &statement[value_start..];
+    let value_leading = value.len() - value.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
+    let value = &value[value_leading..];
+    let quote_offset = match value.as_bytes() {
+        [b'\'', ..] => 0,
+        [b'e' | b'E', b'\'', ..] => 1,
+        _ => return None,
+    };
+    let opening_quote = value_start + value_leading + quote_offset;
+    let statement_end = statement.trim_end().len();
+    let literal_end = statement[..statement_end]
+        .strip_suffix(';')
+        .map_or(statement_end, |without_terminator| without_terminator.len());
+    if opening_quote >= literal_end {
+        return None;
+    }
+
+    let closing_quote = statement[..literal_end].rfind('\'')?;
+    if closing_quote <= opening_quote || !statement[closing_quote + 1..literal_end].trim().is_empty() {
+        return None;
+    }
+    let literal = &statement[opening_quote..=closing_quote];
+    if opengauss_comment_literal_is_valid(literal) {
+        return Some(statement.to_string());
+    }
+
+    let raw_comment = &statement[opening_quote + 1..closing_quote];
+    let escaped_comment = raw_comment.replace('\'', "''");
+    let mut normalized = String::with_capacity(statement.len() + escaped_comment.len() - raw_comment.len());
+    normalized.push_str(&statement[..opening_quote + 1]);
+    normalized.push_str(&escaped_comment);
+    normalized.push_str(&statement[closing_quote..]);
+    Some(normalized)
+}
+
+fn find_opengauss_comment_is_keyword(statement: &str, uppercase: &str) -> Option<usize> {
+    let mut cursor = "COMMENT ON ".len();
+    while cursor + " IS ".len() <= statement.len() {
+        if statement.as_bytes().get(cursor) == Some(&b'\"') {
+            cursor = skip_opengauss_quoted_identifier(statement, cursor);
+            continue;
+        }
+        if uppercase.get(cursor..cursor + " IS ".len()) == Some(" IS ") {
+            return Some(cursor);
+        }
+        cursor += statement[cursor..].chars().next()?.len_utf8();
+    }
+    None
+}
+
+fn skip_opengauss_quoted_identifier(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'\"' {
+            if bytes.get(cursor + 1) == Some(&b'\"') {
+                cursor += 2;
+            } else {
+                return cursor + 1;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn opengauss_comment_literal_is_valid(literal: &str) -> bool {
+    let bytes = literal.as_bytes();
+    if bytes.len() < 2 || bytes.first() != Some(&b'\'') || bytes.last() != Some(&b'\'') {
+        return false;
+    }
+
+    let mut cursor = 1;
+    while cursor < bytes.len() - 1 {
+        if bytes[cursor] == b'\'' {
+            if cursor + 1 < bytes.len() - 1 && bytes[cursor + 1] == b'\'' {
+                cursor += 2;
+            } else {
+                return false;
+            }
+        } else {
+            cursor += 1;
+        }
+    }
+    true
 }
 
 fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>) {
@@ -1484,8 +1625,8 @@ async fn list_postgres_extension_members(
     schema: &str,
 ) -> Result<PostgresExtensionMembers, String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(PostgresExtensionMembers::default()),
         }
@@ -1515,8 +1656,8 @@ async fn list_postgres_export_sequences(
     fail_on_error: bool,
 ) -> Result<Vec<PostgresExportSequence>, String> {
     let pool = {
-        let connections = state.connections.read().await;
-        match connections.get(pool_key) {
+        let pool_handle = state.pool_handle(pool_key).await;
+        match pool_handle.as_ref() {
             Some(crate::connection::PoolKind::Postgres(pool)) => pool.clone(),
             _ => return Ok(Vec::new()),
         }
@@ -1879,10 +2020,16 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     }
 }
 
-fn record_export_error<W: Write>(file: &mut W, fail_on_error: bool, message: String) -> Result<(), String> {
+fn record_export_error<W: Write>(
+    file: &mut W,
+    fail_on_error: bool,
+    message: String,
+    lenient_errors: &mut LenientExportErrors,
+) -> Result<(), String> {
     if fail_on_error {
         Err(message)
     } else {
+        lenient_errors.record(message.clone());
         writeln!(file, "-- ERROR {message}").map_err(|error| format!("Failed to write file: {error}"))
     }
 }
@@ -2046,6 +2193,8 @@ fn emit_database_export_running(
         status: ExportStatus::Running,
         error: None,
         preparing,
+        error_count: 0,
+        error_summary: None,
     });
 }
 
@@ -2067,6 +2216,8 @@ fn emit_database_export_cancelled(
         status: ExportStatus::Cancelled,
         error: None,
         preparing: false,
+        error_count: 0,
+        error_summary: None,
     });
 }
 
@@ -2441,6 +2592,7 @@ async fn export_database_sql_core_inner(
     } else {
         None
     };
+    let mut lenient_errors = LenientExportErrors::default();
 
     // Emit immediately so the UI is never blank while we list schema metadata.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
@@ -2539,7 +2691,12 @@ async fn export_database_sql_core_inner(
             match list_postgres_extension_members(state, &pool_key, &request.schema).await {
                 Ok(members) => members,
                 Err(e) => {
-                    record_export_error(&mut file, request.fail_on_error, format!("reading extension members: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("reading extension members: {e}"),
+                        &mut lenient_errors,
+                    )?;
                     PostgresExtensionMembers::default()
                 }
             }
@@ -2563,7 +2720,12 @@ async fn export_database_sql_core_inner(
                 })
                 .collect(),
             Err(e) => {
-                record_export_error(&mut file, request.fail_on_error, format!("exporting extensions: {e}"))?;
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting extensions: {e}"),
+                    &mut lenient_errors,
+                )?;
                 Vec::new()
             }
         }
@@ -2605,7 +2767,12 @@ async fn export_database_sql_core_inner(
             Ok(sequences) => sequences,
             Err(e) if e == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
             Err(e) => {
-                record_export_error(&mut file, request.fail_on_error, format!("exporting sequences: {e}"))?;
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting sequences: {e}"),
+                    &mut lenient_errors,
+                )?;
                 Vec::new()
             }
         }
@@ -2718,7 +2885,8 @@ async fn export_database_sql_core_inner(
     let concurrent_prefetch_is_safe =
         match state.get_or_create_pool(&request.connection_id, Some(&request.database)).await {
             Ok(metadata_pool_key) => {
-                concurrent_metadata_prefetch_allowed(state.connections.read().await.get(&metadata_pool_key))
+                let pool = state.pool_handle(&metadata_pool_key).await;
+                concurrent_metadata_prefetch_allowed(pool.as_ref())
             }
             // 建池失败时不预取，让写出循环的直查路径按原有方式报告错误
             Err(_) => false,
@@ -2878,6 +3046,8 @@ async fn export_database_sql_core_inner(
             status: ExportStatus::Running,
             error: None,
             preparing: false,
+            error_count: 0,
+            error_summary: None,
         });
 
         // Export structure
@@ -2900,6 +3070,8 @@ async fn export_database_sql_core_inner(
                     status: ExportStatus::Running,
                     error: None,
                     preparing: false,
+                    error_count: 0,
+                    error_summary: None,
                 });
 
                 writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
@@ -2946,6 +3118,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting table structure {table_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -2985,6 +3158,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting columns for table {table_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                     object_index += 1;
                     continue;
@@ -3034,6 +3208,8 @@ async fn export_database_sql_core_inner(
                                     status: ExportStatus::Running,
                                     error: None,
                                     preparing: false,
+                                    error_count: 0,
+                                    error_summary: None,
                                 });
                                 Ok(())
                             },
@@ -3101,6 +3277,7 @@ async fn export_database_sql_core_inner(
                                     &mut file,
                                     request.fail_on_error,
                                     format!("exporting data for table {table_name}: {error}"),
+                                    &mut lenient_errors,
                                 )?;
                                 break;
                             }
@@ -3138,6 +3315,8 @@ async fn export_database_sql_core_inner(
                             status: ExportStatus::Running,
                             error: None,
                             preparing: false,
+                            error_count: 0,
+                            error_summary: None,
                         });
                         if row_count < batch_size {
                             break;
@@ -3182,6 +3361,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3209,7 +3390,12 @@ async fn export_database_sql_core_inner(
                     }
                 }
                 Err(e) => {
-                    record_export_error(&mut file, request.fail_on_error, format!("exporting view {view_name}: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting view {view_name}: {e}"),
+                        &mut lenient_errors,
+                    )?;
                 }
             }
 
@@ -3234,6 +3420,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3265,6 +3453,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting procedure {proc_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -3290,6 +3479,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3321,6 +3512,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting function {func_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -3356,6 +3548,8 @@ async fn export_database_sql_core_inner(
         status: ExportStatus::Done,
         error: None,
         preparing: false,
+        error_count: lenient_errors.count as u64,
+        error_summary: lenient_errors.first.clone(),
     });
 
     Ok(())
@@ -3424,6 +3618,7 @@ mod tests {
         DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
         PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
+    use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
     use crate::storage::Storage;
@@ -4387,6 +4582,60 @@ mod tests {
     }
 
     #[test]
+    fn opengauss_export_inserts_escape_quotes_without_doubling_backslashes() {
+        let style = r#""{\"paddingTop\":\"20vh\",\"fontSize\":16}""#;
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::OpenGauss),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("dbx_issue_json".to_string()),
+            qualified_table_name: None,
+            columns: vec!["comment_text".to_string(), "style".to_string()],
+            column_types: vec![Some("text".to_string()), Some("json".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!("逻辑删除标志：'0'-未删除，'1'-已删除"), json!(style)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        let expected_style = format!("'{style}'");
+        assert_eq!(
+            statements,
+            vec![format!(
+                "INSERT INTO \"public\".\"dbx_issue_json\" (\"comment_text\", \"style\") VALUES ('逻辑删除标志：''0''-未删除，''1''-已删除', {expected_style});"
+            )]
+        );
+    }
+
+    #[test]
+    fn postgres_export_keeps_json_escape_sequences_for_the_same_value() {
+        let style = r#""{\"paddingTop\":\"20vh\",\"fontSize\":16}""#;
+        let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
+            database_type: Some(DatabaseType::Postgres),
+            identifier_quote: None,
+            schema: Some("public".to_string()),
+            table_name: Some("dbx_issue_json".to_string()),
+            qualified_table_name: None,
+            columns: vec!["style".to_string()],
+            column_types: vec![Some("json".to_string())],
+            column_extras: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![json!(style)]],
+            batch_size: Some(10),
+        })
+        .unwrap();
+
+        let expected_style = format!("E'{}'", style.replace('\\', "\\\\"));
+        assert_eq!(
+            statements,
+            vec![format!("INSERT INTO \"public\".\"dbx_issue_json\" (\"style\") VALUES ({expected_style});")]
+        );
+    }
+
+    #[test]
     fn postgres_vector_export_preserves_pgvector_bracket_literals() {
         let statements = build_export_insert_statements(BuildExportInsertStatementsOptions {
             database_type: Some(DatabaseType::Postgres),
@@ -4398,18 +4647,29 @@ mod tests {
                 "id".to_string(),
                 "embedding".to_string(),
                 "qualified_embedding".to_string(),
+                "compact_embedding".to_string(),
                 "labels".to_string(),
+                "embedding_history".to_string(),
             ],
             column_types: vec![
                 Some("integer".to_string()),
                 Some("vector(2)".to_string()),
                 Some("public.vector".to_string()),
+                Some("halfvec(2)".to_string()),
                 Some("text[]".to_string()),
+                Some("public.vector(2)[]".to_string()),
             ],
             column_extras: Vec::new(),
             spatial_columns: Vec::new(),
             spatial_values: Vec::new(),
-            rows: vec![vec![json!(1), json!([1.2, 3.4]), json!(["5", "6"]), json!(["x", "y"])]],
+            rows: vec![vec![
+                json!(1),
+                json!([1.2, 3.4]),
+                json!(["5", "6"]),
+                json!([-0.25, 4]),
+                json!(["x", "y"]),
+                json!([[1.2, 3.4], [5, 6]]),
+            ]],
             batch_size: Some(10),
         })
         .unwrap();
@@ -4417,7 +4677,7 @@ mod tests {
         assert_eq!(
             statements,
             vec![
-                r#"INSERT INTO "public"."items" ("id", "embedding", "qualified_embedding", "labels") VALUES (1, '[1.2,3.4]', '[5,6]', '{"x","y"}');"#
+                r#"INSERT INTO "public"."items" ("id", "embedding", "qualified_embedding", "compact_embedding", "labels", "embedding_history") VALUES (1, '[1.2,3.4]', '[5,6]', '[-0.25,4]', '{"x","y"}', '{{1.2,3.4},{5,6}}');"#
             ]
         );
     }
@@ -5075,6 +5335,32 @@ mod tests {
     }
 
     #[test]
+    fn opengauss_export_escapes_single_quotes_in_comment_ddl() {
+        let ddl = concat!(
+            "CREATE TABLE \"public\".\"dbx_issue_comment\" (\"flag\" varchar(8));\n",
+            "COMMENT ON COLUMN \"public\".\"dbx_issue_comment\".\"flag\" IS '逻辑删除标志：'0'-未删除，'1'-已删除';"
+        );
+
+        assert_eq!(
+            format_export_table_ddl(ddl, Some(DatabaseType::OpenGauss), DdlNormalizeOptions::default()),
+            concat!(
+                "CREATE TABLE \"public\".\"dbx_issue_comment\" (\"flag\" varchar(8));\n",
+                "COMMENT ON COLUMN \"public\".\"dbx_issue_comment\".\"flag\" IS '逻辑删除标志：''0''-未删除，''1''-已删除';"
+            )
+        );
+    }
+
+    #[test]
+    fn opengauss_export_leaves_other_literals_and_valid_comments_unchanged() {
+        let ddl = concat!(
+            "CREATE TABLE \"public\".\"notes\" (\"body\" text DEFAULT 'O''Hara');\n",
+            "COMMENT ON COLUMN \"public\".\"notes\".\"body\" IS 'owner''s note';"
+        );
+
+        assert_eq!(format_export_table_ddl(ddl, Some(DatabaseType::OpenGauss), DdlNormalizeOptions::default()), ddl);
+    }
+
+    #[test]
     fn table_ddl_export_has_one_statement_terminator() {
         let ddl = "CREATE TABLE `users` (`id` int);;\n";
 
@@ -5222,12 +5508,71 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-strict-export-{}.sql", uuid::Uuid::new_v4()));
         let mut file = std::fs::File::create(&path).unwrap();
 
-        let result = record_export_error(&mut file, true, "exporting table users: permission denied".to_string());
+        let mut lenient_errors = LenientExportErrors::default();
+        let result = record_export_error(
+            &mut file,
+            true,
+            "exporting table users: permission denied".to_string(),
+            &mut lenient_errors,
+        );
         drop(file);
 
         assert_eq!(result.unwrap_err(), "exporting table users: permission denied");
+        assert_eq!(lenient_errors.count, 0);
         assert!(std::fs::read_to_string(&path).unwrap().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lenient_export_errors_track_count_and_first_failure_for_terminal_progress() {
+        let path = std::env::temp_dir().join(format!("dbx-lenient-export-{}.sql", uuid::Uuid::new_v4()));
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        let mut lenient_errors = LenientExportErrors::default();
+        record_export_error(
+            &mut file,
+            false,
+            "exporting table orders: RPC call timed out".to_string(),
+            &mut lenient_errors,
+        )
+        .unwrap();
+        record_export_error(
+            &mut file,
+            false,
+            "exporting view active_users: RPC call timed out".to_string(),
+            &mut lenient_errors,
+        )
+        .unwrap();
+        drop(file);
+
+        // The terminal Done progress must carry enough information to warn
+        // instead of reporting plain success (#8184).
+        assert_eq!(lenient_errors.count, 2);
+        assert_eq!(lenient_errors.first.as_deref(), Some("exporting table orders: RPC call timed out"));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("-- ERROR exporting table orders: RPC call timed out"));
+        assert!(contents.contains("-- ERROR exporting view active_users: RPC call timed out"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_progress_deserializes_events_without_lenient_error_fields() {
+        // Progress events persisted by older versions lack errorCount /
+        // errorSummary; they must keep deserializing with zeroed defaults.
+        let legacy = serde_json::from_value::<ExportProgress>(serde_json::json!({
+            "exportId": "export-1",
+            "currentObject": "users",
+            "objectIndex": 3,
+            "totalObjects": 10,
+            "rowsExported": 120,
+            "totalRows": null,
+            "status": "Done",
+            "error": null
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.error_count, 0);
+        assert_eq!(legacy.error_summary, None);
     }
 
     async fn test_app_state(scratch_dir: &std::path::Path) -> AppState {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyColumnFormatter, columnFormatterKeys, defaultIoTDBTimestampFormatter, formatIoTDBTimestampEditorValue, normalizeColumnFormatter, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
+import { applyColumnFormatter, columnFormatterKeys, defaultIoTDBTimestampFormatter, forceCsvTextForTemporalColumns, formatIoTDBTimestampEditorValue, normalizeColumnFormatter, normalizeSupportedDateTimePattern, parseIoTDBTimestampEditorValue } from "@/lib/dataGrid/columnFormatter";
 
 describe("columnFormatterKeys", () => {
   // MySQL query metadata mirrors the database into the schema slot, while the
@@ -164,9 +164,14 @@ describe("defaultIoTDBTimestampFormatter", () => {
     expect(defaultIoTDBTimestampFormatter("iotdb", "INT64", "time_zone=Asia%2FShanghai")).toBeUndefined();
   });
 
-  it("uses UTC when the connection does not specify a time zone", () => {
+  it("uses the IoTDB client session default when the connection does not specify a time zone", () => {
     const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "");
-    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T00:00:00.001+00:00");
+    expect(applyColumnFormatter("1787759999000", formatter)).toBe("2026-08-26T23:59:59.000+08:00");
+  });
+
+  it("falls back to the IoTDB client session default for an invalid configured zone", () => {
+    const formatter = defaultIoTDBTimestampFormatter("iotdb", "TIMESTAMP(ms)", "time_zone=Not%2FAZone");
+    expect(applyColumnFormatter(1, formatter)).toBe("1970-01-01T08:00:00.001+08:00");
   });
 
   it("round-trips a negative nanosecond timestamp without truncating toward zero", () => {
@@ -192,5 +197,27 @@ describe("defaultIoTDBTimestampFormatter", () => {
     expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00.1234", "iotdb", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
     expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00", "mysql", "TIMESTAMP(ms)", "time_zone=Asia%2FShanghai")).toBeUndefined();
     expect(parseIoTDBTimestampEditorValue("2026-08-17 10:00:00", "iotdb", "TIMESTAMP", "time_zone=Asia%2FShanghai")).toBeUndefined();
+  });
+});
+
+describe("forceCsvTextForTemporalColumns", () => {
+  it("wraps only string values in temporal columns as force-text formulas", () => {
+    const rows = [["2026-07-25 00:00:00.000", 48.962002, "root.a.b"]];
+    const columnTypes = ["TIMESTAMP", "DOUBLE", "TEXT"];
+    expect(forceCsvTextForTemporalColumns(rows, columnTypes)).toEqual([['="2026-07-25 00:00:00.000"', 48.962002, "root.a.b"]]);
+  });
+
+  it("leaves null and non-string temporal cells untouched", () => {
+    const rows = [[null, 1700000000000]];
+    const columnTypes = ["DATETIME", "DATETIME"];
+    expect(forceCsvTextForTemporalColumns(rows, columnTypes)).toEqual([[null, 1700000000000]]);
+  });
+
+  it("returns shallow copies of rows when no column is temporal", () => {
+    const rows = [["plain", 1]];
+    const columnTypes = ["VARCHAR", "INT"];
+    const result = forceCsvTextForTemporalColumns(rows, columnTypes);
+    expect(result).toEqual(rows);
+    expect(result[0]).not.toBe(rows[0]);
   });
 });

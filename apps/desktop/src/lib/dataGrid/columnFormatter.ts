@@ -429,12 +429,15 @@ export function iotdbTimestampFractionDigits(precision: IoTDBTimestampPrecision)
 
 function iotdbTimestampTimeZone(urlParams: string | undefined): string {
   const params = new URLSearchParams(urlParams ?? "");
-  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "UTC";
+  // Keep display aligned with the IoTDB Go client's default session zone.
+  // Otherwise an unconfigured connection interprets SQL literals in
+  // Asia/Shanghai but the grid renders the returned epoch in UTC.
+  const candidate = params.get("time_zone") || params.get("timezone") || params.get("zone_id") || "Asia/Shanghai";
   try {
     dayjs(0).tz(candidate);
     return candidate;
   } catch {
-    return "UTC";
+    return "Asia/Shanghai";
   }
 }
 
@@ -445,6 +448,24 @@ export function formatTemporalRowsForExport<T extends CellValue>(rows: readonly 
     row.map((value, index) => {
       if (!isTemporalColumnType(columnTypes[index])) return value;
       return formatTemporalValueForExport(value, normalizedPattern) as T;
+    }),
+  );
+}
+
+// CSV is untyped text: spreadsheet apps (WPS/Excel/OnlyOffice) re-guess a
+// quoted date-looking cell's type on open regardless of RFC4180 quoting,
+// which silently truncates/reformats it and can drop the milliseconds or
+// the date part entirely. Wrapping the value as an `="..."` formula is the
+// standard cross-app way to force text interpretation; the surrounding CSV
+// quoting/escaping (which already doubles embedded `"`) makes it round-trip
+// correctly. Only applied to already-string temporal cells so numeric/plain
+// columns keep exporting as-is.
+export function forceCsvTextForTemporalColumns<T extends CellValue>(rows: readonly (readonly T[])[], columnTypes: readonly (string | null | undefined)[]): T[][] {
+  if (!columnTypes.some((type) => isTemporalColumnType(type))) return rows.map((row) => [...row]);
+  return rows.map((row) =>
+    row.map((value, index) => {
+      if (typeof value !== "string" || !isTemporalColumnType(columnTypes[index])) return value;
+      return `="${value}"` as T;
     }),
   );
 }

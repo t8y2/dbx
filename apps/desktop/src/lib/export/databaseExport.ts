@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api.ts";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 
 export const DATABASE_EXPORT_ROW_LIMIT = 10_000;
 export const DATABASE_EXPORT_PAGE_SIZE = 500;
@@ -74,6 +75,19 @@ export interface AllDatabaseExportPlanItem {
   schema: string;
   fileStem: string;
   displayName: string;
+}
+
+/**
+ * Return schemas that can be exported as ordinary schema-owned objects.
+ *
+ * Xugu exposes database-global namespaces (public synonyms and scheduler jobs)
+ * through reserved synthetic schema names so the sidebar can reuse its normal
+ * tree loading path. They are not real schemas and must not be offered by the
+ * schema export selector.
+ */
+export function filterExportableSchemas(schemas: readonly string[], databaseType?: DatabaseType): string[] {
+  if (databaseType !== "xugu") return [...schemas];
+  return schemas.filter((schema) => !isXuguSyntheticScope(schema));
 }
 
 export interface DatabaseBackupSnapshotOptions {
@@ -153,7 +167,7 @@ export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput):
     }));
   }
   return options.databases.flatMap((database) => {
-    const schemas = options.schemaAware ? (options.schemasByDatabase?.[database] ?? []).filter((schema) => schema.trim()) : [database];
+    const schemas = options.schemaAware ? filterExportableSchemas(options.schemasByDatabase?.[database] ?? [], options.dbType).filter((schema) => schema.trim()) : [database];
     const exportSchemas = schemas.length > 0 ? schemas : [database];
     const includeSchemaInFileName = options.schemaAware && exportSchemas.length > 1;
 

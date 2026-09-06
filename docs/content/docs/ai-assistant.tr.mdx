@@ -1,0 +1,190 @@
+---
+title: Yapay Zekâ Asistanı
+description: Şema bağlamıyla SQL üretmek, veriyi çözümlemek ve denetimli Agent iş akışları çalıştırmak için bulut, uyumlu API ya da yerel CLI modellerini bağlayın.
+---
+
+Yapay Zekâ Asistanı; etkin veritabanını, şemayı, SQL'i, hataları, sonuç önizlemesini ve açıkça belirtilen nesneleri SQL üretimi, açıklama, iyileştirme, hata düzeltme ve veri analizi için bağlam hâline getirir.
+
+<Callout type="warn">Sor modu öneri üretir. Agent modu, kullanıcı açıkça gerçek veri istediğinde sorgu araçlarını çağırabilir. Her model çıktısı yanlış olabilir. SQL çalıştırmadan önce hedefi, alanları, filtreleri, parametreleri ve etkilenen kapsamı inceleyin.</Callout>
+
+## Model Tümleştirmeleri
+
+### API Sağlayıcıları
+
+DBX şunlar için hazır ayarlar içerir:
+
+- Claude
+- OpenAI
+- Gemini
+- DeepSeek
+- Qwen
+- MiniMax
+- Ollama
+- OpenAI Uyumlu
+- Anthropic Uyumlu
+- Özel
+
+Uyumlu ve özel yapılandırmalar; uç noktayı, modeli, API biçemini, kimlik doğrulama yöntemini, proxy'yi, bağlam penceresini ve ek HTTP başlıklarını ayarlayabilir. API biçemleri arasında OpenAI biçemli tamamlamalar, Responses API'si ve Anthropic Messages bulunur. Desteklendiğinde DBX modelleri keşfeder ve asistan ya da Agent kullanımına uygun olmayan uç noktaları eler.
+
+### Yerel CLI Agent'ları
+
+Masaüstü ayrıca yerelde kurulu ve kimliği doğrulanmış şunları çağırabilir:
+
+- Claude Code CLI
+- Codex CLI
+- Pi Coding Agent
+
+Çalıştırılabilir yolu ve ek ortam değişkenlerini yapılandırabilirsiniz. CLI Agent'ları Masaüstü bilgisayarında çalışır ve etkin veritabanına DBX kapsamındaki MCP araçlarıyla erişir. Docker/Web bu yerel CLI sağlayıcılarını gizler, çünkü sunucu tarayıcının çalıştığı bilgisayarda bu komutların kurulu olduğunu varsayamaz.
+
+## Yapılandırma Ekleme
+
+<Steps>
+  <Step>
+    ### Yapay Zekâ Ayarlarını Açın
+
+    Düzenleyici ayarlarında adlandırılmış bir yapay zekâ yapılandırması ekleyin. Aynı sağlayıcı için birden çok uç nokta ya da kimlik bilgisi kaydedilebilir.
+
+  </Step>
+  <Step>
+    ### Sağlayıcıyı ve Modeli Seçin
+
+    Bir hazır ayarı, uyumlu API'yi, özel bir uç noktayı ya da yerel CLI'yi kullanın. Modeller mümkün olduğunda sağlayıcıdan ya da CLI'den keşfedilir; aksi hâlde elle girilebilir. Elle girilen modeller geçerli yapılandırmayla kaydedilir ve uyumlu bir sağlayıcı model keşfi sunmadığında ya da keşif başarısız olduğunda seçilebilir kalır.
+
+  </Step>
+  <Step>
+    ### Kimlik Doğrulamayı ve Akıl Yürütmeyi Yapılandırın
+
+    API modları bir API anahtarı, kimlik doğrulama yöntemi, uç nokta, proxy ve özel HTTP başlıkları kabul eder. Başlıkları ağ geçidi kimlik doğrulaması ya da kiracı yönlendirmesi için kullanın, örneğin `X-GoModel-User-Path: /dbx-assistant`; bunlar model keşfi, bağlantı testleri, sohbet ve Agent istekleriyle gönderilir. Desteklenen modeller; tek bir evrensel ayar yerine sağlayıcının yeteneklerine göre çaba, akıl yürütme ya da düşünme denetimleri sunar.
+
+  </Step>
+  <Step>
+    ### Test Edin ve Kaydedin
+
+    Test; başarıyı, gecikmeyi, geçerli modeli ve kimlik doğrulama, hız sınırı, zaman aşımı ya da eksik model gibi sınıflandırılmış hataları bildirir.
+
+  </Step>
+</Steps>
+
+API anahtarları, özel başlık değerleri, CLI ortam değişkenleri ve özel uç noktalar hassas olabilir. Yapılandırma ekran görüntülerini, dışa aktarımlarını ya da hata ayıklama günlüklerini güvenmediğiniz taraflarla paylaşmayın.
+
+## Sor ve Agent
+
+| Mod | Ne için uygundur | Araç ve çalıştırma davranışı |
+| --- | --- | --- |
+| Sor | SQL üretme, açıklama, iyileştirme, düzeltme ya da çevirme ve mevcut bağlamdan öneri verme | Veritabanını kendiliğinden sorgulamaz; son yanıtlar önerileri doğrulanmış sonuçlardan ayırmalıdır |
+| Agent | "Sonucu getir", "gerçek veriyi karşılaştır" ya da "önce şemayı incele" gibi yinelemeli kanıt gerektiren istekler | Tabloları listeleyebilir, sütunları okuyabilir, veri örnekleyebilir ve salt okunur sorgular çalıştırabilir; yazmalar tam onay gerektirir |
+
+Agent yalnızca özgün istek açıkça gerçek veri ya da sonuç istediğinde bir sorgu çalıştırmalıdır. "Bir sorgu yaz" isteği, Agent modunda bile SQL'i çalıştırmadan döndürmelidir.
+
+## Agent Turları ve Yeniden Denemeler
+
+- **En fazla Agent turu** varsayılan olarak 30'dur ve 5 ile 500 arasında ayarlanabilir. Model, araç ve düzeltme döngüsü yinelemelerini sınırlar
+- **En fazla API yeniden denemesi** varsayılan olarak 2'dir ve hız sınırları, zaman aşımları ile geçici ağ hataları için 0 ile 10 arasında ayarlanabilir. Claude Code, Codex ve Pi CLI sağlayıcıları bu API yeniden deneme ayarını kullanmaz
+- Agent; tur sınırına ulaştığında, iptal edildiğinde, bağlantı koptuğunda ya da araç politikası tarafından reddedildiğinde durur ve tamamlanan adımlar ile hataları saklar
+
+Tur sınırını artırmak gecikmeyi, veritabanı okumalarını ve model maliyetini yükseltir. Sınırı artırmadan önce açık istemleri, açıkça belirtilmiş tabloları ve daha dar bir kapsamı tercih edin.
+
+## Şema, Tablo ve SQL Dosyası Bağlamı
+
+Yapay zekâ bağlamı şunları içerebilir:
+
+- Veritabanı türü, bağlantı adı, veritabanı ve şema
+- Düzenleyicideki geçerli ya da seçili SQL ve en son hata
+- Tablolar, sütunlar, dizinler, yabancı anahtarlar ve sınırlı sayıda örnek satır
+- Geçerli sonucun sınırlı bir önizlemesi
+- Seçili istem şablonları
+- Başvurulan kayıtlı SQL dosyası içeriği
+
+Tabloları ve kayıtlı SQL dosyalarını aramak için istemde `@` yazın:
+
+- `@users`, `users` tablosunun meta verisini önceler
+- `@public.orders`, şema nitelikli bir tablo seçer
+- Birden çok tablo ya da SQL dosyası birlikte seçilebilir
+
+Büyük şemalar kısaltılır. Açıkça belirtmek, modelin tüm nesneler arasında tahmin yürütmesini istemekten daha güvenilirdir; ayrıca belirteç sayısını ve meta veri isteklerini azaltır.
+
+## Genel Yönergeler ve İstem Şablonları
+
+Ayarlar şunları saklayabilir:
+
+- Her isteğe eklenen **genel yönergeler**: adlandırma kuralları, saat dilimi, yumuşak silme uygulamaları ya da üretim kısıtları gibi
+- Yeniden kullanılabilir senaryolar için **istem şablonları**: "yalnızca PostgreSQL uyumlu SQL" ya da "her analize dizin önerileri ekle" gibi
+
+Aynı anda birden çok şablon etkin olabilir. DBX, istek gönderildiğinde seçili şablonların ve genel yönergelerin anlık görüntüsünü alır; böylece sonraki düzenlemeler çalışan bir görevi değiştirmez.
+
+Şablonlar ayrıca **bir veya daha fazla veritabanı türü için varsayılan** olarak işaretlenebilir (Ayarlar → Yapay Zekâ'da şablonun yanındaki yıldız simgesi). Yapay zekâ paneli o veritabanı türündeki bir bağlantıda açıldığında — ya da farklı bir bağlantıya, veritabanına veya şemaya geçildikten sonra — eşleşen varsayılanlar, elle seçimle aynı toplam içerik sınırına tabi olarak otomatik uygulanır. Geçerli veritabanı türü için varsayılan yapılandırılmamışsa, yeni açılan panel o veritabanı türüyle en son kullanılan şablonları geri yükler; hiçbir şablon seçili değilken gönderim yapmak bu hatırlanan seçimi temizler. Bağlantı, veritabanı ya da şema değiştirmek yalnızca açık varsayılanları uygular — hiçbiri yapılandırılmamışsa seçim geri yüklenmez, boş başlar. Elle yapılan seçim kaldırma, panel yeniden açılana ya da ad alanı değişene kadar her zaman önceliklidir.
+
+Şablonlar model bağlamına girer. İçlerine parola, belirteç ya da gereksiz iş verisi koymayın. Kuralları kısa ve çelişkisiz tutun, çünkü modeller çelişen yönergeleri beklendiği gibi çözemeyebilir.
+
+## Yazmalar ve Üretim Güvenliği
+
+Yapay Zekâ Agent'ının yürütme sınırları yalnızca istemle değil, arka uç tarafından uygulanır:
+
+1. Salt okunur araçlar gerektiğinde çağrılabilir
+2. Salt okunur olmayan SQL önce açık bir öneri olarak gösterilmelidir
+3. Kullanıcı onayı yetkiyi aynı bağlantıya, aynı veritabanına ve tam SQL metnine bağlar
+4. Yetki yalnızca bir sonraki çalıştırma için geçerlidir ve hiçbir zaman kalıcı bir yazma izni olmaz
+5. Yapay zekâ Agent'ları üretim veritabanları için yazma ya da DDL yetkisi alamaz; yalnızca DBX'te elle incelenmek üzere SQL döndürebilir
+
+Bağlantının salt okunur koruması, üretim koruması ve veritabanı kimlik bilgileri üst sınır olmayı sürdürür. Hedef değişikliği, SQL değişikliği, boş onay ya da arka uçtaki risk sınıflandırmasının başarısız olması yetkiyi geçersiz kılar.
+
+<Callout type="info">Yapay Zekâ Agent'ı hiçbir zaman "bundan sonra yazabilirsin" izni almaz ve MCP politikasını, bağlantının salt okunur korumasını ya da veritabanı yetkilerini atlayamaz. Sınırın tamamı için [Üretim Güvenliği](/tr/docs/production-safety) sayfasına bakın.</Callout>
+
+## Akıl Yürütme Çabası ve Düşünme
+
+Sağlayıcılar farklı mekanizmalar sunar: sıralı çaba düzeyleri, akıl yürütme düzeyleri, boole düşünme, tam sayı bütçeleri ya da serbest metin seçenekleri. DBX, etkin modelin yeteneğine göre denetimleri gösterir ve seçimi yapılandırma ile model başına hatırlar.
+
+- Basit üretim ve açıklama için sağlayıcı varsayılanını ya da daha düşük çabayı kullanın
+- Çok tablolu akıl yürütme, zor iyileştirme ya da hata tanılaması için çabayı artırın
+- Daha yüksek çaba genellikle gecikmeyi ve maliyeti artırır, doğruluğu garanti etmez
+
+Bir arayüz etiketinin sağlayıcılar arasında birebir aynı anlama geldiğini varsaymayın.
+
+## Konuşmalar, Geçmiş ve Dışa Aktarma
+
+- İstem geçmişinde gezinmek için ↑ ve ↓ tuşlarını kullanın
+- Konuşmalar bağlantı ve veritabanı bağlamıyla kaydedilebilir
+- Son yapay zekâ analiz mesajları bağlantı adı ve zaman damgasıyla Markdown olarak dışa aktarılabilir
+- Markdown dışa aktarımı yalnızca son yanıtı içerir; içsel akıl yürütme ve Agent adımları eklenmez
+
+Dışa aktarımlar yine tablo adları, SQL, sonuç parçaları ve iş verisi içerebilir. Paylaşmadan önce inceleyip maskeleyin.
+
+## Yaygın Görevler
+
+### SQL Üretme
+
+> `@orders` ve `@customers` tablolarını kullanarak son 30 gün için en yüksek gelirli 10 müşteriyi veren bir sorgu üret. Yalnızca SQL döndür, çalıştırma.
+
+"Çalıştırma" demek amacı netleştirir. Tarih işlevlerini, şema nitelemesini, join anahtarlarını, null işlemeyi ve satır sınırlarını inceleyin.
+
+### Gerçek Veriyi Çözümleme
+
+> `@orders` tablosundan son yedi günün günlük sipariş sayılarını sorgula, salt okunur sorguyu çalıştır ve olağan dışı sıçramaları açıkla.
+
+Bu, açıkça gerçek sonuç istediği için Agent moduna uygundur.
+
+### Bir Hatayı Düzeltme
+
+Başarısız SQL'i, veritabanı hatasını ve ilgili tabloları verin. Yapay zekâ sütunları ve lehçe bağlamını inceleyebilir, ancak sürüme özgü davranış, yetkiler, kilitler ve yürütme planları yine insan doğrulaması gerektirir.
+
+## Gizlilik ve Sorun Giderme
+
+- Bulut sağlayıcıları; modele gönderilen istemi, şema özetini, SQL'i ve sınırlı sonuç bağlamını alır; kendi gizlilik koşulları geçerlidir
+- Ollama ve yerel CLI yerelde çalışabilir, ancak model işleminin ya da CLI eklentilerinin kendi ağ ve günlük davranışları olabilir
+- Proxy'ler, uyumlu uç noktalar ve özel ağ geçitleri istek içeriğini günlüğe yazabilir
+- Bağlantı testi hatalarında uç noktayı, kimlik doğrulama yöntemini, model adını, proxy'yi ve API biçemi uyumluluğunu denetleyin
+- Agent sürekli başarısız oluyorsa yalnızca tur sınırını artırmak yerine bağlamı azaltın, tam tabloları belirtin, görevi daraltın ve araç hatalarını inceleyin
+
+## İlgili Özellikler
+
+<Cards>
+  <Card title="Üretim Güvenliği" href="/tr/docs/production-safety">
+    Yapay zekâ, MCP, salt okunur bağlantılar ve üretim koruması için ortak sınırları inceleyin.
+  </Card>
+  <Card title="MCP Tümleştirmesi" href="/tr/docs/mcp">
+    Dış yapay zekâ kodlama asistanlarını DBX üzerinden veritabanlarına bağlayın.
+  </Card>
+  <Card title="Sorgu Düzenleyici" href="/tr/docs/query-editor">
+    Yapay zekânın erişebildiği SQL, sonuç ve meta veri bağlamını öğrenin.
+  </Card>
+</Cards>

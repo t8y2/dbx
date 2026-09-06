@@ -144,6 +144,13 @@ impl RocketMqAdmin {
         })
         .await
     }
+
+    async fn list_all_topic_consumer_groups(&self, topic: &str, enrich: bool) -> Result<Vec<SubscriptionInfo>, String> {
+        collect_paginated_consumer_group_pages(|offset| {
+            self.call("mq_list_consumer_groups", rocketmq_topic_consumer_group_page_params(topic, offset, enrich))
+        })
+        .await
+    }
 }
 
 #[async_trait]
@@ -380,20 +387,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
         }
 
         // Topic path: skip list enrich; batch lag in one agent RPC (no N+1).
-        let result: serde_json::Value = self
-            .call(
-                "mq_list_consumer_groups",
-                serde_json::json!({
-                    "topic": topic.topic,
-                    "limit": 200,
-                    "offset": 0,
-                    "enrich": false,
-                    "includeLag": true,
-                }),
-            )
-            .await?;
-        let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(groups.iter().map(rocketmq_subscription_from_group).collect())
+        self.list_all_topic_consumer_groups(&topic.topic, false).await
     }
 
     async fn enrich_subscriptions(&self, topic: &TopicRef) -> Result<Vec<SubscriptionInfo>, String> {
@@ -403,19 +397,7 @@ impl MessageQueueAdmin for RocketMqAdmin {
         }
 
         // Topic path: skip list enrich; batch lag in one agent RPC (no N+1).
-        let mut params = serde_json::json!({
-            "limit": 500,
-            "offset": 0,
-            "enrich": true,
-        });
-        if !topic.topic.is_empty() {
-            params["topic"] = serde_json::json!(topic.topic);
-            params["limit"] = serde_json::json!(200);
-            params["includeLag"] = serde_json::json!(true);
-        }
-        let result: serde_json::Value = self.call("mq_list_consumer_groups", params).await?;
-        let groups = result.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(groups.iter().map(rocketmq_subscription_from_group).collect())
+        self.list_all_topic_consumer_groups(&topic.topic, true).await
     }
 
     async fn create_subscription(&self, _topic: &TopicRef, _sub: &str, _pos: ResetPosition) -> Result<(), String> {
@@ -790,6 +772,16 @@ fn rocketmq_cluster_consumer_group_page_params(offset: usize, enrich: bool) -> s
         "limit": CONSUMER_GROUP_LIST_PAGE_SIZE,
         "offset": offset,
         "enrich": enrich,
+    })
+}
+
+fn rocketmq_topic_consumer_group_page_params(topic: &str, offset: usize, enrich: bool) -> serde_json::Value {
+    serde_json::json!({
+        "topic": topic,
+        "limit": CONSUMER_GROUP_LIST_PAGE_SIZE,
+        "offset": offset,
+        "enrich": enrich,
+        "includeLag": true,
     })
 }
 
@@ -1463,6 +1455,37 @@ mod tests {
         let enriched = rocketmq_cluster_consumer_group_page_params(500, true);
         assert_eq!(enriched.get("offset").and_then(|value| value.as_u64()), Some(500));
         assert_eq!(enriched.get("enrich").and_then(|value| value.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn topic_consumer_group_pagination_loads_list_and_enrich_pages() {
+        let groups: Vec<serde_json::Value> = (1..=201)
+            .map(|index| serde_json::json!({ "groupId": format!("group-{index:04}"), "groupType": "NORMAL" }))
+            .collect();
+        let total = groups.len();
+
+        for enrich in [false, true] {
+            let mut offsets = Vec::new();
+            let subscriptions = collect_paginated_consumer_group_pages(|offset| {
+                offsets.push(offset);
+                let params = rocketmq_topic_consumer_group_page_params("orders", offset, enrich);
+                assert_eq!(params.get("topic").and_then(|value| value.as_str()), Some("orders"));
+                assert_eq!(params.get("limit").and_then(|value| value.as_i64()), Some(500));
+                assert_eq!(params.get("offset").and_then(|value| value.as_u64()), Some(offset as u64));
+                assert_eq!(params.get("enrich").and_then(|value| value.as_bool()), Some(enrich));
+                assert_eq!(params.get("includeLag").and_then(|value| value.as_bool()), Some(true));
+
+                let end = offset.saturating_add(200).min(total);
+                let page = groups[offset..end].to_vec();
+                async move { Ok(serde_json::json!({ "groups": page, "total": total })) }
+            })
+            .await
+            .expect("topic consumer group pages should be collected");
+
+            assert_eq!(offsets, vec![0, 200]);
+            assert_eq!(subscriptions.len(), 201);
+            assert_eq!(subscriptions[200].name, "group-0201");
+        }
     }
 
     #[tokio::test]

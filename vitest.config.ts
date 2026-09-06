@@ -13,9 +13,14 @@ export default defineConfig({
   test: {
     include: ["packages/app-tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
     globalSetup: "packages/test-globals.ts",
-    // Large store modules are dynamically imported in many specs. Limiting
-    // concurrency prevents those imports from starving timers and making
-    // otherwise deterministic deferred-promise tests exceed Vitest's timeout.
-    maxWorkers: 4,
+    // Many specs dynamically import the large store modules (connectionStore,
+    // queryStore) inside test bodies; when several workers pay that first
+    // import at once, CPU contention can stall a worker's event loop past the
+    // old 5s default and flake deferred-promise tests. A 10s timeout absorbs
+    // that without capping throughput, so workers can scale past 4. CI keeps
+    // 4 workers: its 4-vCPU runners already run vue-tsc/oxlint/oxfmt
+    // concurrently with vitest via `pnpm check`.
+    testTimeout: 10_000,
+    maxWorkers: process.env.CI ? 4 : 8,
   },
 });

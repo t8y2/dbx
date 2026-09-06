@@ -38,8 +38,8 @@ pub async fn get_agent_explain_info_core(
     }
 
     let target = {
-        let connections = state.connections.read().await;
-        let pool = connections.get(&pool_key).ok_or_else(|| "Connection not found".to_string())?;
+        let pool_handle = state.pool_handle(&pool_key).await;
+        let pool = pool_handle.as_ref().ok_or_else(|| "Connection not found".to_string())?;
         match pool {
             PoolKind::Agent(client) => ExplainTarget::Agent(client.clone()),
             PoolKind::ExternalDriver { config, session, .. } => {
@@ -227,14 +227,18 @@ mod tests {
         let storage = crate::storage::Storage::open(&dir.join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         state.configs.write().await.insert(config.id.clone(), config.clone());
-        state.connections.write().await.insert(
-            "oracle-jdbc".to_string(),
-            PoolKind::ExternalDriver {
-                driver_id: "jdbc".to_string(),
-                config: Arc::new(config),
-                session: session.clone(),
-            },
-        );
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "oracle-jdbc".to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: Arc::new(config),
+                        session: session.clone(),
+                    },
+                );
+            })
+            .await;
 
         let plan = get_agent_explain_info_core(
             &state,

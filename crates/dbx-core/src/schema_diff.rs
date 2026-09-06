@@ -154,6 +154,10 @@ pub struct TableDiff {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object_type: Option<String>,
     pub name: String,
+    /// Source-side display/key name. `target_name` is set for an explicit
+    /// source→target table mapping and is the physical target used by DDL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub columns: Option<Vec<ColumnDiff>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,17 +219,92 @@ pub struct FieldMapping {
     pub custom_params: Option<String>,
 }
 
+/// Canonicalizes a handful of ANSI-SQL type synonyms that name the same
+/// underlying type across dialects (e.g. Postgres/Kingbase report the base
+/// type as `character varying` via `format_type()`, while the field-mapping
+/// UI's type catalog lists the shorter `varchar`). Without this, a user
+/// mapping configured against one spelling silently never matches a column
+/// reported under the other.
+fn canonical_type_name(base: &str) -> std::borrow::Cow<'_, str> {
+    match base.trim().to_ascii_uppercase().as_str() {
+        "CHARACTER VARYING" => std::borrow::Cow::Borrowed("VARCHAR"),
+        "CHARACTER" => std::borrow::Cow::Borrowed("CHAR"),
+        _ => std::borrow::Cow::Owned(base.trim().to_ascii_uppercase()),
+    }
+}
+
+/// Finds the mapping for `base_type`, preferring an exact (case-insensitive)
+/// match over an alias match. The field-mapping panel auto-generates one row
+/// per catalog type — `char`, `character`, `varchar` and `character varying`
+/// commonly coexist as separate rows with independently chosen targets — so
+/// treating aliases as interchangeable on the first hit alone would let an
+/// earlier row (e.g. `char`) silently shadow a later exact row (e.g.
+/// `character`) that shares the same canonical name. Alias matching is only
+/// a fallback for when no row exactly names the reported type.
+fn find_mapping<'a>(mappings: &'a [FieldMapping], base_type: &str) -> Option<&'a FieldMapping> {
+    mappings
+        .iter()
+        .find(|m| m.source_type.eq_ignore_ascii_case(base_type))
+        .or_else(|| mappings.iter().find(|m| canonical_type_name(&m.source_type) == canonical_type_name(base_type)))
+}
+
+/// Splices a driver-reported column length back into its type string when
+/// the type name itself omits it. Postgres/Kingbase can report a varying
+/// column as bare `character varying` (no length) via `format_type()` while
+/// still exposing the real length separately as `character_maximum_length`.
+/// Without this, the cross-dialect rewrite below has no way to tell "no
+/// length was ever declared" (safe to default) apart from "the length just
+/// isn't embedded in this dialect's type string" (issue #8011) — silently
+/// falling back to a generic default in the latter case would replace a
+/// known-correct length with a possibly wrong one.
+fn with_known_length(source_type: &str, character_maximum_length: Option<i32>) -> String {
+    let trimmed = source_type.trim();
+    if trimmed.contains('(') {
+        return trimmed.to_string();
+    }
+    // `character_maximum_length` is populated by several drivers for types
+    // where it does NOT mean "declared length in this position" — MySQL's
+    // information_schema fills it in for TEXT/BLOB family columns (e.g.
+    // TEXT -> 65535), and Oracle's DATA_LENGTH is filled in for every
+    // column, including DATE (byte length, e.g. 7) and NUMBER. Splicing
+    // those in verbatim is wrong twice over: `TEXT(65535)` is silently
+    // *reinterpreted* as MEDIUMTEXT by MySQL (real DB verified), and
+    // `DATE(7)` sent to a MySQL target is a straight syntax error.
+    //
+    // CHAR/CHARACTER/NCHAR belong on this whitelist alongside the VARCHAR
+    // family, unlike in type_rewrite's *default*-to-255 list: that list
+    // invents a length out of thin air (where CHAR must be excluded — a
+    // bare CHAR is already valid MySQL, meaning CHAR(1)), whereas this
+    // function only *restores* a length the driver already reported
+    // separately. MySQL's own information_schema does this for CHAR too
+    // (DATA_TYPE="char", CHARACTER_MAXIMUM_LENGTH=10 for a CHAR(10) column,
+    // real DB verified) — excluding CHAR here would silently truncate a
+    // real CHAR(10) column down to CHAR(1). Mirrors the same whitelist
+    // `columnDDLDataType` uses in agents/drivers/kingbase-go/kingbase_metadata.go.
+    let base_upper = trimmed.to_ascii_uppercase();
+    if !matches!(
+        base_upper.as_str(),
+        "VARCHAR" | "CHARACTER VARYING" | "NVARCHAR" | "CHAR" | "CHARACTER" | "NCHAR" | "VARCHAR2" | "NVARCHAR2"
+    ) {
+        return trimmed.to_string();
+    }
+    match character_maximum_length {
+        Some(len) if len > 0 => format!("{trimmed}({len})"),
+        _ => trimmed.to_string(),
+    }
+}
+
 impl FieldMapping {
     pub fn apply<'a>(mappings: &'a [FieldMapping], source_type: &str) -> Option<&'a str> {
         let base_type = source_type.split('(').next().unwrap_or(source_type).trim();
-        mappings.iter().find(|m| m.source_type.eq_ignore_ascii_case(base_type)).map(|m| m.target_type.as_str())
+        find_mapping(mappings, base_type).map(|m| m.target_type.as_str())
     }
 
     pub fn apply_with_params(mappings: &[FieldMapping], source_type: &str, target_kind: DialectKind) -> Option<String> {
         let trimmed = source_type.trim();
         let base_type = trimmed.split('(').next().unwrap_or(trimmed);
         let source_params = &trimmed[base_type.len()..];
-        let matched = mappings.iter().find(|m| m.source_type.eq_ignore_ascii_case(base_type))?;
+        let matched = find_mapping(mappings, base_type)?;
 
         let result = match matched.param_strategy {
             ParamStrategy::Strip => Some(matched.target_type.clone()),
@@ -277,6 +356,13 @@ fn type_supports_params(kind: DialectKind, type_name: &str) -> bool {
                 && (t.has_length || t.has_precision || t.max_precision.is_some())
         })
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaDiffTableMapping {
+    pub source_table: String,
+    pub target_table: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,6 +427,8 @@ pub struct SchemaDiffPreparationOptions {
     pub resource_constraint: Option<ResourceConstraint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub field_mappings: Vec<FieldMapping>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_mappings: Vec<SchemaDiffTableMapping>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1257,6 +1345,7 @@ impl RollbackGraph {
         TableDiff {
             diff_type: inverted_type,
             object_type: diff.object_type.clone(),
+            target_name: diff.target_name.clone(),
             name: diff.name.clone(),
             columns: inverted_columns,
             indexes: inverted_indexes,
@@ -1404,7 +1493,12 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 target_tables: options
                     .target_tables
                     .iter()
-                    .filter(|t| shard_set.contains(t.name.as_str()))
+                    .filter(|t| {
+                        shard_set.contains(t.name.as_str())
+                            || options.table_mappings.iter().any(|mapping| {
+                                shard_set.contains(mapping.source_table.as_str()) && mapping.target_table == t.name
+                            })
+                    })
                     .cloned()
                     .collect(),
                 source_details: options
@@ -1416,7 +1510,12 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 target_details: options
                     .target_details
                     .iter()
-                    .filter(|d| shard_set.contains(d.name.as_str()))
+                    .filter(|d| {
+                        shard_set.contains(d.name.as_str())
+                            || options.table_mappings.iter().any(|mapping| {
+                                shard_set.contains(mapping.source_table.as_str()) && mapping.target_table == d.name
+                            })
+                    })
                     .cloned()
                     .collect(),
                 source_functions: options.source_functions.clone(),
@@ -1434,6 +1533,7 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 compare_column_order: options.compare_column_order,
                 source_dialect: options.source_dialect,
                 target_dialect: options.target_dialect,
+                table_mappings: options.table_mappings.clone(),
                 ..Default::default()
             };
             diff_schema(&shard_options)
@@ -1715,6 +1815,7 @@ impl Default for SchemaDiffPreparationOptions {
             shard_strategy: None,
             resource_constraint: None,
             field_mappings: Vec::new(),
+            table_mappings: Vec::new(),
         }
     }
 }
@@ -1767,6 +1868,11 @@ impl SchemaDiffPreparationOptions {
 
     pub fn with_field_mappings(mut self, mappings: Vec<FieldMapping>) -> Self {
         self.field_mappings = mappings;
+        self
+    }
+
+    pub fn with_table_mappings(mut self, mappings: Vec<SchemaDiffTableMapping>) -> Self {
+        self.table_mappings = mappings;
         self
     }
 }
@@ -1822,6 +1928,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
             diffs.push(TableDiff {
                 diff_type: "renamed".to_string(),
                 object_type: Some("table".to_string()),
+                target_name: Some(c.target_name.clone()),
                 name: c.source_name.clone(),
                 columns: None,
                 indexes: None,
@@ -1847,7 +1954,8 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
         for diff in &diffs {
             if diff.diff_type == "modified" {
                 if let Some(source_detail) = options.source_details.iter().find(|d| d.name == diff.name) {
-                    if let Some(target_detail) = options.target_details.iter().find(|d| d.name == diff.name) {
+                    let target_name = diff.target_name.as_deref().unwrap_or(&diff.name);
+                    if let Some(target_detail) = options.target_details.iter().find(|d| d.name == target_name) {
                         let (_, warnings) = diff_columns_with_compatibility(
                             &source_detail.columns,
                             &target_detail.columns,
@@ -1961,6 +2069,53 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SchemaDiffTableNameResolution {
+    pairs: Vec<(String, String)>,
+    source_only: Vec<String>,
+    target_only: Vec<String>,
+}
+
+fn resolve_schema_diff_table_names(
+    source_names: &[String],
+    target_names: &[String],
+    mappings: &[SchemaDiffTableMapping],
+) -> SchemaDiffTableNameResolution {
+    let target_set: HashSet<&str> = target_names.iter().map(String::as_str).collect();
+    let mut explicit_by_source: HashMap<&str, &str> = HashMap::new();
+    for mapping in mappings {
+        if !mapping.source_table.is_empty() && !mapping.target_table.is_empty() {
+            explicit_by_source.entry(mapping.source_table.as_str()).or_insert(mapping.target_table.as_str());
+        }
+    }
+
+    let mut used_targets = HashSet::new();
+    let mut pairs = Vec::new();
+    let mut source_only = Vec::new();
+    for source_name in source_names {
+        let explicit_target = explicit_by_source
+            .get(source_name.as_str())
+            .copied()
+            .filter(|target_name| target_set.contains(target_name) && !used_targets.contains(target_name));
+        let target_name = explicit_target.or_else(|| {
+            target_set
+                .contains(source_name.as_str())
+                .then_some(source_name.as_str())
+                .filter(|target_name| !used_targets.contains(target_name))
+        });
+
+        if let Some(target_name) = target_name {
+            used_targets.insert(target_name);
+            pairs.push((source_name.clone(), target_name.to_string()));
+        } else {
+            source_only.push(source_name.clone());
+        }
+    }
+
+    let target_only = target_names.iter().filter(|name| !used_targets.contains(name.as_str())).cloned().collect();
+    SchemaDiffTableNameResolution { pairs, source_only, target_only }
+}
+
 fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let source_details: HashMap<&str, &TableSchemaDetail> =
         options.source_details.iter().map(|detail| (detail.name.as_str(), detail)).collect();
@@ -1996,8 +2151,10 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         .map(|table| table.name.clone())
         .collect();
 
-    let (added, removed, common) = diff_names(&source_table_names, &target_table_names);
-    let (added_views, removed_views, common_views) = diff_names(&source_view_names, &target_view_names);
+    let table_resolution =
+        resolve_schema_diff_table_names(&source_table_names, &target_table_names, &options.table_mappings);
+    let view_resolution =
+        resolve_schema_diff_table_names(&source_view_names, &target_view_names, &options.table_mappings);
     let mut result = Vec::new();
 
     // A foreign key whose `ref_table` is itself one of the tables being compared is a
@@ -2011,11 +2168,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     let source_table_name_set: HashSet<&str> = source_table_names.iter().map(String::as_str).collect();
     let target_table_name_set: HashSet<&str> = target_table_names.iter().map(String::as_str).collect();
 
-    for name in added {
+    for name in table_resolution.source_only {
         let source_detail = source_details.get(name.as_str());
         result.push(TableDiff {
             diff_type: "added".to_string(),
             object_type: Some("table".to_string()),
+            target_name: None,
             name,
             ddl: source_detail.and_then(|detail| detail.ddl.clone()),
             target_ddl: None,
@@ -2052,7 +2210,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                     .foreign_keys
                     .iter()
                     .map(|fk| {
-                        let fk = normalize_self_referencing_fk(fk, &source_table_name_set);
+                        let fk = normalize_mapped_foreign_key(
+                            fk,
+                            &source_table_name_set,
+                            &target_table_name_set,
+                            &options.table_mappings,
+                        );
                         ForeignKeyDiff {
                             diff_type: "added".to_string(),
                             name: fk.name.clone(),
@@ -2088,12 +2251,13 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
-    for name in removed {
+    for name in table_resolution.target_only {
         let name_clone = name.clone();
         let target_detail = target_details.get(name_clone.as_str()).copied();
         result.push(TableDiff {
             diff_type: "removed".to_string(),
             object_type: Some("table".to_string()),
+            target_name: None,
             name,
             columns: target_detail.map(|detail| {
                 detail
@@ -2157,11 +2321,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
-    for name in added_views {
+    for name in view_resolution.source_only {
         let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: "added".to_string(),
             object_type: Some("view".to_string()),
+            target_name: None,
             name,
             columns: None,
             indexes: None,
@@ -2175,11 +2340,12 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
-    for name in removed_views {
+    for name in view_resolution.target_only {
         let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: "removed".to_string(),
             object_type: Some("view".to_string()),
+            target_name: None,
             name,
             columns: None,
             indexes: None,
@@ -2193,11 +2359,11 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
-    for name in common_views {
+    for (name, target_name) in view_resolution.pairs {
         let Some(source_ddl) = source_details.get(name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
             continue;
         };
-        let Some(target_ddl) = target_details.get(name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
+        let Some(target_ddl) = target_details.get(target_name.as_str()).and_then(|detail| detail.ddl.as_ref()) else {
             continue;
         };
         if !mysql_view_definitions_differ(source_ddl, target_ddl, options.source_dialect, options.target_dialect) {
@@ -2207,6 +2373,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         result.push(TableDiff {
             diff_type: "modified".to_string(),
             object_type: Some("view".to_string()),
+            target_name: (name != target_name).then_some(target_name),
             name,
             columns: None,
             indexes: None,
@@ -2220,9 +2387,9 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         });
     }
 
-    for name in common {
+    for (name, target_name) in table_resolution.pairs {
         let Some(source) = source_details.get(name.as_str()) else { continue };
-        let Some(target) = target_details.get(name.as_str()) else { continue };
+        let Some(target) = target_details.get(target_name.as_str()) else { continue };
         let column_diffs = diff_columns_with_dialect_options(
             &source.columns,
             &target.columns,
@@ -2234,14 +2401,24 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             options.target_dialect,
         );
         let index_diffs = diff_indexes(&source.indexes, &target.indexes);
-        let normalized_source_fks: Vec<ForeignKeyInfo> =
-            source.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &source_table_name_set)).collect();
+        let normalized_source_fks: Vec<ForeignKeyInfo> = source
+            .foreign_keys
+            .iter()
+            .map(|fk| {
+                normalize_mapped_foreign_key(
+                    fk,
+                    &source_table_name_set,
+                    &target_table_name_set,
+                    &options.table_mappings,
+                )
+            })
+            .collect();
         let normalized_target_fks: Vec<ForeignKeyInfo> =
             target.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set)).collect();
         let foreign_key_diffs = diff_foreign_keys(&normalized_source_fks, &normalized_target_fks);
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
         let source_comment = source_table_comments.get(name.as_str()).cloned().unwrap_or(None);
-        let target_comment = target_table_comments.get(name.as_str()).cloned().unwrap_or(None);
+        let target_comment = target_table_comments.get(target_name.as_str()).cloned().unwrap_or(None);
         let comment_changed = !options.ignore_comments
             && source_comment.clone().unwrap_or_default() != target_comment.clone().unwrap_or_default();
 
@@ -2251,17 +2428,17 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             || !trigger_diffs.is_empty()
             || comment_changed;
 
-        let name_clone = name.clone();
         result.push(TableDiff {
             diff_type: if has_diff { "modified".to_string() } else { "none".to_string() },
             object_type: Some("table".to_string()),
+            target_name: (name != target_name).then_some(target_name.clone()),
             name,
             columns: if has_diff { (!column_diffs.is_empty()).then_some(column_diffs) } else { None },
             indexes: if has_diff { (!index_diffs.is_empty()).then_some(index_diffs) } else { None },
             foreign_keys: if has_diff { (!foreign_key_diffs.is_empty()).then_some(foreign_key_diffs) } else { None },
             triggers: if has_diff { (!trigger_diffs.is_empty()).then_some(trigger_diffs) } else { None },
-            ddl: source_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
-            target_ddl: target_details.get(name_clone.as_str()).and_then(|detail| detail.ddl.clone()),
+            ddl: source.ddl.clone(),
+            target_ddl: target.ddl.clone(),
             source_table_comment: if has_diff { comment_changed.then_some(source_comment) } else { None },
             target_table_comment: if has_diff { comment_changed.then_some(target_comment) } else { None },
             sync_sql: None,
@@ -2541,26 +2718,39 @@ pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnD
     diff_columns_with_options(source, target, false, false, false, 0.5)
 }
 
-fn normalize_mysql_integer_type_for_comparison(data_type: &str) -> String {
+/// Signature of a MySQL column type used to decide whether an integer display
+/// width difference is real or just MySQL echoing back its own default width.
+struct MysqlIntegerTypeSignature {
+    /// Whole normalized type string, used to compare non-integer types as-is.
+    normalized: String,
+    /// `"{base} {suffix}"` (e.g. `"int unsigned"`) when `normalized` is a
+    /// recognized integer type, regardless of whether a width is present.
+    integer_key: Option<String>,
+    /// The explicit display width, when present on a recognized integer type.
+    width: Option<u32>,
+}
+
+fn parse_mysql_integer_type(data_type: &str) -> MysqlIntegerTypeSignature {
     let normalized = data_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let is_integer_base =
+        |base: &str| matches!(base, "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year");
     let Some(open) = normalized.find('(') else {
-        return normalized;
+        let base = normalized.split(' ').next().unwrap_or(&normalized);
+        let integer_key = is_integer_base(base).then(|| normalized.clone());
+        return MysqlIntegerTypeSignature { normalized, integer_key, width: None };
     };
     let Some(close) = normalized[open + 1..].find(')').map(|index| open + 1 + index) else {
-        return normalized;
+        return MysqlIntegerTypeSignature { normalized, integer_key: None, width: None };
     };
     let base = normalized[..open].trim();
-    let width = normalized[open + 1..close].trim();
-    let integer_type = matches!(base, "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year");
-    if !integer_type || width.is_empty() || !width.bytes().all(|byte| byte.is_ascii_digit()) {
-        return normalized;
+    let width_str = normalized[open + 1..close].trim();
+    if !is_integer_base(base) || width_str.is_empty() || !width_str.bytes().all(|byte| byte.is_ascii_digit()) {
+        return MysqlIntegerTypeSignature { normalized, integer_key: None, width: None };
     }
     let suffix = normalized[close + 1..].trim();
-    if suffix.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base} {suffix}")
-    }
+    let integer_key = Some(if suffix.is_empty() { base.to_string() } else { format!("{base} {suffix}") });
+    let width = width_str.parse().ok();
+    MysqlIntegerTypeSignature { normalized, integer_key, width }
 }
 
 fn column_types_equal_for_dialects(
@@ -2572,10 +2762,25 @@ fn column_types_equal_for_dialects(
     if source_type.eq_ignore_ascii_case(target_type) {
         return true;
     }
-    source_dialect == Some(DialectKind::Mysql)
-        && target_dialect == Some(DialectKind::Mysql)
-        && normalize_mysql_integer_type_for_comparison(source_type)
-            == normalize_mysql_integer_type_for_comparison(target_type)
+    if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
+        return false;
+    }
+    let source = parse_mysql_integer_type(source_type);
+    let target = parse_mysql_integer_type(target_type);
+    match (source.integer_key, target.integer_key) {
+        // Same integer family (e.g. both "int unsigned"): a display width present on only one
+        // side is MySQL filling in its own default and not a real difference, but two explicit,
+        // differing widths (e.g. int(11) vs int(15)) are a genuine schema difference.
+        (Some(source_key), Some(target_key)) => {
+            source_key == target_key
+                && match (source.width, target.width) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
+        }
+        (None, None) => source.normalized == target.normalized,
+        _ => false,
+    }
 }
 
 fn column_type_similarity_score(source_type: &str, target_type: &str) -> f64 {
@@ -2866,6 +3071,14 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
                 if source_included.is_empty() { "none".to_string() } else { source_included.join(", ") }
             ));
         }
+        if source_index.column_opclasses != target_index.column_opclasses {
+            let fmt_opclass = |o: &Option<String>| -> String {
+                o.as_deref().filter(|v| !v.is_empty()).unwrap_or("default").to_string()
+            };
+            let src_str = source_index.column_opclasses.iter().map(fmt_opclass).collect::<Vec<_>>().join(", ");
+            let tgt_str = target_index.column_opclasses.iter().map(fmt_opclass).collect::<Vec<_>>().join(", ");
+            changes.push(format!("opclass: {} → {}", tgt_str, src_str));
+        }
         if !changes.is_empty() {
             diffs.push(IndexDiff {
                 diff_type: "modified".to_string(),
@@ -2904,6 +3117,22 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
 fn normalize_self_referencing_fk(fk: &ForeignKeyInfo, own_table_names: &HashSet<&str>) -> ForeignKeyInfo {
     let mut normalized = fk.clone();
     if fk.ref_schema.is_some() && own_table_names.contains(fk.ref_table.as_str()) {
+        normalized.ref_schema = None;
+    }
+    normalized
+}
+
+fn normalize_mapped_foreign_key(
+    fk: &ForeignKeyInfo,
+    source_table_names: &HashSet<&str>,
+    target_table_names: &HashSet<&str>,
+    mappings: &[SchemaDiffTableMapping],
+) -> ForeignKeyInfo {
+    let mut normalized = normalize_self_referencing_fk(fk, source_table_names);
+    if let Some(mapping) = mappings.iter().find(|mapping| {
+        mapping.source_table == normalized.ref_table && target_table_names.contains(mapping.target_table.as_str())
+    }) {
+        normalized.ref_table = mapping.target_table.clone();
         normalized.ref_schema = None;
     }
     normalized
@@ -3688,9 +3917,13 @@ fn add_foreign_key_sql_with_reference_separator(
     )
 }
 
+fn target_table_name(diff: &TableDiff) -> &str {
+    diff.target_name.as_deref().unwrap_or(&diff.name)
+}
+
 fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>, cascade: &str) -> String {
     let object_type = if diff.object_type.as_deref() == Some("view") { "VIEW" } else { "TABLE" };
-    let name = qualified_name(&diff.name, db_type, schema);
+    let name = qualified_name(target_table_name(diff), db_type, schema);
     if db_type == DatabaseType::SqlServer {
         let object_id_type = if object_type == "VIEW" { "V" } else { "U" };
         return format!(
@@ -4569,11 +4802,12 @@ fn generate_create_table_sql(
     let profile = profile_for(db_type);
     // Type rewrite: user mappings → profile type_map → DialectKind matrix → normalize.
     // Call sites must not branch on individual DatabaseType values.
-    let map_type = |source_type: &str| -> String {
-        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, source_type, target_dialect) {
+    let map_type = |col: &ColumnInfo| -> String {
+        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, target_dialect) {
             return user_target;
         }
-        rewrite_column_type(source_type, db_type, source_dialect)
+        rewrite_column_type(&source_type, db_type, source_dialect)
     };
     let table = qualified_name(name, db_type, schema);
 
@@ -4588,7 +4822,7 @@ fn generate_create_table_sql(
             continue;
         };
         let col_name = quote_id(&col.name, db_type);
-        let mapped_type = map_type(&col.data_type);
+        let mapped_type = map_type(col);
         if db_type == DatabaseType::SqlServer {
             col_defs.push(sqlserver_column_definition(col, &mapped_type, source_dialect, schema));
             if col.is_primary_key {
@@ -5024,12 +5258,13 @@ fn generate_schema_sync_sql_inner(
     // explicitly by the comparison plan instead of appending an invalid clause.
     let cascade = if cascade_delete && db_type != DatabaseType::SqlServer { " CASCADE" } else { "" };
 
-    let map_type = |source_type: &str| -> String {
+    let map_type = |col: &ColumnInfo| -> String {
         let tgt = DialectKind::from_database_type(db_type);
-        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, source_type, tgt) {
+        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, tgt) {
             return user_target;
         }
-        rewrite_column_type(source_type, db_type, source_dialect)
+        rewrite_column_type(&source_type, db_type, source_dialect)
     };
     let is_same_dialect =
         source_dialect.map(|source| DialectKind::from_database_type(db_type) == source).unwrap_or(false);
@@ -5039,7 +5274,8 @@ fn generate_schema_sync_sql_inner(
     });
 
     for diff in diffs {
-        let table = qualified_name(&diff.name, db_type, schema);
+        let target_name = target_table_name(diff);
+        let table = qualified_name(target_name, db_type, schema);
 
         if diff.diff_type == "added" && diff.object_type.as_deref() == Some("view") {
             if let Some(ddl) = &diff.ddl {
@@ -5072,7 +5308,7 @@ fn generate_schema_sync_sql_inner(
                         .as_ref()
                         .map_or_else(Vec::new, |triggers| triggers.iter().filter_map(|t| t.source.clone()).collect());
                     let (generated, missing) = generate_create_table_sql(
-                        &diff.name,
+                        target_name,
                         diff.columns.as_ref().map_or(&[] as &[ColumnDiff], |columns| columns.as_slice()),
                         diff.indexes.as_ref().map_or(&[] as &[IndexDiff], |indexes| indexes.as_slice()),
                         diff.foreign_keys
@@ -5119,7 +5355,7 @@ fn generate_schema_sync_sql_inner(
                         .as_ref()
                         .map_or_else(Vec::new, |triggers| triggers.iter().filter_map(|t| t.source.clone()).collect());
                     let (gen, missing) = generate_create_table_sql(
-                        &diff.name,
+                        target_name,
                         cols,
                         diff.indexes.as_ref().map_or(&[] as &[IndexDiff], |v| v.as_slice()),
                         diff.foreign_keys.as_ref().map_or(&[] as &[ForeignKeyDiff], |v| v.as_slice()),
@@ -5146,7 +5382,7 @@ fn generate_schema_sync_sql_inner(
                     .as_ref()
                     .map_or_else(Vec::new, |triggers| triggers.iter().filter_map(|t| t.source.clone()).collect());
                 let (gen, missing) = generate_create_table_sql(
-                    &diff.name,
+                    target_name,
                     diff.columns.as_ref().map_or(&[] as &[ColumnDiff], |v| v.as_slice()),
                     diff.indexes.as_ref().map_or(&[] as &[IndexDiff], |v| v.as_slice()),
                     diff.foreign_keys.as_ref().map_or(&[] as &[ForeignKeyDiff], |v| v.as_slice()),
@@ -5181,7 +5417,7 @@ fn generate_schema_sync_sql_inner(
         if let Some(foreign_keys) = &diff.foreign_keys {
             for fk in foreign_keys {
                 if fk.diff_type == "removed" || fk.diff_type == "modified" {
-                    lines.push(drop_foreign_key_sql(&diff.name, &fk.name, db_type, schema));
+                    lines.push(drop_foreign_key_sql(target_name, &fk.name, db_type, schema));
                 }
             }
         }
@@ -5192,7 +5428,7 @@ fn generate_schema_sync_sql_inner(
                         // SQL Server will reject DROP/ALTER COLUMN while a changed
                         // index still depends on it. Drop changed indexes before
                         // applying column DDL, then recreate modified ones below.
-                        lines.push(drop_index_sql(&diff.name, &index.name, db_type, schema));
+                        lines.push(drop_index_sql(target_name, &index.name, db_type, schema));
                     }
                 }
             }
@@ -5200,7 +5436,7 @@ fn generate_schema_sync_sql_inner(
 
         if let Some(columns) = &diff.columns {
             let convert_col =
-                |col: &ColumnInfo| -> ColumnInfo { ColumnInfo { data_type: map_type(&col.data_type), ..col.clone() } };
+                |col: &ColumnInfo| -> ColumnInfo { ColumnInfo { data_type: map_type(col), ..col.clone() } };
             for column in columns {
                 match column.diff_type.as_str() {
                     "added" => {
@@ -5333,7 +5569,7 @@ fn generate_schema_sync_sql_inner(
                                     }
                                 }
                                 RenameColumnSyntax::SqlServerSpRename => {
-                                    let target_table = qualified_name(&diff.name, db_type, schema);
+                                    let target_table = qualified_name(target_name, db_type, schema);
                                     let full_obj_path =
                                         format!("{target_table}.{}", quote_id(&target_col.name, db_type));
                                     standalone_statements.push(format!(
@@ -5381,7 +5617,7 @@ fn generate_schema_sync_sql_inner(
                     if let Some(source) = &column.source {
                         if column.changes.iter().any(|change| change.starts_with("comment:")) {
                             lines.extend(column_comment_sql(
-                                &diff.name,
+                                target_name,
                                 &column.name,
                                 source.comment.as_deref().unwrap_or_default(),
                                 db_type,
@@ -5390,12 +5626,12 @@ fn generate_schema_sync_sql_inner(
                         }
                         if column.diff_type == "added" {
                             if let Some(comment) = &source.comment {
-                                lines.extend(column_comment_sql(&diff.name, &column.name, comment, db_type, schema));
+                                lines.extend(column_comment_sql(target_name, &column.name, comment, db_type, schema));
                             }
                         }
                         if column.diff_type == "renamed" {
                             if let Some(comment) = &source.comment {
-                                lines.extend(column_comment_sql(&diff.name, &column.name, comment, db_type, schema));
+                                lines.extend(column_comment_sql(target_name, &column.name, comment, db_type, schema));
                             }
                         }
                     }
@@ -5405,7 +5641,7 @@ fn generate_schema_sync_sql_inner(
 
         if diff.source_table_comment.is_some() && diff.source_table_comment != diff.target_table_comment {
             let comment = diff.source_table_comment.as_ref().and_then(|comment| comment.as_deref()).unwrap_or_default();
-            lines.extend(table_comment_sql(&diff.name, comment, db_type, schema));
+            lines.extend(table_comment_sql(target_name, comment, db_type, schema));
         }
 
         if let Some(indexes) = &diff.indexes {
@@ -5413,20 +5649,20 @@ fn generate_schema_sync_sql_inner(
                 match index.diff_type.as_str() {
                     "added" => {
                         if let Some(source) = &index.source {
-                            lines.push(create_index_sql(&diff.name, source, db_type, schema));
+                            lines.push(create_index_sql(target_name, source, db_type, schema));
                         }
                     }
                     "removed" => {
                         if db_type != DatabaseType::SqlServer {
-                            lines.push(drop_index_sql(&diff.name, &index.name, db_type, schema));
+                            lines.push(drop_index_sql(target_name, &index.name, db_type, schema));
                         }
                     }
                     "modified" => {
                         if let Some(source) = &index.source {
                             if db_type != DatabaseType::SqlServer {
-                                lines.push(drop_index_sql(&diff.name, &index.name, db_type, schema));
+                                lines.push(drop_index_sql(target_name, &index.name, db_type, schema));
                             }
-                            lines.push(create_index_sql(&diff.name, source, db_type, schema));
+                            lines.push(create_index_sql(target_name, source, db_type, schema));
                         }
                     }
                     _ => {}
@@ -5438,7 +5674,7 @@ fn generate_schema_sync_sql_inner(
             for fk in foreign_keys {
                 if fk.diff_type == "added" || fk.diff_type == "modified" {
                     if let Some(source) = &fk.source {
-                        lines.push(add_foreign_key_sql(&diff.name, source, db_type, schema));
+                        lines.push(add_foreign_key_sql(target_name, source, db_type, schema));
                     }
                 }
             }
@@ -5645,6 +5881,8 @@ mod tests {
             included_columns: overrides.included_columns,
             comment: overrides.comment,
             key_is_expression: overrides.key_is_expression,
+            column_opclasses: overrides.column_opclasses,
+            constraint_backed: false,
         }
     }
 
@@ -5712,6 +5950,48 @@ mod tests {
             target_dialect: Some(DialectKind::Mysql),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn manual_table_mapping_compares_source_with_target_metadata_and_uses_target_ddl_name() {
+        let result = prepare_schema_diff(SchemaDiffPreparationOptions {
+            source_tables: vec![table_info("charge_records", "TABLE")],
+            target_tables: vec![table_info("charge_record", "TABLE")],
+            source_details: vec![TableSchemaDetail {
+                name: "charge_records".to_string(),
+                columns: vec![column("id", "int", None), column("amount", "decimal(12,2)", None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: Some("CREATE TABLE charge_records (id int, amount decimal(12,2));".to_string()),
+            }],
+            target_details: vec![TableSchemaDetail {
+                name: "charge_record".to_string(),
+                columns: vec![column("id", "int", None), column("amount", "decimal(10,2)", None)],
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+                triggers: Vec::new(),
+                ddl: Some("CREATE TABLE charge_record (id int, amount decimal(10,2));".to_string()),
+            }],
+            database_type: DatabaseType::Mysql,
+            table_mappings: vec![SchemaDiffTableMapping {
+                source_table: "charge_records".to_string(),
+                target_table: "charge_record".to_string(),
+            }],
+            ..Default::default()
+        });
+
+        assert_eq!(result.diffs.len(), 1);
+        let table_diff = &result.diffs[0];
+        assert_eq!(table_diff.diff_type, "modified");
+        assert_eq!(table_diff.name, "charge_records");
+        assert_eq!(table_diff.target_name.as_deref(), Some("charge_record"));
+        assert!(table_diff
+            .columns
+            .as_ref()
+            .is_some_and(|columns| columns.iter().any(|column| column.name == "amount")));
+        assert!(result.sync_sql.contains("ALTER TABLE `charge_record`"), "sync SQL: {}", result.sync_sql);
+        assert!(!result.sync_sql.contains("ALTER TABLE `charge_records`"), "sync SQL: {}", result.sync_sql);
     }
 
     #[test]
@@ -5825,6 +6105,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: name.to_string(),
+            target_name: None,
             columns: Some(columns),
             indexes: None,
             foreign_keys: None,
@@ -6389,6 +6670,7 @@ mod tests {
             diff_type: "modified".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".into(),
                 name: "payload".into(),
@@ -6435,6 +6717,7 @@ mod tests {
             diff_type: "removed".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             ..Default::default()
         };
         let drop_sql = generate_schema_sync_sql(
@@ -6465,6 +6748,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "accounts".into(),
+            target_name: None,
             columns: Some(vec![
                 ColumnDiff {
                     diff_type: "added".into(),
@@ -6591,11 +6875,14 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         };
         let diff = TableDiff {
             diff_type: "modified".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "removed".into(),
                 name: "legacy_status".into(),
@@ -6652,6 +6939,8 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         };
         let unchanged_fk = ForeignKeyInfo {
             name: "fk_events_parent".into(),
@@ -6989,6 +7278,8 @@ mod tests {
             included_columns: Some(vec!["payload".into()]),
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         };
         let btree_sql = create_index_sql("events", &btree, DatabaseType::SqlServer, Some("dbo"));
         assert_eq!(
@@ -7007,6 +7298,8 @@ mod tests {
             included_columns: Some(vec!["status".into(), "payload".into()]),
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         };
         assert_eq!(
             create_index_sql("events", &columnstore, DatabaseType::SqlServer, Some("dbo")),
@@ -7702,6 +7995,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_orders_status".to_string(),
@@ -7713,12 +8008,54 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
 
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].diff_type, "modified");
         assert_eq!(diffs[0].changes, vec!["unique: YES → NO", "columns: status → status, created_at"]);
+    }
+
+    #[test]
+    fn detects_opclass_change_in_postgres_index() {
+        let source_index = index(IndexInfo {
+            name: "idx_name_trgm".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            constraint_backed: false,
+        });
+        let target_index = index(IndexInfo {
+            name: "idx_name_trgm".to_string(),
+            columns: vec!["name".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![None],
+            constraint_backed: false,
+        });
+
+        let diffs = diff_indexes(&[source_index], &[target_index]);
+
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].diff_type, "modified");
+        assert!(
+            diffs[0].changes.iter().any(|c| c.contains("opclass")),
+            "Expected opclass change line, got: {:?}",
+            diffs[0].changes
+        );
     }
 
     #[test]
@@ -7734,6 +8071,8 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         });
         let target_index = index(IndexInfo {
             name: "test_UNIQUE".to_string(),
@@ -7745,6 +8084,8 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         });
 
         let diffs = diff_indexes(std::slice::from_ref(&source_index), &[target_index]);
@@ -7757,6 +8098,7 @@ mod tests {
                 diff_type: "modified".to_string(),
                 object_type: Some("table".to_string()),
                 name: "test".to_string(),
+                target_name: None,
                 columns: None,
                 indexes: Some(diffs),
                 foreign_keys: None,
@@ -7806,6 +8148,8 @@ mod tests {
             included_columns: None,
             comment: None,
             key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![],
+            constraint_backed: false,
         });
 
         let sql = generate_schema_sync_sql(
@@ -7813,6 +8157,7 @@ mod tests {
                 diff_type: "modified".to_string(),
                 object_type: Some("table".to_string()),
                 name: "tankong_data".to_string(),
+                target_name: None,
                 columns: None,
                 indexes: Some(vec![IndexDiff {
                     diff_type: "added".to_string(),
@@ -7865,6 +8210,8 @@ mod tests {
                 expression_key_part.to_string(),
             ],
             key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![],
+            constraint_backed: false,
             is_unique: true,
             is_primary: false,
             filter: None,
@@ -7878,6 +8225,7 @@ mod tests {
                 diff_type: "modified".to_string(),
                 object_type: Some("table".to_string()),
                 name: "tankong_data".to_string(),
+                target_name: None,
                 columns: None,
                 indexes: Some(vec![IndexDiff {
                     diff_type: "added".to_string(),
@@ -7931,6 +8279,8 @@ mod tests {
                 name: "idx_weird_columns".to_string(),
                 columns: vec!["order item".to_string(), "a(b)".to_string(), "a::b".to_string()],
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
                 is_unique: false,
                 is_primary: false,
                 filter: None,
@@ -7944,6 +8294,7 @@ mod tests {
                     diff_type: "modified".to_string(),
                     object_type: Some("table".to_string()),
                     name: "tankong_data".to_string(),
+                    target_name: None,
                     columns: None,
                     indexes: Some(vec![IndexDiff {
                         diff_type: "added".to_string(),
@@ -8102,6 +8453,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: None,
             name: "orders".to_string(),
+            target_name: None,
             columns: None,
             indexes: Some(vec![IndexDiff {
                 diff_type: "modified".to_string(),
@@ -8116,6 +8468,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -8161,6 +8515,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: None,
             name: "users".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".to_string(),
                 name: "name".to_string(),
@@ -8198,6 +8553,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: None,
             name: "notify_channel_config".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".to_string(),
                 name: "config_json".to_string(),
@@ -8244,6 +8600,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: None,
             name: "notify_channel_config".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".to_string(),
                 name: "config_json".to_string(),
@@ -8385,6 +8742,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "users".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "added".to_string(),
                 name: "nickname".to_string(),
@@ -8422,6 +8780,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: None,
             name: "orders".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "added".to_string(),
                 name: "status".to_string(),
@@ -8459,6 +8818,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })),
                 target: None,
                 changes: Vec::new(),
@@ -9086,6 +9447,7 @@ mod tests {
             diff_type: diff_type.to_string(),
             object_type: Some("table".to_string()),
             name: name.to_string(),
+            target_name: None,
             columns: None,
             indexes: None,
             foreign_keys: None,
@@ -9181,6 +9543,8 @@ mod tests {
                     included_columns: Some(vec!["User ID".to_string()]),
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "Order User FK".to_string(),
@@ -9244,6 +9608,8 @@ mod tests {
                     included_columns: None,
                     comment: Some("status lookup".to_string()),
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "user-fk".to_string(),
@@ -9297,6 +9663,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })],
                 foreign_keys: vec![foreign_key(ForeignKeyInfo {
                     name: "parent item fk".to_string(),
@@ -9426,6 +9794,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "users".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".to_string(),
                 name: "name".to_string(),
@@ -9802,6 +10171,49 @@ mod tests {
 
         assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["amount", "name"]);
         assert!(diffs.iter().all(|diff| diff.changes.iter().any(|change| change.starts_with("type:"))));
+    }
+
+    // Regression for #7615: comparing two MySQL databases where an integer column has
+    // different EXPLICIT display widths on both sides (e.g. `int(11)` vs `int(15)`) must
+    // still be reported as a type difference. `data_type` values below are exactly what
+    // `information_schema.COLUMNS.COLUMN_TYPE` returns on a real MySQL 5.7 server for the
+    // DDL in the issue (MySQL 8.0.19+ drops these widths entirely, so this only reproduces
+    // on pre-8.0.19 servers, which is why the issue's own repro needed a specific version).
+    #[test]
+    fn mysql_same_dialect_detects_explicit_integer_display_width_mismatch() {
+        let source = vec![column("id", "int(11)", Some("ID")), column("name", "varchar(20)", Some("名称"))];
+        let target = vec![column("id", "int(15)", Some("ID")), column("name", "varchar(20)", Some("名称"))];
+
+        let diffs = diff_columns_with_dialect_options(
+            &source,
+            &target,
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql),
+        );
+
+        assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["id"]);
+        assert!(diffs[0].changes.iter().any(|change| change.starts_with("type:")), "{:?}", diffs[0].changes);
+
+        // Same scenario the maintainer's own regression test already covers must keep passing:
+        // tinyint(1) (a common MySQL boolean idiom) vs tinyint(4) (the server's own default
+        // display width for tinyint) is likewise a real, explicit difference, not noise.
+        let source = vec![column("flag", "tinyint(1)", None)];
+        let target = vec![column("flag", "tinyint(4)", None)];
+        let diffs = diff_columns_with_dialect_options(
+            &source,
+            &target,
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql),
+        );
+        assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["flag"]);
     }
 
     #[test]
@@ -10355,6 +10767,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: Some(col_diffs),
             indexes: Some(vec![IndexDiff {
                 diff_type: "added".to_string(),
@@ -10369,6 +10782,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })),
                 target: None,
                 changes: vec![],
@@ -10395,6 +10810,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: Some(col_diffs),
             indexes: Some(vec![IndexDiff {
                 diff_type: "removed".to_string(),
@@ -10410,6 +10826,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 })),
                 changes: vec![],
             }]),
@@ -10501,6 +10919,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "renamed".to_string(),
                 name: "new_name".to_string(),
@@ -10533,6 +10952,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "added".to_string(),
                 name: "id".to_string(),
@@ -10601,6 +11021,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: None,
             indexes: None,
             foreign_keys: None,
@@ -10737,6 +11158,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: None,
             indexes: None,
             foreign_keys: None,
@@ -10808,6 +11230,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10819,6 +11243,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs.len(), 1, "index type diff detected");
@@ -10838,6 +11264,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10849,6 +11277,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs[0].changes.iter().filter(|c| c.contains("FULLTEXT")).count(), 1, "fulltext change");
@@ -10868,6 +11298,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10879,6 +11311,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs.len(), 1, "order diff detected");
@@ -10899,6 +11333,8 @@ mod tests {
                 included_columns: Some(vec!["b".into(), "c".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10910,6 +11346,8 @@ mod tests {
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs.len(), 1, "included columns diff detected");
@@ -10929,6 +11367,8 @@ mod tests {
                 included_columns: Some(vec!["b".into()]),
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10940,6 +11380,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs.len(), 1, "included added");
@@ -10959,6 +11401,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
             &[index(IndexInfo {
                 name: "idx_t".into(),
@@ -10970,6 +11414,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             })],
         );
         assert_eq!(diffs.len(), 1, "filter diff");
@@ -10991,6 +11437,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -11002,6 +11450,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 }),
             ],
             &[
@@ -11015,6 +11465,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 }),
                 index(IndexInfo {
                     name: "idx_modified".into(),
@@ -11026,6 +11478,8 @@ mod tests {
                     included_columns: None,
                     comment: None,
                     key_is_expression: Vec::new(),
+                    column_opclasses: vec![],
+                    constraint_backed: false,
                 }),
             ],
         );
@@ -11146,6 +11600,7 @@ mod tests {
             diff_type: "modified".into(),
             object_type: Some("table".into()),
             name: "orders".into(),
+            target_name: None,
             columns: None,
             indexes: None,
             foreign_keys: Some(vec![ForeignKeyDiff {
@@ -11379,6 +11834,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("table".to_string()),
             name: "t".to_string(),
+            target_name: None,
             columns: Some(col_diffs),
             indexes: Some(vec![
                 IndexDiff {
@@ -11394,6 +11850,8 @@ mod tests {
                         included_columns: None,
                         comment: None,
                         key_is_expression: Vec::new(),
+                        column_opclasses: vec![],
+                        constraint_backed: false,
                     })),
                     target: None,
                     changes: vec![],
@@ -11412,6 +11870,8 @@ mod tests {
                         included_columns: None,
                         comment: None,
                         key_is_expression: Vec::new(),
+                        column_opclasses: vec![],
+                        constraint_backed: false,
                     })),
                     changes: vec![],
                 },
@@ -11708,6 +12168,7 @@ mod tests {
             shard_strategy: None,
             resource_constraint: None,
             field_mappings: vec![],
+            table_mappings: vec![],
         };
         let result = prepare_schema_diff(options);
         result.sync_sql
@@ -11807,6 +12268,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             }),
             target: None,
             changes: vec![],
@@ -11938,6 +12401,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "t".into(),
+            target_name: None,
             columns: Some(s1_diffs()),
             indexes: None,
             foreign_keys: None,
@@ -12059,6 +12523,8 @@ mod tests {
                 included_columns: None,
                 comment: None,
                 key_is_expression: Vec::new(),
+                column_opclasses: vec![],
+                constraint_backed: false,
             }),
             target: None,
             changes: vec![],
@@ -12078,6 +12544,7 @@ mod tests {
                     diff_type: "added".into(),
                     object_type: Some("table".into()),
                     name: "t".into(),
+                    target_name: None,
                     columns: Some(cols),
                     indexes: Some(idxs),
                     foreign_keys: None,
@@ -12161,6 +12628,7 @@ mod tests {
                     diff_type: "added".into(),
                     object_type: Some("table".into()),
                     name: "t".into(),
+                    target_name: None,
                     columns: Some(cols),
                     indexes: None,
                     foreign_keys: Some(fks),
@@ -12218,6 +12686,7 @@ mod tests {
                 diff_type: "added".into(),
                 object_type: Some("table".into()),
                 name: "t".into(),
+                target_name: None,
                 columns: Some(s1_diffs()),
                 indexes: None,
                 foreign_keys: None,
@@ -12271,6 +12740,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "t".into(),
+            target_name: None,
             columns: Some(cols),
             indexes: None,
             foreign_keys: None,
@@ -12321,6 +12791,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "t".into(),
+            target_name: None,
             columns: Some(cols),
             indexes: None,
             foreign_keys: None,
@@ -12370,6 +12841,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "t".into(),
+            target_name: None,
             columns: Some(cols),
             indexes: None,
             foreign_keys: None,
@@ -12417,6 +12889,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "t".into(),
+            target_name: None,
             columns: Some(diffs),
             indexes: None,
             foreign_keys: None,
@@ -12573,11 +13046,173 @@ mod tests {
     }
 
     #[test]
+    fn field_mapping_matches_character_varying_alias() {
+        // Kingbase/Postgres report a varchar column's base type as
+        // `character varying` (via format_type()), not `varchar`. A user who
+        // configures a mapping using the shorter, more common `varchar`
+        // spelling must still match it (issue #8011) — previously an exact
+        // string comparison meant such a mapping silently never fired
+        // against the real `character varying` column, dropping the user's
+        // chosen param strategy.
+        let mappings = vec![FieldMapping {
+            source_type: "varchar".into(),
+            target_type: "varchar".into(),
+            param_strategy: ParamStrategy::Custom,
+            custom_params: Some("255".to_string()),
+        }];
+        let result = FieldMapping::apply_with_params(&mappings, "character varying", DialectKind::Mysql);
+        assert_eq!(result, Some("varchar(255)".to_string()));
+
+        let result = FieldMapping::apply_with_params(&mappings, "character varying(50)", DialectKind::Mysql);
+        assert_eq!(result, Some("varchar(255)".to_string()));
+
+        assert_eq!(FieldMapping::apply(&mappings, "character varying"), Some("varchar"));
+    }
+
+    #[test]
+    fn field_mapping_exact_match_is_not_shadowed_by_an_alias() {
+        // char/character/varchar/character varying commonly coexist as
+        // separate auto-generated rows with independently chosen targets.
+        // An exact match must win over an alias match picked up from an
+        // earlier, unrelated row that merely shares the same canonical name
+        // (issue #8011 review: aliasing broke this without a two-pass find).
+        let mappings = vec![
+            FieldMapping {
+                source_type: "char".into(),
+                target_type: "binary".into(),
+                param_strategy: ParamStrategy::Preserve,
+                custom_params: None,
+            },
+            FieldMapping {
+                source_type: "character".into(),
+                target_type: "text".into(),
+                param_strategy: ParamStrategy::Preserve,
+                custom_params: None,
+            },
+        ];
+        assert_eq!(FieldMapping::apply(&mappings, "character"), Some("text"), "exact row must win over the char alias");
+        assert_eq!(
+            FieldMapping::apply(&mappings, "char"),
+            Some("binary"),
+            "exact row must win over the character alias"
+        );
+    }
+
+    #[test]
+    fn with_known_length_splices_reported_length_into_bare_type() {
+        assert_eq!(with_known_length("varchar", Some(1000)), "varchar(1000)");
+        assert_eq!(with_known_length("character varying", None), "character varying");
+        assert_eq!(with_known_length("varchar(50)", Some(1000)), "varchar(50)", "explicit params are never overridden");
+        assert_eq!(with_known_length("varchar", Some(0)), "varchar", "non-positive length is ignored");
+        assert_eq!(with_known_length("varchar", Some(-1)), "varchar", "negative length (unbounded marker) is ignored");
+    }
+
+    #[test]
+    fn with_known_length_ignores_non_length_bearing_types() {
+        // `character_maximum_length` is populated by several drivers for
+        // columns where it does not mean "declared length here" — MySQL's
+        // information_schema fills it in for TEXT/BLOB (byte capacity, e.g.
+        // TEXT -> 65535), and Oracle's DATA_LENGTH is filled in for every
+        // column, DATE and NUMBER included (issue #8011 review round 2).
+        // Splicing those in would silently reinterpret the type (MySQL turns
+        // `TEXT(65535)` into MEDIUMTEXT) or produce invalid DDL (`DATE(7)`).
+        assert_eq!(with_known_length("text", Some(65535)), "text");
+        assert_eq!(with_known_length("date", Some(7)), "date");
+        assert_eq!(with_known_length("number", Some(22)), "number");
+    }
+
+    #[test]
+    fn with_known_length_restores_a_real_char_length() {
+        // Unlike type_rewrite's *default*-to-255 list (which must exclude
+        // CHAR — a bare CHAR is already valid, meaning CHAR(1)), this
+        // function *restores* a length the driver already knows: MySQL's
+        // information_schema reports a CHAR(10) column as DATA_TYPE="char"
+        // with CHARACTER_MAXIMUM_LENGTH=10 (real DB verified). Using
+        // length 1 here would make this assertion pass even with CHAR
+        // wrongly excluded — CHAR(1) and bare CHAR mean the same thing — so
+        // this deliberately uses a length where truncation would show up
+        // (issue #8011 review round 3).
+        assert_eq!(with_known_length("char", Some(10)), "char(10)");
+        assert_eq!(with_known_length("character", Some(10)), "character(10)");
+        assert_eq!(with_known_length("char", None), "char", "no known length means no invented one either");
+    }
+
+    #[test]
+    fn mysql_same_dialect_add_column_keeps_text_type_when_length_metadata_is_present() {
+        // MySQL's own information_schema reports a real character_maximum_length
+        // for TEXT (65535) even though COLUMN_TYPE never carries it in
+        // parentheses. Splicing it in verbatim would have this same-dialect
+        // ADD COLUMN silently reinterpreted as MEDIUMTEXT by the server (real
+        // MySQL 8.4.6 verified) instead of staying TEXT.
+        let mut source_col = column("notes", "text", None);
+        source_col.character_maximum_length = Some(65535);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "notes".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Mysql));
+        assert!(sql.contains("text"), "expected the column to stay TEXT: {sql}");
+        assert!(!sql.contains("(65535)"), "must not splice TEXT's byte capacity in as a length: {sql}");
+    }
+
+    #[test]
+    fn oracle_to_mysql_date_column_does_not_gain_an_invalid_length() {
+        // Oracle's DATA_LENGTH is populated for every column, DATE included
+        // (byte length, e.g. 7) — not just character types. Splicing it in
+        // would send `DATE(7)` to MySQL, which is a syntax error there (real
+        // MySQL 8.4.6 verified); the pre-fix behavior of passing `DATE`
+        // through untouched was already correct.
+        let mut source_col = column("created_on", "DATE", None);
+        source_col.character_maximum_length = Some(7);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "created_on".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Oracle));
+        assert!(!sql.contains("DATE(7)"), "must not turn a valid DATE column into invalid DDL: {sql}");
+    }
+
+    #[test]
+    fn cross_dialect_add_column_uses_known_character_maximum_length_not_a_generic_default() {
+        // Kingbase's MySQL-compatible introspection can report a bare
+        // `varchar`/`character varying` (no length in the type string)
+        // while still exposing the real length via `character_maximum_length`
+        // on the same ColumnInfo. Silently defaulting to 255 in that case
+        // would trade a loud syntax error for a quiet wrong-schema bug
+        // (issue #8011 review).
+        let mut source_col = column("bio", "character varying", None);
+        source_col.character_maximum_length = Some(1000);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "bio".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Postgres));
+        assert!(sql.contains("(1000)"), "expected the real reported length to be preserved: {sql}");
+        assert!(
+            !sql.contains("(255)"),
+            "must not silently fall back to the generic default when the real length is known: {sql}"
+        );
+    }
+
+    #[test]
     fn postgres_creates_sequences_before_tables_that_reference_them() {
         let table_diff = TableDiff {
             diff_type: "added".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             ddl: Some(
                 "CREATE TABLE public.events (id bigint NOT NULL DEFAULT nextval('public.events_id_seq'::regclass))"
                     .into(),
@@ -12625,6 +13260,7 @@ mod tests {
             diff_type: "removed".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             ..TableDiff::default()
         };
         let sequence_diff = SequenceDiff {
@@ -12659,6 +13295,7 @@ mod tests {
             diff_type: "modified".into(),
             object_type: Some("table".into()),
             name: "events".into(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "modified".into(),
                 name: "created_at".into(),
@@ -12832,6 +13469,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("view".into()),
             name: "active_users".into(),
+            target_name: None,
             ddl: Some("CREATE VIEW `active_users` AS SELECT `id` FROM `users` WHERE `active` = 1;".into()),
             ..TableDiff::default()
         };
@@ -12860,6 +13498,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("view".into()),
             name: "active_users".into(),
+            target_name: None,
             ddl: Some("CREATE VIEW `active_users` AS SELECT `id` FROM `users`".into()),
             ..TableDiff::default()
         };
@@ -12887,6 +13526,7 @@ mod tests {
             diff_type: "added".into(),
             object_type: Some("view".into()),
             name: "active_users".into(),
+            target_name: None,
             ..TableDiff::default()
         };
 

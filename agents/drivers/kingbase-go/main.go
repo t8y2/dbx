@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -501,9 +502,17 @@ func (s *server) testConnection(cp connectParams) error {
 type kingbaseDBOpener func(connectParams, string) (*sql.DB, error)
 
 func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpener) (*sql.DB, error) {
+	if endpoints := clusterConnectEndpoints(cp); len(endpoints) > 1 {
+		return openAndPingClusterEndpoints(cp, timeout, endpoints, opener)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	return pingDBWithSSLModes(ctx, cp, opener)
+}
 
+// pingDBWithSSLModes runs the historical sslmode attempt sequence
+// ("prefer" degrades to require then disable) for one set of fields.
+func pingDBWithSSLModes(ctx context.Context, cp connectParams, opener kingbaseDBOpener) (*sql.DB, error) {
 	sslMode := effectiveSSLMode(cp)
 	attempts := []string{sslMode}
 	if sslMode == "prefer" {
@@ -526,6 +535,111 @@ func openAndPingDB(cp connectParams, timeout time.Duration, opener kingbaseDBOpe
 		return nil, err
 	}
 	return nil, errors.New("kingbase connection failed")
+}
+
+type kingbaseEndpoint struct {
+	host string
+	port int
+}
+
+// clusterConnectEndpoints splits the host field into ordered endpoints for
+// cluster (multi-IP) configurations. DBX stores cluster hosts as
+// comma-separated entries, each optionally embedding its own `:port`
+// (mirroring the vastbase/openGauss driver semantics); semicolons are also
+// accepted because Kingbase deployments paste both separators. A native
+// connection_string builds its own DSN, so the host field is only split for
+// the field-based path, and a host without any separator yields a single
+// endpoint which keeps the legacy single-host flow untouched.
+func clusterConnectEndpoints(cp connectParams) []kingbaseEndpoint {
+	if value := strings.TrimSpace(cp.ConnectionString); value != "" && !isKingbaseJDBCURL(value) {
+		return nil
+	}
+	defaultPort := cp.Port
+	if defaultPort <= 0 {
+		defaultPort = 54321
+	}
+	return splitHostEndpoints(cp.Host, defaultPort)
+}
+
+// splitHostEndpoints parses `host1[:port1][,;]host2[:port2]...`. Entries
+// without an embedded port use fallbackPort; bracketed IPv6 literals may
+// carry a port after the closing bracket.
+func splitHostEndpoints(rawHost string, fallbackPort int) []kingbaseEndpoint {
+	parts := strings.FieldsFunc(rawHost, func(r rune) bool { return r == ',' || r == ';' })
+	endpoints := make([]kingbaseEndpoint, 0, len(parts))
+	for _, part := range parts {
+		host, port, ok := parseHostEndpoint(strings.TrimSpace(part), fallbackPort)
+		if !ok {
+			continue
+		}
+		endpoints = append(endpoints, kingbaseEndpoint{host: host, port: port})
+	}
+	return endpoints
+}
+
+func parseHostEndpoint(entry string, fallbackPort int) (string, int, bool) {
+	if entry == "" {
+		return "", 0, false
+	}
+	if strings.HasPrefix(entry, "[") {
+		if close := strings.Index(entry, "]"); close > 0 {
+			host := entry[1:close]
+			suffix := entry[close+1:]
+			portText, hasPort := strings.CutPrefix(suffix, ":")
+			if !hasPort && suffix == "" {
+				return host, fallbackPort, true
+			}
+			if hasPort {
+				if port, err := strconv.Atoi(portText); err == nil && validEndpointPort(port) {
+					return host, port, true
+				}
+			}
+			// Malformed bracketed entries such as `[::1]x` keep their raw
+			// text so the eventual dial error stays honest.
+			return entry, fallbackPort, true
+		}
+	}
+	if strings.Count(entry, ":") == 1 {
+		if host, rawPort, ok := strings.Cut(entry, ":"); ok && host != "" {
+			if port, err := strconv.Atoi(rawPort); err == nil && validEndpointPort(port) {
+				return host, port, true
+			}
+		}
+	}
+	// Bare IPv6 literals and hostnames (including entries with a non-numeric
+	// port suffix) are forwarded verbatim, exactly like the single-host path.
+	return entry, fallbackPort, true
+}
+
+func validEndpointPort(port int) bool {
+	return port > 0 && port <= 65535
+}
+
+// openAndPingClusterEndpoints tries each configured endpoint in order and
+// keeps the first connection that completes the sslmode sequence, matching
+// the failover behavior the openGauss-family drivers implement natively.
+// Following libpq semantics, every endpoint gets its own full timeout
+// budget so one unreachable node cannot starve the remaining candidates.
+func openAndPingClusterEndpoints(
+	cp connectParams,
+	timeout time.Duration,
+	endpoints []kingbaseEndpoint,
+	opener kingbaseDBOpener,
+) (*sql.DB, error) {
+	failures := make([]error, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpointParams := cp
+		endpointParams.Host = endpoint.host
+		endpointParams.Port = endpoint.port
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		db, err := pingDBWithSSLModes(ctx, endpointParams, opener)
+		cancel()
+		if err == nil {
+			return db, nil
+		}
+		failures = append(failures, fmt.Errorf("%s:%d: %w", endpoint.host, endpoint.port, err))
+	}
+	return nil, fmt.Errorf("kingbase connection failed after trying %d endpoints: %w", len(endpoints), errors.Join(failures...))
 }
 
 func shouldRetryKingbaseWithoutSSL(err error) bool {

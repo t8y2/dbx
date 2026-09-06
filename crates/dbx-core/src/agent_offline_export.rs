@@ -417,7 +417,7 @@ fn export_agents_offline_unlocked(
         let plan = inspect_offline_package(package)?;
         let expected = drivers.iter().map(|driver| driver.db_type.clone()).collect::<BTreeSet<_>>();
         let actual = plan.driver_keys.into_iter().collect::<BTreeSet<_>>();
-        if expected != actual || plan.includes_jre != !jres.is_empty() {
+        if expected != actual || plan.includes_jre == jres.is_empty() {
             return Err("Generated offline Agent package failed compatibility validation".to_string());
         }
         Ok(())

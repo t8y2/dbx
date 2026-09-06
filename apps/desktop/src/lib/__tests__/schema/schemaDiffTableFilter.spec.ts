@@ -97,6 +97,17 @@ describe("schemaDiffTableFilter", () => {
     expect(result.targetTables.map((t) => t.name)).toEqual(["a", "c"]);
   });
 
+  it("loads a unique case-insensitive target for explicitly selected tables", () => {
+    const options = { ...baseOptions, ignoreTableNameCase: true };
+    const source: TableInfo[] = [{ name: "USER_INFO", table_type: "BASE TABLE" }];
+    const target: TableInfo[] = [
+      { name: "user_info", table_type: "BASE TABLE" },
+      { name: "other", table_type: "BASE TABLE" },
+    ];
+    const result = filterSchemaDiffTables(source, target, compileSchemaDiffTableFilter(options), options, ["USER_INFO"]);
+    expect(result.targetTables.map((table) => table.name)).toEqual(["user_info"]);
+  });
+
   it("does not include unselected target tables that would otherwise look like drops", () => {
     const source: TableInfo[] = [{ name: "a", table_type: "BASE TABLE" }];
     const target: TableInfo[] = [

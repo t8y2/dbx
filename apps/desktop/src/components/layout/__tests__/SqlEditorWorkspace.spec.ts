@@ -97,12 +97,12 @@ describe("SQL editor workspace single-group tracer bullet", () => {
     // Collapsing unmounts the shared surface, so the mouse re-show affordance
     // must live at the workspace level, not inside the collapsible pane.
     expect(workspaceSource).toContain("editor.showResultsPane");
-    expect(workspaceSource).toContain("showSharedResult && !showResultPane");
+    expect(workspaceSource).toContain("hasSharedOutput && !showResultPane");
     // Running a query re-expands a collapsed pane (issue #6193 promise).
-    expect(workspaceSource).toContain("if (isExecuting) showResultPane.value = true;");
+    expect(workspaceSource).toContain("if (isExecuting || isExplaining) showResultPane.value = true;");
   });
 
-  it("animates layout transitions for split groups and the shared result surface", () => {
+  it("shows results without transitions while retaining new editor-group animation", () => {
     const workspaceCssSource = readFileSync(new URL("../sqlEditorWorkspace.css", import.meta.url), "utf8");
     expect(workspaceSource).toContain('import "./sqlEditorWorkspace.css"');
     // Split-created group panes emerge from the divider side; hydration-gated
@@ -110,14 +110,15 @@ describe("SQL editor workspace single-group tracer bullet", () => {
     expect(workspaceSource).toContain("paneEnterClass");
     expect(workspaceSource).toContain("workspace-pane-enter");
     expect(workspaceCssSource).toContain("@keyframes dbx-workspace-pane-in");
-    // The result pane stays mounted and collapses via its size; the surface
-    // fades through a Vue transition while the splitter hides.
+    // A completed response must not wait for a fade or pane-size transition.
     expect(workspaceSource).toContain("resultPaneTargetSize");
-    expect(workspaceSource).toContain('name="result-surface"');
+    expect(workspaceSource).not.toContain("<Transition");
     expect(workspaceSource).toContain("result-pane-collapsed");
-    expect(workspaceCssSource).toContain(".result-surface-enter-active");
-    expect(workspaceCssSource).toContain(".result-surface-leave-active");
-    // Motion degrades to instant under prefers-reduced-motion.
+    expect(workspaceCssSource).not.toContain(".result-surface-enter-active");
+    expect(workspaceCssSource).not.toContain(".result-surface-leave-active");
+    expect(workspaceCssSource).toMatch(/\.sql-editor-workspace-split\.splitpanes--ready\s*>\s*\.splitpanes__pane\s*\{\s*transition:\s*none !important;/);
+    expect(workspaceCssSource).toMatch(/\.sql-editor-workspace-split\s*>\s*\.splitpanes__splitter\s*\{\s*transition:\s*none;/);
+    // Group animation still respects reduced motion.
     expect(workspaceCssSource).toContain("@media (prefers-reduced-motion: reduce)");
   });
 });

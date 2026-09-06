@@ -21,6 +21,17 @@ function roundTrip(tabs: QueryTab[]) {
 }
 
 describe("openTabsPersistence originalSql round-trip", () => {
+  it("preserves read-only source intent without adding editable source metadata", () => {
+    const [restored] = roundTrip([queryTab({ sourceView: true, sql: "CREATE SEQUENCE seq_users" })]);
+    expect(restored.sourceView).toBe(true);
+    expect(restored.objectSource).toBeUndefined();
+  });
+
+  it("keeps legacy query tabs without source intent compatible", () => {
+    const [restored] = roundTrip([queryTab({ sql: "SELECT 1" })]);
+    expect(restored.sourceView).toBeUndefined();
+  });
+
   it("restores a clean prefilled query tab as clean (sql === originalSql)", () => {
     const sql = 'SELECT * FROM "public"."users"';
     const [restored] = roundTrip([queryTab({ sql, originalSql: sql })]);

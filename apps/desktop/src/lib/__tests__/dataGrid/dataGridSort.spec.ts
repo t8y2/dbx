@@ -59,6 +59,21 @@ describe("simpleDataGridOrderByMatchesSort", () => {
   });
 });
 
+describe("compareDataGridValues numeric ordering", () => {
+  it("sorts bigint string cells beyond the JS safe range numerically (issue #7832)", () => {
+    // BIGINT cells above ±(2^53 - 1) cross the backend boundary as decimal
+    // strings, like DECIMAL cells; numeric columns must still order them by
+    // magnitude instead of falling back to collation or double rounding.
+    const columnType = "bigint";
+    expect(compareDataGridValues("1391198305898897409", "1391198305898909792", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898909792", "1391198305898897409", columnType)).toBeGreaterThan(0);
+    expect(compareDataGridValues("9007199254740993", "1391198305898897409", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues(42, "9007199254740993", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("-9007199254740992", "42", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898897409", "1391198305898897409", columnType)).toBe(0);
+  });
+});
+
 describe("compareDataGridValues datetime ordering", () => {
   it("orders space-separated timestamps with microsecond precision", () => {
     expect(compareDataGridValues("2024-01-01 12:00:00.123456", "2024-01-01 12:00:00.500000")).toBeLessThan(0);

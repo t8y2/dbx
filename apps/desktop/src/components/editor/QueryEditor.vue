@@ -2210,6 +2210,10 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
 }
 
 function handleEnter(view: EditorViewType): boolean {
+  // While an IME composition is active, Enter confirms the composition (the
+  // candidate list); intercepting it here would accept a completion popup on
+  // top of the composition instead of committing the typed text (issue #8029).
+  if (isEditorComposing(view)) return false;
   clearPendingCompletionEnter();
   if (isBatchColumnSelectionCompletionActive(codeMirrorCompletionStatus?.(view.state) ?? null) && applySelectedBatchColumnSelection(view)) return true;
   // CodeMirror's default completion keymap is disabled so batch selection can
@@ -2224,6 +2228,7 @@ function handleEnter(view: EditorViewType): boolean {
       selectFirstCompletion: codeMirrorSelectFirstCompletion,
       retryDelayMs: COMPLETION_TAB_RETRY_DELAY_MS,
       maxWaitMs: COMPLETION_ENTER_MAX_WAIT_MS,
+      isComposing: () => isEditorComposing(view),
       onUnavailable: () => insertNewlineWithoutCompletion(view),
       onSettled: () => {
         if (cancelPendingCompletionEnter === cancelRetry) cancelPendingCompletionEnter = null;
@@ -2276,6 +2281,7 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   // Any non-empty selection range means Tab is being used for block indent,
   // not word completion. A completion popup can still appear as a side effect
   // of the indent edit itself, so it must never hijack this or a following Tab.
+  if (isEditorComposing(view)) return false;
   if (view.state.selection.ranges.every((range) => range.empty)) {
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
     if (isBatchColumnSelectionCompletionActive(completionStatus) && applySelectedBatchColumnSelection(view)) return true;
@@ -2299,6 +2305,10 @@ function waitForCompletionTab(view: EditorViewType): boolean {
 
   const retry = () => {
     pendingCompletionTabTimer = null;
+    // The user started an IME composition while waiting for the pending
+    // completion; Tab now belongs to the candidate list, so drop the queued
+    // acceptance (and the normal-Tab fallback) instead of fighting the IME.
+    if (isEditorComposing(view)) return;
     const selectionRanges = view.state.selection.ranges;
     if (view.state.doc !== initialDoc || selectionRanges.length !== initialSelectionRanges.length || selectionRanges.some((range, index) => !range.empty || range.anchor !== initialSelectionRanges[index]?.anchor || range.head !== initialSelectionRanges[index]?.head)) return;
 

@@ -69,7 +69,7 @@ test("query-tab object source uses canonical identity and honors backend editabi
   assert.match(openObjectSourceBody, /!\["SEQUENCE", "TRIGGER", "TYPE", "TYPE_BODY", "JOB"\]\.includes\(resolvedType\)/);
   assert.match(openObjectSourceBody, /objectType: resolvedType/);
   assert.match(openObjectSourceBody, /signature: node\.signature/);
-  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true \}\)/);
+  assert.match(openObjectSourceBody, /createTab\(connectionId, database, `Source - \$\{node\.label\}`, "query", schema, editableSource, node\.catalog, \{ forceNew: true, sourceView: true \}\)/);
   assert.doesNotMatch(openObjectSourceBody, /queryStore\.updateSql/);
   assert.doesNotMatch(openObjectSourceBody, /queryStore\.markTabClean/);
 });

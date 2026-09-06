@@ -8477,6 +8477,37 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
     )
 }
 
+/// Servers without `pg_get_function_identity_arguments` (Redshift-compatible,
+/// some legacy PostgreSQL forks like TBase) have their object *list* signature
+/// built with the older `pg_get_function_arguments` formatter instead, which
+/// includes `DEFAULT ...` clauses for parameters with default values. Matching
+/// that signature against `pg_get_function_identity_arguments` (which never
+/// includes `DEFAULT` clauses) then always misses for routines with default
+/// parameters. This mirrors the signature filter but uses the same legacy
+/// formatter so it matches what the list query actually produced.
+fn postgres_function_object_source_sql_with_legacy_signature(
+    schema: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+    signature: Option<&str>,
+) -> String {
+    let prokind = if matches!(kind, db::ObjectSourceKind::Procedure) { "p" } else { "f" };
+    let signature_filter = signature
+        .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
+        .unwrap_or_default();
+    format!(
+        "SELECT pg_get_functiondef(p.oid) \
+         FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+         ORDER BY p.oid LIMIT 1",
+        sql_string(schema),
+        sql_string(name),
+        prokind,
+        signature_filter
+    )
+}
+
 fn postgres_function_object_source_sql_without_prokind(
     schema: &str,
     name: &str,
@@ -9609,6 +9640,19 @@ async fn postgres_object_source(
                 .and_then(first_string_cell)
                 .map_err(|fallback_err| format!("{primary_err}; prokind fallback failed: {fallback_err}"))
         }
+        Err(primary_err)
+            if !unwrap_opengauss_record
+                && primary_err == "Object source not found"
+                && signature.is_some()
+                && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
+        {
+            let fallback_sql =
+                postgres_function_object_source_sql_with_legacy_signature(schema, name, object_type, signature);
+            db::postgres::execute_query(pool, &fallback_sql)
+                .await
+                .and_then(first_string_cell)
+                .map_err(|fallback_err| format!("{primary_err}; legacy signature fallback failed: {fallback_err}"))
+        }
         Err(primary_err) if matches!(object_type, db::ObjectSourceKind::View) => {
             let fallback_sql = postgres_view_source_fallback_sql_inner(schema, name, isolate_view_search_path);
             db::postgres::execute_query(pool, &fallback_sql)
@@ -9712,6 +9756,16 @@ mod object_source_tests {
         assert_eq!(
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, Some("integer, integer")),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' AND pg_get_function_identity_arguments(p.oid) = 'integer, integer' ORDER BY p.oid LIMIT 1"
+        );
+
+        assert_eq!(
+            postgres_function_object_source_sql_with_legacy_signature(
+                "public",
+                "recalc_score",
+                &ObjectSourceKind::Procedure,
+                Some("i_id numeric DEFAULT 0, OUT o_code integer"),
+            ),
+            "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'p' AND pg_get_function_arguments(p.oid) = 'i_id numeric DEFAULT 0, OUT o_code integer' ORDER BY p.oid LIMIT 1"
         );
 
         let opengauss_view_sql = opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);

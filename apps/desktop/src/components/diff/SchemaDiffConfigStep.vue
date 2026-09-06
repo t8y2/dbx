@@ -83,17 +83,17 @@ const restrictTables = ref(false);
 const localSelectedTables = ref<string[]>([]);
 
 const activeTableMappings = computed(() => props.options?.tableMappings ?? []);
-const tableMatches = computed<SchemaDiffTableMatch[]>(() => buildSchemaDiffTableMatches(localSelectedTables.value, targetTableList.value, activeTableMappings.value));
+const tableMatches = computed<SchemaDiffTableMatch[]>(() => buildSchemaDiffTableMatches(localSelectedTables.value, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase));
 const matchedTableCount = computed(() => tableMatches.value.filter((match) => match.targetTable).length);
 const missingTargetTables = computed(() => tableMatches.value.filter((match) => !match.targetTable).map((match) => match.sourceTable));
 const tableMappingConflictSource = ref<string | null>(null);
 
 function targetTableOptions(sourceTable: string): string[] {
-  return availableSchemaDiffTargetTables(sourceTable, targetTableList.value, activeTableMappings.value);
+  return availableSchemaDiffTargetTables(sourceTable, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase);
 }
 
 function handleTableMappingUpdate(sourceTable: string, targetTable: string) {
-  const update = updateSchemaDiffTableMapping(activeTableMappings.value, sourceTable, targetTable);
+  const update = updateSchemaDiffTableMapping(activeTableMappings.value, sourceTable, targetTable, props.options.ignoreTableNameCase);
   if (update.accepted) {
     tableMappingConflictSource.value = null;
     emitTableMappings(update.mappings);
@@ -107,7 +107,7 @@ function emitTableMappings(nextMappings: SchemaDiffTableMapping[]) {
 }
 
 function reconcileTableMappings(selectedTables: string[], targetTables = targetTableList.value) {
-  const nextMappings = targetTableListLoaded.value ? reconcileSchemaDiffTableMappings(selectedTables, targetTables, activeTableMappings.value) : pruneSchemaDiffTableMappings(selectedTables, activeTableMappings.value);
+  const nextMappings = targetTableListLoaded.value ? reconcileSchemaDiffTableMappings(selectedTables, targetTables, activeTableMappings.value, props.options.ignoreTableNameCase) : pruneSchemaDiffTableMappings(selectedTables, activeTableMappings.value);
   emitTableMappings(nextMappings);
 }
 

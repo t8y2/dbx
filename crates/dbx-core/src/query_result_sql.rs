@@ -2335,6 +2335,61 @@ fn fallback_alias(index: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Query shape from issue #7832: a MySQL GROUP BY over a LEFT JOIN with an
+    /// aggregated derived table, COUNT(DISTINCT IF(...)) in the projection, and
+    /// inline `-- 中文` line comments. Locks in the invariants that keep DBX's
+    /// derived page/count SQL row-count-identical to the user's statement:
+    /// the statement splitter must keep it a single statement, the page SQL
+    /// must preserve the GROUP BY while injecting deterministic pagination,
+    /// and the count wrap must count the grouped result, not the raw join.
+    #[test]
+    fn mysql_group_by_with_distinct_if_and_comments_keeps_grouping_in_page_and_count_sql() {
+        let sql = "SELECT\n  base.brand_name\n ,base.stall_id\n ,base.floor\n ,COUNT(1) total_invite -- 邀约数量\n ,SUM(IFNULL(base.ver_status, 0)) sign_num -- 签到数量\n ,SUM(IFNULL(dr.draw_count, 0)) draw_num -- 抽奖次数\n ,SUM(IFNULL(dr.draw_user_num, 0)) draw_user_num -- 抽奖人数\n ,COUNT(distinct IF(base.ver_status = 1, base.mobile, null)) sign_and_draw_user_num\nFROM v_form_data_1786326962 base\nLEFT JOIN (\n  SELECT id, SUM(IFNULL(hx_status, 0)) draw_count, COUNT(distinct IF(hx_status = 1, mobile, null)) draw_user_num\n  FROM v_form_data_1786326962_coupon\n  GROUP BY id\n) dr ON base.id = dr.id\nGROUP BY base.brand_name, base.stall_id, base.floor";
+
+        let statements = crate::sql::split_sql_statements_for_database(sql, DatabaseType::Mysql);
+        assert_eq!(statements.len(), 1, "inline comments must not split the statement");
+
+        let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+            sql: sql.to_string(),
+            query_base_sql: sql.to_string(),
+            database_type: Some(DatabaseType::Mysql),
+            pagination: QueryPagination { limit: 500, offset: 0, session_id: None },
+            use_agent_cursor: false,
+            first_page_uses_actual_sql: false,
+        });
+
+        let page_sql = plan.page_sql.expect("pagination plan provides page SQL");
+        assert!(page_sql.to_uppercase().contains("GROUP BY"));
+        assert!(page_sql.contains("ORDER BY 1, 2, 3 LIMIT 500;"), "dedup pagination must be appended after the GROUP BY, got: {page_sql}");
+
+        let count_sql = plan.count_sql.expect("pagination plan provides count SQL");
+        assert!(count_sql.starts_with("SELECT COUNT(*) AS dbx_total_rows FROM ("));
+        assert_eq!(
+            count_sql.matches("GROUP BY").count(),
+            2,
+            "the count wrap must keep both the outer and derived-table GROUP BY, got: {count_sql}"
+        );
+
+        let mut variants = vec![
+            ("crlf", sql.replace('\n', "\r\n")),
+            ("trailing semicolon", format!("{sql};")),
+            ("trailing GROUP BY comment", format!("{sql} -- 分组")),
+        ];
+        if let Some(stripped) = sql.strip_prefix("SELECT") {
+            variants.push(("leading comment", format!("-- header\nSELECT{stripped}")));
+        }
+        for (name, variant) in variants {
+            let counted = build_count_query_sql(CountQuerySqlOptions {
+                original_sql: variant.clone(),
+                database_type: Some(DatabaseType::Mysql),
+            });
+            let counted = counted.sql.unwrap_or_default();
+            assert_eq!(counted.matches("GROUP BY").count(), 2, "{name}: count wrap kept both GROUP BYs");
+            let statements = crate::sql::split_sql_statements_for_database(&variant, DatabaseType::Mysql);
+            assert_eq!(statements.len(), 1, "{name}: still a single statement");
+        }
+    }
+
     #[test]
     fn easysearch_uses_elasticsearch_sql_pagination_rules() {
         let paginated = build_paginated_query_sql(PaginatedQuerySqlOptions {

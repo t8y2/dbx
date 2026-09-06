@@ -15,6 +15,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
+import { showSqlInsertModeDialog, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -24,7 +25,7 @@ import type { DatabaseType, QueryResult } from "@/types/database";
 import type { QueryResultExportRequest } from "@/lib/backend/api";
 import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { buildXlsxSqlWorksheet } from "@/lib/export/xlsxSqlSheet";
-import { formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
+import { forceCsvTextForTemporalColumns, formatTemporalRowsForExport } from "@/lib/dataGrid/columnFormatter";
 import { translateBackendError } from "@/i18n/backend-errors";
 import XlsxHeaderDialog from "@/components/export/XlsxHeaderDialog.vue";
 import i18n from "@/i18n";
@@ -106,7 +107,15 @@ export interface UseDataGridExportOptions {
   hasRowSelection: ComputedRef<boolean>;
   resolveSourceValues?: (rowIds: number[], sourceColumnIndexes: number[]) => Promise<Map<number, Map<number, CellValue>>>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
-  queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => Promise<QueryResultExportRequest | undefined>;
+  queryResultExportRequest?: (options: {
+    exportId: string;
+    filePath: string;
+    format: "csv" | "xlsx" | "txt" | "sql";
+    includeSqlSheet?: boolean;
+    exportTableName?: string;
+    exportColumnTypes?: Array<string | null | undefined>;
+    insertMode?: SqlInsertMode;
+  }) => Promise<QueryResultExportRequest | undefined>;
   /**
    * True when the in-memory result already holds the complete result set —
    * i.e. the query ran without server-side pagination, was not truncated, and
@@ -407,8 +416,12 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function writeXlsxResult(outputPath: string, result: { columns: string[]; columnTypes: string[]; columnComments?: (string | null)[]; rows: CellValue[][] }, includeSqlSheet: boolean, autoFilter: boolean) {
     const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet([{ sql: currentExportSql() || "" }]) : undefined;
     const rightAlign = useSettingsStore().editorSettings.numericColumnRightAlign;
+    // The rows are already rendered with the global export pattern, but the
+    // workbook still needs the pattern itself so its numFmt matches; without it
+    // a `SSS` pattern silently displays as `yyyy-mm-dd hh:mm:ss`.
+    const dateTimeFormat = useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined;
     if (!sqlWorksheet) {
-      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter);
+      await api.exportQueryResultXlsx(outputPath, currentXlsxSheetName(), result.columns, result.columnTypes, result.columnComments, result.rows, rightAlign, autoFilter, dateTimeFormat);
       return;
     }
     await api.exportQueryResultsXlsx(
@@ -426,6 +439,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         { ...sqlWorksheet, autoFilter },
       ],
       autoFilter,
+      dateTimeFormat,
     );
   }
 
@@ -733,8 +747,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         });
         // Hand the raw rows straight to the Rust command. Formatting (NULL→"",
         // bool/number→text, etc.) happens there on a spawn_blocking thread, so
-        // we avoid mapping every cell synchronously on the UI thread.
-        const rows = result.rows;
+        // we avoid mapping every cell synchronously on the UI thread. Temporal
+        // columns are the one exception: force-text them here (see
+        // forceCsvTextForTemporalColumns) so WPS/Excel-style CSV import can't
+        // re-guess and truncate/reformat a date-looking string.
+        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
         if (needsFullExport && exportProgressState) {
           exportProgressState.value = {
             ...exportProgressState.value,
@@ -795,7 +812,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           outputPath = path as string;
         }
         const result = await resultToExport(undefined, undefined, false);
-        await api.exportQueryResultCsv(outputPath, result.columns, result.rows, useSettingsStore().editorSettings.csvQuoteMode);
+        const rows = forceCsvTextForTemporalColumns(result.rows, result.columnTypes);
+        await api.exportQueryResultCsv(outputPath, result.columns, rows, useSettingsStore().editorSettings.csvQuoteMode);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1079,7 +1097,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           autoFilter: exportOptions.autoFilter,
         }));
         const sqlWorksheet = includeSqlSheet ? buildXlsxSqlWorksheet(sheets.map((sheet) => ({ resultName: sheet.sheetName, sql: sheet.sql || sheet.result.sourceStatement || "" }))) : undefined;
-        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: exportOptions.autoFilter }] : worksheets, exportOptions.autoFilter);
+        await api.exportQueryResultsXlsx(outputPath, sqlWorksheet ? [...worksheets, { ...sqlWorksheet, autoFilter: exportOptions.autoFilter }] : worksheets, exportOptions.autoFilter, exportPattern || undefined);
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
@@ -1095,7 +1113,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     await exportAllResultsXlsxResult(true);
   }
 
-  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true): Promise<boolean> {
+  async function exportFullTableDataViaBackend(format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt", rowIds?: number[], headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode?: SqlInsertMode): Promise<boolean> {
     const meta = tableMeta.value;
     // The backend table exporter currently builds two-part table names. External
     // Doris/StarRocks catalogs need the data-tab paginator's three-part SQL.
@@ -1154,6 +1172,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           tableName: meta.tableName,
           filePath: outputPath,
           format,
+          ...(format === "sql" && insertMode ? { insertMode } : {}),
           csvQuoteMode: editorSettings.csvQuoteMode,
           columns: columns.value,
           columnTypes: columnTypes.value,
@@ -1194,7 +1213,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode?: SqlInsertMode): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
@@ -1225,6 +1244,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       includeSqlSheet,
       exportTableName: format === "sql" ? tableMeta.value?.tableName : undefined,
       exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
+      ...(format === "sql" && insertMode ? { insertMode } : {}),
     });
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
     const request = baseRequest
@@ -1307,19 +1327,21 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultSqlViaBackend(rowIds?: number[]): Promise<boolean> {
+  async function exportQueryResultSqlViaBackend(rowIds: number[] | undefined, insertMode: SqlInsertMode): Promise<boolean> {
     if (!isTauriRuntime()) return false;
-    return exportQueryResultViaBackend("sql", rowIds);
+    return exportQueryResultViaBackend("sql", rowIds, false, "name", true, insertMode);
   }
 
   async function exportSql(rowIds?: number[]) {
     await runExclusiveExport(async () => {
+      const insertMode = await showSqlInsertModeDialog();
+      if (insertMode === null) return;
       try {
         // Step 1: table-data context — existing backend table export
-        if (await exportFullTableDataViaBackend("sql", rowIds)) return;
+        if (await exportFullTableDataViaBackend("sql", rowIds, "name", true, insertMode)) return;
 
         // Step 2: query-result context — NEW backend streaming with background task
-        if (await exportQueryResultSqlViaBackend(rowIds)) return;
+        if (await exportQueryResultSqlViaBackend(rowIds, insertMode)) return;
 
         // Step 3: fallback — local export (Web and edge-case scenarios)
         const result = await resultToExport(rowIds, undefined, true, false);
@@ -1334,6 +1356,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           spatialColumns: exportData.spatialColumns,
           spatialValues: exportData.spatialValues,
           rows: exportData.rows,
+          insertMode,
         });
         await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql");
         toast(t("grid.exported"));
@@ -1345,6 +1368,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportCurrentPageSql() {
     await runExclusiveExport(async () => {
+      const insertMode = await showSqlInsertModeDialog();
+      if (insertMode === null) return;
       try {
         const result = await resultToExport(undefined, undefined, false, false);
         const exportData = sqlInsertExportData(result);
@@ -1358,6 +1383,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           spatialColumns: exportData.spatialColumns,
           spatialValues: exportData.spatialValues,
           rows: exportData.rows,
+          insertMode,
         });
         await saveTextFile(content, exportFileName("export-page", "sql", { page: true }), "SQL", "sql");
         toast(t("grid.exported"));

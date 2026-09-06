@@ -314,7 +314,7 @@ describe("RedisValueViewer expiry saving", () => {
     expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("50s");
   });
 
-  it("polls the full value at the configured interval without refreshing the parent key tree", async () => {
+  it("polls the full value at the configured interval and reports it to the parent", async () => {
     vi.useFakeTimers();
     localStorage.setItem("dbx-redis-auto-refresh-enabled-v2", "true");
     localStorage.setItem("dbx-redis-auto-refresh-interval-seconds-v2", "5");
@@ -328,7 +328,10 @@ describe("RedisValueViewer expiry saving", () => {
 
     expect(mocks.redisGetValue).toHaveBeenCalledTimes(2);
     expect(mocks.redisGetTtl).not.toHaveBeenCalled();
-    expect(loaded).toHaveBeenCalledOnce();
+    // The parent holds the key record the detail header's size badge reads, so
+    // a poll has to report the refreshed value for the badge to follow it.
+    expect(loaded).toHaveBeenCalledTimes(2);
+    expect(loaded.mock.calls[1][0]).toMatchObject({ ttl: 45 });
     expect(document.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("refreshed");
     expect(document.querySelector<HTMLElement>("[data-slot='badge'][aria-label='redis.expiry']")?.textContent).toContain("45s");
   });

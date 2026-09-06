@@ -9,6 +9,8 @@ db2	native-pushdown	java-sql	Uses SYSCAT metadata with type, filter, stable orde
 gbase8a	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
 gbase8s	native-pushdown	java-sql	Uses systables with type, filter, stable order, and SKIP/FIRST.
 goldendb	native-pushdown	java-sql	Uses information_schema with type, filter, stable order, and LIMIT/OFFSET.
+iris	native-pushdown	java-sql	Tables via JDBC metadata; columns and primary keys via INFORMATION_SCHEMA.COLUMNS/KEY_COLUMN_USAGE with JDBC fallback.
+cache	native-pushdown	java-sql	Mirrors iris; plain JDBC metadata fallback covers Caché releases before 2012.1 that lack INFORMATION_SCHEMA.
 h2	native-pushdown	java-sql	Uses INFORMATION_SCHEMA with type, filter, stable order, and LIMIT/OFFSET.
 hive-go	shared-fallback	native-go	Uses HiveServer2 metadata APIs, then applies stable filtering and paging in the native agent with a SHOW TABLES fallback.
 ignite	intentional-fallback	java-jdbc-metadata	Uses JDBC metadata from the Ignite thin driver; no portable server-side paging API, common constraints filter locally.

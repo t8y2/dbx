@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { compareDataGridValues, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+import { compareDataGridValues, databaseSortSupportedForDatabase, simpleDataGridOrderByColumn, simpleDataGridOrderByMatchesSort, simpleDataGridOrderByReferencesMissingColumn } from "@/lib/dataGrid/dataGridSort";
+
+describe("databaseSortSupportedForDatabase", () => {
+  it("keeps database-side sorting for databases that support ORDER BY", () => {
+    expect(databaseSortSupportedForDatabase("postgres")).toBe(true);
+    expect(databaseSortSupportedForDatabase("mysql")).toBe(true);
+    expect(databaseSortSupportedForDatabase(undefined)).toBe(true);
+  });
+
+  it("disables database-side sorting for Cassandra browse queries", () => {
+    expect(databaseSortSupportedForDatabase("cassandra")).toBe(false);
+  });
+});
 
 describe("simpleDataGridOrderByColumn", () => {
   it.each([
@@ -44,6 +56,21 @@ describe("simpleDataGridOrderByMatchesSort", () => {
   it("does not treat a manual order as owned by a stale structured sort", () => {
     expect(simpleDataGridOrderByMatchesSort("LOWER(name) ASC", "old_name", "asc")).toBe(false);
     expect(simpleDataGridOrderByMatchesSort('"name" ASC', "old_name", "asc")).toBe(false);
+  });
+});
+
+describe("compareDataGridValues numeric ordering", () => {
+  it("sorts bigint string cells beyond the JS safe range numerically (issue #7832)", () => {
+    // BIGINT cells above ±(2^53 - 1) cross the backend boundary as decimal
+    // strings, like DECIMAL cells; numeric columns must still order them by
+    // magnitude instead of falling back to collation or double rounding.
+    const columnType = "bigint";
+    expect(compareDataGridValues("1391198305898897409", "1391198305898909792", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898909792", "1391198305898897409", columnType)).toBeGreaterThan(0);
+    expect(compareDataGridValues("9007199254740993", "1391198305898897409", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues(42, "9007199254740993", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("-9007199254740992", "42", columnType)).toBeLessThan(0);
+    expect(compareDataGridValues("1391198305898897409", "1391198305898897409", columnType)).toBe(0);
   });
 });
 

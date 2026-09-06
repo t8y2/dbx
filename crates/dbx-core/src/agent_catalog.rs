@@ -125,6 +125,17 @@ mod tests {
     }
 
     #[test]
+    fn cache_profile_uses_dedicated_agent_under_iris() {
+        assert_eq!(agent_key(&DatabaseType::Iris, None), Some("iris"));
+        assert_eq!(agent_key(&DatabaseType::Iris, Some("iris")), Some("iris"));
+        assert_eq!(agent_key(&DatabaseType::Iris, Some("cache")), Some("cache"));
+        assert_eq!(label_for_key("cache"), Some("InterSystems Caché"));
+        // The Caché agent ships its own shaded CacheDB driver, so it needs its
+        // own driver store entry for install/upgrade/uninstall.
+        assert!(driver_store_entries().any(|(key, label)| key == "cache" && label == "InterSystems Caché"));
+    }
+
+    #[test]
     fn manifest_agent_keys_match_catalog_defaults() {
         for entry in database_manifest::entries().iter().filter(|entry| entry.agent_key.is_some()) {
             assert_eq!(

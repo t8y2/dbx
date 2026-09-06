@@ -65,6 +65,8 @@ export interface DataCompareFromTablesOptions {
   targetTable: string;
   columns: string[];
   keyColumns: string[];
+  /** Source-side column names aligned positionally with `columns`; needed when the two databases store identifier case differently (e.g. SQL Server vs Oracle). */
+  sourceColumns?: string[];
   fetchBatchSize?: number;
   degradationThreshold?: DegradationThreshold;
   samplingStrategy?: SamplingStrategy;
@@ -138,4 +140,49 @@ export function inferCompareKeyColumns(columns: Pick<ColumnInfo, "name" | "is_pr
     if (column.is_primary_key) primaryKeys.push(column.name);
   }
   return primaryKeys;
+}
+
+export interface CompareColumnIntersection {
+  /** Target-side column names, kept in source order. */
+  columns: string[];
+  /** Source-side names aligned positionally with `columns`. */
+  sourceColumns: string[];
+}
+
+/**
+ * Intersects source and target columns case-insensitively.
+ *
+ * Databases store identifier case differently (SQL Server keeps the created
+ * case, Oracle and Dameng store upper case, PostgreSQL lower case), so a
+ * migrated table's columns only match across engines when compared without
+ * case. Target names are canonical because sync SQL runs against the target.
+ */
+export function intersectCompareColumns(sourceColumns: Pick<ColumnInfo, "name">[], targetColumns: Pick<ColumnInfo, "name">[]): CompareColumnIntersection {
+  const targetNamesByLowerName = new Map<string, string>();
+  for (const column of targetColumns) {
+    const lowerName = column.name.toLowerCase();
+    if (!targetNamesByLowerName.has(lowerName)) targetNamesByLowerName.set(lowerName, column.name);
+  }
+
+  const columns: string[] = [];
+  const sourceNames: string[] = [];
+  const matched = new Set<string>();
+  for (const column of sourceColumns) {
+    const lowerName = column.name.toLowerCase();
+    const targetName = targetNamesByLowerName.get(lowerName);
+    if (targetName === undefined || matched.has(lowerName)) continue;
+    matched.add(lowerName);
+    columns.push(targetName);
+    sourceNames.push(column.name);
+  }
+  return { columns, sourceColumns: sourceNames };
+}
+
+/**
+ * Resolves a column name to the matching entry of `columns`, ignoring case.
+ * Returns undefined when no column matches.
+ */
+export function matchColumnNameIgnoreCase(name: string, columns: string[]): string | undefined {
+  const lowerName = name.toLowerCase();
+  return columns.find((column) => column.toLowerCase() === lowerName);
 }

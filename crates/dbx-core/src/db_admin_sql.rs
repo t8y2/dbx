@@ -536,11 +536,16 @@ pub fn build_empty_table_sql(options: TableAdminSqlOptions) -> String {
         Some(DatabaseType::Bigquery | DatabaseType::Spanner) => format!("DELETE FROM {table} WHERE TRUE;"),
         Some(
             DatabaseType::Cassandra
-            | DatabaseType::Hive
-            | DatabaseType::Kyuubi
-            | DatabaseType::Argo
-            | DatabaseType::Kylin
-            | DatabaseType::Questdb,
+                | DatabaseType::Hive
+                | DatabaseType::Kyuubi
+                | DatabaseType::Argo
+                | DatabaseType::Kylin
+                | DatabaseType::Questdb
+                // StarRocks and Doris reject a WHERE-less DELETE (StarRocks analyzer:
+                // "Where clause is not set"), and both officially support TRUNCATE TABLE
+                // as the way to clear a whole table.
+                | DatabaseType::Doris
+                | DatabaseType::StarRocks,
         ) => {
             format!("TRUNCATE TABLE {table};")
         }
@@ -1781,6 +1786,21 @@ mod tests {
             }),
             "TRUNCATE TABLE `table_sample`;"
         );
+        // StarRocks and Doris require a WHERE clause on DELETE (StarRocks analyzer:
+        // "Where clause is not set"), so clearing a table must emit the same
+        // TRUNCATE TABLE statement the truncate action already produces.
+        for database_type in [DatabaseType::Doris, DatabaseType::StarRocks] {
+            assert_eq!(
+                build_empty_table_sql(TableAdminSqlOptions {
+                    database_type: Some(database_type),
+                    schema: None,
+                    table_name: "events".to_string(),
+                    cascade: None,
+                    identifier_quote: None,
+                }),
+                "TRUNCATE TABLE `events`;"
+            );
+        }
     }
 
     #[test]

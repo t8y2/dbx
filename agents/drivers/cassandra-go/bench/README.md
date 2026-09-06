@@ -38,11 +38,12 @@ python3 drivers/cassandra-go/bench/agent_compare.py \
   > /tmp/dbx-cassandra-bench/result.json
 ```
 
-If Java is only available in a container, provide the full interactive command:
+If Java is only available in a container, provide the full interactive command
+as a JSON argv array so no shell is implied (pass `["sh", "-c", "..."]`
+explicitly when you need shell features):
 
 ```bash
-JDBC_AGENT_COMMAND='docker run --rm -i --name dbx-cassandra-jdbc-bench -v /tmp/dbx-cassandra-bench:/bench:ro eclipse-temurin:21-jre java -jar /bench/dbx-agent-cassandra.jar'
-JDBC_RSS_COMMAND="docker inspect --format '{{.State.Pid}}' dbx-cassandra-jdbc-bench | xargs -I{} awk '/VmRSS/ {print \$2}' /proc/{}/status"
+JDBC_AGENT_COMMAND='["docker","run","--rm","-i","--name","dbx-cassandra-jdbc-bench","-v","/tmp/dbx-cassandra-bench:/bench:ro","eclipse-temurin:21-jre","java","-jar","/bench/dbx-agent-cassandra.jar"]'
 ```
 
 ## Configuration

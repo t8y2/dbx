@@ -77,6 +77,31 @@ describe("queryStore query result export", () => {
     expect(mocks.connectionIdentifierQuote).toHaveBeenCalledWith("kingbase-1");
   });
 
+  it("passes the selected SQL INSERT mode to the backend request", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("kingbase-1", "app", "Query");
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    tab.sql = "SELECT id, name FROM users";
+    tab.lastExecutedSql = tab.sql;
+    tab.result = {
+      columns: ["id", "name"],
+      rows: [[1, "Ada"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+    };
+
+    const request = await store.buildQueryResultExportRequest(tabId, {
+      exportId: "export-single",
+      filePath: "users.sql",
+      format: "sql",
+      exportTableName: "users",
+      insertMode: "single",
+    });
+
+    expect(request?.insertMode).toBe("single");
+  });
+
   it("uses the Agent cursor for SQL Server legacy result export", async () => {
     mocks.getConfig.mockReturnValue({
       id: "sqlserver-2000",

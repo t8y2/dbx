@@ -334,10 +334,13 @@ async function refreshAutoValue() {
   const requestId = ++autoRefreshRequestId;
   refreshingValue.value = true;
   try {
+    // The parent owns the key record this panel's header reads its size badge
+    // from, so a poll that skipped notifying it left the badge frozen at the
+    // value the key had when it was opened. Notifying is cheap: the parent
+    // refreshes that one record's metadata in place.
     const applied = await load({
       background: true,
       preserveDraft: true,
-      notifyParent: false,
       shouldApply: () => requestId === autoRefreshRequestId && !hasUnsavedRedisDraft.value && !shouldPauseAutoValueRefresh() && autoRefreshEnabled.value && canRunAutoRefresh(),
     });
     if (requestId !== autoRefreshRequestId || !applied || !data.value) return;

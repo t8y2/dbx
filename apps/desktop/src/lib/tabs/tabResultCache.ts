@@ -557,12 +557,16 @@ async function pruneRemoteRuntimeCache(options: ResultCachePruneOptions): Promis
 }
 
 async function deleteRemoteRuntimeCacheOwner(ownerId: string): Promise<void> {
-  if (isTauriRuntime()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("delete_tab_runtime_cache_owner", { ownerId });
-    return;
+  try {
+    if (isTauriRuntime()) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("delete_tab_runtime_cache_owner", { ownerId });
+      return;
+    }
+    await fetch(apiUrl(`/api/tab-runtime-cache/owner?owner_id=${encodeURIComponent(ownerId)}`), { method: "DELETE" });
+  } catch {
+    // Cache deletion is best-effort; the entry expires server-side anyway.
   }
-  await fetch(apiUrl(`/api/tab-runtime-cache/owner?owner_id=${encodeURIComponent(ownerId)}`), { method: "DELETE" });
 }
 
 async function readRemoteRuntimeCache(key: string): Promise<Uint8Array | undefined> {
@@ -592,8 +596,10 @@ async function deleteRemoteRuntimeCache(key: string): Promise<void> {
       return;
     }
     await fetch(apiUrl(`/api/tab-runtime-cache?key=${encodeURIComponent(key)}`), { method: "DELETE" });
-  } catch (error) {
-    console.warn("[DBX][tab-result-cache:remote-delete:error]", { key, error });
+  } catch {
+    // Best-effort delete (the entry expires server-side). Deliberately silent: logging
+    // here after a vitest run finishes races worker teardown and has failed CI runs
+    // ("Closing rpc while onUserConsoleLog was pending").
   }
 }
 

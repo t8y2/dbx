@@ -101,6 +101,7 @@ export const databaseSupport: DatabaseSupportItem[] = [
   { id: "nacos", name: "Nacos", icon: "/icons/database/nacos.png", tone: "#2f80ed" },
   { id: "consul", name: "Consul", icon: "/icons/database/consul.svg", tone: "#e03875" },
   { id: "iris", name: "IRIS", icon: "/icons/database/iris.svg", tone: "#0085ca" },
+  { id: "cache", name: "Caché", icon: "/icons/database/iris.svg", tone: "#358a4e" },
   { id: "jdbcx", name: "JDBC", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff" },
   { id: "request", name: "Your DB?", icon: "/icons/database/jdbcx.svg", tone: "#6ea8ff", href: "https://github.com/t8y2/dbx/discussions" },
 ];

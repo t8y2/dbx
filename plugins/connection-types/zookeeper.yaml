@@ -14,11 +14,15 @@ skipTcpProbe: true
 defaultPort: 2181
 supportLevel: connect
 capabilities:
-  queryExecution: true
+  # ZooKeeper has no SQL engine and its agent exposes only kv_* operations:
+  # no list_databases or query method exists, so query execution and schema
+  # search must stay off (issue #8215: "new query" errored calling
+  # list-databases on a ZooKeeper connection).
+  queryExecution: false
   metadataBrowse: false
   objectBrowser: false
   objectSource: false
-  schemaSearch: true
+  schemaSearch: false
   diagram: false
   tableDataEdit: false
   tableStructureEdit: false

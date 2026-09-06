@@ -13,13 +13,16 @@ import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEv
 import { isPreviewTab } from "@/lib/tabs/tabPresentation";
 import { resolveExecutableSql } from "@/lib/sql/sqlExecutionTarget";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab } from "@/types/database";
 
 defineOptions({ inheritAttrs: false });
 
 const props = defineProps<
-  ContentAreaSurfaceProps & {
+  Omit<ContentAreaSurfaceProps, "activeTab"> & {
+    activeTab?: QueryTab;
+    showTabNavigation?: boolean;
     groupId: string;
     tabIds: string[];
     activeTabId: string | null;
@@ -88,6 +91,8 @@ const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, createNoopEditorToolbarActions());
+const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
+const tabBarTarget = computed(() => tabBarPortal?.targets.get(props.groupId));
 const groupTabs = computed(() => {
   const byId = new Map(queryStore.tabs.map((tab) => [tab.id, tab]));
   return props.tabIds.map((id) => byId.get(id)).filter((tab): tab is QueryTab => !!tab);
@@ -129,21 +134,28 @@ const groupExecutableSql = computed(() => {
 
 <template>
   <div class="editor-group flex h-full min-h-0 min-w-0 overflow-hidden" :class="[groupClass, groupLayoutClass]" :data-group-id="groupId" @pointerdown.capture="$emit('focus-group', groupId)" @focusin="$emit('focus-group', groupId)">
-    <EditorGroupTabBar
-      :group-id="groupId"
-      :tabs="groupTabs"
-      :active-tab-id="activeTabId"
-      :tab-bar-width="tabBarWidth"
-      :tab-bar-collapsed="tabBarCollapsed"
-      :can-detach-tabs="canDetachTabs"
-      :detached-drop-target="detachedDropTarget"
-      @activate-tab="$emit('activate-tab', $event)"
-      @locate-tab="$emit('locate-tab', $event)"
-      @toggle-zen-mode="$emit('toggle-zen-mode')"
-      @start-resize="$emit('start-resize', $event)"
-      @toggle-collapse="$emit('toggle-collapse')"
-      @detach-tab="$emit('detach-tab', $event)"
-    />
+    <Teleport defer v-if="showTabNavigation !== false" :to="tabBarTarget" :disabled="!tabBarPortal?.active.value || !tabBarTarget">
+      <EditorGroupTabBar
+        :group-id="groupId"
+        :tabs="groupTabs"
+        :active-tab-id="activeTabId"
+        :tab-bar-width="tabBarWidth"
+        :tab-bar-collapsed="tabBarCollapsed"
+        :can-detach-tabs="canDetachTabs"
+        :detached-drop-target="detachedDropTarget"
+        :special-page-tabs="toolbar.specialPageTabs.value"
+        @activate-tab="$emit('activate-tab', $event)"
+        @locate-tab="$emit('locate-tab', $event)"
+        @toggle-zen-mode="$emit('toggle-zen-mode')"
+        @start-resize="$emit('start-resize', $event)"
+        @toggle-collapse="$emit('toggle-collapse')"
+        @detach-tab="$emit('detach-tab', $event)"
+        @activate-settings="toolbar.activateSettingsPage()"
+        @close-settings="toolbar.closeSettingsPage()"
+        @activate-driver-store="toolbar.activateDriverStore()"
+        @close-driver-store="toolbar.closeDriverStore()"
+      />
+    </Teleport>
     <!-- The toolbar stays at the top of the pane's content column in every
          placement; only the tab bar moves around it. -->
     <div class="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -196,9 +208,11 @@ const groupExecutableSql = computed(() => {
       <div class="relative flex-1 min-h-0">
         <QueryEditorSurface v-if="activeTab?.mode === 'query'" ref="activeSurfaceRef" v-bind="surfaceBindings" :auto-focus="groupId === queryStore.focusedGroupId" class="h-full" />
         <ContentArea v-else-if="activeTab" ref="activeSurfaceRef" v-bind="surfaceBindings" class="h-full" />
-        <div v-else class="flex h-full items-center justify-center text-sm text-muted-foreground">
-          {{ t("tabs.emptyGroup") }}
-        </div>
+        <slot v-else name="empty">
+          <div class="flex h-full items-center justify-center text-sm text-muted-foreground">
+            {{ t("tabs.emptyGroup") }}
+          </div>
+        </slot>
       </div>
     </div>
   </div>

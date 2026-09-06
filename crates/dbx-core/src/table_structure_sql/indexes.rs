@@ -1,6 +1,6 @@
 use super::comments::build_sqlserver_index_comment_sql;
 use super::dialect::{capabilities_for, database_label, database_type_for_dialect, dialect_label, StructureDialect};
-use super::types::{EditableStructureIndex, TableStructureSqlOptions};
+use super::types::{EditableStructureIndex, IndexInfo, TableStructureSqlOptions};
 use super::util::{clean, qualified_table, quote_ident, quote_new_ident, quote_string};
 use crate::models::connection::DatabaseType;
 
@@ -33,6 +33,10 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
                 warnings.push(format!("Primary index \"{}\" cannot be dropped from this editor.", original.name));
                 continue;
             }
+            if is_dameng_constraint_backed(options.database_type, original) {
+                statements.push(build_dameng_drop_constraint_sql(dialect, &table, &original.name));
+                continue;
+            }
             statements.push(build_drop_index_sql(
                 options.database_type,
                 dialect,
@@ -54,6 +58,18 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
             }
             if original.is_primary {
                 warnings.push(format!("Primary index \"{}\" cannot be edited from this editor.", original.name));
+                continue;
+            }
+            if is_dameng_constraint_backed(options.database_type, original) {
+                statements.extend(build_dameng_constraint_index_edit(
+                    options,
+                    dialect,
+                    &table,
+                    index,
+                    original,
+                    capabilities.index_concurrent,
+                    warnings,
+                ));
                 continue;
             }
             let or_replace =
@@ -100,6 +116,77 @@ pub(super) fn build_index_sql(options: &TableStructureSqlOptions, warnings: &mut
         ));
     }
 
+    statements
+}
+
+/// Dameng builds the index behind a PRIMARY KEY / UNIQUE constraint as a "virtual" index
+/// owned by that constraint. Index-level DDL against such an index — `DROP INDEX` as much as
+/// `CREATE OR REPLACE INDEX` — is rejected with a misleading "no permission to drop index"
+/// error even for the owning user (#7959); it can only be changed through
+/// `ALTER TABLE ... ADD/DROP CONSTRAINT`, the same way Dameng primary keys are already
+/// handled in `columns.rs`.
+///
+/// A "real" unique index (`CREATE UNIQUE INDEX`, which is also what this editor emits for a
+/// newly created unique index) has no constraint behind it, is not reported as
+/// constraint-backed by introspection, and keeps the index-level path — constraint DDL would
+/// fail on it with "constraint does not exist".
+fn is_dameng_constraint_backed(database_type: Option<DatabaseType>, original: &IndexInfo) -> bool {
+    database_type == Some(DatabaseType::Dameng) && original.constraint_backed
+}
+
+fn build_dameng_drop_constraint_sql(dialect: StructureDialect, table: &str, constraint_name: &str) -> String {
+    format!("ALTER TABLE {table} DROP CONSTRAINT {};", quote_ident(dialect, constraint_name))
+}
+
+/// Rewrites an edit of a constraint-backed Dameng index as constraint DDL: drop the
+/// constraint, then re-add it as `UNIQUE` (still unique) or replace it with an ordinary
+/// index (downgraded to a plain index, where index-level DDL is fine again because the
+/// constraint is gone).
+fn build_dameng_constraint_index_edit(
+    options: &TableStructureSqlOptions,
+    dialect: StructureDialect,
+    table: &str,
+    index: &EditableStructureIndex,
+    original: &IndexInfo,
+    concurrently_supported: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let name = clean(&index.name);
+    let columns: Vec<String> =
+        index.columns.iter().map(|column| clean(column)).filter(|column| !column.is_empty()).collect();
+    // Same guard as `build_create_index_statements`: an empty name or an empty column list
+    // cannot produce a valid replacement (`validate_draft` already reports it as a warning).
+    // Emitting only the DROP would silently delete the constraint, so skip the edit entirely.
+    if name.is_empty() || columns.is_empty() {
+        return Vec::new();
+    }
+
+    let mut statements = vec![build_dameng_drop_constraint_sql(dialect, table, &original.name)];
+    if !index.is_unique {
+        statements.extend(build_create_index_statements(
+            options.database_type,
+            dialect,
+            table,
+            index,
+            warnings,
+            options.schema.as_deref(),
+            &options.table_name,
+            false,
+            concurrently_supported,
+            false,
+        ));
+        return statements;
+    }
+
+    // `build_create_index_statements` would honor BITMAP for Dameng, but a unique constraint
+    // always builds a normal index behind itself, so the type cannot be carried over.
+    if normalized_index_type(index) == "BITMAP" {
+        warnings.push(format!(
+            "Index type BITMAP is ignored for unique index \"{name}\": Dameng enforces it with a unique constraint, whose index cannot be a bitmap index."
+        ));
+    }
+    let cols = columns.iter().map(|column| quote_ident(dialect, column)).collect::<Vec<_>>().join(", ");
+    statements.push(format!("ALTER TABLE {table} ADD CONSTRAINT {} UNIQUE ({cols});", quote_ident(dialect, &name)));
     statements
 }
 

@@ -3166,12 +3166,12 @@ mod tests {
         clickhouse_metadata_database, dameng_object_statistics_dba_segments_sql,
         dameng_object_statistics_rows_only_sql, dameng_object_statistics_user_segments_sql, deduplicate_column_infos,
         ephemeral_agent_metadata_session_id, external_driver_statistics_dialect, external_driver_statistics_query_plan,
-        external_driver_uses_mysql_ddl, filter_mongodb_agent_collections, filter_mysql_system_databases_for_config,
-        filter_object_infos, filter_table_infos, filter_visible_schema_names, finalize_object_source,
-        gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql, is_agent_postgres_metadata_fallback_config,
-        is_mysql_external_driver_config, is_oracle_external_driver_config, is_retryable_metadata_error,
-        metadata_error_action, metadata_name_or_comment_matches, mysql_database_list_timeout,
-        mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
+        external_driver_uses_generic_ddl, external_driver_uses_mysql_ddl, filter_mongodb_agent_collections,
+        filter_mysql_system_databases_for_config, filter_object_infos, filter_table_infos, filter_visible_schema_names,
+        finalize_object_source, gaussdb_m_view_object_source_sql, gbase8a_object_statistics_sql,
+        is_agent_postgres_metadata_fallback_config, is_mysql_external_driver_config, is_oracle_external_driver_config,
+        is_retryable_metadata_error, metadata_error_action, metadata_name_or_comment_matches,
+        mysql_database_list_timeout, mysql_external_driver_ddl_from_query_result, mysql_external_driver_ddl_sql,
         mysql_object_source_ddl_column_index, mysql_object_source_sql, mysql_table_list_source_for_config,
         mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_columns_from_query_result,
         oracle_columns_sql, oracle_columns_sql_for_resolved_owner, oracle_current_schema_from_query_result,
@@ -3214,6 +3214,7 @@ mod tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         };
         let mut filtered = index("uq_active_code", &["active_code"], true, false);
         filtered.filter = Some("active = true".to_string());
@@ -3601,6 +3602,30 @@ mod tests {
 
         config.db_type = DatabaseType::Oracle;
         assert!(!is_oracle_external_driver_config(&config));
+    }
+
+    #[test]
+    fn external_driver_generic_ddl_applies_to_unmatched_jdbc_connections() {
+        // JDBCX-style wrappers match no vendor DDL dialect and fall back to the
+        // plugin's generic DatabaseMetaData renderer.
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.connection_string = Some("jdbcx:wrap-jdbc:jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = Some("io.github.jdbcx.WrappedDriver".to_string());
+        assert!(external_driver_uses_generic_ddl(&config));
+        assert!(!external_driver_uses_mysql_ddl(&config));
+        assert!(!is_oracle_external_driver_config(&config));
+
+        // Vendor dialects keep their dedicated SQL paths.
+        config.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = None;
+        assert!(!external_driver_uses_generic_ddl(&config));
+
+        config.connection_string = Some("jdbc:oracle:thin:@//127.0.0.1:1521/ORCL".to_string());
+        assert!(!external_driver_uses_generic_ddl(&config));
+
+        // Vendor-typed database never routes through the generic renderer.
+        let oracle = test_connection_config(DatabaseType::Oracle);
+        assert!(!external_driver_uses_generic_ddl(&oracle));
     }
 
     #[test]
@@ -7804,6 +7829,11 @@ async fn get_table_ddl_once(
                 let session = session.clone();
                 return external_driver_mysql_ddl(session, config.as_ref(), database, schema, table).await;
             }
+            if external_driver_uses_generic_ddl(config.as_ref()) {
+                let config = config.clone();
+                let session = session.clone();
+                return external_driver_jdbc_ddl(session, config.as_ref(), database, schema, table).await;
+            }
         }
         #[cfg(feature = "duckdb-sidecar")]
         if let Some(client) = extract_pool!(pool_handle.as_ref(), DuckDbWorker) {
@@ -8212,6 +8242,7 @@ async fn external_driver_gaussdb_m_indexes(
                     comment: current_comment.clone(),
                     key_is_expression: current_is_expression.clone(),
                     column_opclasses: vec![],
+                    constraint_backed: false,
                 });
             }
             // Start new index
@@ -8282,6 +8313,7 @@ async fn external_driver_gaussdb_m_indexes(
             comment: current_comment,
             key_is_expression: current_is_expression,
             column_opclasses: vec![],
+            constraint_backed: false,
         });
     }
 
@@ -8442,6 +8474,37 @@ fn opengauss_sequence_object_source_sql(schema: &str, name: &str, include_cache:
          ORDER BY c.oid LIMIT 1",
         schema = sql_string(schema),
         name = sql_string(name)
+    )
+}
+
+/// Servers without `pg_get_function_identity_arguments` (Redshift-compatible,
+/// some legacy PostgreSQL forks like TBase) have their object *list* signature
+/// built with the older `pg_get_function_arguments` formatter instead, which
+/// includes `DEFAULT ...` clauses for parameters with default values. Matching
+/// that signature against `pg_get_function_identity_arguments` (which never
+/// includes `DEFAULT` clauses) then always misses for routines with default
+/// parameters. This mirrors the signature filter but uses the same legacy
+/// formatter so it matches what the list query actually produced.
+fn postgres_function_object_source_sql_with_legacy_signature(
+    schema: &str,
+    name: &str,
+    kind: &db::ObjectSourceKind,
+    signature: Option<&str>,
+) -> String {
+    let prokind = if matches!(kind, db::ObjectSourceKind::Procedure) { "p" } else { "f" };
+    let signature_filter = signature
+        .map(|value| format!(" AND pg_get_function_arguments(p.oid) = {}", sql_string(value)))
+        .unwrap_or_default();
+    format!(
+        "SELECT pg_get_functiondef(p.oid) \
+         FROM pg_proc p \
+         JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = {} AND p.proname = {} AND p.prokind = '{}'{} \
+         ORDER BY p.oid LIMIT 1",
+        sql_string(schema),
+        sql_string(name),
+        prokind,
+        signature_filter
     )
 }
 
@@ -9577,6 +9640,19 @@ async fn postgres_object_source(
                 .and_then(first_string_cell)
                 .map_err(|fallback_err| format!("{primary_err}; prokind fallback failed: {fallback_err}"))
         }
+        Err(primary_err)
+            if !unwrap_opengauss_record
+                && primary_err == "Object source not found"
+                && signature.is_some()
+                && matches!(object_type, db::ObjectSourceKind::Procedure | db::ObjectSourceKind::Function) =>
+        {
+            let fallback_sql =
+                postgres_function_object_source_sql_with_legacy_signature(schema, name, object_type, signature);
+            db::postgres::execute_query(pool, &fallback_sql)
+                .await
+                .and_then(first_string_cell)
+                .map_err(|fallback_err| format!("{primary_err}; legacy signature fallback failed: {fallback_err}"))
+        }
         Err(primary_err) if matches!(object_type, db::ObjectSourceKind::View) => {
             let fallback_sql = postgres_view_source_fallback_sql_inner(schema, name, isolate_view_search_path);
             db::postgres::execute_query(pool, &fallback_sql)
@@ -9680,6 +9756,16 @@ mod object_source_tests {
         assert_eq!(
             postgres_object_source_sql("public", "recalc_score", &ObjectSourceKind::Function, Some("integer, integer")),
             "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'f' AND pg_get_function_identity_arguments(p.oid) = 'integer, integer' ORDER BY p.oid LIMIT 1"
+        );
+
+        assert_eq!(
+            postgres_function_object_source_sql_with_legacy_signature(
+                "public",
+                "recalc_score",
+                &ObjectSourceKind::Procedure,
+                Some("i_id numeric DEFAULT 0, OUT o_code integer"),
+            ),
+            "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = 'recalc_score' AND p.prokind = 'p' AND pg_get_function_arguments(p.oid) = 'i_id numeric DEFAULT 0, OUT o_code integer' ORDER BY p.oid LIMIT 1"
         );
 
         let opengauss_view_sql = opengauss_object_source_sql("public", "active_users", &ObjectSourceKind::View, None);
@@ -10288,6 +10374,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            constraint_backed: false,
         }];
 
         let ddl = render_postgres_table_ddl("public", "users", &[id], &indexes, &[], None);
@@ -10313,6 +10400,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -10364,6 +10452,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
             is_partition: true,
@@ -10999,6 +11088,44 @@ async fn external_driver_oracle_ddl(
         .filter(|source| !source.trim().is_empty())
         .map(str::to_string)
         .ok_or_else(|| "JDBC Oracle plugin returned no table DDL".to_string())
+}
+
+/// External JDBC connections that match no vendor DDL dialect (JDBCX wrappers,
+/// custom protocol drivers, …) have table DDL rendered by the plugin from
+/// plain `DatabaseMetaData` via `getObjectSource`, mirroring the agent-side
+/// `DdlBuilder` output.
+fn external_driver_uses_generic_ddl(config: &ConnectionConfig) -> bool {
+    config.db_type == DatabaseType::Jdbc
+        && !is_oracle_external_driver_config(config)
+        && !external_driver_uses_mysql_ddl(config)
+}
+
+async fn external_driver_jdbc_ddl(
+    session: std::sync::Arc<crate::plugins::PluginDriverSession>,
+    config: &ConnectionConfig,
+    database: &str,
+    schema: &str,
+    table: &str,
+) -> Result<String, String> {
+    let result: serde_json::Value = session
+        .invoke_with_timeout(
+            "getObjectSource",
+            serde_json::json!({
+                "connection": config,
+                "database": database,
+                "schema": schema,
+                "name": table,
+                "object_type": "TABLE",
+            }),
+            agent_metadata_timeout(Some(config)),
+        )
+        .await?;
+    result
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| !source.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "JDBC plugin returned no table DDL".to_string())
 }
 
 fn normalize_mysql_display_ddl(sql: String) -> String {

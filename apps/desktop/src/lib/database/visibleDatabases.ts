@@ -247,8 +247,15 @@ export function filterDatabaseNamesForVisiblePicker(databaseNames: string[], con
 export function filterSchemaNamesForVisiblePicker(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, options?: SchemaFilterOptions): string[] {
   if (schemaFilterShowSystemSchemas(connection, options)) return schemaNames;
   const currentSchema = connection?.username?.trim().toLowerCase();
+  // OceanBase Oracle logins embed the tenant in the username ("user@tenant");
+  // the schema equals the user part, so keep the login schema visible in both
+  // forms instead of hiding it behind a system-schema name (#8145).
+  const currentUserPart = currentSchema?.split("@")[0];
   const databaseType = effectiveDatabaseTypeForConnection(connection);
-  return schemaNames.filter((name) => name.toLowerCase() === currentSchema || !isSystemSchemaName(databaseType, name));
+  return schemaNames.filter((name) => {
+    const normalized = name.toLowerCase();
+    return normalized === currentSchema || normalized === currentUserPart || !isSystemSchemaName(databaseType, name);
+  });
 }
 
 export function connectionUsesVisibleSchemaFilter(connection: VisibleDatabaseConnection | undefined): boolean {
@@ -261,7 +268,12 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
 
 export function filterSchemaNamesForConnection(schemaNames: string[], connection: VisibleDatabaseConnection | undefined, database: string, options?: SchemaFilterOptions): string[] {
   const visibleSchemas = connection?.visible_schemas;
-  if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
+  // Single-database connections persist their schema filter under the empty
+  // database key while the editor toolbar addresses the same bucket with its
+  // "_" single-db sentinel; normalize so the strict checkbox filter still
+  // applies to the schema picker (#8145).
+  const filterDatabase = database === "_" ? "" : database;
+  if (!visibleSchemaFilterIsEnabled(visibleSchemas, filterDatabase)) {
     const visibleDatabases = connection?.visible_databases;
     const visibleDatabasePatterns = connection?.visible_database_patterns;
     if (connectionUsesVisibleSchemaFilter(connection) && (visibleDatabaseFilterIsEnabled(visibleDatabases) || visibleDatabasePatternsAreEnabled(visibleDatabasePatterns))) {
@@ -269,7 +281,7 @@ export function filterSchemaNamesForConnection(schemaNames: string[], connection
     }
     return filterSchemaNamesForVisiblePicker(schemaNames, connection, options);
   }
-  const visible = new Set(visibleSchemas![database]);
+  const visible = new Set(visibleSchemas![filterDatabase]);
   return schemaNames.filter((name) => visible.has(name));
 }
 

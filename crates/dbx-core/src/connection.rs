@@ -2906,41 +2906,49 @@ impl AppState {
     pub async fn test_tunnel_profile(&self, profile: &TransportLayerConfig) -> Result<String, String> {
         match profile {
             TransportLayerConfig::Ssh(ssh) => {
-                let ssh = crate::ssh_config::resolve_ssh_tunnel_config(ssh);
-                if ssh.host.trim().is_empty() {
+                // A `~/.ssh/config` alias declaring `ProxyJump` resolves to more
+                // than one hop; every other alias (the common case) resolves to
+                // exactly one, matching `resolve_ssh_tunnel_config`.
+                let chain = crate::ssh_config::resolve_ssh_tunnel_chain(ssh);
+                let leaf = chain.last().expect("resolve_ssh_tunnel_chain always returns at least one hop");
+                if leaf.host.trim().is_empty() {
                     return Err("SSH host is required.".to_string());
                 }
-                let timeout = if ssh.connect_timeout_secs == 0 {
-                    crate::models::connection::default_ssh_connect_timeout_secs()
-                } else {
-                    ssh.connect_timeout_secs
-                };
                 // A throwaway id so the probe never reuses or evicts a live tunnel, and
                 // a sentinel forward target: SSH auth completes on connect, before any
                 // channel to this target is opened, so it need not be reachable.
                 let probe_id = format!("__tunnel_profile_test__:{}", uuid::Uuid::new_v4());
-                let result = self
-                    .tunnels
-                    .start_tunnel(
-                        &probe_id,
-                        &ssh.host,
-                        ssh.port,
-                        &ssh.host,
-                        ssh.port,
-                        &ssh.user,
-                        &ssh.password,
-                        &ssh.key_path,
-                        &ssh.key_passphrase,
-                        ssh.use_ssh_agent,
-                        &ssh.ssh_agent_sock_path,
-                        &ssh.auth_method,
-                        timeout,
-                        "127.0.0.1",
-                        1,
-                        false,
-                        ssh.allow_exec_channel_proxy,
-                    )
-                    .await;
+                let result = if chain.len() == 1 {
+                    let timeout = if leaf.connect_timeout_secs == 0 {
+                        crate::models::connection::default_ssh_connect_timeout_secs()
+                    } else {
+                        leaf.connect_timeout_secs
+                    };
+                    self.tunnels
+                        .start_tunnel(
+                            &probe_id,
+                            &leaf.host,
+                            leaf.port,
+                            &leaf.host,
+                            leaf.port,
+                            &leaf.user,
+                            &leaf.password,
+                            &leaf.key_path,
+                            &leaf.key_passphrase,
+                            leaf.use_ssh_agent,
+                            &leaf.ssh_agent_sock_path,
+                            &leaf.auth_method,
+                            timeout,
+                            "127.0.0.1",
+                            1,
+                            false,
+                            leaf.allow_exec_channel_proxy,
+                        )
+                        .await
+                        .map(|_| ())
+                } else {
+                    self.tunnels.start_chain(&probe_id, &chain, &leaf.host, leaf.port).await.map(|_| ())
+                };
                 self.tunnels.stop_tunnel(&probe_id).await;
                 result.map(|_| "SSH tunnel connection successful".to_string())
             }

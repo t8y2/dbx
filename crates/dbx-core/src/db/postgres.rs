@@ -972,7 +972,11 @@ fn decode_pg_text_wkb(value: &str) -> Option<super::wkb::DecodedGeometry> {
         .or_else(|| trimmed.strip_prefix("\\x"))
         .or_else(|| trimmed.strip_prefix("\\X"))
         .unwrap_or(trimmed);
-    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !matches!(&hex[..2], "00" | "01") || !hex.is_ascii() {
+    // `is_ascii()` must be checked before slicing `hex[..2]`: multibyte UTF-8
+    // text (e.g. Redshift simple-query values probed with an unknown column
+    // type) would otherwise panic on a non-char byte boundary and abort the
+    // process under `panic = "abort"`.
+    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !hex.is_ascii() || !matches!(&hex[..2], "00" | "01") {
         return None;
     }
     let bytes = hex
@@ -3848,6 +3852,7 @@ async fn list_indexes_for_relations_with_sql(
             comment: row.try_get::<_, Option<String>>(10).ok().flatten(),
             key_is_expression,
             column_opclasses: key_opclasses,
+            constraint_backed: false,
         });
     }
     Ok(result)
@@ -4006,8 +4011,12 @@ fn postgres_foreign_keys_for_relations_sql() -> &'static str {
 // the schema/table arrays through their shared subscript so the fallback stays
 // one bounded query and preserves each relation tuple's position.
 // WITH ORDINALITY is equally unavailable before 9.4, so pair conkey/confkey
-// positions with generate_series over the array length plus plain subscripts —
-// the same pre-9.4 technique the index compat SQL relies on.
+// positions with generate_series plus plain subscripts — the same pre-9.4
+// technique the index compat SQL relies on. The series bounds must stay
+// constant: before PostgreSQL 9.3 a FROM item's function arguments cannot
+// reference an earlier FROM item (implicit LATERAL), so bound the series by
+// INDEX_MAX_KEYS (32, stable across PostgreSQL 9–18) and cap the ordinal with
+// a join-condition guard instead.
 fn postgres_foreign_keys_for_relations_compat_sql() -> &'static str {
     "SELECT rel.rel_schema, rel.rel_table, \
      con.conname AS constraint_name, \
@@ -4026,7 +4035,7 @@ fn postgres_foreign_keys_for_relations_compat_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid \
      JOIN pg_catalog.pg_namespace ref_n ON ref_n.oid = ref_c.relnamespace \
-     CROSS JOIN generate_series(1, array_length(con.conkey, 1)) AS fk(ord) \
+     JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1) \
      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = (con.conkey)[fk.ord] AND NOT a.attisdropped \
      JOIN pg_catalog.pg_attribute ref_a ON ref_a.attrelid = ref_c.oid AND ref_a.attnum = (con.confkey)[fk.ord] AND NOT ref_a.attisdropped \
      WHERE con.contype = 'f' AND n.nspname = rel.rel_schema AND c.relname = rel.rel_table \
@@ -7552,6 +7561,7 @@ async fn list_indexes_with_sql(
                 comment: row.try_get::<_, Option<String>>(9).ok().flatten(),
                 key_is_expression,
                 column_opclasses: key_opclasses,
+                constraint_backed: false,
             }
         })
         .collect())
@@ -7609,8 +7619,11 @@ fn postgres_foreign_keys_sql() -> &'static str {
 }
 
 // Pre-9.4 sibling of `postgres_foreign_keys_sql`: WITH ORDINALITY requires
-// PostgreSQL 9.4, so pair conkey/confkey positions with generate_series over
-// the array length plus plain subscripts.
+// PostgreSQL 9.4, so pair conkey/confkey positions with generate_series plus
+// plain subscripts. The series bounds must stay constant: before PostgreSQL
+// 9.3 a FROM item's function arguments cannot reference an earlier FROM item
+// (implicit LATERAL), so bound the series by INDEX_MAX_KEYS (32, stable across
+// PostgreSQL 9–18) and cap the ordinal with a join-condition guard instead.
 fn postgres_foreign_keys_compat_sql() -> &'static str {
     "SELECT con.conname AS constraint_name, \
      a.attname AS column_name, \
@@ -7624,7 +7637,7 @@ fn postgres_foreign_keys_compat_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid \
      JOIN pg_catalog.pg_namespace ref_n ON ref_n.oid = ref_c.relnamespace \
-     CROSS JOIN generate_series(1, array_length(con.conkey, 1)) AS fk(ord) \
+     JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1) \
      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = (con.conkey)[fk.ord] AND NOT a.attisdropped \
      JOIN pg_catalog.pg_attribute ref_a ON ref_a.attrelid = ref_c.oid AND ref_a.attnum = (con.confkey)[fk.ord] AND NOT ref_a.attisdropped \
      WHERE con.contype = 'f' AND n.nspname = $1 AND c.relname = $2 \
@@ -7964,6 +7977,39 @@ fn postgres_sequence_last_values_sql() -> &'static str {
      WHERE c.relkind = 'S' AND n.nspname = $1"
 }
 
+// PostgreSQL 9.x sibling of `postgres_sequences_sql`: the `pg_sequence` catalog
+// (and the `pg_sequence_last_value` function used below) were only added in
+// PostgreSQL 10. Older servers still expose the same properties through the
+// portable `information_schema.sequences` view, which is what openGauss's
+// tier already relies on for the same reason.
+fn postgres_sequences_compat_sql() -> &'static str {
+    "SELECT s.sequence_name, \
+      COALESCE(s.data_type::text, 'bigint'), \
+      COALESCE(s.start_value::text, '1'), \
+      COALESCE(s.minimum_value::text, '1'), \
+      COALESCE(s.maximum_value::text, '9223372036854775807'), \
+      COALESCE(s.increment::text, '1'), \
+      COALESCE(s.cycle_option::text, 'NO') \
+     FROM information_schema.sequences s \
+     WHERE s.sequence_schema = $1 \
+     ORDER BY s.sequence_name"
+}
+
+// Pre-PG10 servers have no `pg_sequence_last_value(oid)` function to read an
+// arbitrary sequence's current value from a single batched query, so the
+// compat tier falls back to querying each sequence relation directly (the
+// pre-10 way of reading `last_value`), one round trip per sequence.
+async fn postgres_sequence_last_value_compat(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    sequence_name: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let qualified = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(sequence_name));
+    let sql = format!("SELECT last_value::text FROM {qualified}");
+    let rows = postgres_query_cached(client, &sql, &[]).await?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()))
+}
+
 fn opengauss_sequence_last_values_sql() -> &'static str {
     "SELECT c.relname, (pg_sequence_last_value(c.oid)).last_value::text \
      FROM pg_class c \
@@ -8012,15 +8058,58 @@ async fn list_sequences_with_sql(
 }
 
 pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
-    // PostgreSQL 10+ stores sequence properties in pg_sequence.
-    list_sequences_with_sql(
-        pool,
-        schema,
-        with_last_values,
-        postgres_sequences_sql(),
-        postgres_sequence_last_values_sql(),
-    )
-    .await
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+
+    // PostgreSQL 10+ stores sequence properties in pg_sequence; older servers
+    // fall back to the portable information_schema.sequences view.
+    let (rows, is_legacy) = match postgres_query_cached(&client, postgres_sequences_sql(), &[&schema]).await {
+        Ok(rows) => (rows, false),
+        Err(primary_error) => match postgres_query_cached(&client, postgres_sequences_compat_sql(), &[&schema]).await {
+            Ok(rows) => {
+                log::debug!(
+                    "[postgres][sequences:compat-used] pg_sequence catalog unavailable ({}); serving sequence metadata from information_schema.sequences",
+                    pg_error_to_string(primary_error)
+                );
+                (rows, true)
+            }
+            Err(_) => return Err(primary_error.to_string()),
+        },
+    };
+
+    let mut sequences: Vec<SequenceInfo> = rows
+        .iter()
+        .map(|row| SequenceInfo {
+            name: pg_row_try_string(row, 0),
+            data_type: pg_row_try_string(row, 1),
+            start_value: pg_row_try_string(row, 2),
+            min_value: pg_row_try_string(row, 3),
+            max_value: pg_row_try_string(row, 4),
+            increment: pg_row_try_string(row, 5),
+            cycle: pg_row_try_string(row, 6) == "YES",
+            last_value: None,
+        })
+        .collect();
+
+    if with_last_values {
+        if is_legacy {
+            for seq in sequences.iter_mut() {
+                if let Ok(Some(value)) = postgres_sequence_last_value_compat(&client, schema, &seq.name).await {
+                    seq.last_value = Some(value);
+                }
+            }
+        } else if let Ok(rows) = postgres_query_cached(&client, postgres_sequence_last_values_sql(), &[&schema]).await {
+            for row in rows {
+                let name: String = pg_row_try_string(&row, 0);
+                if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
+                    if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
+                        seq.last_value = Some(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(sequences)
 }
 
 pub async fn list_opengauss_sequences(
@@ -9468,6 +9557,17 @@ mod tests {
         assert_eq!(pg_text_fallback_value("SRID=4326;point(1 2)", None), (serde_json::json!("point(1 2)"), Some(4326)));
     }
 
+    #[test]
+    fn postgres_text_fallback_does_not_panic_on_multibyte_text() {
+        // Redshift reads decode every simple-query value through the hex-WKB
+        // probe with an unknown column type, so ordinary multibyte text must
+        // pass through instead of slicing at a non-char byte boundary.
+        for value in ["中文字符测试数据", "🚚运输状态标签", "0101中文不是几何数据"] {
+            assert_eq!(pg_text_fallback_value(value, None), (serde_json::json!(value), None));
+            assert_eq!(pg_text_fallback_value(value, Some(PgColType::Geometry)), (serde_json::json!(value), None));
+        }
+    }
+
     struct DockerPostgres {
         name: String,
         port: u16,
@@ -9494,6 +9594,16 @@ mod tests {
     }
 
     async fn start_docker_postgres() -> Option<DockerPostgres> {
+        start_docker_postgres_image("postgres:16-alpine", &[]).await
+    }
+
+    // PostgreSQL 9.3 (pre-pg_sequence/pg_sequence_last_value) only ships an
+    // amd64 image, so Apple Silicon hosts need explicit emulation.
+    async fn start_docker_postgres_9_3() -> Option<DockerPostgres> {
+        start_docker_postgres_image("postgres:9.3", &["--platform", "linux/amd64"]).await
+    }
+
+    async fn start_docker_postgres_image(image: &str, extra_args: &[&str]) -> Option<DockerPostgres> {
         if !docker_ready() {
             eprintln!("skipping docker-backed postgres test because Docker is unavailable");
             return None;
@@ -9503,12 +9613,9 @@ mod tests {
         let container = DockerPostgres { name: format!("dbx-postgres-enum-{}", uuid::Uuid::new_v4()), port };
 
         let status = Command::new("docker")
+            .args(["run", "-d", "--rm", "--name", &container.name])
+            .args(extra_args)
             .args([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &container.name,
                 "-e",
                 "POSTGRES_PASSWORD=postgres",
                 "-e",
@@ -9517,7 +9624,7 @@ mod tests {
                 "POSTGRES_DB=postgres",
                 "-p",
                 &format!("{port}:5432"),
-                "postgres:16-alpine",
+                image,
             ])
             .status()
             .expect("start docker postgres");
@@ -10204,6 +10311,30 @@ mod tests {
         assert!(!opengauss_sql.contains("unnest"));
         assert!(opengauss_sql.contains("con.conkey::text"));
         assert!(opengauss_sql.contains("con.confkey::text"));
+    }
+
+    #[test]
+    fn postgres_foreign_key_compat_sql_keeps_series_bounds_lateral_free() {
+        // Before PostgreSQL 9.3 a FROM item's function arguments cannot
+        // reference an earlier FROM item (implicit LATERAL), so the compat
+        // tiers must keep the generate_series bounds constant at
+        // INDEX_MAX_KEYS and cap the ordinal with a join-condition guard.
+        // The pg_attribute subscripts must still pair conkey/confkey by the
+        // guarded ordinal so composite keys stay aligned.
+        for compat_sql in [postgres_foreign_keys_compat_sql(), postgres_foreign_keys_for_relations_compat_sql()] {
+            assert!(!compat_sql.contains("generate_series(1, array_length"));
+            assert!(
+                compat_sql.contains("JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1)")
+            );
+            assert!(compat_sql.contains("(con.conkey)[fk.ord]"));
+            assert!(compat_sql.contains("(con.confkey)[fk.ord]"));
+            assert!(!compat_sql.contains("LATERAL"));
+            assert!(!compat_sql.contains("WITH ORDINALITY"));
+        }
+        // The modern tiers keep explicit JOIN LATERAL and stay gated behind
+        // the compat fallback.
+        assert!(postgres_foreign_keys_sql().contains("JOIN LATERAL"));
+        assert!(postgres_foreign_keys_for_relations_sql().contains("JOIN LATERAL"));
     }
 
     #[test]
@@ -11313,6 +11444,33 @@ mod tests {
     #[test]
     fn postgres_sequence_last_values_are_read_as_text() {
         assert!(postgres_sequence_last_values_sql().contains("pg_sequence_last_value(c.oid)::text"));
+    }
+
+    #[test]
+    fn postgres_sequences_compat_sql_avoids_pg10_only_catalog() {
+        let sql = postgres_sequences_compat_sql();
+        assert!(!sql.contains("pg_sequence"));
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("sequence_schema = $1"));
+    }
+
+    #[tokio::test]
+    async fn list_sequences_falls_back_on_postgres_9_without_pg_sequence_catalog() {
+        let Some(container) = start_docker_postgres_9_3().await else {
+            return;
+        };
+
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres 9.3");
+        execute_query(&pool, "CREATE SEQUENCE demo_seq START 5").await.expect("create sequence");
+        execute_query(&pool, "SELECT nextval('demo_seq')").await.expect("advance sequence");
+
+        let sequences = list_sequences(&pool, "public", true).await.expect("list_sequences should not 500 on PG9");
+
+        let demo_seq = sequences.iter().find(|s| s.name == "demo_seq").expect("demo_seq present");
+        assert_eq!(demo_seq.last_value.as_deref(), Some("5"));
+        assert_eq!(demo_seq.start_value, "5");
+        assert_eq!(demo_seq.increment, "1");
+        assert!(!demo_seq.cycle);
     }
 
     #[test]

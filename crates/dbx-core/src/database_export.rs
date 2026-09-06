@@ -42,6 +42,28 @@ pub enum DatabaseExportOutputCompression {
     Gzip,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlInsertMode {
+    #[default]
+    Batch,
+    Single,
+}
+
+impl SqlInsertMode {
+    pub(crate) const fn flush_each_row(self) -> bool {
+        matches!(self, Self::Single)
+    }
+
+    pub(crate) const fn batch_size(self, default: usize) -> usize {
+        if self.flush_each_row() || default == 0 {
+            1
+        } else {
+            default
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseExportRequest {
@@ -268,6 +290,32 @@ pub struct ExportProgress {
     /// True while listing schema / prefetching table metadata — before objects are written.
     #[serde(default)]
     pub preparing: bool,
+    /// Per-object failures written into the file as `-- ERROR` comments in
+    /// lenient mode. Strict mode fails the whole export instead, so this stays
+    /// zero. Without it a partially failed export reports plain success and
+    /// the errors are only discoverable by opening the file (#8184).
+    #[serde(default)]
+    pub error_count: u64,
+    /// First lenient failure, so completion surfaces can show what went wrong
+    /// without opening the exported file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
+}
+
+/// Collects lenient per-object export failures for the terminal progress.
+#[derive(Default)]
+struct LenientExportErrors {
+    count: usize,
+    first: Option<String>,
+}
+
+impl LenientExportErrors {
+    fn record(&mut self, message: String) {
+        if self.first.is_none() {
+            self.first = Some(message.clone());
+        }
+        self.count += 1;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1972,10 +2020,16 @@ fn database_export_metadata_prefetch_concurrency(db_type: DatabaseType) -> usize
     }
 }
 
-fn record_export_error<W: Write>(file: &mut W, fail_on_error: bool, message: String) -> Result<(), String> {
+fn record_export_error<W: Write>(
+    file: &mut W,
+    fail_on_error: bool,
+    message: String,
+    lenient_errors: &mut LenientExportErrors,
+) -> Result<(), String> {
     if fail_on_error {
         Err(message)
     } else {
+        lenient_errors.record(message.clone());
         writeln!(file, "-- ERROR {message}").map_err(|error| format!("Failed to write file: {error}"))
     }
 }
@@ -2139,6 +2193,8 @@ fn emit_database_export_running(
         status: ExportStatus::Running,
         error: None,
         preparing,
+        error_count: 0,
+        error_summary: None,
     });
 }
 
@@ -2160,6 +2216,8 @@ fn emit_database_export_cancelled(
         status: ExportStatus::Cancelled,
         error: None,
         preparing: false,
+        error_count: 0,
+        error_summary: None,
     });
 }
 
@@ -2534,6 +2592,7 @@ async fn export_database_sql_core_inner(
     } else {
         None
     };
+    let mut lenient_errors = LenientExportErrors::default();
 
     // Emit immediately so the UI is never blank while we list schema metadata.
     emit_database_export_running(&on_progress, &request.export_id, "", 0, 0, 0, true);
@@ -2632,7 +2691,12 @@ async fn export_database_sql_core_inner(
             match list_postgres_extension_members(state, &pool_key, &request.schema).await {
                 Ok(members) => members,
                 Err(e) => {
-                    record_export_error(&mut file, request.fail_on_error, format!("reading extension members: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("reading extension members: {e}"),
+                        &mut lenient_errors,
+                    )?;
                     PostgresExtensionMembers::default()
                 }
             }
@@ -2656,7 +2720,12 @@ async fn export_database_sql_core_inner(
                 })
                 .collect(),
             Err(e) => {
-                record_export_error(&mut file, request.fail_on_error, format!("exporting extensions: {e}"))?;
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting extensions: {e}"),
+                    &mut lenient_errors,
+                )?;
                 Vec::new()
             }
         }
@@ -2698,7 +2767,12 @@ async fn export_database_sql_core_inner(
             Ok(sequences) => sequences,
             Err(e) if e == EXPORT_CANCELLED_ERROR => return Err(EXPORT_CANCELLED_ERROR.to_string()),
             Err(e) => {
-                record_export_error(&mut file, request.fail_on_error, format!("exporting sequences: {e}"))?;
+                record_export_error(
+                    &mut file,
+                    request.fail_on_error,
+                    format!("exporting sequences: {e}"),
+                    &mut lenient_errors,
+                )?;
                 Vec::new()
             }
         }
@@ -2972,6 +3046,8 @@ async fn export_database_sql_core_inner(
             status: ExportStatus::Running,
             error: None,
             preparing: false,
+            error_count: 0,
+            error_summary: None,
         });
 
         // Export structure
@@ -2994,6 +3070,8 @@ async fn export_database_sql_core_inner(
                     status: ExportStatus::Running,
                     error: None,
                     preparing: false,
+                    error_count: 0,
+                    error_summary: None,
                 });
 
                 writeln!(file, "{};\n", generate_postgres_sequence_create_ddl(sequence, &request.schema))
@@ -3040,6 +3118,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting table structure {table_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -3079,6 +3158,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting columns for table {table_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                     object_index += 1;
                     continue;
@@ -3128,6 +3208,8 @@ async fn export_database_sql_core_inner(
                                     status: ExportStatus::Running,
                                     error: None,
                                     preparing: false,
+                                    error_count: 0,
+                                    error_summary: None,
                                 });
                                 Ok(())
                             },
@@ -3195,6 +3277,7 @@ async fn export_database_sql_core_inner(
                                     &mut file,
                                     request.fail_on_error,
                                     format!("exporting data for table {table_name}: {error}"),
+                                    &mut lenient_errors,
                                 )?;
                                 break;
                             }
@@ -3232,6 +3315,8 @@ async fn export_database_sql_core_inner(
                             status: ExportStatus::Running,
                             error: None,
                             preparing: false,
+                            error_count: 0,
+                            error_summary: None,
                         });
                         if row_count < batch_size {
                             break;
@@ -3276,6 +3361,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3303,7 +3390,12 @@ async fn export_database_sql_core_inner(
                     }
                 }
                 Err(e) => {
-                    record_export_error(&mut file, request.fail_on_error, format!("exporting view {view_name}: {e}"))?;
+                    record_export_error(
+                        &mut file,
+                        request.fail_on_error,
+                        format!("exporting view {view_name}: {e}"),
+                        &mut lenient_errors,
+                    )?;
                 }
             }
 
@@ -3328,6 +3420,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3359,6 +3453,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting procedure {proc_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -3384,6 +3479,8 @@ async fn export_database_sql_core_inner(
                 status: ExportStatus::Running,
                 error: None,
                 preparing: false,
+                error_count: 0,
+                error_summary: None,
             });
 
             match crate::schema::get_object_source_core(
@@ -3415,6 +3512,7 @@ async fn export_database_sql_core_inner(
                         &mut file,
                         request.fail_on_error,
                         format!("exporting function {func_name}: {e}"),
+                        &mut lenient_errors,
                     )?;
                 }
             }
@@ -3450,6 +3548,8 @@ async fn export_database_sql_core_inner(
         status: ExportStatus::Done,
         error: None,
         preparing: false,
+        error_count: lenient_errors.count as u64,
+        error_summary: lenient_errors.first.clone(),
     });
 
     Ok(())
@@ -3518,6 +3618,7 @@ mod tests {
         DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
         PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
+    use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
     use crate::models::connection::DatabaseType;
     use crate::storage::Storage;
@@ -5407,12 +5508,71 @@ mod tests {
         let path = std::env::temp_dir().join(format!("dbx-strict-export-{}.sql", uuid::Uuid::new_v4()));
         let mut file = std::fs::File::create(&path).unwrap();
 
-        let result = record_export_error(&mut file, true, "exporting table users: permission denied".to_string());
+        let mut lenient_errors = LenientExportErrors::default();
+        let result = record_export_error(
+            &mut file,
+            true,
+            "exporting table users: permission denied".to_string(),
+            &mut lenient_errors,
+        );
         drop(file);
 
         assert_eq!(result.unwrap_err(), "exporting table users: permission denied");
+        assert_eq!(lenient_errors.count, 0);
         assert!(std::fs::read_to_string(&path).unwrap().is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn lenient_export_errors_track_count_and_first_failure_for_terminal_progress() {
+        let path = std::env::temp_dir().join(format!("dbx-lenient-export-{}.sql", uuid::Uuid::new_v4()));
+        let mut file = std::fs::File::create(&path).unwrap();
+
+        let mut lenient_errors = LenientExportErrors::default();
+        record_export_error(
+            &mut file,
+            false,
+            "exporting table orders: RPC call timed out".to_string(),
+            &mut lenient_errors,
+        )
+        .unwrap();
+        record_export_error(
+            &mut file,
+            false,
+            "exporting view active_users: RPC call timed out".to_string(),
+            &mut lenient_errors,
+        )
+        .unwrap();
+        drop(file);
+
+        // The terminal Done progress must carry enough information to warn
+        // instead of reporting plain success (#8184).
+        assert_eq!(lenient_errors.count, 2);
+        assert_eq!(lenient_errors.first.as_deref(), Some("exporting table orders: RPC call timed out"));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("-- ERROR exporting table orders: RPC call timed out"));
+        assert!(contents.contains("-- ERROR exporting view active_users: RPC call timed out"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_progress_deserializes_events_without_lenient_error_fields() {
+        // Progress events persisted by older versions lack errorCount /
+        // errorSummary; they must keep deserializing with zeroed defaults.
+        let legacy = serde_json::from_value::<ExportProgress>(serde_json::json!({
+            "exportId": "export-1",
+            "currentObject": "users",
+            "objectIndex": 3,
+            "totalObjects": 10,
+            "rowsExported": 120,
+            "totalRows": null,
+            "status": "Done",
+            "error": null
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.error_count, 0);
+        assert_eq!(legacy.error_summary, None);
     }
 
     async fn test_app_state(scratch_dir: &std::path::Path) -> AppState {

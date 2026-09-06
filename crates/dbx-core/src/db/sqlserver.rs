@@ -2941,6 +2941,7 @@ pub async fn list_indexes(client: &mut SqlServerClient, schema: &str, table: &st
                 comment: row.get::<&str, _>(7).filter(|s: &&str| !s.is_empty()).map(|s: &str| s.to_string()),
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                constraint_backed: false,
             }
         })
         .collect())

@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import SearchableSelect from "@/components/ui/searchable-select/SearchableSelect.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
-import { buildSameNameTableMatches } from "@/lib/diff/sameNameTableMatch";
+import { buildSchemaDiffTableMatches, availableSchemaDiffTargetTables, areSchemaDiffTableMappingsEqual, pruneSchemaDiffTableMappings, reconcileSchemaDiffTableMappings, updateSchemaDiffTableMapping, type SchemaDiffTableMatch } from "@/lib/schema/schemaDiffTableMapping";
 import { createSchemaDiffTableListCoordinator, reconcileSchemaDiffSelectedTables, shouldLoadSchemaDiffTableList, type SchemaDiffTableIdentity, type SchemaDiffTableListLoader, type SchemaDiffTableSide } from "@/lib/schema/schemaDiffTableList";
 import { useConnectionStore } from "@/stores/connectionStore";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -15,7 +15,7 @@ import * as api from "@/lib/backend/api";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { ArrowLeftRight, GitCompareArrows, Save, FolderOpen, Settings, X } from "@lucide/vue";
-import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry } from "@/types/schemaDiff";
+import type { SchemaDiffConfig, SchemaDiffCompareOptions, FieldMappingEntry, SchemaDiffTableMapping } from "@/types/schemaDiff";
 
 const { t } = useI18n();
 const store = useConnectionStore();
@@ -46,6 +46,7 @@ const emit = defineEmits<{
   (e: "update:targetSchema", value: string): void;
   (e: "update:ignoreComments", value: boolean): void;
   (e: "update:fieldMappings", value: FieldMappingEntry[]): void;
+  (e: "update:tableMappings", value: SchemaDiffTableMapping[]): void;
   (e: "open-field-mapping"): void;
   (e: "compare"): void;
   (e: "saveConfig"): void;
@@ -77,11 +78,38 @@ const activeFieldMappings = computed(() => props.options?.fieldMappings ?? []);
 // ---- Visual (explicit) table selection ----
 const sourceTableList = ref<string[]>([]);
 const targetTableList = ref<string[]>([]);
+const targetTableListLoaded = ref(false);
 const restrictTables = ref(false);
 const localSelectedTables = ref<string[]>([]);
 
-const matchResult = computed(() => buildSameNameTableMatches(localSelectedTables.value, targetTableList.value));
-const missingTargetTables = computed(() => matchResult.value.missing);
+const activeTableMappings = computed(() => props.options?.tableMappings ?? []);
+const tableMatches = computed<SchemaDiffTableMatch[]>(() => buildSchemaDiffTableMatches(localSelectedTables.value, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase));
+const matchedTableCount = computed(() => tableMatches.value.filter((match) => match.targetTable).length);
+const missingTargetTables = computed(() => tableMatches.value.filter((match) => !match.targetTable).map((match) => match.sourceTable));
+const tableMappingConflictSource = ref<string | null>(null);
+
+function targetTableOptions(sourceTable: string): string[] {
+  return availableSchemaDiffTargetTables(sourceTable, targetTableList.value, activeTableMappings.value, props.options.ignoreTableNameCase);
+}
+
+function handleTableMappingUpdate(sourceTable: string, targetTable: string) {
+  const update = updateSchemaDiffTableMapping(activeTableMappings.value, sourceTable, targetTable, props.options.ignoreTableNameCase);
+  if (update.accepted) {
+    tableMappingConflictSource.value = null;
+    emitTableMappings(update.mappings);
+  } else {
+    tableMappingConflictSource.value = update.conflictSource ?? sourceTable;
+  }
+}
+
+function emitTableMappings(nextMappings: SchemaDiffTableMapping[]) {
+  if (!areSchemaDiffTableMappingsEqual(nextMappings, activeTableMappings.value)) emit("update:tableMappings", nextMappings);
+}
+
+function reconcileTableMappings(selectedTables: string[], targetTables = targetTableList.value) {
+  const nextMappings = targetTableListLoaded.value ? reconcileSchemaDiffTableMappings(selectedTables, targetTables, activeTableMappings.value, props.options.ignoreTableNameCase) : pruneSchemaDiffTableMappings(selectedTables, activeTableMappings.value);
+  emitTableMappings(nextMappings);
+}
 
 // Keep the visual restriction in sync with the (persisted) config options.
 // `undefined` = not restricted (compare all tables, then regex filter);
@@ -91,27 +119,46 @@ watch(
   (value) => {
     restrictTables.value = Array.isArray(value);
     localSelectedTables.value = value && Array.isArray(value) ? [...value] : [];
+    if (!restrictTables.value) emitTableMappings([]);
+    else if (targetTableListLoaded.value) reconcileTableMappings(localSelectedTables.value);
   },
   { immediate: true },
+);
+
+watch(
+  () => props.options?.tableMappings,
+  () => {
+    if (restrictTables.value && targetTableListLoaded.value) reconcileTableMappings(localSelectedTables.value);
+  },
+  { deep: true },
 );
 
 function handleToggleRestrict(enabled: boolean) {
   restrictTables.value = enabled;
   emit("update:selectedTables", enabled ? [...localSelectedTables.value] : undefined);
+  if (!enabled) emitTableMappings([]);
+  else reconcileTableMappings(localSelectedTables.value);
 }
 
 function handleUpdateSelectedTables(value: string[]) {
   localSelectedTables.value = value;
-  if (restrictTables.value) emit("update:selectedTables", [...value]);
+  if (!restrictTables.value) return;
+  emit("update:selectedTables", [...value]);
+  reconcileTableMappings(value);
 }
 
 function clearUnavailableTableSelection() {
   sourceTableList.value = [];
   targetTableList.value = [];
-  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) return;
+  targetTableListLoaded.value = false;
+  if (props.selectedTables === undefined && !restrictTables.value && localSelectedTables.value.length === 0) {
+    emitTableMappings([]);
+    return;
+  }
   restrictTables.value = false;
   localSelectedTables.value = [];
   emit("update:selectedTables", undefined);
+  emitTableMappings([]);
 }
 
 function getTableIdentity(side: SchemaDiffTableSide): SchemaDiffTableIdentity {
@@ -127,18 +174,28 @@ function isTableIdentityReady(side: SchemaDiffTableSide): boolean {
 function setTableList(side: SchemaDiffTableSide, tables: Array<{ name?: string }>) {
   const names = tables.map((entry) => entry.name ?? "").filter(Boolean);
   if (side === "source") sourceTableList.value = names;
-  else targetTableList.value = names;
+  else {
+    targetTableList.value = names;
+    targetTableListLoaded.value = false;
+  }
 }
 
 function reconcileSelectedTablesAfterSuccessfulLoad(tables: Array<{ name?: string }>) {
-  if (!restrictTables.value || !Array.isArray(props.selectedTables)) return;
-
   const availableTables = tables.map((entry) => entry.name ?? "").filter(Boolean);
-  const nextSelectedTables = reconcileSchemaDiffSelectedTables(props.selectedTables, availableTables);
-  if (nextSelectedTables.length === props.selectedTables.length && nextSelectedTables.every((table, index) => table === props.selectedTables?.[index])) return;
+  let selectedTables = localSelectedTables.value;
+  if (restrictTables.value && Array.isArray(props.selectedTables)) {
+    const nextSelectedTables = reconcileSchemaDiffSelectedTables(props.selectedTables, availableTables);
+    const changed = nextSelectedTables.length !== props.selectedTables.length || nextSelectedTables.some((table, index) => table !== props.selectedTables?.[index]);
+    selectedTables = nextSelectedTables;
+    localSelectedTables.value = nextSelectedTables;
+    if (changed) emit("update:selectedTables", nextSelectedTables);
+  }
+  if (restrictTables.value) reconcileTableMappings(selectedTables);
+}
 
-  localSelectedTables.value = nextSelectedTables;
-  emit("update:selectedTables", nextSelectedTables);
+function reconcileTargetTablesAfterSuccessfulLoad(tables: Array<{ name?: string }>) {
+  targetTableListLoaded.value = true;
+  reconcileTableMappings(localSelectedTables.value, tables.map((entry) => entry.name ?? "").filter(Boolean));
 }
 
 const tableListCoordinator = createSchemaDiffTableListCoordinator({
@@ -146,6 +203,7 @@ const tableListCoordinator = createSchemaDiffTableListCoordinator({
   getIdentity: getTableIdentity,
   setTables: setTableList,
   onSourceTablesLoaded: reconcileSelectedTablesAfterSuccessfulLoad,
+  onTargetTablesLoaded: reconcileTargetTablesAfterSuccessfulLoad,
 });
 
 watch(
@@ -170,7 +228,10 @@ const canConfigureTableSelection = computed(() => isTableIdentityReady("source")
 
 const canCompare = computed(() => {
   const hasSelectedTables = props.selectedTables === undefined || props.selectedTables.length > 0;
-  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && hasSelectedTables && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
+  // Unmapped source tables are not a blocker: they flow through the comparison as
+  // source-only tables (CREATE TABLE in the target), matching the pre-mapping behavior.
+  const hasValidTableMappings = !restrictTables.value || localSelectedTables.value.length === 0 || isTableIdentityReady("target");
+  return props.sourceConnectionId && props.targetConnectionId && props.sourceDatabase && props.targetDatabase && hasSelectedTables && hasValidTableMappings && (!isSchemaAware(sourceConfig.value?.db_type) || props.sourceSchema) && (!isSchemaAware(targetConfig.value?.db_type) || props.targetSchema);
 });
 
 async function loadDatabases(connectionId: string, side: "source" | "target") {
@@ -558,13 +619,53 @@ async function fetchDbVersion(connectionId: string, database: string, schema: st
       </div>
 
       <!-- Target Same-Name Match -->
-      <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-1.5 rounded-lg border p-3 text-xs">
-        <div class="font-medium">{{ t("diff.autoMatchHint") }}</div>
-        <div class="text-muted-foreground">
-          {{ t("diff.matchedTables", { matched: matchResult.matched.length, total: localSelectedTables.length }) }}
+      <!-- Source → target table mapping -->
+      <div v-if="restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')" class="space-y-2 rounded-lg border p-3 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <div class="font-medium">{{ t("diff.targetTableMatching") }}</div>
+          <div class="text-muted-foreground">
+            {{ t("diff.matchedTables", { matched: matchedTableCount, total: localSelectedTables.length }) }}
+          </div>
         </div>
-        <div v-if="missingTargetTables.length" class="text-destructive">
-          {{ t("diff.missingTargetTables", { tables: missingTargetTables.join(", ") }) }}
+        <div class="overflow-x-auto rounded border">
+          <table class="w-full min-w-[520px]">
+            <thead class="border-b bg-muted/30 text-muted-foreground">
+              <tr>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.sourceTables") }}</th>
+                <th class="px-2 py-1.5 text-left font-medium">{{ t("diff.targetTable") }}</th>
+                <th class="w-28 px-2 py-1.5 text-left font-medium">{{ t("diff.status") }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="match in tableMatches" :key="match.sourceTable" class="border-b last:border-b-0">
+                <td class="max-w-[220px] truncate px-2 py-1.5 font-mono" :title="match.sourceTable">{{ match.sourceTable }}</td>
+                <td class="px-2 py-1.5">
+                  <SearchableSelect
+                    :model-value="match.targetTable ?? ''"
+                    @update:model-value="(value: string) => handleTableMappingUpdate(match.sourceTable, value)"
+                    :options="targetTableOptions(match.sourceTable)"
+                    :placeholder="t('diff.selectTargetTable')"
+                    :search-placeholder="t('diff.searchTargetTable')"
+                    :empty-text="t('diff.noTargetTables')"
+                    :disabled="!targetTableListLoaded"
+                    :clearable="true"
+                    :clear-selected-option="true"
+                    trigger-class="h-7 w-full text-xs"
+                    content-class="w-[var(--reka-popover-trigger-width)]"
+                  />
+                </td>
+                <td class="px-2 py-1.5" :class="match.kind === 'unmatched' ? 'text-destructive' : match.kind === 'manual' ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground'">
+                  {{ t(`diff.tableMatchStatus.${match.kind}`) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="targetTableListLoaded && missingTargetTables.length" class="text-muted-foreground">
+          {{ t("diff.unmatchedTableWarning", { count: missingTargetTables.length }) }}
+        </div>
+        <div v-if="tableMappingConflictSource" class="text-destructive">
+          {{ t("diff.targetTableInUse") }}
         </div>
       </div>
     </div>

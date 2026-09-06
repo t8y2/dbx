@@ -2029,6 +2029,7 @@ mod tests {
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                constraint_backed: false,
             }),
             marked_for_drop: true,
         });

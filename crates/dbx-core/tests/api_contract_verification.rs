@@ -49,6 +49,8 @@ fn prepare_schema_diff_function_signature() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        ignore_table_name_case: false,
+        ignore_column_name_case: false,
         detect_renames: false,
         detect_table_renames: false,
         rename_threshold: 0.5,
@@ -62,8 +64,28 @@ fn prepare_schema_diff_function_signature() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     };
     let _result: SchemaDiffPreparation = prepare_schema_diff(options);
+}
+
+#[test]
+fn schema_diff_case_options_are_backward_compatible_and_use_camel_case() {
+    let legacy: SchemaDiffPreparationOptions = serde_json::from_value(serde_json::json!({
+        "databaseType": "postgres"
+    }))
+    .unwrap();
+    assert!(!legacy.ignore_table_name_case);
+    assert!(!legacy.ignore_column_name_case);
+
+    let mut options = legacy;
+    options.ignore_table_name_case = true;
+    options.ignore_column_name_case = true;
+    let json = serde_json::to_value(options).unwrap();
+    assert_eq!(json["ignoreTableNameCase"], true);
+    assert_eq!(json["ignoreColumnNameCase"], true);
+    assert!(json.get("ignore_table_name_case").is_none());
+    assert!(json.get("ignore_column_name_case").is_none());
 }
 
 /// Verify generate_schema_sync_sql accepts all arg types
@@ -126,6 +148,8 @@ fn schema_diff_preparation_field_names() {
         ignore_comments: false,
         cascade_delete: false,
         compare_column_order: false,
+        ignore_table_name_case: false,
+        ignore_column_name_case: false,
         detect_renames: false,
         detect_table_renames: false,
         rename_threshold: 0.5,
@@ -139,6 +163,7 @@ fn schema_diff_preparation_field_names() {
         shard_strategy: None,
         resource_constraint: None,
         field_mappings: vec![],
+        table_mappings: vec![],
     });
 
     let json = serde_json::to_value(&result).unwrap();

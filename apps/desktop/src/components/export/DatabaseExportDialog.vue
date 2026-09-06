@@ -12,7 +12,7 @@ import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -152,6 +152,17 @@ function joinExportPath(directory: string, fileName: string): string {
   return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
 }
 
+// Lenient exports write per-object failures into the SQL file as `-- ERROR`
+// comments and still finish; completion must warn instead of reporting plain
+// success (#8184).
+function toastDatabaseExportCompletion(errorCount: number, errorSummary: string | null) {
+  if (errorCount > 0) {
+    toast(t("databaseExport.exportSuccessWithErrors", { count: errorCount, firstError: errorSummary ?? "" }), 8000);
+    return;
+  }
+  toast(t("databaseExport.exportSuccess"), 3000);
+}
+
 async function loadDatabases(connId: string) {
   if (!connId) return;
   loadingMeta.value = true;
@@ -204,7 +215,7 @@ async function loadSchemas(preferredSchema = "") {
     return;
   }
 
-  const schemaList = await api.listSchemas(connectionId.value, database.value);
+  const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
   const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
   schemas.value = schemaList;
   schema.value = selected;
@@ -278,7 +289,7 @@ async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseEx
   const schemasByDatabase: Record<string, string[]> = {};
   if (schemaAware) {
     for (const db of dbs) {
-      schemasByDatabase[db] = await api.listSchemas(connectionId.value, db);
+      schemasByDatabase[db] = filterExportableSchemas(await api.listSchemas(connectionId.value, db), dbType);
     }
   }
   return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase, dbType });
@@ -370,7 +381,7 @@ async function startExport() {
             finishExportTiming();
             exportDone.value = true;
             isExporting.value = false;
-            toast(t("databaseExport.exportSuccess"), 3000);
+            toastDatabaseExportCompletion(progress.errorCount ?? 0, progress.errorSummary ?? null);
           } else if (progress.status === "Error") {
             finishExportTiming();
             exportError.value = progress.error;
@@ -432,6 +443,8 @@ async function startAllDatabasesExport() {
   exportCancelled.value = false;
   batchDatabaseIndex.value = 0;
   batchRowsExported.value = 0;
+  let batchLenientErrorCount = 0;
+  let batchFirstErrorSummary: string | null = null;
 
   const dbs = [...selectedDatabases.value];
   const connectionType = store.getConfig(connectionId.value)?.db_type;
@@ -475,7 +488,7 @@ async function startAllDatabasesExport() {
       const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.sql`) : `__web_export_${currentExportId}.sql`;
       let currentDatabaseRowsExported = 0;
 
-      await runWithDatabaseBackupSnapshot(
+      const terminal = await runWithDatabaseBackupSnapshot(
         {
           connectionId: connectionId.value,
           database: item.database,
@@ -530,6 +543,8 @@ async function startAllDatabasesExport() {
         (terminal) => terminal.status === "Done",
       );
 
+      batchLenientErrorCount += terminal.errorCount ?? 0;
+      batchFirstErrorSummary ??= terminal.errorSummary ?? null;
       if (exportError.value || exportCancelled.value) break;
       activeDatabaseExportId.value = "";
     }
@@ -547,10 +562,16 @@ async function startAllDatabasesExport() {
         totalRows: null,
         status: "Done",
         error: null,
+        errorCount: batchLenientErrorCount,
+        errorSummary: batchFirstErrorSummary,
       };
       exportProgress.value = finalProgress;
       updateDatabaseExportTask(batchId, finalProgress);
-      toast(t("databaseExport.exportAllSuccess", { count: dbs.length }), 3000);
+      if (batchLenientErrorCount > 0) {
+        toast(t("databaseExport.exportAllSuccessWithErrors", { count: dbs.length, errorCount: batchLenientErrorCount, firstError: batchFirstErrorSummary ?? "" }), 8000);
+      } else {
+        toast(t("databaseExport.exportAllSuccess", { count: dbs.length }), 3000);
+      }
     }
   } catch (e: any) {
     exportError.value = e?.message || String(e);

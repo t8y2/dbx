@@ -5,6 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
@@ -116,6 +117,7 @@ const ProcessListPanel = defineAsyncComponent(() => import("@/components/admin/P
 const SqlServerActivityTracePanel = defineAsyncComponent(() => import("@/components/admin/SqlServerActivityTracePanel.vue"));
 const MySqlDashboard = defineAsyncComponent(() => import("@/components/admin/MySqlDashboard.vue"));
 const PostgresDashboard = defineAsyncComponent(() => import("@/components/admin/PostgresDashboard.vue"));
+const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admin/XuguServerDashboard.vue"));
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
@@ -131,6 +133,7 @@ import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey 
 import {
   databaseDisplayNameForTab,
   executionSummaryItems,
+  isPreviewTab,
   queryResultExecutionSql,
   resultGridCacheKey,
   resultGridColumnWidthCacheKey,
@@ -154,6 +157,7 @@ import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
 import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import { elasticsearchProfileBodyForResult, parseElasticsearchProfile } from "@/lib/elasticsearch/elasticsearchProfile";
 import * as api from "@/lib/backend/api";
+import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
@@ -244,14 +248,8 @@ const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
 onMounted(() => {
-  // Deliberately not preloading DataGrid here for every tab: evaluating that
-  // chunk is expensive (large component graph) and previously ran
-  // unconditionally shortly after any tab mounted, including source-only
-  // tabs (e.g. viewing a large object's DDL) that never need a grid. That
-  // turned a "warm the cache" optimization into a multi-second main-thread
-  // freeze right when the user was trying to read the newly-opened tab (see
-  // issue #8103). The watcher below still preloads it eagerly for tabs that
-  // actually need one.
+  // The watcher below warms the grid for query/data tabs. Keep source-only
+  // tabs out of that path: loading the grid there caused freezes (#8103).
   window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
   window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
@@ -260,9 +258,14 @@ onMounted(() => {
 });
 
 watch(
-  () => [props.activeTab.mode, !!props.activeTab.result] as const,
-  ([mode, hasResult]) => {
-    if (mode === "data" || hasResult) preloadDataGridComponent();
+  () => {
+    const tab = props.activeTab;
+    const gridMode = tab.mode === "query" || tab.mode === "data";
+    // Object source and preview tabs also use query mode, but often never run SQL.
+    return !!tab.result || (gridMode && (tab.isExecuting || tab.isExplaining || (!tab.sourceView && !tab.objectSource && !isPreviewTab(tab))));
+  },
+  (shouldPreload) => {
+    if (shouldPreload) preloadDataGridComponent();
   },
   { immediate: true },
 );
@@ -429,18 +432,7 @@ const activeQueryError = computed(() => {
   if (!result || !isQueryExecutionErrorResult(result)) return "";
   return String(result.rows[0]?.[0] ?? "");
 });
-const hasQueryOutput = computed(
-  () =>
-    !!props.activeTab.result ||
-    !!props.activeTab.resultRuns?.length ||
-    props.activeTab.resultEvicted === true ||
-    !!props.activeTab.explainPlan ||
-    !!props.activeTab.explainError ||
-    !!props.activeTab.explainTableResult ||
-    !!props.activeTab.explainTableError ||
-    props.activeTab.isExecuting === true ||
-    props.activeTab.isExplaining === true,
-);
+const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
 const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
@@ -662,6 +654,21 @@ function toggleResultsPane(): boolean {
   if (props.activeTab.mode !== "query" || !hasQueryOutput.value) return false;
   resultsPaneOpen.value = !resultsPaneOpen.value;
   return true;
+}
+
+/**
+ * The "hide results" chevron. In the shared result surface (result-only) the
+ * local resultsPaneOpen ref is inert — the pane is always rendered there and
+ * the real collapse state lives in SqlEditorWorkspace.showResultPane — so the
+ * chevron bubbles a toggle event up instead. Per-tab surfaces (data tabs)
+ * keep the local collapse behavior.
+ */
+function handleHideResultsPane() {
+  if (props.resultOnly) {
+    emit("toggleResultsPane");
+  } else {
+    resultsPaneOpen.value = false;
+  }
 }
 
 function onResultsResized(payload: { panes: { size: number }[] }) {
@@ -1327,7 +1334,14 @@ defineExpose({
         </Pane>
         <Pane v-if="(resultsPaneOpen || resultOnly) && !editorOnly" class="min-h-0" :size="resultOnly ? 100 : resultsPaneSize" :min-size="resultOnly ? 100 : 20">
           <div class="h-full flex flex-col">
-            <div v-if="hasQueryOutput" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
+            <!--
+              The shared result surface (resultOnly) is always mounted regardless of
+              whether the active tab has run a query yet, and this toolbar is the only
+              place that renders the "hide results" chevron (see handleHideResultsPane).
+              Gating it on hasQueryOutput alone left users with an always-open, empty
+              shared pane and no way to collapse it (#8233).
+            -->
+            <div v-if="hasQueryOutput || resultOnly" class="flex h-10 shrink-0 items-center gap-1 border-b bg-muted/20 px-2">
               <Button
                 v-if="activeTab.mode === 'query' && activeTab.result"
                 variant="ghost"
@@ -1664,7 +1678,7 @@ defineExpose({
                   </PopoverContent>
                 </Popover>
                 <LightTooltip :text="t('editor.hideResultsPane')" side="bottom" :delay="0" :close-delay="0" nowrap>
-                  <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:text-foreground" :title="t('editor.hideResultsPane')" :aria-label="t('editor.hideResultsPane')" @click="resultsPaneOpen = false">
+                  <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-muted-foreground hover:text-foreground" :title="t('editor.hideResultsPane')" :aria-label="t('editor.hideResultsPane')" @click="handleHideResultsPane">
                     <ChevronDown class="h-3.5 w-3.5" />
                   </Button>
                 </LightTooltip>
@@ -1867,7 +1881,8 @@ defineExpose({
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
                 :query-result-export-request="
-                  (options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt' | 'sql'; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)
+                  (options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt' | 'sql'; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined>; insertMode?: SqlInsertMode }) =>
+                    queryStore.buildQueryResultExportRequest(activeTab.id, options)
                 "
                 :all-export-results="allResultExportSheets"
                 :export-file-base-name="activeTab.title"
@@ -2269,6 +2284,7 @@ defineExpose({
           :execution-database="activeDataTabExecutionDatabase"
           :table-meta="activeDataTabTableMeta"
           :table-info-tab="activeTab.tableInfoTab"
+          :auto-show-table-info="settingsStore.editorSettings.tableInfoDrawerPinned"
           :page-offset="activeTab.resultPageOffset"
           :page-limit="activeTab.resultPageLimit"
           :total-row-count="activeTab.resultTotalRowCount"
@@ -2387,7 +2403,7 @@ defineExpose({
     <!-- Document mode: MongoDB collections and Elasticsearch indices -->
     <template v-else-if="activeTab.mode === 'mongo'">
       <div class="flex-1 min-h-0">
-        <DocumentBrowser ref="documentBrowserRef" :key="`${activeTab.id}:${activeTab.sql}`" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" />
+        <DocumentBrowser ref="documentBrowserRef" :key="`${activeTab.id}:${activeTab.sql}`" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" :table-meta="activeTab.tableMeta" :state-key="activeTab.id" />
       </div>
     </template>
 
@@ -2480,10 +2496,12 @@ defineExpose({
           :initial-event-open-request-id="activeTab.objectBrowser?.eventOpenRequestId"
           :initial-event-create-request-id="activeTab.objectBrowser?.eventCreateRequestId"
           :initial-object-filter="activeTab.objectBrowser?.initialObjectFilter"
+          :initial-search-query="activeTab.objectBrowser?.searchQuery"
           :viewport="activeTab.objectBrowser?.viewport"
           @open-table="emit('openObjectTable', activeTab.id, $event)"
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
+          @search-change="emit('objectBrowserSearchChange', activeTab.id, $event)"
         />
       </div>
     </template>
@@ -2530,6 +2548,12 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'postgres-dashboard'">
       <div class="min-h-0 flex-1">
         <PostgresDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
+      </div>
+    </template>
+
+    <template v-else-if="activeTab.mode === 'xugu-dashboard'">
+      <div class="min-h-0 flex-1">
+        <XuguServerDashboard :key="activeTab.id" :connection-id="activeTab.connectionId" />
       </div>
     </template>
 

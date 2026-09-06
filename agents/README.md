@@ -50,6 +50,8 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | zookeeper | Apache ZooKeeper | go-zookeeper native agent |
 | rabbitmq | RabbitMQ | amqp091-go native agent |
 | rocketmq | Apache RocketMQ | rocketmq-admin-go native agent |
+| iris | InterSystems IRIS | InterSystems IRIS JDBC |
+| cache | InterSystems Caché | InterSystems Caché JDBC (CacheDB) |
 
 
 ## Multi-JRE Support

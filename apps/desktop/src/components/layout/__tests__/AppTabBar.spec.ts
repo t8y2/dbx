@@ -3,29 +3,30 @@ import { describe, expect, it } from "vitest";
 
 const tabBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");
 const groupTabBarSource = readFileSync(new URL("../EditorGroupTabBar.vue", import.meta.url), "utf8");
+const groupSource = readFileSync(new URL("../EditorGroup.vue", import.meta.url), "utf8");
 
-function sourceBetween(start: string, end: string): string {
-  const startIndex = tabBarSource.indexOf(start);
-  const endIndex = tabBarSource.indexOf(end, startIndex + start.length);
-  expect(startIndex).toBeGreaterThanOrEqual(0);
-  expect(endIndex).toBeGreaterThan(startIndex);
-  return tabBarSource.slice(startIndex, endIndex);
-}
-
-describe("AppTabBar single production path", () => {
-  it("no longer renders the regular or pinned tab strip", () => {
-    expect(tabBarSource).not.toContain("hideRegularTabs");
-    expect(tabBarSource).not.toContain("regularTabs");
-    expect(tabBarSource).not.toContain("fixedTabsContainerRef");
-    expect(tabBarSource).not.toContain("useTabDrag");
+describe("AppTabBar shared group navigation", () => {
+  it("hosts existing group bars without rendering a second tab strip", () => {
+    expect(tabBarSource).toContain("GROUP_TAB_BAR_PORTAL");
+    expect(tabBarSource).toContain('v-for="group in queryStore.groups"');
+    expect(tabBarSource).toContain(':data-special-page-tab-target="group.id"');
+    expect(tabBarSource).not.toContain("overlayReturnTabs");
+    expect(tabBarSource).not.toContain("data-return-tab");
     expect(tabBarSource).not.toContain("createRenameDuplicateTabItems");
-    expect(groupTabBarSource).toContain("createRenameDuplicateTabItems");
+    expect(groupSource).toContain("<Teleport defer");
+    expect(groupSource).toContain(':disabled="!tabBarPortal?.active.value || !tabBarTarget"');
   });
 
-  it("keeps special pages and the close-confirm dialog as its only surfaces", () => {
-    expect(tabBarSource).toContain("getSpecialRegularTabMenuItems('settings')");
-    expect(tabBarSource).toContain("getSpecialRegularTabMenuItems('driverStore')");
-    expect(tabBarSource).toContain(':open="queryStore.showCloseConfirm"');
+  it("retains targets while hiding inactive special content and follows all placements", () => {
+    expect(tabBarSource).toContain('v-show="driverStoreActive || settingsPageActive"');
+    expect(tabBarSource).toContain("data-special-page-navigation");
+    expect(tabBarSource).toContain("data-special-page-content");
+    expect(tabBarSource).toContain("<slot />");
+    for (const layout of ["flex-col", "flex-col-reverse", "flex-row", "flex-row-reverse"]) {
+      expect(tabBarSource).toContain(layout);
+    }
+    expect(tabBarSource).toContain("props.tabBarCollapsed");
+    expect(tabBarSource).toContain("props.tabBarWidth");
   });
 
   it("scopes the close-other shortcut to the active tab's owner group", () => {
@@ -49,36 +50,43 @@ describe("AppTabBar close confirmation layout", () => {
   });
 
   it("shows the dirty tab list using the shared tab title presentation", () => {
-    const listBlock = sourceBetween('v-for="tab in closeConfirmDirtyTabs"', "</PopoverContent>");
-    expect(listBlock).toContain("tabDisplayTitle(tab, t)");
+    const start = tabBarSource.indexOf('v-for="tab in closeConfirmDirtyTabs"');
+    const end = tabBarSource.indexOf("</PopoverContent>", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(tabBarSource.slice(start, end)).toContain("tabDisplayTitle(tab, t)");
   });
 });
 
-describe("AppTabBar special page selection", () => {
-  it("renders settings and driver store as app-level pills outside the editor groups", () => {
-    expect(tabBarSource).toContain("data-settings-page-tab");
-    expect(tabBarSource).toContain("data-driver-store-tab");
-    expect(tabBarSource).toContain("@click=\"emit('activate-settings-page')\"");
-    expect(tabBarSource).toContain("@click=\"emit('activate-driver-store')\"");
-    expect(tabBarSource).toContain('t("toolbar.driverManager")');
+describe("Group strip special page tabs", () => {
+  it("keeps special page tabs and their update badge in the focused group", () => {
+    expect(groupTabBarSource).toContain("queryStore.focusedGroupId === props.groupId");
+    expect(groupTabBarSource).toContain("data-settings-page-tab");
+    expect(groupTabBarSource).toContain("data-driver-store-tab");
+    expect(groupTabBarSource).toContain("@click=\"emit('activate-settings')\"");
+    expect(groupTabBarSource).toContain("@click=\"emit('activate-driver-store')\"");
+    expect(groupTabBarSource).toContain('t("toolbar.driverManager")');
+    expect(groupTabBarSource).toContain("aria-label=\"t('toolbar.updatableDriverCount')\"");
+    expect(groupTabBarSource).toContain("specialPageTabs?.driverUpdateCount");
   });
 
-  it("keeps the driver update badge on the driver store pill", () => {
-    expect(tabBarSource).toContain("agentDriverUpdateCount");
-    expect(tabBarSource).toContain("aria-label=\"t('toolbar.updatableDriverCount')\"");
+  it("routes special-page actions and preserves ordinary-tab dirty closing", () => {
+    expect(groupSource).toContain(':special-page-tabs="toolbar.specialPageTabs.value"');
+    expect(groupSource).toContain('@activate-settings="toolbar.activateSettingsPage()"');
+    expect(groupSource).toContain('@close-driver-store="toolbar.closeDriverStore()"');
+    expect(groupTabBarSource).toContain('@mousedown.middle.prevent="closeTab(entry.tab)"');
+    expect(groupTabBarSource).toContain('@click.stop="closeTab(entry.tab)"');
+    expect(groupTabBarSource).toContain("queryStore.closeTab(tab.id)");
   });
-});
 
-describe("Group tabbar inherited presentation", () => {
-  it("imports the shared tab bar stylesheet so pills, scrollbar, and wrap styles apply", () => {
+  it("uses one presentation path for active special pages and inactive ordinary tabs", () => {
+    expect(groupTabBarSource).toContain("return !specialPageActive.value && tab.id === props.activeTabId;");
+    expect(groupTabBarSource).toContain("specialPageTabClass(!!specialPageTabs?.settingsActive)");
+    expect(groupTabBarSource).toContain("specialPageTabClass(!!specialPageTabs?.driverStoreActive)");
+    expect(groupTabBarSource).toContain('return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;');
     expect(groupTabBarSource).toContain('import "./appTabBar.css"');
-    expect(groupTabBarSource).toContain("app-tab-pill");
-    expect(groupTabBarSource).toContain("app-tab-scrollbar");
-    expect(groupTabBarSource).toContain("app-tab-bar");
-  });
-
-  it("keeps the dirty marker and dirty title styling", () => {
     expect(groupTabBarSource).toContain("dirty-tab-marker");
     expect(groupTabBarSource).toContain("dirtyTabTitleStyle");
+    expect(groupTabBarSource).toContain("createRenameDuplicateTabItems");
   });
 });

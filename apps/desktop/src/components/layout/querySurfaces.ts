@@ -88,6 +88,7 @@ export interface ContentAreaSurfaceEmits {
   openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
+  objectBrowserSearchChange: [tabId: string, query: string];
   structureEditorSaved: [tabId: string, commentChanged: boolean];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];
@@ -95,4 +96,5 @@ export interface ContentAreaSurfaceEmits {
   openSettings: [initialTab?: string, initialSection?: string];
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   toggleZenMode: [];
+  toggleResultsPane: [];
 }

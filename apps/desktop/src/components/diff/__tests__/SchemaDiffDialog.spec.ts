@@ -107,6 +107,16 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(targetMatch).toBeLessThan(options);
   });
 
+  it("wires source-to-target table mappings through the selector and compare request", () => {
+    expect(configStepSource).toContain('@update:model-value="(value: string) => handleTableMappingUpdate(match.sourceTable, value)"');
+    expect(configStepSource).toContain("tableMatchStatus.${match.kind}");
+    expect(dialogSource).toContain('@update:table-mappings="handleTableMappingsUpdate"');
+    expect(dialogSource).toContain("tableMappings: opts.selectedTables === undefined ? undefined : opts.tableMappings");
+    expect(dialogSource).toContain("ignoreTableNameCase: opts.ignoreTableNameCase");
+    expect(dialogSource).toContain("ignoreColumnNameCase: opts.ignoreColumnNameCase");
+    expect(dialogSource).toContain("const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);");
+  });
+
   it("keeps focused and selected deployment SQL projections separate", () => {
     expect(dialogSource).toContain('const focusedDeploySql = ref("");');
     expect(dialogSource).toContain('const selectedDeploySql = ref("");');

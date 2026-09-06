@@ -1015,6 +1015,65 @@ test("replaces a Unicode prefix inside an open SQL Server bracket identifier", (
   assert.equal(`${sql.slice(0, replacement.from)}${column.apply ?? column.label}${sql.slice(cursor)}`, "select * from test where [名称]");
 });
 
+test("replaces typed CJK table prefixes in MySQL semantic table completion", () => {
+  // Exact report from issue #7757: typing `select * from 测` and accepting the
+  // completion for table 测试表 must replace the typed prefix, not append
+  // after it. Chinese database qualifiers take the same path.
+  for (const fixture of [
+    { sql: "select * from 测", prefix: "测", expected: "select * from 测试表" },
+    { sql: "select * from 测试", prefix: "测试", expected: "select * from 测试表" },
+    { sql: "select * from 测库.测", prefix: "测", expected: "select * from 测库.测试表" },
+    { sql: "select * from mydb.测", prefix: "测", expected: "select * from mydb.测试表" },
+    // ASCII control: unchanged replacement semantics.
+    { sql: "select * from tes", prefix: "tes", expected: "select * from 测试表" },
+  ] as const) {
+    const cursor = fixture.sql.length;
+    const options = { databaseType: "mysql" as DatabaseType, dialect: "mysql" as const };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(fixture.sql, cursor, options), getSqlCompletionContext(fixture.sql, cursor, options));
+    const replacement = prepareSqlCompletionReplacement(fixture.sql, cursor, context, [{ label: "测试表", type: "table" }]);
+
+    assert.equal(context.prefix, fixture.prefix, fixture.sql);
+    assert.equal(replacement.from, cursor - fixture.prefix.length, fixture.sql);
+    assert.equal(`${fixture.sql.slice(0, replacement.from)}测试表${fixture.sql.slice(cursor)}`, fixture.expected, fixture.sql);
+  }
+});
+
+test("keeps MySQL CJK completion names unquoted per the existing quoting policy", () => {
+  // MySQL permits U+0080..U+FFFF unquoted, so a CJK name needs no backticks;
+  // quote-requiring names (reserved words) keep the existing backtick policy.
+  for (const fixture of [
+    { sql: "select * from 测", table: "测试表", expectedApply: "测试表" },
+    { sql: "select * from or", table: "order", expectedApply: "`order`" },
+  ] as const) {
+    const options = { databaseType: "mysql" as DatabaseType, dialect: "mysql" as const };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(fixture.sql, fixture.sql.length, options), getSqlCompletionContext(fixture.sql, fixture.sql.length, options));
+    const items = buildSqlCompletionItemsFromContext(context, {
+      tables: [{ name: fixture.table, type: "table" }],
+      columnsByTable: new Map(),
+      ...options,
+    });
+
+    assert.equal(items.find((item) => item.type === "table")?.apply, fixture.expectedApply, fixture.table);
+  }
+});
+
+test("replaces the trailing identifier a semantic parameter token swallows", () => {
+  // The semantic tokenizer reads `:p测` as a single parameter token, so its
+  // cursor intent reports an empty prefix with a replacement range collapsed
+  // at the cursor. The merged context keeps the legacy prefix, and accepting a
+  // candidate must replace that prefix instead of appending after it.
+  for (const sql of ["select * from t where :p测", "select * from t where :p"] as const) {
+    const cursor = sql.length;
+    const options = { databaseType: "mysql" as DatabaseType, dialect: "mysql" as const };
+    const context = sqlCompletionContextFromSemantic(buildSqlSemanticModel(sql, cursor, options), getSqlCompletionContext(sql, cursor, options));
+    const replacement = prepareSqlCompletionReplacement(sql, cursor, context, [{ label: "名称", type: "column" }]);
+
+    assert.ok(context.prefix.length > 0, sql);
+    assert.equal(replacement.from, cursor - context.prefix.length, sql);
+    assert.equal(`${sql.slice(0, replacement.from)}名称${sql.slice(cursor)}`, "select * from t where :名称", sql);
+  }
+});
+
 test("suggests same-prefix tables while editing double-quoted Oracle-family identifiers", () => {
   for (const databaseType of ["oracle", "dameng"] as const) {
     const markedSql = 'SELECT * FROM "Fo|"';

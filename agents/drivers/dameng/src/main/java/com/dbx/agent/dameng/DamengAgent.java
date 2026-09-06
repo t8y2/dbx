@@ -68,6 +68,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private static final int DBMS_OUTPUT_ENABLE_TIMEOUT_SECS = 5;
     private static final int DBMS_OUTPUT_ENABLE_NETWORK_TIMEOUT_MILLIS = 5_000;
     private static final Pattern DATABASE_VERSION_MAJOR_PATTERN = Pattern.compile("(\\d+)\\.");
+    // Word-boundary match so a type or default merely containing the letters is not mistaken
+    // for the IDENTITY keyword.
+    private static final Pattern DDL_IDENTITY_KEYWORD_PATTERN =
+        Pattern.compile("(?i)(?<![A-Z0-9_$#])IDENTITY(?![A-Z0-9_$#])");
     private static final JdbcAgentProfile DM6_METADATA_PROFILE = new JdbcAgentProfile(
         "dm6.jdbc.driver.DmDriver",
         "jdbc:dm6://{host}:{port}/{database}",
@@ -461,7 +465,21 @@ public final class DamengAgent extends AbstractJdbcAgent {
         if (legacyJdbcMetadata) {
             return unchecked(() -> listJdbcSchemas().stream().map(DatabaseInfo::new).toList());
         }
-        return unchecked(() -> listVisibleUsers().stream().map(DatabaseInfo::new).toList());
+        // DM8 ALL_USERS is privilege-filtered: a normal user only sees itself, so prefer the
+        // full SYS.SYSOBJECTS catalog (mirroring listSchemas; newer/hardened builds require
+        // the SOI role) and fall back to ALL_USERS when the catalog is not readable.
+        return unchecked(() -> {
+            try {
+                return listVisibleSchemas().stream().map(DatabaseInfo::new).toList();
+            } catch (SQLException catalogError) {
+                try {
+                    return listVisibleUsers().stream().map(DatabaseInfo::new).toList();
+                } catch (Exception fallbackError) {
+                    catalogError.addSuppressed(fallbackError);
+                    throw catalogError;
+                }
+            }
+        });
     }
 
     @Override
@@ -1719,6 +1737,13 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
+            if (pkColumns.isEmpty()) {
+                // ALL_CONS_COLUMNS/ALL_CONSTRAINTS return no rows — rather than an error — for
+                // accounts that cannot see the constraint dictionary, which is indistinguishable
+                // from a table that genuinely has no primary key. Re-ask through the driver,
+                // which reports primary keys to the table owner regardless of dictionary grants.
+                pkColumns.addAll(primaryKeyColumnsFromJdbcMetadata(schema, table));
+            }
 
             Set<String> identityColumns = identityColumns(schema, table);
             List<ColumnInfo> result = new ArrayList<>();
@@ -1780,6 +1805,23 @@ public final class DamengAgent extends AbstractJdbcAgent {
     }
 
     private Set<String> identityColumns(String schema, String table) {
+        try {
+            return identityColumnsFromSystemCatalog(schema, table);
+        } catch (Exception systemCatalogError) {
+            // SYS.SYSCOLUMNS is not granted to PUBLIC, so ordinary (non-DBA) accounts fail here
+            // with a permission error. Reporting that as an empty set is indistinguishable from
+            // "this table has no identity column", and the data grid then sends the identity
+            // value on INSERT — which the server rejects, while leaving it out trips the NOT NULL
+            // check. Fall back to the table DDL, which the table owner can always read.
+            //
+            // Any failure triggers the fallback, not just a permission error: the server message
+            // is localized, so matching on its text would silently stop working on a non-Chinese
+            // server, and every other failure mode wants the same fallback anyway.
+            return identityColumnsFromTableDdl(schema, table);
+        }
+    }
+
+    private Set<String> identityColumnsFromSystemCatalog(String schema, String table) throws Exception {
         Set<String> result = new java.util.HashSet<>();
         String sql = """
             SELECT /*+ PARALLEL(1) */ c.NAME
@@ -1799,8 +1841,177 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     }
                 }
             }
+        }
+        return result;
+    }
+
+    private Set<String> identityColumnsFromTableDdl(String schema, String table) {
+        String ddl = null;
+        String sql = "SELECT /*+ PARALLEL(1) */ DBMS_METADATA.GET_DDL(?, ?, ?) FROM DUAL";
+        try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+            stmt.setString(1, "TABLE");
+            stmt.setString(2, table);
+            stmt.setString(3, schema);
+            try (ResultSet rs = stmt.executeQuery()) {
+                if (rs.next()) {
+                    ddl = readTextColumn(rs, 1);
+                }
+            }
         } catch (Exception ignored) {
-            // Some Dameng versions or users do not expose SYS.SYSCOLUMNS.
+            // DBMS_METADATA is unavailable on some deployments (and on views); identity
+            // information stays unknown, which is the best this path can do.
+        }
+        return identityColumnsFromDdlText(ddl);
+    }
+
+    /**
+     * Reads the identity columns out of a {@code CREATE TABLE} statement, e.g.
+     * {@code "ID" INT IDENTITY(1, 1) NOT NULL}. Quoted names and string defaults are skipped so a
+     * column called {@code "IDENTITY"} or a default of {@code 'IDENTITY(1,1)'} is not misread.
+     */
+    static Set<String> identityColumnsFromDdlText(String ddl) {
+        Set<String> result = new java.util.HashSet<>();
+        for (String definition : splitTableDdlDefinitions(ddl)) {
+            String trimmed = definition.trim();
+            if (trimmed.isEmpty() || trimmed.charAt(0) != '"') {
+                // Table-level constraint (PRIMARY KEY(...), CHECK(...)), not a column definition.
+                continue;
+            }
+            StringBuilder name = new StringBuilder();
+            int index = 1;
+            while (index < trimmed.length()) {
+                char ch = trimmed.charAt(index);
+                if (ch == '"') {
+                    if (index + 1 < trimmed.length() && trimmed.charAt(index + 1) == '"') {
+                        name.append('"');
+                        index += 2;
+                        continue;
+                    }
+                    break;
+                }
+                name.append(ch);
+                index++;
+            }
+            if (index >= trimmed.length() || name.length() == 0) {
+                continue;
+            }
+            String rest = stripSingleQuotedLiterals(trimmed.substring(index + 1));
+            if (DDL_IDENTITY_KEYWORD_PATTERN.matcher(rest).find()) {
+                result.add(name.toString());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Splits the column list of a {@code CREATE TABLE} statement on its top-level commas, so that
+     * {@code IDENTITY(1, 1)} and {@code VARCHAR(64)} stay attached to their column.
+     */
+    private static List<String> splitTableDdlDefinitions(String ddl) {
+        List<String> definitions = new ArrayList<>();
+        if (ddl == null) {
+            return definitions;
+        }
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        boolean inLiteral = false;
+        boolean inQuotedName = false;
+        for (int i = 0; i < ddl.length(); i++) {
+            char ch = ddl.charAt(i);
+            if (inLiteral) {
+                current.append(ch);
+                if (ch == '\'') {
+                    inLiteral = false;
+                }
+                continue;
+            }
+            if (inQuotedName) {
+                current.append(ch);
+                if (ch == '"') {
+                    inQuotedName = false;
+                }
+                continue;
+            }
+            if (ch == '\'') {
+                inLiteral = true;
+                current.append(ch);
+                continue;
+            }
+            if (ch == '"') {
+                inQuotedName = true;
+                current.append(ch);
+                continue;
+            }
+            if (ch == '(') {
+                depth++;
+                if (depth == 1) {
+                    // Opening paren of the column list; drop the CREATE TABLE prefix before it.
+                    current.setLength(0);
+                } else {
+                    current.append(ch);
+                }
+                continue;
+            }
+            if (ch == ')') {
+                depth--;
+                if (depth == 0) {
+                    addTableDdlDefinition(definitions, current);
+                    break;
+                }
+                current.append(ch);
+                continue;
+            }
+            if (ch == ',' && depth == 1) {
+                addTableDdlDefinition(definitions, current);
+                continue;
+            }
+            if (depth > 0) {
+                current.append(ch);
+            }
+        }
+        return definitions;
+    }
+
+    private static void addTableDdlDefinition(List<String> definitions, StringBuilder current) {
+        String definition = current.toString().trim();
+        current.setLength(0);
+        if (!definition.isEmpty()) {
+            definitions.add(definition);
+        }
+    }
+
+    private static String stripSingleQuotedLiterals(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        boolean inLiteral = false;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (inLiteral) {
+                if (ch == '\'') {
+                    inLiteral = false;
+                }
+                continue;
+            }
+            if (ch == '\'') {
+                inLiteral = true;
+                out.append(' ');
+                continue;
+            }
+            out.append(ch);
+        }
+        return out.toString();
+    }
+
+    private Set<String> primaryKeyColumnsFromJdbcMetadata(String schema, String table) {
+        Set<String> result = new java.util.HashSet<>();
+        try (ResultSet rs = requireConnected().getMetaData().getPrimaryKeys(null, schema, table)) {
+            while (rs.next()) {
+                String column = rs.getString("COLUMN_NAME");
+                if (notBlank(column)) {
+                    result.add(column);
+                }
+            }
+        } catch (Exception ignored) {
+            // The table is then reported without a primary key, as before this fallback existed.
         }
         return result;
     }
@@ -1818,16 +2029,24 @@ public final class DamengAgent extends AbstractJdbcAgent {
         }
         return unchecked(() -> {
             List<IndexInfo> result = new ArrayList<>();
+            // The LEFT JOIN also matches 'U': a UNIQUE constraint owns its backing index the same
+            // way a primary key does, and neither can be altered with index-level DDL (#7959).
+            // The constraint type therefore drives two flags — IS_PK (only 'P') and
+            // CONSTRAINT_BACKED ('P' or 'U'), the same split `independentIndexes` already uses to
+            // keep constraint-backed indexes out of the generated table DDL. A unique index
+            // created with CREATE UNIQUE INDEX has no ALL_CONSTRAINTS row, so it stays false and
+            // keeps the index-level DDL path.
             String sql = """
                 SELECT /*+ PARALLEL(1) */ i.INDEX_NAME,
                     LISTAGG(ic.COLUMN_NAME, ',') WITHIN GROUP (ORDER BY ic.COLUMN_POSITION) AS COLUMNS,
                     i.UNIQUENESS,
                     CASE WHEN c.CONSTRAINT_TYPE = 'P' THEN 1 ELSE 0 END AS IS_PK,
-                    i.INDEX_TYPE
+                    i.INDEX_TYPE,
+                    CASE WHEN c.CONSTRAINT_TYPE IN ('P', 'U') THEN 1 ELSE 0 END AS CONSTRAINT_BACKED
                 FROM ALL_INDEXES i
                 JOIN ALL_IND_COLUMNS ic ON i.INDEX_NAME = ic.INDEX_NAME AND i.OWNER = ic.INDEX_OWNER AND i.TABLE_OWNER = ic.TABLE_OWNER
                 LEFT JOIN ALL_CONSTRAINTS c ON i.INDEX_NAME = c.INDEX_NAME AND i.TABLE_OWNER = c.OWNER
-                    AND c.CONSTRAINT_TYPE = 'P'
+                    AND c.CONSTRAINT_TYPE IN ('P', 'U')
                 WHERE i.TABLE_OWNER = ? AND i.TABLE_NAME = ?
                 GROUP BY i.INDEX_NAME, i.UNIQUENESS, c.CONSTRAINT_TYPE, i.INDEX_TYPE
                 ORDER BY i.INDEX_NAME
@@ -1837,7 +2056,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
                     while (rs.next()) {
-                        result.add(new IndexInfo(
+                        IndexInfo index = new IndexInfo(
                             rs.getString(1),
                             splitNonEmpty(coalesce(rs.getString(2)), ","),
                             "UNIQUE".equals(rs.getString(3)),
@@ -1846,7 +2065,9 @@ public final class DamengAgent extends AbstractJdbcAgent {
                             rs.getString(5),
                             null,
                             null
-                        ));
+                        );
+                        index.setConstraint_backed("1".equals(rs.getString(6)));
+                        result.add(index);
                     }
                 }
             }

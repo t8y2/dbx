@@ -143,7 +143,17 @@ fn existing_index(name: &str, columns: &[&str], is_unique: bool) -> EditableStru
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
+    index
+}
+
+/// A unique index that is the object *behind* a UNIQUE constraint (Dameng's "virtual" index,
+/// `ALL_CONSTRAINTS.CONSTRAINT_TYPE = 'U'`), as opposed to a standalone ("real") unique index
+/// created with `CREATE UNIQUE INDEX`, which `existing_index(.., true)` still models.
+fn constraint_backed_unique_index(name: &str, columns: &[&str]) -> EditableStructureIndex {
+    let mut index = existing_index(name, columns, true);
+    index.original.as_mut().unwrap().constraint_backed = true;
     index
 }
 
@@ -236,6 +246,7 @@ fn builds_mysql_column_and_index_changes() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
     let mut email_index = index("uniq_users_email", &["email"]);
     email_index.is_unique = true;
@@ -287,16 +298,43 @@ fn dameng_replaces_same_name_index_before_validating_uniqueness() {
 }
 
 #[test]
-fn dameng_replaces_same_name_unique_index_with_normal_index() {
-    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
-    changed.is_unique = false;
+fn dameng_unique_index_column_change_drops_and_readds_constraint() {
+    // #7959: the original index is the one behind a UNIQUE constraint. Editing its columns
+    // while keeping it unique must go through ALTER TABLE ... DROP/ADD CONSTRAINT, not
+    // CREATE OR REPLACE UNIQUE INDEX — Dameng rejects that with "no permission to drop index"
+    // because the index is constraint-owned.
+    let mut changed = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    changed.columns = vec!["EMAIL".to_string(), "TENANT_ID".to_string()];
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
 
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(
         result.statements,
-        vec!["CREATE OR REPLACE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");"]
+        vec![
+            "ALTER TABLE \"APP\".\"USERS\" DROP CONSTRAINT \"IDX_USERS_EMAIL\";",
+            "ALTER TABLE \"APP\".\"USERS\" ADD CONSTRAINT \"IDX_USERS_EMAIL\" UNIQUE (\"EMAIL\", \"TENANT_ID\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_replaces_same_name_unique_index_with_normal_index() {
+    let mut changed = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    changed.is_unique = false;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    // The original index backs a unique constraint (#7959): downgrading it to a plain index
+    // has to drop that constraint first, then create an ordinary index — `CREATE OR REPLACE
+    // INDEX` against a constraint-backed index is rejected by Dameng.
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"APP\".\"USERS\" DROP CONSTRAINT \"IDX_USERS_EMAIL\";",
+            "CREATE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\");",
+        ]
     );
 }
 
@@ -358,6 +396,122 @@ fn dameng_renamed_index_keeps_drop_then_create_path() {
             "CREATE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"EMAIL\");",
         ]
     );
+}
+
+#[test]
+fn dameng_renamed_unique_index_uses_constraint_ddl_not_drop_index() {
+    // Same root cause as #7959: a renamed constraint-backed index still has to go through
+    // DROP/ADD CONSTRAINT rather than DROP INDEX, since DROP INDEX against a
+    // constraint-backed index is rejected by Dameng regardless of whether the name changes.
+    let mut changed = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    changed.name = "IDX_USERS_LOGIN".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"APP\".\"USERS\" DROP CONSTRAINT \"IDX_USERS_EMAIL\";",
+            "ALTER TABLE \"APP\".\"USERS\" ADD CONSTRAINT \"IDX_USERS_LOGIN\" UNIQUE (\"EMAIL\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_standalone_unique_index_keeps_index_level_ddl() {
+    // A unique index created with CREATE UNIQUE INDEX (Dameng's "real" index — which is also
+    // what this editor emits for a new unique index) has no constraint behind it: it is absent
+    // from ALL_CONSTRAINTS, so DROP CONSTRAINT would fail with "constraint does not exist".
+    // Editing it must stay on the index-level path, otherwise DBX breaks the lifecycle of the
+    // unique indexes it creates itself.
+    let mut changed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
+    changed.columns = vec!["EMAIL".to_string(), "TENANT_ID".to_string()];
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(
+        result.statements,
+        vec!["CREATE OR REPLACE UNIQUE INDEX \"IDX_USERS_EMAIL\" ON \"APP\".\"USERS\" (\"EMAIL\", \"TENANT_ID\");"]
+    );
+
+    let mut renamed = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
+    renamed.name = "IDX_USERS_LOGIN".to_string();
+
+    let renamed_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), renamed));
+
+    assert_eq!(renamed_result.warnings, Vec::<String>::new());
+    assert_eq!(
+        renamed_result.statements,
+        vec![
+            "DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";",
+            "CREATE UNIQUE INDEX \"IDX_USERS_LOGIN\" ON \"APP\".\"USERS\" (\"EMAIL\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_dropping_constraint_backed_unique_index_drops_the_constraint() {
+    // Deleting the index of #7959 is broken the same way: DROP INDEX is rejected for a
+    // constraint-owned index, so the delete has to drop the constraint instead.
+    let mut dropped = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    dropped.marked_for_drop = true;
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), dropped));
+
+    assert_eq!(result.warnings, Vec::<String>::new());
+    assert_eq!(result.statements, vec!["ALTER TABLE \"APP\".\"USERS\" DROP CONSTRAINT \"IDX_USERS_EMAIL\";"]);
+
+    // A standalone unique index keeps DROP INDEX.
+    let mut standalone = existing_index("IDX_USERS_EMAIL", &["EMAIL"], true);
+    standalone.marked_for_drop = true;
+
+    let standalone_result =
+        build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), standalone));
+
+    assert_eq!(standalone_result.warnings, Vec::<String>::new());
+    assert_eq!(standalone_result.statements, vec!["DROP INDEX \"APP\".\"IDX_USERS_EMAIL\";"]);
+}
+
+#[test]
+fn dameng_constraint_backed_unique_index_edit_reports_unusable_bitmap_type() {
+    // BITMAP is honored by CREATE INDEX for Dameng, but a unique constraint always builds a
+    // normal index behind itself, so the requested type cannot be carried over silently.
+    let mut changed = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    changed.index_type = "bitmap".to_string();
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(
+        result.warnings,
+        vec![
+            "Index type BITMAP is ignored for unique index \"IDX_USERS_EMAIL\": Dameng enforces it with a unique constraint, whose index cannot be a bitmap index."
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        result.statements,
+        vec![
+            "ALTER TABLE \"APP\".\"USERS\" DROP CONSTRAINT \"IDX_USERS_EMAIL\";",
+            "ALTER TABLE \"APP\".\"USERS\" ADD CONSTRAINT \"IDX_USERS_EMAIL\" UNIQUE (\"EMAIL\");",
+        ]
+    );
+}
+
+#[test]
+fn dameng_constraint_backed_unique_index_edit_without_columns_emits_nothing() {
+    // The empty-column guard of `build_create_index_statements`: dropping the constraint
+    // without a valid replacement would silently delete it, so the edit is skipped entirely
+    // and only `validate_draft`'s warning remains.
+    let mut changed = constraint_backed_unique_index("IDX_USERS_EMAIL", &["EMAIL"]);
+    changed.columns = vec!["  ".to_string()];
+
+    let result = build_table_structure_change_sql(index_change_options(DatabaseType::Dameng, Some("APP"), changed));
+
+    assert_eq!(result.warnings, vec!["Index \"IDX_USERS_EMAIL\" needs at least one column.".to_string()]);
+    assert!(result.statements.is_empty(), "{:?}", result.statements);
 }
 
 #[test]
@@ -891,6 +1045,7 @@ fn builds_informix_column_and_index_changes() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
     let mut email_index = index("uniq_users_email", &["email"]);
     email_index.is_unique = true;
@@ -1339,6 +1494,7 @@ fn iris_drop_index_includes_table_name() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -1651,6 +1807,7 @@ fn gbase8a_uses_limited_mysql_ddl() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -2362,6 +2519,7 @@ fn qualifies_attached_sqlite_table_and_index_changes() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
     let email_index = index("idx_users_email", &["email"]);
 
@@ -6952,6 +7110,7 @@ fn oscar_drop_index_with_schema_qualifier() {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(TableStructureSqlOptions {
@@ -7443,6 +7602,7 @@ fn gaussdb_m_existing_index(
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        constraint_backed: false,
     });
     idx
 }
@@ -7814,6 +7974,7 @@ fn postgres_index_opclass_from_original_when_editable_empty() {
         comment: None,
         key_is_expression: vec![false],
         column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
@@ -7840,6 +8001,7 @@ fn postgres_index_no_rebuild_when_original_has_opclass_and_edit_is_identical() {
         comment: None,
         key_is_expression: vec![false],
         column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
@@ -7865,6 +8027,7 @@ fn postgres_index_rebuild_when_opclass_changed() {
         comment: None,
         key_is_expression: vec![false],
         column_opclasses: vec![None], // was default, now gin_trgm_ops
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
@@ -7963,6 +8126,7 @@ fn postgres_expression_index_appends_opclass() {
         comment: None,
         key_is_expression: vec![true],
         column_opclasses: vec![None],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));
@@ -8008,6 +8172,7 @@ fn postgres_expression_index_opclass_round_trips_from_indclass() {
         comment: None,
         key_is_expression: vec![true],
         column_opclasses: vec![Some("public.gin_trgm_ops".to_string())],
+        constraint_backed: false,
     });
 
     let result = build_table_structure_change_sql(index_change_options(DatabaseType::Postgres, Some("public"), idx));

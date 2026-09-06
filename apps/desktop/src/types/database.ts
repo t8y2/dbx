@@ -554,6 +554,12 @@ export interface IndexInfo {
   key_is_expression?: boolean[] | null;
   /** Parallel to `columns`: operator class name for each key column (PostgreSQL), if non-default. */
   column_opclasses?: (string | null)[] | null;
+  /**
+   * True when the index is the object behind a PRIMARY KEY / UNIQUE constraint rather than a
+   * standalone index. Carried back to the backend inside the index draft's `original` snapshot:
+   * Dameng only accepts `ALTER TABLE ... ADD/DROP CONSTRAINT` for those indexes.
+   */
+  constraint_backed?: boolean | null;
 }
 
 export interface ReferenceKeyInfo {
@@ -1257,6 +1263,7 @@ export interface QueryTab {
     | "sqlserver-trace"
     | "mysql-dashboard"
     | "postgres-dashboard"
+    | "xugu-dashboard"
     | "dolt-version-control";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
@@ -1285,8 +1292,11 @@ export interface QueryTab {
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
+    searchQuery?: string;
     viewport?: ObjectBrowserViewport;
   };
+  /** Opened to view object source, including objects without editable source metadata. */
+  sourceView?: boolean;
   objectSource?: {
     schema?: string;
     name: string;

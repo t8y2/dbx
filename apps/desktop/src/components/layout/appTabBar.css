@@ -351,12 +351,24 @@
 
 .vertical-tab-layout {
   flex: 0 0 15rem;
+  --tab-group-header-inset: 0.5rem;
+  --tab-group-root-rail-x: 1.16rem;
+  --tab-group-tab-inset: 2.5rem;
+  --tab-group-branch-width: 0.65rem;
+  --tab-group-row-half: 1rem;
+  --tab-group-header-gap: 0.08rem;
 }
 
 .vertical-tab-layout .app-tab-strip {
+  display: flex;
+  flex-direction: column;
   height: auto;
   min-height: 0;
   width: 100%;
+}
+
+.vertical-tab-layout .app-tab-scroll {
+  min-height: 0;
 }
 
 .vertical-tab-layout .app-tab-pill {
@@ -440,12 +452,17 @@
   width: calc(100% - 1rem) !important;
   height: 2rem;
   align-self: center;
-  margin: 0.35rem 0.5rem 0.08rem;
+  margin: 0.35rem var(--tab-group-header-inset) var(--tab-group-header-gap);
   padding: 0;
   color: var(--foreground);
   font-size: 0.75rem;
   font-weight: 650;
   line-height: 1rem;
+}
+
+.vertical-tab-layout .tab-group-header,
+.vertical-tab-layout .tab-group-tab {
+  --tab-group-vertical-rail: color-mix(in srgb, var(--tab-group-color) 30%, var(--background));
 }
 
 .vertical-tab-layout .tab-group-header-content {
@@ -474,12 +491,12 @@
   content: "";
   position: absolute;
   z-index: 1;
-  top: 1rem;
-  bottom: -1.08rem;
-  left: 0.66rem;
-  width: 0.7rem;
-  border-bottom: 1px solid var(--tab-group-rail);
-  border-left: 1px solid var(--tab-group-rail);
+  top: 50%;
+  bottom: calc(0rem - var(--tab-group-header-gap) - var(--tab-group-row-half));
+  left: calc(var(--tab-group-root-rail-x) - var(--tab-group-header-inset));
+  width: calc(var(--tab-group-tab-inset) - var(--tab-group-root-rail-x));
+  border-bottom: 1px solid var(--tab-group-vertical-rail);
+  border-left: 1px solid var(--tab-group-vertical-rail);
   border-bottom-left-radius: 0.1875rem;
   pointer-events: none;
 }
@@ -492,7 +509,7 @@
 .vertical-tab-layout .tab-group-tab {
   position: relative;
   width: calc(100% - 3rem);
-  margin-inline: 2.5rem 0.5rem;
+  margin-inline: var(--tab-group-tab-inset) 0.5rem;
   padding-inline-start: 0.65rem !important;
   border-color: transparent;
 }
@@ -500,12 +517,12 @@
 .vertical-tab-layout .tab-group-tab::before {
   content: "";
   position: absolute;
-  top: -0.25rem;
-  bottom: -0.25rem;
-  left: -0.65rem;
+  top: 0;
+  bottom: 0;
+  left: calc(0rem - var(--tab-group-branch-width));
   width: 1px;
   border-radius: 9999px;
-  background: var(--tab-group-rail);
+  background: var(--tab-group-vertical-rail);
   pointer-events: none;
 }
 
@@ -522,10 +539,14 @@
   content: "";
   position: absolute;
   top: calc(50% - 0.5px);
-  left: -0.65rem;
-  width: 0.65rem;
+  left: calc(0rem - var(--tab-group-branch-width));
+  width: var(--tab-group-branch-width);
   height: 1px;
   border-radius: 0 9999px 9999px 0;
-  background: var(--tab-group-rail);
+  background: var(--tab-group-vertical-rail);
   pointer-events: none;
+}
+
+.vertical-tab-layout .tab-group-tab--first::after {
+  display: none;
 }

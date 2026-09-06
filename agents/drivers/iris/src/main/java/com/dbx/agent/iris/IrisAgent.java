@@ -2,10 +2,13 @@ package com.dbx.agent.iris;
 
 import com.dbx.agent.ConfiguredJdbcAgent;
 import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.ConnectParams;
 import com.dbx.agent.JdbcAgentProfile;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.StandardJdbcMetadata;
+
+import com.intersystems.jdbc.IRISConnection;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -30,6 +33,36 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
 
     public IrisAgent() {
         super(IRIS_PROFILE);
+    }
+
+    // The InterSystems driver's default query prefetch block (32768 bytes) means
+    // one server round trip per ~32KB of result data. Large result sets over
+    // high-latency links then spend most of their wall time waiting on the
+    // network instead of transferring rows, while other clients that negotiate
+    // larger fetch blocks finish several times faster. Statement.setFetchSize
+    // does not help here: intersystems-jdbc stores that value but never sends
+    // it to the server. The connection-level query prefetch size is the only
+    // effective knob, so raise it for every DBX IRIS connection. This is
+    // advisory: servers that reject the value keep the driver default, and the
+    // driver only round-trips when the value actually changes.
+    static final int IRIS_QUERY_PREFETCH_SIZE = 262144;
+
+    @Override
+    protected void afterConnect(ConnectParams params, Connection connection) {
+        super.afterConnect(params, connection);
+        applyQueryPrefetchSize(connection);
+    }
+
+    static void applyQueryPrefetchSize(Connection connection) {
+        if (!(connection instanceof IRISConnection)) {
+            return;
+        }
+        try {
+            ((IRISConnection) connection).setQueryPrefetchSize(IRIS_QUERY_PREFETCH_SIZE);
+        } catch (Exception ignored) {
+            // Performance tuning only; keep the connection usable with the
+            // driver default when a server refuses the larger prefetch.
+        }
     }
 
     @Override

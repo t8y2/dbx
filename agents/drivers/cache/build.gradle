@@ -1,0 +1,9 @@
+dependencies {
+    implementation files('libs/CacheDB.jar')
+}
+
+tasks.named('shadowJar') {
+    manifest {
+        attributes('Agent-Label': 'InterSystems Cach\u00e9', 'Main-Class': 'com.dbx.agent.cache.CacheAgent')
+    }
+}

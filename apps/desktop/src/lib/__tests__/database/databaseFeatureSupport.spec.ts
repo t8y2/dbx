@@ -5,12 +5,15 @@ import { buildGetDatabaseCommentSql } from "@/lib/database/dbAdminSql";
 import {
   defaultAutoCommitForDbType,
   isSchemaAware,
+  supportsConnectionQueryActions,
   supportsConnectionScopedQueryExecution,
   supportsConnectionDatabaseBrowser,
   supportsDatabaseNameCompletion,
   supportsDatabaseSchemaQualifier,
+  supportsDatabaseSearch,
   supportsObjectBrowser,
   supportsObjectBrowserTreeNode,
+  supportsQueryExecution,
   supportsQueryTargetDatabaseListing,
   supportsQueryEditorBlockComments,
   supportsSqlInListPaste,
@@ -78,6 +81,32 @@ describe("connection-scoped query targets", () => {
     expect(usesConnectionOnlyQueryTarget("weaviate")).toBe(true);
     expect(usesConnectionOnlyQueryTarget("chromadb")).toBe(true);
     expect(supportsQueryTargetDatabaseListing("etcd")).toBe(false);
+  });
+});
+
+describe("connection query actions", () => {
+  it("keeps SQL query surfaces available for ordinary databases", () => {
+    expect(supportsConnectionQueryActions("mysql")).toBe(true);
+    expect(supportsConnectionQueryActions("postgres")).toBe(true);
+    expect(supportsConnectionQueryActions("redis")).toBe(true);
+    expect(supportsConnectionQueryActions(undefined)).toBe(true);
+  });
+
+  it("hides the sidebar new-query entry for specialized surfaces without a query engine", () => {
+    expect(supportsConnectionQueryActions("nacos")).toBe(false);
+    expect(supportsConnectionQueryActions("consul")).toBe(false);
+    expect(supportsConnectionQueryActions("hbase")).toBe(false);
+    expect(supportsConnectionQueryActions("zookeeper")).toBe(false);
+  });
+});
+
+describe("zookeeper query capabilities", () => {
+  it("does not advertise query execution or schema search for the kv-only agent", () => {
+    // The ZooKeeper agent exposes only kv_* operations: no list-databases or
+    // query method exists, so the manifest must not claim either capability
+    // (issue #8215: "new query" errored calling list-databases).
+    expect(supportsQueryExecution("zookeeper")).toBe(false);
+    expect(supportsDatabaseSearch("zookeeper")).toBe(false);
   });
 });
 

@@ -133,6 +133,13 @@ pub struct IndexInfo {
     /// Parallel to `columns`: operator class name for each key column, if non-default.
     #[serde(default)]
     pub column_opclasses: Vec<Option<String>>,
+    /// Round-tripped from `crate::types::IndexInfo`: `true` when the introspected index is
+    /// the object behind a PRIMARY KEY / UNIQUE constraint. Dameng only accepts constraint
+    /// level DDL for those (#7959); a standalone unique index keeps the index-level path.
+    /// Defaults to `false`, so a payload from an older client (or a source that does not
+    /// report it) behaves exactly as before.
+    #[serde(default)]
+    pub constraint_backed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

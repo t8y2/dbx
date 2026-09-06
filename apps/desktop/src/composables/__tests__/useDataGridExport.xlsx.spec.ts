@@ -129,6 +129,7 @@ describe("useDataGridExport XLSX headers", () => {
       expect.any(String),
       expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Identifier)"], autoFilter: false }), expect.objectContaining({ sheetName: "Names", columnComments: ["name (Display name)"], autoFilter: false })]),
       false,
+      undefined,
     );
   });
 
@@ -141,6 +142,6 @@ describe("useDataGridExport XLSX headers", () => {
 
     await state.exportAllResultsXlsx();
 
-    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false);
+    expect(mocks.exportQueryResultsXlsx).toHaveBeenCalledWith(expect.any(String), expect.arrayContaining([expect.objectContaining({ sheetName: "Ids", columnComments: ["id (Joined identifier)"], autoFilter: false })]), false, undefined);
   });
 });

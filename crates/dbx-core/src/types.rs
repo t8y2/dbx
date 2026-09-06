@@ -398,7 +398,7 @@ pub struct LargeValueCell {
     pub original_bytes: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     /// Database type name for each column, parallel to `columns`. May be empty
@@ -441,6 +441,136 @@ pub struct QueryResult {
     pub messages: Vec<QueryMessage>,
 }
 
+/// Integer cells outside JavaScript's safe integer range (±(2^53 - 1)) cross
+/// the transport boundary as decimal strings so `JSON.parse` /
+/// `response.json()` in the webview cannot silently round them (#7832).
+/// This mirrors the driver-level convention that already ships DECIMAL and
+/// MySQL BIGINT cells as strings; the manual `Serialize` impl below applies
+/// the same guarantee to every `QueryResult` consumer (Tauri IPC, dbx-web
+/// HTTP, agent bridges) even for paths that bypass
+/// `db::json_value_for_js` normalization.
+impl Serialize for QueryResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        // Nine always-present fields (columns, column_types, column_sortables,
+        // rows, affected_rows, execution_time_ms, truncated, session_id,
+        // has_more) plus the optional ones, matching the previous derive.
+        let field_count = 9
+            + usize::from(!self.spatial_columns.is_empty())
+            + usize::from(!self.spatial_values.is_empty())
+            + usize::from(self.elasticsearch_raw_body.is_some())
+            + usize::from(!self.messages.is_empty());
+        let mut state = serializer.serialize_struct("QueryResult", field_count)?;
+        state.serialize_field("columns", &self.columns)?;
+        state.serialize_field("column_types", &self.column_types)?;
+        state.serialize_field("column_sortables", &self.column_sortables)?;
+        if !self.spatial_columns.is_empty() {
+            state.serialize_field("spatial_columns", &self.spatial_columns)?;
+        }
+        if !self.spatial_values.is_empty() {
+            state.serialize_field("spatial_values", &self.spatial_values)?;
+        }
+        state.serialize_field("rows", &JsSafeRows(&self.rows))?;
+        state.serialize_field("affected_rows", &self.affected_rows)?;
+        state.serialize_field("execution_time_ms", &self.execution_time_ms)?;
+        state.serialize_field("truncated", &self.truncated)?;
+        state.serialize_field("session_id", &self.session_id)?;
+        state.serialize_field("has_more", &self.has_more)?;
+        if let Some(body) = &self.elasticsearch_raw_body {
+            state.serialize_field("elasticsearch_raw_body", body)?;
+        }
+        if !self.messages.is_empty() {
+            state.serialize_field("messages", &self.messages)?;
+        }
+        state.end()
+    }
+}
+
+/// Serializes result rows with [`JsSafeCell`] wrapping so unsafe integers
+/// become strings without cloning the row data.
+struct JsSafeRows<'a>(&'a [Vec<serde_json::Value>]);
+
+impl Serialize for JsSafeRows<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for row in self.0 {
+            seq.serialize_element(&JsSafeCells(row))?;
+        }
+        seq.end()
+    }
+}
+
+struct JsSafeCells<'a>(&'a [serde_json::Value]);
+
+impl Serialize for JsSafeCells<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for cell in self.0 {
+            seq.serialize_element(&JsSafeCell(cell))?;
+        }
+        seq.end()
+    }
+}
+
+/// Serializes one cell, replacing unsafe integer numbers with their decimal
+/// string form and recursing into arrays/objects the same way
+/// `db::json_value_for_js` does.
+struct JsSafeCell<'a>(&'a serde_json::Value);
+
+impl Serialize for JsSafeCell<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        match self.0 {
+            serde_json::Value::Number(number) => {
+                if let Some(value) = number.as_i64() {
+                    if !(-crate::db::JS_MAX_SAFE_INTEGER..=crate::db::JS_MAX_SAFE_INTEGER).contains(&value) {
+                        return serializer.serialize_str(&value.to_string());
+                    }
+                } else if let Some(value) = number.as_u64() {
+                    if value > crate::db::JS_MAX_SAFE_INTEGER as u64 {
+                        return serializer.serialize_str(&value.to_string());
+                    }
+                }
+                self.0.serialize(serializer)
+            }
+            serde_json::Value::Array(values) => {
+                use serde::ser::SerializeSeq;
+                let mut seq = serializer.serialize_seq(Some(values.len()))?;
+                for value in values {
+                    seq.serialize_element(&JsSafeCell(value))?;
+                }
+                seq.end()
+            }
+            serde_json::Value::Object(entries) => {
+                let mut map = serializer.serialize_map(Some(entries.len()))?;
+                for (key, value) in entries {
+                    map.serialize_entry(key, &JsSafeCell(value))?;
+                }
+                map.end()
+            }
+            _ => self.0.serialize(serializer),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
     pub name: String,
@@ -461,6 +591,14 @@ pub struct IndexInfo {
     /// `None` means the default operator class is used (can be omitted in DDL).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub column_opclasses: Vec<Option<String>>,
+    /// `true` when this index is the object *behind* a table constraint (PRIMARY KEY or
+    /// UNIQUE) rather than a standalone index. Dameng lists both kinds in `ALL_INDEXES`
+    /// but only a standalone ("real") index accepts index-level DDL: a constraint-backed
+    /// ("virtual") one must be changed through `ALTER TABLE ... ADD/DROP CONSTRAINT`
+    /// (#7959). Defaults to `false` for every introspection source that does not report
+    /// it, which keeps those indexes on the index-level DDL path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub constraint_backed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -893,5 +1031,113 @@ mod tests {
             assert_eq!(candidate.kind, expected);
             assert_eq!(serde_json::to_value(candidate.kind).unwrap(), wire_value.to_ascii_lowercase());
         }
+    }
+
+    fn bigint_result_sample() -> super::QueryResult {
+        super::QueryResult {
+            columns: vec!["id".to_string()],
+            column_types: vec!["bigint".to_string()],
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: vec![vec![
+                serde_json::json!(1391198305898897409i64),
+                serde_json::json!(9007199254740991i64),
+                serde_json::json!(42),
+                serde_json::json!(-9007199254740992i64),
+                serde_json::json!(18446744073709551615u64),
+                serde_json::json!("1391198305898897409"),
+                serde_json::Value::Null,
+            ]],
+            affected_rows: 0,
+            execution_time_ms: 0,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        }
+    }
+
+    /// #7832: integers beyond JavaScript's ±(2^53 - 1) safe range must cross
+    /// the transport boundary as decimal strings, while safe integers keep
+    /// their JSON number form so ordinary grids stay unchanged.
+    #[test]
+    fn query_result_serializes_unsafe_integers_as_strings() {
+        let serialized = serde_json::to_value(bigint_result_sample()).unwrap();
+        let row = &serialized["rows"][0];
+
+        assert_eq!(row[0], serde_json::json!("1391198305898897409"), "big i64 becomes a string");
+        assert_eq!(row[1], serde_json::json!(9007199254740991i64), "max safe i64 stays a number");
+        assert_eq!(row[2], serde_json::json!(42), "small integers stay numbers");
+        assert_eq!(row[3], serde_json::json!("-9007199254740992"), "min unsafe i64 becomes a string");
+        assert_eq!(row[4], serde_json::json!("18446744073709551615"), "big u64 becomes a string");
+        assert_eq!(row[5], serde_json::json!("1391198305898897409"), "existing strings pass through");
+        assert_eq!(row[6], serde_json::Value::Null, "null passes through");
+    }
+
+    #[test]
+    fn query_result_serialization_keeps_wire_shape_and_other_fields() {
+        let mut result = bigint_result_sample();
+        result.rows = vec![vec![serde_json::json!(7)]];
+        result.session_id = Some("session".to_string());
+        result.messages = vec![super::QueryMessage {
+            severity: "Note".to_string(),
+            message: "ok".to_string(),
+            code: None,
+            detail: None,
+            hint: None,
+        }];
+
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "columns": ["id"],
+                "column_types": ["bigint"],
+                "column_sortables": [],
+                "rows": [[7]],
+                "affected_rows": 0,
+                "execution_time_ms": 0,
+                "truncated": false,
+                "session_id": "session",
+                "has_more": false,
+                "messages": [{ "severity": "Note", "message": "ok" }],
+            })
+        );
+
+        // Optional collections stay omitted exactly like the previous derive.
+        let minimal = bigint_result_sample();
+        let serialized = serde_json::to_value(&minimal).unwrap();
+        assert!(serialized.get("spatial_columns").is_none());
+        assert!(serialized.get("spatial_values").is_none());
+        assert!(serialized.get("elasticsearch_raw_body").is_none());
+        assert!(serialized.get("messages").is_none());
+        assert_eq!(serialized["session_id"], serde_json::Value::Null);
+    }
+
+    /// Numeric cells nested inside JSON-typed columns must not lose precision
+    /// either, matching `db::json_value_for_js` recursion.
+    #[test]
+    fn query_result_stringifies_unsafe_integers_nested_in_json_cells() {
+        let mut result = bigint_result_sample();
+        result.rows = vec![vec![
+            serde_json::json!({ "snowflake": 1391198305898897409i64, "safe": 42, "text": "1391198305898897409" }),
+        ]];
+
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            serialized["rows"][0][0],
+            serde_json::json!({ "snowflake": "1391198305898897409", "safe": 42, "text": "1391198305898897409" })
+        );
+    }
+
+    /// The string form must round-trip: consumers deserialize `QueryResult`
+    /// from cached/relayed JSON, and cell values are untyped `Value`s.
+    #[test]
+    fn query_result_deserializes_stringified_integer_cells() {
+        let deserialized: super::QueryResult =
+            serde_json::from_value(serde_json::to_value(bigint_result_sample()).unwrap()).unwrap();
+        assert_eq!(deserialized.rows[0][0], serde_json::json!("1391198305898897409"));
     }
 }

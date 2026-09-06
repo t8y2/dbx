@@ -62,6 +62,8 @@ pub struct DataCompareFromTablesOptions {
     pub columns: Vec<String>,
     pub key_columns: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_columns: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fetch_batch_size: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degradation_threshold: Option<DegradationThreshold>,
@@ -356,6 +358,11 @@ pub async fn prepare_data_compare_from_tables(
     let sampling_strategy = options.sampling_strategy.clone().unwrap_or(SamplingStrategy::Hybrid);
     let enable_checksum = options.enable_checksum.unwrap_or(true);
 
+    // Cross-database comparison matches columns case-insensitively, so `columns` holds
+    // target-side names while the source side needs its own names in the same order.
+    let source_column_names = aligned_source_column_names(&options.columns, options.source_columns.as_ref());
+    let source_key_columns = aligned_source_key_columns(&options.columns, &source_column_names, &options.key_columns);
+
     let (source_rows, target_rows, sampling_rate, verification_method) = match &degradation_level {
         DegradationLevel::Full => {
             let (src, tgt) = tokio::try_join!(
@@ -365,8 +372,8 @@ pub async fn prepare_data_compare_from_tables(
                     &options.source_database,
                     &options.source_schema,
                     &options.source_table,
-                    &options.columns,
-                    &options.key_columns,
+                    &source_column_names,
+                    &source_key_columns,
                     source_database_type,
                     fetch_batch_size,
                 ),
@@ -392,8 +399,8 @@ pub async fn prepare_data_compare_from_tables(
                     &options.source_database,
                     &options.source_schema,
                     &options.source_table,
-                    &options.columns,
-                    &options.key_columns,
+                    &source_column_names,
+                    &source_key_columns,
                     source_database_type,
                     &sampling_strategy,
                     threshold.sample_size,
@@ -1046,6 +1053,27 @@ fn first_count(rows: &[Vec<Value>]) -> Result<u64, String> {
     .ok_or_else(|| format!("COUNT query returned non-numeric value: {value}"))
 }
 
+/// Data compare matches columns case-insensitively across databases that store
+/// identifiers with different case conventions (e.g. SQL Server keeps the created
+/// case while Oracle stores upper case). `columns` carries target-side names, so
+/// the source side is queried with its own names in the same positional order.
+fn aligned_source_column_names(columns: &[String], source_columns: Option<&Vec<String>>) -> Vec<String> {
+    match source_columns {
+        Some(source_columns) if source_columns.len() == columns.len() => source_columns.clone(),
+        _ => columns.to_vec(),
+    }
+}
+
+fn aligned_source_key_columns(columns: &[String], source_columns: &[String], key_columns: &[String]) -> Vec<String> {
+    key_columns
+        .iter()
+        .map(|key| match columns.iter().position(|column| column == key) {
+            Some(index) => source_columns[index].clone(),
+            None => key.clone(),
+        })
+        .collect()
+}
+
 fn build_data_compare_select_sql(
     database_type: DatabaseType,
     schema: &str,
@@ -1648,6 +1676,7 @@ pub async fn verify_data(state: &AppState, options: VerifyDataOptions) -> Result
         target_table: options.target_table,
         columns: options.columns,
         key_columns: options.key_columns,
+        source_columns: None,
         fetch_batch_size: options.fetch_batch_size,
         degradation_threshold: Some(degradation_threshold),
         sampling_strategy: Some(sampling_strategy),
@@ -2530,5 +2559,32 @@ mod tests {
         let snapshot = metrics.snapshot();
         let up = snapshot.iter().find(|e| e.name == "dbx_auto_upgrade_total").unwrap();
         assert_eq!(up.value, crate::risk_metrics::MetricValue::Counter(1));
+    }
+
+    #[test]
+    fn aligned_source_column_names_keep_source_case_in_positional_order() {
+        let columns = vec!["SNID".to_string(), "NAME".to_string()];
+        let source_columns = vec!["snid".to_string(), "name".to_string()];
+
+        let aligned = aligned_source_column_names(&columns, Some(&source_columns));
+        assert_eq!(aligned, source_columns);
+
+        let fallback = aligned_source_column_names(&columns, None);
+        assert_eq!(fallback, columns);
+
+        let mismatched = aligned_source_column_names(&columns, Some(&vec!["snid".to_string()]));
+        assert_eq!(mismatched, columns);
+    }
+
+    #[test]
+    fn aligned_source_key_columns_map_keys_by_position() {
+        let columns = vec!["SNID".to_string(), "NAME".to_string()];
+        let source_columns = vec!["snid".to_string(), "name".to_string()];
+
+        let keys = aligned_source_key_columns(&columns, &source_columns, &["NAME".to_string()]);
+        assert_eq!(keys, vec!["name".to_string()]);
+
+        let unknown = aligned_source_key_columns(&columns, &source_columns, &["missing".to_string()]);
+        assert_eq!(unknown, vec!["missing".to_string()]);
     }
 }

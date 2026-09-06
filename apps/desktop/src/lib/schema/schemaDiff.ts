@@ -1,4 +1,5 @@
 import type { ColumnInfo, IndexInfo, ForeignKeyInfo, TriggerInfo, FunctionInfo, SequenceInfo, RuleInfo, OwnerInfo, DatabaseType, TableInfo } from "@/types/database";
+import type { SchemaDiffTableMapping } from "@/types/schemaDiff";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 
 const DIALECT_KIND_MAP: Record<string, string> = {
@@ -176,6 +177,7 @@ export interface TableDiff {
   type: "added" | "removed" | "modified" | "renamed";
   objectType?: "table" | "view";
   name: string;
+  targetName?: string;
   columns?: ColumnDiff[];
   indexes?: IndexDiff[];
   foreignKeys?: ForeignKeyDiff[];
@@ -221,6 +223,8 @@ export interface SchemaDiffPreparationOptions {
   ignoreComments?: boolean;
   cascadeDelete?: boolean;
   compareColumnOrder?: boolean;
+  ignoreTableNameCase?: boolean;
+  ignoreColumnNameCase?: boolean;
   detectRenames?: boolean;
   detectTableRenames?: boolean;
   renameThreshold?: number;
@@ -230,6 +234,7 @@ export interface SchemaDiffPreparationOptions {
   targetDialect?: string;
   compatibilityThreshold?: number;
   fieldMappings?: FieldMappingEntry[];
+  tableMappings?: SchemaDiffTableMapping[];
 }
 
 export interface RenameCandidate {
@@ -699,7 +704,7 @@ export function convertToSchemaDiffObjects(tableDiffs: TableDiff[], functionDiff
       objectKind: diff.objectType === "view" ? "view" : "table",
       name: diff.name,
       sourceName: diff.type === "added" ? undefined : diff.name,
-      targetName: diff.type === "removed" ? undefined : isRenamed ? newName : diff.name,
+      targetName: diff.type === "removed" ? undefined : isRenamed ? newName : (diff.targetName ?? diff.name),
       selected: opType !== "none",
       sourceDdl: diff.ddl,
       targetDdl: diff.targetDdl,
@@ -974,7 +979,7 @@ export function injectColumnRenameSql(sql: string, diffs: TableDiff[], threshold
         // rc = removed column (exists in source, NOT in target → needs to be ADDED to target)
         // best = added column (exists in target, NOT in source → needs to be DROPPED from target)
         // To sync target → source: rename target's "best.name" to source's "rc.name"
-        replacements.push({ table: diff.name, oldName: best.name, newName: rc.name });
+        replacements.push({ table: diff.targetName ?? diff.name, oldName: best.name, newName: rc.name });
         used.add(best.name);
       }
     }

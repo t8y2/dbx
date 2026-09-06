@@ -54,7 +54,7 @@ const surfaceProps = computed(() => ({
 }));
 const contentEmits = createContentSurfaceEventForwarders(emit);
 const editorGroupBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits }));
-const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeTab.value! }));
+const resultSurfaceBindings = computed(() => ({ ...surfaceProps.value, ...contentEmits, activeTab: activeTab.value ?? props.activeTab }));
 
 defineExpose({
   focusSearch: (target: Element | null = null) => {

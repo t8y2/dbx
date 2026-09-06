@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   ExternalLink,
   Download,
+  Upload,
   FileUp,
   Trash2,
   ChevronDown,
@@ -12500,7 +12501,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
-  return { label: t("grid.export"), icon: Download, children: items };
+  return { label: t("grid.export"), icon: Upload, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {

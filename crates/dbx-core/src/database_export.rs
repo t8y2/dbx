@@ -56,9 +56,7 @@ impl SqlInsertMode {
     }
 
     pub(crate) const fn batch_size(self, default: usize) -> usize {
-        if self.flush_each_row() {
-            1
-        } else if default == 0 {
+        if self.flush_each_row() || default == 0 {
             1
         } else {
             default

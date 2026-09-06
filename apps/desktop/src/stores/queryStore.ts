@@ -4333,6 +4333,20 @@ export const useQueryStore = defineStore("query", () => {
     persistSavedSqlExecutionTarget(tab, options);
   }
 
+  /**
+   * Editing a saved connection's default database (Connection dialog Save) only
+   * updates the connection record — tabs opened before the edit keep whatever
+   * database was snapshotted onto them at creation time (issue #7905). Re-point
+   * every open tab that was still on the connection's old default over to the
+   * new one, same as if the tab had just been created fresh.
+   */
+  function syncTabsDatabaseForConnectionEdit(connectionId: string, previousDatabase: string, nextDatabase: string) {
+    if (previousDatabase === nextDatabase) return;
+    for (const tab of tabs.value) {
+      if (tab.connectionId === connectionId && tab.database === previousDatabase) updateDatabase(tab.id, nextDatabase);
+    }
+  }
+
   function updateCatalog(id: string, catalog: string | undefined, database: string, options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((candidate) => candidate.id === id);
     if (!tab || (tab.catalog === catalog && tab.database === database)) return;
@@ -7786,6 +7800,7 @@ export const useQueryStore = defineStore("query", () => {
     togglePinnedTab,
     reorderTab,
     updateDatabase,
+    syncTabsDatabaseForConnectionEdit,
     updateCatalog,
     updateSchema,
     updateConnection,

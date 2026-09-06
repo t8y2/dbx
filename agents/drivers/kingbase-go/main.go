@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -634,7 +635,46 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	start := time.Now()
 	sqlText := trimStatementSQL(opts.SQL)
 	if isQuerySQL(sqlText) {
-		rows, conn, cancel, err := s.queryRows(sqlText, opts.Schema, opts.TimeoutSecs)
+		maxRows := opts.MaxRows
+		if maxRows <= 0 {
+			maxRows = defaultMaxRows
+		}
+		// DBX core fuses `LIMIT n [OFFSET m]` (and the user's ORDER BY stays)
+		// into the SQL for pagination. For KingbaseES/Postgres the fused LIMIT
+		// makes the planner pick a nested-loop plan "optimized for N rows" whose
+		// repeated pub_code bitmap scans can take minutes, and the ORDER BY forces
+		// a blocking sort. The fast path is the one the COUNT(*) wrapper already
+		// gets: no LIMIT, no ORDER BY -> hash join + HashAggregate. So strip the
+		// trailing LIMIT/OFFSET, wrap the bare statement in a derived table, and
+		// re-apply ORDER BY + LIMIT/OFFSET on the outside: the inner subquery
+		// keeps the fast plan while the server sorts the materialized groups and
+		// pages correctly (ordered results, working OFFSET). If the rewritten
+		// query fails, fall back to the bare unordered execution.
+		execSQL := sqlText
+		if raw, limit, offset, hadLimit := stripTrailingLimit(sqlText); hadLimit {
+			if bare, orderClause, hadOrder := stripTrailingOrderBy(raw); hadOrder {
+				pageSize := limit
+				if pageSize <= 0 {
+					pageSize = maxRows
+				}
+				orderedSQL := buildOrderedPagedQuery(bare, orderClause, pageSize+1, offset)
+				rows, conn, cancel, err := s.queryRows(orderedSQL, opts.Schema, opts.TimeoutSecs)
+				if err == nil {
+					result, rerr := readRows(rows, maxRows)
+					_ = rows.Close()
+					_ = conn.Close()
+					s.endOperation(cancel)
+					if rerr == nil {
+						result.ExecutionTimeMS = time.Since(start).Milliseconds()
+						return result, nil
+					}
+				}
+				execSQL = bare
+			} else {
+				execSQL = raw
+			}
+		}
+		rows, conn, cancel, err := s.queryRows(execSQL, opts.Schema, opts.TimeoutSecs)
 		if err != nil {
 			return queryResult{}, err
 		}
@@ -643,10 +683,6 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 			_ = conn.Close()
 			s.endOperation(cancel)
 		}()
-		maxRows := opts.MaxRows
-		if maxRows <= 0 {
-			maxRows = defaultMaxRows
-		}
 		result, err := readRows(rows, maxRows)
 		result.ExecutionTimeMS = time.Since(start).Milliseconds()
 		return result, err
@@ -665,6 +701,79 @@ func (s *server) executeQuery(opts queryOptions) (queryResult, error) {
 	}
 	affected, _ := execResult.RowsAffected()
 	return queryResult{Columns: []string{}, ColumnTypes: []string{}, Rows: [][]any{}, AffectedRows: affected, ExecutionTimeMS: time.Since(start).Milliseconds()}, nil
+}
+
+// trailingLimitRe matches a DBX-appended `LIMIT n [OFFSET m]` suffix at the end
+// of a statement (optional trailing semicolon/whitespace). It only matches a
+// top-level trailing LIMIT, so a LIMIT inside a subquery is preserved.
+var trailingLimitRe = regexp.MustCompile(`(?is)\s+LIMIT\s+(\d+)(?:\s+OFFSET\s+(\d+))?\s*;?\s*$`)
+
+// stripTrailingLimit removes a trailing `LIMIT n [OFFSET m]` from the statement
+// and reports the captured limit/offset (zero when absent).
+func stripTrailingLimit(sqlText string) (stripped string, limit, offset int, hadLimit bool) {
+	loc := trailingLimitRe.FindStringSubmatchIndex(sqlText)
+	if loc == nil {
+		return sqlText, 0, 0, false
+	}
+	limit = atoiSafe(sqlText[loc[2]:loc[3]])
+	if loc[4] >= 0 { // optional OFFSET group matched
+		offset = atoiSafe(sqlText[loc[4]:loc[5]])
+	}
+	return strings.TrimSpace(sqlText[:loc[0]]), limit, offset, true
+}
+
+func atoiSafe(s string) int {
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return n
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+// stripTrailingOrderBy splits the last top-level `ORDER BY ...` clause off the
+// statement by scanning left-to-right and tracking parenthesis depth, so an
+// ORDER BY inside a subquery is preserved. It does not parse string/identifier
+// quotes, so it is only applied to DBX-paginated statements (which already had
+// a trailing LIMIT stripped) where the rewrite is the point.
+func stripTrailingOrderBy(sqlText string) (bare, orderClause string, hadOrder bool) {
+	upper := strings.ToUpper(sqlText)
+	idx := -1
+	depth := 0
+	for i := 0; i+9 <= len(upper); i++ {
+		switch sqlText[i] {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		}
+		if depth == 0 && upper[i:i+9] == " ORDER BY" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return sqlText, "", false
+	}
+	return strings.TrimSpace(sqlText[:idx]), strings.TrimSpace(sqlText[idx:]), true
+}
+
+// orderByQualifierRe matches a `qualifier.` prefix in an ORDER BY column
+// reference, so `t.modelKey` can be rewritten to `modelKey` when the ORDER BY is
+// moved outside the derived table (which exposes plain column names).
+var orderByQualifierRe = regexp.MustCompile(`(?i)\b[a-z_][a-z0-9_]*\.`)
+
+// buildOrderedPagedQuery wraps the bare aggregate in a derived table and applies
+// ORDER BY + LIMIT/OFFSET on the outside. The inner subquery (no ORDER BY) keeps
+// the fast hash-join + HashAggregate plan; the outer sorts the materialized
+// groups and pages them, so results stay ordered and OFFSET pagination works.
+// limit is expected to be pageSize+1 so truncation can be detected.
+func buildOrderedPagedQuery(bare, orderClause string, limit, offset int) string {
+	order := orderByQualifierRe.ReplaceAllString(orderClause, "")
+	return fmt.Sprintf("SELECT * FROM (%s) dbx_p %s LIMIT %d OFFSET %d", bare, order, limit, offset)
 }
 
 func (s *server) queryRows(sqlText string, schema string, timeoutSecs int) (*sql.Rows, *sql.Conn, context.CancelFunc, error) {

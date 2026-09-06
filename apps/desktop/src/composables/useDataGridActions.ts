@@ -20,6 +20,7 @@ import { uuid } from "@/lib/common/utils";
 import { simpleDataGridOrderByReferencesMissingColumn, type DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import { continuousQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { QUERY_RESULT_FETCH_ALL_BATCH_ROWS, beginFetchAllRows, endFetchAllRows, isFetchAllRowsStopRequested, requestStopFetchAllRows } from "@/lib/dataGrid/queryResultFetchAllRows";
 import { queryResultBaseSql, queryResultExecutionSql } from "@/lib/tabs/tabPresentation";
 import { sqlExecutionTargetCapabilities } from "@/lib/database/sqlExecutionTargetCapabilities";
 
@@ -343,10 +344,10 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     await queryStore.executeCurrentTab();
   }
 
-  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string) {
+  async function onPaginate(tabId: string | undefined, offset: number, limit: number, whereInput?: string, orderBy?: string, options?: { forceAppend?: boolean }) {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
-    const appendResult = settingsStore.editorSettings.infiniteScroll && offset > 0 && offset === tab.result?.rows.length;
+    const appendResult = (options?.forceAppend || settingsStore.editorSettings.infiniteScroll) && offset > 0 && offset === tab.result?.rows.length;
     const appendOptions = appendResult
       ? {
           appendResult: {
@@ -477,6 +478,61 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
+  // Sequentially appends whole batches to the tab's result until the backend
+  // reports no more rows, the configured row cap is reached, or the user
+  // stops it. Reuses onPaginate's append path (forceAppend) so it inherits
+  // the same sort/session continuation, column-metadata preservation, and
+  // row-cap enforcement as manual infinite scroll — nothing here bypasses
+  // the configured "query result max rows" limit.
+  async function onFetchAllRows(tabId: string) {
+    if (!beginFetchAllRows(tabId)) return;
+    try {
+      while (!isFetchAllRowsStopRequested(tabId)) {
+        const tab = queryStore.tabs.find((candidate) => candidate.id === tabId);
+        if (!tab || tab.mode !== "query" || !tab.result) break;
+        // Menu already disables these cases; re-checked defensively here.
+        if (tab.resultPageLimit === undefined || tab.resultSortMode === "local") break;
+        const cap = continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows);
+        const loadedRows = tab.result.rows.length;
+        const remaining = cap - loadedRows;
+        if (remaining <= 0) {
+          toast(t("grid.fetchAllRowsLimitReached", { cap }), 5000);
+          break;
+        }
+        const batchSize = Math.min(Math.max(tab.resultPageLimit, QUERY_RESULT_FETCH_ALL_BATCH_ROWS), remaining);
+        const previousHasMore = tab.result.has_more;
+        const previousSessionId = tab.result.session_id;
+        try {
+          await onPaginate(tabId, loadedRows, batchSize, undefined, undefined, { forceAppend: true });
+        } catch (e: any) {
+          toast(e?.message || String(e), 5000);
+          break;
+        }
+        if (isFetchAllRowsStopRequested(tabId)) break;
+        const after = queryStore.tabs.find((candidate) => candidate.id === tabId)?.result;
+        if (!after) break;
+        const fetchedThisBatch = after.rows.length - loadedRows;
+        // Most drivers hardcode has_more:false for offset pagination, so a
+        // short page (fewer rows than requested) is the reliable "done"
+        // signal there; has_more flipping false after being true only means
+        // something for session/cursor drivers (mirrors
+        // dataGridInfiniteScrollAppendCompletion's cursorExhausted check).
+        const cursorExhausted = !!previousSessionId && previousHasMore === true && after.has_more === false;
+        if (after.rows.length >= cap) {
+          toast(t("grid.fetchAllRowsLimitReached", { cap }), 5000);
+          break;
+        }
+        if (fetchedThisBatch < batchSize || cursorExhausted) break;
+      }
+    } finally {
+      endFetchAllRows(tabId);
+    }
+  }
+
+  function onStopFetchAllRows(tabId: string) {
+    requestStopFetchAllRows(tabId);
+  }
+
   async function onSort(tabId: string | undefined, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode: DataGridSortMode = "database") {
     const tab = resolveActionTab(tabId);
     if (!tab) return;
@@ -596,5 +652,5 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     });
   }
 
-  return { onExecuteSql, onReloadData, onPaginate, onSort };
+  return { onExecuteSql, onReloadData, onPaginate, onSort, onFetchAllRows, onStopFetchAllRows };
 }

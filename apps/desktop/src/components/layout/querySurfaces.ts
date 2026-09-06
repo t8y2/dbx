@@ -79,6 +79,8 @@ export interface ContentAreaSurfaceEmits {
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];
   sort: [tabId: string, column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
+  fetchAllRows: [tabId: string];
+  stopFetchAllRows: [tabId: string];
   executeSql: [tabId: string, sql: string];
   clickTable: [tabId: string, target: SqlObjectNavigationTarget];
   viewTableData: [tabId: string, target: SqlObjectNavigationTarget];

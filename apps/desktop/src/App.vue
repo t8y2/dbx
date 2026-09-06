@@ -897,7 +897,7 @@ async function requestMultiDbExecute() {
 const dialogs = useDialogSources();
 const { getDatabaseOptions } = useDatabaseOptions();
 const { openLineageTarget, openDatabaseSearchTarget, openDiagramTarget, openObjectBrowserTableTarget, onStructureEditorSaved, openTableTarget } = useNavigationTargets(dialogs);
-const { onExecuteSql, onReloadData, onPaginate, onSort } = useDataGridActions(activeTab);
+const { onExecuteSql, onReloadData, onPaginate, onSort, onFetchAllRows, onStopFetchAllRows } = useDataGridActions(activeTab);
 const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openTableTarget,
   openSqlFilePath,
@@ -3571,6 +3571,8 @@ onUnmounted(() => {
                     @reload="(tabId: string, sql: any, searchText: any, whereInput: any, orderBy: any, limit: any, offset: any, intent: any) => onReloadData(tabId, sql, searchText, whereInput, orderBy, limit, offset, intent)"
                     @paginate="(tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string) => onPaginate(tabId, offset, limit, whereInput, orderBy)"
                     @sort="(tabId: string, column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => onSort(tabId, column, columnIndex, direction, whereInput, mode)"
+                    @fetch-all-rows="(tabId: string) => onFetchAllRows(tabId)"
+                    @stop-fetch-all-rows="(tabId: string) => onStopFetchAllRows(tabId)"
                     @execute-sql="(tabId: string, sql: string) => onExecuteSql(tabId, sql)"
                     @click-table="(_tabId: string, target: SqlObjectNavigationTarget) => onClickTable(target)"
                     @view-table-data="(_tabId: string, target: SqlObjectNavigationTarget) => onViewTableData(target)"

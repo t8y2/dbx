@@ -161,6 +161,7 @@ import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { applyMongoGridChangesToDocument, applyMongoGridChangesToDocumentBaseline, buildMongoUpdateDocument, formatMongoShellLiteral, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import { isDataGridToolbarCompact, type DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
+import { isFetchingAllRows } from "@/lib/dataGrid/queryResultFetchAllRows";
 import { useTabScroll } from "@/composables/useTabScroll";
 import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import ToolbarOverflowMenu from "@/components/ui/ToolbarOverflowMenu.vue";
@@ -1880,6 +1881,8 @@ defineExpose({
                 :page-jump-progress="activeTab.resultPageJumpProgress"
                 :on-execute-sql="async (sql: string) => emit('executeSql', activeTab.id, sql)"
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
+                supports-fetch-all-rows
+                :fetch-all-rows-loading="isFetchingAllRows(activeTab.id)"
                 :query-result-export-request="
                   (options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' | 'txt' | 'sql'; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined>; insertMode?: SqlInsertMode }) =>
                     queryStore.buildQueryResultExportRequest(activeTab.id, options)
@@ -1891,6 +1894,8 @@ defineExpose({
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent) => emit('reload', activeTab.id, sql, searchText, whereInput, orderBy, limit, offset, intent)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy)"
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
+                @fetch-all-rows="emit('fetchAllRows', activeTab.id)"
+                @stop-fetch-all-rows="emit('stopFetchAllRows', activeTab.id)"
                 @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
               >
                 <template #result-toolbar-leading="{ compact }">

@@ -60,6 +60,7 @@ import { Input } from "@/components/ui/input";
 import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdownMenu from "@/components/ui/LightDropdownMenu.vue";
+import type { LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -279,6 +280,7 @@ import {
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
 import { continuousQueryResultMaxRows, effectiveQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { QUERY_RESULT_FETCH_ALL_WARN_ROWS, shouldWarnFetchAllRows, suppressFetchAllRowsConfirm } from "@/lib/dataGrid/queryResultFetchAllRows";
 import { allNullColumnIndexes } from "@/lib/dataGrid/dataGridColumnVisibility";
 import { buildDataGridColumnLookupItems, dataGridColumnCommentFor, filterDataGridColumnLookupItems } from "@/lib/dataGrid/dataGridColumnLookup";
 import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
@@ -507,6 +509,9 @@ interface DataGridProps {
   pageJumpProgress?: QueryPageJumpProgress;
   /** Document stores (e.g. MongoDB) count exactly on demand without SQL tableMeta/countSql. */
   countTotalRows?: () => Promise<number | undefined>;
+  /** Opt-in for the "load all rows" page-size-menu entry; only the SQL query-results grid wires this. */
+  supportsFetchAllRows?: boolean;
+  fetchAllRowsLoading?: boolean;
   loading?: boolean;
   cacheKey?: string;
   columnWidthCacheKey?: string;
@@ -578,6 +583,8 @@ const emit = defineEmits<{
   reload: [sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [offset: number, limit: number, whereInput?: string, orderBy?: string];
   sort: [column: string, columnIndex: number, direction: "asc" | "desc" | null, whereInput?: string, mode?: DataGridSortMode];
+  "fetch-all-rows": [];
+  "stop-fetch-all-rows": [];
   "update:whereInput": [value: string];
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
@@ -753,6 +760,14 @@ const infiniteScrollEnabled = computed(() => props.paginationEnabled && settings
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
 const infiniteScrollMaxRows = computed(() => continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
+// A result produced by appending "load all rows" batches, as opposed to a
+// single page. Paginating away from it would silently discard the
+// accumulated rows, so pagination controls hide themselves while this holds.
+// Also true from the moment fetch-all-rows starts loading, not only once the
+// first batch has landed — otherwise pagination controls stay visible (and a
+// stray click could overwrite the in-progress accumulation) during the first
+// batch's request.
+const accumulatedRowsMode = computed(() => isResultsContext.value && (props.result.appended_from_row_count !== undefined || fetchAllRowsLoadingState.value));
 const flatteningMultiLineEnabled = computed(() => settingsStore.editorSettings.flatteningMultiLineText);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
 const readonlyTextCell = ref<{
@@ -4191,7 +4206,7 @@ async function lastPage() {
 }
 
 function handleGridPaginationShortcut(event: KeyboardEvent): boolean {
-  if (!props.paginationEnabled || gridPaginationBusy.value || infiniteScrollEnabled.value) return false;
+  if (!props.paginationEnabled || gridPaginationBusy.value || infiniteScrollEnabled.value || accumulatedRowsMode.value) return false;
   const shortcuts = settingsStore.editorSettings.shortcuts;
   let navigate: (() => void) | undefined;
   if (currentPage.value > 1 && isGoToFirstPageShortcut(event, shortcuts)) navigate = firstPage;
@@ -8508,12 +8523,70 @@ function saveExtractorConfiguration(value: { preference: DataGridCopyPreference;
   });
 }
 
-const pageSizeMenuItems = computed(() =>
-  pageSizeOptions.value.map((size) => ({
+const FETCH_ALL_ROWS_MENU_VALUE = "__fetch_all_rows__";
+const fetchAllRowsAvailable = computed(() => isResultsContext.value && !!props.supportsFetchAllRows);
+const fetchAllRowsLoadingState = computed(() => !!props.fetchAllRowsLoading);
+// Once "load all rows" has run its course for this result (has_more no
+// longer true), disable re-triggering it — there is nothing left to fetch,
+// matching how the pagination controls already hide themselves.
+const fetchAllRowsMenuDisabled = computed(() => {
+  if (fetchAllRowsLoadingState.value) return false;
+  if (props.pageLimit === undefined || props.sortMode === "local") return true;
+  if (accumulatedRowsMode.value && props.result.has_more !== true) return true;
+  return false;
+});
+const fetchAllRowsMenuLabel = computed(() => (fetchAllRowsLoadingState.value ? t("grid.fetchAllRowsStop") : t("grid.fetchAllRows")));
+const showFetchAllRowsConfirm = ref(false);
+function requestFetchAllRows() {
+  if (fetchAllRowsMenuDisabled.value) return;
+  const cap = infiniteScrollMaxRows.value;
+  const knownTotal = displayedTotalRowCount.value;
+  if (!suppressFetchAllRowsConfirm.value || shouldWarnFetchAllRows(knownTotal, cap, QUERY_RESULT_FETCH_ALL_WARN_ROWS)) {
+    showFetchAllRowsConfirm.value = true;
+    return;
+  }
+  emit("fetch-all-rows");
+}
+function confirmFetchAllRows() {
+  showFetchAllRowsConfirm.value = false;
+  emit("fetch-all-rows");
+}
+function stopFetchAllRows() {
+  emit("stop-fetch-all-rows");
+}
+// Switching tabs remounts DataGrid (keyed by tab id), so an in-flight
+// fetch-all-rows loop for the outgoing tab has no UI left to report to;
+// stop it rather than let it keep fetching in the background unobserved.
+onUnmounted(() => {
+  if (fetchAllRowsLoadingState.value) stopFetchAllRows();
+});
+const fetchAllRowsWarnLarge = computed(() => shouldWarnFetchAllRows(displayedTotalRowCount.value, infiniteScrollMaxRows.value, QUERY_RESULT_FETCH_ALL_WARN_ROWS));
+const fetchAllRowsConfirmMessage = computed(() => {
+  const total = displayedTotalRowCount.value;
+  if (fetchAllRowsWarnLarge.value && typeof total === "number") {
+    return t("grid.fetchAllRowsConfirmLarge", { total, threshold: QUERY_RESULT_FETCH_ALL_WARN_ROWS });
+  }
+  if (typeof total === "number") {
+    return t("grid.fetchAllRowsConfirmMessage", { total });
+  }
+  return t("grid.fetchAllRowsConfirmUnknown", { cap: infiniteScrollMaxRows.value });
+});
+
+const pageSizeMenuItems = computed(() => {
+  const items: LightDropdownItem[] = pageSizeOptions.value.map((size) => ({
     value: String(size),
     label: `${size} ${t("grid.rowsPerPageShort")}`,
-  })),
-);
+  }));
+  if (fetchAllRowsAvailable.value) {
+    items.push({
+      value: FETCH_ALL_ROWS_MENU_VALUE,
+      label: fetchAllRowsMenuLabel.value,
+      separatorBefore: true,
+      disabled: fetchAllRowsMenuDisabled.value,
+    });
+  }
+  return items;
+});
 
 const exportMenuItems = computed(() => {
   const hasFullResultExport = !!props.fullExportResult;
@@ -8615,6 +8688,14 @@ const exportMenuItems = computed(() => {
 });
 
 function selectPageSizeMenuItem(value: string) {
+  if (value === FETCH_ALL_ROWS_MENU_VALUE) {
+    if (fetchAllRowsLoadingState.value) {
+      stopFetchAllRows();
+    } else {
+      requestFetchAllRows();
+    }
+    return;
+  }
   changePageSize(Number(value));
 }
 
@@ -14826,6 +14907,11 @@ function openGridSnapshot() {
         <span v-if="showTruncationWarning" class="shrink-0 text-amber-500 text-xs">(truncated)</span>
         <span v-if="!hasData" class="shrink-0">{{ t("grid.rowsAffected", { count: result.affected_rows }) }}</span>
         <span class="shrink-0">{{ result.execution_time_ms }}ms</span>
+        <span v-if="fetchAllRowsLoadingState" class="shrink-0 flex items-center gap-1">
+          <Loader2 aria-hidden="true" class="h-3 w-3 animate-spin" />
+          {{ typeof displayedTotalRowCount === "number" ? t("grid.fetchAllRowsProgress", { loaded: result.rows.length, total: displayedTotalRowCount }) : t("grid.fetchAllRowsProgressUnknown", { loaded: result.rows.length }) }}
+          <button type="button" class="text-muted-foreground/70 underline underline-offset-2 hover:text-foreground" @click="stopFetchAllRows">{{ t("grid.fetchAllRowsStop") }}</button>
+        </span>
 
         <template v-if="editable && hasDataGridSaveTarget">
           <span v-if="hasPendingChanges" class="shrink-0 text-foreground">
@@ -14855,6 +14941,8 @@ function openGridSnapshot() {
         :loading="gridPaginationBusy"
         :infinite-scroll-enabled="infiniteScrollEnabled"
         :infinite-scroll-all-loaded="infiniteScrollAllLoaded"
+        :accumulated-rows="accumulatedRowsMode"
+        :fetching-all-rows="fetchAllRowsLoadingState"
         :page-size="pageSize"
         :page-size-menu-items="pageSizeMenuItems"
         :export-menu-items="exportMenuItems"
@@ -15004,6 +15092,18 @@ function openGridSnapshot() {
       <SqlPreviewPanel :sql="previewSqlText" :loading="isPreviewLoading" :can-undo="canUndoPendingChange" :can-redo="canRedoPendingChange" @undo="undoGridChange" @redo="redoGridChange" @close="closeSqlPreview" />
     </div>
 
+    <DangerConfirmDialog
+      v-model:open="showFetchAllRowsConfirm"
+      v-model:suppress-future-prompts="suppressFetchAllRowsConfirm"
+      :title="t('grid.fetchAllRows')"
+      :message="fetchAllRowsConfirmMessage"
+      :details-text="t('grid.fetchAllRowsConfirmDetails', { cap: infiniteScrollMaxRows })"
+      :confirm-label="t('grid.fetchAllRows')"
+      :show-suppress-toggle="!fetchAllRowsWarnLarge"
+      :suppress-toggle-label="t('grid.fetchAllRowsSuppress')"
+      :close-on-confirm="false"
+      @confirm="confirmFetchAllRows"
+    />
     <DangerConfirmDialog
       v-model:open="formatterCustomDeleteOpen"
       :title="t('grid.formatterDeleteCustom')"

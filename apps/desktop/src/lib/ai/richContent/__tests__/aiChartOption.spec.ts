@@ -89,4 +89,11 @@ describe("buildAiChartOption", () => {
     expect(option.xAxis).toMatchObject({ name: "Month" });
     expect(option.yAxis).toMatchObject({ name: "Amount" });
   });
+
+  it("enables accessible output and zoom-safe labels for dense category axes", () => {
+    const option = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "line", xAxis: { values: Array.from({ length: 13 }, (_, i) => `day-${i}`) }, series: [{ name: "s", data: Array.from({ length: 13 }, (_, i) => i) }] })), light);
+    expect(option.aria).toMatchObject({ enabled: true });
+    expect(option.dataZoom).toHaveLength(2);
+    expect(option.xAxis).toMatchObject({ axisLabel: { rotate: 35, overflow: "truncate" } });
+  });
 });

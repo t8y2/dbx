@@ -21,8 +21,11 @@ function legendTextStyle(theme: AiChartTheme): { color: string } {
 }
 
 export function buildAiChartOption(spec: AiChartSpec, theme: AiChartTheme): EChartsOption {
+  // ECharts 6 uses `enabled`; older ECharts 5 examples call this `show`.
+  const aria = { enabled: true };
   if (spec.type === "pie") {
     return {
+      aria,
       tooltip: { trigger: "item" },
       legend: { bottom: 0, textStyle: legendTextStyle(theme) },
       title: spec.title ? { text: spec.title, left: "center", textStyle: { color: theme.isDark ? "#ccc" : "#333", fontSize: 13 } } : undefined,
@@ -36,17 +39,20 @@ export function buildAiChartOption(spec: AiChartSpec, theme: AiChartTheme): ECha
     };
   }
 
+  const denseCategories = spec.xAxis.values.length > 12;
   return {
+    aria,
     tooltip: { trigger: "axis" },
     legend: { bottom: 0, textStyle: legendTextStyle(theme) },
     title: spec.title ? { text: spec.title, left: "center", textStyle: { color: theme.isDark ? "#ccc" : "#333", fontSize: 13 } } : undefined,
-    grid: { left: 60, right: 20, top: spec.title ? 40 : 20, bottom: 40 },
+    grid: { left: 60, right: 20, top: spec.title ? 40 : 20, bottom: denseCategories ? 76 : 40 },
+    dataZoom: denseCategories ? [{ type: "inside" }, { type: "slider", bottom: 8, height: 16 }] : undefined,
     xAxis: {
       type: "category",
       name: spec.xAxis.label ?? undefined,
       nameTextStyle: { color: axisLabelColor(theme) },
       data: spec.xAxis.values,
-      axisLabel: { color: axisLabelColor(theme) },
+      axisLabel: denseCategories ? { color: axisLabelColor(theme), rotate: 35, overflow: "truncate", width: 88 } : { color: axisLabelColor(theme) },
     },
     yAxis: {
       type: "value",

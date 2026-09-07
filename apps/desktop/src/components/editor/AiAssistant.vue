@@ -174,21 +174,20 @@ import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
-const AiChartRenderer = defineAsyncComponent({
-  // Lazy-load the chart renderer (and with it the whole echarts bundle): echarts
-  // is only pulled in when a message actually renders a chart-json segment, so a
-  // plain AI conversation never loads it. Keeps parity with QueryChart.vue in
-  // ContentArea.vue, which is also async.
-  loader: () => import("@/components/ai/rich/AiChartRenderer.vue"),
-  // Reserve the chart's slot height while the chunk loads so the message
-  // stream does not jitter before the chart appears (the chart itself keeps
-  // its explicit >=320px non-zero height contract).
-  // Render-function component: the production bundle is runtime-only (no
-  // template compiler), so the placeholder must not use a `template` option.
-  loadingComponent: () => h("div", { class: "my-2 h-80 w-full rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900" }),
-});
 
 const { t } = useI18n();
+const AiChartRenderer = defineAsyncComponent({
+  // Lazy-load the chart renderer (and with it the whole echarts bundle): echarts
+  // is only pulled in when a message actually renders a chart-json segment.
+  loader: () => import("@/components/ai/rich/AiChartRenderer.vue"),
+  // A visible, fixed-height status prevents an async chunk from looking like a
+  // failed chart and reserves the same viewport before the canvas is ready.
+  loadingComponent: () =>
+    h("div", { class: "my-2 flex min-h-60 h-[clamp(15rem,35vw,20rem)] w-full items-center justify-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 text-xs text-zinc-500 dark:border-zinc-700/50 dark:bg-zinc-900 dark:text-zinc-400", role: "status", "aria-live": "polite" }, [
+      h(Loader2, { class: "h-4 w-4 animate-spin", "aria-hidden": "true" }),
+      h("span", t("common.loading")),
+    ]),
+});
 const settings = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
@@ -4714,7 +4713,7 @@ async function openExternalUrl(url: string) {
                   <div v-if="seg.type === 'text'" class="ai-markdown whitespace-normal" @click.capture="onMarkdownClick">
                     <div v-html="seg.html" />
                   </div>
-                  <AiChartRenderer v-else-if="seg.type === 'chart'" :spec="seg.spec" />
+                  <AiChartRenderer v-else-if="seg.type === 'chart'" :spec="seg.spec" :content="seg.content" />
                   <div v-else class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900">
                     <div class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400">
                       <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />

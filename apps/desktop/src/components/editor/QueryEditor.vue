@@ -6730,6 +6730,7 @@ watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) =
   if (!view.value) return;
   if (tabId !== prevTabId) {
     activateTabDocument(prevTabId, tabId, val);
+    if (props.autoFocus) restoreEditorFocus();
     return;
   }
   if (val !== view.value.state.doc.toString()) {

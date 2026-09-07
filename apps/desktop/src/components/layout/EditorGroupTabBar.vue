@@ -199,6 +199,7 @@ const tabScrollbarThumbStyle = computed<CSSProperties>(() => ({
 // Overflow search lists this group's tabs (mirrors the legacy AppTabBar
 // overflow popover, scoped to the group that owns the strip).
 const tabOverflowOpen = ref(false);
+const tabLayoutRevision = ref(0);
 // The overflow popover's "search opened tabs" query is scoped to the popover
 // list only. It must not reach the strip: with a shared query, typing a term
 // with no match would empty the always-visible top tab bar while the active
@@ -243,6 +244,15 @@ function tabSectionThumbStyle(key: string): CSSProperties {
   };
 }
 
+function tabSectionHasOverflow(key: string): boolean {
+  const row = key === "fixed" ? fixedTabsRowRef.value : regularTabsRowRef.value;
+  return !!row && row.scrollWidth - row.clientWidth > 1;
+}
+
+function hasHorizontalRowOverflow(): boolean {
+  return tabSectionHasOverflow("fixed") || tabSectionHasOverflow("regular");
+}
+
 function onHorizontalTabWheel(event: WheelEvent) {
   // A trackpad can emit vertical and horizontal deltas together. Only let a
   // clearly horizontal gesture reach the row's native horizontal scroller.
@@ -252,8 +262,15 @@ function onHorizontalTabWheel(event: WheelEvent) {
   }
 }
 
+function revealActiveTabAfterLayout() {
+  const activeTab = tabsContainerRef.value?.querySelector<HTMLElement>('[data-active-tab="true"]');
+  if (!activeTab) return;
+  activeTab.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "nearest" });
+}
+
 const showOverflowControl = computed(() => {
-  const hasOverflow = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value : hasTabOverflow.value;
+  void tabLayoutRevision.value;
+  const hasOverflow = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value;
   return props.tabs.length > 0 && hasOverflow && !isWrapLayout.value && !isVerticalLayout.value;
 });
 const tabTailDragRegionClass = computed(() => (showOverflowControl.value || isWrapLayout.value || isVerticalLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
@@ -1158,15 +1175,17 @@ watch(
 );
 
 watch(
-  () => [props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"), props.specialPageTabs?.settingsOpen, props.specialPageTabs?.driverStoreOpen, settingsStore.editorSettings.tabLayout],
+  () => [props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"), props.specialPageTabs?.settingsOpen, props.specialPageTabs?.driverStoreOpen, settingsStore.editorSettings.tabLayout, compactTabTitle.value],
   () => {
     // Tab content can change without changing the scroll container's size.
     // Re-measure after Vue has committed the new pills to avoid stale overflow controls.
     nextTick(() =>
       requestAnimationFrame(() => {
+        tabLayoutRevision.value++;
         updateScrollButtons();
         fixedTabsScroll.updateScrollButtons();
         regularTabsScroll.updateScrollButtons();
+        nextTick(() => requestAnimationFrame(revealActiveTabAfterLayout));
       }),
     );
   },
@@ -1239,7 +1258,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
               ]"
             >
               <div
-                v-if="hasHorizontalFixedRows && tabSectionScroll(section.key).hasTabOverflow.value"
+                v-if="hasHorizontalFixedRows && (tabSectionScroll(section.key).hasTabOverflow.value || tabSectionHasOverflow(section.key))"
                 class="app-tab-scrollbar"
                 :class="[section.pinned ? 'app-tab-scrollbar--bottom' : '', { 'app-tab-scrollbar--dragging': tabSectionScroll(section.key).isScrollbarDragging.value }]"
                 @pointerdown="tabSectionScroll(section.key).startScrollbarDrag($event)"

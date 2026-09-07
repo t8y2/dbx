@@ -237,6 +237,20 @@
   pointer-events: auto;
 }
 
+/* With two horizontal rows, reveal only the scrollbar belonging to the row
+ * under the pointer. The dragging state keeps it visible after the pointer
+ * leaves the row. */
+.horizontal-fixed-tabs-scroll .app-tab-scrollbar {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:hover .app-tab-scrollbar,
+.horizontal-fixed-tabs-scroll .app-tab-scrollbar--dragging {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .app-tab-scrollbar::before {
   content: "";
   position: absolute;

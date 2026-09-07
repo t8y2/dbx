@@ -169,11 +169,7 @@ function toastDatabaseExportCompletion(errorCount: number, errorSummary: string 
   toast(t("databaseExport.exportSuccess"), 3000);
 }
 
-const canChangeQueryTimeout = computed(() =>
-  !!connectionId.value &&
-  !!exportWarning.value &&
-  isQueryTimeoutErrorMessage(exportWarning.value),
-);
+const canChangeQueryTimeout = computed(() => !!connectionId.value && !!exportWarning.value && isQueryTimeoutErrorMessage(exportWarning.value));
 
 async function loadDatabases(connId: string) {
   if (!connId) return;

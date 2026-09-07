@@ -13,6 +13,11 @@ const canaryVectors = [
   '<form action="https://canary.invalid/submit"><input type="submit" value="submit"></form>',
   '<base href="https://canary.invalid/">',
   '<a href="relative.png">relative link</a>',
+  // The relative <img> fires an auto-load with no click required: if `base-uri
+  // 'none'` failed, <base href> would rewrite it to
+  // https://canary.invalid/relative.png and the netlog would expose the leak
+  // without manual interaction.
+  '<img src="relative.png" alt="relative">',
   // Visible only when scripting is DISABLED (context A): a green PASS marker.
   '<noscript><p style="color:green;margin:0;font:600 13px system-ui">scripts are blocked → PASS</p></noscript>',
 ].join("\n");

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, toRaw, watch, type Component } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -174,7 +174,19 @@ import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
-import AiChartRenderer from "@/components/ai/rich/AiChartRenderer.vue";
+const AiChartRenderer = defineAsyncComponent({
+  // Lazy-load the chart renderer (and with it the whole echarts bundle): echarts
+  // is only pulled in when a message actually renders a chart-json segment, so a
+  // plain AI conversation never loads it. Keeps parity with QueryChart.vue in
+  // ContentArea.vue, which is also async.
+  loader: () => import("@/components/ai/rich/AiChartRenderer.vue"),
+  // Reserve the chart's slot height while the chunk loads so the message
+  // stream does not jitter before the chart appears (the chart itself keeps
+  // its explicit >=320px non-zero height contract).
+  loadingComponent: {
+    template: '<div class="my-2 h-80 w-full rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900"></div>',
+  },
+});
 
 const { t } = useI18n();
 const settings = useSettingsStore();

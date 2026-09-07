@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { AlertTriangle, Check, Copy, Download } from "@lucide/vue";
+import { AlertTriangle, Check, Copy, Download, Maximize2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { saveTextFile } from "@/lib/export/saveTextFile";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { acknowledgeAiHtmlCopyRisk, isAiHtmlCopyRiskAcknowledged } from "@/lib/ai/richContent/aiHtmlPreview";
 
 const props = defineProps<{
@@ -17,6 +18,7 @@ const props = defineProps<{
 const { t } = useI18n();
 const { toast } = useToast();
 const copied = ref(false);
+const previewExpanded = ref(false);
 // Inline confirmation instead of a modal: the first copy attempt arms the risk
 // strip; confirming copies (optionally remembering the choice for the
 // session), canceling keeps the clipboard untouched.
@@ -82,6 +84,9 @@ async function saveSafeHtml() {
        what gets saved. -->
   <section class="my-2 flex min-h-60 h-[clamp(15rem,35vw,20rem)] flex-col overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900" :aria-label="t('ai.htmlPreviewLabel')">
     <div class="flex h-8 items-center justify-end gap-1 border-b border-zinc-200 px-2 dark:border-zinc-700/50">
+      <button type="button" class="mr-auto rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100" :title="t('ai.htmlExpandPreview')" :aria-label="t('ai.htmlExpandPreview')" @click="previewExpanded = true">
+        <Maximize2 class="h-3.5 w-3.5" />
+      </button>
       <button
         type="button"
         class="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
@@ -115,4 +120,20 @@ async function saveSafeHtml() {
       <iframe sandbox="" :srcdoc="document" class="h-full w-full bg-white" :title="t('ai.htmlPreviewLabel')" />
     </div>
   </section>
+
+  <!-- The expanded dialog renders the SAME sandboxed document as the inline
+       card — identical `sandbox=""` and the identical CSP-wrapped `srcdoc`
+       bytes. This is pure UX magnification: the zero-trust boundary does not
+       change, there is no path here that hands raw HTML to the OS browser. -->
+  <Dialog :open="previewExpanded" @update:open="previewExpanded = $event">
+    <DialogContent class="sm:max-w-[min(1100px,92vw)] flex h-[85vh] flex-col">
+      <DialogHeader class="shrink-0">
+        <DialogTitle>{{ t("ai.htmlPreviewLabel") }}</DialogTitle>
+        <DialogDescription>{{ t("ai.htmlExpandPreviewHint") }}</DialogDescription>
+      </DialogHeader>
+      <div class="min-h-0 flex-1">
+        <iframe sandbox="" :srcdoc="document" class="h-full w-full bg-white" :title="t('ai.htmlPreviewLabel')" />
+      </div>
+    </DialogContent>
+  </Dialog>
 </template>

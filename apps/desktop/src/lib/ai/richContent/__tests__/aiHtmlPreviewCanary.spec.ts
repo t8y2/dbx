@@ -25,13 +25,17 @@ const canaryVectors = [
 const componentSource = readFileSync(new URL("../../../../components/ai/rich/AiHtmlPreview.vue", import.meta.url), "utf8");
 
 describe("AiHtmlPreview sandbox hardening (static canary)", () => {
-  it("sandboxes the preview iframe without any escape hatch", () => {
-    // Inspect the actual iframe tag, not the whole source (comments mention the
-    // sandbox tokens by name when documenting why they are absent).
-    const iframeTag = componentSource.match(/<iframe[^>]*>/)?.[0] ?? "";
-    expect(iframeTag).toContain('sandbox=""');
-    for (const forbidden of ["allow-scripts", "allow-same-origin", "allow-forms", "allow-popups", "allow-modals", "allow-top-navigation"]) {
-      expect(iframeTag).not.toContain(forbidden);
+  it("sandboxes every preview iframe without any escape hatch", () => {
+    // Inspect every actual iframe tag, not the whole source (comments mention the
+    // sandbox tokens by name when documenting why they are absent). The inline
+    // card and the expanded dialog iframes must carry identical boundaries.
+    const iframeTags = componentSource.match(/<iframe[^>]*>/g) ?? [];
+    expect(iframeTags.length).toBeGreaterThanOrEqual(2);
+    for (const iframeTag of iframeTags) {
+      expect(iframeTag).toContain('sandbox=""');
+      for (const forbidden of ["allow-scripts", "allow-same-origin", "allow-forms", "allow-popups", "allow-modals", "allow-top-navigation"]) {
+        expect(iframeTag).not.toContain(forbidden);
+      }
     }
   });
 

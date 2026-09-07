@@ -3038,6 +3038,8 @@ export default {
     chartDownloadFailed: "Failed to download chart image",
     chartData: "Chart data",
     htmlPreviewLabel: "AI-generated HTML preview",
+    htmlExpandPreview: "Open larger preview",
+    htmlExpandPreviewHint: "This preview runs fully sandboxed — scripts and network access are blocked.",
     htmlSaveSafe: "Save Safe HTML",
     htmlSaveFailed: "Failed to save HTML file",
     htmlCopySource: "Copy source",

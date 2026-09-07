@@ -2861,6 +2861,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "グラフ画像をダウンロードできませんでした",
     chartData: "グラフのデータ",
     htmlPreviewLabel: "AI生成HTMLのプレビュー",
+    htmlExpandPreview: "拡大プレビューを開く",
+    htmlExpandPreviewHint: "このプレビューは完全なサンドボックスで実行され、スクリプトとネットワークアクセスはブロックされます。",
     htmlSaveSafe: "安全なHTMLを保存",
     htmlSaveFailed: "HTMLファイルの保存に失敗しました",
     htmlCopySource: "ソースをコピー",

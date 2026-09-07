@@ -24,7 +24,7 @@ const locales: Array<[string, Record<string, unknown>]> = [
 // Keys the safe-HTML preview (PR2 of #6467) adds to the `ai` namespace. Every
 // locale must expose all of them — the preview UI renders in whatever locale
 // the user runs, and a missing key would leak raw keys into the toolbar.
-const AI_HTML_PREVIEW_KEYS = ["htmlPreviewLabel", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"] as const;
+const AI_HTML_PREVIEW_KEYS = ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"] as const;
 
 describe("AI rich content locale parity", () => {
   it.each(locales)("%s exposes the full ai.html* key set with non-empty copy", (_name, locale) => {

@@ -2831,6 +2831,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "차트 이미지를 다운로드하지 못했습니다",
     chartData: "차트 데이터",
     htmlPreviewLabel: "AI 생성 HTML 미리보기",
+    htmlExpandPreview: "큰 화면으로 미리보기",
+    htmlExpandPreviewHint: "이 미리보기는 완전한 샌드박스에서 실행되며 스크립트와 네트워크 액세스가 차단됩니다.",
     htmlSaveSafe: "안전한 HTML 저장",
     htmlSaveFailed: "HTML 파일 저장에 실패했습니다",
     htmlCopySource: "소스 복사",

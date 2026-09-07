@@ -2939,6 +2939,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "圖表圖片下載失敗",
     chartData: "圖表資料",
     htmlPreviewLabel: "AI 產生的 HTML 預覽",
+    htmlExpandPreview: "在大視窗預覽",
+    htmlExpandPreviewHint: "預覽在完全沙箱中執行，指令碼與網路存取均被封鎖。",
     htmlSaveSafe: "儲存安全 HTML",
     htmlSaveFailed: "儲存 HTML 檔案失敗",
     htmlCopySource: "複製原始碼",

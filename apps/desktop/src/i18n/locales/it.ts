@@ -2719,6 +2719,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "Impossibile scaricare l'immagine del grafico",
     chartData: "Dati del grafico",
     htmlPreviewLabel: "Anteprima HTML generata dall'IA",
+    htmlExpandPreview: "Apri anteprima ingrandita",
+    htmlExpandPreviewHint: "Questa anteprima viene eseguita in una sandbox completa: script e accesso alla rete sono bloccati.",
     htmlSaveSafe: "Salva HTML sicuro",
     htmlSaveFailed: "Salvataggio del file HTML non riuscito",
     htmlCopySource: "Copia sorgente",

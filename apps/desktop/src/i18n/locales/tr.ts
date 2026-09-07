@@ -3012,6 +3012,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "Grafik görüntüsü indirilemedi",
     chartData: "Grafik verileri",
     htmlPreviewLabel: "AI tarafından oluşturulan HTML önizlemesi",
+    htmlExpandPreview: "Büyük önizleme aç",
+    htmlExpandPreviewHint: "Bu önizleme tamamen korumalı alanda çalışır; betikler ve ağ erişimi engellenir.",
     htmlSaveSafe: "Güvenli HTML'i kaydet",
     htmlSaveFailed: "HTML dosyası kaydedilemedi",
     htmlCopySource: "Kaynağı kopyala",

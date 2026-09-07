@@ -2961,6 +2961,8 @@ export default withEnglishFallback({
     chartDownloadFailed: "图表图片下载失败",
     chartData: "图表数据",
     htmlPreviewLabel: "AI 生成的 HTML 预览",
+    htmlExpandPreview: "在大窗口预览",
+    htmlExpandPreviewHint: "预览在完全沙箱中运行，脚本与网络访问均被阻止。",
     htmlSaveSafe: "保存安全 HTML",
     htmlSaveFailed: "保存 HTML 文件失败",
     htmlCopySource: "复制源码",

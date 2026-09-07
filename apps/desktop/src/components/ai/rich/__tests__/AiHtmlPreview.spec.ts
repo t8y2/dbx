@@ -13,6 +13,36 @@ vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboard }));
 vi.mock("@/lib/export/saveTextFile", () => ({ saveTextFile: mocks.saveTextFile }));
 
+// The real Dialog portals its content only while open; we stub it as a
+// transparent DOM passthrough that mirrors that gating (slot only rendered when
+// `open` is true) and that closes through Vue's emit mechanism when clicked.
+// This mirrors the CodeSnapshotDialog.spec.ts stub approach.
+vi.mock("@/components/ui/dialog", async () => {
+  const { defineComponent, h } = await import("vue");
+  const passthrough = defineComponent({
+    setup(_props, { slots }) {
+      return () => h("div", slots.default?.());
+    },
+  });
+  return {
+    Dialog: defineComponent({
+      props: { open: Boolean },
+      emits: ["update:open"],
+      setup(props, { emit, slots }) {
+        return () => h("div", { "data-open": String(props.open), onClick: () => emit("update:open", false) }, props.open ? slots.default?.() : undefined);
+      },
+    }),
+    DialogContent: passthrough,
+    DialogHeader: passthrough,
+    DialogTitle: defineComponent({
+      setup(_props, { slots }) {
+        return () => h("div", { "data-slot": "dialog-title" }, slots.default?.());
+      },
+    }),
+    DialogDescription: passthrough,
+  };
+});
+
 import { buildSafeHtmlPreview } from "@/lib/ai/richContent/aiHtmlPreview";
 import type { App } from "vue";
 import { createApp, nextTick } from "vue";
@@ -118,6 +148,30 @@ describe("AiHtmlPreview", () => {
     expect(confirmStrip()).toBeNull();
     expect(mocks.copyToClipboard).toHaveBeenCalledWith(content);
     expect(mocks.toast).toHaveBeenCalledWith("ai.htmlCopyRiskToast");
+  });
+
+  it("opens the same sandboxed document in an expanded dialog and closes it", async () => {
+    await mountPreview();
+    expect(root?.querySelectorAll("iframe").length).toBe(1);
+
+    await click(button("ai.htmlExpandPreview"));
+    // The stub Dialog renders inline; the second iframe carries the same
+    // sandbox boundary and the same CSP-wrapped srcdoc as the inline card.
+    const iframes = [...(root?.querySelectorAll("iframe") ?? [])];
+    expect(iframes.length).toBe(2);
+    const dialogIframe = iframes[1];
+    expect(dialogIframe.getAttribute("sandbox")).toBe("");
+    const srcdoc = dialogIframe.getAttribute("srcdoc") ?? "";
+    expect(srcdoc).toContain("Content-Security-Policy");
+    expect(srcdoc).toContain("default-src 'none'");
+    expect(srcdoc).toContain(content);
+    // The dialog title is the same preview label used for the inline card.
+    expect(root?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("ai.htmlPreviewLabel");
+
+    // Closing (Esc / overlay / programmatic update:open) removes the iframe.
+    const dialog = root?.querySelector('[data-open="true"]');
+    await click(dialog);
+    expect(root?.querySelectorAll("iframe").length).toBe(1);
   });
 
   it("writes the wrapped safe document, never the raw source", async () => {

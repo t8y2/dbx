@@ -1,6 +1,10 @@
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
-import { DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeEditorSettings, type EditorSettings } from "@/stores/settingsStore";
+import { DEFAULT_CUSTOM_THEME_COLORS, DEFAULT_CUSTOM_THEME_DDL_COLORS, DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeEditorSettings, type EditorSettings } from "@/stores/settingsStore";
 import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
+import { DATA_GRID_TYPE_COLOR_KEYS, DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID } from "@/lib/dataGrid/dataGridTypeColorScheme";
+import { SHORTCUT_DEFINITIONS } from "@/lib/editor/shortcutRegistry";
+import { isCompleteSqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
+import { SQL_VARIABLE_SYNTAX_KEYS } from "@/lib/sql/sqlVariableSyntax";
 
 /**
  * Local backup / restore of application settings ("配置导入与导出").
@@ -152,6 +156,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "tableColumnTemplateFields",
     "redisKeyTemplates",
     "exportBatchSize",
+    "csvQuoteMode",
     "exportRowLimitEnabled",
     "exportRowLimit",
     "queryExportKeysetOptimizationEnabled",
@@ -264,9 +269,131 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
   appLayout: (value) => value === "separated" || value === "classic",
   activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
   // normalizeToolbarItems keeps unknown/typed values for every known key, so
-  // each one must already be the boolean the UI writes.
-  toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean"),
+  // each one must already be the boolean the UI writes, and no extra key may
+  // appear.
+  toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean") && Object.keys(value).every((key) => key in DEFAULT_TOOLBAR_ITEMS),
   ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
+};
+
+function isNonEmptyTrimmedString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isArrayOfShape(value: unknown, isItem: (item: unknown) => boolean): boolean {
+  return Array.isArray(value) && value.every(isItem);
+}
+
+function isStringArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isNonEmptyStringArray(value: unknown): boolean {
+  return isStringArray(value) && (value as string[]).every((item) => item.trim().length > 0);
+}
+
+/** Required color keys of a custom editor theme, keyed by expected JSON kind. */
+function valueKindShape(defaults: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(defaults).map(([key, value]) => [key, typeof value]));
+}
+
+const CUSTOM_THEME_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_COLORS as unknown as Record<string, unknown>);
+const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_COLORS as unknown as Record<string, unknown>);
+
+function hasRequiredValueKinds(value: unknown, shape: Record<string, string>): boolean {
+  if (!isPlainObject(value)) return false;
+  return Object.entries(shape).every(([key, kind]) => typeof value[key] === kind);
+}
+
+function isCustomThemeItem(value: unknown): boolean {
+  return isPlainObject(value) && isNonEmptyTrimmedString(value.id) && isNonEmptyTrimmedString(value.name) && hasRequiredValueKinds(value.colors, CUSTOM_THEME_COLORS_SHAPE) && hasRequiredValueKinds(value.ddlColors, CUSTOM_THEME_DDL_COLORS_SHAPE);
+}
+
+// The store normalizer only writes #rrggbb values, matching normalizeDataGridTypeColors.
+const DATA_GRID_TYPE_HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+function isDataGridTypeColorSchemeItem(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  // The auto id is the "follow the built-in palette" sentinel, never a scheme.
+  if (!isNonEmptyTrimmedString(value.id) || value.id === DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID) return false;
+  if (!isNonEmptyTrimmedString(value.name)) return false;
+  const colors = value.colors;
+  if (!isPlainObject(colors)) return false;
+  return DATA_GRID_TYPE_COLOR_KEYS.every((key) => {
+    const color = colors[key];
+    return typeof color === "string" && DATA_GRID_TYPE_HEX_COLOR_RE.test(color);
+  });
+}
+
+function isSqlSnippetItem(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || !isNonEmptyTrimmedString(value.prefix) || typeof value.body !== "string") return false;
+  return value.enabled === undefined || typeof value.enabled === "boolean";
+}
+
+function isSqlShortcutActionItem(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  if (!isNonEmptyTrimmedString(value.id) || !isNonEmptyTrimmedString(value.label) || typeof value.shortcut !== "string" || typeof value.sql !== "string") return false;
+  return value.enabled === undefined || typeof value.enabled === "boolean";
+}
+
+const SHORTCUT_ACTION_IDS = new Set<string>(SHORTCUT_DEFINITIONS.map((definition) => definition.id));
+
+/** Normalized shape: exactly the known action ids, each bound to a string. */
+function isShortcutSettingsShape(value: unknown): boolean {
+  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => SHORTCUT_ACTION_IDS.has(key) && typeof entry === "string");
+}
+
+/** Raw shape: overrides for known actions must be strings; unknown keys stay ignored for forward compatibility. */
+function isRawShortcutSettingsShape(value: unknown): boolean {
+  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !SHORTCUT_ACTION_IDS.has(key) || typeof entry === "string");
+}
+
+const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
+
+function isSqlVariableSyntaxOverridesShape(value: unknown, isAllowedToggle: (toggle: unknown) => boolean): boolean {
+  if (!isPlainObject(value)) return false;
+  return Object.values(value).every((entry) => isPlainObject(entry) && Object.entries(entry).every(([key, toggle]) => SQL_VARIABLE_SYNTAX_KEY_SET.has(key) && isAllowedToggle(toggle)));
+}
+
+/**
+ * Full nested-schema checks for the structured (array/object) fields, run on
+ * the normalized value. The store normalizer only sanitizes some of them —
+ * notably `normalizeEditorSettings` keeps `customThemes` items that lack
+ * `id` or `name` — so without these checks a file like
+ * `{"customThemes": [{}]}` would import cleanly and later corrupt the
+ * persisted settings.
+ */
+const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  customThemes: (value) => isArrayOfShape(value, isCustomThemeItem),
+  dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
+  tableColumnTemplateFields: isNonEmptyStringArray,
+  shortcuts: isShortcutSettingsShape,
+  sqlFormatter: isCompleteSqlFormatterSettings,
+  sidebarHiddenTablePrefixes: isNonEmptyStringArray,
+  redisKeyTemplates: isNonEmptyStringArray,
+  snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
+  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => toggle === false),
+};
+
+/**
+ * The same nested schemas applied to the raw file values before
+ * normalization. This rejects payloads the normalizer would silently repair
+ * by dropping entries or substituting defaults — importing those would
+ * overwrite the user's data (custom schemes, snippets, formatter options, …)
+ * with sanitized defaults instead of surfacing the malformed file.
+ */
+const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  customThemes: (value) => isArrayOfShape(value, isCustomThemeItem),
+  dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
+  tableColumnTemplateFields: isStringArray,
+  shortcuts: isRawShortcutSettingsShape,
+  sqlFormatter: isCompleteSqlFormatterSettings,
+  sidebarHiddenTablePrefixes: isStringArray,
+  redisKeyTemplates: isStringArray,
+  snippets: (value) => isArrayOfShape(value, isSqlSnippetItem),
+  sqlShortcuts: (value) => isArrayOfShape(value, isSqlShortcutActionItem),
+  sqlVariableSyntaxOverrides: (value) => isSqlVariableSyntaxOverridesShape(value, (toggle) => typeof toggle === "boolean"),
 };
 
 /**
@@ -280,7 +407,10 @@ const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (val
  * back different and rejects the import. Pass-through fields (see
  * PASS_THROUGH_FIELD_VALIDATORS) get an explicit domain check instead,
  * because the normalizer keeps them as-is. Objects and arrays are sanitized
- * through the same normalizer and accepted in their normalized form.
+ * through the same normalizer and must additionally satisfy a full nested
+ * schema (see NESTED_FIELD_VALIDATORS / RAW_STRUCTURED_FIELD_VALIDATORS):
+ * malformed nested payloads are rejected instead of being silently repaired
+ * or persisted.
  */
 export function parseSettingsTransferFile(text: string): { ok: true; value: ParsedSettingsTransfer } | { ok: false; error: SettingsTransferParseError } {
   if (exceedsSettingsTransferSizeLimit(text)) {
@@ -326,7 +456,12 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
       invalidKeys.push(key);
       continue;
     }
-    const validator = PASS_THROUGH_FIELD_VALIDATORS[key];
+    const rawValidator = RAW_STRUCTURED_FIELD_VALIDATORS[key];
+    if (rawValidator && !rawValidator(raw)) {
+      invalidKeys.push(key);
+      continue;
+    }
+    const validator = PASS_THROUGH_FIELD_VALIDATORS[key] ?? NESTED_FIELD_VALIDATORS[key];
     if (validator && !validator(value)) {
       invalidKeys.push(key);
       continue;

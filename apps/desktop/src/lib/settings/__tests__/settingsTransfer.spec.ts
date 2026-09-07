@@ -195,4 +195,104 @@ describe("settingsTransfer", () => {
     expect(result.value.editorSettings.pageSize).toBe(200);
     expect(result.value.editorSettings.snippets).toEqual(settings.snippets);
   });
+
+  it("rejects custom theme items that lack id or name", () => {
+    const validTheme = { ...DEFAULT_EDITOR_SETTINGS.customThemes[0] };
+    const idless = parseSettingsTransferFile(fileWith({ customThemes: [{ ...validTheme, id: "" }] }));
+    expect(idless.ok).toBe(false);
+    if (idless.ok) return;
+    expect(idless.error.detail).toContain("customThemes");
+
+    const unnamed = parseSettingsTransferFile(fileWith({ customThemes: [{ ...validTheme, name: undefined }] }));
+    expect(unnamed.ok).toBe(false);
+    if (unnamed.ok) return;
+    expect(unnamed.error.detail).toContain("customThemes");
+  });
+
+  it("rejects custom theme items with wrong-typed colors", () => {
+    const validTheme = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const result = parseSettingsTransferFile(
+      fileWith({
+        customThemes: [{ ...validTheme, id: "t1", name: "T1", colors: { ...validTheme.colors, keyword: 5 } }],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("customThemes");
+  });
+
+  it("accepts complete custom themes and data grid color schemes", () => {
+    const validTheme = { ...DEFAULT_EDITOR_SETTINGS.customThemes[0], id: "t1", name: "T1" };
+    const scheme = {
+      id: "s1",
+      name: "S1",
+      colors: { integer: "#1d4ed8", numeric: "#0e7490", string: "#166534", boolean: "#c2410c", temporal: "#7e22ce", structured: "#be185d", identifier: "#92400e", binary: "#b91c1c", spatial: "#047857" },
+    };
+    const result = parseSettingsTransferFile(fileWith({ customThemes: [validTheme], dataGridTypeColorSchemes: [scheme] }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
+    expect(result.value.editorSettings.dataGridTypeColorSchemes).toEqual([scheme]);
+  });
+
+  it("rejects data grid color schemes claiming the reserved auto id", () => {
+    const result = parseSettingsTransferFile(fileWith({ dataGridTypeColorSchemes: [{ id: "auto", name: "S" }] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("dataGridTypeColorSchemes");
+  });
+
+  it("rejects malformed snippet items instead of substituting defaults", () => {
+    const result = parseSettingsTransferFile(fileWith({ snippets: [{}] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("snippets");
+  });
+
+  it("rejects malformed sql shortcut items", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlShortcuts: [{ id: "s1" }] }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlShortcuts");
+  });
+
+  it("rejects non-string entries in string array settings", () => {
+    const redis = parseSettingsTransferFile(fileWith({ redisKeyTemplates: [5] }));
+    expect(redis.ok).toBe(false);
+    if (redis.ok) return;
+    expect(redis.error.detail).toContain("redisKeyTemplates");
+
+    const prefixes = parseSettingsTransferFile(fileWith({ sidebarHiddenTablePrefixes: [null] }));
+    expect(prefixes.ok).toBe(false);
+    if (prefixes.ok) return;
+    expect(prefixes.error.detail).toContain("sidebarHiddenTablePrefixes");
+  });
+
+  it("rejects formatter settings missing a required option", () => {
+    const partialFormatter: Record<string, unknown> = { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter };
+    delete partialFormatter.keywordCase;
+    const result = parseSettingsTransferFile(fileWith({ sqlFormatter: partialFormatter }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlFormatter");
+  });
+
+  it("rejects malformed sql variable syntax overrides", () => {
+    const result = parseSettingsTransferFile(fileWith({ sqlVariableSyntaxOverrides: { mysql: { positional: "yes" } } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("sqlVariableSyntaxOverrides");
+  });
+
+  it("rejects shortcut overrides whose known keys are not strings", () => {
+    const result = parseSettingsTransferFile(fileWith({ shortcuts: { executeSql: 5 } }));
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.detail).toContain("shortcuts");
+  });
+
+  it("maps csvQuoteMode into the data category", () => {
+    expect(transferCategoryForKey("csvQuoteMode")).toBe("data");
+    expect(collectTransferCategories(["csvQuoteMode", "pageSize"])).toEqual(["data"]);
+  });
 });

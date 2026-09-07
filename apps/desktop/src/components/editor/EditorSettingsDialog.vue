@@ -1410,6 +1410,9 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
       case "exportBatchSize":
         editExportBatchSize.value = draft.exportBatchSize;
         break;
+      case "csvQuoteMode":
+        editCsvQuoteMode.value = draft.csvQuoteMode;
+        break;
       case "exportRowLimitEnabled":
         editExportRowLimitEnabled.value = draft.exportRowLimitEnabled;
         break;

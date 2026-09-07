@@ -5043,6 +5043,10 @@ export async function clearDatabaseExportCancellation(exportId: string): Promise
   await invoke("clear_database_export_cancellation", { exportId });
 }
 
+export async function databaseExportDestinationNeedsConfirmation(directory: string): Promise<boolean> {
+  return invoke("database_export_destination_needs_confirmation", { directory });
+}
+
 export async function recordDatabaseExportDestination(directory: string): Promise<void> {
   await invoke("record_database_export_destination", { directory });
 }

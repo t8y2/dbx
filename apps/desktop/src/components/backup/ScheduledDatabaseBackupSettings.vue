@@ -357,9 +357,28 @@ async function requestCancelRun(runId: string) {
   if (await cancelRun(runId)) toast(t("databaseBackup.cancelRequested"), 2500);
 }
 
+async function confirmLegacyDestination(schedule: DatabaseBackupSchedule): Promise<DatabaseBackupSchedule | null> {
+  if (!(await api.databaseExportDestinationNeedsConfirmation(schedule.destinationDirectory))) return schedule;
+
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: schedule.destinationDirectory,
+    title: t("databaseBackup.selectDestination"),
+  });
+  if (typeof selected !== "string") return null;
+
+  await api.recordDatabaseExportDestination(selected);
+  if (selected === schedule.destinationDirectory) return schedule;
+  return saveSchedule({ ...schedule, destinationDirectory: selected });
+}
+
 async function runNow(schedule: DatabaseBackupSchedule) {
   try {
-    const run = await runSchedule(schedule.id, "manual");
+    const confirmedSchedule = await confirmLegacyDestination(schedule);
+    if (!confirmedSchedule) return;
+    const run = await runSchedule(confirmedSchedule.id, "manual");
     if (!run) return;
     if (run.status === "success") toast(t("databaseBackup.runSuccess", { count: run.files.length }), 3000);
     else if (run.status === "cancelled") toast(t("databaseBackup.runCancelled"), 3000);

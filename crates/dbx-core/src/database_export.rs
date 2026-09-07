@@ -2328,6 +2328,23 @@ async fn save_export_destination_identity(
     state.storage.save_state(&export_destination_state_key(dir), &value, "application/octet-stream").await
 }
 
+/// Returns whether this macOS destination still has the transient, untagged
+/// `st_dev` identity written by DBX versions before persistent volume UUIDs
+/// were introduced. The caller must require an explicit directory selection
+/// before replacing it; unattended backups must continue to fail closed.
+pub async fn export_destination_identity_needs_confirmation(
+    state: &crate::connection::AppState,
+    dir: &std::path::Path,
+) -> Result<bool, String> {
+    let recorded_identity = state
+        .storage
+        .load_state(&export_destination_state_key(dir))
+        .await?
+        .map(|(bytes, _content_type)| ExportDestinationIdentity::decode(&bytes))
+        .transpose()?;
+    Ok(cfg!(target_os = "macos") && matches!(recorded_identity, Some(Some(ExportDestinationIdentity::LegacyDevice(_)))))
+}
+
 /// Ensures `dir` exists for an export destination, without ever silently
 /// recreating a directory that previously produced a successful export (or
 /// was recorded via [`record_export_destination_identity`]) and has since
@@ -5795,6 +5812,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
+            super::export_destination_identity_needs_confirmation(&state, &destination).await.unwrap(),
+            "legacy macOS destination state should require explicit confirmation"
+        );
+        assert!(
             ensure_export_destination_dir(&state, &destination).await.is_err(),
             "an unattended export must not silently replace legacy identity state, even when st_dev still matches"
         );
@@ -5802,6 +5823,10 @@ mod tests {
         record_export_destination_identity(&state, &destination)
             .await
             .expect("explicitly confirming the destination should replace legacy state");
+        assert!(
+            !super::export_destination_identity_needs_confirmation(&state, &destination).await.unwrap(),
+            "persistent volume identity should not require another confirmation"
+        );
         ensure_export_destination_dir(&state, &destination)
             .await
             .expect("the confirmed persistent volume identity should match");

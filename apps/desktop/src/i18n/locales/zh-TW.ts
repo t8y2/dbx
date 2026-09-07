@@ -6392,6 +6392,8 @@ export default withEnglishFallback({
     customUiBorder: "邊框",
     customUiSidebar: "側邊欄",
     shortcutConvertNamingStyle: "切換命名風格",
+    dataGridAutoHideFilterBuilder: "應用篩選後自動隱藏條件編輯器",
+    dataGridAutoHideFilterBuilderDescription: "關閉後，應用篩選後仍保留條件編輯器，方便繼續調整。",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

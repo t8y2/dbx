@@ -22,6 +22,14 @@ const canaryVectors = [
   '<noscript><p style="color:green;margin:0;font:600 13px system-ui">scripts are blocked → PASS</p></noscript>',
 ].join("\n");
 
+// Navigation canary — deliberately NOT in canaryVectors: every vector above
+// must survive verbatim (a stripped canary proves nothing), but no CSP fetch
+// directive governs navigation and `sandbox=""` only gates top-navigation and
+// popups, so a sandboxed iframe can still navigate itself. The refresh meta is
+// the one vector the wrapper itself must defuse before it reaches either
+// context; a zero-click `<meta refresh>` is an automatic outbound beacon.
+const metaRefreshCanary = '<meta http-equiv="refresh" content="0;url=https://canary.invalid/">';
+
 const componentSource = readFileSync(new URL("../../../../components/ai/rich/AiHtmlPreview.vue", import.meta.url), "utf8");
 
 describe("AiHtmlPreview sandbox hardening (static canary)", () => {
@@ -68,13 +76,26 @@ describe("AiHtmlPreview sandbox hardening (static canary)", () => {
     expect(AI_HTML_PREVIEW_CSP).toContain("base-uri 'none'");
   });
 
+  it("defuses the meta-refresh navigation canary (navigation is outside the CSP fetch model)", () => {
+    const wrapped = buildSafeHtmlPreview(`${canaryVectors}\n${metaRefreshCanary}`);
+    // The verbatim-survival canaries are untouched by the defusing pass...
+    for (const vector of canaryVectors.split("\n")) {
+      expect(wrapped).toContain(vector);
+    }
+    // ...while the refresh meta is swapped for an inert comment: the wrapped
+    // document holds no live http-equiv=refresh in any spelling.
+    expect(wrapped).not.toContain(metaRefreshCanary);
+    expect(wrapped).toContain("<!-- meta refresh removed -->");
+    expect(wrapped).not.toMatch(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?\s*refresh\b/i);
+  });
+
   it("writes a manual WebView canary harness when AI_HTML_CANARY_OUT is set", () => {
     const outPath = process.env.AI_HTML_CANARY_OUT;
     if (!outPath) {
       // Regenerate on demand: AI_HTML_CANARY_OUT=<path> pnpm vitest run <this file>
       return;
     }
-    const wrapped = buildSafeHtmlPreview(canaryVectors);
+    const wrapped = buildSafeHtmlPreview(`${canaryVectors}\n${metaRefreshCanary}`);
     // The visible PASS marker inside the sandbox: `noscript` renders only when
     // scripting is disabled — i.e. exactly when the sandbox held.
     const harness = [
@@ -97,6 +118,7 @@ describe("AiHtmlPreview sandbox hardening (static canary)", () => {
       "<li><b>fetch:</b> no network request to <code>canary.invalid</code>.</li>",
       "<li><b>Form:</b> submitting the canary form does nothing — no navigation to <code>canary.invalid</code>.</li>",
       "<li><b>Base rewrite:</b> the “relative link” does not resolve to <code>canary.invalid/relative.png</code>.</li>",
+      "<li><b>Meta refresh:</b> the document does not navigate away on its own — the canary refresh meta must appear only as the inert <code>&lt;!-- meta refresh removed --&gt;</code> comment.</li>",
       "</ul></body></html>",
     ].join("\n");
     writeFileSync(outPath, harness, "utf8");

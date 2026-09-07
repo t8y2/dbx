@@ -45,6 +45,30 @@ describe("buildSafeHtmlPreview", () => {
     expect(wrapped).toContain(hostile);
   });
 
+  it("defuses <meta http-equiv=refresh> in any case, quoting style, or attribute order", () => {
+    const vectors = [
+      '<meta http-equiv="refresh" content="0;url=https://attacker/">',
+      "<meta http-equiv='refresh' content='0;url=https://attacker/'>",
+      "<meta http-equiv=refresh content='0;url=https://attacker/'>",
+      '<meta content="0;url=https://attacker/" http-equiv="refresh">',
+      '<META HTTP-EQUIV="Refresh" CONTENT="0;url=https://attacker/">',
+      '<meta name="x" http-equiv="refresh" charset="utf-8" content="0;url=https://attacker/">',
+      '<meta http-equiv="refresh" content="0;url=https://attacker/"/>',
+    ];
+    for (const vector of vectors) {
+      const wrapped = buildSafeHtmlPreview(vector);
+      expect(wrapped).toContain("<!-- meta refresh removed -->");
+      // No live refresh meta may survive in any spelling.
+      expect(wrapped).not.toMatch(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?\s*refresh\b/i);
+    }
+  });
+
+  it("preserves the body around a defused refresh meta and leaves other metas untouched", () => {
+    const body = '<p>before</p><meta http-equiv="refresh" content="0;url=https://attacker/"><p>after</p><meta charset="utf-8">';
+    const wrapped = buildSafeHtmlPreview(body);
+    expect(wrapped).toContain('<p>before</p><!-- meta refresh removed --><p>after</p><meta charset="utf-8">');
+  });
+
   it("stays safe when the AI content is a complete HTML document", () => {
     const completeDocument = "<!DOCTYPE html><html><head><title>p</title></head><body>own</body></html>";
     const wrapped = buildSafeHtmlPreview(completeDocument);

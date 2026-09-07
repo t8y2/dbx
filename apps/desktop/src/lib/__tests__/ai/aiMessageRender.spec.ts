@@ -260,6 +260,56 @@ describe("createAiMessageRenderer rich chart segments", () => {
   });
 });
 
+describe("createAiMessageRenderer rich html segments", () => {
+  const markdown = (text: string) => `<p>${text}</p>`;
+
+  it("routes a closed html fence to an html segment carrying the safe document", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const segments = renderer.render("```html\n<p>hi</p>\n```");
+    const seg = segments[0];
+    expect(seg.type).toBe("html");
+    if (seg.type !== "html") return;
+    expect(seg.content).toBe("<p>hi</p>");
+    expect(seg.document).toContain("Content-Security-Policy");
+    expect(seg.document).toContain("<p>hi</p>");
+  });
+
+  it("keeps an unfinished html fence as a plain code segment while streaming", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render("```html\n<p>hi", { streaming: true });
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.pending).toBe(true);
+  });
+
+  it("switches an open html fence to an html segment once the closing fence arrives", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    expect(renderer.render("```html\n<p>hi", { streaming: true })[0].type).toBe("code");
+    expect(renderer.render("```html\n<p>hi</p>\n```", { streaming: true })[0].type).toBe("html");
+  });
+
+  it("falls back to a code segment when the html body exceeds the preview budget", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const oversize = "x".repeat(512 * 1024 + 1);
+    const [seg] = renderer.render(`\`\`\`html\n${oversize}\n\`\`\``);
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.lang).toBe("HTML");
+    expect(seg.isSql).toBe(false);
+    expect(seg.pending).toBe(false);
+    expect(seg.content).toBe(oversize);
+  });
+
+  it("never routes html fences into the sql code path that offers run/apply buttons", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render("```html\n<p>hi</p>\n```");
+    // The template only offers run/apply on `type === 'code'` segments with
+    // `isSql`; an html segment must never wear that shape.
+    expect(seg.type).not.toBe("code");
+    expect(seg.type).toBe("html");
+  });
+});
+
 describe("splitStreamingTextBlocks", () => {
   const long = "内容".repeat(200);
 

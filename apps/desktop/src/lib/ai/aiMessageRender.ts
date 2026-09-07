@@ -1,4 +1,4 @@
-import { AI_RICH_BLOCK_HANDLERS, type AiMessageChartSegment, type AiRichBlockHandler } from "@/lib/ai/richContent/aiRichContent";
+import { AI_RICH_BLOCK_HANDLERS, type AiMessageChartSegment, type AiMessageHtmlSegment, type AiRichBlockHandler } from "@/lib/ai/richContent/aiRichContent";
 
 export interface AiMessageTextSegment {
   type: "text";
@@ -16,7 +16,7 @@ export interface AiMessageCodeSegment {
   pending: boolean;
 }
 
-export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment | AiMessageChartSegment;
+export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment | AiMessageChartSegment | AiMessageHtmlSegment;
 
 interface MessageSegment {
   type: "text" | "code";

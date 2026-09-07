@@ -188,6 +188,11 @@ const AiChartRenderer = defineAsyncComponent({
       h("span", t("common.loading")),
     ]),
 });
+const AiHtmlPreview = defineAsyncComponent({
+  // HTML previews are rare (the prompt only allows them on explicit request),
+  // so lazy-load the component just like the chart renderer.
+  loader: () => import("@/components/ai/rich/AiHtmlPreview.vue"),
+});
 const settings = useSettingsStore();
 const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
@@ -4714,6 +4719,7 @@ async function openExternalUrl(url: string) {
                     <div v-html="seg.html" />
                   </div>
                   <AiChartRenderer v-else-if="seg.type === 'chart'" :spec="seg.spec" :content="seg.content" />
+                  <AiHtmlPreview v-else-if="seg.type === 'html'" :content="seg.content" :document="seg.document" />
                   <div v-else class="my-2 overflow-hidden rounded-md border border-zinc-200 bg-zinc-50 dark:border-zinc-700/50 dark:bg-zinc-900">
                     <div class="flex items-center border-b border-zinc-200 px-3 py-1.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700/50 dark:text-zinc-400">
                       <component :is="seg.isSql ? Database : Terminal" class="h-3 w-3 mr-1.5" />

@@ -1,8 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-// Issue #8236: switching away from the "Browse Objects" tab and back reset
-// the keyword search filter, because ObjectBrowser has no <KeepAlive> around
+// Issues #8236 and #8285: switching away from the "Browse Objects" tab and
+// back reset the keyword search, including after opening and closing a table,
+// because ObjectBrowser has no <KeepAlive> around
 // it (ContentArea renders it inside a plain v-else-if chain) and its `search`
 // ref was always seeded to "". The fix threads the value through
 // activeTab.objectBrowser.searchQuery, mirroring the existing viewport
@@ -14,6 +15,7 @@ const querySurfacesSource = readFileSync(new URL("../../layout/querySurfaces.ts"
 const contentSurfaceEventsSource = readFileSync(new URL("../../../lib/tabs/contentSurfaceEvents.ts", import.meta.url), "utf8");
 const queryStoreSource = readFileSync(new URL("../../../stores/queryStore.ts", import.meta.url), "utf8");
 const databaseTypesSource = readFileSync(new URL("../../../types/database.ts", import.meta.url), "utf8");
+const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "utf8");
 
 describe("ObjectBrowser keyword search survives tab switches", () => {
   it("seeds the local search ref from a persisted initial value instead of always starting empty", () => {
@@ -29,6 +31,11 @@ describe("ObjectBrowser keyword search survives tab switches", () => {
   it("ContentArea binds the persisted search query as a prop and forwards the change event", () => {
     expect(contentAreaSource).toContain(':initial-search-query="activeTab.objectBrowser?.searchQuery"');
     expect(contentAreaSource).toContain("@search-change=\"emit('objectBrowserSearchChange', activeTab.id, $event)\"");
+  });
+
+  it("keeps the original object tab as the owner when a table is opened", () => {
+    expect(appSource).toMatch(/@open-object-table="\s*\n?\s*\(tabId: string, target: \{[\s\S]*?\) => \{[\s\S]*?const tab = queryStore\.tabs\.find\(\(candidate\) => candidate\.id === tabId\) \?\? activeTab;[\s\S]*?openObjectBrowserTableTarget\(/);
+    expect(appSource).toContain('@object-browser-search-change="(tabId: string, query: string) => queryStore.updateObjectBrowserSearch(tabId, query)"');
   });
 
   it("the surface event contract and forwarding list both know about objectBrowserSearchChange", () => {

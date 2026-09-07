@@ -143,6 +143,20 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
   return draft;
 }
 
+/**
+ * Draft-shaped, per-key-normalized values for exactly the keys present in
+ * `settings`. Used for partial updates (e.g. settings import) where keys the
+ * input does not contain must leave the target state untouched.
+ */
+export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+  const patch: Partial<EditorSettingsDraft> = {};
+  for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
+    if (!(key in settings)) continue;
+    (patch as Record<string, unknown>)[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
+  }
+  return patch;
+}
+
 export function editorSettingsPatchFromDraft(draft: EditorSettingsDraft, base: EditorSettingsDraft): Partial<EditorSettings> {
   const patch: Partial<EditorSettings> = {};
   for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {

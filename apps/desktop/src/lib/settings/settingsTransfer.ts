@@ -1,5 +1,6 @@
 import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, type EditorSettingsDraftKey } from "./editorSettingsDraft";
-import { DEFAULT_EDITOR_SETTINGS, normalizeEditorSettings, type EditorSettings } from "@/stores/settingsStore";
+import { DEFAULT_EDITOR_SETTINGS, DEFAULT_TOOLBAR_ITEMS, normalizeEditorSettings, type EditorSettings } from "@/stores/settingsStore";
+import { EDITOR_MAX_FONT_SIZE, EDITOR_MIN_FONT_SIZE } from "@/lib/editor/editorZoom";
 
 /**
  * Local backup / restore of application settings ("配置导入与导出").
@@ -203,6 +204,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * UTF-8 needs 1–3 bytes per UTF-16 code unit, so the character count alone
+ * settles every text outside the ambiguous expansion band. The precise byte
+ * count — which allocates an encoded copy of the whole text — is only built
+ * for inputs whose size could still tip over the limit after expansion.
+ */
+function exceedsSettingsTransferSizeLimit(text: string): boolean {
+  if (text.length > MAX_SETTINGS_TRANSFER_FILE_BYTES) return true;
+  if (text.length * 3 <= MAX_SETTINGS_TRANSFER_FILE_BYTES) return false;
+  return new TextEncoder().encode(text).byteLength > MAX_SETTINGS_TRANSFER_FILE_BYTES;
+}
+
 function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -217,6 +230,46 @@ function jsonKindOf(value: unknown): string {
 const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.map((key) => [key, jsonKindOf((DEFAULT_EDITOR_SETTINGS as unknown as Record<string, unknown>)[key])]));
 
 /**
+ * Keys whose store normalizer keeps any non-nullish value as-is (only a
+ * nullish fallback). For these, the round-trip equality check cannot catch a
+ * bad value: `fontSize: 0` or `appLayout: "invalid"` would survive untouched
+ * and later be persisted. Each entry restates the domain the settings UI and
+ * the clamping helpers enforce, so importing an out-of-range number, a broken
+ * enum or a non-boolean flag refuses the whole file instead.
+ */
+const PASS_THROUGH_BOOLEAN_KEYS = [
+  "wordWrap",
+  "showExecutionTargetPicker",
+  "autoAliasTables",
+  "confirmDangerousSqlExecution",
+  "confirmUnsavedSqlClose",
+  "showColumnCommentsInHeader",
+  "showColumnTypesInHeader",
+  "colorizeDataGridCellTypes",
+  "showIndexIndicatorsInHeader",
+  "compactColumnHeaderActions",
+  "dataGridQuickEntry",
+  "flatteningMultiLineText",
+  "infiniteScroll",
+  "autoCalculateTotalRows",
+  "autoSelectActiveSidebarNode",
+  "sidebarAllowHorizontalScroll",
+  "sidebarShowTooltips",
+  "updateNotificationsEnabled",
+] as const satisfies readonly EditorSettingsDraftKey[];
+
+const PASS_THROUGH_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
+  // The editor font slider and the Ctrl+wheel zoom both clamp to this range.
+  fontSize: (value) => typeof value === "number" && Number.isFinite(value) && value >= EDITOR_MIN_FONT_SIZE && value <= EDITOR_MAX_FONT_SIZE,
+  appLayout: (value) => value === "separated" || value === "classic",
+  activeCustomThemeId: (value) => typeof value === "string" && value.trim().length > 0,
+  // normalizeToolbarItems keeps unknown/typed values for every known key, so
+  // each one must already be the boolean the UI writes.
+  toolbarItems: (value) => isPlainObject(value) && Object.keys(DEFAULT_TOOLBAR_ITEMS).every((key) => typeof value[key] === "boolean"),
+  ...Object.fromEntries(PASS_THROUGH_BOOLEAN_KEYS.map((key) => [key, (value: unknown) => typeof value === "boolean"])),
+};
+
+/**
  * Parses and validates an imported settings file. Validation is all-or-
  * nothing: the caller only receives values once every whitelisted field in
  * the file passed the checks, so a rejected file can never partially modify
@@ -224,11 +277,13 @@ const EXPECTED_JSON_KINDS = new Map<string, string>(EDITOR_SETTINGS_DRAFT_KEYS.m
  *
  * Scalar values (boolean/number/string) must survive the store's own
  * normalizer unchanged — an out-of-domain enum or a clamped number comes
- * back different and rejects the import. Objects and arrays are sanitized
+ * back different and rejects the import. Pass-through fields (see
+ * PASS_THROUGH_FIELD_VALIDATORS) get an explicit domain check instead,
+ * because the normalizer keeps them as-is. Objects and arrays are sanitized
  * through the same normalizer and accepted in their normalized form.
  */
 export function parseSettingsTransferFile(text: string): { ok: true; value: ParsedSettingsTransfer } | { ok: false; error: SettingsTransferParseError } {
-  if (new TextEncoder().encode(text).byteLength > MAX_SETTINGS_TRANSFER_FILE_BYTES) {
+  if (exceedsSettingsTransferSizeLimit(text)) {
     return { ok: false, error: { code: "too-large" } };
   }
 
@@ -268,6 +323,11 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
     const raw = editor[key];
     const value = (normalized as unknown as Record<string, unknown>)[key];
     if (jsonKindOf(raw) !== EXPECTED_JSON_KINDS.get(key)) {
+      invalidKeys.push(key);
+      continue;
+    }
+    const validator = PASS_THROUGH_FIELD_VALIDATORS[key];
+    if (validator && !validator(value)) {
       invalidKeys.push(key);
       continue;
     }

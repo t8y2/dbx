@@ -146,7 +146,18 @@ async function importSettingsFromDesktop() {
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (typeof selected !== "string") return;
-    const { readTextFile } = await import("@tauri-apps/plugin-fs");
+    const { readTextFile, stat } = await import("@tauri-apps/plugin-fs");
+    // Reject oversized files before reading them into memory. If the platform
+    // cannot stat the path, fall through and let the parse-time limit decide.
+    try {
+      const info = await stat(selected);
+      if (info.size > MAX_SETTINGS_TRANSFER_FILE_BYTES) {
+        notifyFileTooLarge();
+        return;
+      }
+    } catch {
+      // stat failures are not fatal; the reader/parse checks still apply.
+    }
     const text = await readTextFile(selected);
     handleImportedText(text, fileNameFromPath(selected));
   } catch (error) {
@@ -167,6 +178,11 @@ async function handleFileInputChange(event: Event) {
   const file = input.files?.[0];
   input.value = "";
   if (!file) return;
+  // Reject oversized files before reading them into memory.
+  if (file.size > MAX_SETTINGS_TRANSFER_FILE_BYTES) {
+    notifyFileTooLarge();
+    return;
+  }
   importing.value = true;
   try {
     const text = await file.text();
@@ -188,6 +204,12 @@ function handleImportedText(text: string, fileName: string) {
   pendingImportFileName.value = fileName;
   pendingImportConflicts.value = props.getDraftConflictCategories(result.value.editorSettings);
   showImportConfirmDialog.value = true;
+}
+
+// The pre-read size checks (stat on desktop, File.size in the browser) and
+// the parser's own limit share this message.
+function notifyFileTooLarge() {
+  toast(translateParseError({ code: "too-large" }), 5000);
 }
 
 function translateParseError(error: SettingsTransferParseError): string {

@@ -76,6 +76,52 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("sidebarIndent");
   });
 
+  it("rejects pass-through numeric fields outside the editor font range", () => {
+    const zero = parseSettingsTransferFile(fileWith({ fontSize: 0 }));
+    expect(zero.ok).toBe(false);
+    if (zero.ok) return;
+    expect(zero.error.detail).toContain("fontSize");
+
+    const huge = parseSettingsTransferFile(fileWith({ fontSize: 100 }));
+    expect(huge.ok).toBe(false);
+  });
+
+  it("accepts in-range fractional editor font sizes", () => {
+    const result = parseSettingsTransferFile(fileWith({ fontSize: 13.5 }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.fontSize).toBe(13.5);
+  });
+
+  it("rejects pass-through layout enums", () => {
+    const result = parseSettingsTransferFile(fileWith({ appLayout: "invalid" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.code).toBe("invalid-fields");
+    expect(result.error.detail).toContain("appLayout");
+  });
+
+  it("rejects pass-through boolean flags with non-boolean values", () => {
+    const result = parseSettingsTransferFile(fileWith({ wordWrap: "yes" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.detail).toContain("wordWrap");
+  });
+
+  it("rejects toolbar items whose known keys are not booleans", () => {
+    const result = parseSettingsTransferFile(fileWith({ toolbarItems: { dataTransfer: "yes" } }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.detail).toContain("toolbarItems");
+  });
+
+  it("rejects empty active custom theme ids", () => {
+    const result = parseSettingsTransferFile(fileWith({ activeCustomThemeId: "  " }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.detail).toContain("activeCustomThemeId");
+  });
+
   it("imports only the keys present in the file", () => {
     const result = parseSettingsTransferFile(fileWith({ theme: DEFAULT_EDITOR_SETTINGS.theme }));
     expect(result.ok).toBe(true);

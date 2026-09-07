@@ -189,7 +189,17 @@ import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepp
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_CUSTOM_UI_COLOR_DEFS, APP_THEME_PALETTES, type AppCornerStyle, type AppCustomUiColors, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
-import { editorSettingsDraftChanged, editorSettingsDraftFromSettings, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft";
+import {
+  editorSettingsDraftChanged,
+  editorSettingsDraftFromSettings,
+  editorSettingsDraftPatchFromSettings,
+  editorSettingsPatchFromDraft,
+  normalizeQueryResultMaxRowsDraft,
+  normalizeTableOpenPageSizeDraft,
+  shouldConfirmEditorSettingsDialogClose,
+  type EditorSettingsDraft,
+  type EditorSettingsDraftKey,
+} from "@/lib/settings/editorSettingsDraft";
 import { serializeSettingsTransfer, sortTransferCategories, transferCategoryForKey, type SettingsTransferCategoryId } from "@/lib/settings/settingsTransfer";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
@@ -1127,114 +1137,324 @@ function syncEditorSettingsDraftFromStore() {
   hasImportedSettingsPendingApply.value = false;
 }
 
-// Mirror of syncEditorSettingsDraftFromStore for loading an imported settings
-// draft into the edit refs. The draft values are already settings-shaped and
-// normalized, so this only performs the ref-specific representations (joined
-// textarea strings, grid rows, editable snippet copies). The base snapshot is
-// intentionally left untouched: imported values stay unapplied until the user
-// clicks Apply, exactly like hand-edited draft values.
-function applyEditorSettingsDraftToRefs(draft: EditorSettingsDraft) {
-  editFontFamily.value = draft.fontFamily;
-  editFontSize.value = draft.fontSize;
-  editTableFontFamily.value = draft.tableFontFamily;
-  editUiFontFamily.value = draft.uiFontFamily;
-  editUiScale.value = draft.uiScale;
-  editTheme.value = draft.theme;
-  editCustomThemes.value = [...draft.customThemes];
-  editActiveCustomThemeId.value = draft.activeCustomThemeId;
-  editExecuteMode.value = draft.executeMode;
-  editDefaultTransactionMode.value = draft.defaultTransactionMode;
-  editExecuteAllOnBlankLine.value = draft.executeAllOnBlankLine;
-  editShowExecutionTargetPicker.value = draft.showExecutionTargetPicker;
-  editShowStatementRunButtons.value = draft.showStatementRunButtons;
-  editShowLineNumbers.value = draft.showLineNumbers;
-  editShowCurrentStatementFrame.value = draft.showCurrentStatementFrame;
-  editShowInsertValueHints.value = draft.showInsertValueHints;
-  editAutoAliasTables.value = draft.autoAliasTables;
-  editInsertSpaceAfterCompletion.value = draft.insertSpaceAfterCompletion;
-  editSortCompletionColumnsAlphabetically.value = draft.sortCompletionColumnsAlphabetically;
-  editSelectFirstCompletionOnOpen.value = draft.selectFirstCompletionOnOpen;
-  editCompletionTriggerMode.value = draft.completionTriggerMode;
-  editWordWrap.value = draft.wordWrap;
-  editVimModeEnabled.value = draft.vimModeEnabled;
-  editAutoCloseBrackets.value = draft.autoCloseBrackets;
-  editSqlSemanticDiagnosticsMode.value = draft.sqlSemanticDiagnosticsMode;
-  editSqlSemanticDiagnosticsEnabled.value = draft.sqlSemanticDiagnosticsMode !== "disabled";
-  editConfirmDangerousSqlExecution.value = draft.confirmDangerousSqlExecution;
-  editContinueOnErrorOnBatch.value = draft.continueOnErrorOnBatch;
-  editConfirmUnsavedSqlClose.value = draft.confirmUnsavedSqlClose;
-  editAppCloseUnsavedTabsMode.value = draft.appCloseUnsavedTabsMode;
-  editSavedSqlOpenTargetMode.value = draft.savedSqlOpenTargetMode;
-  editAppLayout.value = draft.appLayout;
-  editTabLayout.value = draft.tabLayout;
-  editTabPlacement.value = draft.tabPlacement;
-  editTabGroupMode.value = draft.tabGroupMode;
-  editTabSortMode.value = draft.tabSortMode;
-  editShowColumnCommentsInHeader.value = draft.showColumnCommentsInHeader;
-  editShowColumnTypesInHeader.value = draft.showColumnTypesInHeader;
-  editDataGridShowTransposeFieldMetadata.value = draft.dataGridShowTransposeFieldMetadata;
-  editColorizeDataGridCellTypes.value = draft.colorizeDataGridCellTypes;
-  editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(draft.dataGridTypeColorSchemes);
-  editActiveDataGridTypeColorSchemeId.value = draft.activeDataGridTypeColorSchemeId;
-  editShowIndexIndicatorsInHeader.value = draft.showIndexIndicatorsInHeader;
-  editCompactColumnHeaderActions.value = draft.compactColumnHeaderActions;
-  editDataGridQuickEntry.value = draft.dataGridQuickEntry;
-  editDataGridFilterEditorView.value = draft.dataGridFilterEditorView;
-  editDataGridTextFilterPanelHeight.value = draft.dataGridTextFilterPanelHeight;
-  editMultiStatementDefaultView.value = draft.multiStatementDefaultView;
-  editDataGridAutoTransposeSingleRow.value = draft.dataGridAutoTransposeSingleRow;
-  editDataGridCellDetailButtonVisible.value = draft.dataGridCellDetailButtonVisible;
-  editDataGridCrosshairHighlight.value = draft.dataGridCrosshairHighlight;
-  editFlatteningMultiLineText.value = draft.flatteningMultiLineText;
-  editPageSize.value = draft.pageSize;
-  editTableOpenPageSize.value = draft.tableOpenPageSize;
-  editQueryResultMaxRowsEnabled.value = draft.queryResultMaxRowsEnabled;
-  editQueryResultMaxRows.value = draft.queryResultMaxRows;
-  editInfiniteScroll.value = draft.infiniteScroll;
-  editRegexMaxMatchCount.value = draft.regexMaxMatchCount;
-  editAutoCalculateTotalRows.value = draft.autoCalculateTotalRows;
-  editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(draft.tableColumnTemplateFields);
-  editShortcuts.value = normalizeShortcutSettings(draft.shortcuts);
-  editSqlFormatter.value = normalizeSqlFormatterSettings(draft.sqlFormatter);
-  sqlFormatterConfigValid.value = true;
-  editSidebarActivation.value = draft.sidebarActivation;
-  editSidebarObjectDisplay.value = draft.sidebarObjectDisplay;
-  editRoutineSourceOpenMode.value = draft.routineSourceOpenMode;
-  editSidebarTableSearchEnabled.value = draft.sidebarTableSearchEnabled;
-  editAutoSelectActiveSidebarNode.value = draft.autoSelectActiveSidebarNode;
-  editSidebarBrowseObjectsOnDatabaseActivation.value = draft.sidebarBrowseObjectsOnDatabaseActivation;
-  editOpenTabsRestoreMode.value = draft.openTabsRestoreMode;
-  editDisconnectTabHandlingMode.value = draft.disconnectTabHandlingMode;
-  editDataTabReuseMode.value = draft.dataTabReuseMode;
-  editOpenDataTabsNextToActive.value = draft.openDataTabsNextToActive;
-  editPrefillNewQueryWithSelect.value = draft.prefillNewQueryWithSelect;
-  editGenerateSqlIncludeDatabaseName.value = draft.generateSqlIncludeDatabaseName;
-  editFormatSqlOnSqlFileSave.value = draft.formatSqlOnSqlFileSave;
-  editShowTableDdlHoverPreview.value = draft.showTableDdlHoverPreview;
-  editClickTableNavigationTarget.value = draft.clickTableNavigationTarget;
-  editUpdateNotificationsEnabled.value = draft.updateNotificationsEnabled;
-  editSidebarHiddenTablePrefixes.value = draft.sidebarHiddenTablePrefixes.join("\n");
-  editSidebarCopyTableNameSeparator.value = draft.sidebarCopyTableNameSeparator;
-  editSidebarCopyTableNameIncludeSchema.value = draft.sidebarCopyTableNameIncludeSchema;
-  editRedisKeyTemplates.value = normalizeRedisKeyTemplates(draft.redisKeyTemplates).join("\n");
-  editSidebarObjectInfoMode.value = draft.sidebarObjectInfoMode;
-  editSidebarAllowHorizontalScroll.value = draft.sidebarAllowHorizontalScroll;
-  editSidebarShowTooltips.value = draft.sidebarShowTooltips;
-  editSidebarIndent.value = draft.sidebarIndent;
-  editSidebarFontSize.value = draft.sidebarFontSize;
-  editExportBatchSize.value = draft.exportBatchSize;
-  editGlobalDateTimeDisplayFormat.value = draft.globalDateTimeDisplayFormat;
-  editGlobalDateTimeExportFormat.value = draft.globalDateTimeExportFormat;
-  editGlobalDateTimeImportFormat.value = draft.globalDateTimeImportFormat;
-  editExportRowLimitEnabled.value = draft.exportRowLimitEnabled;
-  editExportRowLimit.value = draft.exportRowLimit;
-  editQueryExportKeysetOptimizationEnabled.value = draft.queryExportKeysetOptimizationEnabled;
-  editUpdateDownloadSource.value = draft.updateDownloadSource;
-  editToolbarItems.value = { ...draft.toolbarItems };
-  editSnippets.value = draft.snippets.map(editableSnippet);
-  editSqlShortcuts.value = draft.sqlShortcuts.map(editableSqlShortcut);
-  editSqlVariableSubstitutionEnabled.value = draft.sqlVariableSubstitutionEnabled;
-  editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(draft.sqlVariableSyntaxOverrides);
+// Mirror of syncEditorSettingsDraftFromStore for loading draft values into
+// the edit refs. Draft values are already settings-shaped and normalized, so
+// this only performs the ref-specific representations (joined textarea
+// strings, grid rows, editable snippet copies). Accepts a key subset so a
+// partial update (settings import) writes exactly the listed refs and leaves
+// every other in-progress edit untouched. The base snapshot is intentionally
+// left untouched: changed values stay unapplied until the user clicks Apply,
+// exactly like hand-edited draft values.
+function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonly EditorSettingsDraftKey[]) {
+  for (const key of keys) {
+    switch (key) {
+      case "fontFamily":
+        editFontFamily.value = draft.fontFamily;
+        break;
+      case "fontSize":
+        editFontSize.value = draft.fontSize;
+        break;
+      case "tableFontFamily":
+        editTableFontFamily.value = draft.tableFontFamily;
+        break;
+      case "uiFontFamily":
+        editUiFontFamily.value = draft.uiFontFamily;
+        break;
+      case "uiScale":
+        editUiScale.value = draft.uiScale;
+        break;
+      case "theme":
+        editTheme.value = draft.theme;
+        break;
+      case "customThemes":
+        editCustomThemes.value = [...draft.customThemes];
+        break;
+      case "activeCustomThemeId":
+        editActiveCustomThemeId.value = draft.activeCustomThemeId;
+        break;
+      case "executeMode":
+        editExecuteMode.value = draft.executeMode;
+        break;
+      case "executeAllOnBlankLine":
+        editExecuteAllOnBlankLine.value = draft.executeAllOnBlankLine;
+        break;
+      case "showExecutionTargetPicker":
+        editShowExecutionTargetPicker.value = draft.showExecutionTargetPicker;
+        break;
+      case "showStatementRunButtons":
+        editShowStatementRunButtons.value = draft.showStatementRunButtons;
+        break;
+      case "showLineNumbers":
+        editShowLineNumbers.value = draft.showLineNumbers;
+        break;
+      case "showCurrentStatementFrame":
+        editShowCurrentStatementFrame.value = draft.showCurrentStatementFrame;
+        break;
+      case "showInsertValueHints":
+        editShowInsertValueHints.value = draft.showInsertValueHints;
+        break;
+      case "autoAliasTables":
+        editAutoAliasTables.value = draft.autoAliasTables;
+        break;
+      case "insertSpaceAfterCompletion":
+        editInsertSpaceAfterCompletion.value = draft.insertSpaceAfterCompletion;
+        break;
+      case "sortCompletionColumnsAlphabetically":
+        editSortCompletionColumnsAlphabetically.value = draft.sortCompletionColumnsAlphabetically;
+        break;
+      case "selectFirstCompletionOnOpen":
+        editSelectFirstCompletionOnOpen.value = draft.selectFirstCompletionOnOpen;
+        break;
+      case "wordWrap":
+        editWordWrap.value = draft.wordWrap;
+        break;
+      case "vimModeEnabled":
+        editVimModeEnabled.value = draft.vimModeEnabled;
+        break;
+      case "autoCloseBrackets":
+        editAutoCloseBrackets.value = draft.autoCloseBrackets;
+        break;
+      case "sqlSemanticDiagnosticsMode":
+        editSqlSemanticDiagnosticsMode.value = draft.sqlSemanticDiagnosticsMode;
+        editSqlSemanticDiagnosticsEnabled.value = draft.sqlSemanticDiagnosticsMode !== "disabled";
+        break;
+      case "confirmDangerousSqlExecution":
+        editConfirmDangerousSqlExecution.value = draft.confirmDangerousSqlExecution;
+        break;
+      case "confirmUnsavedSqlClose":
+        editConfirmUnsavedSqlClose.value = draft.confirmUnsavedSqlClose;
+        break;
+      case "appCloseUnsavedTabsMode":
+        editAppCloseUnsavedTabsMode.value = draft.appCloseUnsavedTabsMode;
+        break;
+      case "savedSqlOpenTargetMode":
+        editSavedSqlOpenTargetMode.value = draft.savedSqlOpenTargetMode;
+        break;
+      case "appLayout":
+        editAppLayout.value = draft.appLayout;
+        break;
+      case "tabLayout":
+        editTabLayout.value = draft.tabLayout;
+        break;
+      case "tabPlacement":
+        editTabPlacement.value = draft.tabPlacement;
+        break;
+      case "tabGroupMode":
+        editTabGroupMode.value = draft.tabGroupMode;
+        break;
+      case "tabSortMode":
+        editTabSortMode.value = draft.tabSortMode;
+        break;
+      case "showColumnCommentsInHeader":
+        editShowColumnCommentsInHeader.value = draft.showColumnCommentsInHeader;
+        break;
+      case "showColumnTypesInHeader":
+        editShowColumnTypesInHeader.value = draft.showColumnTypesInHeader;
+        break;
+      case "dataGridShowTransposeFieldMetadata":
+        editDataGridShowTransposeFieldMetadata.value = draft.dataGridShowTransposeFieldMetadata;
+        break;
+      case "colorizeDataGridCellTypes":
+        editColorizeDataGridCellTypes.value = draft.colorizeDataGridCellTypes;
+        break;
+      case "dataGridTypeColorSchemes":
+        editDataGridTypeColorSchemes.value = cloneDataGridTypeColorSchemes(draft.dataGridTypeColorSchemes);
+        break;
+      case "activeDataGridTypeColorSchemeId":
+        editActiveDataGridTypeColorSchemeId.value = draft.activeDataGridTypeColorSchemeId;
+        break;
+      case "showIndexIndicatorsInHeader":
+        editShowIndexIndicatorsInHeader.value = draft.showIndexIndicatorsInHeader;
+        break;
+      case "compactColumnHeaderActions":
+        editCompactColumnHeaderActions.value = draft.compactColumnHeaderActions;
+        break;
+      case "dataGridQuickEntry":
+        editDataGridQuickEntry.value = draft.dataGridQuickEntry;
+        break;
+      case "dataGridFilterEditorView":
+        editDataGridFilterEditorView.value = draft.dataGridFilterEditorView;
+        break;
+      case "dataGridTextFilterPanelHeight":
+        editDataGridTextFilterPanelHeight.value = draft.dataGridTextFilterPanelHeight;
+        break;
+      case "multiStatementDefaultView":
+        editMultiStatementDefaultView.value = draft.multiStatementDefaultView;
+        break;
+      case "dataGridAutoTransposeSingleRow":
+        editDataGridAutoTransposeSingleRow.value = draft.dataGridAutoTransposeSingleRow;
+        break;
+      case "dataGridCellDetailButtonVisible":
+        editDataGridCellDetailButtonVisible.value = draft.dataGridCellDetailButtonVisible;
+        break;
+      case "dataGridCrosshairHighlight":
+        editDataGridCrosshairHighlight.value = draft.dataGridCrosshairHighlight;
+        break;
+      case "pageSize":
+        editPageSize.value = draft.pageSize;
+        break;
+      case "tableOpenPageSize":
+        editTableOpenPageSize.value = draft.tableOpenPageSize;
+        break;
+      case "queryResultMaxRowsEnabled":
+        editQueryResultMaxRowsEnabled.value = draft.queryResultMaxRowsEnabled;
+        break;
+      case "queryResultMaxRows":
+        editQueryResultMaxRows.value = draft.queryResultMaxRows;
+        break;
+      case "infiniteScroll":
+        editInfiniteScroll.value = draft.infiniteScroll;
+        break;
+      case "regexMaxMatchCount":
+        editRegexMaxMatchCount.value = draft.regexMaxMatchCount;
+        break;
+      case "autoCalculateTotalRows":
+        editAutoCalculateTotalRows.value = draft.autoCalculateTotalRows;
+        break;
+      case "flatteningMultiLineText":
+        editFlatteningMultiLineText.value = draft.flatteningMultiLineText;
+        break;
+      case "tableColumnTemplateFields":
+        editTableColumnTemplateRows.value = tableColumnTemplateRowsFromSettings(draft.tableColumnTemplateFields);
+        break;
+      case "shortcuts":
+        editShortcuts.value = normalizeShortcutSettings(draft.shortcuts);
+        break;
+      case "sqlFormatter":
+        editSqlFormatter.value = normalizeSqlFormatterSettings(draft.sqlFormatter);
+        sqlFormatterConfigValid.value = true;
+        break;
+      case "sidebarActivation":
+        editSidebarActivation.value = draft.sidebarActivation;
+        break;
+      case "sidebarObjectDisplay":
+        editSidebarObjectDisplay.value = draft.sidebarObjectDisplay;
+        break;
+      case "routineSourceOpenMode":
+        editRoutineSourceOpenMode.value = draft.routineSourceOpenMode;
+        break;
+      case "sidebarTableSearchEnabled":
+        editSidebarTableSearchEnabled.value = draft.sidebarTableSearchEnabled;
+        break;
+      case "autoSelectActiveSidebarNode":
+        editAutoSelectActiveSidebarNode.value = draft.autoSelectActiveSidebarNode;
+        break;
+      case "sidebarBrowseObjectsOnDatabaseActivation":
+        editSidebarBrowseObjectsOnDatabaseActivation.value = draft.sidebarBrowseObjectsOnDatabaseActivation;
+        break;
+      case "openTabsRestoreMode":
+        editOpenTabsRestoreMode.value = draft.openTabsRestoreMode;
+        break;
+      case "disconnectTabHandlingMode":
+        editDisconnectTabHandlingMode.value = draft.disconnectTabHandlingMode;
+        break;
+      case "dataTabReuseMode":
+        editDataTabReuseMode.value = draft.dataTabReuseMode;
+        break;
+      case "openDataTabsNextToActive":
+        editOpenDataTabsNextToActive.value = draft.openDataTabsNextToActive;
+        break;
+      case "prefillNewQueryWithSelect":
+        editPrefillNewQueryWithSelect.value = draft.prefillNewQueryWithSelect;
+        break;
+      case "generateSqlIncludeDatabaseName":
+        editGenerateSqlIncludeDatabaseName.value = draft.generateSqlIncludeDatabaseName;
+        break;
+      case "formatSqlOnSqlFileSave":
+        editFormatSqlOnSqlFileSave.value = draft.formatSqlOnSqlFileSave;
+        break;
+      case "showTableDdlHoverPreview":
+        editShowTableDdlHoverPreview.value = draft.showTableDdlHoverPreview;
+        break;
+      case "updateNotificationsEnabled":
+        editUpdateNotificationsEnabled.value = draft.updateNotificationsEnabled;
+        break;
+      case "sidebarObjectInfoMode":
+        editSidebarObjectInfoMode.value = draft.sidebarObjectInfoMode;
+        break;
+      case "sidebarAllowHorizontalScroll":
+        editSidebarAllowHorizontalScroll.value = draft.sidebarAllowHorizontalScroll;
+        break;
+      case "sidebarShowTooltips":
+        editSidebarShowTooltips.value = draft.sidebarShowTooltips;
+        break;
+      case "sidebarIndent":
+        editSidebarIndent.value = draft.sidebarIndent;
+        break;
+      case "sidebarFontSize":
+        editSidebarFontSize.value = draft.sidebarFontSize;
+        break;
+      case "sidebarHiddenTablePrefixes":
+        editSidebarHiddenTablePrefixes.value = draft.sidebarHiddenTablePrefixes.join("\n");
+        break;
+      case "sidebarCopyTableNameSeparator":
+        editSidebarCopyTableNameSeparator.value = draft.sidebarCopyTableNameSeparator;
+        break;
+      case "sidebarCopyTableNameIncludeSchema":
+        editSidebarCopyTableNameIncludeSchema.value = draft.sidebarCopyTableNameIncludeSchema;
+        break;
+      case "redisKeyTemplates":
+        editRedisKeyTemplates.value = normalizeRedisKeyTemplates(draft.redisKeyTemplates).join("\n");
+        break;
+      case "exportBatchSize":
+        editExportBatchSize.value = draft.exportBatchSize;
+        break;
+      case "exportRowLimitEnabled":
+        editExportRowLimitEnabled.value = draft.exportRowLimitEnabled;
+        break;
+      case "exportRowLimit":
+        editExportRowLimit.value = draft.exportRowLimit;
+        break;
+      case "queryExportKeysetOptimizationEnabled":
+        editQueryExportKeysetOptimizationEnabled.value = draft.queryExportKeysetOptimizationEnabled;
+        break;
+      case "globalDateTimeDisplayFormat":
+        editGlobalDateTimeDisplayFormat.value = draft.globalDateTimeDisplayFormat;
+        break;
+      case "globalDateTimeExportFormat":
+        editGlobalDateTimeExportFormat.value = draft.globalDateTimeExportFormat;
+        break;
+      case "globalDateTimeImportFormat":
+        editGlobalDateTimeImportFormat.value = draft.globalDateTimeImportFormat;
+        break;
+      case "updateDownloadSource":
+        editUpdateDownloadSource.value = draft.updateDownloadSource;
+        break;
+      case "toolbarItems":
+        editToolbarItems.value = { ...draft.toolbarItems };
+        break;
+      case "snippets":
+        editSnippets.value = draft.snippets.map(editableSnippet);
+        break;
+      case "sqlShortcuts":
+        editSqlShortcuts.value = draft.sqlShortcuts.map(editableSqlShortcut);
+        break;
+      case "sqlVariableSubstitutionEnabled":
+        editSqlVariableSubstitutionEnabled.value = draft.sqlVariableSubstitutionEnabled;
+        break;
+      case "sqlVariableSyntaxOverrides":
+        editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(draft.sqlVariableSyntaxOverrides);
+        break;
+      case "continueOnErrorOnBatch":
+        editContinueOnErrorOnBatch.value = draft.continueOnErrorOnBatch;
+        break;
+      case "clickTableNavigationTarget":
+        editClickTableNavigationTarget.value = draft.clickTableNavigationTarget;
+        break;
+      case "completionTriggerMode":
+        editCompletionTriggerMode.value = draft.completionTriggerMode;
+        break;
+      case "defaultTransactionMode":
+        editDefaultTransactionMode.value = draft.defaultTransactionMode;
+        break;
+      default: {
+        // Compile-time exhaustiveness over EDITOR_SETTINGS_DRAFT_KEYS: adding a
+        // draft key without a ref assignment fails the build here.
+        const unhandled: never = key;
+        void unhandled;
+      }
+    }
+  }
 }
 
 // Sync from store when dialog opens
@@ -2237,16 +2457,15 @@ async function buildAppliedExportPayload(): Promise<string | null> {
   return buildSettingsExportPayload();
 }
 
-// Load validated imported values into the draft. Missing keys keep the
-// current draft value; the base snapshot is untouched so everything stays
-// unapplied until the user clicks Apply (or discards via the close flow).
+// Load validated imported values into the draft. Only the keys the file
+// actually contains are written: in-progress edits the file does not cover —
+// including state that a draft round-trip would drop, like a half-filled
+// table-column template row that has no field name yet — keep their exact
+// draft state. The base snapshot is untouched so everything stays unapplied
+// until the user clicks Apply (or discards via the close flow).
 function applyImportedEditorSettings(imported: Partial<EditorSettings>) {
-  const merged = editorSettingsDraftFromSettings({
-    ...settingsStore.editorSettings,
-    ...currentEditorSettingsDraft(),
-    ...imported,
-  });
-  applyEditorSettingsDraftToRefs(merged);
+  const patch = editorSettingsDraftPatchFromSettings(imported);
+  applyEditorSettingsKeysToRefs(patch as EditorSettingsDraft, Object.keys(patch) as EditorSettingsDraftKey[]);
   hasImportedSettingsPendingApply.value = true;
 }
 

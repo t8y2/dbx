@@ -11,7 +11,8 @@ use crate::db::mongo_driver::MongoDocumentResult;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
-    agent_execute_query_params, pool_error_action, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
+    agent_execute_query_params, is_dbx_query_timeout_error, pool_error_action, query_timeout_duration,
+    wait_for_query_opt, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
@@ -5113,18 +5114,24 @@ fn transfer_pool_error_action(
 async fn transfer_pool_context(
     state: &AppState,
     pool_key: &str,
-) -> (Option<String>, Option<String>, Option<DatabaseType>) {
+) -> (Option<String>, Option<String>, Option<DatabaseType>, Option<u64>) {
     let configs = state.configs.read().await;
     let config = config_for_pool_key(pool_key, &configs);
     (
         config.map(|config| config.id.clone()),
         database_from_pool_key(pool_key).map(str::to_string),
         config.map(|config| config.db_type),
+        config.map(|config| config.effective_query_timeout_secs()),
     )
 }
 
 fn client_session_id_from_pool_key(pool_key: &str) -> Option<&str> {
     pool_key.split_once(":session:").map(|(_, session)| session).filter(|session| !session.is_empty())
+}
+
+fn is_transfer_query_timeout(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    is_dbx_query_timeout_error(&lower) || lower.contains("查询超时") || lower.contains("查詢逾時")
 }
 
 async fn execute_on_pool_with_options(
@@ -5134,7 +5141,7 @@ async fn execute_on_pool_with_options(
     max_rows: Option<usize>,
     safety: TransferExecutionSafety,
 ) -> Result<db::QueryResult, String> {
-    let (connection_id, database, db_type) = transfer_pool_context(state, pool_key).await;
+    let (connection_id, database, db_type, _query_timeout_secs) = transfer_pool_context(state, pool_key).await;
     let client_session_id = client_session_id_from_pool_key(pool_key).map(str::to_string);
     let mut current_pool_key = pool_key.to_string();
 
@@ -5208,81 +5215,111 @@ async fn execute_on_pool_once(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<db::QueryResult, String> {
-    // Read-only check: block transfer operations in readonly mode
+    let (_connection_id, _database, _db_type, query_timeout_secs) = transfer_pool_context(state, pool_key).await;
+    let query_timeout = query_timeout_duration(query_timeout_secs);
+
+    // Read-only check: block transfer operations in readonly mode.
     crate::query::check_read_only_for_connection(state, pool_key, sql).await?;
     let pool_handle = state.pool_handle(pool_key).await;
     let pool = pool_handle.as_ref().ok_or("Connection not found")?;
 
-    match pool {
+    let result = match pool {
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
-            db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, Default::default()).await
+            wait_for_query_opt(
+                None,
+                query_timeout,
+                db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, Default::default()),
+            )
+            .await
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            db::postgres::execute_query_with_max_rows(&p, sql, max_rows).await
+            wait_for_query_opt(None, query_timeout, db::postgres::execute_query_with_max_rows(&p, sql, max_rows)).await
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
-            db::sqlite::execute_query_with_max_rows(&p, sql, max_rows).await
+            wait_for_query_opt(None, query_timeout, db::sqlite::execute_query_with_max_rows(&p, sql, max_rows)).await
         }
         PoolKind::ClickHouse(client) => {
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
-            db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows).await
+            wait_for_query_opt(
+                None,
+                query_timeout,
+                db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows),
+            )
+            .await
         }
         PoolKind::InfluxDb(client) => {
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
-            db::influxdb_driver::execute_query(&client, &database, sql).await
+            wait_for_query_opt(None, query_timeout, db::influxdb_driver::execute_query(&client, &database, sql)).await
         }
         PoolKind::InfluxDb3(client) => {
             let client = client.clone();
             let database = database_from_pool_key(pool_key).unwrap_or("default").to_string();
-            db::influxdb3_driver::execute_query(&client, &database, sql, max_rows).await
+            wait_for_query_opt(
+                None,
+                query_timeout,
+                db::influxdb3_driver::execute_query(&client, &database, sql, max_rows),
+            )
+            .await
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
             let mut client = client.lock().await;
-            let result = db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await;
+            let result = wait_for_query_opt(
+                None,
+                query_timeout,
+                db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows),
+            )
+            .await;
             drop(client);
             result
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
             let database = database_from_pool_key(pool_key).map(str::to_string);
-            let sql = sql.to_string();
+            let options = QueryExecutionOptions {
+                max_rows,
+                fetch_size: max_rows,
+                timeout_secs: query_timeout_secs,
+                ..QueryExecutionOptions::default()
+            };
+            let params = agent_execute_query_params(sql, database.as_deref(), None, options);
             let mut client = client.lock().await;
-            let params = agent_execute_query_params(
-                &sql,
-                database.as_deref(),
-                None,
-                QueryExecutionOptions { max_rows, fetch_size: max_rows, ..QueryExecutionOptions::default() },
-            );
-            client.execute_query(params).await
+            client.execute_query_with_timeout(params, query_timeout).await
         }
         PoolKind::ExternalDriver { config, session, .. } => {
             let database = database_from_pool_key(pool_key)
                 .map(str::to_string)
                 .unwrap_or_else(|| config.effective_database().unwrap_or("").to_string());
-            let params = crate::query::external_driver_query_params(
-                config.as_ref(),
-                sql,
-                &database,
-                None,
-                &QueryExecutionOptions { max_rows, fetch_size: max_rows, ..QueryExecutionOptions::default() },
-            );
-            session.invoke_with_timeout("executeQuery", params, None).await
+            let options = QueryExecutionOptions {
+                max_rows,
+                fetch_size: max_rows,
+                timeout_secs: query_timeout_secs,
+                ..QueryExecutionOptions::default()
+            };
+            let params = crate::query::external_driver_query_params(config.as_ref(), sql, &database, None, &options);
+            session.invoke_with_timeout("executeQuery", params, query_timeout).await
         }
         #[cfg(feature = "duckdb-sidecar")]
         PoolKind::DuckDbWorker(client) => {
             let client = client.clone();
-            let sql = sql.to_string();
-            client.execute(None, sql, max_rows, None, None).await
+            client.execute(None, sql.to_string(), max_rows, None, query_timeout).await
         }
         _ => Err("Unsupported database type for transfer".to_string()),
+    };
+    drop(pool_handle);
+    if result.as_ref().is_err_and(|error| is_transfer_query_timeout(error)) {
+        // A timed-out native driver future may still own a checked-out
+        // connection. Discard the pool so a late server response cannot be
+        // reused by the next transfer statement.
+        state.remove_pool_by_key(pool_key).await;
     }
+    result
 }
 
 fn database_from_pool_key(pool_key: &str) -> Option<&str> {
@@ -8556,6 +8593,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_query_timeout_errors_are_classified() {
+        assert!(is_transfer_query_timeout("Query timed out after 1 seconds"));
+        assert!(is_transfer_query_timeout("查询超时 (1s)"));
+        assert!(is_transfer_query_timeout("查詢逾時 (1s)"));
+        assert!(!is_transfer_query_timeout("Connection timed out while loading tables"));
+    }
 
     fn jdbc_transfer_config(connection_string: &str, driver_class: &str, profile: &str) -> ConnectionConfig {
         ConnectionConfig {

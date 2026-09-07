@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   activeRuns: [] as DatabaseBackupRun[],
   ensureConnected: vi.fn(async () => {}),
   listDatabases: vi.fn(async (_connectionId: string) => [{ name: "app" }]),
+  databaseExportDestinationNeedsConfirmation: vi.fn(async (_directory: string) => false),
   recordDatabaseExportDestination: vi.fn(async (_directory: string) => {}),
+  openDirectory: vi.fn(async (): Promise<string | null> => "/backups"),
   toast: vi.fn(),
   saveSchedule: vi.fn(),
   setScheduleEnabled: vi.fn(),
@@ -58,13 +60,14 @@ vi.mock("@/composables/useToast", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(async () => "/backups"),
+  open: mocks.openDirectory,
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   listDatabases: mocks.listDatabases,
   deleteDatabaseBackupFiles: vi.fn(),
   revealPathInFileManager: vi.fn(),
+  databaseExportDestinationNeedsConfirmation: mocks.databaseExportDestinationNeedsConfirmation,
   recordDatabaseExportDestination: mocks.recordDatabaseExportDestination,
 }));
 
@@ -230,6 +233,13 @@ function saveScheduleButton(): HTMLButtonElement {
   return button;
 }
 
+function scheduleRunNowButton(): HTMLButtonElement {
+  const title = String(i18n.global.t("databaseBackup.runNow"));
+  const button = Array.from(document.body.querySelectorAll<HTMLButtonElement>("button")).find((item) => item.title === title && !item.textContent?.trim());
+  if (!button) throw new Error("Schedule run-now button not found");
+  return button;
+}
+
 afterEach(() => {
   for (const app of mountedApps.splice(0)) app.unmount();
   document.body.innerHTML = "";
@@ -242,11 +252,17 @@ afterEach(() => {
   mocks.ensureConnected.mockClear();
   mocks.listDatabases.mockReset();
   mocks.listDatabases.mockResolvedValue([{ name: "app" }]);
+  mocks.databaseExportDestinationNeedsConfirmation.mockReset();
+  mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValue(false);
   mocks.recordDatabaseExportDestination.mockReset();
   mocks.recordDatabaseExportDestination.mockResolvedValue(undefined);
+  mocks.openDirectory.mockReset();
+  mocks.openDirectory.mockResolvedValue("/backups");
   mocks.toast.mockClear();
   mocks.saveSchedule.mockClear();
   mocks.cancelRun.mockClear();
+  mocks.runSchedule.mockReset();
+  mocks.runSchedule.mockResolvedValue(null);
   mocks.runOneShot.mockReset();
   mocks.runOneShot.mockResolvedValue(null);
 });
@@ -498,6 +514,46 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
 
     expect(addScheduleButton().disabled).toBe(true);
     expect(document.body.textContent).toContain(String(i18n.global.t("databaseBackup.noSupportedConnections")));
+  });
+
+  it("reconfirms a legacy destination before manually running its schedule", async () => {
+    mocks.schedules.push(schedule());
+    mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValueOnce(true);
+    mocks.runSchedule.mockResolvedValueOnce({
+      id: "run-1",
+      scheduleId: "schedule-1",
+      scheduleName: "Nightly backup",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "manual",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-08-18T00:00:00.000Z",
+      completedAt: "2026-08-18T00:01:00.000Z",
+      files: [],
+    });
+    await mountSettings();
+
+    scheduleRunNowButton().click();
+    await flush();
+
+    expect(mocks.databaseExportDestinationNeedsConfirmation).toHaveBeenCalledWith("/backups");
+    expect(mocks.openDirectory).toHaveBeenCalledWith(expect.objectContaining({ directory: true, defaultPath: "/backups" }));
+    expect(mocks.recordDatabaseExportDestination).toHaveBeenCalledWith("/backups");
+    expect(mocks.runSchedule).toHaveBeenCalledWith("schedule-1", "manual");
+  });
+
+  it("does not run a legacy schedule when destination confirmation is cancelled", async () => {
+    mocks.schedules.push(schedule());
+    mocks.databaseExportDestinationNeedsConfirmation.mockResolvedValueOnce(true);
+    mocks.openDirectory.mockResolvedValueOnce(null);
+    await mountSettings();
+
+    scheduleRunNowButton().click();
+    await flush();
+
+    expect(mocks.recordDatabaseExportDestination).not.toHaveBeenCalled();
+    expect(mocks.runSchedule).not.toHaveBeenCalled();
   });
 
   it("removes unavailable databases from an edited schedule before saving", async () => {

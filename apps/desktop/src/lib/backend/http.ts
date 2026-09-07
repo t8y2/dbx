@@ -2480,6 +2480,10 @@ export async function clearDatabaseExportCancellation(_exportId: string): Promis
   // The web exporter owns and clears its cancellation marker on completion.
 }
 
+export async function databaseExportDestinationNeedsConfirmation(_directory: string): Promise<boolean> {
+  throw new Error("Scheduled database backups are only available in the desktop app.");
+}
+
 export async function recordDatabaseExportDestination(_directory: string): Promise<void> {
   throw new Error("Scheduled database backups are only available in the desktop app.");
 }

@@ -1233,7 +1233,7 @@ pub fn is_connection_error(err: &str) -> bool {
         || is_os_connection_error(&lower)
 }
 
-fn is_dbx_query_timeout_error(lower: &str) -> bool {
+pub(crate) fn is_dbx_query_timeout_error(lower: &str) -> bool {
     lower.starts_with("query timed out after ")
 }
 
@@ -5446,82 +5446,53 @@ where
             }
         }
         TxnConnection::Mysql(Some(conn)) => {
-            let query_result = match cancel_token.as_ref() {
-                Some(cancel_token) => {
-                    tokio::select! {
-                        _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
-                        result = conn.query_iter(sql) => result.map_err(|error| format!("Query failed: {error}")),
+            // The query timeout is an inactivity budget reset by every received row,
+            // not a cap on the total duration of a long backup/export stream.
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            let progress_clock_for_rows = progress_clock.clone();
+            let timeout_error = format!(
+                "Query timed out after {} seconds",
+                operation_budget.query_timeout.map_or(0, |timeout| timeout.as_secs())
+            );
+            let stream_future = async {
+                let mut result = conn.query_iter(sql).await.map_err(|error| format!("Query failed: {error}"))?;
+                let Some(mut stream) =
+                    result.stream::<mysql_async::Row>().await.map_err(|error| format!("Query failed: {error}"))?
+                else {
+                    return Err("Empty result set stream".to_string());
+                };
+
+                let mut batch = Vec::with_capacity(batch_size);
+                let mut total_rows = 0_u64;
+                while let Some(row_result) = stream.next().await {
+                    match row_result {
+                        Ok(row) => {
+                            batch.push(
+                                (0..row.len()).map(|index| db::mysql::mysql_value_to_json(&row, index)).collect(),
+                            );
+                            total_rows += 1;
+                            if batch.len() >= batch_size {
+                                on_batch(std::mem::take(&mut batch))?;
+                                batch = Vec::with_capacity(batch_size);
+                            }
+                        }
+                        Err(err) => return Err(format!("Query failed: {err}")),
                     }
+                    progress_clock_for_rows.mark();
                 }
-                None => conn.query_iter(sql).await.map_err(|error| format!("Query failed: {error}")),
+                if !batch.is_empty() {
+                    on_batch(batch)?;
+                }
+                Ok(total_rows)
             };
-            match query_result {
-                Ok(mut result) => {
-                    let stream_result = match cancel_token.as_ref() {
-                        Some(cancel_token) => {
-                            tokio::select! {
-                                _ = cancel_token.cancelled() => Err(QUERY_CANCELED.to_string()),
-                                stream = result.stream::<mysql_async::Row>() => stream.map_err(|error| format!("Query failed: {error}")),
-                            }
-                        }
-                        None => {
-                            result.stream::<mysql_async::Row>().await.map_err(|error| format!("Query failed: {error}"))
-                        }
-                    };
-                    match stream_result {
-                        Ok(Some(mut stream)) => {
-                            let mut batch = Vec::with_capacity(batch_size);
-                            let mut total_rows = 0_u64;
-                            let mut error = None;
-                            loop {
-                                let next_row = match cancel_token.as_ref() {
-                                    Some(cancel_token) => {
-                                        tokio::select! {
-                                            _ = cancel_token.cancelled() => {
-                                                error = Some(QUERY_CANCELED.to_string());
-                                                break;
-                                            }
-                                            row = stream.next() => row,
-                                        }
-                                    }
-                                    None => stream.next().await,
-                                };
-                                let Some(row_result) = next_row else { break };
-                                match row_result {
-                                    Ok(row) => {
-                                        batch.push(
-                                            (0..row.len())
-                                                .map(|index| db::mysql::mysql_value_to_json(&row, index))
-                                                .collect(),
-                                        );
-                                        total_rows += 1;
-                                        if batch.len() >= batch_size {
-                                            if let Err(err) = on_batch(std::mem::take(&mut batch)) {
-                                                error = Some(err);
-                                                break;
-                                            }
-                                            batch = Vec::with_capacity(batch_size);
-                                        }
-                                    }
-                                    Err(err) => {
-                                        error = Some(format!("Query failed: {err}"));
-                                        break;
-                                    }
-                                }
-                            }
-                            if error.is_none() && !batch.is_empty() {
-                                if let Err(err) = on_batch(batch) {
-                                    error = Some(err);
-                                }
-                            }
-                            error.map_or(Ok(total_rows), Err)
-                        }
-                        Ok(None) => Err("Empty result set stream".to_string()),
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            }
+            await_stream_with_progress_timeout(
+                stream_future,
+                operation_budget.query_timeout,
+                progress_clock,
+                cancel_token.as_ref(),
+                timeout_error,
+            )
+            .await
         }
         TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),
         TxnConnection::Agent { .. } => {
@@ -6849,7 +6820,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6975,7 +6946,7 @@ for line in sys.stdin:
         .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6992,7 +6963,7 @@ for line in sys.stdin:
                 .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -7006,7 +6977,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(!runtime.is_failed());
 
         runtime.kill();
@@ -8550,7 +8521,7 @@ for line in sys.stdin:
             execute_in_manual_transaction(&state, "txn-test", "SELECT 42", "dbx_test", None, Some(10)).await.unwrap();
         assert_eq!(results[0].rows, vec![vec![serde_json::json!(42)]]);
         commit_manual_transaction(&state, "txn-test").await.unwrap();
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
         assert_eq!(
             std::fs::read_to_string(&calls).unwrap(),
             "beginManualTransaction\nexecuteInManualTransaction\ncommitManualTransaction\n"

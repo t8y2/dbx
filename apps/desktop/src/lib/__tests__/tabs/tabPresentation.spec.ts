@@ -27,6 +27,8 @@ const translations: Record<string, string> = {
   "tabs.tooltipConnection": "Connection:",
   "tabs.tooltipGroup": "Group:",
   "tabs.tooltipDatabase": "Database:",
+  "tabs.tooltipTable": "Table:",
+  "tabs.tooltipTableComment": "Table Comment:",
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
 };
@@ -208,6 +210,22 @@ describe("tab group presentation", () => {
     };
 
     expect(connectionGroupDisplayName("conn-1", translate)).toBe("Ungrouped");
+  });
+
+  it("shows a bounded table comment only when it is non-empty", () => {
+    const lines = tabTooltipLines(
+      queryTab({
+        mode: "data",
+        tableComment: `  ${"表".repeat(55)}\narchive  `,
+        tableMeta: { schema: "public", tableName: "users", columns: [], primaryKeys: [] },
+      }),
+      translate,
+    );
+    const comment = lines.find((line) => line.label === "Table Comment:")?.value;
+
+    expect(Array.from(comment || "")).toHaveLength(50);
+    expect(comment?.endsWith("…")).toBe(true);
+    expect(tabTooltipLines(queryTab({ mode: "data", tableComment: "   ", tableMeta: { schema: "public", tableName: "users", columns: [], primaryKeys: [] } }), translate).some((line) => line.label === "Table Comment:")).toBe(false);
   });
 });
 

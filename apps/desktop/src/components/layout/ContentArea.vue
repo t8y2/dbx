@@ -5,6 +5,7 @@ import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { canReloadUnavailableDataTab, restoredDataTabReloadFilters } from "@/lib/table/tableDataRefresh";
 import { defaultViewForResult } from "@/lib/query/queryResultDefaultView";
 import { isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
+import { hasQueryOutput as tabHasQueryOutput } from "@/lib/query/queryOutput";
 import { batchSqlRecoveryState, type BatchSqlRecoveryAction } from "@/lib/query/batchSqlRecovery";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
@@ -132,6 +133,7 @@ import { canCancelQueryExecution, isActiveResultLoading, queryExecutionLabelKey 
 import {
   databaseDisplayNameForTab,
   executionSummaryItems,
+  isPreviewTab,
   queryResultExecutionSql,
   resultGridCacheKey,
   resultGridColumnWidthCacheKey,
@@ -246,14 +248,8 @@ const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
 onMounted(() => {
-  // Deliberately not preloading DataGrid here for every tab: evaluating that
-  // chunk is expensive (large component graph) and previously ran
-  // unconditionally shortly after any tab mounted, including source-only
-  // tabs (e.g. viewing a large object's DDL) that never need a grid. That
-  // turned a "warm the cache" optimization into a multi-second main-thread
-  // freeze right when the user was trying to read the newly-opened tab (see
-  // issue #8103). The watcher below still preloads it eagerly for tabs that
-  // actually need one.
+  // The watcher below warms the grid for query/data tabs. Keep source-only
+  // tabs out of that path: loading the grid there caused freezes (#8103).
   window.addEventListener("dbx-refresh-active-kv-browser", onRefreshActiveKvBrowser);
   window.addEventListener("resize", updateStandaloneResultToolbarDimensions);
   window.visualViewport?.addEventListener("resize", updateStandaloneResultToolbarDimensions);
@@ -262,9 +258,14 @@ onMounted(() => {
 });
 
 watch(
-  () => [props.activeTab.mode, !!props.activeTab.result] as const,
-  ([mode, hasResult]) => {
-    if (mode === "data" || hasResult) preloadDataGridComponent();
+  () => {
+    const tab = props.activeTab;
+    const gridMode = tab.mode === "query" || tab.mode === "data";
+    // Object source and preview tabs also use query mode, but often never run SQL.
+    return !!tab.result || (gridMode && (tab.isExecuting || tab.isExplaining || (!tab.sourceView && !tab.objectSource && !isPreviewTab(tab))));
+  },
+  (shouldPreload) => {
+    if (shouldPreload) preloadDataGridComponent();
   },
   { immediate: true },
 );
@@ -431,18 +432,7 @@ const activeQueryError = computed(() => {
   if (!result || !isQueryExecutionErrorResult(result)) return "";
   return String(result.rows[0]?.[0] ?? "");
 });
-const hasQueryOutput = computed(
-  () =>
-    !!props.activeTab.result ||
-    !!props.activeTab.resultRuns?.length ||
-    props.activeTab.resultEvicted === true ||
-    !!props.activeTab.explainPlan ||
-    !!props.activeTab.explainError ||
-    !!props.activeTab.explainTableResult ||
-    !!props.activeTab.explainTableError ||
-    props.activeTab.isExecuting === true ||
-    props.activeTab.isExplaining === true,
-);
+const hasQueryOutput = computed(() => tabHasQueryOutput(props.activeTab));
 const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
@@ -1285,6 +1275,7 @@ defineExpose({
               class="relative z-0 flex-1"
               :auto-focus="autoFocus !== false"
               :model-value="activeTab.sql"
+              :tab-id="activeTab.id"
               :connection-id="activeTab.connectionId"
               :catalog="activeTab.catalog"
               :database="activeTab.database"
@@ -1862,6 +1853,7 @@ defineExpose({
                 :loading="activeResultIsLoading"
                 :editable="!!activeTab.queryAnalysis || !!mongoQueryResultSaveHandler"
                 :source-columns="activeTab.querySourceColumns"
+                :joined-write-targets="activeTab.queryWriteTargets"
                 :readonly-column-indexes="groupedQueryReadonlyColumnIndexes(activeTab)"
                 :result-column-comments="activeTab.resultColumnComments"
                 :query-display-source-columns="activeTab.queryDisplaySourceColumns"

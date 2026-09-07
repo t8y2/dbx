@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAiMessageRenderer, splitStreamingTextBlocks } from "@/lib/ai/aiMessageRender";
 import { formatAiInlineMarkdown } from "@/lib/ai/aiMarkdown";
-
 describe("createAiMessageRenderer", () => {
   it("caches completed short messages", () => {
     const markdown = vi.fn((text: string) => `<p>${text}</p>`);
@@ -202,6 +201,112 @@ describe("createAiMessageRenderer", () => {
     renderer.render("abc");
 
     expect(markdown).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createAiMessageRenderer rich chart segments", () => {
+  const markdown = (text: string) => `<p>${text}</p>`;
+  const chartJson = JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [120, 200] }] });
+
+  it("routes a closed chart-json fence to a chart segment", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const segments = renderer.render("```chart-json\n" + chartJson + "\n```");
+    const seg = segments[0];
+    expect(seg.type).toBe("chart");
+    if (seg.type !== "chart") return;
+    expect(seg.content).toBe(chartJson);
+    expect(seg.spec.type).toBe("bar");
+  });
+
+  it("keeps an unfinished chart-json fence as a plain code segment while streaming", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render(`\`\`\`chart-json\n${chartJson.slice(0, 20)}`, { streaming: true });
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.pending).toBe(true);
+  });
+
+  it("switches an open chart-json fence to a chart segment once the closing fence arrives", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const open = `\`\`\`chart-json\n${chartJson.slice(0, 20)}`;
+    const closed = `\`\`\`chart-json\n${chartJson}\n\`\`\``;
+    expect(renderer.render(open, { streaming: true })[0].type).toBe("code");
+    expect(renderer.render(closed, { streaming: true })[0].type).toBe("chart");
+  });
+
+  it("falls back to a code segment when a closed chart-json fence fails validation", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render("```chart-json\n{ not json\n```");
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.lang).toBe("CHART-JSON");
+    expect(seg.isSql).toBe(false);
+    expect(seg.pending).toBe(false);
+  });
+
+  it("keeps sql/bash/json fences on the plain code path", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [sql] = renderer.render("```sql\nSELECT 1\n```");
+    expect(sql.type).toBe("code");
+    if (sql.type !== "code") return;
+    expect(sql.lang).toBe("SQL");
+    expect(sql.isSql).toBe(true);
+
+    const [bash] = renderer.render("```bash\necho hi\n```");
+    expect(bash.type).toBe("code");
+    if (bash.type !== "code") return;
+    expect(bash.lang).toBe("BASH");
+    expect(bash.isSql).toBe(false);
+  });
+});
+
+describe("createAiMessageRenderer rich html segments", () => {
+  const markdown = (text: string) => `<p>${text}</p>`;
+
+  it("routes a closed html fence to an html segment carrying the safe document", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const segments = renderer.render("```html\n<p>hi</p>\n```");
+    const seg = segments[0];
+    expect(seg.type).toBe("html");
+    if (seg.type !== "html") return;
+    expect(seg.content).toBe("<p>hi</p>");
+    expect(seg.document).toContain("Content-Security-Policy");
+    expect(seg.document).toContain("<p>hi</p>");
+  });
+
+  it("keeps an unfinished html fence as a plain code segment while streaming", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render("```html\n<p>hi", { streaming: true });
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.pending).toBe(true);
+  });
+
+  it("switches an open html fence to an html segment once the closing fence arrives", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    expect(renderer.render("```html\n<p>hi", { streaming: true })[0].type).toBe("code");
+    expect(renderer.render("```html\n<p>hi</p>\n```", { streaming: true })[0].type).toBe("html");
+  });
+
+  it("falls back to a code segment when the html body exceeds the preview budget", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const oversize = "x".repeat(512 * 1024 + 1);
+    const [seg] = renderer.render(`\`\`\`html\n${oversize}\n\`\`\``);
+    expect(seg.type).toBe("code");
+    if (seg.type !== "code") return;
+    expect(seg.lang).toBe("HTML");
+    expect(seg.isSql).toBe(false);
+    expect(seg.pending).toBe(false);
+    expect(seg.content).toBe(oversize);
+  });
+
+  it("never routes html fences into the sql code path that offers run/apply buttons", () => {
+    const renderer = createAiMessageRenderer({ markdown });
+    const [seg] = renderer.render("```html\n<p>hi</p>\n```");
+    // The template only offers run/apply on `type === 'code'` segments with
+    // `isSql`; an html segment must never wear that shape.
+    expect(seg.type).not.toBe("code");
+    expect(seg.type).toBe("html");
   });
 });
 

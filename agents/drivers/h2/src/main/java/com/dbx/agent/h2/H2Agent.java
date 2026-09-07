@@ -92,7 +92,29 @@ public class H2Agent extends AbstractJdbcAgent {
     @Override
     protected void afterConnect(ConnectParams params, Connection connection) {
         databaseName = params.getDatabase();
-        databaseMajorVersion = unchecked(() -> connection.getMetaData().getDatabaseMajorVersion());
+        databaseMajorVersion = detectDatabaseMajorVersion(connection);
+    }
+
+    // For a remote (TCP/SSL) connection, JDBC metadata such as
+    // getDatabaseMajorVersion() reflects the *loaded driver's* own version, not
+    // the server's, whenever the driver profile could not be auto-detected from
+    // a local database file (see H2FileFormatDetector) and fell back to the
+    // newest bundled driver. H2VERSION() is evaluated by the server itself, so
+    // it reports the real engine version regardless of which driver connected.
+    private static int detectDatabaseMajorVersion(Connection connection) {
+        try (java.sql.Statement statement = connection.createStatement();
+            ResultSet resultSet = statement.executeQuery("SELECT H2VERSION()")) {
+            if (resultSet.next()) {
+                String version = resultSet.getString(1);
+                int dot = version == null ? -1 : version.indexOf('.');
+                if (dot > 0) {
+                    return Integer.parseInt(version.substring(0, dot));
+                }
+            }
+        } catch (SQLException | NumberFormatException ignored) {
+            // Fall back to JDBC driver metadata below.
+        }
+        return unchecked(() -> connection.getMetaData().getDatabaseMajorVersion());
     }
 
     H2DriverVersion driverVersion() {

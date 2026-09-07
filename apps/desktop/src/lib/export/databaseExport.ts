@@ -166,6 +166,17 @@ export function buildAllDatabaseExportPlan(options: AllDatabaseExportPlanInput):
       displayName: schema,
     }));
   }
+  // PostgreSQL supports multiple schemas in one database. Keep the database
+  // as the export unit so the backend can produce one restore script for all
+  // schemas instead of one file per schema.
+  if (options.dbType === "postgres" && options.schemaAware) {
+    return options.databases.map((database) => ({
+      database,
+      schema: "",
+      fileStem: database,
+      displayName: database,
+    }));
+  }
   return options.databases.flatMap((database) => {
     const schemas = options.schemaAware ? filterExportableSchemas(options.schemasByDatabase?.[database] ?? [], options.dbType).filter((schema) => schema.trim()) : [database];
     const exportSchemas = schemas.length > 0 ? schemas : [database];

@@ -85,6 +85,7 @@ import { loadSidebarObjectGroup } from "@/lib/sidebar/sidebarObjectGroupRouting"
 import { isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
 import { isXuguSyntheticTreeNode } from "@/lib/sidebar/xuguPublicSynonyms";
 import { buildXuguSchedulerJobSql, type XuguSchedulerJobAction } from "@/lib/database/xuguSchedulerJobSql";
+import { canViewDatabaseObjectDependencies, databaseDependencyProviderFor } from "@/lib/database/databaseObjectDependencies";
 import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import { mysqlObjectTemplateForGroup } from "@/lib/sidebar/mysqlObjectTemplates";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
@@ -152,6 +153,7 @@ import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, su
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
@@ -1808,6 +1810,7 @@ async function newQuery() {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           tableName: node.label,
           columns: [],
         });
@@ -1907,6 +1910,7 @@ async function newSelectTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -1925,6 +1929,7 @@ async function newSelectTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -1949,6 +1954,7 @@ async function newInsertTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
             tableType: context.tableType,
@@ -1968,6 +1974,7 @@ async function newInsertTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
       tableType: context.tableType,
@@ -1993,6 +2000,7 @@ async function newUpdateTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -2011,6 +2019,7 @@ async function newUpdateTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -2035,6 +2044,7 @@ async function newDeleteTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -2053,6 +2063,7 @@ async function newDeleteTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -2080,7 +2091,11 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
         source: result.source,
       });
     },
-    (ddl, target) => formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseTypeForNode(target)), settingsStore.editorSettings.sqlFormatter),
+    async (ddl, target) => {
+      const formatDialect = sqlFormatDialectForDbType(databaseTypeForNode(target));
+      const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
+      return settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
+    },
   );
   connectionStore.activeConnectionId = tabTarget.connectionId;
   const title = `DDL - ${targets.map((target) => target.label).join(", ")}`;
@@ -2458,7 +2473,7 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
             },
           });
         } else {
-          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
+          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true, sourceView: true });
         }
       })
       .catch((e: any) => {
@@ -2481,6 +2496,25 @@ function openProcedureExecution() {
   const node = activeNode.value;
   if (node.type !== "procedure" || !node.connectionId || !node.database) return;
   emit("open-procedure", node);
+}
+
+async function openDatabaseObjectDependencies() {
+  const node = activeNode.value;
+  const provider = databaseDependencyProviderFor(currentDatabaseType());
+  if (!provider || !node.connectionId || !node.database || !provider.supports(node)) return;
+  const sql = provider.buildQuery(node);
+  if (!sql) return;
+
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    const objectName = node.objectName || node.label;
+    const tabId = queryStore.createTab(node.connectionId, node.database, `${t("contextMenu.viewDependencies")} - ${objectName}`, "query", node.schema, undefined, node.catalog, { forceNew: true });
+    queryStore.updateSql(tabId, sql);
+    await queryStore.executeTabSql(tabId, sql);
+  } catch (e: any) {
+    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 async function compileXuguObject() {
@@ -5780,6 +5814,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         icon: FileCode,
       });
     }
+    if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
+      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
     if (node.type === "view" || node.type === "materialized_view") {
       items.push({ label: t("contextMenu.editView"), action: () => openObjectSourceDialog(true), icon: Pencil });
       items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
@@ -5921,6 +5958,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (currentDatabaseType() === "xugu" && buildXuguCompileSql({ objectType: node.type, schema: node.schema, name: node.objectName || node.label })) {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
+    if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
+      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
     if (node.type === "index" && canOpenStructureEditor.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.editIndex"), action: openStructureEditor, icon: PencilRuler });
@@ -5957,6 +5997,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (!isPackageMember && canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
+      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
     if (currentDatabaseType() === "mysql") {
       items.push(copyNameMenuItem());
     }
@@ -6022,6 +6065,9 @@ function buildObjectSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.push({ label: t("contextMenu.compileObject"), action: compileXuguObject, icon: Wrench });
     }
     items.push({ label: t("contextMenu.viewSource"), action: () => openObjectSourceDialog(false), icon: Code2 });
+    if (canViewDatabaseObjectDependencies(currentDatabaseType(), node)) {
+      items.push({ label: t("contextMenu.viewDependencies"), action: openDatabaseObjectDependencies, icon: Network });
+    }
     if (node.type === "package" && currentDatabaseType() === "xugu" && node.xuguPackageBodyAvailable === true) {
       items.push({
         label: `${t("contextMenu.viewSource")} (${t("objects.packageBody")})`,

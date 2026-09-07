@@ -831,6 +831,7 @@ export interface QueryResultRun {
   resultEvicted?: boolean;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
@@ -1295,12 +1296,15 @@ export interface QueryTab {
     searchQuery?: string;
     viewport?: ObjectBrowserViewport;
   };
+  /** Opened to view object source, including objects without editable source metadata. */
+  sourceView?: boolean;
   objectSource?: {
     schema?: string;
     name: string;
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  tableComment?: string | null;
   tableMeta?: {
     schema?: string;
     tableName: string;
@@ -1368,6 +1372,7 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
+  queryWriteTargets?: Array<{ tableMeta: NonNullable<QueryTab["tableMeta"]>; sourceColumns: Array<string | undefined> }>;
   /**
    * Column comments for a multi-source query result (e.g. JOIN), indexed by
    * result-column ordinal (projection order). Each entry is the comment of the

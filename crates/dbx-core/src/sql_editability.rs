@@ -694,7 +694,7 @@ fn is_select_star(body: &str, alias: Option<&str>) -> bool {
 }
 
 fn parse_from_sources(body: &str) -> Vec<FromSource> {
-    if body.is_empty() || body.contains('(') || body.contains(')') {
+    if body.is_empty() {
         return Vec::new();
     }
 
@@ -742,6 +742,9 @@ fn parse_table_source_at(text: &str, start: usize, index: usize) -> Option<(From
     }
     let mut end = pos + ident.end;
     let tail_pos = skip_whitespace(text, end);
+    if text[tail_pos..].starts_with('(') {
+        return None;
+    }
     let alias = if starts_with_keyword_at(text, tail_pos, "AS") {
         let alias_ident = read_identifier(text, tail_pos + 2)?;
         end = alias_ident.end;
@@ -1582,6 +1585,28 @@ mod tests {
             star: true,
             result_name: "*".to_string(),
             expression: expression.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod joined_predicate_regression {
+    use super::analyze_editable_query_editability;
+
+    #[test]
+    fn parenthesized_join_predicate_preserves_both_sources() {
+        let result = analyze_editable_query_editability("SELECT u.id,u.nickname,p.paper_id,p.paper_name FROM users u JOIN papers p ON (u.id=p.user_id) WHERE u.id=1");
+        assert!(result.editable);
+        assert_eq!(result.analysis.unwrap().sources.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn joined_derived_and_function_sources_remain_read_only() {
+        for sql in [
+            "SELECT u.id,p.id FROM users u JOIN (SELECT id FROM papers) p ON u.id=p.id",
+            "SELECT u.id,p.id FROM users u JOIN generate_series(1,2) p ON u.id=p.id",
+        ] {
+            assert!(!analyze_editable_query_editability(sql).editable, "{sql}");
         }
     }
 }

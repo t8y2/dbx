@@ -3624,7 +3624,7 @@ test("expands single-table alias star projections for editable query metadata", 
   }
 });
 
-test("keeps joined query read-only when multiple source tables are writable candidates", async () => {
+test("keeps per-table write targets when multiple source tables are writable candidates", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());
   const connectionStore = useConnectionStore();
@@ -3711,10 +3711,15 @@ test("keeps joined query read-only when multiple source tables are writable cand
     await store.executeTabSql(tabId, sql);
 
     const tab = store.tabs.find((item) => item.id === tabId);
-    await waitFor(() => columnRequests.length === 2 && tab?.queryEditabilityReason === "complex-source");
-    assert.equal(tab?.queryAnalysis, undefined);
-    assert.equal(tab?.tableMeta, undefined);
-    assert.equal(tab?.querySourceColumns, undefined);
+    await waitFor(() => columnRequests.length === 2 && tab?.queryWriteTargets?.length === 2);
+    assert.equal(tab?.queryEditabilityReason, undefined);
+    assert.equal(tab?.queryAnalysis?.allowDelete, false);
+    assert.equal(tab?.queryAnalysis?.allowInsert, false);
+    assert.deepEqual(
+      tab?.queryWriteTargets?.map((target) => target.tableMeta.tableName),
+      ["users", "orders"],
+    );
+    assert.deepEqual(tab?.querySourceColumns, ["id", "name", "id", "total"]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

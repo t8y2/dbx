@@ -92,6 +92,8 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
@@ -112,7 +114,7 @@ import {
   isClickHouseExistingRowReadonlyColumn,
   isHiddenGridColumn,
   isTdengineExistingRowReadonlyColumn,
-  usesSyntheticRowIdKey,
+  shouldIncludeSyntheticRowId,
 } from "@/lib/table/tableEditing";
 import { buildDataGridColumnDistinctValuesSql, buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import {
@@ -461,6 +463,7 @@ interface DataGridProps {
   pageSizePreference?: DataGridPageSizePreference;
   autoTransposeSingleRow?: boolean;
   sourceColumns?: Array<string | undefined>;
+  joinedWriteTargets?: import("@/types/database").QueryTab["queryWriteTargets"];
   readonlyColumnIndexes?: number[];
   /**
    * Column comments for a multi-source query result (e.g. JOIN), indexed by
@@ -2441,7 +2444,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
   appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-  filterBuilderOpen.value = false;
+  if (settingsStore.editorSettings.dataGridAutoHideFilterBuilder) filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 
@@ -4348,7 +4351,7 @@ async function refreshSavedRows(request: { dirtyRows: ReadonlyMap<number, Readon
     ...tableDataLargeValuePreviewOptions(resolvedDatabaseType.value, tableMeta.columns, tableMeta.primaryKeys, pageSize.value),
     whereInput: identityConditions.join(" OR "),
     limit: planResult.plan.sourceIndexes.length + 1,
-    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   const refreshed = await api.executeQuery(connectionId, props.executionDatabase ?? props.database ?? "", sql, tableMeta.schema ?? props.schema, undefined, {
     maxRows: planResult.plan.sourceIndexes.length + 1,
@@ -4383,6 +4386,7 @@ const editor = useDataGridEditor({
   database: computed(() => props.executionDatabase ?? props.database),
   tableMeta: computed(() => props.tableMeta),
   sourceColumns: computed(() => props.sourceColumns),
+  joinedWriteTargets: computed(() => props.joinedWriteTargets),
   readonlyColumnIndexes: computed(() => (props.readonlyColumnIndexes ? new Set(props.readonlyColumnIndexes) : undefined)),
   canEditExistingRows,
   onExecuteSql: computed(() => props.onExecuteSql),
@@ -5540,7 +5544,7 @@ async function hydrateVisibleLargeValuePreviews(generation: number) {
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.size,
     offset: 0,
-    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
   const connection = connectionStore.getConfig(props.connectionId);
@@ -5707,7 +5711,7 @@ async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeV
     whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
     limit: requests.length,
     offset: 0,
-    includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
   });
   const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
   const results = await api.executeMulti(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
@@ -5995,6 +5999,11 @@ function captureViewportAnchorForRefresh(): { row?: PersistedDataGridSelection; 
   if (showTranspose.value || displayItems.value.length === 0) return null;
   const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
   if (!scroller) return null;
+  // Already viewing the top of the grid: don't anchor to the row currently
+  // there. Anchoring would re-pin that row to the same on-screen offset even
+  // after a refresh prepends new rows above it (e.g. newly inserted rows
+  // under a DESC sort), pushing the new rows above the visible area (#8339).
+  if (scroller.scrollTop <= 0) return null;
   const rowHeight = useCanvasGridRows.value ? CANVAS_DATA_GRID_ROW_HEIGHT : DOM_DATA_GRID_ROW_HEIGHT;
   const fallbackDisplayIndex = Math.max(0, Math.min(displayItems.value.length - 1, Math.floor(scroller.scrollTop / rowHeight)));
   const item = displayItems.value[fallbackDisplayIndex];
@@ -7113,7 +7122,7 @@ async function applyOrderBySearch() {
       injectDefaultTimeSeriesWhere: true,
       limit: pageSize.value,
       whereInput: currentWhereInput(),
-      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+      includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);
@@ -7152,7 +7161,7 @@ async function applyWhereFilter() {
       limit: pageSize.value,
       injectDefaultTimeSeriesWhere: true,
       whereInput,
-      includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
+      includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
     });
     markConditionInputsApplied();
     await props.onExecuteSql(sql);
@@ -11393,7 +11402,8 @@ async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
       },
       { force },
     );
-    ddlContent.value = ddl;
+    const formatDialect = sqlFormatDialectForDbType(resolvedDatabaseType.value);
+    ddlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? ddl : omitDdlIdentifierQuotes(ddl, formatDialect);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {
@@ -14325,8 +14335,9 @@ function openGridSnapshot() {
                   <Copy class="w-3 h-3" />
                   <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleDdlWrap">
+                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" :title="t('settings.wordWrap')" :aria-label="t('settings.wordWrap')" @click="toggleDdlWrap">
                   <WrapText class="w-3 h-3" />
+                  <span class="table-info-action-label">{{ t("settings.wordWrap") }}</span>
                 </Button>
               </div>
               <div v-else-if="activeTableInfoTab === 'indexes' && canManageMongoIndexes" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">

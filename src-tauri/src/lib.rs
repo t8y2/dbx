@@ -2462,6 +2462,7 @@ pub fn run() {
             commands::database_export::export_database_sql,
             commands::database_export::cancel_database_export,
             commands::database_export::clear_database_export_cancellation,
+            commands::database_export::database_export_destination_needs_confirmation,
             commands::database_export::record_database_export_destination,
             commands::table_export::start_table_export,
             commands::table_export::cancel_table_export,

@@ -98,6 +98,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ openDataTabsNextToActive: null } as any).openDataTabsNextToActive).toBe(false);
   });
 
+  it("quotes generated SQL identifiers by default and preserves an explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: true }).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: false }).generateSqlQuoteIdentifiers).toBe(false);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: "false" } as any).generateSqlQuoteIdentifiers).toBe(true);
+  });
+
   it("keeps SQL-file save formatting disabled unless explicitly enabled", () => {
     expect(normalizeEditorSettings({}).formatSqlOnSqlFileSave).toBe(false);
     expect(normalizeEditorSettings({ formatSqlOnSqlFileSave: true }).formatSqlOnSqlFileSave).toBe(true);
@@ -486,8 +493,10 @@ describe("normalizeMcpGlobalPolicy", () => {
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: null,
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
     });
@@ -505,8 +514,10 @@ describe("normalizeMcpGlobalPolicy", () => {
       readOnly: true,
       allowDangerousSql: true,
       allowedConnectionIds: ["connection-1", "connection-2"],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     });
@@ -804,8 +815,10 @@ describe("settingsStore MCP policy persistence", () => {
       readOnly: true,
       allowDangerousSql: false,
       allowedConnectionIds: ["connection-1"],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     };
@@ -819,8 +832,10 @@ describe("settingsStore MCP policy persistence", () => {
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: [],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     });

@@ -53,11 +53,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedGroupIds: string[];
   allowedToolNames: string[] | null;
   connectionPolicies: McpConnectionPolicy[];
+  groupPolicies: McpGroupPolicy[];
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+}
+
+export interface McpGroupPolicy {
+  groupId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export interface McpConnectionPolicy {
@@ -113,14 +121,17 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
   allowedConnectionIds: null,
+  allowedGroupIds: [],
   allowedToolNames: null,
   connectionPolicies: [],
+  groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
   const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  const allowedGroupIds = allowedConnectionIds === null ? [] : [...new Set((policy?.allowedGroupIds ?? []).filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
   const allowedToolNames = policy?.allowedToolNames === null || policy?.allowedToolNames === undefined ? null : [...new Set(policy.allowedToolNames.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim()))];
   const connectionPolicies = Object.values(
     (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
@@ -156,6 +167,20 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
       return rules;
     }, {}),
   );
+  const groupPolicies = Object.values(
+    (policy?.groupPolicies ?? []).reduce<Record<string, McpGroupPolicy>>((rules, rule) => {
+      if (!rule || typeof rule.groupId !== "string" || !rule.groupId.trim()) return rules;
+      const groupId = rule.groupId.trim();
+      const current = rules[groupId];
+      const readOnly = current?.readOnly === true || rule.readOnly === true;
+      rules[groupId] = {
+        groupId,
+        readOnly,
+        allowDangerousSql: !readOnly && (current ? current.allowDangerousSql && rule.allowDangerousSql === true : rule.allowDangerousSql === true),
+      };
+      return rules;
+    }, {}),
+  );
   // null / undefined / non-positive => null (inherit connection). 0 is preserved
   // as an explicit "no limit" only here; the UI maps "no limit" <=> 0 and
   // "inherit" <=> null.
@@ -164,8 +189,10 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
     allowedConnectionIds,
+    allowedGroupIds,
     allowedToolNames,
     connectionPolicies,
+    groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
   };
@@ -757,6 +784,7 @@ export interface EditorSettings {
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
+  dataGridAutoHideFilterBuilder: boolean;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
@@ -799,6 +827,7 @@ export interface EditorSettings {
   openDataTabsNextToActive: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
+  generateSqlQuoteIdentifiers: boolean;
   formatSqlOnSqlFileSave: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
@@ -986,6 +1015,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
+  dataGridAutoHideFilterBuilder: true,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
@@ -1028,6 +1058,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   openDataTabsNextToActive: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
+  generateSqlQuoteIdentifiers: true,
   formatSqlOnSqlFileSave: false,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
@@ -1431,6 +1462,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
+    dataGridAutoHideFilterBuilder: settings.dataGridAutoHideFilterBuilder ?? DEFAULT_EDITOR_SETTINGS.dataGridAutoHideFilterBuilder,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
@@ -1499,6 +1531,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
+    generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
     formatSqlOnSqlFileSave: settings.formatSqlOnSqlFileSave === true,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
@@ -1780,8 +1813,10 @@ export const useSettingsStore = defineStore("settings", () => {
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         allowedConnectionIds: next.allowedConnectionIds,
+        allowedGroupIds: next.allowedGroupIds,
         allowedToolNames: next.allowedToolNames,
         connectionPolicies: next.connectionPolicies,
+        groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
       });
     } catch (error) {
@@ -2145,6 +2180,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
+    if (partial.dataGridAutoHideFilterBuilder !== undefined) editorSettings.value.dataGridAutoHideFilterBuilder = partial.dataGridAutoHideFilterBuilder;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
@@ -2187,6 +2223,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
+    if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
     if (partial.formatSqlOnSqlFileSave !== undefined) editorSettings.value.formatSqlOnSqlFileSave = partial.formatSqlOnSqlFileSave === true;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);

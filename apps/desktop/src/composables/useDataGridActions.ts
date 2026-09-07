@@ -7,7 +7,7 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { elasticsearchCursorPageJumpRequestCount } from "@/lib/dataGrid/dataGridPagination";
-import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import * as api from "@/lib/backend/api";
 import type { QueryTab } from "@/types/database";
@@ -87,7 +87,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const tableMeta = tableMetaForDataTab(tab);
     const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : (tableMeta?.primaryKeys ?? []);
-    const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta?.tableType);
+    const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta?.tableType);
     // 列投影只信任真实元数据列：tableMetaForDataTab 的 fallback 列来自查询
     // 结果（可能是失败结果的 ["Error"]），进入 SQL 会生成非法投影；
     // 真实列缺失时省略 columns 让 builder 生成 SELECT *

@@ -5,9 +5,9 @@
  * changes per database type, transaction state, and feature flags, so any
  * static guess would over- or under-condense. Instead the toolbar measures its
  * own row: while the content overflows the available width it steps up one
- * tier (moving controls into the overflow menu); it only steps back down when
- * there is real slack AND the pane has grown meaningfully since the last
- * condensation, so a static narrow layout can never oscillate.
+ * tier (moving controls into the overflow menu). Each expanded tier's measured
+ * requirement is retained, so the toolbar can restore the fullest tier that
+ * fits without relying on scrollWidth from the already-condensed flex row.
  *
  * - Tier 0: full layout.
  * - Tier 1: secondary edit/entry actions (compress, keyword case, semantic
@@ -36,22 +36,32 @@ export interface EditorToolbarTierInput {
   contentWidth: number;
   /** Toolbar width when the current tier was condensed into; anchors step-down hysteresis. */
   condensedAtWidth?: number;
+  /** Required widths captured immediately before each tier was condensed. */
+  expandedTierRequiredWidths?: Partial<Record<EditorToolbarTier, number>>;
 }
 
 /**
  * Resolves the next toolbar tier from real measurements. Monotonic per
- * measurement — repeated calls after a tier change converge instead of
- * oscillating, because stepping down additionally requires the pane to have
- * grown by EDITOR_TOOLBAR_STEP_DOWN_MIN_GROWTH_PX since the last step up.
+ * measurement. Known expanded-tier widths allow a widened pane to restore the
+ * best fitting tier in one render; the growth-based branch remains as a safe
+ * fallback for callers without historical measurements.
  */
 export function resolveNextEditorToolbarTier(input: EditorToolbarTierInput): EditorToolbarTier {
-  const { tier, availableWidth, contentWidth, condensedAtWidth = 0 } = input;
+  const { tier, availableWidth, contentWidth, condensedAtWidth = 0, expandedTierRequiredWidths } = input;
   if (!Number.isFinite(availableWidth) || !Number.isFinite(contentWidth) || availableWidth <= 0 || contentWidth <= 0) {
     // Unmeasured (first paint, hosts without ResizeObserver) keeps the current tier.
     return tier;
   }
   if (contentWidth > availableWidth && tier < EDITOR_TOOLBAR_MAX_TIER) {
     return (tier + 1) as EditorToolbarTier;
+  }
+  if (tier > 0 && expandedTierRequiredWidths) {
+    for (let candidate = 0; candidate < tier; candidate += 1) {
+      const requiredWidth = expandedTierRequiredWidths[candidate as EditorToolbarTier];
+      if (requiredWidth && availableWidth >= requiredWidth + EDITOR_TOOLBAR_STEP_DOWN_SLACK_PX) {
+        return candidate as EditorToolbarTier;
+      }
+    }
   }
   if (tier > 0 && availableWidth - contentWidth >= EDITOR_TOOLBAR_STEP_DOWN_SLACK_PX && availableWidth - condensedAtWidth >= EDITOR_TOOLBAR_STEP_DOWN_MIN_GROWTH_PX) {
     return (tier - 1) as EditorToolbarTier;

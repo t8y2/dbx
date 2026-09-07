@@ -53,6 +53,23 @@ test("all-database export includes every schema for schema-aware databases", () 
   ]);
 });
 
+test("all-database PostgreSQL export keeps all schemas in one database file", () => {
+  const plan = buildAllDatabaseExportPlan({
+    databases: ["app", "analytics"],
+    schemaAware: true,
+    schemasByDatabase: {
+      app: ["public", "private"],
+      analytics: ["reporting"],
+    },
+    dbType: "postgres",
+  });
+
+  assert.deepEqual(plan, [
+    { database: "app", schema: "", fileStem: "app", displayName: "app" },
+    { database: "analytics", schema: "", fileStem: "analytics", displayName: "analytics" },
+  ]);
+});
+
 test("all-database export uses the database as schema for non-schema-aware databases", () => {
   const plan = buildAllDatabaseExportPlan({
     databases: ["app", "analytics"],

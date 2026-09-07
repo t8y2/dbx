@@ -402,6 +402,10 @@ pub struct SchemaDiffPreparationOptions {
     #[serde(default)]
     pub compare_column_order: bool,
     #[serde(default)]
+    pub ignore_table_name_case: bool,
+    #[serde(default)]
+    pub ignore_column_name_case: bool,
+    #[serde(default)]
     pub detect_renames: bool,
     #[serde(default)]
     pub detect_table_renames: bool,
@@ -577,13 +581,31 @@ impl DependencyGraph {
         Self::build_with_functions(details, tables, &[], &[])
     }
 
+    pub fn build_with_options(
+        details: &[TableSchemaDetail],
+        tables: &[TableInfo],
+        ignore_table_name_case: bool,
+    ) -> Self {
+        Self::build_with_functions_and_options(details, tables, &[], &[], ignore_table_name_case)
+    }
+
     /// Extended build: also extracts dependencies from view DDLs, triggers, and function/sequence definitions.
     /// Falls back to regex-based text scanning when no live DB query is available.
     pub fn build_with_functions(
         details: &[TableSchemaDetail],
         tables: &[TableInfo],
         functions: &[FunctionInfo],
+        sequences: &[SequenceInfo],
+    ) -> Self {
+        Self::build_with_functions_and_options(details, tables, functions, sequences, false)
+    }
+
+    pub fn build_with_functions_and_options(
+        details: &[TableSchemaDetail],
+        tables: &[TableInfo],
+        functions: &[FunctionInfo],
         _sequences: &[SequenceInfo],
+        ignore_table_name_case: bool,
     ) -> Self {
         let table_names: HashSet<&str> =
             tables.iter().filter(|t| !t.table_type.contains("VIEW")).map(|t| t.name.as_str()).collect();
@@ -608,14 +630,25 @@ impl DependencyGraph {
         for table_name in &table_names {
             if let Some(detail) = detail_map.get(table_name) {
                 for fk in &detail.foreign_keys {
-                    if table_names.contains(fk.ref_table.as_str()) {
+                    let referenced_table = if table_names.contains(fk.ref_table.as_str()) {
+                        Some(fk.ref_table.as_str())
+                    } else if ignore_table_name_case {
+                        let mut candidates =
+                            table_names.iter().copied().filter(|name| name.eq_ignore_ascii_case(&fk.ref_table));
+                        let candidate = candidates.next();
+                        candidate.filter(|_| candidates.next().is_none())
+                    } else {
+                        None
+                    };
+
+                    if let Some(referenced_table) = referenced_table {
                         if let Some(node) = nodes.get_mut(*table_name) {
-                            if !node.depends_on.contains(&fk.ref_table) {
-                                node.depends_on.push(fk.ref_table.clone());
+                            if !node.depends_on.iter().any(|name| name == referenced_table) {
+                                node.depends_on.push(referenced_table.to_string());
                             }
                         }
-                        if let Some(ref_node) = nodes.get_mut(&fk.ref_table) {
-                            if !ref_node.depended_by.iter().any(|d| d == *table_name) {
+                        if let Some(ref_node) = nodes.get_mut(referenced_table) {
+                            if !ref_node.depended_by.iter().any(|name| name == *table_name) {
                                 ref_node.depended_by.push((*table_name).to_string());
                             }
                         }
@@ -1076,12 +1109,47 @@ pub fn diff_columns_with_compatibility(
     compatibility_threshold: f64,
     field_mappings: &[FieldMapping],
 ) -> (Vec<ColumnDiff>, Vec<ColumnCompatibilityWarning>) {
+    diff_columns_with_compatibility_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        source_dialect,
+        target_dialect,
+        compatibility_threshold,
+        field_mappings,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_columns_with_compatibility_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+    source_dialect: DialectKind,
+    target_dialect: DialectKind,
+    compatibility_threshold: f64,
+    field_mappings: &[FieldMapping],
+    ignore_column_name_case: bool,
+) -> (Vec<ColumnDiff>, Vec<ColumnCompatibilityWarning>) {
     use crate::sql_dialect::descriptor::TypeMappingMatrix;
 
     let matrix = TypeMappingMatrix::for_dialects(source_dialect, target_dialect);
     let engine = DefaultTypeInferenceEngine;
 
-    let basic_diffs = diff_columns_with_options(source, target, ignore_comments, compare_column_order, false, 0.5);
+    let basic_diffs = diff_columns_with_identifier_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        false,
+        0.5,
+        None,
+        None,
+        ignore_column_name_case,
+    );
 
     let mut warnings = Vec::new();
     let mut enhanced_diffs = Vec::new();
@@ -1531,6 +1599,8 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 ignore_comments: options.ignore_comments,
                 cascade_delete: options.cascade_delete,
                 compare_column_order: options.compare_column_order,
+                ignore_table_name_case: options.ignore_table_name_case,
+                ignore_column_name_case: options.ignore_column_name_case,
                 source_dialect: options.source_dialect,
                 target_dialect: options.target_dialect,
                 table_mappings: options.table_mappings.clone(),
@@ -1802,6 +1872,8 @@ impl Default for SchemaDiffPreparationOptions {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            ignore_table_name_case: false,
+            ignore_column_name_case: false,
             detect_renames: false,
             detect_table_renames: false,
             rename_threshold: 0.5,
@@ -1895,7 +1967,11 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     let dialect_str = options.source_dialect.map(|d| d.label().to_string()).unwrap_or_else(|| "generic".to_string());
     let options = AstTransmitFilter::filter_diff_preparation_options(options, &dialect_str);
 
-    let dep_graph = DependencyGraph::build(&options.source_details, &options.source_tables);
+    let dep_graph = DependencyGraph::build_with_options(
+        &options.source_details,
+        &options.source_tables,
+        options.ignore_table_name_case,
+    );
 
     let mut diffs = if let Some(ref strategy) = options.shard_strategy {
         shard_diff(&options, strategy)
@@ -1956,7 +2032,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                 if let Some(source_detail) = options.source_details.iter().find(|d| d.name == diff.name) {
                     let target_name = diff.target_name.as_deref().unwrap_or(&diff.name);
                     if let Some(target_detail) = options.target_details.iter().find(|d| d.name == target_name) {
-                        let (_, warnings) = diff_columns_with_compatibility(
+                        let (_, warnings) = diff_columns_with_compatibility_options(
                             &source_detail.columns,
                             &target_detail.columns,
                             options.ignore_comments,
@@ -1965,6 +2041,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                             tgt_dialect,
                             options.compatibility_threshold,
                             &options.field_mappings,
+                            options.ignore_column_name_case,
                         );
                         all_warnings.extend(warnings);
                     }
@@ -2076,10 +2153,19 @@ struct SchemaDiffTableNameResolution {
     target_only: Vec<String>,
 }
 
+fn identifiers_equal(left: &str, right: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 fn resolve_schema_diff_table_names(
     source_names: &[String],
     target_names: &[String],
     mappings: &[SchemaDiffTableMapping],
+    ignore_table_name_case: bool,
 ) -> SchemaDiffTableNameResolution {
     let target_set: HashSet<&str> = target_names.iter().map(String::as_str).collect();
     let mut explicit_by_source: HashMap<&str, &str> = HashMap::new();
@@ -2089,24 +2175,52 @@ fn resolve_schema_diff_table_names(
         }
     }
 
-    let mut used_targets = HashSet::new();
+    // Reserve valid explicit targets before automatic matching so an explicit mapping
+    // wins even when another source table appears earlier in the input list.
+    let mut explicit_targets_by_source = HashMap::new();
+    let mut reserved_explicit_targets = HashSet::new();
+    for source_name in source_names {
+        let Some(target_name) = explicit_by_source.get(source_name.as_str()).copied() else { continue };
+        if target_set.contains(target_name) && reserved_explicit_targets.insert(target_name) {
+            explicit_targets_by_source.insert(source_name.clone(), target_name.to_string());
+        }
+    }
+
+    let mut resolved_targets_by_source = explicit_targets_by_source.clone();
+    let mut used_targets: HashSet<&str> = reserved_explicit_targets.clone();
+
+    // Resolve every exact match before considering case-insensitive candidates.
+    // This keeps an exact match from losing its target to an earlier case-only match.
+    for source_name in source_names {
+        if resolved_targets_by_source.contains_key(source_name) {
+            continue;
+        }
+        if target_set.contains(source_name.as_str()) && used_targets.insert(source_name.as_str()) {
+            resolved_targets_by_source.insert(source_name.clone(), source_name.clone());
+        }
+    }
+
+    if ignore_table_name_case {
+        for source_name in source_names {
+            if resolved_targets_by_source.contains_key(source_name) {
+                continue;
+            }
+            let mut candidates = target_names.iter().filter(|target_name| {
+                !used_targets.contains(target_name.as_str()) && identifiers_equal(source_name, target_name, true)
+            });
+            let candidate = candidates.next();
+            if let Some(target_name) = candidate.filter(|_| candidates.next().is_none()) {
+                used_targets.insert(target_name.as_str());
+                resolved_targets_by_source.insert(source_name.clone(), target_name.clone());
+            }
+        }
+    }
+
     let mut pairs = Vec::new();
     let mut source_only = Vec::new();
     for source_name in source_names {
-        let explicit_target = explicit_by_source
-            .get(source_name.as_str())
-            .copied()
-            .filter(|target_name| target_set.contains(target_name) && !used_targets.contains(target_name));
-        let target_name = explicit_target.or_else(|| {
-            target_set
-                .contains(source_name.as_str())
-                .then_some(source_name.as_str())
-                .filter(|target_name| !used_targets.contains(target_name))
-        });
-
-        if let Some(target_name) = target_name {
-            used_targets.insert(target_name);
-            pairs.push((source_name.clone(), target_name.to_string()));
+        if let Some(target_name) = resolved_targets_by_source.get(source_name) {
+            pairs.push((source_name.clone(), target_name.clone()));
         } else {
             source_only.push(source_name.clone());
         }
@@ -2151,10 +2265,19 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         .map(|table| table.name.clone())
         .collect();
 
-    let table_resolution =
-        resolve_schema_diff_table_names(&source_table_names, &target_table_names, &options.table_mappings);
-    let view_resolution =
-        resolve_schema_diff_table_names(&source_view_names, &target_view_names, &options.table_mappings);
+    let table_resolution = resolve_schema_diff_table_names(
+        &source_table_names,
+        &target_table_names,
+        &options.table_mappings,
+        options.ignore_table_name_case,
+    );
+    let view_resolution = resolve_schema_diff_table_names(
+        &source_view_names,
+        &target_view_names,
+        &options.table_mappings,
+        options.ignore_table_name_case,
+    );
+    let table_pairs = table_resolution.pairs.clone();
     let mut result = Vec::new();
 
     // A foreign key whose `ref_table` is itself one of the tables being compared is a
@@ -2214,7 +2337,9 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                             fk,
                             &source_table_name_set,
                             &target_table_name_set,
+                            &table_pairs,
                             &options.table_mappings,
+                            options.ignore_table_name_case,
                         );
                         ForeignKeyDiff {
                             diff_type: "added".to_string(),
@@ -2390,7 +2515,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     for (name, target_name) in table_resolution.pairs {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(target_name.as_str()) else { continue };
-        let column_diffs = diff_columns_with_dialect_options(
+        let column_diffs = diff_columns_with_identifier_options(
             &source.columns,
             &target.columns,
             options.ignore_comments,
@@ -2399,8 +2524,9 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             options.rename_threshold,
             options.source_dialect,
             options.target_dialect,
+            options.ignore_column_name_case,
         );
-        let index_diffs = diff_indexes(&source.indexes, &target.indexes);
+        let index_diffs = diff_indexes_with_options(&source.indexes, &target.indexes, options.ignore_column_name_case);
         let normalized_source_fks: Vec<ForeignKeyInfo> = source
             .foreign_keys
             .iter()
@@ -2409,13 +2535,23 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                     fk,
                     &source_table_name_set,
                     &target_table_name_set,
+                    &table_pairs,
                     &options.table_mappings,
+                    options.ignore_table_name_case,
                 )
             })
             .collect();
-        let normalized_target_fks: Vec<ForeignKeyInfo> =
-            target.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set)).collect();
-        let foreign_key_diffs = diff_foreign_keys(&normalized_source_fks, &normalized_target_fks);
+        let normalized_target_fks: Vec<ForeignKeyInfo> = target
+            .foreign_keys
+            .iter()
+            .map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set, options.ignore_table_name_case))
+            .collect();
+        let foreign_key_diffs = diff_foreign_keys_with_options(
+            &normalized_source_fks,
+            &normalized_target_fks,
+            options.ignore_table_name_case,
+            options.ignore_column_name_case,
+        );
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
         let source_comment = source_table_comments.get(name.as_str()).cloned().unwrap_or(None);
         let target_comment = target_table_comments.get(target_name.as_str()).cloned().unwrap_or(None);
@@ -2846,17 +2982,76 @@ fn diff_columns_with_dialect_options(
     source_dialect: Option<DialectKind>,
     target_dialect: Option<DialectKind>,
 ) -> Vec<ColumnDiff> {
+    diff_columns_with_identifier_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        detect_renames,
+        rename_threshold,
+        source_dialect,
+        target_dialect,
+        false,
+    )
+}
+
+fn resolve_column_matches(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_column_name_case: bool,
+) -> Vec<Option<usize>> {
+    let mut matches = vec![None; source.len()];
+    let mut used_targets = HashSet::new();
+
+    // Exact matches always win, even when a case-insensitive candidate is also available.
+    for (source_index, source_column) in source.iter().enumerate() {
+        if let Some(target_index) = target.iter().enumerate().find_map(|(target_index, target_column)| {
+            (target_column.name == source_column.name && !used_targets.contains(&target_index)).then_some(target_index)
+        }) {
+            matches[source_index] = Some(target_index);
+            used_targets.insert(target_index);
+        }
+    }
+
+    if ignore_column_name_case {
+        for (source_index, source_column) in source.iter().enumerate() {
+            if matches[source_index].is_some() {
+                continue;
+            }
+            let mut candidates = target.iter().enumerate().filter(|(target_index, target_column)| {
+                !used_targets.contains(target_index) && target_column.name.eq_ignore_ascii_case(&source_column.name)
+            });
+            let candidate = candidates.next().map(|(target_index, _)| target_index);
+            if let Some(target_index) = candidate.filter(|_| candidates.next().is_none()) {
+                matches[source_index] = Some(target_index);
+                used_targets.insert(target_index);
+            }
+        }
+    }
+
+    matches
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_columns_with_identifier_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+    detect_renames: bool,
+    rename_threshold: f64,
+    source_dialect: Option<DialectKind>,
+    target_dialect: Option<DialectKind>,
+    ignore_column_name_case: bool,
+) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
-    let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
-    let target_position_map: HashMap<&str, usize> =
-        target.iter().enumerate().map(|(index, column)| (column.name.as_str(), index)).collect();
-    let can_compare_order = compare_column_order
-        && source.len() == target.len()
-        && source.iter().all(|column| target_map.contains_key(column.name.as_str()));
+    let column_matches = resolve_column_matches(source, target, ignore_column_name_case);
+    let can_compare_order =
+        compare_column_order && source.len() == target.len() && column_matches.iter().all(Option::is_some);
 
     for (source_index, source_column) in source.iter().enumerate() {
-        if let Some(target_column) = target_map.get(source_column.name.as_str()) {
+        if let Some(target_index) = column_matches[source_index] {
+            let target_column = &target[target_index];
             let mut changes = Vec::new();
             if !column_types_equal_for_dialects(
                 &source_column.data_type,
@@ -2892,12 +3087,8 @@ fn diff_columns_with_dialect_options(
                     source_column.comment.as_deref().unwrap_or_default()
                 ));
             }
-            if can_compare_order {
-                if let Some(target_index) = target_position_map.get(source_column.name.as_str()) {
-                    if source_index != *target_index {
-                        changes.push(format!("order: {} → {}", *target_index + 1, source_index + 1));
-                    }
-                }
+            if can_compare_order && source_index != target_index {
+                changes.push(format!("order: {} → {}", target_index + 1, source_index + 1));
             }
             if !changes.is_empty() {
                 diffs.push(ColumnDiff {
@@ -2922,7 +3113,7 @@ fn diff_columns_with_dialect_options(
     }
 
     for (target_index, target_column) in target.iter().enumerate() {
-        if !source_map.contains_key(target_column.name.as_str()) {
+        if !column_matches.iter().flatten().any(|matched_index| *matched_index == target_index) {
             diffs.push(ColumnDiff {
                 diff_type: "removed".to_string(),
                 name: target_column.name.clone(),
@@ -3016,6 +3207,33 @@ fn column_add_position(columns: &[ColumnInfo], index: usize) -> ColumnAddPositio
 }
 
 pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff> {
+    diff_indexes_with_options(source, target, false)
+}
+
+fn index_columns_equal(source: &IndexInfo, target: &IndexInfo, ignore_column_name_case: bool) -> bool {
+    source.columns.len() == target.columns.len()
+        && source.columns.iter().enumerate().all(|(index, source_column)| {
+            let target_column = &target.columns[index];
+            let source_is_expression = source.key_is_expression.get(index).copied().unwrap_or(false);
+            let target_is_expression = target.key_is_expression.get(index).copied().unwrap_or(false);
+            if source_is_expression || target_is_expression {
+                source_column == target_column
+            } else {
+                identifiers_equal(source_column, target_column, ignore_column_name_case)
+            }
+        })
+}
+
+fn identifier_lists_equal(left: &[String], right: &[String], ignore_column_name_case: bool) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| identifiers_equal(left, right, ignore_column_name_case))
+}
+
+fn diff_indexes_with_options(
+    source: &[IndexInfo],
+    target: &[IndexInfo],
+    ignore_column_name_case: bool,
+) -> Vec<IndexDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &IndexInfo> = target.iter().map(|index| (index.name.as_str(), index)).collect();
     let source_map: HashMap<&str, &IndexInfo> = source.iter().map(|index| (index.name.as_str(), index)).collect();
@@ -3043,7 +3261,7 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
                 if source_index.is_unique { "YES" } else { "NO" }
             ));
         }
-        if source_index.columns.join(",") != target_index.columns.join(",") {
+        if !index_columns_equal(source_index, target_index, ignore_column_name_case) {
             changes.push(format!("columns: {} → {}", target_index.columns.join(", "), source_index.columns.join(", ")));
         }
         if source_index.index_type.as_deref().unwrap_or_default()
@@ -3064,7 +3282,7 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
         }
         let source_included = source_index.included_columns.clone().unwrap_or_default();
         let target_included = target_index.included_columns.clone().unwrap_or_default();
-        if source_included.join(",") != target_included.join(",") {
+        if !identifier_lists_equal(&source_included, &target_included, ignore_column_name_case) {
             changes.push(format!(
                 "include: {} → {}",
                 if target_included.is_empty() { "none".to_string() } else { target_included.join(", ") },
@@ -3114,9 +3332,15 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn normalize_self_referencing_fk(fk: &ForeignKeyInfo, own_table_names: &HashSet<&str>) -> ForeignKeyInfo {
+fn normalize_self_referencing_fk(
+    fk: &ForeignKeyInfo,
+    own_table_names: &HashSet<&str>,
+    ignore_table_name_case: bool,
+) -> ForeignKeyInfo {
     let mut normalized = fk.clone();
-    if fk.ref_schema.is_some() && own_table_names.contains(fk.ref_table.as_str()) {
+    if fk.ref_schema.is_some()
+        && own_table_names.iter().any(|table_name| identifiers_equal(table_name, &fk.ref_table, ignore_table_name_case))
+    {
         normalized.ref_schema = None;
     }
     normalized
@@ -3126,19 +3350,42 @@ fn normalize_mapped_foreign_key(
     fk: &ForeignKeyInfo,
     source_table_names: &HashSet<&str>,
     target_table_names: &HashSet<&str>,
+    table_pairs: &[(String, String)],
     mappings: &[SchemaDiffTableMapping],
+    ignore_table_name_case: bool,
 ) -> ForeignKeyInfo {
-    let mut normalized = normalize_self_referencing_fk(fk, source_table_names);
-    if let Some(mapping) = mappings.iter().find(|mapping| {
-        mapping.source_table == normalized.ref_table && target_table_names.contains(mapping.target_table.as_str())
-    }) {
-        normalized.ref_table = mapping.target_table.clone();
+    let mut normalized = normalize_self_referencing_fk(fk, source_table_names, ignore_table_name_case);
+    let mapped_target = mappings
+        .iter()
+        .find(|mapping| {
+            mapping.source_table == normalized.ref_table && target_table_names.contains(mapping.target_table.as_str())
+        })
+        .map(|mapping| mapping.target_table.as_str())
+        .or_else(|| {
+            table_pairs
+                .iter()
+                .find(|(source_table, _)| {
+                    identifiers_equal(source_table, &normalized.ref_table, ignore_table_name_case)
+                })
+                .map(|(_, target_table)| target_table.as_str())
+        });
+    if let Some(mapped_target) = mapped_target {
+        normalized.ref_table = mapped_target.to_string();
         normalized.ref_schema = None;
     }
     normalized
 }
 
 pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -> Vec<ForeignKeyDiff> {
+    diff_foreign_keys_with_options(source, target, false, false)
+}
+
+fn diff_foreign_keys_with_options(
+    source: &[ForeignKeyInfo],
+    target: &[ForeignKeyInfo],
+    ignore_table_name_case: bool,
+    ignore_column_name_case: bool,
+) -> Vec<ForeignKeyDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &ForeignKeyInfo> = target.iter().map(|fk| (fk.name.as_str(), fk)).collect();
     let source_map: HashMap<&str, &ForeignKeyInfo> = source.iter().map(|fk| (fk.name.as_str(), fk)).collect();
@@ -3156,10 +3403,10 @@ pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -
         };
 
         let mut changes = Vec::new();
-        if source_fk.column != target_fk.column {
+        if !identifiers_equal(&source_fk.column, &target_fk.column, ignore_column_name_case) {
             changes.push(format!("column: {} → {}", target_fk.column, source_fk.column));
         }
-        if source_fk.ref_table != target_fk.ref_table {
+        if !identifiers_equal(&source_fk.ref_table, &target_fk.ref_table, ignore_table_name_case) {
             changes.push(format!("ref table: {} → {}", target_fk.ref_table, source_fk.ref_table));
         }
         if source_fk.ref_schema != target_fk.ref_schema {
@@ -3169,7 +3416,7 @@ pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -
                 source_fk.ref_schema.as_deref().unwrap_or("")
             ));
         }
-        if source_fk.ref_column != target_fk.ref_column {
+        if !identifiers_equal(&source_fk.ref_column, &target_fk.ref_column, ignore_column_name_case) {
             changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
         }
         let source_on_delete = normalized_foreign_key_action(source_fk.on_delete.as_deref());
@@ -3919,6 +4166,15 @@ fn add_foreign_key_sql_with_reference_separator(
 
 fn target_table_name(diff: &TableDiff) -> &str {
     diff.target_name.as_deref().unwrap_or(&diff.name)
+}
+
+fn ddl_column_name(column: &ColumnDiff) -> &str {
+    if let (Some(source), Some(target)) = (&column.source, &column.target) {
+        if source.name.eq_ignore_ascii_case(&target.name) {
+            return &target.name;
+        }
+    }
+    &column.name
 }
 
 fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>, cascade: &str) -> String {
@@ -5482,12 +5738,16 @@ fn generate_schema_sync_sql_inner(
                     }
                     "modified" => {
                         if let Some(source) = &column.source {
-                            let mapped = convert_col(source);
+                            let target_column_name = ddl_column_name(column);
+                            let mut mapped = convert_col(source);
+                            if mapped.name != target_column_name {
+                                mapped.name = target_column_name.to_string();
+                            }
                             if db_type == DatabaseType::SqlServer {
                                 if let Some(target_col) = &column.target {
                                     standalone_statements.extend(sqlserver_column_change_statements(
                                         &table,
-                                        &column.name,
+                                        target_column_name,
                                         source,
                                         target_col,
                                         &mapped.data_type,
@@ -5503,7 +5763,7 @@ fn generate_schema_sync_sql_inner(
                                     ));
                                 }
                             } else {
-                                let name = quote_id(&column.name, db_type);
+                                let name = quote_id(target_column_name, db_type);
                                 if column.changes.iter().any(|change| change.starts_with("type:")) {
                                     parts.push(format!("  ALTER COLUMN {name} TYPE {}", mapped.data_type));
                                 }
@@ -5618,7 +5878,7 @@ fn generate_schema_sync_sql_inner(
                         if column.changes.iter().any(|change| change.starts_with("comment:")) {
                             lines.extend(column_comment_sql(
                                 target_name,
-                                &column.name,
+                                ddl_column_name(column),
                                 source.comment.as_deref().unwrap_or_default(),
                                 db_type,
                                 schema,
@@ -12155,6 +12415,8 @@ mod tests {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            ignore_table_name_case: false,
+            ignore_column_name_case: false,
             detect_renames: false,
             detect_table_renames: false,
             rename_threshold: 0.5,

@@ -11,6 +11,14 @@ import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, Qu
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
 export type OutputView = "result" | "summary" | "explain" | "chart";
+const TABLE_COMMENT_TOOLTIP_MAX_LENGTH = 50;
+
+function tableCommentTooltipValue(comment: string | null | undefined): string | undefined {
+  const normalized = comment?.trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  const characters = Array.from(normalized);
+  return characters.length <= TABLE_COMMENT_TOOLTIP_MAX_LENGTH ? normalized : `${characters.slice(0, TABLE_COMMENT_TOOLTIP_MAX_LENGTH - 1).join("")}…`;
+}
 
 export function connectionDisplayName(connectionId: string): string {
   const connectionStore = useConnectionStore();
@@ -170,6 +178,10 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.tableMeta.tableName });
+    const comment = tableCommentTooltipValue(tab.tableComment);
+    if (comment) {
+      lines.push({ label: t("tabs.tooltipTableComment"), value: comment });
+    }
   }
   if (tab.mode === "mongo" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });

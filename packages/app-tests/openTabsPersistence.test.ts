@@ -311,6 +311,7 @@ test("restores data and structure tabs with table state", () => {
       resultPageOffset: 50,
       whereInput: "id > 10",
       orderByInput: "id DESC",
+      tableComment: "Application users",
       tableMeta: {
         schema: "public",
         tableName: "users",
@@ -351,6 +352,7 @@ test("restores data and structure tabs with table state", () => {
   assert.equal(restored.tabs[0]?.resultPageOffset, 50);
   assert.equal(restored.tabs[0]?.whereInput, "id > 10");
   assert.equal(restored.tabs[0]?.orderByInput, "id DESC");
+  assert.equal(restored.tabs[0]?.tableComment, "Application users");
   assert.equal(restored.tabs[1]?.structureTableName, "users");
 });
 

@@ -36,7 +36,7 @@ import { nextRedisCommandDb } from "@/lib/redis/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { usesAgentCursorForQuery } from "@/lib/database/databaseDriverManifest";
 import { defaultAutoCommitForDbType, supportsClearableQuerySchema, supportsTransaction } from "@/lib/database/databaseFeatureSupport";
-import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { canInsertTableRows, canUseKeylessRowPredicate, DBX_ROWID_COLUMN, editablePrimaryKeys, shouldIncludeSyntheticRowId, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
@@ -105,7 +105,7 @@ const groupedDisplayMetadataLimiter = new MetadataTaskLimiter(GROUPED_DISPLAY_ME
   console.debug("[DBX][metadata-load:grouped-display-limiter]", event);
 });
 const UPPERCASE_FOLDED_METADATA_TYPES = new Set<string>([...ORACLE_LIKE_METADATA_TYPES, "saphana"]);
-const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle"]);
+const HIDDEN_QUERY_KEY_DATABASE_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "oracle", "xugu"]);
 const QUERY_RESULT_EXPORT_UNSUPPORTED_ERROR = "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
 const CANCEL_QUERY_TIMEOUT_MS = 10_000;
@@ -1462,6 +1462,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEstimatedBytes = undefined;
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
+    tab.queryWriteTargets = undefined;
     tab.resultColumnComments = undefined;
     tab.queryDisplaySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -1534,6 +1535,7 @@ export const useQueryStore = defineStore("query", () => {
     run.resultEstimatedBytes = undefined;
     run.queryAnalysis = undefined;
     run.querySourceColumns = undefined;
+    run.queryWriteTargets = undefined;
     run.resultColumnComments = undefined;
     run.queryDisplaySourceColumns = undefined;
     run.queryEditabilityReason = undefined;
@@ -1578,6 +1580,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEvicted = run.resultEvicted;
     tab.queryAnalysis = run.queryAnalysis;
     tab.querySourceColumns = run.querySourceColumns;
+    tab.queryWriteTargets = run.queryWriteTargets;
     tab.resultColumnComments = run.resultColumnComments;
     tab.queryDisplaySourceColumns = run.queryDisplaySourceColumns;
     tab.queryEditabilityReason = run.queryEditabilityReason;
@@ -1818,6 +1821,7 @@ export const useQueryStore = defineStore("query", () => {
         activeResultRunId: run.id,
         queryAnalysis: run.queryAnalysis,
         querySourceColumns: run.querySourceColumns,
+        queryWriteTargets: run.queryWriteTargets,
         resultColumnComments: run.resultColumnComments,
         queryDisplaySourceColumns: run.queryDisplaySourceColumns,
         queryEditabilityReason: run.queryEditabilityReason,
@@ -1899,6 +1903,7 @@ export const useQueryStore = defineStore("query", () => {
       resultEvicted: tab.resultEvicted,
       queryAnalysis: tab.queryAnalysis,
       querySourceColumns: tab.querySourceColumns,
+      queryWriteTargets: tab.queryWriteTargets,
       resultColumnComments: tab.resultColumnComments,
       queryDisplaySourceColumns: tab.queryDisplaySourceColumns,
       queryEditabilityReason: tab.queryEditabilityReason,
@@ -1999,6 +2004,7 @@ export const useQueryStore = defineStore("query", () => {
       resultEvicted: tab.resultEvicted,
       queryAnalysis: tab.queryAnalysis,
       querySourceColumns: tab.querySourceColumns,
+      queryWriteTargets: tab.queryWriteTargets,
       resultColumnComments: tab.resultColumnComments,
       queryDisplaySourceColumns: tab.queryDisplaySourceColumns,
       queryEditabilityReason: tab.queryEditabilityReason,
@@ -2244,6 +2250,7 @@ export const useQueryStore = defineStore("query", () => {
       structureTableName: t.structureTableName,
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
+      sourceView: t.sourceView,
       tableMeta: t.tableMeta,
       mongoEditTarget: t.mongoEditTarget,
       resultEvicted: t.resultEvicted,
@@ -2430,10 +2437,20 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
   }
 
-  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string, catalog?: string, options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean } = {}) {
+  function createTab(
+    connectionId: string,
+    database: string,
+    title?: string,
+    mode: QueryTab["mode"] = "query",
+    schema?: string,
+    initialSql?: string,
+    catalog?: string,
+    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean } = {},
+  ) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
+        if (options.sourceView) existing.sourceView = true;
         switchTab(existing.id);
         return existing.id;
       }
@@ -2446,6 +2463,7 @@ export const useQueryStore = defineStore("query", () => {
       title: title || `query_${tabs.value.length + 1}`,
       customTitle: mode === "query" && title ? true : undefined,
       forceWordWrap: options.forceWordWrap,
+      sourceView: options.sourceView,
       connectionId,
       database,
       schema,
@@ -2478,6 +2496,7 @@ export const useQueryStore = defineStore("query", () => {
         (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
     );
     if (existing) {
+      existing.sourceView = true;
       switchTab(existing.id);
       if (!isTabDirty(existing)) {
         updateSql(existing.id, options.sql);
@@ -2486,7 +2505,7 @@ export const useQueryStore = defineStore("query", () => {
       return existing.id;
     }
 
-    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true });
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true });
     setObjectSource(id, options.objectSource);
     return id;
   }
@@ -3682,9 +3701,11 @@ export const useQueryStore = defineStore("query", () => {
       structureDraft: original.structureDraft ? cloneTabDraft(original.structureDraft) : undefined,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
+      sourceView: original.sourceView,
       tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,
       queryAnalysis: original.queryAnalysis ? { ...original.queryAnalysis, sources: original.queryAnalysis.sources?.map((source) => ({ ...source })), columns: original.queryAnalysis.columns.map((c) => ({ ...c })) } : undefined,
       querySourceColumns: original.querySourceColumns ? [...original.querySourceColumns] : undefined,
+      queryWriteTargets: original.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
       resultColumnComments: original.resultColumnComments ? [...original.resultColumnComments] : undefined,
       queryDisplaySourceColumns: original.queryDisplaySourceColumns ? [...original.queryDisplaySourceColumns] : undefined,
       queryEditabilityReason: original.queryEditabilityReason,
@@ -3881,7 +3902,7 @@ export const useQueryStore = defineStore("query", () => {
         primaryKeys,
         ...tableDataLargeValuePreviewOptions(effectiveDbType, tableMeta.columns, primaryKeys, limit),
         includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-        includeRowId: usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableMeta.tableType),
+        includeRowId: shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableMeta.tableType),
         whereInput: tab.whereInput,
         injectDefaultTimeSeriesWhere: true,
         orderBy,
@@ -4555,7 +4576,7 @@ export const useQueryStore = defineStore("query", () => {
     return producedResult;
   }
 
-  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
+  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
 
   type LoadedEditableSource = {
     source: EditableQuerySource;
@@ -4644,6 +4665,7 @@ export const useQueryStore = defineStore("query", () => {
   function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
+    tab.queryWriteTargets = patch.queryWriteTargets;
     tab.queryEditabilityReason = patch.queryEditabilityReason;
     tab.mongoEditTarget = undefined;
     tab.tableMeta = patch.tableMeta;
@@ -4791,7 +4813,7 @@ export const useQueryStore = defineStore("query", () => {
     return matches.length === 1 && matches[0]?.type === "table";
   }
 
-  async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource): Promise<boolean> {
+  async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource, databaseType: DatabaseType): Promise<boolean> {
     if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
     if (loaded.tableMeta.tableType?.trim()) return false;
 
@@ -4808,7 +4830,7 @@ export const useQueryStore = defineStore("query", () => {
         database: loaded.tableMeta.database ?? tab.database,
         schema: loaded.tableMeta.schema,
         tableName: loaded.tableMeta.tableName,
-        databaseType: "oracle",
+        databaseType,
         driverProfile: connection?.driver_profile || connection?.db_type,
         catalog: loaded.tableMeta.catalog,
       },
@@ -4836,7 +4858,7 @@ export const useQueryStore = defineStore("query", () => {
       databaseType,
       primaryKeys: missingPrimaryKeys,
       existingResultNames: metadataAnalysis.selectStar ? loaded.tableMeta.columns.map((column) => column.name) : metadataAnalysis.columns.map((column) => column.resultName),
-      sourceExpressions: databaseType === "oracle" && missingPrimaryKeys.includes(DBX_ROWID_COLUMN) ? { [DBX_ROWID_COLUMN]: "ROWIDTOCHAR(ROWID)" } : undefined,
+      sourceExpressions: missingPrimaryKeys.includes(DBX_ROWID_COLUMN) && (databaseType === "oracle" || databaseType === "xugu") ? { [DBX_ROWID_COLUMN]: databaseType === "oracle" ? "ROWIDTOCHAR(ROWID)" : "ROWID" } : undefined,
     });
     if (!rewritten) return unchanged;
     queryExecutionLog("info", "hidden-primary-keys", {
@@ -4863,13 +4885,14 @@ export const useQueryStore = defineStore("query", () => {
       const hasDirectSourceProjection = analysis.columns.some((column) => Boolean(column.sourceName) && (!column.sourceKey || column.sourceKey === source.key));
       if (!wholeSourceProjected && !hasDirectSourceProjection) return unchanged;
       // Whole-source projections already include declared primary keys. Only
-      // Oracle needs preflight metadata here to add ROWID for a keyless table.
-      if (databaseType !== "oracle" && wholeSourceProjected) return unchanged;
+      // Oracle and Xugu need preflight metadata here to add their synthetic
+      // row key for a keyless base table.
+      if (databaseType !== "oracle" && databaseType !== "xugu" && wholeSourceProjected) return unchanged;
 
       const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, databaseType, executionDatabase);
       const cached = getCachedTableMetadata(target.request);
       let loaded = cached ? loadedEditableSourceFromMetadata(target, cached.metadata) : undefined;
-      if (!cached && databaseType === "oracle") {
+      if (!cached && (databaseType === "oracle" || databaseType === "xugu")) {
         // Oracle column discovery can be slow. A star projection over a table
         // with a declared primary key already returns the complete row identity,
         // so SQL can start while the full metadata needed for editing loads.
@@ -4900,12 +4923,12 @@ export const useQueryStore = defineStore("query", () => {
       if (loaded.tableMeta.tableType?.toUpperCase().includes("VIEW")) return unchanged;
       const columnPrimaryKeys = loaded.tableMeta.columns.filter((column) => column.is_primary_key).map((column) => column.name);
       const primaryKeys = databaseType === "oracle" ? loaded.tableMeta.primaryKeys : editablePrimaryKeys(databaseType, loaded.tableMeta.columns, loaded.tableMeta.tableType);
-      const syntheticOracleRowId = databaseType === "oracle" && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
-      // Oracle base tables without a natural identifier use the same ROWID
-      // identity as table-data tabs. Confirm the object is a base table because
-      // selecting ROWID from a view can fail with ORA-01445.
-      if (syntheticOracleRowId && !(await resolveOracleRowIdSafety(tab, loaded))) return unchanged;
-      const declaredPrimaryKeys = databaseType === "oracle" && !syntheticOracleRowId ? primaryKeys : columnPrimaryKeys;
+      const syntheticRowId = (databaseType === "oracle" || databaseType === "xugu") && usesSyntheticRowIdKey(databaseType, primaryKeys, loaded.tableMeta.tableType);
+      // Base tables without a natural identifier use the same ROWID identity
+      // as table-data tabs (Oracle and Xugu). Confirm the object is a base
+      // table because selecting ROWID from a view can fail with ORA-01445.
+      if (syntheticRowId && !(await resolveOracleRowIdSafety(tab, loaded, databaseType))) return unchanged;
+      const declaredPrimaryKeys = databaseType === "oracle" && !syntheticRowId ? primaryKeys : columnPrimaryKeys;
       return buildHiddenPrimaryKeyPreparation(tab, sql, databaseType, loaded, primaryKeys, declaredPrimaryKeys, traceId, elapsed);
     } catch (error) {
       // Metadata enrichment is optional. Query execution must retain its prior
@@ -5159,11 +5182,16 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       if (candidates.length > 1) {
+        const target = candidates[0]!;
         return {
-          queryAnalysis: undefined,
-          querySourceColumns: undefined,
-          queryEditabilityReason: "complex-source",
-          tableMeta: undefined,
+          queryAnalysis: { ...target.analysis, multiSource: true, allowInsert: false, allowDelete: false, allowInsertDelete: false },
+          querySourceColumns: tab.result.columns.map((_, index) => {
+            const owners = candidates.filter((candidate) => candidate.sourceColumns?.[index] !== undefined);
+            return owners.length === 1 ? owners[0]!.sourceColumns![index] : undefined;
+          }),
+          queryWriteTargets: candidates.map((candidate) => ({ tableMeta: candidate.tableMeta, sourceColumns: candidate.sourceColumns! })),
+          queryEditabilityReason: undefined,
+          tableMeta: target.tableMeta,
           resultColumnComments: multiSourceInfo?.comments,
           queryDisplaySourceColumns: multiSourceInfo?.mapping,
         };
@@ -5600,6 +5628,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -5984,6 +6013,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -6051,6 +6081,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -6545,6 +6576,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;
+        current.queryWriteTargets = undefined;
         current.resultColumnComments = undefined;
         current.queryDisplaySourceColumns = undefined;
         current.queryEditabilityReason = undefined;
@@ -7062,6 +7094,7 @@ export const useQueryStore = defineStore("query", () => {
     touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
+    tab.queryWriteTargets = undefined;
     tab.resultColumnComments = undefined;
     tab.queryDisplaySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -7188,6 +7221,7 @@ export const useQueryStore = defineStore("query", () => {
 
     tab.queryAnalysis = snapshot.queryAnalysis;
     tab.querySourceColumns = snapshot.querySourceColumns;
+    tab.queryWriteTargets = snapshot.queryWriteTargets;
     tab.resultColumnComments = snapshot.resultColumnComments;
     tab.queryDisplaySourceColumns = snapshot.queryDisplaySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;

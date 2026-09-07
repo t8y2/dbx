@@ -11,7 +11,7 @@ import { canApplyDataTabMetadata, dataTabMetadataNeedsRefresh, findExistingDataT
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
-import { usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import { canActivateExistingDataTableTab } from "@/lib/tabs/dataTabActivation";
@@ -173,6 +173,7 @@ export function useSidebarDataOpenRuntime() {
     };
 
     if (existingSameTableTab && (existingSameTableTab.isExecuting || canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false }))) {
+      if (node.comment !== undefined) existingSameTableTab.tableComment = node.comment;
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
       // 代次失配视同冷缓存（即使位于 30s TTL 窗口内也要重建）：disconnect /
@@ -192,12 +193,16 @@ export function useSidebarDataOpenRuntime() {
       if (existingDataTabCandidate) {
         queryStore.switchTab(existingDataTabCandidate.tab.id);
         resetReusedDataTabState(existingDataTabCandidate.tab);
+        existingDataTabCandidate.tab.tableComment = node.comment;
         return existingDataTabCandidate.tab.id;
       }
-      return queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, {
+      const createdTabId = queryStore.createTab(node.connectionId, node.database, node.label, "data", tableSchema, undefined, node.catalog, {
         forceNew: true,
         insertAfterActive: settingsStore.editorSettings.openDataTabsNextToActive,
       });
+      const createdTab = queryStore.tabs.find((tab) => tab.id === createdTabId);
+      if (createdTab) createdTab.tableComment = node.comment;
+      return createdTabId;
     })();
     openDataLog("info", "tab-created", { traceId, tabId, elapsed: elapsed() });
     logPhase("tab-created", { tabId });
@@ -334,7 +339,7 @@ export function useSidebarDataOpenRuntime() {
       const loadedTableMeta = cachedTableMeta ?? queryStore.tabs.find((item) => item.id === tabId)?.tableMeta;
       const columns = loadedTableMeta?.columns ?? [];
       const primaryKeys = loadedTableMeta?.primaryKeys ?? [];
-      const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
+      const includeRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, tableType);
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
         driverProfile: config?.driver_profile,

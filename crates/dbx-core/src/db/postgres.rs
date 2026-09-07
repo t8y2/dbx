@@ -10323,7 +10323,9 @@ mod tests {
         // guarded ordinal so composite keys stay aligned.
         for compat_sql in [postgres_foreign_keys_compat_sql(), postgres_foreign_keys_for_relations_compat_sql()] {
             assert!(!compat_sql.contains("generate_series(1, array_length"));
-            assert!(compat_sql.contains("JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1)"));
+            assert!(
+                compat_sql.contains("JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1)")
+            );
             assert!(compat_sql.contains("(con.conkey)[fk.ord]"));
             assert!(compat_sql.contains("(con.confkey)[fk.ord]"));
             assert!(!compat_sql.contains("LATERAL"));

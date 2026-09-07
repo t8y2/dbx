@@ -64,6 +64,21 @@ describe("editable query hidden primary keys", () => {
     });
   });
 
+  it("supports Xugu's unqualified ROWID expression for keyless base tables", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * FROM APP.USERS t WHERE t.ACTIVE = 1",
+        databaseType: "xugu",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWID" },
+      }),
+    ).toEqual({
+      sql: 'SELECT *, ROWID AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
+      projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
+    });
+  });
+
   it("preserves an Oracle FOR UPDATE clause when appending a hidden row key", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

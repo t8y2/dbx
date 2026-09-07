@@ -118,7 +118,10 @@ vi.mock("@/lib/backend/debugLog", () => ({ appendDebugLog: vi.fn(), isDebugLoggi
 // dataTabOpenPolicy 使用真实实现，覆盖设置开关对应的复用范围
 vi.mock("@/lib/sidebar/treeNodeContext", () => ({ hasTreeNodeDatabaseContext: () => true }));
 vi.mock("@/lib/table/tableSelectSql", () => ({ buildTableSelectSql: mocks.buildTableSelectSql }));
-vi.mock("@/lib/table/tableEditing", () => ({ usesSyntheticRowIdKey: () => false }));
+vi.mock("@/lib/table/tableEditing", () => ({
+  usesSyntheticRowIdKey: () => false,
+  shouldIncludeSyntheticRowId: () => false,
+}));
 vi.mock("@/lib/table/tableOpenPageLimit", () => ({ tableOpenPageLimit: () => 100 }));
 vi.mock("@/lib/tabs/dataTabActivation", () => ({ canActivateExistingDataTableTab: () => false }));
 
@@ -202,16 +205,24 @@ describe("useSidebarDataOpenRuntime", () => {
   it("reuses a sidebar tab for the same table in same-table mode", async () => {
     mocks.openDataTabsNextToActive = true;
 
-    await useSidebarDataOpenRuntime().openData(tableNode);
-    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, comment: "Old comment" });
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, comment: "Updated comment" });
 
     expect(mocks.tabs).toHaveLength(1);
+    expect(mocks.tabs[0]?.tableComment).toBe("Updated comment");
+  });
+
+  it("copies the existing sidebar table comment without another metadata request", async () => {
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, comment: "Application users" });
+
+    expect(mocks.tabs[0]?.tableComment).toBe("Application users");
+    expect(mocks.loadTableMetadata).toHaveBeenCalledTimes(1);
   });
 
   it("keeps different sidebar tables independent in same-table mode", async () => {
     const ordersNode = { ...tableNode, id: "table-orders", label: "orders" };
 
-    await useSidebarDataOpenRuntime().openData(tableNode);
+    await useSidebarDataOpenRuntime().openData({ ...tableNode, comment: "User table" });
     await useSidebarDataOpenRuntime().openData(ordersNode);
 
     expect(mocks.tabs).toHaveLength(2);
@@ -270,6 +281,7 @@ describe("useSidebarDataOpenRuntime", () => {
 
     expect(mocks.tabs).toHaveLength(1);
     expect(mocks.tabs[0]?.title).toBe("orders");
+    expect(mocks.tabs[0]?.tableComment).toBeUndefined();
     expect(mocks.tabs[0]?.tableMeta?.tableName).toBe("orders");
     expect(mocks.tabs[0]?.resultLocalSortOriginalLargeValueCells).toBeUndefined();
   });

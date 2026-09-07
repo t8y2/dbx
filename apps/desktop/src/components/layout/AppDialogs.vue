@@ -59,6 +59,7 @@ const emit = defineEmits<{
   connectFailed: [message: string];
   openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -255,7 +256,14 @@ watch(
     :prefill-target-database="dialogs.transferPrefillTargetDatabase.value"
     :prefill-target-schema="dialogs.transferPrefillTargetSchema.value"
   />
-  <SchemaDiffDialog v-if="dialogs.showSchemaDiffDialog.value" v-model:open="dialogs.showSchemaDiffDialog.value" :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value" :prefill-database="dialogs.schemaDiffPrefillDatabase.value" :prefill-schema="dialogs.schemaDiffPrefillSchema.value" />
+  <SchemaDiffDialog
+    v-if="dialogs.showSchemaDiffDialog.value"
+    v-model:open="dialogs.showSchemaDiffDialog.value"
+    :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value"
+    :prefill-database="dialogs.schemaDiffPrefillDatabase.value"
+    :prefill-schema="dialogs.schemaDiffPrefillSchema.value"
+    :session-id="dialogs.schemaDiffSessionId.value"
+  />
   <DataCompareDialog
     v-if="dialogs.showDataCompareDialog.value"
     v-model:open="dialogs.showDataCompareDialog.value"
@@ -263,6 +271,7 @@ watch(
     :prefill-database="dialogs.dataComparePrefillDatabase.value"
     :prefill-schema="dialogs.dataComparePrefillSchema.value"
     :prefill-table="dialogs.dataComparePrefillTable.value"
+    :session-id="dialogs.dataCompareSessionId.value"
   />
   <SqlFileExecutionDialog v-model:open="dialogs.showSqlFileDialog.value" :prefill-connection-id="dialogs.sqlFilePrefillConnectionId.value" :prefill-database="dialogs.sqlFilePrefillDatabase.value" :prefill-file-path="dialogs.sqlFilePrefillFilePath.value" />
   <SchemaDiagramDialog
@@ -319,6 +328,7 @@ watch(
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
+    @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
   <ConfigConnectionSelectDialog
     v-if="dialogs.showConfigConnectionSelectDialog.value"

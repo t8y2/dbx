@@ -1,7 +1,7 @@
 import type { DatabaseType } from "@/types/database";
 import { isSchemaAware, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 
-export type SyntheticEditKey = "oracle-rowid" | "neo4j-element-id";
+export type SyntheticEditKey = "oracle-rowid" | "xugu-rowid" | "neo4j-element-id";
 
 export interface TableDataCapability {
   insert: boolean;
@@ -157,6 +157,20 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
   },
   oracle: {
     syntheticKey: "oracle-rowid",
+  },
+  xugu: {
+    // Xugu exposes a stable ROWID pseudo-column for base, partitioned and
+    // temporary tables. Keep this capability scoped to Xugu instead of
+    // broadening Oracle-compatible behavior for other drivers.
+    syntheticKey: "xugu-rowid",
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: true,
+    },
   },
   "oceanbase-oracle": {
     syntheticKey: "oracle-rowid",

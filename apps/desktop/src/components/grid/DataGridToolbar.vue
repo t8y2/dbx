@@ -272,7 +272,7 @@ function actionLabelClass(action: DataGridToolbarActionKey) {
 
     <Tooltip v-if="isDataGridToolbarCapabilityVisible(save)">
       <TooltipTrigger as-child>
-        <Button data-toolbar-action="save" variant="default" size="sm" :class="[...actionButtonClass('save'), 'data-grid-topbar-action-button--commit relative']" :disabled="isDataGridToolbarCapabilityDisabled(save)" @click="void triggerDataGridToolbarAction(save)">
+        <Button data-toolbar-action="save" variant="default" size="sm" :class="[...actionButtonClass('save'), 'data-grid-topbar-action-button--commit relative ml-2']" :disabled="isDataGridToolbarCapabilityDisabled(save)" @click="void triggerDataGridToolbarAction(save)">
           <Loader2 v-if="save?.loading" class="data-grid-topbar-action-icon h-3 w-3 animate-spin" />
           <Save v-else-if="actionIsCompact('save') || !save?.pendingCount" class="data-grid-topbar-action-icon h-3 w-3" />
           <span

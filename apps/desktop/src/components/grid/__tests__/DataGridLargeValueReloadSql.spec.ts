@@ -18,12 +18,12 @@ describe("DataGrid large-value reload SQL", () => {
     // Keyless Oracle tables address rows via the hidden __DBX_ROWID alias; the
     // reload must opt into the ROWIDTOCHAR inline view so the generated SQL
     // never references __DBX_ROWID as a base-table column (ORA-00904).
-    expect(fetchChunkSource).toContain("includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType)");
+    expect(fetchChunkSource).toContain("includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType)");
   });
 
   it("keeps the visible-preview hydration consistent with the synthetic key", () => {
     const hydrateSource = functionSource("hydrateVisibleLargeValuePreviews", "runVisibleLargeValuePreviewHydration");
 
-    expect(hydrateSource).toContain("includeRowId: usesSyntheticRowIdKey(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType)");
+    expect(hydrateSource).toContain("includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType)");
   });
 });

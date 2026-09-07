@@ -117,6 +117,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -182,7 +183,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
+  openTable: [target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
@@ -966,7 +967,7 @@ function executeRowAction(row: ObjectBrowserRow, action: ObjectBrowserRowAction)
       void openTypeInfo(row);
       break;
     case "open-table":
-      emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog });
+      emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog, comment: row.comment });
       break;
     case "open-source":
       void (row.type === "EVENT" ? openEventEditor(row) : openSource(row));
@@ -1149,7 +1150,8 @@ async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOp
   try {
     const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
     if (sidePanelGuard.isStale(epoch)) return;
-    tableDdlContent.value = ddl;
+    const formatDialect = sqlFormatDialectForDbType(effectiveDatabaseType.value);
+    tableDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? ddl : omitDdlIdentifierQuotes(ddl, formatDialect);
     loadedSuccessfully = true;
   } catch (e: any) {
     if (sidePanelGuard.isStale(epoch)) return;
@@ -1736,7 +1738,7 @@ function objectBrowserOpenTableType(row: ObjectBrowserRow): string {
 }
 
 function openViewData(row: ObjectBrowserRow) {
-  emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog });
+  emit("openTable", { tableName: row.name, schema: row.schema, tableType: objectBrowserOpenTableType(row), catalog: props.catalog, comment: row.comment });
 }
 
 function openStructureEditor(row: ObjectBrowserRow) {
@@ -3592,7 +3594,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         </div>
       </div>
       <!-- Right-side panel: table info or source -->
-      <div v-if="sidePanelRow || isEventEditor" class="object-browser-side-panel relative flex min-h-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `${sidePanelWidth}px` }">
+      <div v-if="sidePanelRow || isEventEditor" class="object-browser-side-panel relative flex min-h-0 min-w-0 shrink-0 flex-col border-l bg-background" :class="{ 'side-panel-resizing': isResizingSidePanel }" :style="{ width: `min(${sidePanelWidth}px, 100%)` }">
         <div class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onSidePanelResizeStart" />
         <!-- Table info mode -->
         <template v-if="sidePanelMode === 'table-info'">
@@ -3604,8 +3606,9 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                 <Copy class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("grid.copyDdl") }}</span>
               </Button>
-              <Button variant="ghost" size="icon" class="h-6 w-6" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" @click="toggleTableDdlWordWrap">
+              <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :class="{ 'bg-accent': settingsStore.editorSettings.tableDdlWordWrap }" :title="t('settings.wordWrap')" :aria-label="t('settings.wordWrap')" @click="toggleTableDdlWordWrap">
                 <WrapText class="w-3 h-3" />
+                <span class="table-info-action-label">{{ t("settings.wordWrap") }}</span>
               </Button>
             </div>
             <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">

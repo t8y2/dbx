@@ -15,6 +15,17 @@ describe("schema diff table mappings", () => {
     ]);
   });
 
+  it("matches table names case-insensitively only when enabled and rejects ambiguous candidates", () => {
+    expect(reconcileSchemaDiffTableMappings(["User"], ["user"], [], true)).toEqual([{ sourceTable: "User", targetTable: "user" }]);
+    expect(reconcileSchemaDiffTableMappings(["user"], ["User", "USER"], [], true)).toEqual([]);
+    expect(reconcileSchemaDiffTableMappings(["foo", "FOO"], ["FOO"], [], true)).toEqual([{ sourceTable: "FOO", targetTable: "FOO" }]);
+    expect(buildSchemaDiffTableMatches(["User"], ["user"], [], true)).toEqual([{ sourceTable: "User", targetTable: "user", kind: "automatic" }]);
+  });
+
+  it("keeps explicit table mappings ahead of case-insensitive automatic matching", () => {
+    expect(reconcileSchemaDiffTableMappings(["source_a"], ["SOURCE_A", "target_b"], [{ sourceTable: "source_a", targetTable: "target_b" }], true)).toEqual([{ sourceTable: "source_a", targetTable: "target_b" }]);
+  });
+
   it("leaves a source unmatched when only some names exist on target", () => {
     expect(buildSchemaDiffTableMatches(["a", "b", "c"], ["a", "x", "c"], [])).toEqual([
       { sourceTable: "a", targetTable: "a", kind: "automatic" },
@@ -79,6 +90,8 @@ describe("schema diff table mappings", () => {
     const restored = normalizeSchemaDiffCompareOptions(JSON.parse(JSON.stringify(options)));
     expect(restored.tableMappings).toEqual([{ sourceTable: "a", targetTable: "a_new" }]);
     expect(normalizeSchemaDiffCompareOptions({}).tableMappings).toEqual([]);
+    expect(normalizeSchemaDiffCompareOptions({}).ignoreTableNameCase).toBe(false);
+    expect(normalizeSchemaDiffCompareOptions({}).ignoreColumnNameCase).toBe(false);
   });
 
   it("swaps each mapping direction", () => {

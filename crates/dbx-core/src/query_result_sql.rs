@@ -628,13 +628,18 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         return Some(inject_sql_server_top(statement, limit));
     }
 
-    let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
+    // The inner query may end with a line comment after removing ORDER BY.
+    // Keep the derived-table closing parenthesis on a new line so it is not
+    // swallowed by `--` / `#` comments.
+    let statement_without_order = order_by_index
+        .map(|index| statement_for_sql_suffix(statement[..index].trim_end()))
+        .unwrap_or_else(|| statement_for_sql_suffix(statement));
     if !sql_server_row_number_pagination_safe(statement) {
         return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
     }
 
     let row_number_order = order_by_index
-        .map(|index| statement[index..].trim().to_string())
+        .map(|index| statement_for_sql_suffix(statement[index..].trim()))
         .unwrap_or_else(|| "ORDER BY (SELECT NULL)".to_string());
     let end = offset + limit;
     Some(format!(
@@ -718,12 +723,14 @@ fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset:
     let row_number_order = sql_server_derived_pagination_order(statement)
         .unwrap_or_else(|| format!("ORDER BY {}", sql_server_default_pagination_order(statement)));
     if offset == 0 {
-        return format!("SELECT TOP ({limit}) * FROM ({statement}) [dbx_page] {row_number_order};");
+        let derived_statement = statement_for_sql_suffix(statement);
+        return format!("SELECT TOP ({limit}) * FROM ({derived_statement}) [dbx_page] {row_number_order};");
     }
 
     let end = offset + limit;
+    let derived_statement = statement_for_sql_suffix(statement);
     format!(
-        "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
+        "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({derived_statement}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
     )
 }
 
@@ -2360,7 +2367,10 @@ mod tests {
 
         let page_sql = plan.page_sql.expect("pagination plan provides page SQL");
         assert!(page_sql.to_uppercase().contains("GROUP BY"));
-        assert!(page_sql.contains("ORDER BY 1, 2, 3 LIMIT 500;"), "dedup pagination must be appended after the GROUP BY, got: {page_sql}");
+        assert!(
+            page_sql.contains("ORDER BY 1, 2, 3 LIMIT 500;"),
+            "dedup pagination must be appended after the GROUP BY, got: {page_sql}"
+        );
 
         let count_sql = plan.count_sql.expect("pagination plan provides count SQL");
         assert!(count_sql.starts_with("SELECT COUNT(*) AS dbx_total_rows FROM ("));
@@ -3005,6 +3015,36 @@ mod tests {
             result.sql.unwrap(),
             "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER (ORDER BY [id]) AS [__dbx_row_num] FROM (SELECT TOP (500) [id], [order_no], [store_id], [product_id], [customer_name], [quantity], [amount], [order_status], [created_at] FROM [sales].[orders_10k]) dbx_page_source) dbx_page WHERE [__dbx_row_num] > 100 AND [__dbx_row_num] <= 200 ORDER BY [__dbx_row_num];"
         );
+    }
+
+    #[test]
+    fn sqlserver_later_page_keeps_derived_table_closing_after_comment_before_order_by() {
+        let sql = "SELECT\n*\nFROM\ncode\n-- WHERE\n-- ccode = '1002'\nORDER BY\nccode;";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        let generated = result.sql.expect("build SQL Server page SQL");
+        assert!(generated.contains("FROM (SELECT\n*\nFROM\ncode\n-- WHERE\n-- ccode = '1002'\n) dbx_page_source"));
+        assert!(!generated.contains("-- ccode = '1002') dbx_page_source"));
+    }
+
+    #[test]
+    fn sqlserver_later_page_keeps_row_number_window_after_comment_after_order_by() {
+        let sql = "SELECT\n*\nFROM\ncode\nORDER BY\nccode -- sort";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        let generated = result.sql.expect("build SQL Server page SQL");
+        assert!(generated.contains("ROW_NUMBER() OVER (ORDER BY\nccode -- sort\n) AS [__dbx_row_num]"));
+        assert!(!generated.contains("-- sort) AS [__dbx_row_num]"));
     }
 
     #[test]

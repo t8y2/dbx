@@ -72,6 +72,7 @@ fn full_access_policy() -> McpGlobalPolicy {
         allowed_tool_names: None,
         connection_policies: vec![],
         query_timeout_secs: None,
+        ..Default::default()
     }
 }
 
@@ -85,6 +86,7 @@ fn short_timeout_policy() -> McpGlobalPolicy {
         allowed_tool_names: None,
         connection_policies: vec![],
         query_timeout_secs: Some(1),
+        ..Default::default()
     }
 }
 

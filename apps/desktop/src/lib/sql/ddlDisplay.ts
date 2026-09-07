@@ -17,7 +17,7 @@ function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boole
     case "generic":
       return !requiresPostgresIdentifierQuote(identifier);
     case "sqlserver":
-      return SIMPLE_SQLSERVER_IDENTIFIER.test(identifier);
+      return SIMPLE_SQLSERVER_IDENTIFIER.test(identifier) && !requiresMysqlIdentifierQuote(identifier.toLowerCase());
     default:
       return false;
   }

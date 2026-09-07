@@ -14,7 +14,7 @@ vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: mocks.copyToClipboar
 vi.mock("@/lib/export/saveTextFile", () => ({ saveTextFile: mocks.saveTextFile }));
 
 import { buildSafeHtmlPreview } from "@/lib/ai/richContent/aiHtmlPreview";
-import type { App, ComponentPublicInstance } from "vue";
+import type { App } from "vue";
 import { createApp, nextTick } from "vue";
 
 const content = "<p>Hello <strong>world</strong></p>";
@@ -125,5 +125,37 @@ describe("AiHtmlPreview", () => {
     await click(button("ai.htmlSaveSafe"));
     expect(mocks.saveTextFile).toHaveBeenCalledWith(documentHtml, "dbx-ai-html-preview.html", "HTML", "html");
     expect(mocks.saveTextFile.mock.calls[0][0]).not.toBe(content);
+  });
+
+  it("suppresses the risk toast when the clipboard write fails", async () => {
+    await mountPreview();
+    // Arm the remembered session acknowledgment, mirroring the existing flow.
+    await click(copyButton());
+    const strip = confirmStrip();
+    expect(strip).not.toBeNull();
+    const checkbox = strip?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    if (checkbox) {
+      checkbox.checked = true;
+      checkbox.dispatchEvent(new window.Event("change"));
+      await nextTick();
+    }
+    const buttons = [...(strip?.querySelectorAll("button") ?? [])];
+    await click(buttons[buttons.length - 1]);
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(content);
+
+    // A later copy in the same session skips the confirmation — but this time
+    // the clipboard write fails, so the risk toast must not claim success.
+    // (Regression for #I01: the previous code toasted unconditionally.)
+    mocks.copyToClipboard.mockRejectedValueOnce(new Error("denied"));
+    mocks.toast.mockClear();
+    unmount();
+    await mountPreview();
+    await click(copyButton());
+    expect(confirmStrip()).toBeNull();
+    expect(mocks.copyToClipboard).toHaveBeenCalledWith(content);
+    expect(mocks.toast).not.toHaveBeenCalled();
+    // The failure is still silent (doCopy swallows), so the "copied" checkmark
+    // must not appear either — no false success signal at all.
+    expect(root?.querySelector(".text-green-500")).toBeNull();
   });
 });

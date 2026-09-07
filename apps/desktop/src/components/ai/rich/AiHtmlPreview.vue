@@ -28,9 +28,13 @@ function copySource() {
     showCopyConfirm.value = true;
     return;
   }
-  void doCopy();
-  // Later copies skip the confirmation but keep a visible risk reminder.
-  toast(t("ai.htmlCopyRiskToast"));
+  void warnAfterCopy();
+}
+
+// Later copies skip the confirmation but keep a visible risk reminder — only
+// when the copy actually succeeded.
+async function warnAfterCopy() {
+  if (await doCopy()) toast(t("ai.htmlCopyRiskToast"));
 }
 
 function confirmCopy() {
@@ -44,13 +48,17 @@ function cancelCopy() {
   rememberChoice.value = false;
 }
 
-async function doCopy() {
+async function doCopy(): Promise<boolean> {
   try {
     await copyToClipboard(props.content);
     copied.value = true;
     window.setTimeout(() => (copied.value = false), 1600);
+    return true;
   } catch {
-    // Keep the preview usable if the host denies clipboard access.
+    // The raw AI HTML is the sensitive payload: do not cover up a clipboard
+    // failure with a success-looking toast, and keep the preview usable if
+    // the host denies clipboard access.
+    return false;
   }
 }
 

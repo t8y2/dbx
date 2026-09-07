@@ -56,3 +56,17 @@ test("matches DBX pagination rewrites without accepting unrelated stale SQL", ()
   assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
   assert.equal(sqlErrorSqlMatchesEditor(editorSql, "SELECT *\nFROM other_table\nWHERE LIMIT 100;"), false);
 });
+
+test("matches the user's own LIMIT when the SQL differs only by a semicolon", () => {
+  const editorSql = "SELECT *\nFROM projects\nLIMIT 10";
+  const executedSql = "SELECT *\nFROM projects\nLIMIT 10;";
+
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+});
+
+test("strips the generated OFFSET ROWS FETCH FIRST suffix fully", () => {
+  const editorSql = "SELECT *\nFROM projects";
+  const executedSql = "SELECT *\nFROM projects OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY;";
+
+  assert.equal(sqlErrorSqlMatchesEditor(editorSql, executedSql), true);
+});

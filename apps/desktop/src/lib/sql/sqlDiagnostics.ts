@@ -13,7 +13,7 @@ function normalizeSqlForComparison(sql: string): string {
 }
 
 function removeDbxPagination(sql: string): string {
-  return sql.replace(/\s+(?:limit\s+\d+(?:\s+offset\s+\d+)?|offset\s+\d+\s+rows?(?:\s+fetch\s+next\s+\d+\s+rows?)?|fetch\s+(?:first|next)\s+\d+\s+rows?\s+only)\s*;?\s*$/iu, "").trim();
+  return sql.replace(/\s+(?:limit\s+\d+(?:\s+offset\s+\d+)?|offset\s+\d+\s+rows?(?:\s+fetch\s+(?:next|first)\s+\d+\s+rows?(?:\s+only)?)?|fetch\s+(?:first|next)\s+\d+\s+rows?\s+only)\s*;?\s*$/iu, "").trim();
 }
 
 /**
@@ -24,7 +24,9 @@ function removeDbxPagination(sql: string): string {
  */
 export function sqlErrorSqlMatchesEditor(editorSql: string, executedSql: string): boolean {
   if (editorSql === executedSql) return true;
-  return normalizeSqlForComparison(removeDbxPagination(executedSql)) === normalizeSqlForComparison(editorSql);
+  const norm = (sql: string) => normalizeSqlForComparison(sql);
+  if (norm(executedSql) === norm(editorSql)) return true;
+  return norm(removeDbxPagination(executedSql)) === norm(removeDbxPagination(editorSql));
 }
 
 function toZeroBased(value: string | undefined): number | null {

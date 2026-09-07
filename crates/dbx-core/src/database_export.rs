@@ -34,6 +34,30 @@ pub fn database_export_client_session_id(export_id: &str) -> String {
     task_client_session_id("database-export", export_id)
 }
 
+async fn database_export_query_options(
+    state: &crate::connection::AppState,
+    connection_id: &str,
+    client_session_id: &str,
+    max_rows: Option<usize>,
+) -> crate::query::QueryExecutionOptions {
+    let timeout_secs =
+        state.configs.read().await.get(connection_id).map(|config| config.effective_query_timeout_secs()).unwrap_or(0);
+    database_export_query_options_for_timeout(timeout_secs, client_session_id, max_rows)
+}
+
+fn database_export_query_options_for_timeout(
+    timeout_secs: u64,
+    client_session_id: &str,
+    max_rows: Option<usize>,
+) -> crate::query::QueryExecutionOptions {
+    crate::query::QueryExecutionOptions {
+        max_rows,
+        timeout_secs: Some(timeout_secs),
+        client_session_id: Some(client_session_id.to_string()),
+        ..Default::default()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DatabaseExportOutputCompression {
@@ -196,7 +220,9 @@ async fn list_mysql_export_view_dependencies(
     state: &crate::connection::AppState,
     connection_id: &str,
     database: &str,
+    client_session_id: &str,
 ) -> Result<Vec<(String, String)>, String> {
+    let options = database_export_query_options(state, connection_id, client_session_id, Some(usize::MAX)).await;
     let result = crate::query::execute_sql_statement_with_options(
         state,
         connection_id,
@@ -204,7 +230,7 @@ async fn list_mysql_export_view_dependencies(
         &mysql_view_dependencies_sql(database),
         None,
         None,
-        crate::query::QueryExecutionOptions { max_rows: Some(usize::MAX), ..Default::default() },
+        options,
     )
     .await?;
     Ok(mysql_view_dependencies_from_rows(&result.rows))
@@ -237,18 +263,21 @@ fn mysql_database_export_preamble(database: &str, charset: Option<&str>, collati
 async fn mysql_database_export_preamble_for_request(
     state: &crate::connection::AppState,
     request: &DatabaseExportRequest,
+    client_session_id: &str,
 ) -> String {
     let metadata_sql = format!(
         "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = {}",
         mysql_sql_string_literal(&request.database)
     );
-    let metadata = crate::query::execute_sql_statement(
+    let options = database_export_query_options(state, &request.connection_id, client_session_id, Some(1)).await;
+    let metadata = crate::query::execute_sql_statement_with_options(
         state,
         &request.connection_id,
         &request.database,
         &metadata_sql,
         None,
         None,
+        options,
     )
     .await
     .ok()
@@ -2663,7 +2692,7 @@ async fn export_database_sql_core_inner(
     };
 
     let create_database_preamble = if request.include_create_database && matches!(db_type, DatabaseType::Mysql) {
-        Some(mysql_database_export_preamble_for_request(state, request).await)
+        Some(mysql_database_export_preamble_for_request(state, request, &client_session_id).await)
     } else {
         None
     };
@@ -2739,7 +2768,9 @@ async fn export_database_sql_core_inner(
     let mut tables: Vec<_> = all_tables.iter().filter(|t| !t.table_type.contains("VIEW")).collect();
     let mut views: Vec<_> = all_tables.iter().filter(|t| t.table_type.contains("VIEW")).collect();
     if request.include_objects && db_type == DatabaseType::Mysql && views.len() > 1 {
-        match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database).await {
+        match list_mysql_export_view_dependencies(state, &request.connection_id, &request.database, &client_session_id)
+            .await
+        {
             Ok(dependencies) => views = sort_export_views_by_dependencies(&views, &dependencies),
             Err(error) => {
                 log::debug!(
@@ -3270,7 +3301,24 @@ async fn export_database_sql_core_inner(
                             );
                             replace_database_export_select_list(sql, &col_names, &col_types, &db_type)
                         };
-                        let result = match crate::transfer::execute_read_on_pool(state, &pool_key, &sql).await {
+                        let options = database_export_query_options(
+                            state,
+                            &request.connection_id,
+                            &client_session_id,
+                            Some(batch_size),
+                        )
+                        .await;
+                        let result = match crate::query::execute_sql_statement_with_options(
+                            state,
+                            &request.connection_id,
+                            &request.database,
+                            &sql,
+                            Some(&request.schema),
+                            None,
+                            options,
+                        )
+                        .await
+                        {
                             Ok(result) => result,
                             Err(error) => {
                                 record_export_error(
@@ -3605,18 +3653,18 @@ mod tests {
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        database_export_select_sql, database_export_total_objects, drop_table_if_exists_sql,
-        ensure_export_destination_dir, export_destination_identity_mismatch, filter_export_table_infos,
-        format_export_sql_literal, format_export_table_ddl, format_mysql_spatial_export_literal,
-        format_xugu_spatial_export_literal, generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl,
-        generate_postgres_sequence_owner_ddl, generate_postgres_sequence_setval_sql,
-        is_postgres_extension_member_routine, mysql_database_export_preamble, mysql_view_dependencies_from_rows,
-        mysql_view_dependencies_sql, normalize_export_table_ddl, record_export_destination_identity,
-        record_export_error, replace_database_export_select_list, sort_export_views_by_dependencies,
-        split_postgres_export_table_triggers, write_database_export_rows, BuildDatabaseSqlExportOptions,
-        BuildExportInsertStatementsOptions, DatabaseExportObjectCounts, DatabaseExportRequest, DatabaseExportWriter,
-        DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension, PostgresExportSequence,
-        PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
+        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
+        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
+        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
+        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
+        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
+        mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
+        record_export_destination_identity, record_export_error, replace_database_export_select_list,
+        sort_export_views_by_dependencies, split_postgres_export_table_triggers, write_database_export_rows,
+        BuildDatabaseSqlExportOptions, BuildExportInsertStatementsOptions, DatabaseExportObjectCounts,
+        DatabaseExportRequest, DatabaseExportWriter, DdlNormalizeOptions, ExportedTableSql, PostgresExportExtension,
+        PostgresExportSequence, PostgresExtensionMembers, DATABASE_EXPORT_INSERT_BATCH_SIZE, DATABASE_EXPORT_ROW_LIMIT,
     };
     use super::{ExportProgress, LenientExportErrors};
     use crate::connection::AppState;
@@ -3631,6 +3679,19 @@ mod tests {
         Arc, Mutex,
     };
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn database_export_query_options_preserve_connection_timeout() {
+        let options = database_export_query_options_for_timeout(7, "database-export-session", Some(500));
+
+        assert_eq!(options.timeout_secs, Some(7));
+        assert_eq!(options.max_rows, Some(500));
+        assert_eq!(options.client_session_id.as_deref(), Some("database-export-session"));
+
+        let unlimited = database_export_query_options_for_timeout(0, "database-export-session", None);
+        assert_eq!(unlimited.timeout_secs, Some(0));
+        assert_eq!(unlimited.max_rows, None);
+    }
 
     #[tokio::test]
     async fn await_export_operation_drops_pending_metadata_after_cancel() {

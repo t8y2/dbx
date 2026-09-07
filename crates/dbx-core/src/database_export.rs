@@ -2593,15 +2593,24 @@ pub async fn export_database_sql_core(
     }
 }
 
+/// Destination directory that must exist (and stay on the same filesystem)
+/// before the export file may be written there, or `None` when the file path
+/// has no parent (e.g. a bare file name or the filesystem root). Shared by
+/// [`create_database_export_writer`] and the all-schemas export, which
+/// validates the destination up front instead of only after exporting every
+/// schema to temporary files.
+fn export_destination_parent_dir(file_path: &str) -> Option<&std::path::Path> {
+    let parent = std::path::Path::new(file_path).parent()?;
+    (!parent.as_os_str().is_empty()).then_some(parent)
+}
+
 async fn create_database_export_writer(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
 ) -> Result<DatabaseExportWriter, String> {
     let mut expected_destination_identity = None;
-    if let Some(parent) = std::path::Path::new(&request.file_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
-        }
+    if let Some(parent) = export_destination_parent_dir(&request.file_path) {
+        expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
     }
     let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
     // The directory check above and this `File::create` are separate
@@ -2657,6 +2666,15 @@ async fn export_postgres_all_schemas_sql_core(
         return Err(format!("No exportable schemas found in database '{}'.", request.database));
     }
 
+    // Validate the destination before exporting every schema to temporary
+    // files: the writer below only runs after the loop, which for large
+    // databases can be hours away, and a missing or unwritable destination
+    // must fail fast instead. This is an early fail, not a replacement -- the
+    // writer still performs its own checks when it opens the output file.
+    if let Some(parent) = export_destination_parent_dir(&request.file_path) {
+        ensure_export_destination_dir(state, parent).await?;
+    }
+
     let temp_dir =
         tempfile::tempdir().map_err(|error| format!("Failed to create temporary export directory: {error}"))?;
     let result = async {
@@ -2698,8 +2716,14 @@ async fn export_postgres_all_schemas_sql_core(
             if let Some(progress) = terminal {
                 rows_exported = rows_exported.saturating_add(progress.rows_exported);
                 error_count = error_count.saturating_add(progress.error_count);
-                if error_summary.is_none() {
-                    error_summary = progress.error_summary;
+                // Aggregate lenient failure summaries across schemas; keeping
+                // only the first schema's summary would understate the errors
+                // behind an error_count that accumulates over all schemas.
+                if let Some(summary) = progress.error_summary {
+                    error_summary = Some(match error_summary.take() {
+                        Some(existing) => format!("{existing}; {summary}"),
+                        None => summary,
+                    });
                 }
             }
             schema_outputs.push((schema_name.clone(), schema_request.file_path));

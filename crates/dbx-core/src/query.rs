@@ -1233,7 +1233,7 @@ pub fn is_connection_error(err: &str) -> bool {
         || is_os_connection_error(&lower)
 }
 
-fn is_dbx_query_timeout_error(lower: &str) -> bool {
+pub(crate) fn is_dbx_query_timeout_error(lower: &str) -> bool {
     lower.starts_with("query timed out after ")
 }
 
@@ -5446,7 +5446,15 @@ where
             }
         }
         TxnConnection::Mysql(Some(conn)) => {
-            wait_for_result_opt(cancel_token, operation_budget.query_timeout, async {
+            // The query timeout is an inactivity budget reset by every received row,
+            // not a cap on the total duration of a long backup/export stream.
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            let progress_clock_for_rows = progress_clock.clone();
+            let timeout_error = format!(
+                "Query timed out after {} seconds",
+                operation_budget.query_timeout.map_or(0, |timeout| timeout.as_secs())
+            );
+            let stream_future = async {
                 let mut result = conn.query_iter(sql).await.map_err(|error| format!("Query failed: {error}"))?;
                 let Some(mut stream) =
                     result.stream::<mysql_async::Row>().await.map_err(|error| format!("Query failed: {error}"))?
@@ -5470,12 +5478,20 @@ where
                         }
                         Err(err) => return Err(format!("Query failed: {err}")),
                     }
+                    progress_clock_for_rows.mark();
                 }
                 if !batch.is_empty() {
                     on_batch(batch)?;
                 }
                 Ok(total_rows)
-            })
+            };
+            await_stream_with_progress_timeout(
+                stream_future,
+                operation_budget.query_timeout,
+                progress_clock,
+                cancel_token.as_ref(),
+                timeout_error,
+            )
             .await
         }
         TxnConnection::Mysql(None) => Err(MANUAL_TRANSACTION_SESSION_NOT_FOUND_ERROR.to_string()),

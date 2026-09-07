@@ -27,8 +27,10 @@ export interface AiRichBlockFlags {
   /**
    * True only when the closing fence has arrived. Handlers must not be invoked
    * for an unfinished fence: a half-open block stays a plain code segment
-   * (streaming). The renderer enforces this gate before calling `parse`, so a
-   * handler never needs to re-check it.
+   * (streaming). The renderer normally enforces this gate before calling
+   * `parse`, but a handler may also defensively reject `closed: false` — the
+   * double check is cheap and keeps handlers safe if a future caller skips the
+   * renderer gate.
    */
   closed: boolean;
 }

@@ -117,6 +117,7 @@ import { useQueryStore } from "@/stores/queryStore";
 import QueryEditor from "@/components/editor/QueryEditor.vue";
 import MySqlEventEditor from "@/components/objects/MySqlEventEditor.vue";
 import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -1149,7 +1150,8 @@ async function fetchTableDdl(force = settingsStore.editorSettings.refreshDdlOnOp
   try {
     const { ddl } = await loadObjectDdl(tableMetadataRequest(row), { force });
     if (sidePanelGuard.isStale(epoch)) return;
-    tableDdlContent.value = ddl;
+    const formatDialect = sqlFormatDialectForDbType(effectiveDatabaseType.value);
+    tableDdlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? ddl : omitDdlIdentifierQuotes(ddl, formatDialect);
     loadedSuccessfully = true;
   } catch (e: any) {
     if (sidePanelGuard.isStale(epoch)) return;

@@ -22,6 +22,7 @@ import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -2995,7 +2996,9 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
           // (the same one the sidebar/object-source viewers use). Tables keep
           // the aligned column layout from reformatHoverDdl.
           const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
-          sqlContent = isViewObject ? await formatSqlForDisplay(rawDdl, props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType), settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+          const formatDialect = props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType);
+          const formatted = isViewObject ? await formatSqlForDisplay(rawDdl, formatDialect, settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+          sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
         }
       } catch (error) {
         console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);

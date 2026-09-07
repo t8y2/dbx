@@ -92,6 +92,8 @@ import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { loadObjectMetadataFacet } from "@/lib/metadata/objectMetadataCache";
 import * as api from "@/lib/backend/api";
 import { formatElapsedSeconds } from "@/lib/common/elapsedTime";
+import { sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { dataGridCellDisplayText, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { createColumnDrafts } from "@/lib/table/tableStructureEditorState";
@@ -11395,7 +11397,8 @@ async function fetchDdl(force = settingsStore.editorSettings.refreshDdlOnOpen) {
       },
       { force },
     );
-    ddlContent.value = ddl;
+    const formatDialect = sqlFormatDialectForDbType(resolvedDatabaseType.value);
+    ddlContent.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? ddl : omitDdlIdentifierQuotes(ddl, formatDialect);
   } catch (e: any) {
     ddlContent.value = `-- Error: ${e}`;
   } finally {

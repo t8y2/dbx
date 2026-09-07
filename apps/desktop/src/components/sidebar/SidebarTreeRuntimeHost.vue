@@ -153,6 +153,7 @@ import { buildEditableObjectSource, buildRoutineRenameObjectSourceStatements, su
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
 import { buildViewDdl } from "@/lib/table/viewDdl";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
 import { connectionObjectTreeNodeSchema, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { hasTreeNodeDatabaseContext } from "@/lib/sidebar/treeNodeContext";
@@ -2090,7 +2091,11 @@ async function openSidebarMultiTableDdlTab(targets: Array<TreeNode & { connectio
         source: result.source,
       });
     },
-    (ddl, target) => formatSqlForDisplay(ddl, sqlFormatDialectForDbType(databaseTypeForNode(target)), settingsStore.editorSettings.sqlFormatter),
+    async (ddl, target) => {
+      const formatDialect = sqlFormatDialectForDbType(databaseTypeForNode(target));
+      const formatted = await formatSqlForDisplay(ddl, formatDialect, settingsStore.editorSettings.sqlFormatter);
+      return settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
+    },
   );
   connectionStore.activeConnectionId = tabTarget.connectionId;
   const title = `DDL - ${targets.map((target) => target.label).join(", ")}`;

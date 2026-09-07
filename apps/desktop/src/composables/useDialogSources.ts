@@ -45,10 +45,12 @@ const transferPrefillTargetSchema = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const schemaDiffPrefillSchema = ref("");
+const schemaDiffSessionId = ref<string | null>(null);
 const dataComparePrefillConnectionId = ref("");
 const dataComparePrefillDatabase = ref("");
 const dataComparePrefillSchema = ref("");
 const dataComparePrefillTable = ref("");
+const dataCompareSessionId = ref<string | null>(null);
 const sqlFilePrefillConnectionId = ref("");
 const sqlFilePrefillDatabase = ref("");
 const sqlFilePrefillFilePath = ref("");
@@ -96,6 +98,16 @@ function clearTransferPrefill() {
   transferPrefillTargetSchema.value = "";
 }
 
+export function openSchemaDiffSession(sessionId: string): void {
+  schemaDiffSessionId.value = sessionId;
+  showSchemaDiffDialog.value = true;
+}
+
+export function openDataCompareSession(sessionId: string): void {
+  dataCompareSessionId.value = sessionId;
+  showDataCompareDialog.value = true;
+}
+
 export function useDialogSources() {
   const { t } = useI18n();
   const connectionStore = useConnectionStore();
@@ -134,6 +146,7 @@ export function useDialogSources() {
           schemaDiffPrefillConnectionId.value = v.connectionId;
           schemaDiffPrefillDatabase.value = v.database;
           schemaDiffPrefillSchema.value = v.schema ?? "";
+          schemaDiffSessionId.value = null;
           showSchemaDiffDialog.value = true;
           connectionStore.schemaDiffSource = null;
         }
@@ -148,11 +161,20 @@ export function useDialogSources() {
           dataComparePrefillDatabase.value = v.database;
           dataComparePrefillSchema.value = v.schema ?? "";
           dataComparePrefillTable.value = v.tableName ?? "";
+          dataCompareSessionId.value = null;
           showDataCompareDialog.value = true;
           connectionStore.dataCompareSource = null;
         }
       },
     );
+
+    watch(showSchemaDiffDialog, (open) => {
+      if (!open) schemaDiffSessionId.value = null;
+    });
+
+    watch(showDataCompareDialog, (open) => {
+      if (!open) dataCompareSessionId.value = null;
+    });
 
     watch(
       () => connectionStore.sqlFileSource,
@@ -502,10 +524,12 @@ export function useDialogSources() {
     schemaDiffPrefillConnectionId,
     schemaDiffPrefillDatabase,
     schemaDiffPrefillSchema,
+    schemaDiffSessionId,
     dataComparePrefillConnectionId,
     dataComparePrefillDatabase,
     dataComparePrefillSchema,
     dataComparePrefillTable,
+    dataCompareSessionId,
     sqlFilePrefillConnectionId,
     sqlFilePrefillDatabase,
     sqlFilePrefillFilePath,

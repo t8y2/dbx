@@ -18,18 +18,19 @@ import SchemaDiffOptionsPanel from "@/components/diff/SchemaDiffOptionsPanel.vue
 
 import { getSchemaDiffOptionsForDbType } from "@/lib/schema/schemaDiffOptions";
 import { buildDeployTxResult } from "@/lib/schema/deployTxResult";
-import { loadSchemaDetails } from "@/lib/schema/schemaDiffMetadataLoad";
-import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSchemaDiffExtraObjects, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
-import { createSchemaDiffTableListLoader, type SchemaDiffTableIdentity } from "@/lib/schema/schemaDiffTableList";
+import { getSchemaDiffNextProgressStep, shouldLoadSchemaDiffExtraObjects, type SchemaDiffProgressPhase } from "@/lib/schema/schemaDiffProgress";
+import { createSchemaDiffTableListLoader } from "@/lib/schema/schemaDiffTableList";
 import { normalizeSchemaDiffCompareOptions } from "@/types/schemaDiff";
 import type { SchemaDiffCompareOptions, SchemaDiffConfig, FieldMappingEntry, SchemaDiffTableMapping } from "@/types/schemaDiff";
+import { getSchemaDiffSession, schemaDiffSessionObjects, startSchemaDiffSession, type SchemaDiffSession } from "@/composables/useSchemaDiffSession";
 import type { DatabaseType, ObjectSourceKind } from "@/types/database";
 import {
-  convertToSchemaDiffObjects,
   detectDestructiveSchemaDiffStatements,
   groupDiffObjects,
   injectColumnRenameSql,
   schemaDiffDeployTargetSchema,
+  normalizeDialectKind,
+  databaseTypeToDialectKind,
   findSchemaDiffObject,
   flattenSchemaDiffObjects,
   schemaDiffSelectionTargets,
@@ -39,8 +40,6 @@ import {
   setSchemaDiffObjectSelected,
   setSchemaDiffObjectSelectedWithDependencies,
   summarizeSchemaDiffOperations,
-  databaseTypeToDialectKind,
-  normalizeDialectKind,
   type OperationGroup,
   type SchemaDiffObject,
   type DiffOperationType,
@@ -53,7 +52,7 @@ import {
   type DependencyGraph,
   normalizeSchemaDiffDependencyGraph,
 } from "@/lib/schema/schemaDiff";
-import { compileSchemaDiffTableFilter, filterSchemaDiffTables } from "@/lib/schema/schemaDiffTableFilter";
+
 import { swapSchemaDiffTableMappings } from "@/lib/schema/schemaDiffTableMapping";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
@@ -71,6 +70,7 @@ const props = defineProps<{
   prefillConnectionId?: string;
   prefillDatabase?: string;
   prefillSchema?: string;
+  sessionId?: string | null;
 }>();
 
 // Wizard state
@@ -117,7 +117,10 @@ interface SchemaDiffProgress {
 const loading = ref(false);
 const schemaDiffProgress = ref<SchemaDiffProgress | null>(null);
 const schemaDiffHasExtraObjectPhase = ref(false);
-let comparisonRequestId = 0;
+const activeSessionId = ref<string | null>(props.sessionId ?? null);
+let appliedSessionResult: SchemaDiffPreparation | null = null;
+let shownSessionError = "";
+let componentUnmounted = false;
 const diffObjects = ref<SchemaDiffObject[]>([]);
 const diffGroups = ref<OperationGroup[]>([]);
 const selectedObjectId = ref<string | null>(null);
@@ -221,6 +224,7 @@ let resizeObserver: ResizeObserver | null = null;
 let saveTimeout: number | null = null;
 
 function setupResizeObserver() {
+  if (componentUnmounted) return;
   const el = document.querySelector('[data-slot="dialog-content"]') as HTMLElement;
   if (!el) return;
 
@@ -254,7 +258,9 @@ watch(
   () => step.value,
   (newStep) => {
     if (newStep === "result") {
-      setTimeout(setupResizeObserver, 100);
+      setTimeout(() => {
+        if (!componentUnmounted) setupResizeObserver();
+      }, 100);
     } else {
       teardownResizeObserver();
     }
@@ -262,6 +268,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  componentUnmounted = true;
   teardownResizeObserver();
 });
 
@@ -325,7 +332,6 @@ const schemaDiffNextProgressLabel = computed(() => {
 });
 
 function resetComparisonResultState() {
-  comparisonRequestId++;
   selectedDeploySqlGeneration++;
   focusedDeploySqlGeneration++;
   loading.value = false;
@@ -354,30 +360,106 @@ function resetComparisonResultState() {
   deployResult.value = null;
 }
 
-// Watch for prefilled values
+function comparisonEndpointLabel(connectionId: string, database: string, schema: string): string {
+  const connection = store.getConfig(connectionId);
+  return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
+}
+
+function restoreSchemaDiffSession(session: SchemaDiffSession): void {
+  const config = session.config;
+  sourceConnectionId.value = config.sourceConnectionId;
+  sourceDatabase.value = config.sourceDatabase;
+  sourceSchema.value = config.sourceSchema;
+  targetConnectionId.value = config.targetConnectionId;
+  targetDatabase.value = config.targetDatabase;
+  targetSchema.value = config.targetSchema;
+  ignoreComments.value = config.ignoreComments;
+  ensureDefaultConfig(config.targetDbType);
+  updateActiveConfigConnection({
+    sourceConnectionId: config.sourceConnectionId,
+    sourceDatabase: config.sourceDatabase,
+    sourceSchema: config.sourceSchema,
+    targetConnectionId: config.targetConnectionId,
+    targetDatabase: config.targetDatabase,
+    targetSchema: config.targetSchema,
+  });
+  updateActiveConfigOptions(config.options);
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(config.targetDbType, config.options);
+}
+
+function applySchemaDiffSession(session: SchemaDiffSession | undefined): void {
+  if (!session) return;
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(session.config.targetDbType, session.config.options);
+  if (session.status === "running") {
+    loading.value = true;
+    step.value = "compare";
+    schemaDiffProgress.value = session.progress ?? { phase: "loading-table-lists" };
+    return;
+  }
+
+  loading.value = false;
+  schemaDiffProgress.value = null;
+  if (session.status === "failed") {
+    step.value = "config";
+    if (session.error && shownSessionError !== session.error) {
+      shownSessionError = session.error;
+      toast(session.error, 5000);
+    }
+    return;
+  }
+  if (!session.result) return;
+
+  step.value = "result";
+  if (appliedSessionResult === session.result) return;
+  appliedSessionResult = session.result;
+  rollbackSql.value = session.result.rollbackSyncSql ?? "";
+  rollbackCompleteness.value = session.result.rollbackCompleteness ?? "complete";
+  missingRollbackObjects.value = session.result.missingRollbackObjects ?? [];
+  renameCandidates.value = session.result.renameCandidates ?? [];
+  compatibilityWarnings.value = session.result.compatibilityWarnings ?? [];
+  permissionDiffs.value = session.result.permissionDiffs ?? [];
+  dependencyGraph.value = normalizeSchemaDiffDependencyGraph(session.result.dependencyGraph);
+  diffObjects.value = schemaDiffSessionObjects(session.result);
+  diffGroups.value = groupDiffObjects(diffObjects.value);
+  lastDiffResult.value = session.result;
+  deploySqlMode.value = "forward";
+  void regenerateSelectedDeploySql();
+  void regenerateFocusedDeploySql();
+}
+
+// A Compare session deliberately outlives this v-if-mounted dialog. Closing the
+// dialog only removes the view; the session runner keeps updating its task.
 watch(
-  () => open.value,
-  (isOpen) => {
-    if (isOpen) {
-      resetComparisonResultState();
-      ensureDefaultConfig();
-      if (props.prefillConnectionId) {
-        sourceConnectionId.value = props.prefillConnectionId;
-        if (props.prefillDatabase) {
-          sourceDatabase.value = props.prefillDatabase;
-        }
-        if (props.prefillSchema) {
-          sourceSchema.value = props.prefillSchema;
-        }
-      }
-    } else {
-      comparisonRequestId++;
-      loading.value = false;
-      schemaDiffProgress.value = null;
-      schemaDiffHasExtraObjectPhase.value = false;
+  [() => open.value, () => props.sessionId],
+  ([isOpen]) => {
+    if (!isOpen) return;
+    const session = getSchemaDiffSession(props.sessionId);
+    activeSessionId.value = session?.id ?? null;
+    appliedSessionResult = null;
+    shownSessionError = "";
+    resetComparisonResultState();
+    if (session) {
+      restoreSchemaDiffSession(session);
+      applySchemaDiffSession(session);
+      return;
+    }
+
+    ensureDefaultConfig();
+    if (props.prefillConnectionId) {
+      sourceConnectionId.value = props.prefillConnectionId;
+      if (props.prefillDatabase) sourceDatabase.value = props.prefillDatabase;
+      if (props.prefillSchema) sourceSchema.value = props.prefillSchema;
     }
   },
   { immediate: true },
+);
+
+watch(
+  () => {
+    const session = getSchemaDiffSession(activeSessionId.value);
+    return [session?.status, session?.progress, session?.result, session?.error] as const;
+  },
+  () => applySchemaDiffSession(getSchemaDiffSession(activeSessionId.value)),
 );
 
 // Config sync
@@ -462,195 +544,35 @@ function handleFieldMappingsUpdate(mappings: FieldMappingEntry[]) {
   }
 }
 
-async function handleCompare() {
-  const requestId = ++comparisonRequestId;
-  const isCurrentRequest = () => requestId === comparisonRequestId;
+function handleCompare(): void {
+  const sourceConfig = store.getConfig(sourceConnectionId.value);
+  const targetConfig = store.getConfig(targetConnectionId.value);
+  const targetDbType = (targetConfig?.db_type || "mysql") as DatabaseType;
+  const sourceDbType = sourceConfig?.db_type || targetDbType;
+  const options = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, targetDbType);
 
-  loading.value = true;
-  step.value = "compare";
-  schemaDiffProgress.value = { phase: "loading-table-lists" };
-  schemaDiffHasExtraObjectPhase.value = false;
-
-  // Reset Phase 4 state to prevent stale data from previous compares
-  rollbackSql.value = "";
-  rollbackCompleteness.value = "complete";
-  missingRollbackObjects.value = [];
-  renameCandidates.value = [];
-  compatibilityWarnings.value = [];
-  permissionDiffs.value = [];
-  dependencyGraph.value = null;
-
-  try {
-    const sourceConfig = store.getConfig(sourceConnectionId.value);
-    const targetConfig = store.getConfig(targetConnectionId.value);
-    const dbType = targetConfig?.db_type || "mysql";
-    const sourceDbType = sourceConfig?.db_type || dbType;
-    const opts = normalizeSchemaDiffCompareOptions(activeConfig.value?.options, dbType);
-    const isPostgresLike = isSchemaDiffPostgresLike(dbType);
-    const hasExtraObjectPhase = shouldLoadSchemaDiffExtraObjects(dbType, opts);
-    schemaDiffHasExtraObjectPhase.value = hasExtraObjectPhase;
-    const tableFilter = compileSchemaDiffTableFilter(opts);
-
-    const sourceTableIdentity: SchemaDiffTableIdentity = { connectionId: sourceConnectionId.value, database: sourceDatabase.value, schema: sourceSchema.value };
-    const targetTableIdentity: SchemaDiffTableIdentity = { connectionId: targetConnectionId.value, database: targetDatabase.value, schema: targetSchema.value };
-    // The dialog can remain open while either database changes, so Compare must not reuse
-    // the table list cached while configuring the comparison.
-    const [srcTables, tgtTables] = await Promise.all([schemaDiffTableListLoader.load(sourceTableIdentity, { refresh: true }), schemaDiffTableListLoader.load(targetTableIdentity, { refresh: true })]);
-    if (!isCurrentRequest()) return;
-    // Explicit (visual) table selection is applied here, BEFORE any per-table
-    // metadata details are loaded, so metadata requests only happen for the
-    // final table set. `undefined`/empty means no restriction (legacy path).
-    const { sourceTables, targetTables } = filterSchemaDiffTables(srcTables, tgtTables, tableFilter, opts, opts.selectedTables);
-
-    schemaDiffProgress.value = { phase: "loading-source-details", current: 0, total: sourceTables.length };
-    const sourceDetails = await loadSchemaDetails(
-      sourceTables,
-      {
-        connectionId: sourceConnectionId.value,
-        database: sourceDatabase.value,
-        schema: sourceSchema.value,
-        dbType: sourceDbType,
-        options: opts,
-        onProgress: (progress) => {
-          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-source-details", ...progress };
-        },
-      },
-      api,
-    );
-    if (!isCurrentRequest()) return;
-
-    schemaDiffProgress.value = { phase: "loading-target-details", current: 0, total: targetTables.length };
-    const targetDetails = await loadSchemaDetails(
-      targetTables,
-      {
-        connectionId: targetConnectionId.value,
-        database: targetDatabase.value,
-        schema: targetSchema.value,
-        dbType,
-        options: opts,
-        onProgress: (progress) => {
-          if (isCurrentRequest()) schemaDiffProgress.value = { phase: "loading-target-details", ...progress };
-        },
-      },
-      api,
-    );
-    if (!isCurrentRequest()) return;
-
-    // Fetch new object types for PostgreSQL-like databases
-    const promises: Promise<any>[] = [];
-    if (isPostgresLike && opts?.functions) {
-      promises.push(api.listFunctions(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listFunctions(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-    if (isPostgresLike && opts?.sequences) {
-      promises.push(api.listSequences(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, !!opts?.sequenceLastValues));
-      promises.push(api.listSequences(targetConnectionId.value, targetDatabase.value, targetSchema.value, !!opts?.sequenceLastValues));
-    }
-    if (isPostgresLike && opts?.rules) {
-      promises.push(api.listRules(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listRules(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-    if (isPostgresLike && opts?.owners) {
-      promises.push(api.listOwners(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value));
-      promises.push(api.listOwners(targetConnectionId.value, targetDatabase.value, targetSchema.value));
-    }
-
-    if (hasExtraObjectPhase) schemaDiffProgress.value = { phase: "loading-extra-objects" };
-    const results = await Promise.all(promises);
-    if (!isCurrentRequest()) return;
-    let idx = 0;
-    const srcFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
-    const tgtFunctions = opts?.functions && isPostgresLike ? results[idx++] : [];
-    const srcSequences = opts?.sequences && isPostgresLike ? results[idx++] : [];
-    const tgtSequences = opts?.sequences && isPostgresLike ? results[idx++] : [];
-    const srcRules = opts?.rules && isPostgresLike ? results[idx++] : [];
-    const tgtRules = opts?.rules && isPostgresLike ? results[idx++] : [];
-    const srcOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
-    const tgtOwners = opts?.owners && isPostgresLike ? results[idx++] : [];
-
-    schemaDiffProgress.value = { phase: "comparing" };
-    const result = await api.prepareSchemaDiff({
-      sourceTables,
-      targetTables,
-      sourceDetails,
-      targetDetails,
-      sourceFunctions: srcFunctions,
-      targetFunctions: tgtFunctions,
-      sourceSequences: srcSequences,
-      targetSequences: tgtSequences,
-      sourceRules: srcRules,
-      targetRules: tgtRules,
-      sourceOwners: srcOwners,
-      targetOwners: tgtOwners,
-      // Mappings only apply to an explicit table selection; the all-tables path
-      // (selectedTables === undefined) must stay mapping-free so the Rust side
-      // cannot reclassify added/removed tables from stale persisted mappings.
-      tableMappings: opts.selectedTables === undefined ? undefined : opts.tableMappings,
-      databaseType: dbType,
-      targetSchema: schemaDiffDeployTargetSchema(dbType, targetDatabase.value, targetSchema.value),
+  appliedSessionResult = null;
+  shownSessionError = "";
+  resetComparisonResultState();
+  schemaDiffHasExtraObjectPhase.value = shouldLoadSchemaDiffExtraObjects(targetDbType, options);
+  const session = startSchemaDiffSession(
+    {
+      sourceConnectionId: sourceConnectionId.value,
+      sourceDatabase: sourceDatabase.value,
+      sourceSchema: sourceSchema.value,
+      targetConnectionId: targetConnectionId.value,
+      targetDatabase: targetDatabase.value,
+      targetSchema: targetSchema.value,
+      sourceDbType,
+      targetDbType,
+      options,
       ignoreComments: ignoreComments.value,
-      cascadeDelete: opts?.cascadeDelete ?? false,
-      compareColumnOrder: opts.compareColumnOrder,
-      ignoreTableNameCase: opts.ignoreTableNameCase,
-      ignoreColumnNameCase: opts.ignoreColumnNameCase,
-      detectRenames: opts?.detectRenames ?? false,
-      detectTableRenames: opts?.detectTableRenames ?? false,
-      renameThreshold: opts?.renameThreshold ?? 0.5,
-      enableRollback: opts?.enableRollback ?? false,
-      batchPatterns: opts?.batchPatterns
-        ? opts.batchPatterns
-            .split(",")
-            .map((s: string) => s.trim())
-            .filter(Boolean)
-        : undefined,
-      sourceDialect: opts?.sourceDialect ? normalizeDialectKind(opts.sourceDialect) : sourceConfig?.db_type ? databaseTypeToDialectKind(sourceConfig.db_type) : undefined,
-      targetDialect: opts?.targetDialect ? normalizeDialectKind(opts.targetDialect) : targetConfig?.db_type ? databaseTypeToDialectKind(targetConfig.db_type) : undefined,
-      compatibilityThreshold: opts?.compatibilityThreshold ?? 0.5,
-      fieldMappings:
-        opts?.fieldMappings?.map((m: FieldMappingEntry) => ({
-          sourceType: m.sourceType,
-          targetType: m.targetType,
-          paramStrategy: m.paramStrategy ?? "preserve",
-          customParams: m.customParams,
-        })) || [],
-    });
-    if (!isCurrentRequest()) return;
-
-    // Extract new result fields
-    rollbackSql.value = result.rollbackSyncSql ?? "";
-    rollbackCompleteness.value = result.rollbackCompleteness ?? "complete";
-    missingRollbackObjects.value = result.missingRollbackObjects ?? [];
-    renameCandidates.value = result.renameCandidates ?? [];
-    compatibilityWarnings.value = result.compatibilityWarnings ?? [];
-    permissionDiffs.value = result.permissionDiffs ?? [];
-    dependencyGraph.value = normalizeSchemaDiffDependencyGraph(result.dependencyGraph);
-
-    // Convert to unified objects
-    diffObjects.value = convertToSchemaDiffObjects(result.diffs, result.functionDiffs, result.sequenceDiffs, result.ruleDiffs, result.ownerDiffs, result.renameCandidates);
-
-    // Group by operation type and object kind
-    diffGroups.value = groupDiffObjects(diffObjects.value);
-
-    // Save the structured result; both script previews are generated from the
-    // current selection projection below rather than from the initial full SQL.
-    lastDiffResult.value = result;
-    deploySqlMode.value = "forward";
-    schemaDiffProgress.value = { phase: "generating" };
-    await regenerateSelectedDeploySql();
-    await regenerateFocusedDeploySql();
-    if (!isCurrentRequest()) return;
-
-    schemaDiffProgress.value = null;
-    step.value = "result";
-  } catch (e: any) {
-    if (!isCurrentRequest()) return;
-    schemaDiffProgress.value = null;
-    schemaDiffHasExtraObjectPhase.value = false;
-    toast(e?.message || String(e), 5000);
-    step.value = "config";
-  } finally {
-    if (isCurrentRequest()) loading.value = false;
-  }
+      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
+    },
+    { tableListLoader: schemaDiffTableListLoader },
+  );
+  activeSessionId.value = session.id;
+  applySchemaDiffSession(session);
 }
 
 function handleToggleGroup(operationType: DiffOperationType) {
@@ -738,10 +660,10 @@ async function regenerateSelectedDeploySql() {
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
   } catch (error: any) {
-    if (generation === selectedDeploySqlGeneration) toast(error?.message || String(error), 5000);
+    if (!componentUnmounted && generation === selectedDeploySqlGeneration) toast(error?.message || String(error), 5000);
     return;
   }
-  if (generation !== selectedDeploySqlGeneration) return;
+  if (componentUnmounted || generation !== selectedDeploySqlGeneration) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
   rollbackCompleteness.value = plan.rollbackCompleteness ?? "complete";
@@ -767,10 +689,10 @@ async function regenerateFocusedDeploySql(objectId: string | null = selectedObje
   try {
     plan = await api.generateSchemaSyncPlan(input, buildSchemaSyncPlanOptions(options));
   } catch (error: any) {
-    if (generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) toast(error?.message || String(error), 5000);
+    if (!componentUnmounted && generation === focusedDeploySqlGeneration && selectedObjectId.value === objectId) toast(error?.message || String(error), 5000);
     return;
   }
-  if (generation !== focusedDeploySqlGeneration || selectedObjectId.value !== objectId) return;
+  if (componentUnmounted || generation !== focusedDeploySqlGeneration || selectedObjectId.value !== objectId) return;
 
   const formatted = formatSchemaSyncPlan(plan, input, options);
   focusedForwardDeploySql.value = formatted.forwardSql;

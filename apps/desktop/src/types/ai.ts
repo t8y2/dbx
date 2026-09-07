@@ -40,6 +40,8 @@ export interface AiConfig {
   customHeaders?: Record<string, string>;
   proxyEnabled?: boolean;
   proxyUrl?: string;
+  /** Disable TLS certificate verification for the AI endpoint (self-signed/private CA only). */
+  skipTlsVerify?: boolean;
   enableThinking?: boolean;
   reasoningLevel?: AiReasoningLevel;
   /** Optional per-configuration output budget sent as max_tokens/max_output_tokens. */

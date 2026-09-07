@@ -67,6 +67,7 @@ function createHarness(options: {
   indentMore?: (view: MockView) => boolean;
   acceptCompletionShortcut?: string;
   selectFirstCompletionOnOpen?: boolean;
+  imeComposing?: (view: MockView) => boolean;
 }): TabHarness {
   const source = [
     extractDeclaration(/const COMPLETION_REMOTE_LATENCY_BUDGET_MS = \d+;/, "remote completion latency budget"),
@@ -111,6 +112,7 @@ function createHarness(options: {
     "normalizeShortcutSettings",
     "shortcutToCodeMirrorKey",
     "props",
+    "isEditorComposing",
     `${javascript}\nreturn { handleTab, handleEnter, insertNewlineWithoutCompletion, acceptCompletionOrNextSnippetField, clearPendingCompletionTab, consumeSqlCompletionAutoStartSuppression };`,
   );
   return factory(
@@ -137,6 +139,7 @@ function createHarness(options: {
     normalizeShortcutSettings,
     shortcutToCodeMirrorKey,
     { databaseType: "mysql" },
+    options.imeComposing ?? ((view: MockView) => (view as MockView & { composing?: boolean }).composing === true || (view as MockView & { compositionStarted?: boolean }).compositionStarted === true),
   ) as TabHarness;
 }
 
@@ -193,6 +196,42 @@ describe("QueryEditor completion Tab keymap", () => {
     expect(acceptCompletion).toHaveBeenCalledWith(view);
     expect(closeCompletion).not.toHaveBeenCalled();
     expect(insertNewlineKeepIndent).not.toHaveBeenCalled();
+  });
+
+  it("lets the IME keep Enter while a composition is active instead of accepting a completion (#8029)", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const closeCompletion = vi.fn(() => true);
+    const insertNewlineKeepIndent = vi.fn(() => true);
+    const harness = createHarness({
+      completionStatus: () => "active",
+      acceptCompletion,
+      closeCompletion,
+      insertNewlineKeepIndent,
+      selectFirstCompletionOnOpen: true,
+      imeComposing: () => true,
+    });
+    const view = createView();
+
+    expect(harness.handleEnter(view)).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+    expect(closeCompletion).not.toHaveBeenCalled();
+    expect(insertNewlineKeepIndent).not.toHaveBeenCalled();
+  });
+
+  it("lets the IME keep Tab while a composition is active instead of accepting a completion (#8029)", () => {
+    const acceptCompletion = vi.fn(() => true);
+    const nextSnippetField = vi.fn(() => true);
+    const harness = createHarness({
+      completionStatus: () => "active",
+      acceptCompletion,
+      nextSnippetField,
+      imeComposing: () => true,
+    });
+    const view = createView();
+
+    expect(harness.acceptCompletionOrNextSnippetField(view)).toBe(false);
+    expect(acceptCompletion).not.toHaveBeenCalled();
+    expect(nextSnippetField).not.toHaveBeenCalled();
   });
 
   it("does not suppress later completion when Enter cannot insert a newline", () => {

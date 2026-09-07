@@ -1,4 +1,4 @@
-use crate::models::connection::TransportLayerConfig;
+use crate::models::connection::{SshTunnelConfig, TransportLayerConfig};
 
 use super::http_tunnel::HttpTunnelManager;
 use super::proxy_tunnel::ProxyTunnelManager;
@@ -22,15 +22,20 @@ impl LayerEndpoint {
 /// the *next* one in the chain) must see the resolved host/port rather than
 /// a literal alias string, so resolution happens once up front instead of
 /// only at the `start_tunnel` call site.
-fn resolve_ssh_layers(
+///
+/// An SSH layer's alias may itself resolve to more than one hop (its
+/// `~/.ssh/config` entry declares `ProxyJump`); every other layer, and every
+/// SSH layer without `ProxyJump`, resolves to exactly one element. `None` is
+/// returned for non-SSH layers.
+fn resolve_ssh_layer_chains(
     layers: &[TransportLayerConfig],
-    resolve: impl Fn(&crate::models::connection::SshTunnelConfig) -> crate::models::connection::SshTunnelConfig,
-) -> Vec<TransportLayerConfig> {
+    resolve: impl Fn(&SshTunnelConfig) -> Vec<SshTunnelConfig>,
+) -> Vec<Option<Vec<SshTunnelConfig>>> {
     layers
         .iter()
         .map(|layer| match layer {
-            TransportLayerConfig::Ssh(ssh) => TransportLayerConfig::Ssh(resolve(ssh)),
-            other => other.clone(),
+            TransportLayerConfig::Ssh(ssh) => Some(resolve(ssh)),
+            _ => None,
         })
         .collect()
 }
@@ -117,8 +122,30 @@ async fn start_transport_layers_internal(
     }
     validate_transport_layers(layers)?;
 
-    let layers = resolve_ssh_layers(layers, crate::ssh_config::resolve_ssh_tunnel_config);
-    let layers = layers.as_slice();
+    let ssh_chains = resolve_ssh_layer_chains(layers, crate::ssh_config::resolve_ssh_tunnel_chain);
+    for (index, chain) in ssh_chains.iter().enumerate() {
+        // A multi-hop chain only knows how to dial its first hop directly
+        // (see the `start_chain` call below), so it can't yet sit behind an
+        // earlier transport layer.
+        if chain.as_ref().is_some_and(|chain| chain.len() > 1) && index != 0 {
+            return Err(format!(
+                "SSH layer {} uses a multi-hop `~/.ssh/config` ProxyJump chain, which DBX only supports as the first transport layer. Add the jump host as its own tunnel layer instead.",
+                index + 1
+            ));
+        }
+    }
+    let entry_endpoint = |index: usize| -> (String, u16) {
+        match &ssh_chains[index] {
+            Some(chain) => {
+                let first = &chain[0];
+                (first.host.clone(), first.port)
+            }
+            None => {
+                let (host, port) = layers[index].endpoint();
+                (host.to_string(), port)
+            }
+        }
+    };
 
     let mut next_connect_endpoint: Option<LayerEndpoint> = None;
     let mut final_local_port = 0;
@@ -126,85 +153,109 @@ async fn start_transport_layers_internal(
     for (index, layer) in layers.iter().enumerate() {
         let layer_id = layer_id(connection_id, index);
         let is_last = index + 1 == layers.len();
-        let (layer_host, layer_port) = layer.endpoint();
-        let connect_endpoint = next_connect_endpoint
-            .clone()
-            .unwrap_or_else(|| LayerEndpoint { host: layer_host.to_string(), port: layer_port });
+        let (layer_host, layer_port) = entry_endpoint(index);
+        let connect_endpoint =
+            next_connect_endpoint.clone().unwrap_or(LayerEndpoint { host: layer_host, port: layer_port });
         let target_endpoint = if is_last {
             LayerEndpoint { host: remote_host.to_string(), port: remote_port }
         } else {
-            let (next_host, next_port) = layers[index + 1].endpoint();
-            LayerEndpoint { host: next_host.to_string(), port: next_port }
+            let (next_host, next_port) = entry_endpoint(index + 1);
+            LayerEndpoint { host: next_host, port: next_port }
         };
 
-        let local_port = match layer {
-            TransportLayerConfig::Ssh(resolved) if is_last && final_ssh_socks5 => ssh_tunnels
-                .start_socks5_proxy(
-                    &layer_id,
-                    &connect_endpoint.host,
-                    connect_endpoint.port,
-                    &resolved.host,
-                    resolved.port,
-                    &resolved.user,
-                    &resolved.password,
-                    &resolved.key_path,
-                    &resolved.key_passphrase,
-                    resolved.use_ssh_agent,
-                    &resolved.ssh_agent_sock_path,
-                    &resolved.auth_method,
-                    effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
-                    resolved.allow_exec_channel_proxy,
-                )
-                .await
-                .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?,
-            TransportLayerConfig::Ssh(resolved) => ssh_tunnels
-                .start_tunnel_on_local_port(
-                    &layer_id,
-                    &connect_endpoint.host,
-                    connect_endpoint.port,
-                    &resolved.host,
-                    resolved.port,
-                    &resolved.user,
-                    &resolved.password,
-                    &resolved.key_path,
-                    &resolved.key_passphrase,
-                    resolved.use_ssh_agent,
-                    &resolved.ssh_agent_sock_path,
-                    &resolved.auth_method,
-                    effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
-                    &target_endpoint.host,
-                    target_endpoint.port,
-                    is_last && resolved.expose_lan,
-                    resolved.allow_exec_channel_proxy,
-                    if is_last { final_ssh_local_port } else { None },
-                )
-                .await
-                .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?,
-            TransportLayerConfig::Proxy(proxy) => proxy_tunnels
-                .start_tunnel(
-                    &layer_id,
-                    proxy.proxy_type,
-                    &connect_endpoint.host,
-                    connect_endpoint.port,
-                    &proxy.username,
-                    &proxy.password,
-                    &target_endpoint.host,
-                    target_endpoint.port,
-                )
-                .await
-                .map_err(|err| format!("Proxy layer {} failed: {err}", index + 1))?,
-            TransportLayerConfig::HttpTunnel(http) => http_tunnels
-                .start_tunnel(
-                    &layer_id,
-                    &http.url,
-                    &http.token,
-                    http.connect_timeout_secs,
-                    &target_endpoint.host,
-                    target_endpoint.port,
-                )
-                .await
-                .map_err(|err| format!("HTTP tunnel layer {} failed: {err}", index + 1))?,
-        };
+        let local_port =
+            match (layer, &ssh_chains[index]) {
+                (TransportLayerConfig::Ssh(_), Some(chain)) if chain.len() > 1 => {
+                    if is_last && final_ssh_socks5 {
+                        return Err("Dynamic SOCKS5 routing does not support a multi-hop SSH (ProxyJump) profile yet."
+                            .to_string());
+                    }
+                    if is_last && final_ssh_local_port.is_some() {
+                        return Err("A fixed local port is not supported for a multi-hop SSH (ProxyJump) profile yet."
+                            .to_string());
+                    }
+                    ssh_tunnels
+                        .start_chain(&layer_id, chain, &target_endpoint.host, target_endpoint.port)
+                        .await
+                        .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?
+                }
+                (TransportLayerConfig::Ssh(_), Some(chain)) if is_last && final_ssh_socks5 => {
+                    let resolved = &chain[0];
+                    ssh_tunnels
+                        .start_socks5_proxy(
+                            &layer_id,
+                            &connect_endpoint.host,
+                            connect_endpoint.port,
+                            &resolved.host,
+                            resolved.port,
+                            &resolved.user,
+                            &resolved.password,
+                            &resolved.key_path,
+                            &resolved.key_passphrase,
+                            resolved.use_ssh_agent,
+                            &resolved.ssh_agent_sock_path,
+                            &resolved.auth_method,
+                            effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
+                            resolved.allow_exec_channel_proxy,
+                        )
+                        .await
+                        .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?
+                }
+                (TransportLayerConfig::Ssh(_), Some(chain)) => {
+                    let resolved = &chain[0];
+                    ssh_tunnels
+                        .start_tunnel_on_local_port(
+                            &layer_id,
+                            &connect_endpoint.host,
+                            connect_endpoint.port,
+                            &resolved.host,
+                            resolved.port,
+                            &resolved.user,
+                            &resolved.password,
+                            &resolved.key_path,
+                            &resolved.key_passphrase,
+                            resolved.use_ssh_agent,
+                            &resolved.ssh_agent_sock_path,
+                            &resolved.auth_method,
+                            effective_ssh_connect_timeout_secs(resolved.connect_timeout_secs),
+                            &target_endpoint.host,
+                            target_endpoint.port,
+                            is_last && resolved.expose_lan,
+                            resolved.allow_exec_channel_proxy,
+                            if is_last { final_ssh_local_port } else { None },
+                        )
+                        .await
+                        .map_err(|err| format!("SSH layer {} failed: {err}", index + 1))?
+                }
+                (TransportLayerConfig::Proxy(proxy), None) => proxy_tunnels
+                    .start_tunnel(
+                        &layer_id,
+                        proxy.proxy_type,
+                        &connect_endpoint.host,
+                        connect_endpoint.port,
+                        &proxy.username,
+                        &proxy.password,
+                        &target_endpoint.host,
+                        target_endpoint.port,
+                    )
+                    .await
+                    .map_err(|err| format!("Proxy layer {} failed: {err}", index + 1))?,
+                (TransportLayerConfig::HttpTunnel(http), None) => http_tunnels
+                    .start_tunnel(
+                        &layer_id,
+                        &http.url,
+                        &http.token,
+                        http.connect_timeout_secs,
+                        &target_endpoint.host,
+                        target_endpoint.port,
+                    )
+                    .await
+                    .map_err(|err| format!("HTTP tunnel layer {} failed: {err}", index + 1))?,
+                (TransportLayerConfig::Proxy(_) | TransportLayerConfig::HttpTunnel(_), Some(_))
+                | (TransportLayerConfig::Ssh(_), None) => {
+                    unreachable!("resolve_ssh_layer_chains produces Some(_) iff the layer is TransportLayerConfig::Ssh")
+                }
+            };
 
         final_local_port = local_port;
         next_connect_endpoint = Some(LayerEndpoint::localhost(local_port));
@@ -274,35 +325,42 @@ fn plan_transport_layers(
     remote_port: u16,
     local_ports: &[u16],
 ) -> Vec<PlannedTransportLayer> {
-    plan_transport_layers_with_resolver(layers, remote_host, remote_port, local_ports, |ssh| ssh.clone())
+    plan_transport_layers_with_resolver(layers, remote_host, remote_port, local_ports, |ssh| vec![ssh.clone()])
 }
 
 /// Same as `plan_transport_layers`, but takes an explicit SSH-alias resolver
-/// so tests can exercise `~/.ssh/config` resolution without touching the real
-/// filesystem (mirrors `start_transport_layers`'s use of `resolve_ssh_layers`).
+/// so tests can exercise `~/.ssh/config` resolution (including a `ProxyJump`
+/// chain) without touching the real filesystem — mirrors `start_transport_layers`'s
+/// use of `resolve_ssh_layer_chains`. Each planned SSH layer covers only its
+/// *first* hop's connect endpoint; a chain's internal hops are exercised by
+/// `resolve_ssh_tunnel_chain`'s own unit tests in `ssh_config.rs`; not
+/// re-planned here.
 #[cfg(test)]
 fn plan_transport_layers_with_resolver(
     layers: &[TransportLayerConfig],
     remote_host: &str,
     remote_port: u16,
     local_ports: &[u16],
-    resolve: impl Fn(&crate::models::connection::SshTunnelConfig) -> crate::models::connection::SshTunnelConfig,
+    resolve: impl Fn(&crate::models::connection::SshTunnelConfig) -> Vec<crate::models::connection::SshTunnelConfig>,
 ) -> Vec<PlannedTransportLayer> {
-    let layers = resolve_ssh_layers(layers, resolve);
-    let layers = layers.as_slice();
+    let ssh_chains = resolve_ssh_layer_chains(layers, resolve);
+    let entry_endpoint = |index: usize| -> (String, u16) {
+        match &ssh_chains[index] {
+            Some(chain) => (chain[0].host.clone(), chain[0].port),
+            None => {
+                let (host, port) = layers[index].endpoint();
+                (host.to_string(), port)
+            }
+        }
+    };
     let mut planned = Vec::new();
     let mut next_connect_endpoint: Option<(String, u16)> = None;
     for (index, layer) in layers.iter().enumerate() {
         let is_last = index + 1 == layers.len();
-        let (layer_host, layer_port) = layer.endpoint();
-        let (connect_host, connect_port) =
-            next_connect_endpoint.clone().unwrap_or_else(|| (layer_host.to_string(), layer_port));
-        let (target_host, target_port) = if is_last {
-            (remote_host.to_string(), remote_port)
-        } else {
-            let (next_host, next_port) = layers[index + 1].endpoint();
-            (next_host.to_string(), next_port)
-        };
+        let (layer_host, layer_port) = entry_endpoint(index);
+        let (connect_host, connect_port) = next_connect_endpoint.clone().unwrap_or((layer_host, layer_port));
+        let (target_host, target_port) =
+            if is_last { (remote_host.to_string(), remote_port) } else { entry_endpoint(index + 1) };
         let layer_type = match layer {
             TransportLayerConfig::Ssh(_) => PlannedLayerType::Ssh,
             TransportLayerConfig::Proxy(_) => PlannedLayerType::Proxy,
@@ -442,7 +500,7 @@ mod tests {
             let mut resolved = ssh.clone();
             resolved.host = "10.0.0.5".to_string();
             resolved.port = 2222;
-            resolved
+            vec![resolved]
         });
 
         assert_eq!(
@@ -471,7 +529,7 @@ mod tests {
                 resolved.host = "10.0.0.5".to_string();
                 resolved.port = 2222;
             }
-            resolved
+            vec![resolved]
         });
 
         assert_eq!(
@@ -492,6 +550,35 @@ mod tests {
                     remote_port: 5432,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn proxy_jump_chain_dials_first_hop_and_forwards_to_next_layer() {
+        // Issue #7706: an SSH layer whose alias resolves to a `ProxyJump`
+        // chain must dial the outermost jump first, not the final target.
+        let layers = vec![ssh_layer("ssh-a", "target-alias", 22)];
+
+        let planned = plan_transport_layers_with_resolver(&layers, "db.internal", 5432, &[], |ssh| {
+            assert_eq!(ssh.host, "target-alias");
+            let mut jump = ssh.clone();
+            jump.host = "1.1.1.1".to_string();
+            jump.port = 22;
+            let mut target = ssh.clone();
+            target.host = "1.1.1.2".to_string();
+            target.port = 2222;
+            vec![jump, target]
+        });
+
+        assert_eq!(
+            planned,
+            vec![PlannedTransportLayer {
+                layer_type: PlannedLayerType::Ssh,
+                connect_host: "1.1.1.1".to_string(),
+                connect_port: 22,
+                remote_host: "db.internal".to_string(),
+                remote_port: 5432,
+            }]
         );
     }
 

@@ -34,6 +34,7 @@ export const contentSurfaceEventNames = [
   "openObjectTable",
   "objectSchemaChange",
   "objectBrowserViewportChange",
+  "objectBrowserSearchChange",
   "structureEditorSaved",
   "structureEditorClose",
   "previewStatement",
@@ -41,6 +42,7 @@ export const contentSurfaceEventNames = [
   "openSettings",
   "openConnectionSettings",
   "toggleZenMode",
+  "toggleResultsPane",
 ] as const satisfies Array<keyof ContentAreaSurfaceEmits>;
 
 export type ContentSurfaceEventName = (typeof contentSurfaceEventNames)[number];

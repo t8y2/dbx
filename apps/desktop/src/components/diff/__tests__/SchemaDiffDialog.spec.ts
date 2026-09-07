@@ -112,6 +112,8 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(configStepSource).toContain("tableMatchStatus.${match.kind}");
     expect(dialogSource).toContain('@update:table-mappings="handleTableMappingsUpdate"');
     expect(dialogSource).toContain("tableMappings: opts.selectedTables === undefined ? undefined : opts.tableMappings");
+    expect(dialogSource).toContain("ignoreTableNameCase: opts.ignoreTableNameCase");
+    expect(dialogSource).toContain("ignoreColumnNameCase: opts.ignoreColumnNameCase");
     expect(dialogSource).toContain("const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);");
   });
 

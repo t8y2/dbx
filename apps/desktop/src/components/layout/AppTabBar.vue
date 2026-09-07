@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch, type CSSProperties } from "vue";
+import { computed, inject, onUnmounted, ref, watch, type CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { X, Minimize2, Maximize2, Settings, Package, AlertTriangle } from "@lucide/vue";
-import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
+import { AlertTriangle } from "@lucide/vue";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
-import TabModeIcon from "./TabModeIcon.vue";
-import { tabColorStyle, tabDisplayTitle, tabIconClass } from "@/lib/tabs/tabPresentation";
+import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
+import { tabDisplayTitle } from "@/lib/tabs/tabPresentation";
 import "./appTabBar.css";
 
 const props = defineProps<{
@@ -20,6 +19,8 @@ const props = defineProps<{
   agentDriverUpdateCount?: number;
   detachedDropTarget?: boolean;
   canDetachTabs?: boolean;
+  tabBarWidth?: number;
+  tabBarCollapsed?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -38,7 +39,29 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
-const isClassicLayout = computed(() => settingsStore.editorSettings.appLayout === "classic");
+const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
+const isVerticalLayout = computed(() => ["left", "right"].includes(settingsStore.editorSettings.tabPlacement));
+const layoutClass = computed(() => {
+  switch (settingsStore.editorSettings.tabPlacement) {
+    case "bottom":
+      return "flex-col-reverse";
+    case "left":
+      return "flex-row";
+    case "right":
+      return "flex-row-reverse";
+    default:
+      return "flex-col";
+  }
+});
+const navigationStyle = computed<CSSProperties>(() => {
+  if (!isVerticalLayout.value) return { maxHeight: "50%" };
+  const width = props.tabBarCollapsed ? "3.5rem" : `${props.tabBarWidth ?? 240}px`;
+  return { width, flex: `0 0 ${width}` };
+});
+function setTabBarTarget(groupId: string, element: unknown) {
+  if (element instanceof HTMLElement) tabBarPortal?.targets.set(groupId, element);
+  else tabBarPortal?.targets.delete(groupId);
+}
 const closeConfirmDirtyCount = computed(() => queryStore.closeConfirmDirtyTabIds.length);
 const showCloseConfirmBulkActions = computed(() => closeConfirmDirtyCount.value > 1);
 const closeConfirmDirtyTabs = computed(() => queryStore.closeConfirmDirtyTabIds.map((id) => queryStore.tabs.find((tab) => tab.id === id)).filter((tab): tab is NonNullable<ReturnType<typeof queryStore.tabs.find>> => !!tab));
@@ -64,13 +87,6 @@ const closeConfirmMessage = computed(() => {
 });
 const closeConfirmListOpen = ref(false);
 let closeConfirmListCloseTimer: ReturnType<typeof setTimeout> | null = null;
-const compactTabTitle = computed({
-  get: () => settingsStore.editorSettings.compactTabTitle,
-  set: (checked: boolean | "indeterminate") => {
-    settingsStore.updateEditorSettings({ compactTabTitle: checked === true });
-  },
-});
-
 function openCloseConfirmList() {
   if (closeConfirmListCloseTimer) {
     clearTimeout(closeConfirmListCloseTimer);
@@ -104,37 +120,6 @@ watch(
     }
   },
 );
-
-function toggleCompactTabTitle() {
-  compactTabTitle.value = !compactTabTitle.value;
-}
-
-// Special-page tabs share the regular tabs' presentation: flat full-height
-// segments with right borders in the classic layout, floating pills in the
-// separated layout (mirrors EditorGroupTabBar's strip classes).
-const specialStripRowClass = computed(() => (isClassicLayout.value ? "h-9 items-stretch" : "h-10 items-center px-2"));
-const specialStripScrollClass = computed(() => (isClassicLayout.value ? "h-full items-center overflow-x-auto" : "h-full items-center gap-1.5 overflow-x-auto py-1.5"));
-const specialStripBarClass = computed(() => (isClassicLayout.value ? "bg-muted" : `bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`));
-
-function specialTabClass(active: boolean, widthClass = ""): string[] {
-  if (isClassicLayout.value) {
-    return ["h-full border-r border-border/80 font-medium dark:border-border/45", active ? "bg-background text-foreground" : "text-foreground/70 hover:text-foreground/90"];
-  }
-  return [`h-7 ${widthClass} rounded-md border`, active ? "border-ring font-medium text-foreground" : "border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90"];
-}
-
-function specialTabColorStyle(active: boolean): CSSProperties | undefined {
-  // Special pages carry no connection color; mirror tabColorStyle's classic
-  // active underline so they read as selected like every other tab.
-  if (!isClassicLayout.value) return undefined;
-  return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;
-}
-
-// While a special page hides the workspace, the group tab strips disappear
-// with it. Re-render the open tabs here so a click is the way back to the
-// editors (v0.6.2 kept everything in one strip; the split-pane refactor moved
-// regular tabs into the hidden workspace and left no mouse path back).
-const overlayReturnTabs = computed(() => (props.settingsPageActive || props.driverStoreActive ? queryStore.tabs : []));
 
 type SpecialRegularSurface = "driverStore" | "settings";
 
@@ -173,32 +158,6 @@ function closeOtherActiveTabs() {
 
 defineExpose({ closeOtherActiveTabs });
 
-function getSpecialRegularTabMenuItems(surface: SpecialRegularSurface): ContextMenuItem[] {
-  const keep = surface;
-  const closeCurrent = surface === "driverStore" ? () => emit("close-driver-store") : () => emit("close-settings-page");
-  const specialSurfaceCount = (props.driverStoreOpen ? 1 : 0) + (props.settingsPageOpen ? 1 : 0);
-  const closeOtherDisabled = specialSurfaceCount <= 1;
-
-  return [
-    {
-      label: compactTabTitle.value ? t("contextMenu.fullTabTitle") : t("contextMenu.compactTabTitle"),
-      action: toggleCompactTabTitle,
-      icon: compactTabTitle.value ? Maximize2 : Minimize2,
-    },
-    { label: "", separator: true },
-    { label: t("contextMenu.closeTab"), action: closeCurrent, icon: X },
-    {
-      label: t("contextMenu.closeOtherTabs"),
-      action: () => {
-        closeSpecialRegularSurfaces(keep);
-      },
-      disabled: closeOtherDisabled,
-      icon: X,
-    },
-    { label: t("contextMenu.closeAllTabs"), action: closeCurrent, variant: "destructive" as const, icon: X },
-  ];
-}
-
 function handleSaveAndClose() {
   const id = queryStore.saveAndClosePendingTab();
   if (id) {
@@ -227,87 +186,14 @@ function handleCancelClose() {
 </script>
 
 <template>
-  <!-- Renders only while a special page owns the main area (the workspace and
-       its group strips are hidden then); open-but-inactive special pages
-       append to the focused group's tab strip instead of a row of their own. -->
-  <div v-if="driverStoreActive || settingsPageActive" class="app-tab-bar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[specialStripBarClass, { 'ring-2 ring-primary ring-inset': detachedDropTarget }]" data-main-tab-bar>
-    <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="specialStripRowClass">
-      <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
-        <div class="app-tab-scroll flex h-full w-full min-w-0 flex-1" :class="specialStripScrollClass">
-          <!-- Open tabs as the mouse path back while a special page owns the main area -->
-          <div
-            v-for="tab in overlayReturnTabs"
-            :key="tab.id"
-            data-return-tab
-            class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-            :class="specialTabClass(false)"
-            :style="tabColorStyle(tab, false, isClassicLayout)"
-            :title="tabDisplayTitle(tab, t)"
-            data-active-tab="false"
-            @click="emit('activate-tab', tab.id)"
-            @mousedown.middle.prevent="queryStore.closeTab(tab.id)"
-          >
-            <span class="shrink-0" :class="tabIconClass(tab)">
-              <TabModeIcon :tab="tab" class="h-3.5 w-3.5" />
-            </span>
-            <span class="min-w-0 flex-1 truncate">{{ tabDisplayTitle(tab, t) }}</span>
-            <span v-if="queryStore.isTabDirty(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-            <button class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="queryStore.closeTab(tab.id)">
-              <X class="h-3 w-3" />
-            </button>
-          </div>
-
-          <!-- Settings Page Tab -->
-          <CustomContextMenu v-if="settingsPageOpen" :items="getSpecialRegularTabMenuItems('settings')" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
-              <div
-                data-settings-page-tab
-                class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                :class="specialTabClass(!!settingsPageActive, 'min-w-36')"
-                :style="specialTabColorStyle(!!settingsPageActive)"
-                :data-active-tab="settingsPageActive"
-                @click="emit('activate-settings-page')"
-                @mousedown.middle.prevent="emit('close-settings-page')"
-              >
-                <span class="shrink-0 text-sky-600 dark:text-sky-400">
-                  <Settings class="h-3.5 w-3.5" />
-                </span>
-                <span class="min-w-0 truncate flex-1">{{ t("settings.title") }}</span>
-                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-settings-page')">
-                  <X class="h-3 w-3" />
-                </button>
-              </div>
-            </div>
-          </CustomContextMenu>
-
-          <!-- Driver Store Tab -->
-          <CustomContextMenu v-if="driverStoreOpen" :items="getSpecialRegularTabMenuItems('driverStore')" v-slot="{ onContextMenu }">
-            <div :class="isClassicLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
-              <div
-                data-driver-store-tab
-                class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                :class="specialTabClass(!!driverStoreActive, 'min-w-38')"
-                :style="specialTabColorStyle(!!driverStoreActive)"
-                :data-active-tab="driverStoreActive"
-                @click="emit('activate-driver-store')"
-                @mousedown.middle.prevent="emit('close-driver-store')"
-              >
-                <span class="shrink-0 text-amber-600 dark:text-amber-400">
-                  <Package class="h-3.5 w-3.5" />
-                </span>
-                <span class="min-w-0 truncate flex-1">{{ t("toolbar.driverManager") }}</span>
-                <span v-if="(agentDriverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
-                  {{ (agentDriverUpdateCount ?? 0) > 99 ? "99+" : agentDriverUpdateCount }}
-                </span>
-                <button class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" @click.stop="emit('close-driver-store')">
-                  <X class="h-3 w-3" />
-                </button>
-              </div>
-            </div>
-          </CustomContextMenu>
-          <div class="min-w-8 flex-1 self-stretch" data-tauri-drag-region />
-        </div>
-      </div>
+  <!-- Targets remain mounted while inactive so the original group bars can
+       move here without losing their local presentation state. -->
+  <div v-show="driverStoreActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
+    <div data-special-page-navigation class="flex min-h-0 min-w-0 shrink-0 flex-col overflow-auto" :style="navigationStyle">
+      <div v-for="group in queryStore.groups" :key="group.id" :ref="(element) => setTabBarTarget(group.id, element)" :data-special-page-tab-target="group.id" class="flex min-h-0 min-w-0" :class="isVerticalLayout ? 'flex-1' : 'shrink-0'" />
+    </div>
+    <div data-special-page-content class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <slot />
     </div>
   </div>
 

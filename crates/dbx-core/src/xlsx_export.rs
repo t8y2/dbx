@@ -10,6 +10,33 @@ const XLSX_DATE_STYLE: usize = 2;
 const XLSX_DATETIME_STYLE: usize = 3;
 const NUMERIC_RIGHT_ALIGN_STYLE: usize = 4;
 const NUMERIC_LEFT_ALIGN_STYLE: usize = 5;
+// Excel renders numeric cells with the General format in the shortest form, so
+// database scale like "0.3500000" displays as "0.35" even though the full value
+// is stored. Pre-registered number formats (one per fractional-digit count up
+// to MAX_NUMERIC_SCALE_FORMAT) keep the declared decimals visible (#8225).
+// Styles are appended after the six fixed entries, two per scale (right/left
+// alignment), so the indices stay stable for the streaming writer.
+const MAX_NUMERIC_SCALE_FORMAT: usize = 15;
+const NUMERIC_SCALE_STYLE_BASE: usize = 6;
+const SCALE_NUMFMT_ID_BASE: usize = 166;
+
+fn numeric_scale_style(scale: usize, right_align: bool) -> Option<usize> {
+    if scale == 0 || scale > MAX_NUMERIC_SCALE_FORMAT {
+        return None;
+    }
+    Some(NUMERIC_SCALE_STYLE_BASE + (scale - 1) * 2 + usize::from(!right_align))
+}
+
+/// Fractional digit count of a plain (non-exponent) decimal string. Values in
+/// exponent notation return 0: a fixed "0.00"-style format would round tiny
+/// magnitudes to zero, so they keep the General format's scientific display.
+fn decimal_fraction_digits(value: &str) -> usize {
+    let trimmed = value.trim();
+    if trimmed.contains(['e', 'E']) {
+        return 0;
+    }
+    trimmed.split_once('.').map_or(0, |(_, fraction)| fraction.chars().filter(|ch| ch.is_ascii_digit()).count())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -767,10 +794,15 @@ fn push_typed_cell_xml(
     if is_numeric_column_type(column_type) {
         if let Some(Value::String(value)) = value {
             if let Some(number) = safe_excel_number(value) {
+                // Excel's General format drops database scale ("0.3500000"
+                // renders as "0.35"), so numeric cells carrying a fractional
+                // part switch to the matching pre-registered scale format.
+                let scale_style =
+                    numeric_scale_style(decimal_fraction_digits(number), style == Some(NUMERIC_RIGHT_ALIGN_STYLE));
                 output.push_str("<c r=\"");
                 push_cell_ref(output, row_index, col_index);
                 output.push('"');
-                push_cell_style(output, style);
+                push_cell_style(output, scale_style.or(style));
                 write!(output, "><v>{number}</v></c>").expect("writing XLSX numeric cells into a String cannot fail");
                 return;
             }
@@ -979,21 +1011,43 @@ fn styles_xml(date_time_format: Option<&str>) -> String {
             }
         })
         .unwrap_or((default_date, default_datetime));
+    // One fixed "0.0…0" format per fractional-digit count plus right/left xfs
+    // per format, appended after the six fixed styles (see numeric_scale_style).
+    let mut scale_numfmts = String::new();
+    let mut scale_xfs = String::new();
+    for scale in 1..=MAX_NUMERIC_SCALE_FORMAT {
+        let format_code = format!("0.{}", "0".repeat(scale));
+        scale_numfmts.push_str(&format!(
+            "<numFmt numFmtId=\"{}\" formatCode=\"{}\"/>",
+            SCALE_NUMFMT_ID_BASE + scale - 1,
+            format_code
+        ));
+        for (alignment, _) in [("right", true), ("left", false)] {
+            scale_xfs.push_str(&format!(
+                "<xf numFmtId=\"{}\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\" applyAlignment=\"1\"><alignment horizontal=\"{alignment}\"/></xf>",
+                SCALE_NUMFMT_ID_BASE + scale - 1
+            ));
+        }
+    }
     format!(
         concat!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>",
             "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">",
-            "<numFmts count=\"2\"><numFmt numFmtId=\"164\" formatCode=\"{}\"/><numFmt numFmtId=\"165\" formatCode=\"{}\"/></numFmts>",
+            "<numFmts count=\"{}\"><numFmt numFmtId=\"164\" formatCode=\"{}\"/><numFmt numFmtId=\"165\" formatCode=\"{}\"/>{}</numFmts>",
             "<fonts count=\"2\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>",
             "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill></fills>",
             "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>",
             "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>",
-            "<cellXfs count=\"6\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf></cellXfs>",
+            "<cellXfs count=\"{}\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"165\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"right\"/></xf><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\"><alignment horizontal=\"left\"/></xf>{}</cellXfs>",
             "<cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles>",
             "</styleSheet>"
         ),
+        2 + MAX_NUMERIC_SCALE_FORMAT,
         escape_xml(&date_format),
-        escape_xml(&datetime_format)
+        escape_xml(&datetime_format),
+        scale_numfmts,
+        6 + MAX_NUMERIC_SCALE_FORMAT * 2,
+        scale_xfs
     )
 }
 
@@ -1272,9 +1326,66 @@ mod tests {
         .expect("build workbook");
 
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
-        assert!(sheet.contains("<c r=\"A2\" s=\"5\"><v>1.00000</v></c>"));
-        assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"A2\" s=\"15\"><v>1.00000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"17\"><v>2800.000000</v></c>"));
         assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>00123</t></is></c>"));
+    }
+
+    #[test]
+    fn applies_scale_preserving_number_formats_to_fractional_numeric_cells() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Scale formats".to_string()),
+            columns: vec!["qty".to_string(), "cost".to_string(), "exp".to_string()],
+            column_types: vec!["numeric(18,4)".to_string(), "decimal(10,7)".to_string(), "double".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!("5.0000"), json!("0.3500000"), json!("1.23E-5")]],
+            numeric_column_right_align: true,
+        })
+        .expect("build workbook");
+
+        let styles = read_zip_entry(&workbook, "xl/styles.xml");
+        assert!(styles.contains("numFmtId=\"169\" formatCode=\"0.0000\""));
+        assert!(styles.contains("numFmtId=\"172\" formatCode=\"0.0000000\""));
+        assert!(styles.contains("<cellXfs count=\"36\">"));
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"12\"><v>5.0000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"18\"><v>0.3500000</v></c>"));
+        // Exponent-notation values keep the General format's scientific display.
+        assert!(sheet.contains("<c r=\"C2\" s=\"4\"><v>1.23E-5</v></c>"));
+    }
+
+    #[test]
+    fn keeps_integral_and_left_aligned_numeric_cells_on_plain_styles() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Left align".to_string()),
+            columns: vec!["qty".to_string(), "count".to_string()],
+            column_types: vec!["numeric(18,4)".to_string(), "int".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!("5.0000"), json!("7")]],
+            numeric_column_right_align: false,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"13\"><v>5.0000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>7</v></c>"));
+    }
+
+    #[test]
+    fn caps_scale_formats_beyond_fifteen_decimals() {
+        let workbook = build_xlsx_workbook(&XlsxWorksheetData {
+            sheet_name: Some("Deep scale".to_string()),
+            columns: vec!["value".to_string()],
+            column_types: vec!["numeric(38,20)".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![json!("0.00000000000000000001")]],
+            numeric_column_right_align: true,
+        })
+        .expect("build workbook");
+
+        let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
+        assert!(sheet.contains("<c r=\"A2\" s=\"4\"><v>0.00000000000000000001</v></c>"));
     }
 
     #[test]
@@ -1304,9 +1415,9 @@ mod tests {
         .expect("build workbook");
 
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
-        assert!(sheet.contains("<c r=\"A2\" s=\"4\"><v>-100000.0000000000</v></c>"));
-        assert!(sheet.contains("<c r=\"B2\" s=\"4\"><v>-999999999999999.0000</v></c>"));
-        assert!(sheet.contains("<c r=\"C2\" s=\"4\"><v>123456789012345.0000000000</v></c>"));
+        assert!(sheet.contains("<c r=\"A2\" s=\"24\"><v>-100000.0000000000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"12\"><v>-999999999999999.0000</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" s=\"24\"><v>123456789012345.0000000000</v></c>"));
         assert!(sheet.contains("<c r=\"D2\" t=\"inlineStr\" s=\"4\"><is><t>1234567890123456.0000</t></is></c>"));
         assert!(sheet.contains("<c r=\"E2\" t=\"inlineStr\" s=\"4\"><is><t>100000.0000000001</t></is></c>"));
         assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\" s=\"4\"><is><t>not-a-number</t></is></c>"));
@@ -1351,7 +1462,7 @@ mod tests {
         assert!(sheet.contains("<c r=\"B2\" s=\"3\"><v>45347.543229166666</v></c>"));
         assert!(sheet.contains("<c r=\"C2\" t=\"inlineStr\"><is><t>2024-02-25</t></is></c>"));
         assert!(sheet.contains("<c r=\"D2\" t=\"inlineStr\"><is><t>not-a-date</t></is></c>"));
-        assert!(sheet.contains("<c r=\"E2\" s=\"5\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"E2\" s=\"17\"><v>2800.000000</v></c>"));
         assert!(sheet.contains("<c r=\"F2\" t=\"inlineStr\"><is><t>2024-02-25T13:02:15+08:00</t></is></c>"));
         assert!(styles.contains("numFmtId=\"164\" formatCode=\"yyyy-mm-dd\""));
         assert!(styles.contains("numFmtId=\"165\" formatCode=\"yyyy-mm-dd hh:mm:ss\""));
@@ -1425,17 +1536,17 @@ mod tests {
         .expect("build workbook");
 
         let sheet = read_zip_entry(&workbook, "xl/worksheets/sheet1.xml");
-        for (reference, value) in [
-            ("A2", "2"),
-            ("B2", "42"),
-            ("C2", "-7"),
-            ("D2", "4000000000"),
-            ("E2", "123456789012345"),
-            ("F2", "123.5"),
-            ("G2", "987654.321"),
-            ("H2", "2800.000000"),
+        for (reference, value, style) in [
+            ("A2", "2", "5"),
+            ("B2", "42", "5"),
+            ("C2", "-7", "5"),
+            ("D2", "4000000000", "5"),
+            ("E2", "123456789012345", "5"),
+            ("F2", "123.5", "7"),
+            ("G2", "987654.321", "11"),
+            ("H2", "2800.000000", "17"),
         ] {
-            assert!(sheet.contains(&format!("<c r=\"{reference}\" s=\"5\"><v>{value}</v></c>")), "sheet={sheet}");
+            assert!(sheet.contains(&format!("<c r=\"{reference}\" s=\"{style}\"><v>{value}</v></c>")), "sheet={sheet}");
         }
     }
 
@@ -1542,8 +1653,8 @@ mod tests {
         let bytes = fs::read(&path).expect("read workbook");
         let sheet = read_zip_entry(&bytes, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains("<c r=\"A2\" s=\"5\"><v>42</v></c>"));
-        assert!(sheet.contains("<c r=\"B2\" s=\"5\"><v>123.5</v></c>"));
-        assert!(sheet.contains("<c r=\"C2\" s=\"5\"><v>2800.000000</v></c>"));
+        assert!(sheet.contains("<c r=\"B2\" s=\"7\"><v>123.5</v></c>"));
+        assert!(sheet.contains("<c r=\"C2\" s=\"17\"><v>2800.000000</v></c>"));
         let _ = fs::remove_file(&path);
     }
 

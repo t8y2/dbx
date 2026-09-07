@@ -14,7 +14,7 @@ import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
-import { inferCompareKeyColumns } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase } from "@/lib/dataGrid/dataCompare";
 import type { ColumnInfo, DatabaseType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
@@ -546,6 +546,8 @@ async function startCompare() {
         if (!targetTables.value.includes(task.targetTable)) {
           const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
           const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : [];
+          const sourceColumnNames = sourceColumns.map((column) => column.name);
+          const sourceKeyColumns = resolvedKeys.map((key) => matchColumnNameIgnoreCase(key, sourceColumnNames) ?? key);
           const preparation = await api.prepareDataCompareMissingTarget({
             sourceConnectionId: sourceConnectionId.value,
             sourceDatabase: sourceDatabase.value,
@@ -555,12 +557,12 @@ async function startCompare() {
             targetDatabase: targetDatabase.value,
             targetSchema: targetSchema.value,
             targetTable: task.targetTable,
-            keyColumns: resolvedKeys,
+            keyColumns: sourceKeyColumns,
           });
           results.push({
             sourceTable: task.sourceTable,
             targetTable: task.targetTable,
-            keyColumns: resolvedKeys,
+            keyColumns: sourceKeyColumns,
             columns: sourceColumns.map((column) => column.name),
             columnInfo: sourceColumns,
             status: "different",
@@ -591,9 +593,19 @@ async function startCompare() {
 
         const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
         const targetColumns = await loadColumnsWithCache(targetColumnCache, targetConnectionId.value, targetDatabase.value, targetSchema.value, task.targetTable);
-        const columns = sourceColumns.map((column) => column.name).filter((column) => targetColumns.some((target) => target.name === column));
+        const matched = intersectCompareColumns(sourceColumns, targetColumns);
+        const columns = matched.columns;
         const columnInfo = columns.map((column) => targetColumns.find((target) => target.name === column)).filter((column): column is CompareColumn => !!column);
-        const missingKeys = resolvedKeys.filter((column) => !columns.includes(column));
+        const canonicalKeyColumns: string[] = [];
+        const missingKeys: string[] = [];
+        for (const key of resolvedKeys) {
+          const canonical = matchColumnNameIgnoreCase(key, columns);
+          if (!canonical) {
+            missingKeys.push(key);
+          } else if (!canonicalKeyColumns.includes(canonical)) {
+            canonicalKeyColumns.push(canonical);
+          }
+        }
         if (missingKeys.length > 0) {
           throw new Error(t("dataCompare.missingKeyColumns", { columns: missingKeys.join(", ") }));
         }
@@ -611,7 +623,8 @@ async function startCompare() {
           targetSchema: targetSchema.value,
           targetTable: task.targetTable,
           columns,
-          keyColumns: resolvedKeys,
+          keyColumns: canonicalKeyColumns,
+          sourceColumns: matched.sourceColumns,
         });
 
         const added = preparation.result.added.length;
@@ -622,7 +635,7 @@ async function startCompare() {
         results.push({
           sourceTable: task.sourceTable,
           targetTable: task.targetTable,
-          keyColumns: resolvedKeys,
+          keyColumns: canonicalKeyColumns,
           columns,
           columnInfo,
           status,

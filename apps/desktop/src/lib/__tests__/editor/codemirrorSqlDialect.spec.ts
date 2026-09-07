@@ -68,6 +68,24 @@ describe("codemirrorSqlDialect", () => {
     expect(nodeNameAt(dialect, "SELECT GETDATE()", "GETDATE")).toBe("Builtin");
   });
 
+  it("tokenizes T-SQL temp table names instead of erroring on the hash (#8267)", () => {
+    const dialect = createDbxCodeMirrorSqlDialect(langSql, "sqlserver", "sqlserver");
+    const statement = "select * into #GH_GHMXK from ##global_temp where b.jssjh = @sjh";
+
+    // `#`/`##` prefixes used to fall through to a parser error token, leaving
+    // temp table names unhighlighted; they share the SpecialVar channel with
+    // @@variables, whose scanner handles the doubled prefix natively.
+    expect(nodeNameAt(dialect, statement, "#GH_GHMXK")).toBe("SpecialVar");
+    expect(nodeNameAt(dialect, statement, "##global_temp")).toBe("SpecialVar");
+    expect(nodeNameAt(dialect, statement, "@sjh")).toBe("SpecialVar");
+    expect(nodeNameAt(dialect, statement, "select")).toBe("Keyword");
+    expect(nodeNameAt(dialect, statement, "into")).toBe("Keyword");
+
+    // MySQL keeps interpreting `#` as a line comment — its dialect is untouched.
+    const mysql = createDbxCodeMirrorSqlDialect(langSql, "mysql", "mysql");
+    expect(nodeNameAt(mysql, "SELECT a FROM t -- x\nWHERE b = 1", "WHERE")).toBe("Keyword");
+  });
+
   it("keeps double quotes as identifier delimiters for Oracle-family dialects", () => {
     const databaseTypes: DatabaseType[] = ["oracle", "dameng", "yashandb", "oscar", "oceanbase-oracle"];
 

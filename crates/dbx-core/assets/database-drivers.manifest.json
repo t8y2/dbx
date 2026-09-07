@@ -2446,11 +2446,11 @@
       "defaultPort": 2181,
       "supportLevel": "connect",
       "capabilities": {
-        "queryExecution": true,
+        "queryExecution": false,
         "metadataBrowse": false,
         "objectBrowser": false,
         "objectSource": false,
-        "schemaSearch": true,
+        "schemaSearch": false,
         "diagram": false,
         "tableDataEdit": false,
         "tableStructureEdit": false,

@@ -50,11 +50,11 @@ function isSchemaDiffObjectEnabled(table: TableInfo, options: Pick<SchemaDiffCom
   return isSchemaDiffView(table) ? options.views : options.tables;
 }
 
-type SchemaDiffTableFilterOptions = Pick<SchemaDiffCompareOptions, "tables" | "views"> & {
+type SchemaDiffTableFilterOptions = Pick<SchemaDiffCompareOptions, "tables" | "views" | "ignoreTableNameCase"> & {
   tableMappings?: SchemaDiffCompareOptions["tableMappings"];
 };
 
-export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: SchemaDiffTableFilterOptions = { tables: true, views: true }, selectedTables?: string[]): FilteredSchemaDiffTables {
+export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: TableInfo[], filter: CompiledSchemaDiffTableFilter, options: SchemaDiffTableFilterOptions = { tables: true, views: true, ignoreTableNameCase: false }, selectedTables?: string[]): FilteredSchemaDiffTables {
   // Visual (explicit) table selection is applied first, then the existing include/exclude
   // regex filter. With an explicit selection, targets are selected by the effective
   // source→target mapping; without one, the legacy all-tables path is unchanged.
@@ -72,6 +72,7 @@ export function filterSchemaDiffTables(sourceTables: TableInfo[], targetTables: 
       filteredSourceTables.map((table) => table.name),
       filteredTargetTables.map((table) => table.name),
       options.tableMappings ?? [],
+      options.ignoreTableNameCase,
     ).map((mapping) => mapping.targetTable),
   );
 

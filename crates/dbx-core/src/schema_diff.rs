@@ -219,17 +219,92 @@ pub struct FieldMapping {
     pub custom_params: Option<String>,
 }
 
+/// Canonicalizes a handful of ANSI-SQL type synonyms that name the same
+/// underlying type across dialects (e.g. Postgres/Kingbase report the base
+/// type as `character varying` via `format_type()`, while the field-mapping
+/// UI's type catalog lists the shorter `varchar`). Without this, a user
+/// mapping configured against one spelling silently never matches a column
+/// reported under the other.
+fn canonical_type_name(base: &str) -> std::borrow::Cow<'_, str> {
+    match base.trim().to_ascii_uppercase().as_str() {
+        "CHARACTER VARYING" => std::borrow::Cow::Borrowed("VARCHAR"),
+        "CHARACTER" => std::borrow::Cow::Borrowed("CHAR"),
+        _ => std::borrow::Cow::Owned(base.trim().to_ascii_uppercase()),
+    }
+}
+
+/// Finds the mapping for `base_type`, preferring an exact (case-insensitive)
+/// match over an alias match. The field-mapping panel auto-generates one row
+/// per catalog type — `char`, `character`, `varchar` and `character varying`
+/// commonly coexist as separate rows with independently chosen targets — so
+/// treating aliases as interchangeable on the first hit alone would let an
+/// earlier row (e.g. `char`) silently shadow a later exact row (e.g.
+/// `character`) that shares the same canonical name. Alias matching is only
+/// a fallback for when no row exactly names the reported type.
+fn find_mapping<'a>(mappings: &'a [FieldMapping], base_type: &str) -> Option<&'a FieldMapping> {
+    mappings
+        .iter()
+        .find(|m| m.source_type.eq_ignore_ascii_case(base_type))
+        .or_else(|| mappings.iter().find(|m| canonical_type_name(&m.source_type) == canonical_type_name(base_type)))
+}
+
+/// Splices a driver-reported column length back into its type string when
+/// the type name itself omits it. Postgres/Kingbase can report a varying
+/// column as bare `character varying` (no length) via `format_type()` while
+/// still exposing the real length separately as `character_maximum_length`.
+/// Without this, the cross-dialect rewrite below has no way to tell "no
+/// length was ever declared" (safe to default) apart from "the length just
+/// isn't embedded in this dialect's type string" (issue #8011) — silently
+/// falling back to a generic default in the latter case would replace a
+/// known-correct length with a possibly wrong one.
+fn with_known_length(source_type: &str, character_maximum_length: Option<i32>) -> String {
+    let trimmed = source_type.trim();
+    if trimmed.contains('(') {
+        return trimmed.to_string();
+    }
+    // `character_maximum_length` is populated by several drivers for types
+    // where it does NOT mean "declared length in this position" — MySQL's
+    // information_schema fills it in for TEXT/BLOB family columns (e.g.
+    // TEXT -> 65535), and Oracle's DATA_LENGTH is filled in for every
+    // column, including DATE (byte length, e.g. 7) and NUMBER. Splicing
+    // those in verbatim is wrong twice over: `TEXT(65535)` is silently
+    // *reinterpreted* as MEDIUMTEXT by MySQL (real DB verified), and
+    // `DATE(7)` sent to a MySQL target is a straight syntax error.
+    //
+    // CHAR/CHARACTER/NCHAR belong on this whitelist alongside the VARCHAR
+    // family, unlike in type_rewrite's *default*-to-255 list: that list
+    // invents a length out of thin air (where CHAR must be excluded — a
+    // bare CHAR is already valid MySQL, meaning CHAR(1)), whereas this
+    // function only *restores* a length the driver already reported
+    // separately. MySQL's own information_schema does this for CHAR too
+    // (DATA_TYPE="char", CHARACTER_MAXIMUM_LENGTH=10 for a CHAR(10) column,
+    // real DB verified) — excluding CHAR here would silently truncate a
+    // real CHAR(10) column down to CHAR(1). Mirrors the same whitelist
+    // `columnDDLDataType` uses in agents/drivers/kingbase-go/kingbase_metadata.go.
+    let base_upper = trimmed.to_ascii_uppercase();
+    if !matches!(
+        base_upper.as_str(),
+        "VARCHAR" | "CHARACTER VARYING" | "NVARCHAR" | "CHAR" | "CHARACTER" | "NCHAR" | "VARCHAR2" | "NVARCHAR2"
+    ) {
+        return trimmed.to_string();
+    }
+    match character_maximum_length {
+        Some(len) if len > 0 => format!("{trimmed}({len})"),
+        _ => trimmed.to_string(),
+    }
+}
+
 impl FieldMapping {
     pub fn apply<'a>(mappings: &'a [FieldMapping], source_type: &str) -> Option<&'a str> {
         let base_type = source_type.split('(').next().unwrap_or(source_type).trim();
-        mappings.iter().find(|m| m.source_type.eq_ignore_ascii_case(base_type)).map(|m| m.target_type.as_str())
+        find_mapping(mappings, base_type).map(|m| m.target_type.as_str())
     }
 
     pub fn apply_with_params(mappings: &[FieldMapping], source_type: &str, target_kind: DialectKind) -> Option<String> {
         let trimmed = source_type.trim();
         let base_type = trimmed.split('(').next().unwrap_or(trimmed);
         let source_params = &trimmed[base_type.len()..];
-        let matched = mappings.iter().find(|m| m.source_type.eq_ignore_ascii_case(base_type))?;
+        let matched = find_mapping(mappings, base_type)?;
 
         let result = match matched.param_strategy {
             ParamStrategy::Strip => Some(matched.target_type.clone()),
@@ -326,6 +401,10 @@ pub struct SchemaDiffPreparationOptions {
     pub cascade_delete: bool,
     #[serde(default)]
     pub compare_column_order: bool,
+    #[serde(default)]
+    pub ignore_table_name_case: bool,
+    #[serde(default)]
+    pub ignore_column_name_case: bool,
     #[serde(default)]
     pub detect_renames: bool,
     #[serde(default)]
@@ -502,13 +581,31 @@ impl DependencyGraph {
         Self::build_with_functions(details, tables, &[], &[])
     }
 
+    pub fn build_with_options(
+        details: &[TableSchemaDetail],
+        tables: &[TableInfo],
+        ignore_table_name_case: bool,
+    ) -> Self {
+        Self::build_with_functions_and_options(details, tables, &[], &[], ignore_table_name_case)
+    }
+
     /// Extended build: also extracts dependencies from view DDLs, triggers, and function/sequence definitions.
     /// Falls back to regex-based text scanning when no live DB query is available.
     pub fn build_with_functions(
         details: &[TableSchemaDetail],
         tables: &[TableInfo],
         functions: &[FunctionInfo],
+        sequences: &[SequenceInfo],
+    ) -> Self {
+        Self::build_with_functions_and_options(details, tables, functions, sequences, false)
+    }
+
+    pub fn build_with_functions_and_options(
+        details: &[TableSchemaDetail],
+        tables: &[TableInfo],
+        functions: &[FunctionInfo],
         _sequences: &[SequenceInfo],
+        ignore_table_name_case: bool,
     ) -> Self {
         let table_names: HashSet<&str> =
             tables.iter().filter(|t| !t.table_type.contains("VIEW")).map(|t| t.name.as_str()).collect();
@@ -533,14 +630,25 @@ impl DependencyGraph {
         for table_name in &table_names {
             if let Some(detail) = detail_map.get(table_name) {
                 for fk in &detail.foreign_keys {
-                    if table_names.contains(fk.ref_table.as_str()) {
+                    let referenced_table = if table_names.contains(fk.ref_table.as_str()) {
+                        Some(fk.ref_table.as_str())
+                    } else if ignore_table_name_case {
+                        let mut candidates =
+                            table_names.iter().copied().filter(|name| name.eq_ignore_ascii_case(&fk.ref_table));
+                        let candidate = candidates.next();
+                        candidate.filter(|_| candidates.next().is_none())
+                    } else {
+                        None
+                    };
+
+                    if let Some(referenced_table) = referenced_table {
                         if let Some(node) = nodes.get_mut(*table_name) {
-                            if !node.depends_on.contains(&fk.ref_table) {
-                                node.depends_on.push(fk.ref_table.clone());
+                            if !node.depends_on.iter().any(|name| name == referenced_table) {
+                                node.depends_on.push(referenced_table.to_string());
                             }
                         }
-                        if let Some(ref_node) = nodes.get_mut(&fk.ref_table) {
-                            if !ref_node.depended_by.iter().any(|d| d == *table_name) {
+                        if let Some(ref_node) = nodes.get_mut(referenced_table) {
+                            if !ref_node.depended_by.iter().any(|name| name == *table_name) {
                                 ref_node.depended_by.push((*table_name).to_string());
                             }
                         }
@@ -1001,12 +1109,47 @@ pub fn diff_columns_with_compatibility(
     compatibility_threshold: f64,
     field_mappings: &[FieldMapping],
 ) -> (Vec<ColumnDiff>, Vec<ColumnCompatibilityWarning>) {
+    diff_columns_with_compatibility_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        source_dialect,
+        target_dialect,
+        compatibility_threshold,
+        field_mappings,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_columns_with_compatibility_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+    source_dialect: DialectKind,
+    target_dialect: DialectKind,
+    compatibility_threshold: f64,
+    field_mappings: &[FieldMapping],
+    ignore_column_name_case: bool,
+) -> (Vec<ColumnDiff>, Vec<ColumnCompatibilityWarning>) {
     use crate::sql_dialect::descriptor::TypeMappingMatrix;
 
     let matrix = TypeMappingMatrix::for_dialects(source_dialect, target_dialect);
     let engine = DefaultTypeInferenceEngine;
 
-    let basic_diffs = diff_columns_with_options(source, target, ignore_comments, compare_column_order, false, 0.5);
+    let basic_diffs = diff_columns_with_identifier_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        false,
+        0.5,
+        None,
+        None,
+        ignore_column_name_case,
+    );
 
     let mut warnings = Vec::new();
     let mut enhanced_diffs = Vec::new();
@@ -1456,6 +1599,8 @@ pub fn shard_diff(options: &SchemaDiffPreparationOptions, shard_strategy: &Shard
                 ignore_comments: options.ignore_comments,
                 cascade_delete: options.cascade_delete,
                 compare_column_order: options.compare_column_order,
+                ignore_table_name_case: options.ignore_table_name_case,
+                ignore_column_name_case: options.ignore_column_name_case,
                 source_dialect: options.source_dialect,
                 target_dialect: options.target_dialect,
                 table_mappings: options.table_mappings.clone(),
@@ -1727,6 +1872,8 @@ impl Default for SchemaDiffPreparationOptions {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            ignore_table_name_case: false,
+            ignore_column_name_case: false,
             detect_renames: false,
             detect_table_renames: false,
             rename_threshold: 0.5,
@@ -1820,7 +1967,11 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
     let dialect_str = options.source_dialect.map(|d| d.label().to_string()).unwrap_or_else(|| "generic".to_string());
     let options = AstTransmitFilter::filter_diff_preparation_options(options, &dialect_str);
 
-    let dep_graph = DependencyGraph::build(&options.source_details, &options.source_tables);
+    let dep_graph = DependencyGraph::build_with_options(
+        &options.source_details,
+        &options.source_tables,
+        options.ignore_table_name_case,
+    );
 
     let mut diffs = if let Some(ref strategy) = options.shard_strategy {
         shard_diff(&options, strategy)
@@ -1881,7 +2032,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                 if let Some(source_detail) = options.source_details.iter().find(|d| d.name == diff.name) {
                     let target_name = diff.target_name.as_deref().unwrap_or(&diff.name);
                     if let Some(target_detail) = options.target_details.iter().find(|d| d.name == target_name) {
-                        let (_, warnings) = diff_columns_with_compatibility(
+                        let (_, warnings) = diff_columns_with_compatibility_options(
                             &source_detail.columns,
                             &target_detail.columns,
                             options.ignore_comments,
@@ -1890,6 +2041,7 @@ pub fn prepare_schema_diff(options: SchemaDiffPreparationOptions) -> SchemaDiffP
                             tgt_dialect,
                             options.compatibility_threshold,
                             &options.field_mappings,
+                            options.ignore_column_name_case,
                         );
                         all_warnings.extend(warnings);
                     }
@@ -2001,10 +2153,19 @@ struct SchemaDiffTableNameResolution {
     target_only: Vec<String>,
 }
 
+fn identifiers_equal(left: &str, right: &str, ignore_case: bool) -> bool {
+    if ignore_case {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 fn resolve_schema_diff_table_names(
     source_names: &[String],
     target_names: &[String],
     mappings: &[SchemaDiffTableMapping],
+    ignore_table_name_case: bool,
 ) -> SchemaDiffTableNameResolution {
     let target_set: HashSet<&str> = target_names.iter().map(String::as_str).collect();
     let mut explicit_by_source: HashMap<&str, &str> = HashMap::new();
@@ -2014,24 +2175,52 @@ fn resolve_schema_diff_table_names(
         }
     }
 
-    let mut used_targets = HashSet::new();
+    // Reserve valid explicit targets before automatic matching so an explicit mapping
+    // wins even when another source table appears earlier in the input list.
+    let mut explicit_targets_by_source = HashMap::new();
+    let mut reserved_explicit_targets = HashSet::new();
+    for source_name in source_names {
+        let Some(target_name) = explicit_by_source.get(source_name.as_str()).copied() else { continue };
+        if target_set.contains(target_name) && reserved_explicit_targets.insert(target_name) {
+            explicit_targets_by_source.insert(source_name.clone(), target_name.to_string());
+        }
+    }
+
+    let mut resolved_targets_by_source = explicit_targets_by_source.clone();
+    let mut used_targets: HashSet<&str> = reserved_explicit_targets.clone();
+
+    // Resolve every exact match before considering case-insensitive candidates.
+    // This keeps an exact match from losing its target to an earlier case-only match.
+    for source_name in source_names {
+        if resolved_targets_by_source.contains_key(source_name) {
+            continue;
+        }
+        if target_set.contains(source_name.as_str()) && used_targets.insert(source_name.as_str()) {
+            resolved_targets_by_source.insert(source_name.clone(), source_name.clone());
+        }
+    }
+
+    if ignore_table_name_case {
+        for source_name in source_names {
+            if resolved_targets_by_source.contains_key(source_name) {
+                continue;
+            }
+            let mut candidates = target_names.iter().filter(|target_name| {
+                !used_targets.contains(target_name.as_str()) && identifiers_equal(source_name, target_name, true)
+            });
+            let candidate = candidates.next();
+            if let Some(target_name) = candidate.filter(|_| candidates.next().is_none()) {
+                used_targets.insert(target_name.as_str());
+                resolved_targets_by_source.insert(source_name.clone(), target_name.clone());
+            }
+        }
+    }
+
     let mut pairs = Vec::new();
     let mut source_only = Vec::new();
     for source_name in source_names {
-        let explicit_target = explicit_by_source
-            .get(source_name.as_str())
-            .copied()
-            .filter(|target_name| target_set.contains(target_name) && !used_targets.contains(target_name));
-        let target_name = explicit_target.or_else(|| {
-            target_set
-                .contains(source_name.as_str())
-                .then_some(source_name.as_str())
-                .filter(|target_name| !used_targets.contains(target_name))
-        });
-
-        if let Some(target_name) = target_name {
-            used_targets.insert(target_name);
-            pairs.push((source_name.clone(), target_name.to_string()));
+        if let Some(target_name) = resolved_targets_by_source.get(source_name) {
+            pairs.push((source_name.clone(), target_name.clone()));
         } else {
             source_only.push(source_name.clone());
         }
@@ -2076,10 +2265,19 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
         .map(|table| table.name.clone())
         .collect();
 
-    let table_resolution =
-        resolve_schema_diff_table_names(&source_table_names, &target_table_names, &options.table_mappings);
-    let view_resolution =
-        resolve_schema_diff_table_names(&source_view_names, &target_view_names, &options.table_mappings);
+    let table_resolution = resolve_schema_diff_table_names(
+        &source_table_names,
+        &target_table_names,
+        &options.table_mappings,
+        options.ignore_table_name_case,
+    );
+    let view_resolution = resolve_schema_diff_table_names(
+        &source_view_names,
+        &target_view_names,
+        &options.table_mappings,
+        options.ignore_table_name_case,
+    );
+    let table_pairs = table_resolution.pairs.clone();
     let mut result = Vec::new();
 
     // A foreign key whose `ref_table` is itself one of the tables being compared is a
@@ -2139,7 +2337,9 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                             fk,
                             &source_table_name_set,
                             &target_table_name_set,
+                            &table_pairs,
                             &options.table_mappings,
+                            options.ignore_table_name_case,
                         );
                         ForeignKeyDiff {
                             diff_type: "added".to_string(),
@@ -2315,7 +2515,7 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
     for (name, target_name) in table_resolution.pairs {
         let Some(source) = source_details.get(name.as_str()) else { continue };
         let Some(target) = target_details.get(target_name.as_str()) else { continue };
-        let column_diffs = diff_columns_with_dialect_options(
+        let column_diffs = diff_columns_with_identifier_options(
             &source.columns,
             &target.columns,
             options.ignore_comments,
@@ -2324,8 +2524,9 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
             options.rename_threshold,
             options.source_dialect,
             options.target_dialect,
+            options.ignore_column_name_case,
         );
-        let index_diffs = diff_indexes(&source.indexes, &target.indexes);
+        let index_diffs = diff_indexes_with_options(&source.indexes, &target.indexes, options.ignore_column_name_case);
         let normalized_source_fks: Vec<ForeignKeyInfo> = source
             .foreign_keys
             .iter()
@@ -2334,13 +2535,23 @@ fn diff_schema(options: &SchemaDiffPreparationOptions) -> Vec<TableDiff> {
                     fk,
                     &source_table_name_set,
                     &target_table_name_set,
+                    &table_pairs,
                     &options.table_mappings,
+                    options.ignore_table_name_case,
                 )
             })
             .collect();
-        let normalized_target_fks: Vec<ForeignKeyInfo> =
-            target.foreign_keys.iter().map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set)).collect();
-        let foreign_key_diffs = diff_foreign_keys(&normalized_source_fks, &normalized_target_fks);
+        let normalized_target_fks: Vec<ForeignKeyInfo> = target
+            .foreign_keys
+            .iter()
+            .map(|fk| normalize_self_referencing_fk(fk, &target_table_name_set, options.ignore_table_name_case))
+            .collect();
+        let foreign_key_diffs = diff_foreign_keys_with_options(
+            &normalized_source_fks,
+            &normalized_target_fks,
+            options.ignore_table_name_case,
+            options.ignore_column_name_case,
+        );
         let trigger_diffs = diff_triggers(&source.triggers, &target.triggers);
         let source_comment = source_table_comments.get(name.as_str()).cloned().unwrap_or(None);
         let target_comment = target_table_comments.get(target_name.as_str()).cloned().unwrap_or(None);
@@ -2643,26 +2854,39 @@ pub fn diff_columns(source: &[ColumnInfo], target: &[ColumnInfo]) -> Vec<ColumnD
     diff_columns_with_options(source, target, false, false, false, 0.5)
 }
 
-fn normalize_mysql_integer_type_for_comparison(data_type: &str) -> String {
+/// Signature of a MySQL column type used to decide whether an integer display
+/// width difference is real or just MySQL echoing back its own default width.
+struct MysqlIntegerTypeSignature {
+    /// Whole normalized type string, used to compare non-integer types as-is.
+    normalized: String,
+    /// `"{base} {suffix}"` (e.g. `"int unsigned"`) when `normalized` is a
+    /// recognized integer type, regardless of whether a width is present.
+    integer_key: Option<String>,
+    /// The explicit display width, when present on a recognized integer type.
+    width: Option<u32>,
+}
+
+fn parse_mysql_integer_type(data_type: &str) -> MysqlIntegerTypeSignature {
     let normalized = data_type.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase();
+    let is_integer_base =
+        |base: &str| matches!(base, "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year");
     let Some(open) = normalized.find('(') else {
-        return normalized;
+        let base = normalized.split(' ').next().unwrap_or(&normalized);
+        let integer_key = is_integer_base(base).then(|| normalized.clone());
+        return MysqlIntegerTypeSignature { normalized, integer_key, width: None };
     };
     let Some(close) = normalized[open + 1..].find(')').map(|index| open + 1 + index) else {
-        return normalized;
+        return MysqlIntegerTypeSignature { normalized, integer_key: None, width: None };
     };
     let base = normalized[..open].trim();
-    let width = normalized[open + 1..close].trim();
-    let integer_type = matches!(base, "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint" | "year");
-    if !integer_type || width.is_empty() || !width.bytes().all(|byte| byte.is_ascii_digit()) {
-        return normalized;
+    let width_str = normalized[open + 1..close].trim();
+    if !is_integer_base(base) || width_str.is_empty() || !width_str.bytes().all(|byte| byte.is_ascii_digit()) {
+        return MysqlIntegerTypeSignature { normalized, integer_key: None, width: None };
     }
     let suffix = normalized[close + 1..].trim();
-    if suffix.is_empty() {
-        base.to_string()
-    } else {
-        format!("{base} {suffix}")
-    }
+    let integer_key = Some(if suffix.is_empty() { base.to_string() } else { format!("{base} {suffix}") });
+    let width = width_str.parse().ok();
+    MysqlIntegerTypeSignature { normalized, integer_key, width }
 }
 
 fn column_types_equal_for_dialects(
@@ -2674,10 +2898,25 @@ fn column_types_equal_for_dialects(
     if source_type.eq_ignore_ascii_case(target_type) {
         return true;
     }
-    source_dialect == Some(DialectKind::Mysql)
-        && target_dialect == Some(DialectKind::Mysql)
-        && normalize_mysql_integer_type_for_comparison(source_type)
-            == normalize_mysql_integer_type_for_comparison(target_type)
+    if source_dialect != Some(DialectKind::Mysql) || target_dialect != Some(DialectKind::Mysql) {
+        return false;
+    }
+    let source = parse_mysql_integer_type(source_type);
+    let target = parse_mysql_integer_type(target_type);
+    match (source.integer_key, target.integer_key) {
+        // Same integer family (e.g. both "int unsigned"): a display width present on only one
+        // side is MySQL filling in its own default and not a real difference, but two explicit,
+        // differing widths (e.g. int(11) vs int(15)) are a genuine schema difference.
+        (Some(source_key), Some(target_key)) => {
+            source_key == target_key
+                && match (source.width, target.width) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                }
+        }
+        (None, None) => source.normalized == target.normalized,
+        _ => false,
+    }
 }
 
 fn column_type_similarity_score(source_type: &str, target_type: &str) -> f64 {
@@ -2743,17 +2982,76 @@ fn diff_columns_with_dialect_options(
     source_dialect: Option<DialectKind>,
     target_dialect: Option<DialectKind>,
 ) -> Vec<ColumnDiff> {
+    diff_columns_with_identifier_options(
+        source,
+        target,
+        ignore_comments,
+        compare_column_order,
+        detect_renames,
+        rename_threshold,
+        source_dialect,
+        target_dialect,
+        false,
+    )
+}
+
+fn resolve_column_matches(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_column_name_case: bool,
+) -> Vec<Option<usize>> {
+    let mut matches = vec![None; source.len()];
+    let mut used_targets = HashSet::new();
+
+    // Exact matches always win, even when a case-insensitive candidate is also available.
+    for (source_index, source_column) in source.iter().enumerate() {
+        if let Some(target_index) = target.iter().enumerate().find_map(|(target_index, target_column)| {
+            (target_column.name == source_column.name && !used_targets.contains(&target_index)).then_some(target_index)
+        }) {
+            matches[source_index] = Some(target_index);
+            used_targets.insert(target_index);
+        }
+    }
+
+    if ignore_column_name_case {
+        for (source_index, source_column) in source.iter().enumerate() {
+            if matches[source_index].is_some() {
+                continue;
+            }
+            let mut candidates = target.iter().enumerate().filter(|(target_index, target_column)| {
+                !used_targets.contains(target_index) && target_column.name.eq_ignore_ascii_case(&source_column.name)
+            });
+            let candidate = candidates.next().map(|(target_index, _)| target_index);
+            if let Some(target_index) = candidate.filter(|_| candidates.next().is_none()) {
+                matches[source_index] = Some(target_index);
+                used_targets.insert(target_index);
+            }
+        }
+    }
+
+    matches
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_columns_with_identifier_options(
+    source: &[ColumnInfo],
+    target: &[ColumnInfo],
+    ignore_comments: bool,
+    compare_column_order: bool,
+    detect_renames: bool,
+    rename_threshold: f64,
+    source_dialect: Option<DialectKind>,
+    target_dialect: Option<DialectKind>,
+    ignore_column_name_case: bool,
+) -> Vec<ColumnDiff> {
     let mut diffs = Vec::new();
-    let target_map: HashMap<&str, &ColumnInfo> = target.iter().map(|column| (column.name.as_str(), column)).collect();
-    let source_map: HashMap<&str, &ColumnInfo> = source.iter().map(|column| (column.name.as_str(), column)).collect();
-    let target_position_map: HashMap<&str, usize> =
-        target.iter().enumerate().map(|(index, column)| (column.name.as_str(), index)).collect();
-    let can_compare_order = compare_column_order
-        && source.len() == target.len()
-        && source.iter().all(|column| target_map.contains_key(column.name.as_str()));
+    let column_matches = resolve_column_matches(source, target, ignore_column_name_case);
+    let can_compare_order =
+        compare_column_order && source.len() == target.len() && column_matches.iter().all(Option::is_some);
 
     for (source_index, source_column) in source.iter().enumerate() {
-        if let Some(target_column) = target_map.get(source_column.name.as_str()) {
+        if let Some(target_index) = column_matches[source_index] {
+            let target_column = &target[target_index];
             let mut changes = Vec::new();
             if !column_types_equal_for_dialects(
                 &source_column.data_type,
@@ -2789,12 +3087,8 @@ fn diff_columns_with_dialect_options(
                     source_column.comment.as_deref().unwrap_or_default()
                 ));
             }
-            if can_compare_order {
-                if let Some(target_index) = target_position_map.get(source_column.name.as_str()) {
-                    if source_index != *target_index {
-                        changes.push(format!("order: {} → {}", *target_index + 1, source_index + 1));
-                    }
-                }
+            if can_compare_order && source_index != target_index {
+                changes.push(format!("order: {} → {}", target_index + 1, source_index + 1));
             }
             if !changes.is_empty() {
                 diffs.push(ColumnDiff {
@@ -2819,7 +3113,7 @@ fn diff_columns_with_dialect_options(
     }
 
     for (target_index, target_column) in target.iter().enumerate() {
-        if !source_map.contains_key(target_column.name.as_str()) {
+        if !column_matches.iter().flatten().any(|matched_index| *matched_index == target_index) {
             diffs.push(ColumnDiff {
                 diff_type: "removed".to_string(),
                 name: target_column.name.clone(),
@@ -2913,6 +3207,33 @@ fn column_add_position(columns: &[ColumnInfo], index: usize) -> ColumnAddPositio
 }
 
 pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff> {
+    diff_indexes_with_options(source, target, false)
+}
+
+fn index_columns_equal(source: &IndexInfo, target: &IndexInfo, ignore_column_name_case: bool) -> bool {
+    source.columns.len() == target.columns.len()
+        && source.columns.iter().enumerate().all(|(index, source_column)| {
+            let target_column = &target.columns[index];
+            let source_is_expression = source.key_is_expression.get(index).copied().unwrap_or(false);
+            let target_is_expression = target.key_is_expression.get(index).copied().unwrap_or(false);
+            if source_is_expression || target_is_expression {
+                source_column == target_column
+            } else {
+                identifiers_equal(source_column, target_column, ignore_column_name_case)
+            }
+        })
+}
+
+fn identifier_lists_equal(left: &[String], right: &[String], ignore_column_name_case: bool) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| identifiers_equal(left, right, ignore_column_name_case))
+}
+
+fn diff_indexes_with_options(
+    source: &[IndexInfo],
+    target: &[IndexInfo],
+    ignore_column_name_case: bool,
+) -> Vec<IndexDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &IndexInfo> = target.iter().map(|index| (index.name.as_str(), index)).collect();
     let source_map: HashMap<&str, &IndexInfo> = source.iter().map(|index| (index.name.as_str(), index)).collect();
@@ -2940,7 +3261,7 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
                 if source_index.is_unique { "YES" } else { "NO" }
             ));
         }
-        if source_index.columns.join(",") != target_index.columns.join(",") {
+        if !index_columns_equal(source_index, target_index, ignore_column_name_case) {
             changes.push(format!("columns: {} → {}", target_index.columns.join(", "), source_index.columns.join(", ")));
         }
         if source_index.index_type.as_deref().unwrap_or_default()
@@ -2961,7 +3282,7 @@ pub fn diff_indexes(source: &[IndexInfo], target: &[IndexInfo]) -> Vec<IndexDiff
         }
         let source_included = source_index.included_columns.clone().unwrap_or_default();
         let target_included = target_index.included_columns.clone().unwrap_or_default();
-        if source_included.join(",") != target_included.join(",") {
+        if !identifier_lists_equal(&source_included, &target_included, ignore_column_name_case) {
             changes.push(format!(
                 "include: {} → {}",
                 if target_included.is_empty() { "none".to_string() } else { target_included.join(", ") },
@@ -3011,9 +3332,15 @@ fn normalized_foreign_key_action(action: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn normalize_self_referencing_fk(fk: &ForeignKeyInfo, own_table_names: &HashSet<&str>) -> ForeignKeyInfo {
+fn normalize_self_referencing_fk(
+    fk: &ForeignKeyInfo,
+    own_table_names: &HashSet<&str>,
+    ignore_table_name_case: bool,
+) -> ForeignKeyInfo {
     let mut normalized = fk.clone();
-    if fk.ref_schema.is_some() && own_table_names.contains(fk.ref_table.as_str()) {
+    if fk.ref_schema.is_some()
+        && own_table_names.iter().any(|table_name| identifiers_equal(table_name, &fk.ref_table, ignore_table_name_case))
+    {
         normalized.ref_schema = None;
     }
     normalized
@@ -3023,19 +3350,42 @@ fn normalize_mapped_foreign_key(
     fk: &ForeignKeyInfo,
     source_table_names: &HashSet<&str>,
     target_table_names: &HashSet<&str>,
+    table_pairs: &[(String, String)],
     mappings: &[SchemaDiffTableMapping],
+    ignore_table_name_case: bool,
 ) -> ForeignKeyInfo {
-    let mut normalized = normalize_self_referencing_fk(fk, source_table_names);
-    if let Some(mapping) = mappings.iter().find(|mapping| {
-        mapping.source_table == normalized.ref_table && target_table_names.contains(mapping.target_table.as_str())
-    }) {
-        normalized.ref_table = mapping.target_table.clone();
+    let mut normalized = normalize_self_referencing_fk(fk, source_table_names, ignore_table_name_case);
+    let mapped_target = mappings
+        .iter()
+        .find(|mapping| {
+            mapping.source_table == normalized.ref_table && target_table_names.contains(mapping.target_table.as_str())
+        })
+        .map(|mapping| mapping.target_table.as_str())
+        .or_else(|| {
+            table_pairs
+                .iter()
+                .find(|(source_table, _)| {
+                    identifiers_equal(source_table, &normalized.ref_table, ignore_table_name_case)
+                })
+                .map(|(_, target_table)| target_table.as_str())
+        });
+    if let Some(mapped_target) = mapped_target {
+        normalized.ref_table = mapped_target.to_string();
         normalized.ref_schema = None;
     }
     normalized
 }
 
 pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -> Vec<ForeignKeyDiff> {
+    diff_foreign_keys_with_options(source, target, false, false)
+}
+
+fn diff_foreign_keys_with_options(
+    source: &[ForeignKeyInfo],
+    target: &[ForeignKeyInfo],
+    ignore_table_name_case: bool,
+    ignore_column_name_case: bool,
+) -> Vec<ForeignKeyDiff> {
     let mut diffs = Vec::new();
     let target_map: HashMap<&str, &ForeignKeyInfo> = target.iter().map(|fk| (fk.name.as_str(), fk)).collect();
     let source_map: HashMap<&str, &ForeignKeyInfo> = source.iter().map(|fk| (fk.name.as_str(), fk)).collect();
@@ -3053,10 +3403,10 @@ pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -
         };
 
         let mut changes = Vec::new();
-        if source_fk.column != target_fk.column {
+        if !identifiers_equal(&source_fk.column, &target_fk.column, ignore_column_name_case) {
             changes.push(format!("column: {} → {}", target_fk.column, source_fk.column));
         }
-        if source_fk.ref_table != target_fk.ref_table {
+        if !identifiers_equal(&source_fk.ref_table, &target_fk.ref_table, ignore_table_name_case) {
             changes.push(format!("ref table: {} → {}", target_fk.ref_table, source_fk.ref_table));
         }
         if source_fk.ref_schema != target_fk.ref_schema {
@@ -3066,7 +3416,7 @@ pub fn diff_foreign_keys(source: &[ForeignKeyInfo], target: &[ForeignKeyInfo]) -
                 source_fk.ref_schema.as_deref().unwrap_or("")
             ));
         }
-        if source_fk.ref_column != target_fk.ref_column {
+        if !identifiers_equal(&source_fk.ref_column, &target_fk.ref_column, ignore_column_name_case) {
             changes.push(format!("ref column: {} → {}", target_fk.ref_column, source_fk.ref_column));
         }
         let source_on_delete = normalized_foreign_key_action(source_fk.on_delete.as_deref());
@@ -3816,6 +4166,15 @@ fn add_foreign_key_sql_with_reference_separator(
 
 fn target_table_name(diff: &TableDiff) -> &str {
     diff.target_name.as_deref().unwrap_or(&diff.name)
+}
+
+fn ddl_column_name(column: &ColumnDiff) -> &str {
+    if let (Some(source), Some(target)) = (&column.source, &column.target) {
+        if source.name.eq_ignore_ascii_case(&target.name) {
+            return &target.name;
+        }
+    }
+    &column.name
 }
 
 fn drop_object_sql(diff: &TableDiff, db_type: DatabaseType, schema: Option<&str>, cascade: &str) -> String {
@@ -4699,11 +5058,12 @@ fn generate_create_table_sql(
     let profile = profile_for(db_type);
     // Type rewrite: user mappings → profile type_map → DialectKind matrix → normalize.
     // Call sites must not branch on individual DatabaseType values.
-    let map_type = |source_type: &str| -> String {
-        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, source_type, target_dialect) {
+    let map_type = |col: &ColumnInfo| -> String {
+        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, target_dialect) {
             return user_target;
         }
-        rewrite_column_type(source_type, db_type, source_dialect)
+        rewrite_column_type(&source_type, db_type, source_dialect)
     };
     let table = qualified_name(name, db_type, schema);
 
@@ -4718,7 +5078,7 @@ fn generate_create_table_sql(
             continue;
         };
         let col_name = quote_id(&col.name, db_type);
-        let mapped_type = map_type(&col.data_type);
+        let mapped_type = map_type(col);
         if db_type == DatabaseType::SqlServer {
             col_defs.push(sqlserver_column_definition(col, &mapped_type, source_dialect, schema));
             if col.is_primary_key {
@@ -5154,12 +5514,13 @@ fn generate_schema_sync_sql_inner(
     // explicitly by the comparison plan instead of appending an invalid clause.
     let cascade = if cascade_delete && db_type != DatabaseType::SqlServer { " CASCADE" } else { "" };
 
-    let map_type = |source_type: &str| -> String {
+    let map_type = |col: &ColumnInfo| -> String {
         let tgt = DialectKind::from_database_type(db_type);
-        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, source_type, tgt) {
+        let source_type = with_known_length(&col.data_type, col.character_maximum_length);
+        if let Some(user_target) = FieldMapping::apply_with_params(field_mappings, &source_type, tgt) {
             return user_target;
         }
-        rewrite_column_type(source_type, db_type, source_dialect)
+        rewrite_column_type(&source_type, db_type, source_dialect)
     };
     let is_same_dialect =
         source_dialect.map(|source| DialectKind::from_database_type(db_type) == source).unwrap_or(false);
@@ -5331,7 +5692,7 @@ fn generate_schema_sync_sql_inner(
 
         if let Some(columns) = &diff.columns {
             let convert_col =
-                |col: &ColumnInfo| -> ColumnInfo { ColumnInfo { data_type: map_type(&col.data_type), ..col.clone() } };
+                |col: &ColumnInfo| -> ColumnInfo { ColumnInfo { data_type: map_type(col), ..col.clone() } };
             for column in columns {
                 match column.diff_type.as_str() {
                     "added" => {
@@ -5377,12 +5738,16 @@ fn generate_schema_sync_sql_inner(
                     }
                     "modified" => {
                         if let Some(source) = &column.source {
-                            let mapped = convert_col(source);
+                            let target_column_name = ddl_column_name(column);
+                            let mut mapped = convert_col(source);
+                            if mapped.name != target_column_name {
+                                mapped.name = target_column_name.to_string();
+                            }
                             if db_type == DatabaseType::SqlServer {
                                 if let Some(target_col) = &column.target {
                                     standalone_statements.extend(sqlserver_column_change_statements(
                                         &table,
-                                        &column.name,
+                                        target_column_name,
                                         source,
                                         target_col,
                                         &mapped.data_type,
@@ -5398,7 +5763,7 @@ fn generate_schema_sync_sql_inner(
                                     ));
                                 }
                             } else {
-                                let name = quote_id(&column.name, db_type);
+                                let name = quote_id(target_column_name, db_type);
                                 if column.changes.iter().any(|change| change.starts_with("type:")) {
                                     parts.push(format!("  ALTER COLUMN {name} TYPE {}", mapped.data_type));
                                 }
@@ -5513,7 +5878,7 @@ fn generate_schema_sync_sql_inner(
                         if column.changes.iter().any(|change| change.starts_with("comment:")) {
                             lines.extend(column_comment_sql(
                                 target_name,
-                                &column.name,
+                                ddl_column_name(column),
                                 source.comment.as_deref().unwrap_or_default(),
                                 db_type,
                                 schema,
@@ -10068,6 +10433,49 @@ mod tests {
         assert!(diffs.iter().all(|diff| diff.changes.iter().any(|change| change.starts_with("type:"))));
     }
 
+    // Regression for #7615: comparing two MySQL databases where an integer column has
+    // different EXPLICIT display widths on both sides (e.g. `int(11)` vs `int(15)`) must
+    // still be reported as a type difference. `data_type` values below are exactly what
+    // `information_schema.COLUMNS.COLUMN_TYPE` returns on a real MySQL 5.7 server for the
+    // DDL in the issue (MySQL 8.0.19+ drops these widths entirely, so this only reproduces
+    // on pre-8.0.19 servers, which is why the issue's own repro needed a specific version).
+    #[test]
+    fn mysql_same_dialect_detects_explicit_integer_display_width_mismatch() {
+        let source = vec![column("id", "int(11)", Some("ID")), column("name", "varchar(20)", Some("名称"))];
+        let target = vec![column("id", "int(15)", Some("ID")), column("name", "varchar(20)", Some("名称"))];
+
+        let diffs = diff_columns_with_dialect_options(
+            &source,
+            &target,
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql),
+        );
+
+        assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["id"]);
+        assert!(diffs[0].changes.iter().any(|change| change.starts_with("type:")), "{:?}", diffs[0].changes);
+
+        // Same scenario the maintainer's own regression test already covers must keep passing:
+        // tinyint(1) (a common MySQL boolean idiom) vs tinyint(4) (the server's own default
+        // display width for tinyint) is likewise a real, explicit difference, not noise.
+        let source = vec![column("flag", "tinyint(1)", None)];
+        let target = vec![column("flag", "tinyint(4)", None)];
+        let diffs = diff_columns_with_dialect_options(
+            &source,
+            &target,
+            false,
+            false,
+            false,
+            0.5,
+            Some(DialectKind::Mysql),
+            Some(DialectKind::Mysql),
+        );
+        assert_eq!(diffs.iter().map(|diff| diff.name.as_str()).collect::<Vec<_>>(), vec!["flag"]);
+    }
+
     #[test]
     fn mysql_modify_column_preserves_explicit_auto_increment() {
         let mut source = column("id", "int", Some("new comment"));
@@ -12007,6 +12415,8 @@ mod tests {
             ignore_comments: false,
             cascade_delete: false,
             compare_column_order: false,
+            ignore_table_name_case: false,
+            ignore_column_name_case: false,
             detect_renames: false,
             detect_table_renames: false,
             rename_threshold: 0.5,
@@ -12894,6 +13304,167 @@ mod tests {
             result,
             Some("character(100)".to_string()),
             "Custom params already wrapped in parentheses should be kept as-is"
+        );
+    }
+
+    #[test]
+    fn field_mapping_matches_character_varying_alias() {
+        // Kingbase/Postgres report a varchar column's base type as
+        // `character varying` (via format_type()), not `varchar`. A user who
+        // configures a mapping using the shorter, more common `varchar`
+        // spelling must still match it (issue #8011) — previously an exact
+        // string comparison meant such a mapping silently never fired
+        // against the real `character varying` column, dropping the user's
+        // chosen param strategy.
+        let mappings = vec![FieldMapping {
+            source_type: "varchar".into(),
+            target_type: "varchar".into(),
+            param_strategy: ParamStrategy::Custom,
+            custom_params: Some("255".to_string()),
+        }];
+        let result = FieldMapping::apply_with_params(&mappings, "character varying", DialectKind::Mysql);
+        assert_eq!(result, Some("varchar(255)".to_string()));
+
+        let result = FieldMapping::apply_with_params(&mappings, "character varying(50)", DialectKind::Mysql);
+        assert_eq!(result, Some("varchar(255)".to_string()));
+
+        assert_eq!(FieldMapping::apply(&mappings, "character varying"), Some("varchar"));
+    }
+
+    #[test]
+    fn field_mapping_exact_match_is_not_shadowed_by_an_alias() {
+        // char/character/varchar/character varying commonly coexist as
+        // separate auto-generated rows with independently chosen targets.
+        // An exact match must win over an alias match picked up from an
+        // earlier, unrelated row that merely shares the same canonical name
+        // (issue #8011 review: aliasing broke this without a two-pass find).
+        let mappings = vec![
+            FieldMapping {
+                source_type: "char".into(),
+                target_type: "binary".into(),
+                param_strategy: ParamStrategy::Preserve,
+                custom_params: None,
+            },
+            FieldMapping {
+                source_type: "character".into(),
+                target_type: "text".into(),
+                param_strategy: ParamStrategy::Preserve,
+                custom_params: None,
+            },
+        ];
+        assert_eq!(FieldMapping::apply(&mappings, "character"), Some("text"), "exact row must win over the char alias");
+        assert_eq!(
+            FieldMapping::apply(&mappings, "char"),
+            Some("binary"),
+            "exact row must win over the character alias"
+        );
+    }
+
+    #[test]
+    fn with_known_length_splices_reported_length_into_bare_type() {
+        assert_eq!(with_known_length("varchar", Some(1000)), "varchar(1000)");
+        assert_eq!(with_known_length("character varying", None), "character varying");
+        assert_eq!(with_known_length("varchar(50)", Some(1000)), "varchar(50)", "explicit params are never overridden");
+        assert_eq!(with_known_length("varchar", Some(0)), "varchar", "non-positive length is ignored");
+        assert_eq!(with_known_length("varchar", Some(-1)), "varchar", "negative length (unbounded marker) is ignored");
+    }
+
+    #[test]
+    fn with_known_length_ignores_non_length_bearing_types() {
+        // `character_maximum_length` is populated by several drivers for
+        // columns where it does not mean "declared length here" — MySQL's
+        // information_schema fills it in for TEXT/BLOB (byte capacity, e.g.
+        // TEXT -> 65535), and Oracle's DATA_LENGTH is filled in for every
+        // column, DATE and NUMBER included (issue #8011 review round 2).
+        // Splicing those in would silently reinterpret the type (MySQL turns
+        // `TEXT(65535)` into MEDIUMTEXT) or produce invalid DDL (`DATE(7)`).
+        assert_eq!(with_known_length("text", Some(65535)), "text");
+        assert_eq!(with_known_length("date", Some(7)), "date");
+        assert_eq!(with_known_length("number", Some(22)), "number");
+    }
+
+    #[test]
+    fn with_known_length_restores_a_real_char_length() {
+        // Unlike type_rewrite's *default*-to-255 list (which must exclude
+        // CHAR — a bare CHAR is already valid, meaning CHAR(1)), this
+        // function *restores* a length the driver already knows: MySQL's
+        // information_schema reports a CHAR(10) column as DATA_TYPE="char"
+        // with CHARACTER_MAXIMUM_LENGTH=10 (real DB verified). Using
+        // length 1 here would make this assertion pass even with CHAR
+        // wrongly excluded — CHAR(1) and bare CHAR mean the same thing — so
+        // this deliberately uses a length where truncation would show up
+        // (issue #8011 review round 3).
+        assert_eq!(with_known_length("char", Some(10)), "char(10)");
+        assert_eq!(with_known_length("character", Some(10)), "character(10)");
+        assert_eq!(with_known_length("char", None), "char", "no known length means no invented one either");
+    }
+
+    #[test]
+    fn mysql_same_dialect_add_column_keeps_text_type_when_length_metadata_is_present() {
+        // MySQL's own information_schema reports a real character_maximum_length
+        // for TEXT (65535) even though COLUMN_TYPE never carries it in
+        // parentheses. Splicing it in verbatim would have this same-dialect
+        // ADD COLUMN silently reinterpreted as MEDIUMTEXT by the server (real
+        // MySQL 8.4.6 verified) instead of staying TEXT.
+        let mut source_col = column("notes", "text", None);
+        source_col.character_maximum_length = Some(65535);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "notes".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Mysql));
+        assert!(sql.contains("text"), "expected the column to stay TEXT: {sql}");
+        assert!(!sql.contains("(65535)"), "must not splice TEXT's byte capacity in as a length: {sql}");
+    }
+
+    #[test]
+    fn oracle_to_mysql_date_column_does_not_gain_an_invalid_length() {
+        // Oracle's DATA_LENGTH is populated for every column, DATE included
+        // (byte length, e.g. 7) — not just character types. Splicing it in
+        // would send `DATE(7)` to MySQL, which is a syntax error there (real
+        // MySQL 8.4.6 verified); the pre-fix behavior of passing `DATE`
+        // through untouched was already correct.
+        let mut source_col = column("created_on", "DATE", None);
+        source_col.character_maximum_length = Some(7);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "created_on".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Oracle));
+        assert!(!sql.contains("DATE(7)"), "must not turn a valid DATE column into invalid DDL: {sql}");
+    }
+
+    #[test]
+    fn cross_dialect_add_column_uses_known_character_maximum_length_not_a_generic_default() {
+        // Kingbase's MySQL-compatible introspection can report a bare
+        // `varchar`/`character varying` (no length in the type string)
+        // while still exposing the real length via `character_maximum_length`
+        // on the same ColumnInfo. Silently defaulting to 255 in that case
+        // would trade a loud syntax error for a quiet wrong-schema bug
+        // (issue #8011 review).
+        let mut source_col = column("bio", "character varying", None);
+        source_col.character_maximum_length = Some(1000);
+        let diff = ColumnDiff {
+            diff_type: "added".to_string(),
+            name: "bio".to_string(),
+            source: Some(source_col),
+            target: None,
+            changes: vec![],
+            add_position: None,
+        };
+        let sql = gen_sql(wrap_table_diff("t", vec![diff]), DatabaseType::Mysql, Some(DialectKind::Postgres));
+        assert!(sql.contains("(1000)"), "expected the real reported length to be preserved: {sql}");
+        assert!(
+            !sql.contains("(255)"),
+            "must not silently fall back to the generic default when the real length is known: {sql}"
         );
     }
 

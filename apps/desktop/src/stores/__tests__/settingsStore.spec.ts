@@ -23,6 +23,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ refreshDdlOnOpen: "true" } as any).refreshDdlOnOpen).toBe(false);
   });
 
+  it("keeps table-info drawer pinning disabled unless explicitly enabled", () => {
+    expect(normalizeEditorSettings({}).tableInfoDrawerPinned).toBe(false);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: true }).tableInfoDrawerPinned).toBe(true);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: false }).tableInfoDrawerPinned).toBe(false);
+    expect(normalizeEditorSettings({ tableInfoDrawerPinned: "true" } as any).tableInfoDrawerPinned).toBe(false);
+  });
+
   it("enables SQL variable substitution by default and only preserves booleans", () => {
     expect(normalizeEditorSettings({}).sqlVariableSubstitutionEnabled).toBe(true);
     expect(normalizeEditorSettings({ sqlVariableSubstitutionEnabled: true }).sqlVariableSubstitutionEnabled).toBe(true);
@@ -89,6 +96,13 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ openDataTabsNextToActive: false }).openDataTabsNextToActive).toBe(false);
     expect(normalizeEditorSettings({ openDataTabsNextToActive: "true" } as any).openDataTabsNextToActive).toBe(false);
     expect(normalizeEditorSettings({ openDataTabsNextToActive: null } as any).openDataTabsNextToActive).toBe(false);
+  });
+
+  it("quotes generated SQL identifiers by default and preserves an explicit opt-out", () => {
+    expect(normalizeEditorSettings({}).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: true }).generateSqlQuoteIdentifiers).toBe(true);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: false }).generateSqlQuoteIdentifiers).toBe(false);
+    expect(normalizeEditorSettings({ generateSqlQuoteIdentifiers: "false" } as any).generateSqlQuoteIdentifiers).toBe(true);
   });
 
   it("keeps SQL-file save formatting disabled unless explicitly enabled", () => {
@@ -479,8 +493,10 @@ describe("normalizeMcpGlobalPolicy", () => {
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: null,
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
     });
@@ -498,8 +514,10 @@ describe("normalizeMcpGlobalPolicy", () => {
       readOnly: true,
       allowDangerousSql: true,
       allowedConnectionIds: ["connection-1", "connection-2"],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     });
@@ -797,8 +815,10 @@ describe("settingsStore MCP policy persistence", () => {
       readOnly: true,
       allowDangerousSql: false,
       allowedConnectionIds: ["connection-1"],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     };
@@ -812,8 +832,10 @@ describe("settingsStore MCP policy persistence", () => {
       readOnly: false,
       allowDangerousSql: false,
       allowedConnectionIds: [],
+      allowedGroupIds: [],
       allowedToolNames: null,
       connectionPolicies: [],
+      groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
     });

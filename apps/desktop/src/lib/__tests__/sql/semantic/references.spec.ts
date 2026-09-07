@@ -31,6 +31,33 @@ describe("sqlSemanticReferences shared consumers", () => {
     expect(diagnostics.map((diagnostic) => diagnostic.message)).toEqual(["Unknown column ro.missing"]);
   });
 
+  it("does not flag a SELECT alias used by DuckDB ORDER BY", () => {
+    const sql = `SELECT SUM(price * amount) AS total, api_key_name FROM amounts GROUP BY api_key_name ORDER BY total DESC`;
+    const aliasStart = sql.indexOf("total", sql.indexOf("ORDER BY"));
+    const analysis: SqlReferenceAnalysis = {
+      tables: [
+        {
+          name: "amounts",
+          span: span(sql.indexOf("amounts") + 1, sql.indexOf("amounts") + "amounts".length),
+        },
+      ],
+      columns: [
+        {
+          name: "total",
+          span: span(aliasStart + 1, aliasStart + "total".length),
+        },
+      ],
+    };
+
+    const diagnostics = buildSqlSemanticDiagnostics(analysis, {
+      tables: [],
+      columnsByTable: new Map([["amounts", [{ name: "price" }, { name: "amount" }, { name: "api_key_name" }]]]),
+      sql,
+    });
+
+    expect(diagnostics).toEqual([]);
+  });
+
   it("resolves navigation targets from subquery aliases and projected columns", () => {
     const { sql, cursor } = sqlFixtureCursor("SELECT sq.user_| FROM (SELECT id, name AS user_name FROM users) sq");
     const model = buildSqlSemanticModel(sql, cursor);

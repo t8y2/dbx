@@ -360,9 +360,15 @@
 }
 
 .vertical-tab-layout .app-tab-strip {
+  display: flex;
+  flex-direction: column;
   height: auto;
   min-height: 0;
   width: 100%;
+}
+
+.vertical-tab-layout .app-tab-scroll {
+  min-height: 0;
 }
 
 .vertical-tab-layout .app-tab-pill {

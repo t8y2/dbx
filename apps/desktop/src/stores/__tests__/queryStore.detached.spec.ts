@@ -63,6 +63,19 @@ describe("queryStore detached-tab handoff", () => {
     expect(freshStore.focusedGroupId).toBe(freshStore.groups[0]?.id);
   });
 
+  it("keeps read-only source intent across detached-window handoff", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const id = store.createTab("pg-1", "app", "Source - seq_users", "query", "public", "CREATE SEQUENCE seq_users", undefined, { sourceView: true });
+    const handoff = await store.prepareDetachedTab(id);
+    expect(handoff.tab.sourceView).toBe(true);
+    setActivePinia(createPinia());
+    const detachedStore = useQueryStore();
+    await detachedStore.adoptDetachedTab(handoff);
+    expect(detachedStore.tabs[0]?.sourceView).toBe(true);
+    expect(detachedStore.tabs[0]?.objectSource).toBeUndefined();
+  });
+
   it("removeTabAfterDetachedReady clears the owning pane and prunes it when emptied", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

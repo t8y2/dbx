@@ -18,6 +18,46 @@ describe("dataGridContextMenu", () => {
     expect(dataGridSelectedSortMenuValue(state, "id", 0)).toBe("local-desc");
   });
 
+  it("omits database sort entries from the sort menu when database sort is unsupported", () => {
+    const state = { column: "id", columnIndex: 0, direction: "desc" as const, mode: "local" as const };
+    const items = createDataGridSortMenuItems({
+      column: "id",
+      columnIndex: 0,
+      state,
+      databaseSortEnabled: false,
+      labels: { databaseAscending: "db asc", databaseDescending: "db desc", currentPageAscending: "page asc", currentPageDescending: "page desc", clear: "clear" },
+      icons: { database: icon, ascending: icon, descending: icon, clear: icon },
+    });
+    expect(items.map((item) => item.value)).toEqual(["local-asc", "local-desc", "clear"]);
+    expect(items[0]?.separatorBefore).toBeFalsy();
+    expect(dataGridSelectedSortMenuValue(state, "id", 0)).toBe("local-desc");
+  });
+
+  it("omits database sort entries from the column context menu when database sort is unsupported", () => {
+    const action = vi.fn();
+    const filter = createDataGridFilterSubmenu({
+      label: "filter",
+      icon,
+      labels: { equals: "equals", notEquals: "not equals", like: "like", notLike: "not like", lessThan: "less", greaterThan: "greater", isNull: "null", isNotNull: "not null", clear: "clear" },
+      apply: action,
+      clear: action,
+    });
+    const items = createDataGridColumnContextMenuItems({
+      headerColumn: false,
+      contextColumn: true,
+      canCopyAlterSql: false,
+      canFilter: true,
+      hasSort: true,
+      sortMode: "database",
+      databaseSortEnabled: false,
+      labels: { copyName: "copy name", copyNames: "copy names", details: "details", copyAlterSql: "alter", databaseAscending: "db asc", databaseDescending: "db desc", localAscending: "local asc", localDescending: "local desc", clearSort: "clear sort" },
+      icons: { copy: icon, columnDetails: icon, database: icon, ascending: icon, descending: icon, clearSort: icon },
+      actions: { copyName: action, copyNames: action, details: action, copyAlterSql: action, sort: action },
+      filterSubmenu: filter,
+    });
+    expect(items.map((item) => item.label)).toEqual(["local asc", "local desc", "clear sort", "", "filter"]);
+  });
+
   it("omits unavailable server actions and disables unavailable formatter", () => {
     const items = createDataGridCompactColumnActionItems({
       labels: { formatter: "formatter", clearFormatter: "clear formatter", localFilter: "local", serverFilter: "server" },

@@ -53,11 +53,19 @@ export interface McpGlobalPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   allowedConnectionIds: string[] | null;
+  allowedGroupIds: string[];
   allowedToolNames: string[] | null;
   connectionPolicies: McpConnectionPolicy[];
+  groupPolicies: McpGroupPolicy[];
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+}
+
+export interface McpGroupPolicy {
+  groupId: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export interface McpConnectionPolicy {
@@ -113,14 +121,17 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   readOnly: false,
   allowDangerousSql: false,
   allowedConnectionIds: null,
+  allowedGroupIds: [],
   allowedToolNames: null,
   connectionPolicies: [],
+  groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
   const allowedConnectionIds = policy?.allowedConnectionIds === null || policy?.allowedConnectionIds === undefined ? null : [...new Set(policy.allowedConnectionIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
+  const allowedGroupIds = allowedConnectionIds === null ? [] : [...new Set((policy?.allowedGroupIds ?? []).filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()))];
   const allowedToolNames = policy?.allowedToolNames === null || policy?.allowedToolNames === undefined ? null : [...new Set(policy.allowedToolNames.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim()))];
   const connectionPolicies = Object.values(
     (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
@@ -156,6 +167,20 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
       return rules;
     }, {}),
   );
+  const groupPolicies = Object.values(
+    (policy?.groupPolicies ?? []).reduce<Record<string, McpGroupPolicy>>((rules, rule) => {
+      if (!rule || typeof rule.groupId !== "string" || !rule.groupId.trim()) return rules;
+      const groupId = rule.groupId.trim();
+      const current = rules[groupId];
+      const readOnly = current?.readOnly === true || rule.readOnly === true;
+      rules[groupId] = {
+        groupId,
+        readOnly,
+        allowDangerousSql: !readOnly && (current ? current.allowDangerousSql && rule.allowDangerousSql === true : rule.allowDangerousSql === true),
+      };
+      return rules;
+    }, {}),
+  );
   // null / undefined / non-positive => null (inherit connection). 0 is preserved
   // as an explicit "no limit" only here; the UI maps "no limit" <=> 0 and
   // "inherit" <=> null.
@@ -164,8 +189,10 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     readOnly: policy?.readOnly === true,
     allowDangerousSql: policy?.allowDangerousSql === true,
     allowedConnectionIds,
+    allowedGroupIds,
     allowedToolNames,
     connectionPolicies,
+    groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
   };
@@ -425,6 +452,22 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     apiKeyUrl: "https://www.jalapeno-cloud.ai/dbx",
     descriptionKey: "ai.jalapenoDescription",
   },
+  {
+    id: "hualong-ai",
+    label: "HuaLongAI",
+    iconPath: "/icons/ai/hualong-ai.png",
+    group: "partner",
+    provider: "openai-compatible",
+    endpoint: "https://api.hualong.online/v1",
+    model: "gpt-5.6-terra",
+    models: [{ name: "gpt-5.6-terra" }],
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+    websiteUrl: "https://api.hualong.online/",
+    apiKeyUrl: "https://api.hualong.online/",
+    descriptionKey: "ai.hualongDescription",
+  },
 ];
 
 function normalizeAiProviderEndpoint(endpoint: string): string {
@@ -502,6 +545,7 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
+    skipTlsVerify: !!config?.skipTlsVerify,
     enableThinking: config?.enableThinking ?? true,
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
     maxOutputTokens,
@@ -759,6 +803,7 @@ export interface EditorSettings {
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoActiveTab: TableInfoTab;
+  tableInfoDrawerPinned: boolean;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
@@ -781,6 +826,7 @@ export interface EditorSettings {
   openDataTabsNextToActive: boolean;
   prefillNewQueryWithSelect: boolean;
   generateSqlIncludeDatabaseName: boolean;
+  generateSqlQuoteIdentifiers: boolean;
   formatSqlOnSqlFileSave: boolean;
   updateNotificationsEnabled: boolean;
   sidebarHiddenTablePrefixes: string[];
@@ -987,6 +1033,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoActiveTab: "ddl",
+  tableInfoDrawerPinned: false,
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
@@ -1009,6 +1056,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   openDataTabsNextToActive: false,
   prefillNewQueryWithSelect: true,
   generateSqlIncludeDatabaseName: false,
+  generateSqlQuoteIdentifiers: true,
   formatSqlOnSqlFileSave: false,
   updateNotificationsEnabled: true,
   sidebarHiddenTablePrefixes: [],
@@ -1431,6 +1479,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
+    tableInfoDrawerPinned: settings.tableInfoDrawerPinned === true,
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
@@ -1479,6 +1528,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     openDataTabsNextToActive: typeof settings.openDataTabsNextToActive === "boolean" ? settings.openDataTabsNextToActive : DEFAULT_EDITOR_SETTINGS.openDataTabsNextToActive,
     prefillNewQueryWithSelect: typeof settings.prefillNewQueryWithSelect === "boolean" ? settings.prefillNewQueryWithSelect : DEFAULT_EDITOR_SETTINGS.prefillNewQueryWithSelect,
     generateSqlIncludeDatabaseName: settings.generateSqlIncludeDatabaseName === true,
+    generateSqlQuoteIdentifiers: typeof settings.generateSqlQuoteIdentifiers === "boolean" ? settings.generateSqlQuoteIdentifiers : DEFAULT_EDITOR_SETTINGS.generateSqlQuoteIdentifiers,
     formatSqlOnSqlFileSave: settings.formatSqlOnSqlFileSave === true,
     updateNotificationsEnabled: settings.updateNotificationsEnabled ?? DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled,
     sidebarHiddenTablePrefixes: normalizeSidebarHiddenTablePrefixes(settings.sidebarHiddenTablePrefixes),
@@ -1760,8 +1810,10 @@ export const useSettingsStore = defineStore("settings", () => {
         readOnly: next.readOnly,
         allowDangerousSql: next.allowDangerousSql,
         allowedConnectionIds: next.allowedConnectionIds,
+        allowedGroupIds: next.allowedGroupIds,
         allowedToolNames: next.allowedToolNames,
         connectionPolicies: next.connectionPolicies,
+        groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
       });
     } catch (error) {
@@ -2144,6 +2196,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoActiveTab !== undefined) editorSettings.value.tableInfoActiveTab = normalizeTableInfoTab(partial.tableInfoActiveTab);
+    if (partial.tableInfoDrawerPinned !== undefined) editorSettings.value.tableInfoDrawerPinned = partial.tableInfoDrawerPinned === true;
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
@@ -2166,6 +2219,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.openDataTabsNextToActive !== undefined) editorSettings.value.openDataTabsNextToActive = partial.openDataTabsNextToActive === true;
     if (partial.prefillNewQueryWithSelect !== undefined) editorSettings.value.prefillNewQueryWithSelect = partial.prefillNewQueryWithSelect;
     if (partial.generateSqlIncludeDatabaseName !== undefined) editorSettings.value.generateSqlIncludeDatabaseName = partial.generateSqlIncludeDatabaseName === true;
+    if (partial.generateSqlQuoteIdentifiers !== undefined) editorSettings.value.generateSqlQuoteIdentifiers = partial.generateSqlQuoteIdentifiers === true;
     if (partial.formatSqlOnSqlFileSave !== undefined) editorSettings.value.formatSqlOnSqlFileSave = partial.formatSqlOnSqlFileSave === true;
     if (partial.updateNotificationsEnabled !== undefined) editorSettings.value.updateNotificationsEnabled = partial.updateNotificationsEnabled;
     if (partial.sidebarHiddenTablePrefixes !== undefined) editorSettings.value.sidebarHiddenTablePrefixes = normalizeSidebarHiddenTablePrefixes(partial.sidebarHiddenTablePrefixes);

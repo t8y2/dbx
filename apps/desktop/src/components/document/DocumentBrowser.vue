@@ -69,6 +69,7 @@ import {
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
 import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
+import { restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import {
@@ -110,11 +111,22 @@ const props = defineProps<{
   collection: string;
   databaseType?: DatabaseType;
   tableMeta?: NonNullable<QueryTab["tableMeta"]>;
+  /** Tab id; query conditions are cached per tab and restored on remount. */
+  stateKey?: string;
 }>();
 
 type JsonRecord = Record<string, unknown>;
 type ViewMode = "document" | "table";
 const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
+
+// This component is keyed by tab in ContentArea and unmounted on every tab
+// switch; without restoring from the per-tab cache, coming back to the tab
+// would silently drop the user's filter/sort conditions. Page position only
+// survives for skip-based paging: cursor stores (DynamoDB/Elasticsearch)
+// cannot resume a page without their cursor stacks, and infinite scroll
+// always restarts from the first segment.
+const restoredDocumentBrowserState = props.stateKey ? restoreDocumentBrowserState(props.stateKey) : undefined;
+const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && (documentStoreProviderFor(props.databaseType).kind === "mongodb" || documentStoreProviderFor(props.databaseType).kind === "meilisearch");
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
@@ -135,7 +147,7 @@ const loading = ref(false);
 const documentLoadExecutionId = ref("");
 const documentLoadCancelling = ref(false);
 const documentLoadingElapsedSeconds = ref("0.0");
-const page = ref(0);
+const page = ref(restoresSkipBasedPage ? Math.max(0, Math.trunc(restoredDocumentBrowserState!.page)) : 0);
 const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.tableOpenPageSize));
 const selectedIdx = ref<number | null>(null);
 const editJson = ref("");
@@ -155,8 +167,8 @@ const viewMode = computed<ViewMode>({
   get: () => settingsStore.editorSettings.mongoViewMode,
   set: (value) => settingsStore.updateEditorSettings({ mongoViewMode: value }),
 });
-const filterInput = ref("");
-const sortInput = ref("");
+const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
+const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -284,8 +296,21 @@ type DocumentGridChanges = {
 const documentFilterBuilderOpen = ref(false);
 const documentFilterFieldPopoverOpen = ref<Record<string, boolean>>({});
 const documentFilterFieldSearch = ref<Record<string, string>>({});
-const documentFilterRules = ref<DocumentFilterRule[]>([]);
-const appliedDocumentFilter = ref<Record<string, unknown> | null>(null);
+const documentFilterRules = ref<DocumentFilterRule[]>(restoredDocumentBrowserState?.documentFilterRules ?? []);
+const appliedDocumentFilter = ref<Record<string, unknown> | null>(restoredDocumentBrowserState?.appliedDocumentFilter ?? null);
+
+function persistDocumentBrowserState() {
+  if (!props.stateKey) return;
+  saveDocumentBrowserState(props.stateKey, {
+    filterInput: filterInput.value,
+    sortInput: sortInput.value,
+    appliedDocumentFilter: appliedDocumentFilter.value,
+    documentFilterRules: documentFilterRules.value,
+    page: page.value,
+  });
+}
+
+watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], persistDocumentBrowserState, { deep: true });
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
 function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
   const mappingTypes = elasticsearchFieldTypes.value;
@@ -2120,6 +2145,7 @@ onMounted(async () => {
   void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
+  persistDocumentBrowserState();
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   unsubscribeElasticsearchIndexCleared?.();
   unsubscribeElasticsearchIndexCleared = undefined;

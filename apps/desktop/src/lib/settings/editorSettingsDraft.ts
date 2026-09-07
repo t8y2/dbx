@@ -75,6 +75,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "openDataTabsNextToActive",
   "prefillNewQueryWithSelect",
   "generateSqlIncludeDatabaseName",
+  "generateSqlQuoteIdentifiers",
   "formatSqlOnSqlFileSave",
   "showTableDdlHoverPreview",
   "updateNotificationsEnabled",

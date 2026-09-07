@@ -68,6 +68,10 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataTabReuseMode");
   });
 
+  it("includes generated SQL identifier quote preference", () => {
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("generateSqlQuoteIdentifiers");
+  });
+
   it("includes adjacent data-tab opening", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("openDataTabsNextToActive");
   });

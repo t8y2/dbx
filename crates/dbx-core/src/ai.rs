@@ -391,6 +391,10 @@ pub struct AiConfig {
     pub proxy_enabled: bool,
     #[serde(default)]
     pub proxy_url: String,
+    /// Disable TLS certificate verification for the AI endpoint. Intended for
+    /// trusted self-signed / private-CA gateways only.
+    #[serde(default)]
+    pub skip_tls_verify: bool,
     #[serde(default = "default_enable_thinking")]
     pub enable_thinking: bool,
     #[serde(default)]
@@ -1746,6 +1750,9 @@ fn ai_endpoint_is_loopback(config: &AiConfig) -> bool {
 
 pub fn build_ai_http_client(config: &AiConfig, timeout_secs: u64) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs));
+    if config.skip_tls_verify {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
     if config.proxy_enabled && !config.proxy_url.trim().is_empty() && !ai_endpoint_is_loopback(config) {
         let proxy_url = normalize_ai_proxy_url(&config.proxy_url);
         let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| format!("Invalid AI proxy URL: {e}"))?;
@@ -4909,6 +4916,7 @@ mod tests {
                 custom_headers: Default::default(),
                 proxy_enabled: false,
                 proxy_url: String::new(),
+                skip_tls_verify: false,
                 enable_thinking: true,
                 reasoning_level: AiReasoningLevel::Default,
                 max_output_tokens: None,
@@ -5543,6 +5551,7 @@ mod tests {
 
         assert!(!config.proxy_enabled);
         assert_eq!(config.proxy_url, "");
+        assert!(!config.skip_tls_verify);
         assert!(config.enable_thinking);
         assert_eq!(config.auth_method, AiAuthMethod::ApiKey);
         assert!(config.claude_code_cli_path.is_none());
@@ -5573,6 +5582,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5615,6 +5625,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "127.0.0.1:7890".to_string(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5643,6 +5654,23 @@ mod tests {
     }
 
     #[test]
+    fn ai_http_client_accepts_skip_tls_verify() {
+        let mut config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "custom",
+            "apiKey": "key",
+            "endpoint": "https://ai.private-ca.internal/v1",
+            "model": "my-model",
+            "apiStyle": "completions"
+        }))
+        .unwrap();
+        assert!(!config.skip_tls_verify);
+
+        config.skip_tls_verify = true;
+
+        build_ai_http_client(&config, 1).unwrap();
+    }
+
+    #[test]
     fn ai_http_client_bypasses_proxy_for_loopback_endpoint() {
         let config = AiConfig {
             provider: AiProvider::OpenaiCompatible,
@@ -5655,6 +5683,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: true,
             proxy_url: "not a proxy url".to_string(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5695,6 +5724,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5739,6 +5769,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5780,6 +5811,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5840,6 +5872,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5876,6 +5909,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -5915,6 +5949,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6021,6 +6056,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6108,6 +6144,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6191,6 +6228,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6240,6 +6278,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6411,6 +6450,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6456,6 +6496,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6549,6 +6590,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -6873,6 +6915,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7105,6 +7148,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7157,6 +7201,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7212,6 +7257,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7261,6 +7307,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7654,6 +7701,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::High,
             max_output_tokens: None,
@@ -7730,6 +7778,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,
@@ -7801,6 +7850,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: false,
             reasoning_level: AiReasoningLevel::Default,
             max_output_tokens: None,

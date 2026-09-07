@@ -1851,6 +1851,50 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
   });
 });
 
+describe("RedisKeyBrowser KeepAlive scan budget (issue #7779)", () => {
+  it("does not replenish an exhausted automatic budget after deactivate/reactivate and resize", async () => {
+    const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 1000 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 90 : 0;
+      },
+    });
+
+    try {
+      mocks.infiniteScroll = true;
+      mocks.redisScanPageSize = 1000;
+      let call = 0;
+      mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+        call++;
+        return Promise.resolve({ cursor: cursor + 1, keys: call === 1 ? [{ key_display: "seed", key_raw: "c2VlZA==", key_type: "string", ttl: -1 }] : [], total_keys: 5_000_000 });
+      });
+
+      const browser = mountKeptAliveBrowser();
+      await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(8));
+      await settle();
+      const callsAtBudget = mocks.redisScanKeysBatch.mock.calls.length;
+
+      await browser.deactivate();
+      await browser.activate();
+      requiredElement<HTMLElement>(".redis-key-scroller").dispatchEvent(new Event("resize"));
+      await settle();
+
+      expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(callsAtBudget);
+    } finally {
+      if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, "clientHeight", originalClientHeight);
+      if (originalScrollHeight) Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalScrollHeight);
+    }
+  });
+});
+
 describe("RedisKeyBrowser interrupted Fetch All", () => {
   it("publishes Fetch All rows through one stable Array facade and explicitly refreshes its viewport", async () => {
     const initial = { key_display: "initial", key_raw: "aW5pdGlhbA==", key_type: "string", ttl: -1 };

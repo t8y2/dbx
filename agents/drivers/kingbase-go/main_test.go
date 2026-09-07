@@ -352,6 +352,75 @@ func (state *connectionAttemptState) connectionStrings() []string {
 	return append([]string(nil), state.dsns...)
 }
 
+// failoverState records every opener attempt (per endpoint host + sslmode)
+// and simulates ping failures keyed as "<sslMode>@<host>".
+type failoverState struct {
+	mu         sync.Mutex
+	opened     []string
+	dsns       []string
+	pingErrors map[string]error
+}
+
+type failoverOpener struct {
+	state *failoverState
+}
+
+type failoverConnector struct {
+	state   *failoverState
+	host    string
+	sslMode string
+}
+
+type failoverDriver struct{}
+
+type failoverConn struct {
+	state   *failoverState
+	host    string
+	sslMode string
+}
+
+func (o failoverOpener) open(cp connectParams, sslMode string) (*sql.DB, error) {
+	dsn := buildDSNWithSSLMode(cp, sslMode)
+	o.state.mu.Lock()
+	o.state.opened = append(o.state.opened, sslMode+"@"+cp.Host)
+	o.state.dsns = append(o.state.dsns, dsn)
+	o.state.mu.Unlock()
+	return sql.OpenDB(failoverConnector{state: o.state, host: cp.Host, sslMode: sslMode}), nil
+}
+
+func (connector failoverConnector) Connect(context.Context) (driver.Conn, error) {
+	conn := failoverConn{state: connector.state, host: connector.host, sslMode: connector.sslMode}
+	return &conn, nil
+}
+
+func (failoverConnector) Driver() driver.Driver { return failoverDriver{} }
+
+func (failoverDriver) Open(string) (driver.Conn, error) { return nil, driver.ErrSkip }
+
+func (*failoverConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+
+func (*failoverConn) Close() error { return nil }
+
+func (*failoverConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+
+func (connection failoverConn) Ping(context.Context) error {
+	connection.state.mu.Lock()
+	defer connection.state.mu.Unlock()
+	return connection.state.pingErrors[connection.sslMode+"@"+connection.host]
+}
+
+func (state *failoverState) attempts() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.opened...)
+}
+
+func (state *failoverState) connectionStrings() []string {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return append([]string(nil), state.dsns...)
+}
+
 func openFakeDB(t *testing.T, rowCount int) (*sql.DB, *fakeDriverState) {
 	t.Helper()
 	registerTestDriver.Do(func() { sql.Register("kingbase-agent-test", fakeDriver{}) })
@@ -958,6 +1027,300 @@ func TestOpenAndPingDBSSLDefaultsToVerifyFull(t *testing.T) {
 	attempts, _ := state.snapshot()
 	if len(attempts) != 1 || attempts[0] != "verify-full" {
 		t.Fatalf("SSL=true must stay verify-full: %v", attempts)
+	}
+}
+
+func TestSplitHostEndpoints(t *testing.T) {
+	tests := []struct {
+		name         string
+		host         string
+		fallbackPort int
+		expected     []kingbaseEndpoint
+	}{
+		{
+			name:         "single host stays whole",
+			host:         "172.22.232.10",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "172.22.232.10", port: 54321}},
+		},
+		{
+			name:         "single host with custom fallback port",
+			host:         "db.example.com",
+			fallbackPort: 6000,
+			expected:     []kingbaseEndpoint{{host: "db.example.com", port: 6000}},
+		},
+		{
+			name:         "comma separated cluster",
+			host:         "172.22.232.10,172.22.232.11",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "172.22.232.10", port: 54321},
+				{host: "172.22.232.11", port: 54321},
+			},
+		},
+		{
+			name:         "semicolon separated cluster",
+			host:         "172.22.232.10; 172.22.232.11",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "172.22.232.10", port: 54321},
+				{host: "172.22.232.11", port: 54321},
+			},
+		},
+		{
+			name:         "per entry ports",
+			host:         "10.0.0.1:1000,10.0.0.2:2000",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 1000},
+				{host: "10.0.0.2", port: 2000},
+			},
+		},
+		{
+			name:         "mixed embedded and fallback ports",
+			host:         "10.0.0.1:1000,10.0.0.2",
+			fallbackPort: 54322,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 1000},
+				{host: "10.0.0.2", port: 54322},
+			},
+		},
+		{
+			name:         "bracketed ipv6 without port",
+			host:         "[2001:db8::1],[2001:db8::2]",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "2001:db8::1", port: 54321},
+				{host: "2001:db8::2", port: 54321},
+			},
+		},
+		{
+			name:         "bracketed ipv6 with port",
+			host:         "[2001:db8::1]:6000,[2001:db8::2]:6001",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "2001:db8::1", port: 6000},
+				{host: "2001:db8::2", port: 6001},
+			},
+		},
+		{
+			name:         "bare ipv6 literal",
+			host:         "::1",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "::1", port: 54321}},
+		},
+		{
+			name:         "invalid port suffix stays part of the host",
+			host:         "db.example.com:notaport",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "db.example.com:notaport", port: 54321}},
+		},
+		{
+			name:         "out of range port falls back",
+			host:         "10.0.0.1:70000",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{{host: "10.0.0.1:70000", port: 54321}},
+		},
+		{
+			name:         "empty entries are dropped",
+			host:         "10.0.0.1,, ;10.0.0.2",
+			fallbackPort: 54321,
+			expected: []kingbaseEndpoint{
+				{host: "10.0.0.1", port: 54321},
+				{host: "10.0.0.2", port: 54321},
+			},
+		},
+		{
+			name:         "empty host yields no endpoints",
+			host:         "  ",
+			fallbackPort: 54321,
+			expected:     []kingbaseEndpoint{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpoints := splitHostEndpoints(test.host, test.fallbackPort)
+			if len(endpoints) != len(test.expected) {
+				t.Fatalf("unexpected endpoint count: got %#v want %#v", endpoints, test.expected)
+			}
+			for index, endpoint := range endpoints {
+				if endpoint != test.expected[index] {
+					t.Fatalf("endpoint %d mismatch: got %#v want %#v", index, endpoint, test.expected[index])
+				}
+			}
+		})
+	}
+}
+
+func TestClusterConnectEndpointsIgnoresNativeConnectionString(t *testing.T) {
+	if endpoints := clusterConnectEndpoints(connectParams{
+		Host:             "10.0.0.1,10.0.0.2",
+		Port:             54321,
+		ConnectionString: "host=cluster.example.com port=54321",
+	}); endpoints != nil {
+		t.Fatalf("native connection string must not be split: %#v", endpoints)
+	}
+	// The JDBC URL the host app always passes is ignored by the DSN builder,
+	// so the host field must still be split for it.
+	endpoints := clusterConnectEndpoints(connectParams{
+		Host:             "10.0.0.1,10.0.0.2",
+		Port:             54321,
+		ConnectionString: "jdbc:kingbase8://10.0.0.1:54321/test",
+	})
+	if len(endpoints) != 2 {
+		t.Fatalf("jdbc url must not block cluster splitting: %#v", endpoints)
+	}
+}
+
+func TestOpenAndPingDBSingleHostDSNUnchanged(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@172.22.232.10": gokb.ErrSSLNotSupported,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "172.22.232.10", Port: 54321, Username: "system", Database: "test"}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dsns := state.connectionStrings()
+	if len(dsns) != 2 {
+		t.Fatalf("single host must keep the prefer fallback sequence: %v", dsns)
+	}
+	for _, dsn := range dsns {
+		if !strings.Contains(dsn, "host='172.22.232.10' port=54321 ") {
+			t.Fatalf("single host DSN changed: %s", dsn)
+		}
+	}
+}
+
+func TestOpenAndPingDBMultiHostFailsOverToReachableEndpoint(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@203.0.113.10": errors.New("dial tcp 203.0.113.10:54321: connect: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "203.0.113.10,198.51.100.20", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	if strings.Join(attempts, " -> ") != "require@203.0.113.10 -> require@198.51.100.20" {
+		t.Fatalf("unexpected failover order: %v", attempts)
+	}
+	dsns := state.connectionStrings()
+	if len(dsns) != 2 {
+		t.Fatalf("unexpected DSN count: %v", dsns)
+	}
+	if !strings.Contains(dsns[0], "host='203.0.113.10' port=54321") {
+		t.Fatalf("first DSN must target the first endpoint: %s", dsns[0])
+	}
+	if !strings.Contains(dsns[1], "host='198.51.100.20' port=54321") {
+		t.Fatalf("second DSN must target the second endpoint: %s", dsns[1])
+	}
+}
+
+func TestOpenAndPingDBMultiHostAppliesConfiguredPortToEveryEndpoint(t *testing.T) {
+	// Regression for #7885: the whole comma-joined host string used to reach
+	// gokb as one hostname (`lookup ip1,ip2: no such host`) while the
+	// configured port was never applied per endpoint.
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.10.0.1": errors.New("dial tcp: connection refused"),
+		"disable@10.10.0.1": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.10.0.1,10.10.0.2", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, dsn := range state.connectionStrings() {
+		if strings.Contains(dsn, "10.10.0.1,") || strings.Contains(dsn, ",10.10.0.2") {
+			t.Fatalf("comma-joined host leaked into DSN: %s", dsn)
+		}
+		if !strings.Contains(dsn, "port=54321") {
+			t.Fatalf("configured port missing from DSN: %s", dsn)
+		}
+	}
+}
+
+func TestOpenAndPingDBMultiHostPerEntryPorts(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1:1000,10.0.0.2:2000", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dsns := state.connectionStrings()
+	if !strings.Contains(dsns[0], "host='10.0.0.1' port=1000") {
+		t.Fatalf("first endpoint must use its embedded port: %s", dsns[0])
+	}
+	if !strings.Contains(dsns[1], "host='10.0.0.2' port=2000") {
+		t.Fatalf("second endpoint must use its embedded port: %s", dsns[1])
+	}
+}
+
+func TestOpenAndPingDBMultiHostSemicolonSeparatorFailsOver(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.9": errors.New("dial tcp: connection refused"),
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.9;10.0.0.10", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	if len(attempts) != 2 || attempts[1] != "require@10.0.0.10" {
+		t.Fatalf("semicolon separated hosts must fail over in order: %v", attempts)
+	}
+}
+
+func TestOpenAndPingDBMultiHostAllEndpointsFail(t *testing.T) {
+	refused := errors.New("dial tcp: connection refused")
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": refused,
+		"require@10.0.0.2": refused,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1,10.0.0.2", Port: 54321}, time.Second, opener.open)
+	if db != nil {
+		db.Close()
+	}
+	if err == nil {
+		t.Fatal("expected failure when every endpoint is down")
+	}
+	if !errors.Is(err, refused) {
+		t.Fatalf("aggregated error must wrap endpoint failures: %v", err)
+	}
+	for _, endpoint := range []string{"10.0.0.1:54321", "10.0.0.2:54321"} {
+		if !strings.Contains(err.Error(), endpoint) {
+			t.Fatalf("error must mention %s: %v", endpoint, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "trying 2 endpoints") {
+		t.Fatalf("error must report the endpoint count: %v", err)
+	}
+}
+
+func TestOpenAndPingDBMultiHostKeepsSSLFallbackPerEndpoint(t *testing.T) {
+	state := &failoverState{pingErrors: map[string]error{
+		"require@10.0.0.1": gokb.ErrSSLNotSupported,
+		"disable@10.0.0.1": errors.New("dial tcp: connection refused"),
+		"require@10.0.0.2": gokb.ErrSSLNotSupported,
+	}}
+	opener := failoverOpener{state: state}
+	db, err := openAndPingDB(connectParams{Host: "10.0.0.1,10.0.0.2", Port: 54321}, time.Second, opener.open)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	attempts := state.attempts()
+	expected := "require@10.0.0.1 -> disable@10.0.0.1 -> require@10.0.0.2 -> disable@10.0.0.2"
+	if strings.Join(attempts, " -> ") != expected {
+		t.Fatalf("unexpected attempt sequence: %v", attempts)
 	}
 }
 

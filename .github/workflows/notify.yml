@@ -195,7 +195,9 @@ jobs:
 
           PAYLOAD=$(jq -nc --arg msg "$MSG_CONTENT" \
             '{"umo": "default:GroupMessage:1087880322", "message": $msg}')
-          printf '%s' "$PAYLOAD" | ssh "root@${HOST}" "curl -fsS -X POST http://localhost:6185/api/v1/im/message \
+          if ! printf '%s' "$PAYLOAD" | ssh "root@${HOST}" "curl -fsS -X POST http://localhost:6185/api/v1/im/message \
             -H 'Authorization: Bearer ${ASTRBOT_API_KEY}' \
             -H 'Content-Type: application/json' \
-            --data-binary @-"
+            --data-binary @-"; then
+            echo "::warning::QQ group notification failed; the event notification was sent to Feishu."
+          fi

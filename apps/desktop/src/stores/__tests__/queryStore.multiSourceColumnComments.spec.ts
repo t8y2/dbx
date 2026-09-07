@@ -128,10 +128,15 @@ describe("queryStore multi-source result column comments", () => {
     const tab = store.tabs.find((item) => item.id === tabId)!;
     await vi.waitFor(() => expect(tab.resultColumnComments).toBeDefined());
 
-    // Multi-source results stay non-editable: no single tableMeta.
-    expect(tab.tableMeta).toBeUndefined();
-    expect(tab.queryEditabilityReason).toBe("complex-source");
-    expect(tab.querySourceColumns).toBeUndefined();
+    // Both sources return their primary key, so each has its own write target.
+    expect(tab.queryEditabilityReason).toBeUndefined();
+    expect(tab.queryAnalysis).toMatchObject({ multiSource: true, allowInsert: false, allowDelete: false });
+    expect(tab.queryWriteTargets?.map((target) => target.tableMeta.tableName)).toEqual(["orders", "users"]);
+    expect(tab.queryWriteTargets?.map((target) => target.tableMeta.primaryKeys)).toEqual([["id"], ["id"]]);
+    expect(tab.queryWriteTargets?.map((target) => target.sourceColumns)).toEqual([
+      ["id", "user_id", undefined, undefined],
+      [undefined, undefined, "id", "name"],
+    ]);
 
     // Comments are indexed by result ordinal, so the second `id` (users.id)
     // keeps its own comment instead of first-source-wins on the name.

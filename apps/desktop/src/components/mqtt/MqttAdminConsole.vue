@@ -30,6 +30,7 @@ const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
 const messagesPaused = ref(false);
 const displayEncoding = ref<PayloadEncoding>("plaintext");
 const topicSearch = ref("");
+const payloadSearch = ref("");
 const showSubscriptionDialog = ref(false);
 const savingSubscription = ref(false);
 const formTopic = ref("");
@@ -68,6 +69,16 @@ function buildTopicTree(topics: MqttSavedTopic[]): MqttTopicNode {
 }
 
 const topicTree = computed(() => buildTopicTree(savedTopics.value));
+
+function messagePayloadText(msg: MqttMessage): string {
+  return msg.payloadText ?? decodePayload(msg.payloadBase64, "plaintext");
+}
+
+const filteredMessages = computed(() => {
+  const query = payloadSearch.value.trim().toLowerCase();
+  if (!query) return messages.value;
+  return messages.value.filter((msg) => messagePayloadText(msg).toLowerCase().includes(query));
+});
 
 async function refreshData() {
   try {
@@ -241,7 +252,7 @@ function toggleMessagesPaused() {
 }
 
 function formatMessagePayload(msg: MqttMessage): string {
-  if (displayEncoding.value === "plaintext" && msg.payloadText != null) return msg.payloadText;
+  if (displayEncoding.value === "plaintext") return messagePayloadText(msg);
   return decodePayload(msg.payloadBase64, displayEncoding.value);
 }
 
@@ -325,11 +336,21 @@ onUnmounted(stopPolling);
 
       <div class="flex min-w-0 flex-1 flex-col">
         <div class="flex min-h-0 flex-1 flex-col">
-          <div class="flex shrink-0 items-center justify-between border-b px-3 py-2 text-xs font-semibold uppercase text-muted-foreground">
-            <span v-if="selectedTopic">{{ t("connection.mqttMessagesForTopic", { topic: selectedTopic }) }}</span>
-            <span v-else>{{ t("connection.mqttAllMessages") }}</span>
-            <div class="flex items-center gap-2">
-              <span class="font-normal">{{ messages.length }}</span>
+          <div class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2 text-xs font-semibold uppercase text-muted-foreground">
+            <span v-if="selectedTopic" class="min-w-0 truncate">{{ t("connection.mqttMessagesForTopic", { topic: selectedTopic }) }}</span>
+            <span v-else class="min-w-0 truncate">{{ t("connection.mqttAllMessages") }}</span>
+            <div class="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+              <input
+                v-model="payloadSearch"
+                data-testid="mqtt-payload-search"
+                class="h-6 min-w-[10rem] flex-1 rounded border bg-transparent px-1.5 text-[11px] font-normal normal-case outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                :placeholder="t('connection.mqttSearchPayloadPlaceholder')"
+                :aria-label="t('connection.mqttSearchPayloadPlaceholder')"
+              />
+              <span data-testid="mqtt-message-count" class="font-normal" aria-live="polite">
+                <template v-if="payloadSearch.trim()">{{ filteredMessages.length }} / {{ messages.length }}</template>
+                <template v-else>{{ messages.length }}</template>
+              </span>
               <select v-model="displayEncoding" class="h-6 rounded border bg-transparent px-1.5 text-[11px] text-muted-foreground outline-none">
                 <option v-for="enc in PAYLOAD_ENCODINGS" :key="enc" :value="enc">{{ PAYLOAD_ENCODING_LABELS[enc] }}</option>
               </select>
@@ -355,8 +376,9 @@ onUnmounted(stopPolling);
           </div>
           <div class="flex min-h-0 flex-1 flex-col overflow-auto">
             <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
+            <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
             <div
-              v-for="(msg, i) in messages"
+              v-for="(msg, i) in filteredMessages"
               :key="i"
               class="w-full cursor-pointer border-b px-3 py-2 text-xs"
               :class="

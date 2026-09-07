@@ -591,6 +591,8 @@ async function handleCompare() {
       ignoreComments: ignoreComments.value,
       cascadeDelete: opts?.cascadeDelete ?? false,
       compareColumnOrder: opts.compareColumnOrder,
+      ignoreTableNameCase: opts.ignoreTableNameCase,
+      ignoreColumnNameCase: opts.ignoreColumnNameCase,
       detectRenames: opts?.detectRenames ?? false,
       detectTableRenames: opts?.detectTableRenames ?? false,
       renameThreshold: opts?.renameThreshold ?? 0.5,

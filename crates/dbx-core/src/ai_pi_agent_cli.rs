@@ -862,6 +862,7 @@ mod tests {
             custom_headers: Default::default(),
             proxy_enabled: false,
             proxy_url: String::new(),
+            skip_tls_verify: false,
             enable_thinking: true,
             reasoning_level: AiReasoningLevel::High,
             max_output_tokens: None,

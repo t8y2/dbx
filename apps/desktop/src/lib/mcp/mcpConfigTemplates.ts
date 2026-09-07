@@ -44,6 +44,10 @@ export function buildMcpTraeConfig(config?: McpLaunchConfig, nativeBinPath?: str
   return buildMcpJsonConfig(nativeBinPath ? { command: nativeBinPath, env: config?.env } : config);
 }
 
+export function buildMcpQoderConfig(config?: McpLaunchConfig, nativeBinPath?: string): string {
+  return buildMcpTraeConfig(config, nativeBinPath);
+}
+
 export function buildMcpVsCodeConfig(config?: McpLaunchConfig): string {
   const dbx: Record<string, unknown> = {
     type: "stdio",

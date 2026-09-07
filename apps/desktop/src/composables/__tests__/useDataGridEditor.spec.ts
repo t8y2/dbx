@@ -36,7 +36,15 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerousRowDeletion = true, cacheKey?: string, readonlyColumnIndexes?: number[], existingRows: CellValue[][] = [], onCellValueChanged?: (rowId: number, columnIndex: number) => void) {
+function createEditor(
+  sourceColumns?: Array<string | undefined>,
+  confirmDangerousRowDeletion = true,
+  cacheKey?: string,
+  readonlyColumnIndexes?: number[],
+  existingRows: CellValue[][] = [],
+  onCellValueChanged?: (rowId: number, columnIndex: number) => void,
+  tableColumns?: Array<{ name: string; data_type: string; extra?: string; column_default?: string }>,
+) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
     columns: ["first", "hidden", "last"],
@@ -51,7 +59,7 @@ function createEditor(sourceColumns?: Array<string | undefined>, confirmDangerou
     database: computed(() => "app"),
     tableMeta: computed(() => ({
       tableName: "people",
-      columns: [
+      columns: tableColumns ?? [
         { name: "first", data_type: "varchar" },
         { name: "hidden", data_type: "varchar" },
         { name: "last", data_type: "varchar" },
@@ -388,6 +396,29 @@ describe("useDataGridEditor appendPastedRowsToNewRow", () => {
     expect(editor.hasPendingChanges.value).toBe(true);
   });
 
+  it("clears generated key columns instead of pasting the copied value", () => {
+    const editor = createEditor(undefined, true, undefined, undefined, [], undefined, [
+      { name: "first", data_type: "integer", extra: "autoincrement" },
+      { name: "hidden", data_type: "varchar" },
+      { name: "last", data_type: "varchar" },
+    ]);
+
+    const result = editor.appendPastedRowsToNewRow(
+      -1,
+      [
+        ["1", "Lovelace"],
+        ["2", "Hopper"],
+      ],
+      [0, 2],
+    );
+
+    expect(result).toEqual({ ok: true, rowCount: 2 });
+    expect(editor.newRows.value).toEqual([
+      [null, null, "Lovelace"],
+      [null, null, "Hopper"],
+    ]);
+  });
+
   it("keeps explicitly read-only mapped columns out of editing and paste", () => {
     const editor = createEditor(["first", "hidden", "last"], true, undefined, [0]);
 
@@ -596,6 +627,8 @@ describe("useDataGridEditor saveChanges reload", () => {
 
   function createSaveTestEditor(
     options: {
+      joinedWriteTargets?: import("@/types/database").QueryTab["queryWriteTargets"];
+      queryResult?: { columns: string[]; rows: CellValue[][] };
       currentPage?: Ref<number>;
       prepareFullReload?: () => void;
       customSaveHandler?: { save: ReturnType<typeof vi.fn> };
@@ -613,6 +646,7 @@ describe("useDataGridEditor saveChanges reload", () => {
         [2, "pending"],
       ],
     });
+    if (options.queryResult) result.value = options.queryResult;
     const editor = useDataGridEditor({
       result: computed(() => result.value),
       editable: computed(() => true),
@@ -628,6 +662,7 @@ describe("useDataGridEditor saveChanges reload", () => {
         primaryKeys: ["id"],
       })),
       sourceColumns: computed(() => undefined),
+      joinedWriteTargets: computed(() => options.joinedWriteTargets),
       onExecuteSql: computed(() => undefined),
       customSaveHandler: computed(() => options.customSaveHandler),
       manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
@@ -661,6 +696,55 @@ describe("useDataGridEditor saveChanges reload", () => {
 
     expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
     expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+  });
+
+  it("previews and saves edits to both joined tables in a single transaction", async () => {
+    const refreshSavedRows = vi.fn();
+    const targets = [
+      { tableMeta: { tableName: "users", primaryKeys: ["id"], columns: [] }, sourceColumns: ["id", "name", undefined, undefined] },
+      { tableMeta: { tableName: "papers", primaryKeys: ["id"], columns: [] }, sourceColumns: [undefined, undefined, "id", "title"] },
+    ];
+    mocks.prepareDataGridSave.mockImplementation(async (options) => ({ statements: ["update " + options.tableMeta.tableName], rollbackStatements: ["undo " + options.tableMeta.tableName] }));
+    mocks.executeInTransaction.mockResolvedValue({ affected_rows: 2 });
+    const { editor, emit } = createSaveTestEditor({ joinedWriteTargets: targets, queryResult: { columns: ["id", "name", "paper_id", "title"], rows: [[1, "old", 20, "old"]] }, refreshSavedRows });
+    editor.dirtyRows.value.set(
+      0,
+      new Map([
+        [1, "new name"],
+        [3, "new title"],
+      ]),
+    );
+    expect(await editor.previewChanges()).toEqual(["update users", "update papers"]);
+    expect(mocks.executeInTransaction).not.toHaveBeenCalled();
+    await editor.saveChanges();
+    expect(mocks.executeInTransaction).toHaveBeenCalledWith("connection-1", "app", ["update users", "update papers"], undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(refreshSavedRows).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith("reload", undefined, "", undefined, undefined, 100, 0);
+    expect(mocks.prepareDataGridSave.mock.calls[0]![0].dirtyRows).toEqual([[0, [[1, "new name"]]]]);
+    expect(mocks.prepareDataGridSave.mock.calls[1]![0].dirtyRows).toEqual([[0, [[3, "new title"]]]]);
+  });
+
+  it("keeps both joined edits pending if the transaction fails", async () => {
+    const targets = [
+      { tableMeta: { tableName: "users", primaryKeys: ["id"], columns: [] }, sourceColumns: ["id", "name", undefined, undefined] },
+      { tableMeta: { tableName: "papers", primaryKeys: ["id"], columns: [] }, sourceColumns: [undefined, undefined, "id", "title"] },
+    ];
+    mocks.prepareDataGridSave.mockImplementation(async (options) => ({ statements: ["update " + options.tableMeta.tableName], rollbackStatements: [] }));
+    mocks.executeInTransaction.mockRejectedValue(new Error("second update failed"));
+    const { editor, emit } = createSaveTestEditor({ joinedWriteTargets: targets, queryResult: { columns: ["id", "name", "paper_id", "title"], rows: [[1, "old", 20, "old"]] } });
+    editor.dirtyRows.value.set(
+      0,
+      new Map([
+        [1, "new name"],
+        [3, "new title"],
+      ]),
+    );
+    await editor.saveChanges();
+    expect(editor.dirtyRows.value.get(0)?.size).toBe(2);
+    expect(editor.saveError.value).toContain("second update failed");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(emit.mock.calls.some(([event]) => event === "reload")).toBe(false);
   });
 
   it("saves query-result edits through the active manual transaction session", async () => {

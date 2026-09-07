@@ -831,6 +831,7 @@ export interface QueryResultRun {
   resultEvicted?: boolean;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
+  queryWriteTargets?: QueryTab["queryWriteTargets"];
   resultColumnComments?: QueryTab["resultColumnComments"];
   queryDisplaySourceColumns?: QueryTab["queryDisplaySourceColumns"];
   queryEditabilityReason?: QueryTab["queryEditabilityReason"];
@@ -1263,6 +1264,7 @@ export interface QueryTab {
     | "sqlserver-trace"
     | "mysql-dashboard"
     | "postgres-dashboard"
+    | "xugu-dashboard"
     | "dolt-version-control";
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
@@ -1291,8 +1293,11 @@ export interface QueryTab {
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
+    searchQuery?: string;
     viewport?: ObjectBrowserViewport;
   };
+  /** Opened to view object source, including objects without editable source metadata. */
+  sourceView?: boolean;
   objectSource?: {
     schema?: string;
     name: string;
@@ -1366,6 +1371,7 @@ export interface QueryTab {
     }[];
   };
   querySourceColumns?: Array<string | undefined>;
+  queryWriteTargets?: Array<{ tableMeta: NonNullable<QueryTab["tableMeta"]>; sourceColumns: Array<string | undefined> }>;
   /**
    * Column comments for a multi-source query result (e.g. JOIN), indexed by
    * result-column ordinal (projection order). Each entry is the comment of the

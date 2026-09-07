@@ -337,6 +337,24 @@ export function buildConnectionGroupPathMap(layout: SidebarLayout): Map<string, 
   return paths;
 }
 
+/** Build root-to-leaf stable group-id paths for permission inheritance. */
+export function buildConnectionGroupIdPathMap(layout: SidebarLayout): Map<string, string[]> {
+  const paths = new Map<string, string[]>();
+
+  const visit = (entries: SidebarOrderEntry[], path: string[]) => {
+    for (const entry of entries) {
+      if (entry.type === "connection") {
+        paths.set(entry.id, path);
+        continue;
+      }
+      visit(entryChildren(entry), [...path, entry.id]);
+    }
+  };
+
+  visit(layout.order, []);
+  return paths;
+}
+
 export interface ConnectionGroupDestinationRow {
   id: string;
   name: string;

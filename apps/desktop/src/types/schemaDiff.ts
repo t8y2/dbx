@@ -22,6 +22,8 @@ export interface SchemaDiffCompareOptions {
   cascadeDelete: boolean;
   sequenceLastValues: boolean;
   compareColumnOrder: boolean;
+  ignoreTableNameCase: boolean;
+  ignoreColumnNameCase: boolean;
   tableIncludePattern: string;
   tableExcludePattern: string;
   tableFilterPriority: SchemaDiffTableFilterPriority;
@@ -100,6 +102,8 @@ export const DEFAULT_POSTGRES_OPTIONS: SchemaDiffCompareOptions = {
   cascadeDelete: false,
   sequenceLastValues: true,
   compareColumnOrder: false,
+  ignoreTableNameCase: false,
+  ignoreColumnNameCase: false,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",
@@ -133,6 +137,8 @@ export const DEFAULT_MYSQL_OPTIONS: SchemaDiffCompareOptions = {
   cascadeDelete: false,
   sequenceLastValues: false,
   compareColumnOrder: false,
+  ignoreTableNameCase: false,
+  ignoreColumnNameCase: false,
   tableIncludePattern: "",
   tableExcludePattern: "",
   tableFilterPriority: "exclude",

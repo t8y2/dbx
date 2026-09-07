@@ -1424,7 +1424,7 @@ mod tests {
 
         let second = state.app.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
-        assert!(!state.app.pool_handle(&initial.id).await.is_some());
+        assert!(state.app.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1680,7 +1680,7 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(cached_admin_url, Some("http://127.0.0.1:8081"));
         drop(configs);
-        assert!(!state.app.pool_handle(&initial.id).await.is_some());
+        assert!(state.app.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1872,7 +1872,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle(&removed.id).await.is_some());
+        assert!(state.app.pool_handle(&removed.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1942,7 +1942,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle("conn").await.is_some());
+        assert!(state.app.pool_handle("conn").await.is_none());
         assert!(state.app.ensure_current_connection_attempt("conn", Some(current_attempt)).await.is_err());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -2000,7 +2000,7 @@ mod tests {
         .await;
         assert!(result.is_ok());
 
-        assert!(!state.app.pool_handle(&config.id).await.is_some());
+        assert!(state.app.pool_handle(&config.id).await.is_none());
         let second = state.app.mq_registry.get_or_build(&config).await.unwrap().adapter;
         assert!(!Arc::ptr_eq(&first, &second));
 

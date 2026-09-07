@@ -20,6 +20,7 @@ use crate::csv_export::{
 pub use crate::database_export::ExportStatus;
 use crate::database_export::{
     build_export_insert_statements, is_export_cancelled, is_internal_export_column, BuildExportInsertStatementsOptions,
+    SqlInsertMode,
 };
 use crate::db::agent_driver::AgentTableReadStartParams;
 use crate::models::connection::DatabaseType;
@@ -53,6 +54,8 @@ pub struct TableExportRequest {
     pub file_path: String,
     /// "csv", "xlsx", "json", "markdown", "sql", or "txt"
     pub format: String,
+    #[serde(default)]
+    pub insert_mode: SqlInsertMode,
     #[serde(default)]
     pub csv_quote_mode: CsvQuoteMode,
     #[serde(default)]
@@ -1268,7 +1271,7 @@ async fn try_export_native_table_stream(
                         spatial_columns: Vec::new(),
                         spatial_values: Vec::new(),
                         rows: std::mem::take(pending_rows),
-                        batch_size: Some(SQL_INSERT_BATCH_SIZE),
+                        batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
                     })?;
                     if !statements.is_empty() {
                         if wrote_statements {
@@ -1290,7 +1293,7 @@ async fn try_export_native_table_stream(
                 cancel_token.clone(),
                 |row| {
                     pending_rows.push(row.to_vec());
-                    if pending_rows.len() >= SQL_INSERT_BATCH_SIZE {
+                    if request.insert_mode.flush_each_row() || pending_rows.len() >= SQL_INSERT_BATCH_SIZE {
                         flush_pending(&mut file, &mut pending_rows)?;
                     }
                     rows_exported += 1;
@@ -2102,7 +2105,7 @@ async fn export_table_data_core_inner(
                     spatial_columns: result.spatial_columns.clone(),
                     spatial_values: result.spatial_values.clone(),
                     rows: result.rows.clone(),
-                    batch_size: Some(100),
+                    batch_size: Some(request.insert_mode.batch_size(SQL_INSERT_BATCH_SIZE)),
                 })?;
                 if !statements.is_empty() {
                     if wrote_statements {
@@ -2176,6 +2179,22 @@ mod tests {
     use std::io::Read;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn table_export_request_defaults_to_batch_insert_mode() {
+        let request: TableExportRequest = serde_json::from_value(json!({
+            "exportId": "export-1",
+            "connectionId": "conn-1",
+            "database": "db",
+            "schema": null,
+            "tableName": "users",
+            "filePath": "users.sql",
+            "format": "sql"
+        }))
+        .expect("deserialize table export request");
+
+        assert_eq!(request.insert_mode, SqlInsertMode::Batch);
+    }
 
     #[cfg(unix)]
     struct ExternalDriverExportFixture {
@@ -2266,6 +2285,7 @@ mod tests {
             table_name: "EXPORT_SAMPLE".to_string(),
             file_path: output.to_string_lossy().into_owned(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: Some(vec!["id".to_string(), "name".to_string()]),
             column_types: Some(vec![Some("INTEGER".to_string()), Some("VARCHAR".to_string())]),
             primary_keys: Some(vec!["id".to_string()]),
@@ -2427,6 +2447,7 @@ mod tests {
             table_name: "weather".to_string(),
             file_path: output.to_string_lossy().into_owned(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             csv_quote_mode: CsvQuoteMode::All,
             columns: None,
             column_types: None,
@@ -2591,6 +2612,7 @@ mod tests {
             table_name: "device2".to_string(),
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2648,6 +2670,7 @@ mod tests {
             table_name: "device2".to_string(),
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2683,6 +2706,7 @@ mod tests {
             table_name: "device2".to_string(),
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2713,6 +2737,7 @@ mod tests {
             table_name: "device2".to_string(),
             file_path: "device2.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2751,6 +2776,7 @@ mod tests {
             table_name: "samples".to_string(),
             file_path: "samples.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2801,6 +2827,7 @@ mod tests {
             table_name: "events".to_string(),
             file_path: "events.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2845,6 +2872,7 @@ mod tests {
             table_name: "orders".to_string(),
             file_path: "orders.txt".to_string(),
             format: "txt".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2917,6 +2945,7 @@ mod tests {
             table_name: "order".to_string(),
             file_path: "order.csv".to_string(),
             format: "csv".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -2971,6 +3000,7 @@ mod tests {
             table_name: "spatial_data".to_string(),
             file_path: "spatial_data.sql".to_string(),
             format: "sql".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,
@@ -3027,6 +3057,7 @@ mod tests {
             table_name: "USERS".to_string(),
             file_path: "users.sql".to_string(),
             format: "sql".to_string(),
+            insert_mode: Default::default(),
             columns: None,
             column_types: None,
             primary_keys: None,

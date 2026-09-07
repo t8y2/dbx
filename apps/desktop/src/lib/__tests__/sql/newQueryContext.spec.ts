@@ -208,6 +208,10 @@ describe("buildSelectAllSql", () => {
     expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" })).toBe('SELECT * FROM "public"."users"');
   });
 
+  it("can omit identifier quotes while preserving schema qualification", () => {
+    expect(buildSelectAllSql("postgres", { schema: "public", tableName: "users" }, undefined, undefined, false, false)).toBe("SELECT * FROM public.users");
+  });
+
   it("preserves the Phoenix schema for new-query prefill", () => {
     expect(buildSelectAllSql("jdbc", { schema: "APP", tableName: "USERS" }, '"', "phoenix")).toBe('SELECT * FROM "APP"."USERS"');
   });
@@ -278,6 +282,19 @@ describe("resolveNewQueryInitialSql", () => {
         databaseType: "postgres",
       }),
     ).toBe('SELECT * FROM "public"."users"');
+  });
+
+  it("omits identifier quotes when configured for new-query prefill", () => {
+    expect(
+      resolveNewQueryInitialSql({
+        activeTab: dataTab(),
+        prefillEnabled: true,
+        targetConnectionId: "conn-1",
+        targetDatabase: "app_db",
+        databaseType: "postgres",
+        quoteIdentifiers: false,
+      }),
+    ).toBe("SELECT * FROM public.users");
   });
 
   it("passes the Phoenix driver profile into the initial SQL builder", () => {

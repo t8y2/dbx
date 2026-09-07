@@ -174,7 +174,9 @@ import { authorizationPlanSql, authorizationPlanStatus, buildCreateDatabaseAutho
 import { connectionSupportsProcessList } from "@/lib/database/processListDrivers";
 import { connectionSupportsServerDashboard } from "@/lib/database/mysqlServerStatus";
 import { connectionSupportsServerDashboard as connectionSupportsPgServerDashboard } from "@/lib/database/postgresServerStatus";
+import { connectionSupportsXuguServerDashboard } from "@/lib/database/xuguServerStatus";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
+import { sidebarTreeArrowAction } from "@/lib/sidebar/sidebarTreeArrowNavigation";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
 import { runBatchTableTruncate } from "@/lib/table/batchTableTruncate";
 import { runBatchTableDrop } from "@/lib/table/batchTableDrop";
@@ -1142,6 +1144,11 @@ function onKeydown(event: KeyboardEvent) {
     event.stopPropagation();
     return;
   }
+  if (isSidebarTreeArrowKey(event) && handleSidebarTreeArrowKey(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "F2") {
     if (!requestRenameSelectedNode()) return;
     event.preventDefault();
@@ -1178,6 +1185,27 @@ function onKeydown(event: KeyboardEvent) {
 
 function isPasteTreeClipboardShortcut(event: KeyboardEvent): boolean {
   return isPasteSidebarSelectionShortcut(event, settingsStore.editorSettings.shortcuts);
+}
+
+function isSidebarTreeArrowKey(event: KeyboardEvent): boolean {
+  return !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown" || event.key === "ArrowLeft" || event.key === "ArrowRight");
+}
+
+function handleSidebarTreeArrowKey(event: KeyboardEvent): boolean {
+  const rows = sidebarTreeContext?.getVisibleFlatNodes?.();
+  if (!rows?.length) return false;
+  const action = sidebarTreeArrowAction(rows, activeNode.value.id, event.key, { databaseType: currentDatabaseType() });
+  if (action.kind === "none") return false;
+  if (action.kind === "toggle") {
+    toggleNode(activeNode.value);
+    return true;
+  }
+  connectionStore.connectionMultiSelectActive = false;
+  connectionStore.selectedTreeNodeId = action.nodeId;
+  connectionStore.selectedTreeNodeIds = [action.nodeId];
+  connectionStore.treeSelectionAnchorId = action.nodeId;
+  sidebarTreeContext?.focusTreeNode?.(action.nodeId);
+  return true;
 }
 
 function isEditConnectionShortcut(event: KeyboardEvent): boolean {
@@ -1702,6 +1730,8 @@ async function openServerDashboard() {
     connectionStore.activeConnectionId = node.connectionId;
     if (currentDatabaseType() === "nacos") {
       queryStore.openNacosDashboard(node.connectionId);
+    } else if (connectionSupportsXuguServerDashboard(connectionStore.getConfig(node.connectionId))) {
+      queryStore.openXuguDashboard(node.connectionId);
     } else if (connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId))) {
       queryStore.openPostgresDashboard(node.connectionId);
     } else {
@@ -1778,6 +1808,7 @@ async function newQuery() {
           database: node.database,
           schema: node.schema,
           includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+          quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
           tableName: node.label,
           columns: [],
         });
@@ -1877,6 +1908,7 @@ async function newSelectTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -1895,6 +1927,7 @@ async function newSelectTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -1919,6 +1952,7 @@ async function newInsertTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
             tableType: context.tableType,
@@ -1938,6 +1972,7 @@ async function newInsertTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
       tableType: context.tableType,
@@ -1963,6 +1998,7 @@ async function newUpdateTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -1981,6 +2017,7 @@ async function newUpdateTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -2005,6 +2042,7 @@ async function newDeleteTemplate() {
             database: context.node.database,
             schema: context.tableSchema,
             includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
             tableName: context.node.label,
             columns: context.columns,
           }),
@@ -2023,6 +2061,7 @@ async function newDeleteTemplate() {
       database: context.node.database,
       schema: context.tableSchema,
       includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+      quoteIdentifiers: settingsStore.editorSettings.generateSqlQuoteIdentifiers,
       tableName: context.node.label,
       columns: context.columns,
     });
@@ -2428,7 +2467,7 @@ function openObjectSourceDialog(initialEditing: boolean, viewPackageBody = false
             },
           });
         } else {
-          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true });
+          queryStore.createTab(connectionId, database, `Source - ${node.label}`, "query", schema, editableSource, node.catalog, { forceNew: true, sourceView: true });
         }
       })
       .catch((e: any) => {
@@ -5195,7 +5234,10 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     if (currentDatabaseType() === "sqlserver") {
       items.push({ label: t("contextMenu.sqlServerTrace"), action: openSqlServerActivityTrace, icon: Activity });
     }
-    if (node.connectionId && (currentDatabaseType() === "nacos" || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))) {
+    if (
+      node.connectionId &&
+      (currentDatabaseType() === "nacos" || connectionSupportsXuguServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsServerDashboard(connectionStore.getConfig(node.connectionId)) || connectionSupportsPgServerDashboard(connectionStore.getConfig(node.connectionId)))
+    ) {
       items.push({ label: t("contextMenu.serverDashboard"), action: openServerDashboard, icon: Gauge });
     }
     if (currentDatabaseType() === "dameng") {

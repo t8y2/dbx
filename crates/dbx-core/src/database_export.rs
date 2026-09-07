@@ -42,6 +42,28 @@ pub enum DatabaseExportOutputCompression {
     Gzip,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SqlInsertMode {
+    #[default]
+    Batch,
+    Single,
+}
+
+impl SqlInsertMode {
+    pub(crate) const fn flush_each_row(self) -> bool {
+        matches!(self, Self::Single)
+    }
+
+    pub(crate) const fn batch_size(self, default: usize) -> usize {
+        if self.flush_each_row() || default == 0 {
+            1
+        } else {
+            default
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseExportRequest {

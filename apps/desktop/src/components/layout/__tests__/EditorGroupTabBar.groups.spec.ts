@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
-import { createApp, nextTick } from "vue";
+import { createApp, nextTick, reactive } from "vue";
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
@@ -456,6 +456,134 @@ describe("EditorGroupTabBar group behavior", () => {
     const mongoItems = await openMenu(mongoId);
     expect(mongoItems.find((button) => button.textContent?.includes("Open in new window"))).toBeUndefined();
 
+    app.unmount();
+    host.remove();
+  });
+});
+
+describe("EditorGroupTabBar special page navigation", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    setActivePinia(createPinia());
+  });
+
+  function mountSpecialBar(extraProps: Record<string, unknown> = {}) {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const tabId = store.createTab("pg-1", "app", "Query", "query");
+    const specialPageTabs = reactive({ settingsOpen: true, settingsActive: true, driverStoreOpen: true, driverStoreActive: false, driverUpdateCount: 105 });
+    const events: string[] = [];
+    const mounted = mountBar(store.focusedGroupId, store.tabs.slice(), tabId, pinia, {
+      specialPageTabs,
+      "onActivate-settings": () => events.push("activate-settings"),
+      "onActivate-driver-store": () => events.push("activate-driver-store"),
+      "onClose-settings": () => events.push("close-settings"),
+      "onClose-driver-store": () => events.push("close-driver-store"),
+      ...extraProps,
+    });
+    return { ...mounted, store, settings, tabId, specialPageTabs, events };
+  }
+
+  it.each(["classic", "separated"] as const)("keeps grouped tabs and both special pages at every placement in %s layout", async (layout) => {
+    const { app, host, settings, store, tabId } = mountSpecialBar();
+    settings.editorSettings.appLayout = layout;
+    for (const placement of ["top", "bottom", "left", "right"] as const) {
+      settings.editorSettings.tabPlacement = placement;
+      await settle();
+      expect(host.querySelectorAll(".tab-group-header")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-settings-page-tab]")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-driver-store-tab]")).toHaveLength(1);
+      expect(host.querySelector(`[data-tab-id="${tabId}"]`)?.getAttribute("data-active-tab")).toBe("false");
+      expect(host.querySelector(".tab-group-header--active")).toBeNull();
+      expect(store.activeTabId).toBe(tabId);
+      const vertical = placement === "left" || placement === "right";
+      expect(host.querySelector(".app-tab-bar")?.classList.contains("vertical-tab-layout")).toBe(vertical);
+      const special = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+      expect(special.classList.contains("h-8")).toBe(vertical);
+      expect(special.style.boxShadow).toBe(vertical ? "" : layout === "classic" ? "inset 0 -2px 0 var(--ring)" : "");
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it.each(["left", "right"] as const)("keeps collapsed %s special tabs accessible and closable without labels or badges", async (placement) => {
+    const { app, host, settings, events } = mountSpecialBar({ tabBarCollapsed: true });
+    settings.editorSettings.tabPlacement = placement;
+    await settle();
+    for (const [selector, action] of [
+      ["[data-settings-page-tab]", "settings"],
+      ["[data-driver-store-tab]", "driver-store"],
+    ]) {
+      const tab = host.querySelector<HTMLElement>(selector!)!;
+      expect(tab.getAttribute("aria-label")).toBe(tab.title);
+      expect(tab.getAttribute("tabindex")).toBe("0");
+      expect(tab.textContent?.trim()).toBe("");
+      expect(tab.querySelector("button")).toBeNull();
+      tab.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      tab.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }));
+      tab.dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true }));
+      expect(events).toEqual(expect.arrayContaining([`activate-${action}`, `close-${action}`]));
+      expect(events.filter((event) => event === `activate-${action}`)).toHaveLength(2);
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it.each(["classic", "separated"] as const)("lets side-tab wrappers size to their rows while preserving the %s horizontal layout", async (layout) => {
+    const { app, host, settings, tabId } = mountSpecialBar();
+    settings.editorSettings.appLayout = layout;
+    for (const placement of ["top", "left", "bottom", "right", "top"] as const) {
+      settings.editorSettings.tabPlacement = placement;
+      await settle();
+      const tab = host.querySelector<HTMLElement>(`[data-tab-id="${tabId}"]`)!;
+      const wrapper = tab.closest<HTMLElement>(".app-tab-scroll > div")!;
+      expect(wrapper).not.toBeNull();
+      expect(wrapper).not.toBe(tab);
+      const horizontal = placement === "top" || placement === "bottom";
+      expect(wrapper.classList.contains("h-full")).toBe(layout === "classic" && horizontal);
+    }
+    app.unmount();
+    host.remove();
+  });
+
+  it("restores normal activation without resetting a collapsed semantic group", async () => {
+    const { app, host, specialPageTabs, tabId, store } = mountSpecialBar();
+    await settle();
+    const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
+    header.click();
+    await settle();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    specialPageTabs.settingsActive = false;
+    await settle();
+    expect(header.getAttribute("aria-expanded")).toBe("false");
+    expect(store.activeTabId).toBe(tabId);
+    header.click();
+    await settle();
+    expect(host.querySelector(`[data-tab-id="${tabId}"]`)?.getAttribute("data-active-tab")).toBe("true");
+    expect(host.querySelector(".tab-group-header--active")).not.toBeNull();
+    app.unmount();
+    host.remove();
+  });
+
+  it("preserves special-tab context menu close scope and prevents close-button activation", async () => {
+    const { app, host, events, store, tabId } = mountSpecialBar();
+    await settle();
+    const tab = host.querySelector<HTMLElement>("[data-settings-page-tab]")!;
+    tab.querySelector<HTMLButtonElement>("button")!.click();
+    expect(events).toEqual(["close-settings"]);
+    tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    await settle();
+    const menu = document.body.querySelector<HTMLElement>("[data-dbx-context-menu]")!;
+    const closeOther = Array.from(menu.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.includes("Close other tabs"))!;
+    expect(closeOther).toBeDefined();
+    closeOther.click();
+    await settle();
+    expect(events).toEqual(["close-settings", "close-driver-store"]);
+    expect(store.tabs.map((item) => item.id)).toEqual([tabId]);
     app.unmount();
     host.remove();
   });

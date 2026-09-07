@@ -113,6 +113,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://api.hualong.online/" target="_blank">
+        <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
+      </a>
+    </td>
+    <td>
+      HuaLongAI（华龙算力）是面向重度 AI 开发者的模型 API 中转服务商，主营 Codex 与 Claude 系列模型，100% 官方源直供、不掺假；计费透明，Token 级账单可逐笔核验，支持企业合同与发票。
+      <a href="https://api.hualong.online/" target="_blank">访问 HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
         <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>

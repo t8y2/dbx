@@ -7606,6 +7606,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "Dışa aktarma tamamlandı ancak {count} nesne başarısız oldu: {firstError}… Ayrıntılar için dışa aktarılan dosyadaki -- ERROR yorumlarına bakın.",
     exportAllSuccessWithErrors: "{count} veritabanı dışa aktarıldı ancak {errorCount} nesne başarısız oldu: {firstError}… Ayrıntılar için dosyalardaki -- ERROR yorumlarına bakın.",
     allDatabasesTask: "Tüm veritabanları ({count})",
+    allSchemas: "Tüm şemalar",
     exportError: "Dışa aktarma başarısız: {error}",
     exportCancelled: "Dışa aktarma iptal edildi",
     runInBackground: "Arka planda çalıştır",

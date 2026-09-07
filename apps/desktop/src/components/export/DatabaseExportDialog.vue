@@ -54,6 +54,7 @@ const filteredTables = computed(() => {
   return tables.value.filter((name) => name.toLowerCase().includes(q));
 });
 const tableError = ref<string | null>(null);
+const POSTGRES_ALL_SCHEMAS = "__DBX_ALL_SCHEMAS__";
 
 // Options
 const includeStructure = ref(true);
@@ -65,6 +66,7 @@ const omitAutoIncrement = ref(false);
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
 // db_type == mysql, which also covers MariaDB / TiDB / OceanBase-MySQL-mode).
 const isMysqlFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "mysql");
+const isPostgresAllSchemas = computed(() => store.getConfig(connectionId.value)?.db_type === "postgres" && schema.value === POSTGRES_ALL_SCHEMAS);
 
 // Export state
 const isExporting = ref(false);
@@ -109,6 +111,7 @@ const canExport = computed(() => {
   const hasContent = includeStructure.value || includeData.value || includeObjects.value;
   if (!connectionId.value || !hasContent || isExporting.value) return false;
   if (exportAllDatabases.value) return selectedDatabases.value.length > 0 && !loadingMeta.value;
+  if (isPostgresAllSchemas.value) return database.value && schemas.value.length > 0 && !loadingMeta.value;
   return (
     database.value &&
     schema.value &&
@@ -222,6 +225,13 @@ async function loadSchemas(preferredSchema = "") {
 }
 
 async function loadTables(preferredTable = "", preferredTables: string[] = []) {
+  if (schema.value === POSTGRES_ALL_SCHEMAS) {
+    tables.value = [];
+    selectedTables.value = [];
+    loadingTables.value = false;
+    tableError.value = null;
+    return;
+  }
   if (!connectionId.value || !database.value || !schema.value) return;
   loadingTables.value = true;
   tableError.value = null;
@@ -362,9 +372,9 @@ async function startExport() {
           exportId: exportId.value,
           connectionId: connectionId.value,
           database: database.value,
-          schema: schema.value,
+          schema: isPostgresAllSchemas.value ? "" : schema.value,
           filePath,
-          selectedTables: includeStructure.value || includeData.value ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
+          selectedTables: !isPostgresAllSchemas.value && (includeStructure.value || includeData.value) ? buildSelectedTablesPayload(tables.value, selectedTables.value) : undefined,
           includeStructure: includeStructure.value,
           includeData: includeData.value,
           includeObjects: includeObjects.value,
@@ -720,6 +730,7 @@ watch(schema, (value) => {
   const preferredTables = pendingPrefillTables.value;
   pendingPrefillTable.value = "";
   pendingPrefillTables.value = [];
+  if (value === POSTGRES_ALL_SCHEMAS) return;
   if (value) loadTables(preferredTable, preferredTables).catch((e) => toast(String(e), 5000));
 });
 
@@ -829,12 +840,13 @@ watch(
                 <SelectValue :placeholder="t('diff.selectSchema')" />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
+                <SelectItem v-if="store.getConfig(connectionId)?.db_type === 'postgres'" :value="POSTGRES_ALL_SCHEMAS">{{ t("databaseExport.allSchemas") }}</SelectItem>
                 <SelectItem v-for="s in schemas" :key="s" :value="s">{{ s }}</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
-          <div v-if="!exportAllDatabases && schema" class="space-y-2">
+          <div v-if="!exportAllDatabases && schema && !isPostgresAllSchemas" class="space-y-2">
             <div class="flex items-center justify-between gap-2">
               <Label class="text-xs">{{ t("databaseExport.tableSelection") }}</Label>
               <div v-if="tables.length" class="text-[11px] text-muted-foreground">

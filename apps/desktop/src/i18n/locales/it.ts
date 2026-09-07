@@ -7282,6 +7282,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "Esportazione completata con {count} oggetti non riusciti: {firstError}… Dettagli nei commenti -- ERROR nel file esportato.",
     exportAllSuccessWithErrors: "Esportati {count} database, ma {errorCount} oggetti non riusciti: {firstError}… Dettagli nei commenti -- ERROR nei file.",
     allDatabasesTask: "Tutti i database ({count})",
+    allSchemas: "Tutti gli schemi",
     exportError: "Esportazione non riuscita: {error}",
     exportCancelled: "Esportazione annullata",
     runInBackground: "Esegui in background",

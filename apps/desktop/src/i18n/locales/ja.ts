@@ -7334,6 +7334,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "エクスポートは完了しましたが、{count} 個のオブジェクトが失敗しました：{firstError}… 詳細はエクスポートファイル内の -- ERROR コメントを確認してください。",
     exportAllSuccessWithErrors: "{count} 個のデータベースをエクスポートしましたが、{errorCount} 個のオブジェクトが失敗しました：{firstError}… 詳細はファイル内の -- ERROR コメントを確認してください。",
     allDatabasesTask: "すべてのデータベース ({count})",
+    allSchemas: "すべてのスキーマ",
     exportError: "エクスポートに失敗しました: {error}",
     exportCancelled: "エクスポートがキャンセルされました",
   },

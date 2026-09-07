@@ -6597,6 +6597,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "匯出完成，但有 {count} 個物件失敗：{firstError}……詳情見匯出檔案中的 -- ERROR 註解。",
     exportAllSuccessWithErrors: "已匯出 {count} 個資料庫，但有 {errorCount} 個物件失敗：{firstError}……詳情見匯出檔案中的 -- ERROR 註解。",
     allDatabasesTask: "全部資料庫（{count}）",
+    allSchemas: "全部 schema",
     exportError: "匯出失敗： {error}",
     exportCancelled: "匯出已取消",
     runInBackground: "背景執行",

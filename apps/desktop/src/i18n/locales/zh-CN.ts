@@ -7679,6 +7679,7 @@ export default withEnglishFallback({
     noTables: "未找到表",
     export: "导出",
     exportAllDatabases: "导出全部数据库",
+    allSchemas: "全部 Schema",
     exporting: "正在导出...",
     preparing: "正在准备导出（读取表与元数据）...",
     preparingObject: "正在准备: {object}",

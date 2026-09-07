@@ -7284,6 +7284,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "A exportação terminou com {count} objeto(s) com falha: {firstError}… Veja os comentários -- ERROR no arquivo exportado.",
     exportAllSuccessWithErrors: "{count} bancos de dados exportados, mas {errorCount} objeto(s) falharam: {firstError}… Veja os comentários -- ERROR nos arquivos.",
     allDatabasesTask: "Todos os bancos de dados ({count})",
+    allSchemas: "Todos os esquemas",
     exportError: "Falha na exportação: {error}",
     exportCancelled: "Exportação cancelada",
   },

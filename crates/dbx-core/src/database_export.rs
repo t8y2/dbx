@@ -2557,10 +2557,21 @@ pub async fn export_database_sql_core(
     request: &DatabaseExportRequest,
     on_progress: impl Fn(ExportProgress) + Sync,
 ) -> Result<(), String> {
+    let db_type = state
+        .configs
+        .read()
+        .await
+        .get(&request.connection_id)
+        .map(|config| config.db_type)
+        .ok_or_else(|| format!("Connection config not found: {}", request.connection_id))?;
     // Keep the large export state machine on the heap. Besides making the
     // caller future small, this prevents the metadata-prefetch locals from
     // exhausting the bounded stack used by test and runtime worker threads.
-    let result = Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await;
+    let result = if matches!(db_type, DatabaseType::Postgres) && request.schema.trim().is_empty() {
+        Box::pin(export_postgres_all_schemas_sql_core(state, request, &on_progress)).await
+    } else {
+        Box::pin(export_database_sql_core_inner(state, request, &on_progress)).await
+    };
     let metadata_session_id = database_export_client_session_id(&request.export_id);
     if let Err(error) =
         state.close_metadata_session_pool(&request.connection_id, Some(&request.database), &metadata_session_id).await
@@ -2580,6 +2591,161 @@ pub async fn export_database_sql_core(
     } else {
         result
     }
+}
+
+async fn create_database_export_writer(
+    state: &Arc<crate::connection::AppState>,
+    request: &DatabaseExportRequest,
+) -> Result<DatabaseExportWriter, String> {
+    let mut expected_destination_identity = None;
+    if let Some(parent) = std::path::Path::new(&request.file_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
+        }
+    }
+    let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
+    // The directory check above and this `File::create` are separate
+    // operations: the mount can disappear and be replaced by something else
+    // at the same path in between. Re-check the identity of the handle we
+    // actually opened, not just the path, and refuse to keep a backup that
+    // landed on the wrong filesystem. See #6327.
+    let opened_destination_identity = export_destination_identity_for_file(&file);
+    if export_destination_identity_mismatch(
+        expected_destination_identity.as_ref(),
+        opened_destination_identity.as_ref(),
+    ) {
+        drop(file);
+        let _ = std::fs::remove_file(&request.file_path);
+        return Err(format!(
+            "Backup destination for {} changed while opening the output file -- the directory now \
+             resolves to a different filesystem than the one just verified. If a removable or network \
+             drive was disconnected and reconnected, retry the backup.",
+            request.file_path
+        ));
+    }
+    Ok(match request.output_compression {
+        DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
+        DatabaseExportOutputCompression::Gzip => {
+            DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
+        }
+    })
+}
+
+fn postgres_export_schema_names(schemas: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    schemas
+        .into_iter()
+        .map(|schema| schema.trim().to_string())
+        .filter(|schema| !schema.is_empty() && schema != "information_schema" && !schema.starts_with("pg_"))
+        .filter(|schema| seen.insert(schema.clone()))
+        .collect()
+}
+
+fn postgres_create_schema_sql(schema: &str) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {};", quote_identifier(schema, &DatabaseType::Postgres))
+}
+
+async fn export_postgres_all_schemas_sql_core(
+    state: &Arc<crate::connection::AppState>,
+    request: &DatabaseExportRequest,
+    on_progress: impl Fn(ExportProgress) + Sync,
+) -> Result<(), String> {
+    let schemas = postgres_export_schema_names(
+        crate::schema::list_schemas_core(state, &request.connection_id, &request.database).await?,
+    );
+    if schemas.is_empty() {
+        return Err(format!("No exportable schemas found in database '{}'.", request.database));
+    }
+
+    let temp_dir =
+        tempfile::tempdir().map_err(|error| format!("Failed to create temporary export directory: {error}"))?;
+    let result = async {
+        let mut schema_outputs = Vec::with_capacity(schemas.len());
+        let mut rows_exported = 0_u64;
+        let mut error_count = 0_u64;
+        let mut error_summary = None;
+
+        for (schema_index, schema_name) in schemas.iter().enumerate() {
+            let mut schema_request = request.clone();
+            schema_request.schema = schema_name.clone();
+            schema_request.file_path = temp_dir.path().join(format!("schema-{schema_index}.sql")).display().to_string();
+            schema_request.output_compression = DatabaseExportOutputCompression::None;
+
+            let terminal = Arc::new(std::sync::Mutex::new(None::<ExportProgress>));
+            let terminal_for_callback = terminal.clone();
+            let schema_name_for_callback = schema_name.clone();
+            let completed_rows = rows_exported;
+            let child_progress = |mut progress: ExportProgress| {
+                if matches!(progress.status, ExportStatus::Done | ExportStatus::Cancelled) {
+                    *terminal_for_callback.lock().expect("export terminal mutex poisoned") = Some(progress);
+                    return;
+                }
+                progress.export_id = request.export_id.clone();
+                progress.current_object = if progress.current_object.is_empty() {
+                    schema_name_for_callback.clone()
+                } else {
+                    format!("{schema_name_for_callback}: {}", progress.current_object)
+                };
+                progress.rows_exported = completed_rows.saturating_add(progress.rows_exported);
+                on_progress(progress);
+            };
+
+            Box::pin(export_database_sql_core_inner(state, &schema_request, child_progress)).await?;
+            let terminal = terminal.lock().expect("export terminal mutex poisoned").clone();
+            if terminal.as_ref().is_some_and(|progress| matches!(progress.status, ExportStatus::Cancelled)) {
+                return Err(EXPORT_CANCELLED_ERROR.to_string());
+            }
+            if let Some(progress) = terminal {
+                rows_exported = rows_exported.saturating_add(progress.rows_exported);
+                error_count = error_count.saturating_add(progress.error_count);
+                if error_summary.is_none() {
+                    error_summary = progress.error_summary;
+                }
+            }
+            schema_outputs.push((schema_name.clone(), schema_request.file_path));
+        }
+
+        let mut file = create_database_export_writer(state, request).await?;
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        writeln!(file, "-- Database export: {}", request.database).map_err(|e| format!("Failed to write file: {e}"))?;
+        writeln!(file, "-- Date: {timestamp}").map_err(|e| format!("Failed to write file: {e}"))?;
+        writeln!(file, "-- Generated by DBX").map_err(|e| format!("Failed to write file: {e}"))?;
+        writeln!(file, "-- PostgreSQL schemas: {}", schemas.join(", "))
+            .map_err(|e| format!("Failed to write file: {e}"))?;
+        writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        for schema_name in &schemas {
+            writeln!(file, "{}", postgres_create_schema_sql(schema_name))
+                .map_err(|e| format!("Failed to write file: {e}"))?;
+        }
+        writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+
+        for (schema_name, path) in schema_outputs {
+            writeln!(file, "-- Schema export: {schema_name}").map_err(|e| format!("Failed to write file: {e}"))?;
+            let mut source = std::io::BufReader::new(
+                std::fs::File::open(path).map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
+            );
+            std::io::copy(&mut source, &mut file).map_err(|e| format!("Failed to combine schema export: {e}"))?;
+            writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
+        }
+        file.finish()?;
+        on_progress(ExportProgress {
+            export_id: request.export_id.clone(),
+            current_object: request.database.clone(),
+            object_index: schemas.len(),
+            total_objects: schemas.len(),
+            rows_exported,
+            total_rows: None,
+            status: ExportStatus::Done,
+            error: None,
+            preparing: false,
+            error_count,
+            error_summary,
+        });
+        Ok(())
+    }
+    .await;
+
+    result
 }
 
 async fn export_database_sql_core_inner(
@@ -2629,38 +2795,7 @@ async fn export_database_sql_core_inner(
     ))
     .await?;
     // 4. Create file
-    let mut expected_destination_identity = None;
-    if let Some(parent) = std::path::Path::new(&request.file_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
-        }
-    }
-    let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
-    // The directory check above and this `File::create` are separate
-    // operations: the mount can disappear and be replaced by something else
-    // at the same path in between. Re-check the identity of the handle we
-    // actually opened, not just the path, and refuse to keep a backup that
-    // landed on the wrong filesystem. See #6327.
-    let opened_destination_identity = export_destination_identity_for_file(&file);
-    if export_destination_identity_mismatch(
-        expected_destination_identity.as_ref(),
-        opened_destination_identity.as_ref(),
-    ) {
-        drop(file);
-        let _ = std::fs::remove_file(&request.file_path);
-        return Err(format!(
-            "Backup destination for {} changed while opening the output file -- the directory now \
-             resolves to a different filesystem than the one just verified. If a removable or network \
-             drive was disconnected and reconnected, retry the backup.",
-            request.file_path
-        ));
-    }
-    let mut file = match request.output_compression {
-        DatabaseExportOutputCompression::None => DatabaseExportWriter::Plain(BufWriter::new(file)),
-        DatabaseExportOutputCompression::Gzip => {
-            DatabaseExportWriter::Gzip(Box::new(GzEncoder::new(BufWriter::new(file), Compression::default())))
-        }
-    };
+    let mut file = create_database_export_writer(state, request).await?;
 
     let create_database_preamble = if request.include_create_database && matches!(db_type, DatabaseType::Mysql) {
         Some(mysql_database_export_preamble_for_request(state, request).await)
@@ -3600,8 +3735,8 @@ mod tests {
     use super::{
         await_export_operation, await_export_stream_operation, clear_export_cancelled,
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
-        emit_database_export_cancelled, set_export_cancelled, snapshot_batch_cancelled, ExportStatus,
-        EXPORT_CANCELLED_ERROR,
+        emit_database_export_cancelled, postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled,
+        snapshot_batch_cancelled, ExportStatus, EXPORT_CANCELLED_ERROR,
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
@@ -3885,6 +4020,26 @@ mod tests {
 
         assert_eq!(ddl, "CREATE EXTENSION IF NOT EXISTS \"pg_trgm\" WITH SCHEMA \"addons\";");
         assert!(!ddl.contains("VERSION"));
+    }
+
+    #[test]
+    fn postgres_all_schema_export_filters_system_schemas_and_deduplicates() {
+        assert_eq!(
+            postgres_export_schema_names(vec![
+                " public ".to_string(),
+                "pg_catalog".to_string(),
+                "information_schema".to_string(),
+                "private".to_string(),
+                "private".to_string(),
+                "".to_string(),
+            ]),
+            vec!["public".to_string(), "private".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_all_schema_export_creates_quoted_schema_if_missing() {
+        assert_eq!(postgres_create_schema_sql("tenant\"data"), "CREATE SCHEMA IF NOT EXISTS \"tenant\"\"data\";");
     }
 
     #[test]

@@ -6990,6 +6990,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "내보내기가 완료되었지만 {count}개 객체가 실패했습니다: {firstError}… 자세한 내용은 내보낸 파일의 -- ERROR 주석을 참조하세요.",
     exportAllSuccessWithErrors: "데이터베이스 {count}개를 내보냈지만 {errorCount}개 객체가 실패했습니다: {firstError}… 자세한 내용은 파일의 -- ERROR 주석을 참조하세요.",
     allDatabasesTask: "모든 데이터베이스 ({count})",
+    allSchemas: "모든 스키마",
     exportError: "내보내기 실패: {error}",
     exportCancelled: "내보내기 취소됨",
     runInBackground: "백그라운드에서 실행",

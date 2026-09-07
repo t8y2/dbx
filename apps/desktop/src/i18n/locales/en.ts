@@ -7698,6 +7698,7 @@ export default {
     noTables: "No tables found",
     export: "Export",
     exportAllDatabases: "Export All Databases",
+    allSchemas: "All schemas",
     exporting: "Exporting...",
     preparing: "Preparing export (reading tables and metadata)...",
     preparingObject: "Preparing: {object}",

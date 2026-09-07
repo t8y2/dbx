@@ -7280,6 +7280,7 @@ export default withEnglishFallback({
     exportSuccessWithErrors: "La exportación terminó con {count} objeto(s) fallidos: {firstError}… Consulta los comentarios -- ERROR en el archivo exportado.",
     exportAllSuccessWithErrors: "Se exportaron {count} bases de datos, pero {errorCount} objeto(s) fallaron: {firstError}… Consulta los comentarios -- ERROR en los archivos.",
     allDatabasesTask: "Todas las bases de datos ({count})",
+    allSchemas: "Todos los esquemas",
     exportError: "Error al exportar: {error}",
     exportCancelled: "Exportación cancelada",
     filterTables: "Buscar tablas...",

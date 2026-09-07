@@ -133,11 +133,11 @@
 }
 
 .horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control {
-  padding-inline-end: 2.5rem;
+  padding-inline-end: 2.25rem;
 }
 
 .horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control .app-tab-scrollbar {
-  inset-inline-end: 2.5rem;
+  inset-inline-end: 2.25rem;
 }
 
 .horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:not(:first-child) .app-tab-scrollbar {
@@ -146,7 +146,7 @@
 
 .horizontal-fixed-tabs .tab-overflow-control {
   box-sizing: border-box;
-  width: 2.5rem;
+  width: 2.25rem;
   padding-inline: 1px;
   height: 2.25rem !important;
   align-items: center;
@@ -157,7 +157,8 @@
 }
 
 .tab-overflow-control button {
-  width: 32px;
+  width: 34px;
+  height: 34px;
   min-width: 0;
   border-color: color-mix(in oklch, var(--foreground) 18%, var(--border));
   background-color: color-mix(in oklch, var(--muted) 72%, var(--background));

@@ -113,6 +113,17 @@
   </tr>
   <tr>
     <td align="center" valign="middle" width="200">
+      <a href="https://api.hualong.online/" target="_blank">
+        <img src="docs/public/sponsors/hualong-card.png" alt="HuaLongAI" width="175" />
+      </a>
+    </td>
+    <td>
+      HuaLongAI is a model API relay built for heavy AI developers, offering 100% official-source Codex and Claude models with transparent token-level billing, enterprise contracts, and invoicing.
+      <a href="https://api.hualong.online/" target="_blank">Visit HuaLongAI</a>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="middle" width="200">
       <a href="https://www.atlascloud.ai/?ref=6YYXWA" target="_blank">
         <img src="docs/public/sponsors/atlas-card.png" alt="Atlas Cloud" width="175" />
       </a>

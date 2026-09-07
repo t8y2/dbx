@@ -1,7 +1,17 @@
+import type { DatabaseType } from "@/types/database";
 import { isNumericColumnType } from "@/lib/dataGrid/dataGridColumnType";
 
 export type DataGridSortDirection = "asc" | "desc";
 export type DataGridSortMode = "database" | "local";
+
+/**
+ * Cassandra rejects ORDER BY unless the partition key is restricted by an
+ * equality filter, so a browse query can never be sorted database-side there
+ * and the sort would keep failing on every refresh or page jump while applied.
+ */
+export function databaseSortSupportedForDatabase(databaseType?: DatabaseType): boolean {
+  return databaseType !== "cassandra";
+}
 
 export interface DataGridSortState {
   column: string | null;

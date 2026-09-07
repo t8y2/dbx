@@ -10,19 +10,17 @@ import type { McpConnectionPolicy } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 type DatabaseScope = McpConnectionPolicy["databaseScope"];
-type DatabaseExecutionMode = "inherit" | "read_only" | "safe_write" | "high_risk_write";
-type ExecutionMode = Exclude<DatabaseExecutionMode, "inherit">;
-
+type ExecutionMode = "read_only" | "safe_write" | "high_risk_write";
 const { t } = useI18n();
 
 const PAGE_SIZE_OPTIONS = [6, 10, 20] as const;
+const DATABASE_SCOPES: DatabaseScope[] = ["all", "selected", "none"];
 
 const props = withDefaults(
   defineProps<{
     connections: readonly ConnectionConfig[];
     allowedConnectionIds: readonly string[] | null;
     connectionPolicies: readonly McpConnectionPolicy[];
-    globalExecutionMode: ExecutionMode;
     disabled?: boolean;
     busy?: boolean;
   }>(),
@@ -31,6 +29,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "update:connectionPolicies": [value: McpConnectionPolicy[]];
+  "set:database-policy": [connectionId: string, databaseName: string, mode: ExecutionMode | "inherit"];
 }>();
 
 const selectedConnectionId = ref("");
@@ -92,18 +91,29 @@ function policyFor(connectionId: string): McpConnectionPolicy {
 function updateSelectedPolicy(patch: Partial<McpConnectionPolicy>) {
   if (props.disabled || !selectedConnectionId.value) return;
   const existing = policyFor(selectedConnectionId.value);
-  const migration = existing.executionModePolicyVersion === 1 ? {} : { ...promoteLegacyConnectionDefault(existing), executionModePolicyVersion: 1 as const };
-  const next = { ...existing, ...migration, ...patch };
+  const next = { ...existing, ...patch };
   const policies = props.connectionPolicies.filter((policy) => policy.connectionId !== selectedConnectionId.value);
   emit("update:connectionPolicies", [...policies, next]);
 }
 
 function setScope(scope: DatabaseScope) {
+  if (scope !== "selected" && selectedDatabasePolicies.value.length > 0 && !window.confirm(t("settings.mcpDatabaseScopeClearsPermissionExceptions"))) return;
   updateSelectedPolicy({
     databaseScope: scope,
     allowedDatabases: scope === "selected" ? selectedDatabases.value : [],
     databasePolicies: scope === "selected" ? selectedDatabasePolicies.value.filter((policy) => selectedDatabases.value.includes(policy.databaseName)) : [],
   });
+}
+
+function onScopeKeydown(event: KeyboardEvent, scope: DatabaseScope) {
+  if (props.disabled || props.busy || !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const currentIndex = DATABASE_SCOPES.indexOf(scope);
+  const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? DATABASE_SCOPES.length - 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? (currentIndex - 1 + DATABASE_SCOPES.length) % DATABASE_SCOPES.length : (currentIndex + 1) % DATABASE_SCOPES.length;
+  const nextScope = DATABASE_SCOPES[nextIndex];
+  const group = event.currentTarget instanceof HTMLElement ? event.currentTarget.closest<HTMLElement>('[role="radiogroup"]') : null;
+  group?.querySelector<HTMLElement>(`[data-database-scope="${nextScope}"]`)?.focus();
+  setScope(nextScope);
 }
 
 function setConnectionPage(page: number) {
@@ -122,6 +132,7 @@ function selectConnection(connectionId: string) {
 }
 
 function toggleDatabase(database: string, checked: boolean) {
+  if (!checked && selectedDatabasePolicies.value.some((policy) => policy.databaseName === database) && !window.confirm(t("settings.mcpDatabaseScopeClearsPermissionExceptions"))) return;
   const databases = checked ? [...new Set([...selectedDatabases.value, database])] : selectedDatabases.value.filter((item) => item !== database);
   updateSelectedPolicy({
     databaseScope: "selected",
@@ -130,70 +141,11 @@ function toggleDatabase(database: string, checked: boolean) {
   });
 }
 
-function databaseExecutionMode(database: string): DatabaseExecutionMode {
+function databasePolicyMode(database: string): ExecutionMode | "inherit" {
   const policy = selectedDatabasePolicies.value.find((item) => item.databaseName === database);
   if (!policy) return "inherit";
   if (policy.readOnly) return "read_only";
   return policy.allowDangerousSql ? "high_risk_write" : "safe_write";
-}
-
-function connectionExecutionMode(): DatabaseExecutionMode {
-  const policy = selectedPolicy.value;
-  if (!policy || !policy.executionModeConfigured) return "inherit";
-  if (policy.readOnly) return "read_only";
-  return policy.allowDangerousSql ? "high_risk_write" : "safe_write";
-}
-
-function effectiveDatabaseExecutionMode(database: string): ExecutionMode {
-  const databaseMode = databaseExecutionMode(database);
-  if (databaseMode !== "inherit") return databaseMode;
-  const connectionMode = connectionExecutionMode();
-  return connectionMode === "inherit" ? props.globalExecutionMode : connectionMode;
-}
-
-function executionModeLabel(mode: ExecutionMode): string {
-  return t(mode === "read_only" ? "settings.mcpExecutionModeReadOnly" : mode === "safe_write" ? "settings.mcpExecutionModeSafeWrite" : "settings.mcpExecutionModeHighRiskWrite");
-}
-
-function executionModeRank(mode: DatabaseExecutionMode): number {
-  return mode === "read_only" ? 0 : mode === "safe_write" ? 1 : mode === "high_risk_write" ? 2 : 3;
-}
-
-function promoteLegacyConnectionDefault(policy: McpConnectionPolicy): Pick<McpConnectionPolicy, "readOnly" | "allowDangerousSql" | "executionModeConfigured" | "databasePolicies"> {
-  if (policy.executionModePolicyVersion === 1) {
-    return { readOnly: policy.readOnly, allowDangerousSql: policy.allowDangerousSql, executionModeConfigured: policy.executionModeConfigured, databasePolicies: policy.databasePolicies };
-  }
-  const legacyMode = connectionExecutionMode();
-  const effectiveMode = executionModeRank(legacyMode) < executionModeRank(props.globalExecutionMode) ? legacyMode : props.globalExecutionMode;
-  const databasePolicies = policy.databasePolicies.map((databasePolicy) => {
-    const databaseMode = databasePolicy.readOnly ? "read_only" : databasePolicy.allowDangerousSql ? "high_risk_write" : "safe_write";
-    const effectiveDatabaseMode = executionModeRank(databaseMode) < executionModeRank(effectiveMode) ? databaseMode : effectiveMode;
-    return {
-      ...databasePolicy,
-      readOnly: effectiveDatabaseMode === "read_only",
-      allowDangerousSql: effectiveDatabaseMode === "high_risk_write",
-    };
-  });
-  return {
-    readOnly: effectiveMode === "read_only",
-    allowDangerousSql: effectiveMode === "high_risk_write",
-    executionModeConfigured: true,
-    databasePolicies,
-  };
-}
-
-function setDatabaseExecutionMode(database: string, mode: DatabaseExecutionMode) {
-  const existing = policyFor(selectedConnectionId.value);
-  const migrated = promoteLegacyConnectionDefault(existing);
-  const policies = migrated.databasePolicies.filter((policy) => policy.databaseName !== database);
-  if (mode !== "inherit") {
-    policies.push({
-      databaseName: database,
-      readOnly: mode === "read_only",
-      allowDangerousSql: mode === "high_risk_write",
-    });
-  }
-  updateSelectedPolicy({ ...promoteLegacyConnectionDefault(existing), databasePolicies: policies, executionModePolicyVersion: 1 });
 }
 
 function addManualDatabase() {
@@ -295,9 +247,9 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div>
             <p class="text-sm font-medium">{{ selectedConnection.name }}</p>
-            <p class="text-xs text-muted-foreground">{{ t("settings.mcpDatabaseScopePermissionNote") }}</p>
+            <p class="text-xs text-muted-foreground">{{ t("settings.mcpDatabaseScopeDescription") }}</p>
           </div>
-          <Button type="button" variant="outline" size="sm" :disabled="disabled || Boolean(loadingConnectionId)" @click="loadConnectionDatabases">
+          <Button v-if="selectedScope !== 'all'" type="button" variant="outline" size="sm" :disabled="disabled || Boolean(loadingConnectionId)" @click="loadConnectionDatabases">
             <Loader2 v-if="loadingConnectionId === selectedConnection.id" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
             <RefreshCw v-else class="mr-1.5 h-3.5 w-3.5" />
             {{ t("settings.mcpDatabaseLoadButton") }}
@@ -305,19 +257,55 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
         </div>
 
         <div class="grid gap-2 sm:grid-cols-3" role="radiogroup" :aria-label="t('settings.mcpDatabaseScopeAriaLabel')">
-          <Button type="button" variant="outline" class="h-auto justify-start px-3 py-2 text-left" :class="selectedScope === 'all' ? 'dbx-choice-selected' : ''" :disabled="disabled || busy" @click="setScope('all')">
+          <Button
+            type="button"
+            role="radio"
+            data-database-scope="all"
+            variant="outline"
+            class="h-auto justify-start px-3 py-2 text-left"
+            :class="selectedScope === 'all' ? 'dbx-choice-selected' : ''"
+            :aria-checked="selectedScope === 'all'"
+            :tabindex="selectedScope === 'all' ? 0 : -1"
+            :disabled="disabled || busy"
+            @click="setScope('all')"
+            @keydown="onScopeKeydown($event, 'all')"
+          >
             <span
               ><span class="block text-sm">{{ t("settings.mcpDatabaseScopeAllTitle") }}</span
               ><span class="block text-[11px] font-normal text-muted-foreground">{{ t("settings.mcpDatabaseScopeAllDescription") }}</span></span
             >
           </Button>
-          <Button type="button" variant="outline" class="h-auto justify-start px-3 py-2 text-left" :class="selectedScope === 'selected' ? 'dbx-choice-selected' : ''" :disabled="disabled || busy" @click="setScope('selected')">
+          <Button
+            type="button"
+            role="radio"
+            data-database-scope="selected"
+            variant="outline"
+            class="h-auto justify-start px-3 py-2 text-left"
+            :class="selectedScope === 'selected' ? 'dbx-choice-selected' : ''"
+            :aria-checked="selectedScope === 'selected'"
+            :tabindex="selectedScope === 'selected' ? 0 : -1"
+            :disabled="disabled || busy"
+            @click="setScope('selected')"
+            @keydown="onScopeKeydown($event, 'selected')"
+          >
             <span
               ><span class="block text-sm">{{ t("settings.mcpDatabaseScopeSelectedTitle") }}</span
               ><span class="block text-[11px] font-normal text-muted-foreground">{{ t("settings.mcpDatabaseScopeSelectedDescription") }}</span></span
             >
           </Button>
-          <Button type="button" variant="outline" class="h-auto justify-start px-3 py-2 text-left" :class="selectedScope === 'none' ? 'dbx-choice-selected' : ''" :disabled="disabled || busy" @click="setScope('none')">
+          <Button
+            type="button"
+            role="radio"
+            data-database-scope="none"
+            variant="outline"
+            class="h-auto justify-start px-3 py-2 text-left"
+            :class="selectedScope === 'none' ? 'dbx-choice-selected' : ''"
+            :aria-checked="selectedScope === 'none'"
+            :tabindex="selectedScope === 'none' ? 0 : -1"
+            :disabled="disabled || busy"
+            @click="setScope('none')"
+            @keydown="onScopeKeydown($event, 'none')"
+          >
             <span
               ><span class="block text-sm">{{ t("settings.mcpDatabaseScopeNoneTitle") }}</span
               ><span class="block text-[11px] font-normal text-muted-foreground">{{ t("settings.mcpDatabaseScopeNoneDescription") }}</span></span
@@ -337,17 +325,20 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
             <label v-for="database in pagedDatabases" :key="database" class="flex cursor-pointer items-center gap-2 border-b px-3 py-2 text-xs last:border-b-0 hover:bg-muted/50">
               <input type="checkbox" :checked="selectedDatabases.includes(database)" :disabled="disabled || busy" @change="toggleDatabase(database, ($event.target as HTMLInputElement).checked)" />
               <span class="min-w-0 flex-1 truncate font-mono">{{ database }}</span>
-              <div v-if="selectedDatabases.includes(database)" class="flex shrink-0 items-center gap-1.5">
-                <span class="text-[11px] text-muted-foreground">{{ t("settings.mcpDatabasePolicySetting") }}</span>
-                <select :value="databaseExecutionMode(database)" :disabled="disabled || busy" class="h-7 max-w-32 rounded border bg-background px-1.5 text-[11px]" @click.stop @change="setDatabaseExecutionMode(database, ($event.target as HTMLSelectElement).value as DatabaseExecutionMode)">
-                  <option value="inherit">{{ t("settings.mcpDatabasePolicyInherit") }}</option>
-                  <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
-                  <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
-                  <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
-                </select>
-                <Badge variant="secondary" class="text-[10px] font-normal">{{ t("settings.mcpDatabasePolicyEffective", { mode: executionModeLabel(effectiveDatabaseExecutionMode(database)) }) }}</Badge>
-              </div>
               <Check v-if="selectedDatabases.includes(database)" class="h-3.5 w-3.5 text-green-600" />
+              <select
+                v-if="selectedDatabases.includes(database)"
+                :value="databasePolicyMode(database)"
+                class="h-7 shrink-0 rounded border bg-background px-1.5 text-[11px]"
+                :disabled="disabled || busy"
+                @click.stop
+                @change="$emit('set:database-policy', selectedConnectionId, database, ($event.target as HTMLSelectElement).value as ExecutionMode | 'inherit')"
+              >
+                <option value="inherit">{{ t("settings.mcpConnectionPolicyInherit") }}</option>
+                <option value="read_only">{{ t("settings.mcpConnectionPolicyReadOnly") }}</option>
+                <option value="safe_write">{{ t("settings.mcpConnectionPolicySafeWrite") }}</option>
+                <option value="high_risk_write">{{ t("settings.mcpConnectionPolicyHighRiskWrite") }}</option>
+              </select>
             </label>
             <div v-if="databasePageCount > 1" class="flex items-center justify-center gap-2 border-t px-3 py-2 text-xs text-muted-foreground">
               <Button type="button" size="icon-sm" variant="ghost" :disabled="databasePage === 1" :title="t('settings.mcpPreviousPage')" :aria-label="t('settings.mcpPreviousPage')" @click="setDatabasePage(databasePage - 1)"><ChevronLeft /></Button>

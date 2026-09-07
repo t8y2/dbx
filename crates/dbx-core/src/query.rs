@@ -6849,7 +6849,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6975,7 +6975,7 @@ for line in sys.stdin:
         .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -6992,7 +6992,7 @@ for line in sys.stdin:
                 .unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(runtime.is_failed());
 
         runtime.kill();
@@ -7006,7 +7006,7 @@ for line in sys.stdin:
         let error = execute_sql_statement(&state, "conn-1", "", "SELECT 1", None, None).await.unwrap_err();
 
         assert!(error.contains("injected Agent failure"));
-        assert!(!state.pool_handle("conn-1").await.is_some());
+        assert!(state.pool_handle("conn-1").await.is_none());
         assert!(!runtime.is_failed());
 
         runtime.kill();
@@ -8550,7 +8550,7 @@ for line in sys.stdin:
             execute_in_manual_transaction(&state, "txn-test", "SELECT 42", "dbx_test", None, Some(10)).await.unwrap();
         assert_eq!(results[0].rows, vec![vec![serde_json::json!(42)]]);
         commit_manual_transaction(&state, "txn-test").await.unwrap();
-        assert!(!state.pool_handle(pool_key).await.is_some());
+        assert!(state.pool_handle(pool_key).await.is_none());
         assert_eq!(
             std::fs::read_to_string(&calls).unwrap(),
             "beginManualTransaction\nexecuteInManualTransaction\ncommitManualTransaction\n"

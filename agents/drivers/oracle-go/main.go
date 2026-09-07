@@ -4522,8 +4522,8 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 			for _, column := range columns {
 				columnRef := oracleColumnRef(tableRef.AliasText, column.Name)
 				outputAlias := quoteIdentifier(column.Name)
-				if isOracleSTGeometry(column) && !deferLOBs {
-					rewritten = append(rewritten, oracleSTGeometryExpression(columnRef, outputAlias))
+				if isOracleGeometryType(column) && !deferLOBs {
+					rewritten = append(rewritten, oracleGeometryExpression(column, columnRef, outputAlias))
 				} else if isOracleXMLType(column.DataType) && !deferLOBs {
 					rewritten = append(rewritten, oracleXMLSerializeExpression(columnRef, outputAlias))
 				} else if deferLOBs {
@@ -4548,8 +4548,8 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 					outputAlias = quoteIdentifier(meta.Name)
 				}
 				columnRef := oracleColumnRef(qualifier, meta.Name)
-				if isOracleSTGeometry(meta) && !deferLOBs {
-					rewritten = append(rewritten, oracleSTGeometryExpression(columnRef, outputAlias))
+				if isOracleGeometryType(meta) && !deferLOBs {
+					rewritten = append(rewritten, oracleGeometryExpression(meta, columnRef, outputAlias))
 					changed = true
 					sourceIndex++
 					continue
@@ -4579,8 +4579,8 @@ func rewriteOracleSelectItems(items []string, columns []oracleColumnMeta, tableR
 func oracleDeferredLOBExpressions(columnRef, outputAlias string, sourceIndex int, column oracleColumnMeta) ([]string, bool) {
 	kind, placeholder, ok := oracleDeferredLOBKind(column.DataType)
 	valueRef := columnRef
-	if isOracleSTGeometry(column) {
-		kind, placeholder, ok = "C", "<ST_GEOMETRY>", true
+	if isOracleGeometryType(column) {
+		kind, placeholder, ok = "C", oracleGeometryPlaceholder(column), true
 	}
 	if !ok {
 		return nil, false
@@ -4593,6 +4593,24 @@ func oracleDeferredLOBExpressions(columnRef, outputAlias string, sourceIndex int
 
 func oracleSTGeometryExpression(columnRef, alias string) string {
 	return fmt.Sprintf("SDE.ST_AsText(%s) AS %s", columnRef, alias)
+}
+
+func oracleSDOGeometryExpression(columnRef, alias string) string {
+	return fmt.Sprintf("SDO_UTIL.TO_WKTGEOMETRY(%s) AS %s", columnRef, alias)
+}
+
+func oracleGeometryExpression(column oracleColumnMeta, columnRef, alias string) string {
+	if isOracleSDOGeometry(column) {
+		return oracleSDOGeometryExpression(columnRef, alias)
+	}
+	return oracleSTGeometryExpression(columnRef, alias)
+}
+
+func oracleGeometryPlaceholder(column oracleColumnMeta) string {
+	if isOracleSDOGeometry(column) {
+		return "<SDO_GEOMETRY>"
+	}
+	return "<ST_GEOMETRY>"
 }
 
 func oracleDeferredLOBKind(dataType string) (kind, placeholder string, ok bool) {
@@ -4692,7 +4710,7 @@ func oracleQualifierMatchesTable(qualifier string, tableRef oracleTableRef) bool
 
 func oracleColumnsNeedValueRewrite(columns []oracleColumnMeta, deferLOBs bool) bool {
 	for _, column := range columns {
-		if isOracleSTGeometry(column) || isOracleXMLType(column.DataType) || (deferLOBs && isOracleDeferredLOBType(column.DataType)) {
+		if isOracleGeometryType(column) || isOracleXMLType(column.DataType) || (deferLOBs && isOracleDeferredLOBType(column.DataType)) {
 			return true
 		}
 	}
@@ -4726,6 +4744,19 @@ func isOracleSTGeometry(column oracleColumnMeta) bool {
 		return true
 	}
 	return dataType == "ST_GEOMETRY" && strings.EqualFold(strings.TrimSpace(column.DataTypeOwner), "SDE")
+}
+
+func isOracleSDOGeometry(column oracleColumnMeta) bool {
+	// Oracle Spatial's MDSYS.SDO_GEOMETRY is likewise an unregistered object
+	// type for go-ora and panics on scan; SDO_UTIL.TO_WKTGEOMETRY provides
+	// the supported CLOB (WKT) representation for reads. Most schemas only
+	// see it through the PUBLIC synonym, so DATA_TYPE_OWNER is commonly
+	// "PUBLIC" rather than "MDSYS" and isn't checked here.
+	return strings.ToUpper(strings.TrimSpace(column.DataType)) == "SDO_GEOMETRY"
+}
+
+func isOracleGeometryType(column oracleColumnMeta) bool {
+	return isOracleSTGeometry(column) || isOracleSDOGeometry(column)
 }
 
 func leadingSQLSelectListStart(sqlText string) int {

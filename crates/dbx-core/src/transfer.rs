@@ -5148,6 +5148,33 @@ async fn execute_on_pool_with_options(
             PoolErrorAction::Keep => return result,
             PoolErrorAction::Discard => {
                 state.remove_pool_by_key(&current_pool_key).await;
+                // `WriteNoReplay` deliberately downgrades a recoverable connection
+                // error to `Discard` here so this specific write is never replayed
+                // (its outcome on the server is unknown). But leaving the pool
+                // torn down does not just affect this one statement: a bulk
+                // multi-table transfer keeps reusing this same `pool_key` for
+                // every remaining table, so once one table hits a transient
+                // connection drop (a momentary "too many connections"/"connection
+                // closed" from the target server under load), every later table
+                // immediately fails too with "Connection not found" / "Pool not
+                // found" -- turning one blip into a cascade for the rest of the
+                // run. Re-establish a fresh pool under the same key so the next
+                // caller isn't handed a known-dead connection; this never retries
+                // the failed statement above, only prepares the pool for
+                // whichever statement runs next.
+                if pool_error_action(db_type, error) == PoolErrorAction::ReconnectAndRetry {
+                    if let Some(connection_id) = connection_id.as_deref() {
+                        let catalog = catalog_from_pool_key(&current_pool_key).map(str::to_string);
+                        let _ = state
+                            .reconnect_pool_for_session_with_catalog(
+                                connection_id,
+                                database.as_deref(),
+                                catalog.as_deref(),
+                                client_session_id.as_deref(),
+                            )
+                            .await;
+                    }
+                }
                 return result;
             }
             PoolErrorAction::ReconnectAndRetry if attempt == 0 => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
+import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpQoderConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl } from "@/lib/mcp/mcpConfigTemplates";
 
 describe("MCP config templates", () => {
   it("builds the standard mcpServers JSON used by Claude, Cursor, TRAE, and Windsurf", () => {
@@ -63,6 +63,19 @@ describe("MCP config templates", () => {
     });
     expect(JSON.parse(buildMcpTraeConfig(nodeLaunch))).toEqual({
       mcpServers: { dbx: nodeLaunch },
+    });
+  });
+
+  it("builds the Qoder config with the same launch shape as TRAE", () => {
+    const launch = {
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: ["C:\\dbx\\mcp\\dist\\index.js"],
+      env: { DBX_DATA_DIR: "D:\\DBX Data" },
+    };
+    const nativeBinPath = "C:\\Users\\supervisor\\AppData\\Roaming\\npm\\node_modules\\@dbx-app\\mcp-win32-x64\\bin\\dbx-mcp.exe";
+
+    expect(JSON.parse(buildMcpQoderConfig(launch, nativeBinPath))).toEqual({
+      mcpServers: { dbx: { command: nativeBinPath, env: launch.env } },
     });
   });
 

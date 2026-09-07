@@ -247,6 +247,11 @@ export function createDbxCodeMirrorSqlDialect(langSql: CodeMirrorSqlLanguageModu
     keywords: [baseKeywords, commonKeywords, isClickHouse ? CLICKHOUSE_KEYWORDS : "", isPostgres ? POSTGRES_PLPGSQL_KEYWORDS : "", isSqlServer ? SQLSERVER_KEYWORDS : ""].filter(Boolean).join(" "),
     types: [baseTypes, isClickHouse ? CLICKHOUSE_TYPES : "", isPostgres ? POSTGRES_PLPGSQL_TYPES : ""].filter(Boolean).join(" ") || undefined,
     builtin: [baseBuiltin, isClickHouse ? CLICKHOUSE_BUILTINS : "", isPostgres ? `${POSTGRES_BUILTINS} ${POSTGRES_PLPGSQL_BUILTIN}` : "", isMysql ? MYSQL_BUILTINS : "", driverProfileSqlBuiltinTerms(driverProfile)].filter(Boolean).join(" ") || undefined,
+    // T-SQL temp tables (#local / ##global) otherwise tokenize the leading
+    // `#` as a parser error, breaking highlighting for the whole name. The
+    // specialVar scanner natively handles the doubled prefix and already
+    // covers @@variables, so # joins the same channel for SQL Server (#8267).
+    ...(isSqlServer ? { specialVar: `${baseDialect.spec.specialVar ?? ""}#` } : {}),
     ...(isClickHouse
       ? {
           identifierQuotes: '"`',

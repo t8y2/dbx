@@ -1,6 +1,6 @@
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionReferencedTable } from "@/lib/sql/sqlCompletion";
 import { SQL_SEMANTIC_DIALECTS } from "@/lib/sql/semantic/dialect";
-import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticToken } from "@/lib/sql/semantic/types";
+import type { SqlSemanticModel, SqlSemanticRowSource, SqlSemanticSpan, SqlSemanticToken } from "@/lib/sql/semantic/types";
 
 export type SqlSemanticCompletionScopeKind = "keyword" | "table" | "schema" | "catalog" | "routine" | "columns" | "local";
 
@@ -258,14 +258,30 @@ function semanticMutationTarget(model: SqlSemanticModel): SqlSemanticRowSource |
   return targetId ? model.rowSources.find((source) => source.id === targetId) : model.rowSources.find((source) => source.kind === "mutation_target");
 }
 
+/**
+ * When the semantic scanner misses the trailing identifier that the legacy
+ * scanner still reports (semantic prefix empty with a replacement range
+ * collapsed at the cursor) while the merged context keeps a non-empty prefix
+ * from the base context, align the replacement range with that prefix.
+ * prepareSqlCompletionReplacement prefers the range over
+ * `cursor - prefix.length`, so a range collapsed at the cursor would make the
+ * accepted candidate append after the typed prefix instead of replacing it
+ * (issue #7757).
+ */
+function replacementRangeAlignedWithPrefix(model: SqlSemanticModel, keptPrefix: string, semanticRange: SqlSemanticSpan): SqlSemanticSpan {
+  if (keptPrefix.length === 0 || model.cursorIntent.prefix.length > 0) return semanticRange;
+  if (semanticRange.start !== semanticRange.end || semanticRange.end !== model.cursor) return semanticRange;
+  return { start: model.cursor - keptPrefix.length, end: model.cursor };
+}
+
 export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: SqlCompletionContext): SqlCompletionContext {
   if (model.cursorIntent.kind === "suppressed") {
     return base;
   }
   const replacementRange = model.cursorIntent.replacementRange;
-  if (model.cursorIntent.confidence === "low") return { ...base, replacementRange };
+  if (model.cursorIntent.confidence === "low") return { ...base, replacementRange: replacementRangeAlignedWithPrefix(model, base.prefix, replacementRange) };
   if ((base.suggestTables || base.exclusiveTableSuggestions) && model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "schema" && model.cursorIntent.kind !== "catalog" && model.cursorIntent.kind !== "delete_target") {
-    return { ...base, replacementRange };
+    return { ...base, replacementRange: replacementRangeAlignedWithPrefix(model, base.prefix, replacementRange) };
   }
 
   const scope = sqlSemanticCompletionScope(model);
@@ -286,7 +302,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
 
   return {
     ...base,
-    replacementRange,
+    replacementRange: replacementRangeAlignedWithPrefix(model, prefix, replacementRange),
     prefix,
     qualifier,
     qualifierParts,

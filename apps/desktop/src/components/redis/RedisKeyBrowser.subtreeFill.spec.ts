@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick } from "vue";
+import { createApp, defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RedisKeyInfo } from "@/lib/backend/api";
@@ -273,6 +273,37 @@ function mountBrowser() {
   return host;
 }
 
+function mountKeptAliveBrowser() {
+  const active = ref(true);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () =>
+          h(KeepAlive, null, {
+            default: () => (active.value ? h(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false }) : null),
+          });
+      },
+    }),
+  );
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.mount(host);
+  mountedApps.push({ unmount: () => app.unmount(), host });
+
+  return {
+    host,
+    async deactivate() {
+      active.value = false;
+      await settle();
+    },
+    async activate() {
+      active.value = true;
+      await settle();
+    },
+  };
+}
+
 async function settle() {
   await nextTick();
   await Promise.resolve();
@@ -283,6 +314,16 @@ async function settle() {
 
 async function settleThoroughly(rounds = 40) {
   for (let i = 0; i < rounds; i++) await settle();
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 function resetApiMocks() {
@@ -523,6 +564,40 @@ describe("RedisKeyBrowser bounded group subtree fill (issue #7918)", () => {
     expect(leafVisible(host, "grp:a")).toBe(true);
   });
 
+  it("rotates Load more continuation between pending expanded subtrees", async () => {
+    stubOverflowingViewport();
+    const callsByGroup = { aa: 0, bb: 0 };
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "aa:*" || pattern === "bb:*") {
+        callsByGroup[pattern === "aa:*" ? "aa" : "bb"]++;
+        return Promise.resolve({ cursor: cursor + 1, keys: [], total_keys: 0 });
+      }
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("aa:a"), keyInfo("bb:a")], total_keys: 10_000 });
+      return Promise.resolve({ cursor: 9, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    host.querySelectorAll<HTMLElement>("[data-redis-group]")[0]!.parentElement!.parentElement!.click();
+    await settleThoroughly();
+    host.querySelectorAll<HTMLElement>("[data-redis-group]")[1]!.parentElement!.parentElement!.click();
+    await settleThoroughly();
+    expect(callsByGroup).toEqual({ aa: 7, bb: 7 });
+
+    clickLoadMore(host);
+    await settleThoroughly();
+    expect(callsByGroup).toEqual({ aa: 14, bb: 7 });
+    clickLoadMore(host);
+    await settleThoroughly();
+    expect(callsByGroup).toEqual({ aa: 14, bb: 14 });
+
+    // Each resumed group retains its own completed pass's cursor.
+    for (const pattern of ["aa:*", "bb:*"]) {
+      const calls = mocks.redisScanKeysBatch.mock.calls.filter((call: unknown[]) => call[3] === pattern);
+      expect(calls[SUBTREE_FILL_MAX_CALLS_BY_ITERATIONS][2]).toBe(SUBTREE_FILL_MAX_CALLS_BY_ITERATIONS);
+    }
+  });
+
   it("resumes a partially filled subtree when the group is re-expanded", async () => {
     stubOverflowingViewport();
     let subtreeCall = 0;
@@ -552,5 +627,176 @@ describe("RedisKeyBrowser bounded group subtree fill (issue #7918)", () => {
 
     expect(subtreeCalls().length).toBe(SUBTREE_FILL_MAX_CALLS_BY_KEYS + 1);
     expect(subtreeCalls()[SUBTREE_FILL_MAX_CALLS_BY_KEYS][2]).toBe(3000 + SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+  });
+
+  it("does not resume a collapsed pending subtree from a main Load more", async () => {
+    stubOverflowingViewport();
+    let subtreeCall = 0;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        subtreeCall++;
+        return Promise.resolve({ cursor: 4000 + subtreeCall, keys: subtreeBatchKeys(100, subtreeCall), total_keys: 0 });
+      }
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 10_000 });
+      return Promise.resolve({ cursor: 9, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+
+    expandFirstGroupRow(host);
+    clickLoadMore(host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(subtreeCalls()[SUBTREE_FILL_MAX_CALLS_BY_KEYS]?.[2]).toBe(4000 + SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+  });
+
+  it("does not grant a pending subtree another pass from automatic main fill", async () => {
+    stubOverflowingViewport();
+    let mainCalls = 0;
+    let subtreeCall = 0;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        subtreeCall++;
+        return Promise.resolve({ cursor: 5000 + subtreeCall, keys: subtreeBatchKeys(100, subtreeCall), total_keys: 0 });
+      }
+      mainCalls++;
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 5_000_000 });
+      return Promise.resolve({ cursor: cursor + 1, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 90 : 100;
+      },
+    });
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("resize"));
+    await settleThoroughly();
+
+    expect(mainCalls).toBeGreaterThan(1);
+    expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+  });
+
+  it("retains the last applied subtree cursor when KeepAlive invalidates an in-flight resume", async () => {
+    stubOverflowingViewport();
+    const inFlightResume = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    let subtreeCall = 0;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        subtreeCall++;
+        if (subtreeCall <= SUBTREE_FILL_MAX_CALLS_BY_KEYS) {
+          return Promise.resolve({ cursor: 6000 + subtreeCall, keys: subtreeBatchKeys(100, subtreeCall), total_keys: 0 });
+        }
+        if (subtreeCall === SUBTREE_FILL_MAX_CALLS_BY_KEYS + 1) return inFlightResume.promise;
+        return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:resumed")], total_keys: 0 });
+      }
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 10_000 });
+      return Promise.resolve({ cursor: 9, keys: [], total_keys: 0 });
+    });
+
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(browser.host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+
+    clickLoadMore(browser.host);
+    await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS + 1));
+    expect(subtreeCalls()[SUBTREE_FILL_MAX_CALLS_BY_KEYS]?.[2]).toBe(6000 + SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+
+    await browser.deactivate();
+    inFlightResume.resolve({ cursor: 7000, keys: [keyInfo("grp:stale")], total_keys: 0 });
+    await settleThoroughly();
+    await browser.activate();
+
+    expandFirstGroupRow(browser.host);
+    expandFirstGroupRow(browser.host);
+    await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(SUBTREE_FILL_MAX_CALLS_BY_KEYS + 2));
+    expect(subtreeCalls()[SUBTREE_FILL_MAX_CALLS_BY_KEYS + 1]?.[2]).toBe(6000 + SUBTREE_FILL_MAX_CALLS_BY_KEYS);
+    expect(leafVisible(browser.host, "grp:stale")).toBe(false);
+  });
+
+  it("stops an active subtree after collapse and resumes from its in-flight cursor", async () => {
+    stubOverflowingViewport();
+    const firstSubtreePage = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, cursor: number, pattern: string) => {
+      if (pattern === "grp:*" && cursor === 0) return firstSubtreePage.promise;
+      if (pattern === "grp:*") return Promise.resolve({ cursor: 0, keys: [keyInfo("grp:resumed")], total_keys: 0 });
+      if (cursor === 0) return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 10_000 });
+      return Promise.resolve({ cursor: 9, keys: [], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(1));
+    expandFirstGroupRow(host);
+    firstSubtreePage.resolve({ cursor: 57, keys: [], total_keys: 0 });
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(1);
+
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(2);
+    expect(subtreeCalls()[1]?.[2]).toBe(57);
+  });
+
+  it.each(["resolves", "rejects"] as const)("keeps a newer same-group fill owned when a stale fill %s", async (outcome) => {
+    stubOverflowingViewport();
+    const oldFill = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    const currentFill = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    let mainCalls = 0;
+    let subtreeCall = 0;
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "grp:*") {
+        subtreeCall++;
+        if (subtreeCall === 1) return oldFill.promise;
+        return currentFill.promise;
+      }
+      mainCalls++;
+      return Promise.resolve({ cursor: 9, keys: [keyInfo("grp:a")], total_keys: 10_000 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(1));
+
+    const refresh = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
+    expect(refresh, "refresh button").toBeDefined();
+    refresh!.click();
+    await vi.waitFor(() => expect(mainCalls).toBeGreaterThanOrEqual(2));
+    await settleThoroughly();
+    expandFirstGroupRow(host);
+    expandFirstGroupRow(host);
+    await vi.waitFor(() => expect(subtreeCalls()).toHaveLength(2));
+
+    if (outcome === "resolves") oldFill.resolve({ cursor: 88, keys: [keyInfo("grp:stale")], total_keys: 0 });
+    else oldFill.reject(new Error("stale subtree failure"));
+    await settleThoroughly();
+    expect(mocks.toast).not.toHaveBeenCalled();
+    expect(leafVisible(host, "grp:stale")).toBe(false);
+
+    expandFirstGroupRow(host);
+    expandFirstGroupRow(host);
+    await settleThoroughly();
+    expect(subtreeCalls()).toHaveLength(2);
+
+    currentFill.resolve({ cursor: 0, keys: [keyInfo("grp:current")], total_keys: 0 });
+    await settleThoroughly();
+    expect(mocks.toast).not.toHaveBeenCalled();
   });
 });

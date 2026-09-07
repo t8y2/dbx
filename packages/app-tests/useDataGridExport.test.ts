@@ -24,6 +24,7 @@ const clipboardMock = vi.hoisted(() => ({
   copyToClipboard: vi.fn(),
 }));
 const runtimeMock = vi.hoisted(() => ({ isTauri: false }));
+const sqlInsertModeMock = vi.hoisted(() => ({ showSqlInsertModeDialog: vi.fn() }));
 const dialogMock = vi.hoisted(() => ({ save: vi.fn() }));
 const toastMock = vi.hoisted(() => vi.fn());
 const translateMock = vi.hoisted(() =>
@@ -35,6 +36,7 @@ const translateMock = vi.hoisted(() =>
 );
 
 vi.mock("@/lib/backend/api", () => apiMock);
+vi.mock("@/lib/export/sqlInsertMode", () => sqlInsertModeMock);
 vi.mock("@/lib/common/clipboard", () => clipboardMock);
 vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtimeMock.isTauri }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: dialogMock.save }));
@@ -130,7 +132,7 @@ function buildExportHarness(
   const fullExportResult = vi.fn(async () => {
     throw new Error("fullExportResult should not be called for streaming CSV/XLSX query exports");
   });
-  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => ({
+  const queryResultExportRequest = vi.fn(async (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined>; insertMode?: "batch" | "single" }) => ({
     exportId: options.exportId,
     connectionId: "conn-1",
     database: "db",
@@ -144,6 +146,7 @@ function buildExportHarness(
     includeSqlSheet: options.includeSqlSheet,
     exportTableName: options.exportTableName,
     exportColumnTypes: options.exportColumnTypes,
+    ...(options.insertMode ? { insertMode: options.insertMode } : {}),
     pageSize: 1000,
     rowLimit: 100000,
     totalRows: 2,
@@ -262,6 +265,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   runtimeMock.isTauri = false;
   dialogMock.save.mockResolvedValue(null);
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValue("batch");
   clipboardMock.copyToClipboard.mockResolvedValue(undefined);
   apiMock.startQueryResultExport.mockImplementation(async (_request, onProgress) => {
     onProgress({ exportId: _request.exportId, tableName: "", rowsExported: 2, totalRows: 2, status: "Done" });
@@ -484,6 +488,105 @@ test("MySQL joined query SQL export keeps result aliases instead of source colum
     assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].columns, ["order_no", "customer_name", "total_amount"]);
     assert.deepEqual(apiMock.buildExportSqlInsert.mock.calls[0][0].rows, [[101, "Ada", "25.50"]]);
     assert.match((await download.content()) ?? "", /`order_no`, `customer_name`, `total_amount`/);
+  } finally {
+    download.restore();
+  }
+});
+
+test("non-SQL query exports do not forward the INSERT mode", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.csv");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportCsv();
+
+  assert.equal("insertMode" in queryResultExportRequest.mock.calls[0][0], false);
+  assert.equal("insertMode" in apiMock.startQueryResultExport.mock.calls[0][0], false);
+});
+
+test("SQL export uses batch mode by default for query-result streaming", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(sqlInsertModeMock.showSqlInsertModeDialog.mock.calls.length, 1);
+  assert.equal(queryResultExportRequest.mock.calls[0][0].insertMode, "batch");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].insertMode, "batch");
+});
+
+test("SQL export forwards the selected single-row mode to query-result streaming", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/query-result.sql");
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  const { composable, queryResultExportRequest } = buildExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(queryResultExportRequest.mock.calls[0][0].insertMode, "single");
+  assert.equal(apiMock.startQueryResultExport.mock.calls[0][0].insertMode, "single");
+});
+
+test("table data SQL export forwards the selected mode to the table backend", async () => {
+  runtimeMock.isTauri = true;
+  dialogMock.save.mockResolvedValue("/tmp/users.sql");
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  const { composable } = buildTableDataExportHarness();
+
+  await composable.exportSql();
+
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].format, "sql");
+  assert.equal(apiMock.startTableExport.mock.calls[0][0].insertMode, "single");
+});
+
+test("local SQL export maps the selected mode to the shared formatter", async () => {
+  const download = installTextDownloadCapture();
+  sqlInsertModeMock.showSqlInsertModeDialog.mockResolvedValueOnce("single");
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada');");
+
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "name"],
+      column_types: ["int", "text"],
+      rows: [[1, "Ada"]],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({ completeLocalResult });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.buildExportSqlInsert.mock.calls[0][0].batchSize, 1);
+  } finally {
+    download.restore();
+  }
+});
+
+test("local SQL export defaults to the shared batch formatter", async () => {
+  const download = installTextDownloadCapture();
+  apiMock.buildExportSqlInsert.mockResolvedValueOnce("INSERT INTO `users` (`id`, `name`) VALUES (1, 'Ada'), (2, 'Lin');");
+
+  try {
+    const completeLocalResult: QueryResult = {
+      columns: ["id", "name"],
+      column_types: ["int", "text"],
+      rows: [
+        [1, "Ada"],
+        [2, "Lin"],
+      ],
+      affected_rows: 0,
+      execution_time_ms: 1,
+      truncated: false,
+      has_more: false,
+    };
+    const { composable } = buildExportHarness({ completeLocalResult });
+
+    await composable.exportSql();
+
+    assert.equal(apiMock.buildExportSqlInsert.mock.calls[0][0].batchSize, undefined);
   } finally {
     download.restore();
   }

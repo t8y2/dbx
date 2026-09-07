@@ -11,8 +11,7 @@ const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "ut
 describe("App main content surface structure", () => {
   it("hides only the editor workspace via the surface guard, never the special pages", () => {
     const guard = 'v-show="!driverStoreActive && !settingsStore.settingsPageActive"';
-    // One guarded wrapper; the welcome screen's v-else-if reuses the flags in
-    // its own condition and must not be mistaken for a second guard.
+    // The empty-state slot shares the query surface's visibility guard.
     expect(appSource.split(guard).length - 1).toBe(1);
 
     // Source order: special surfaces first, then the guarded editor wrapper.
@@ -22,9 +21,11 @@ describe("App main content surface structure", () => {
     expect([...indices].sort((a, b) => a - b)).toEqual(indices);
   });
 
-  it("guards the editor wrapper with the open-tab count and chains the welcome screen to it", () => {
-    expect(appSource).toContain('<div v-if="queryStore.tabs.length > 0" v-show="!driverStoreActive && !settingsStore.settingsPageActive"');
-    expect(appSource).toContain('v-else-if="queryStore.tabs.length === 0 && !driverStoreActive && !settingsStore.settingsPageActive"');
+  it("keeps navigation independent from the workspace welcome content", () => {
+    expect(appSource).toContain(':show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"');
+    expect(appSource).toContain(':active-tab="activeTab ?? undefined"');
+    expect(appSource).toMatch(/<template #empty>\s*<WelcomeScreen/);
+    expect(appSource).not.toContain('v-if="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"');
   });
 
   it("anchors the drag-back hit test on every pane strip and the special-surfaces bar", () => {
@@ -32,8 +33,8 @@ describe("App main content surface structure", () => {
     const slimBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");
     expect(groupBarSource).toContain("data-main-tab-bar");
     expect(groupBarSource).toContain("'ring-2 ring-primary ring-inset': detachedDropTarget");
-    expect(slimBarSource).toContain("data-main-tab-bar");
-    expect(slimBarSource).toContain("'ring-2 ring-primary ring-inset': detachedDropTarget");
+    expect(slimBarSource).toContain("data-special-page-tab-target");
+    expect(slimBarSource).not.toContain("data-return-tab");
     // The split workspace renders several bars; the hit test must union their rects.
     expect(appSource).toContain('querySelectorAll<HTMLElement>("[data-main-tab-bar]")');
   });

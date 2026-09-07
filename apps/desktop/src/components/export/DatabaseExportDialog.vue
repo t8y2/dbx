@@ -12,7 +12,7 @@ import * as api from "@/lib/backend/api";
 import type { ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
@@ -215,7 +215,7 @@ async function loadSchemas(preferredSchema = "") {
     return;
   }
 
-  const schemaList = await api.listSchemas(connectionId.value, database.value);
+  const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
   const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
   schemas.value = schemaList;
   schema.value = selected;
@@ -289,7 +289,7 @@ async function buildExportPlanForDatabases(dbs: string[]): Promise<AllDatabaseEx
   const schemasByDatabase: Record<string, string[]> = {};
   if (schemaAware) {
     for (const db of dbs) {
-      schemasByDatabase[db] = await api.listSchemas(connectionId.value, db);
+      schemasByDatabase[db] = filterExportableSchemas(await api.listSchemas(connectionId.value, db), dbType);
     }
   }
   return buildAllDatabaseExportPlan({ databases: dbs, schemaAware, schemasByDatabase, dbType });

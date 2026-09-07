@@ -10,6 +10,7 @@ use dbx_core::{
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
     connection::AppState,
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
+    mcp_policy::{connection_group_paths, McpConnectionGroupPath},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
@@ -50,73 +51,6 @@ impl From<&ConnectionConfig> for ConnectionSummary {
     }
 }
 
-#[derive(Deserialize)]
-struct SidebarLayout {
-    #[serde(default)]
-    groups: Vec<SidebarGroup>,
-    #[serde(default)]
-    order: Vec<SidebarOrderEntry>,
-}
-
-#[derive(Deserialize)]
-struct SidebarGroup {
-    id: String,
-    name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type")]
-enum SidebarOrderEntry {
-    #[serde(rename = "group")]
-    Group {
-        id: String,
-        children: Option<Vec<SidebarOrderEntry>>,
-        #[serde(rename = "connectionIds")]
-        connection_ids: Option<Vec<String>>,
-    },
-    #[serde(rename = "connection")]
-    Connection { id: String },
-}
-
-fn connection_group_paths(layout: Value) -> HashMap<String, Vec<String>> {
-    let Ok(layout) = serde_json::from_value::<SidebarLayout>(layout) else {
-        return HashMap::new();
-    };
-    let groups = layout.groups.into_iter().map(|group| (group.id, group.name)).collect::<HashMap<_, _>>();
-    let mut paths = HashMap::new();
-    collect_connection_group_paths(&layout.order, &groups, &mut Vec::new(), &mut paths);
-    paths
-}
-
-fn collect_connection_group_paths(
-    entries: &[SidebarOrderEntry],
-    groups: &HashMap<String, String>,
-    path: &mut Vec<String>,
-    paths: &mut HashMap<String, Vec<String>>,
-) {
-    for entry in entries {
-        match entry {
-            SidebarOrderEntry::Connection { id } => {
-                paths.insert(id.clone(), path.clone());
-            }
-            SidebarOrderEntry::Group { id, children, connection_ids } => {
-                let Some(name) = groups.get(id) else {
-                    continue;
-                };
-                path.push(name.clone());
-                if let Some(children) = children {
-                    collect_connection_group_paths(children, groups, path, paths);
-                } else if let Some(connection_ids) = connection_ids {
-                    for connection_id in connection_ids {
-                        paths.insert(connection_id.clone(), path.clone());
-                    }
-                }
-                path.pop();
-            }
-        }
-    }
-}
-
 fn legacy_mcp_allow_writes() -> Option<bool> {
     match std::env::var("DBX_MCP_ALLOW_WRITES").ok()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" => Some(true),
@@ -141,6 +75,21 @@ fn effective_mcp_policy_with_legacy_allow_writes(
     // can execute unconfirmed writes through CLI providers.
     if legacy_allow_writes == Some(false) {
         policy.read_only = true;
+        policy.allow_dangerous_sql = false;
+        for rule in &mut policy.group_policies {
+            rule.read_only = true;
+            rule.allow_dangerous_sql = false;
+        }
+        for rule in &mut policy.connection_policies {
+            rule.read_only = true;
+            rule.allow_dangerous_sql = false;
+            rule.execution_mode_configured = true;
+            rule.execution_mode_policy_version = Some(dbx_core::mcp_policy::MCP_EXECUTION_POLICY_VERSION);
+            for database_policy in &mut rule.database_policies {
+                database_policy.read_only = true;
+                database_policy.allow_dangerous_sql = false;
+            }
+        }
     }
     policy
 }
@@ -240,6 +189,14 @@ pub trait DbxBackend: Send + Sync {
     }
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
         Ok(HashMap::new())
+    }
+    async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
+        Ok(self
+            .load_connection_group_paths()
+            .await?
+            .into_iter()
+            .map(|(connection_id, names)| (connection_id, McpConnectionGroupPath { ids: Vec::new(), names }))
+            .collect())
     }
     async fn execute_agent_tool(
         &self,
@@ -732,7 +689,23 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
-        Ok(self.state.storage.load_sidebar_layout().await?.map(connection_group_paths).unwrap_or_default())
+        Ok(self
+            .load_connection_group_details()
+            .await?
+            .into_iter()
+            .map(|(connection_id, path)| (connection_id, path.names))
+            .collect())
+    }
+
+    async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
+        self.state
+            .storage
+            .load_sidebar_layout()
+            .await?
+            .as_ref()
+            .map(connection_group_paths)
+            .transpose()
+            .map(Option::unwrap_or_default)
     }
 
     async fn execute_agent_tool(
@@ -1056,13 +1029,22 @@ impl DbxBackend for WebBackend {
     }
 
     async fn load_connection_group_paths(&self) -> Result<HashMap<String, Vec<String>>, String> {
+        Ok(self
+            .load_connection_group_details()
+            .await?
+            .into_iter()
+            .map(|(connection_id, path)| (connection_id, path.names))
+            .collect())
+    }
+
+    async fn load_connection_group_details(&self) -> Result<HashMap<String, McpConnectionGroupPath>, String> {
         let layout = self
             .request(reqwest::Method::GET, "/api/layout/sidebar", None)
             .await?
             .json::<Option<Value>>()
             .await
             .map_err(|error| format!("Invalid sidebar layout response: {error}"))?;
-        Ok(layout.map(connection_group_paths).unwrap_or_default())
+        layout.as_ref().map(connection_group_paths).transpose().map(Option::unwrap_or_default)
     }
 
     async fn execute_agent_tool(
@@ -2270,8 +2252,10 @@ mod tests {
             read_only,
             allow_dangerous_sql: false,
             allowed_connection_ids: None,
+            allowed_group_ids: Vec::new(),
             allowed_tool_names: None,
             connection_policies: Vec::new(),
+            group_policies: Vec::new(),
             query_timeout_secs: None,
         }
     }
@@ -2301,7 +2285,7 @@ mod tests {
 
     #[test]
     fn parses_nested_current_and_legacy_connection_group_paths() {
-        let paths = connection_group_paths(json!({
+        let layout = json!({
             "groups": [
                 { "id": "project", "name": "Project" },
                 { "id": "staging", "name": "Staging" },
@@ -2321,25 +2305,26 @@ mod tests {
                     ]
                 },
                 { "type": "group", "id": "legacy", "connectionIds": ["legacy-connection"] },
-                {
-                    "type": "group",
-                    "id": "missing-group",
-                    "children": [{ "type": "connection", "id": "dangling" }]
-                },
                 { "type": "connection", "id": "root" }
             ]
-        }));
+        });
+        let paths = connection_group_paths(&layout).unwrap();
 
-        assert_eq!(paths.get("nested"), Some(&vec!["Project".to_string(), "Staging".to_string()]));
-        assert_eq!(paths.get("grouped"), Some(&vec!["Project".to_string()]));
-        assert_eq!(paths.get("legacy-connection"), Some(&vec!["Legacy".to_string()]));
-        assert_eq!(paths.get("root"), Some(&Vec::new()));
-        assert!(!paths.contains_key("dangling"));
+        assert_eq!(paths["nested"].ids, vec!["project".to_string(), "staging".to_string()]);
+        assert_eq!(paths["nested"].names, vec!["Project".to_string(), "Staging".to_string()]);
+        assert_eq!(paths["grouped"].names, vec!["Project".to_string()]);
+        assert_eq!(paths["legacy-connection"].names, vec!["Legacy".to_string()]);
+        assert_eq!(paths["root"], McpConnectionGroupPath::default());
     }
 
     #[test]
-    fn malformed_sidebar_layout_has_no_group_paths() {
-        assert!(connection_group_paths(json!({ "groups": "invalid", "order": [] })).is_empty());
+    fn malformed_sidebar_layout_is_rejected() {
+        assert!(connection_group_paths(&json!({ "groups": "invalid", "order": [] })).is_err());
+        assert!(connection_group_paths(&json!({
+            "groups": [],
+            "order": [{ "type": "group", "id": "missing-group", "children": [] }]
+        }))
+        .is_err());
     }
 
     #[tokio::test]

@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick } from "vue";
+import { createApp, defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RedisKeyInfo } from "@/lib/backend/api";
 
 const mocks = vi.hoisted(() => ({
+  ensureConnected: vi.fn(),
   redisScanKeysBatch: vi.fn(),
+  redisScanValues: vi.fn(),
   redisGetValue: vi.fn(),
   redisSetString: vi.fn(),
   redisJsonSet: vi.fn(),
@@ -34,6 +36,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/backend/api", () => ({
   redisScanKeysBatch: mocks.redisScanKeysBatch,
+  redisScanValues: mocks.redisScanValues,
   redisGetValue: mocks.redisGetValue,
   redisSetString: mocks.redisSetString,
   redisJsonSet: mocks.redisJsonSet,
@@ -53,7 +56,7 @@ vi.mock("@/lib/backend/api", () => ({
 
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
-    ensureConnected: vi.fn().mockResolvedValue(undefined),
+    ensureConnected: mocks.ensureConnected,
     getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
@@ -276,6 +279,45 @@ function mountBrowser() {
   return host;
 }
 
+function mountKeptAliveBrowser(onError?: (error: unknown) => void) {
+  const active = ref(true);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const app = createApp(
+    defineComponent({
+      setup() {
+        return () =>
+          h(KeepAlive, null, {
+            default: () => (active.value ? h(RedisKeyBrowser, { connectionId: "connection", db: 0, blockDangerousRedisCommands: false }) : null),
+          });
+      },
+    }),
+  );
+  if (onError) app.config.errorHandler = onError;
+  app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+  app.mount(host);
+  mountedApps.push({ unmount: () => app.unmount(), host });
+  return {
+    host,
+    async deactivate() {
+      active.value = false;
+      await settleThoroughly();
+    },
+    async activate() {
+      active.value = true;
+      await settleThoroughly();
+    },
+  };
+}
+
+function unmountBrowser(host: HTMLElement) {
+  const index = mountedApps.findIndex((mounted) => mounted.host === host);
+  expect(index, "mounted browser").toBeGreaterThanOrEqual(0);
+  const [mounted] = mountedApps.splice(index, 1);
+  mounted!.unmount();
+  host.remove();
+}
+
 async function settle() {
   await nextTick();
   await Promise.resolve();
@@ -284,13 +326,25 @@ async function settle() {
   await nextTick();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 function resetApiMocks() {
   vi.clearAllMocks();
+  mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.redisScanPageSize = 100;
   mocks.infiniteScroll = true;
   mocks.queryResultMaxRowsEnabled = true;
   mocks.queryResultMaxRows = 5000;
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
+  mocks.redisScanValues.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });
 }
 
 // A short, un-collapsed tree (a real DB has millions of keys folded into a
@@ -449,6 +503,308 @@ async function settleThoroughly(rounds = 40) {
 function keyInfo(rawKey: string): RedisKeyInfo {
   return { key_display: rawKey, key_raw: rawKey, key_type: "string", ttl: -1, size: 0, value_preview: "" };
 }
+
+async function searchByValue(host: HTMLElement, mode: "value" | "all" = "value") {
+  const modeIndex = mode === "value" ? 1 : 2;
+  host.querySelectorAll<HTMLButtonElement>(".redis-search-mode-button")[modeIndex]?.click();
+  await settle();
+  const input = host.querySelector<HTMLInputElement>("[data-redis-search-input]");
+  expect(input, "redis search input").toBeDefined();
+  input!.value = "needle";
+  input!.dispatchEvent(new Event("input", { bubbles: true }));
+  await nextTick();
+  input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await settleThoroughly();
+}
+
+function clickLoadMore(host: HTMLElement) {
+  const button = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.loadMoreKeys") && !candidate.disabled);
+  expect(button, "load more button").toBeDefined();
+  button!.click();
+}
+
+function clickFetchAll(host: HTMLElement) {
+  const button = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((candidate) => candidate.textContent?.includes("redis.fetchAllKeys") && !candidate.disabled);
+  expect(button, "fetch all button").toBeDefined();
+  button!.click();
+}
+
+describe("RedisKeyBrowser bounded value search (issue #7779)", () => {
+  it.each([
+    ["value", false],
+    ["all", true],
+  ] as const)("loads only one initial %s page and clamps COUNT", async (mode, searchBoth) => {
+    mocks.redisScanPageSize = 5000;
+    mocks.redisScanValues.mockResolvedValueOnce({ cursor: 41, keys: [], total_keys: 5_000_000 }).mockResolvedValue({ cursor: 0, keys: [keyInfo("unexpected")], total_keys: 0 });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    await searchByValue(host, mode);
+
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+    expect(mocks.redisScanValues).toHaveBeenLastCalledWith("connection", 0, 0, "*", "needle", 100, searchBoth);
+    expect(host.textContent).toContain("redis.loadMoreKeys");
+  });
+
+  it("advances exactly one page per Load more or real scroll and preserves the opaque cursor", async () => {
+    stubNonOverflowingViewport();
+    mocks.redisScanPageSize = 1000;
+    mocks.redisScanValues.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 41, keys: [keyInfo("match")], total_keys: 5_000_000 });
+      if (cursor === 41) return Promise.resolve({ cursor: 73, keys: [keyInfo("match")], total_keys: 0 });
+      return Promise.resolve({ cursor: 99, keys: [keyInfo("sparse")], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    await searchByValue(host);
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("resize"));
+    await settleThoroughly();
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+
+    clickLoadMore(host);
+    await settleThoroughly();
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(2);
+    expect(mocks.redisScanValues.mock.calls[1]?.[2]).toBe(41);
+
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(mocks.redisScanValues).toHaveBeenCalledTimes(3));
+    expect(mocks.redisScanValues.mock.calls[2]?.[2]).toBe(73);
+    expect(mocks.redisScanValues.mock.calls.every((call) => (call[5] as number) <= 100)).toBe(true);
+    expect(host.textContent).toContain("sparse");
+  });
+
+  it("keeps explicit Fetch all interruptible by clamping every value page to COUNT 100", async () => {
+    mocks.redisScanPageSize = 10_000;
+    mocks.redisScanValues.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 11, keys: [], total_keys: 5_000_000 });
+      if (cursor === 11) return Promise.resolve({ cursor: 12, keys: [], total_keys: 0 });
+      return Promise.resolve({ cursor: 0, keys: [keyInfo("last")], total_keys: 0 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    await searchByValue(host);
+    clickFetchAll(host);
+    await settleThoroughly();
+
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 11, 12]);
+    expect(mocks.redisScanValues.mock.calls.every((call) => call[5] === 100)).toBe(true);
+  });
+
+  it("does not retry a rejected value continuation", async () => {
+    stubNonOverflowingViewport();
+    mocks.redisScanValues.mockResolvedValueOnce({ cursor: 31, keys: [keyInfo("match")], total_keys: 5_000_000 }).mockRejectedValue(new Error("value scan failed"));
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    await searchByValue(host);
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("scroll"));
+    await vi.waitFor(() => expect(mocks.redisScanValues).toHaveBeenCalledTimes(2));
+    await settleThoroughly();
+
+    expect(mocks.toast).toHaveBeenCalledTimes(1);
+    await settleThoroughly(10);
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("RedisKeyBrowser KeepAlive empty scan pages (issue #7779)", () => {
+  it.each(["value", "all"] as const)("retains an empty %s scan cursor across tab switches", async (mode) => {
+    mocks.infiniteScroll = false;
+    mocks.redisScanValues.mockImplementation((_connectionId: string, _db: number, cursor: number) => {
+      if (cursor === 0) return Promise.resolve({ cursor: 41, keys: [], total_keys: 5_000_000 });
+      if (cursor === 41) return Promise.resolve({ cursor: 73, keys: [], total_keys: 0 });
+      return Promise.resolve({ cursor: 0, keys: [keyInfo("match")], total_keys: 0 });
+    });
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    await searchByValue(browser.host, mode);
+    clickLoadMore(browser.host);
+    await settleThoroughly();
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 41]);
+
+    await browser.deactivate();
+    await browser.activate();
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 41]);
+
+    clickLoadMore(browser.host);
+    await settleThoroughly();
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 41, 73]);
+    expect(browser.host.textContent).toContain("match");
+  });
+
+  it.each(["value", "all"] as const)("starts the edited %s query from zero after pausing its debounce", async (mode) => {
+    mocks.infiniteScroll = false;
+    mocks.redisScanValues.mockImplementation((_connectionId: string, _db: number, _cursor: number, _pattern: string, query: string) => Promise.resolve(query === "needle" ? { cursor: 41, keys: [], total_keys: 5_000_000 } : { cursor: 0, keys: [keyInfo("updated-match")], total_keys: 1 }));
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    await searchByValue(browser.host, mode);
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+
+    const input = browser.host.querySelector<HTMLInputElement>("[data-redis-search-input]")!;
+    input.value = "updated";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    await browser.deactivate();
+    await browser.activate();
+
+    expect(mocks.redisScanValues.mock.calls.map((call) => [call[2], call[4]])).toEqual([
+      [0, "needle"],
+      [0, "updated"],
+    ]);
+    expect(browser.host.textContent).toContain("updated-match");
+  });
+
+  it("keeps the edited query pending when connection recovery finishes while inactive", async () => {
+    mocks.infiniteScroll = false;
+    mocks.redisScanValues.mockImplementation((_connectionId: string, _db: number, _cursor: number, _pattern: string, query: string) => Promise.resolve(query === "needle" ? { cursor: 41, keys: [], total_keys: 5_000_000 } : { cursor: 0, keys: [keyInfo("updated-match")], total_keys: 1 }));
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    await searchByValue(browser.host);
+    const input = browser.host.querySelector<HTMLInputElement>("[data-redis-search-input]")!;
+    input.value = "updated";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    await browser.deactivate();
+
+    const connectionRecovery = deferred<void>();
+    mocks.ensureConnected.mockReturnValueOnce(connectionRecovery.promise);
+    await browser.activate();
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+    await browser.deactivate();
+    connectionRecovery.resolve();
+    await settleThoroughly();
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+
+    await browser.activate();
+    expect(mocks.redisScanValues.mock.calls.map((call) => [call[2], call[4]])).toEqual([
+      [0, "needle"],
+      [0, "updated"],
+    ]);
+    expect(browser.host.textContent).toContain("updated-match");
+  });
+
+  it("retries a failed refresh on activation even when the previous empty page had more keys", async () => {
+    const onError = vi.fn();
+    const failure = new Error("refresh failed");
+    mocks.infiniteScroll = false;
+    mocks.redisScanValues
+      .mockResolvedValueOnce({ cursor: 41, keys: [], total_keys: 5_000_000 })
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValue({ cursor: 0, keys: [keyInfo("recovered")], total_keys: 1 });
+    const browser = mountKeptAliveBrowser(onError);
+    await settleThoroughly();
+    await searchByValue(browser.host);
+
+    const refresh = Array.from(browser.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
+    expect(refresh, "refresh button").toBeDefined();
+    refresh!.click();
+    await settleThoroughly();
+    expect(onError).toHaveBeenCalledWith(failure, expect.anything(), expect.anything());
+
+    await browser.deactivate();
+    await browser.activate();
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 0, 0]);
+    expect(browser.host.textContent).toContain("recovered");
+  });
+
+  it("retries an interrupted refresh without accepting its late empty page", async () => {
+    const pending = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.infiniteScroll = false;
+    mocks.redisScanValues
+      .mockResolvedValueOnce({ cursor: 41, keys: [], total_keys: 5_000_000 })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue({ cursor: 0, keys: [keyInfo("recovered")], total_keys: 1 });
+    const browser = mountKeptAliveBrowser();
+    await settleThoroughly();
+    await searchByValue(browser.host);
+
+    const refresh = Array.from(browser.host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
+    expect(refresh, "refresh button").toBeDefined();
+    refresh!.click();
+    await settleThoroughly();
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(2);
+
+    await browser.deactivate();
+    pending.resolve({ cursor: 91, keys: [], total_keys: 0 });
+    await settleThoroughly();
+    await browser.activate();
+    expect(mocks.redisScanValues.mock.calls.map((call) => call[2])).toEqual([0, 0, 0]);
+    expect(browser.host.textContent).toContain("recovered");
+  });
+});
+
+describe("RedisKeyBrowser continuation ownership (issue #7779)", () => {
+  it("disables refresh while the current page is loading", async () => {
+    const pending = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.redisScanKeysBatch.mockReturnValue(pending.promise);
+
+    const host = mountBrowser();
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1));
+    const refresh = Array.from(host.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.className.includes("h-6 w-6") && !button.hasAttribute("title"));
+    expect(refresh, "refresh button").toBeDefined();
+    expect(refresh!.disabled).toBe(true);
+    refresh!.click();
+    await settle();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ cursor: 0, keys: [], total_keys: 0 });
+    await settleThoroughly();
+  });
+
+  it("blocks an old cursor while an Enter-only key pattern is unsubmitted", async () => {
+    stubNonOverflowingViewport();
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("redis-key-scroller") ? 5000 : 0;
+      },
+    });
+    mocks.redisScanKeysBatch.mockImplementation((_connectionId: string, _db: number, _cursor: number, pattern: string) => {
+      if (pattern === "*") return Promise.resolve({ cursor: 41, keys: [keyInfo("seed")], total_keys: 5_000_000 });
+      return Promise.resolve({ cursor: 0, keys: [keyInfo("new")], total_keys: 1 });
+    });
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+    const input = host.querySelector<HTMLInputElement>("[data-redis-search-input]")!;
+    input.value = "new";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("resize"));
+    host.querySelector(".redis-key-scroller")?.dispatchEvent(new Event("scroll"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settleThoroughly();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await vi.waitFor(() => expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2));
+    expect(mocks.redisScanKeysBatch.mock.calls[1]?.slice(2, 4)).toEqual([0, "new"]);
+  });
+
+  it("discards a late value page after unmount without scheduling a successor", async () => {
+    const pending = deferred<{ cursor: number; keys: RedisKeyInfo[]; total_keys: number }>();
+    mocks.redisScanValues.mockReturnValue(pending.promise);
+
+    const host = mountBrowser();
+    await settleThoroughly();
+    await searchByValue(host);
+    await vi.waitFor(() => expect(mocks.redisScanValues).toHaveBeenCalledTimes(1));
+
+    mocks.updateRedisDbKeyStats.mockClear();
+    unmountBrowser(host);
+    pending.resolve({ cursor: 91, keys: [keyInfo("stale")], total_keys: 5_000_000 });
+    await settleThoroughly();
+
+    expect(mocks.redisScanValues).toHaveBeenCalledTimes(1);
+    expect(mocks.updateRedisDbKeyStats).not.toHaveBeenCalled();
+  });
+});
 
 // `iterations` (aka `max_iterations`) is the 6th positional arg the frontend
 // sends to `redisScanKeysBatch` — the same unit the backend spends as real

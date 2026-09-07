@@ -78,8 +78,9 @@ vi.mock("@/components/layout/QueryResultSurface.vue", () => ({
 
 import SqlEditorWorkspace from "../SqlEditorWorkspace.vue";
 import { useQueryStore } from "@/stores/queryStore";
+import type { QueryTab } from "@/types/database";
 
-function tab(id: string) {
+function tab(id: string): QueryTab {
   return {
     id,
     title: id,
@@ -87,10 +88,12 @@ function tab(id: string) {
     database: "db",
     sql: "SELECT 1",
     mode: "query",
-  } as const;
+    isExecuting: false,
+    result: { columns: ["id"], rows: [], affected_rows: 0, execution_time_ms: 1 },
+  };
 }
 
-function dataTab(id: string) {
+function dataTab(id: string): QueryTab {
   return { ...tab(id), mode: "data" };
 }
 
@@ -104,8 +107,42 @@ describe("SqlEditorWorkspace mount contract", () => {
   let pinia: ReturnType<typeof createPinia>;
   let i18n: ReturnType<typeof createI18n>;
 
+  function mountOutputWorkspace(tabs: QueryTab[]) {
+    const store = useQueryStore();
+    store.tabs = tabs;
+    store.activeTabId = tabs[0]!.id;
+    store.groups = [{ id: "g1", tabIds: tabs.map((item) => item.id), activeTabId: tabs[0]!.id }];
+    store.focusedGroupId = "g1";
+    store.sizes = [100];
+    const host = createHost();
+    const app = createApp(SqlEditorWorkspace, {
+      activeTab: tabs[0]!,
+      activeConnection: undefined,
+      executableSql: "SELECT 1",
+      activeOutputView: "result",
+      formatSqlRequest: null,
+      compressSqlRequest: null,
+      selectedSql: "",
+      cursorPos: 0,
+      blockDangerousRedisCommands: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    const vm = app.mount(host) as unknown as { toggleResultsPane: () => boolean };
+    return {
+      store,
+      host,
+      vm,
+      cleanup: () => {
+        app.unmount();
+        host.remove();
+      },
+    };
+  }
+
   beforeEach(() => {
     document.body.innerHTML = "";
+    localStorage.removeItem("dbx-shared-results-pane-size");
     editorPreviewCalls.length = 0;
     editorFocusCalls.length = 0;
     groupHandleModRCalls.length = 0;
@@ -119,6 +156,89 @@ describe("SqlEditorWorkspace mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it("gives an idle query the full editor pane without a result surface or re-show button", async () => {
+    const { host, vm, cleanup } = mountOutputWorkspace([{ ...tab("idle"), result: undefined }]);
+    await nextTick();
+
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(host.querySelector('[aria-label="editor.showResultsPane"]')).toBeNull();
+    expect(host.querySelector(".result-pane-collapsed")).not.toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("100");
+    expect(vm.toggleResultsPane()).toBe(false);
+    cleanup();
+  });
+
+  it("shows arriving results and hides or restores them within a single render tick", async () => {
+    const { store, host, vm, cleanup } = mountOutputWorkspace([{ ...tab("idle"), result: undefined }]);
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+
+    store.tabs[0]!.result = tab("result").result;
+    await nextTick();
+    expect(host.querySelector('[data-test="result-surface"]')).not.toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("68");
+    expect(host.querySelector('[class*="result-surface-enter"]')).toBeNull();
+
+    expect(vm.toggleResultsPane()).toBe(true);
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("100");
+
+    expect(vm.toggleResultsPane()).toBe(true);
+    await nextTick();
+    expect(host.querySelector('[data-test="result-surface"]')).not.toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("68");
+    expect(host.querySelector('[class*="result-surface-enter"]')).toBeNull();
+    cleanup();
+  });
+
+  it.each(["isExecuting", "isExplaining"] as const)("opens and reopens output on %s and removes it after the last output is cleared", async (runningKey) => {
+    const { store, host, vm, cleanup } = mountOutputWorkspace([{ ...tab("idle"), result: undefined }]);
+    const active = store.tabs[0]!;
+    active[runningKey] = true;
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("68");
+
+    active.result = tab("result").result;
+    active[runningKey] = false;
+    await nextTick();
+    expect(vm.toggleResultsPane()).toBe(true);
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(host.querySelector('[aria-label="editor.showResultsPane"]')).not.toBeNull();
+
+    active[runningKey] = true;
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+
+    active[runningKey] = false;
+    active.result = undefined;
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(host.querySelector('[aria-label="editor.showResultsPane"]')).toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("100");
+    cleanup();
+  });
+
+  it("preserves the saved result height across result and idle query tabs", async () => {
+    localStorage.setItem("dbx-shared-results-pane-size", "45");
+    const { store, host, cleanup } = mountOutputWorkspace([tab("result"), { ...tab("idle"), result: undefined }]);
+    await nextTick();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("55");
+
+    store.activeTabId = "idle";
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("100");
+
+    store.activeTabId = "result";
+    await nextTick();
+    expect(host.querySelector("[data-shared-result-surface]")).not.toBeNull();
+    expect(host.querySelector(".pane-stub")?.getAttribute("size")).toBe("55");
+    cleanup();
   });
 
   it("renders one editor group per store group and binds the shared result to the global active tab", async () => {
@@ -232,9 +352,6 @@ describe("SqlEditorWorkspace mount contract", () => {
 
     vm.toggleResultsPane();
     await nextTick();
-    // Wait out the leave transition frame before asserting the unmount.
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
     expect(host.querySelector('[data-test="result-surface"]')).toBeNull();
 
     app.unmount();
@@ -341,10 +458,6 @@ describe("SqlEditorWorkspace mount contract", () => {
 
     store.activeTabId = "tab-data";
     await nextTick();
-    // The leave transition keeps the surface in the DOM for one more frame
-    // before unmounting it (CSS durations collapse to zero in the test env).
-    await new Promise((resolve) => setTimeout(resolve, 30));
-
     expect(host.querySelector("[data-shared-result-surface]")).toBeNull();
     // Outer editor pane + always-mounted result pane (collapsed to size 0)
     // + one pane per group.

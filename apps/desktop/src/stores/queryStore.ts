@@ -41,6 +41,7 @@ import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/table/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { isDataTabMetadataLifecycleStale } from "@/lib/sidebar/dataTabOpenPolicy";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
+import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { getCachedTableMetadata, loadTableColumns, loadTableIndexes, loadTableMetadata, tableMetadataToDataTabMeta, updateCachedTableMetadataType, type TableMetadataRequest } from "@/lib/metadata/tableMetadataCache";
 import { MetadataTaskLimiter } from "@/lib/metadata/metadataTaskLimiter";
@@ -149,6 +150,7 @@ interface BuildQueryResultExportRequestOptions {
   includeSqlSheet?: boolean;
   exportTableName?: string;
   exportColumnTypes?: Array<string | null | undefined>;
+  insertMode?: SqlInsertMode;
 }
 
 interface OpenSavedSqlOptions {
@@ -1460,6 +1462,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEstimatedBytes = undefined;
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
+    tab.queryWriteTargets = undefined;
     tab.resultColumnComments = undefined;
     tab.queryDisplaySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -1532,6 +1535,7 @@ export const useQueryStore = defineStore("query", () => {
     run.resultEstimatedBytes = undefined;
     run.queryAnalysis = undefined;
     run.querySourceColumns = undefined;
+    run.queryWriteTargets = undefined;
     run.resultColumnComments = undefined;
     run.queryDisplaySourceColumns = undefined;
     run.queryEditabilityReason = undefined;
@@ -1576,6 +1580,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultEvicted = run.resultEvicted;
     tab.queryAnalysis = run.queryAnalysis;
     tab.querySourceColumns = run.querySourceColumns;
+    tab.queryWriteTargets = run.queryWriteTargets;
     tab.resultColumnComments = run.resultColumnComments;
     tab.queryDisplaySourceColumns = run.queryDisplaySourceColumns;
     tab.queryEditabilityReason = run.queryEditabilityReason;
@@ -1816,6 +1821,7 @@ export const useQueryStore = defineStore("query", () => {
         activeResultRunId: run.id,
         queryAnalysis: run.queryAnalysis,
         querySourceColumns: run.querySourceColumns,
+        queryWriteTargets: run.queryWriteTargets,
         resultColumnComments: run.resultColumnComments,
         queryDisplaySourceColumns: run.queryDisplaySourceColumns,
         queryEditabilityReason: run.queryEditabilityReason,
@@ -1897,6 +1903,7 @@ export const useQueryStore = defineStore("query", () => {
       resultEvicted: tab.resultEvicted,
       queryAnalysis: tab.queryAnalysis,
       querySourceColumns: tab.querySourceColumns,
+      queryWriteTargets: tab.queryWriteTargets,
       resultColumnComments: tab.resultColumnComments,
       queryDisplaySourceColumns: tab.queryDisplaySourceColumns,
       queryEditabilityReason: tab.queryEditabilityReason,
@@ -1997,6 +2004,7 @@ export const useQueryStore = defineStore("query", () => {
       resultEvicted: tab.resultEvicted,
       queryAnalysis: tab.queryAnalysis,
       querySourceColumns: tab.querySourceColumns,
+      queryWriteTargets: tab.queryWriteTargets,
       resultColumnComments: tab.resultColumnComments,
       queryDisplaySourceColumns: tab.queryDisplaySourceColumns,
       queryEditabilityReason: tab.queryEditabilityReason,
@@ -2242,6 +2250,7 @@ export const useQueryStore = defineStore("query", () => {
       structureTableName: t.structureTableName,
       objectBrowser: t.objectBrowser,
       objectSource: t.objectSource,
+      sourceView: t.sourceView,
       tableMeta: t.tableMeta,
       mongoEditTarget: t.mongoEditTarget,
       resultEvicted: t.resultEvicted,
@@ -2428,10 +2437,20 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || "") && (tab.catalog || "") === (catalog || ""));
   }
 
-  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string, catalog?: string, options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean } = {}) {
+  function createTab(
+    connectionId: string,
+    database: string,
+    title?: string,
+    mode: QueryTab["mode"] = "query",
+    schema?: string,
+    initialSql?: string,
+    catalog?: string,
+    options: { forceNew?: boolean; activate?: boolean; forceWordWrap?: boolean; insertAfterActive?: boolean; sourceView?: boolean } = {},
+  ) {
     if (title && !options.forceNew) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema, catalog);
       if (existing) {
+        if (options.sourceView) existing.sourceView = true;
         switchTab(existing.id);
         return existing.id;
       }
@@ -2444,6 +2463,7 @@ export const useQueryStore = defineStore("query", () => {
       title: title || `query_${tabs.value.length + 1}`,
       customTitle: mode === "query" && title ? true : undefined,
       forceWordWrap: options.forceWordWrap,
+      sourceView: options.sourceView,
       connectionId,
       database,
       schema,
@@ -2476,6 +2496,7 @@ export const useQueryStore = defineStore("query", () => {
         (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
     );
     if (existing) {
+      existing.sourceView = true;
       switchTab(existing.id);
       if (!isTabDirty(existing)) {
         updateSql(existing.id, options.sql);
@@ -2484,7 +2505,7 @@ export const useQueryStore = defineStore("query", () => {
       return existing.id;
     }
 
-    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true });
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true, sourceView: true });
     setObjectSource(id, options.objectSource);
     return id;
   }
@@ -2780,6 +2801,29 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "postgres-dashboard",
+    };
+    return registerOpenTab(tab);
+  }
+
+  function openXuguDashboard(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "xugu-dashboard" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: conn?.name ? `${conn.name} - ${t("xuguServerDashboard.title")}` : t("xuguServerDashboard.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "xugu-dashboard",
     };
     return registerOpenTab(tab);
   }
@@ -3657,9 +3701,11 @@ export const useQueryStore = defineStore("query", () => {
       structureDraft: original.structureDraft ? cloneTabDraft(original.structureDraft) : undefined,
       objectBrowser: original.objectBrowser ? { ...original.objectBrowser } : undefined,
       objectSource: original.objectSource ? { ...original.objectSource } : undefined,
+      sourceView: original.sourceView,
       tableMeta: original.tableMeta ? { ...original.tableMeta, columns: [...original.tableMeta.columns], primaryKeys: [...original.tableMeta.primaryKeys] } : undefined,
       queryAnalysis: original.queryAnalysis ? { ...original.queryAnalysis, sources: original.queryAnalysis.sources?.map((source) => ({ ...source })), columns: original.queryAnalysis.columns.map((c) => ({ ...c })) } : undefined,
       querySourceColumns: original.querySourceColumns ? [...original.querySourceColumns] : undefined,
+      queryWriteTargets: original.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),
       resultColumnComments: original.resultColumnComments ? [...original.resultColumnComments] : undefined,
       queryDisplaySourceColumns: original.queryDisplaySourceColumns ? [...original.queryDisplaySourceColumns] : undefined,
       queryEditabilityReason: original.queryEditabilityReason,
@@ -4074,6 +4120,13 @@ export const useQueryStore = defineStore("query", () => {
     const previous = tab.objectBrowser?.viewport;
     if (previous?.scrollTop === viewport.scrollTop && previous.viewMode === viewport.viewMode) return;
     tab.objectBrowser = { ...tab.objectBrowser, viewport };
+  }
+
+  function updateObjectBrowserSearch(id: string, query: string) {
+    const tab = tabs.value.find((t) => t.id === id);
+    if (!tab || tab.mode !== "objects") return;
+    if (tab.objectBrowser?.searchQuery === query) return;
+    tab.objectBrowser = { ...tab.objectBrowser, searchQuery: query };
   }
 
   function updateNacosConfigEditorViewport(connectionId: string, namespace: string, viewport: NacosConfigEditorViewport) {
@@ -4523,7 +4576,7 @@ export const useQueryStore = defineStore("query", () => {
     return producedResult;
   }
 
-  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
+  type QueryMetadataPatch = Pick<QueryTab, "queryAnalysis" | "querySourceColumns" | "queryWriteTargets" | "queryEditabilityReason" | "tableMeta" | "resultColumnComments" | "queryDisplaySourceColumns">;
 
   type LoadedEditableSource = {
     source: EditableQuerySource;
@@ -4612,6 +4665,7 @@ export const useQueryStore = defineStore("query", () => {
   function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
+    tab.queryWriteTargets = patch.queryWriteTargets;
     tab.queryEditabilityReason = patch.queryEditabilityReason;
     tab.mongoEditTarget = undefined;
     tab.tableMeta = patch.tableMeta;
@@ -5127,11 +5181,16 @@ export const useQueryStore = defineStore("query", () => {
       }
 
       if (candidates.length > 1) {
+        const target = candidates[0]!;
         return {
-          queryAnalysis: undefined,
-          querySourceColumns: undefined,
-          queryEditabilityReason: "complex-source",
-          tableMeta: undefined,
+          queryAnalysis: { ...target.analysis, multiSource: true, allowInsert: false, allowDelete: false, allowInsertDelete: false },
+          querySourceColumns: tab.result.columns.map((_, index) => {
+            const owners = candidates.filter((candidate) => candidate.sourceColumns?.[index] !== undefined);
+            return owners.length === 1 ? owners[0]!.sourceColumns![index] : undefined;
+          }),
+          queryWriteTargets: candidates.map((candidate) => ({ tableMeta: candidate.tableMeta, sourceColumns: candidate.sourceColumns! })),
+          queryEditabilityReason: undefined,
+          tableMeta: target.tableMeta,
           resultColumnComments: multiSourceInfo?.comments,
           queryDisplaySourceColumns: multiSourceInfo?.mapping,
         };
@@ -5568,6 +5627,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -5952,6 +6012,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -6019,6 +6080,7 @@ export const useQueryStore = defineStore("query", () => {
           touchResult(current);
           current.queryAnalysis = undefined;
           current.querySourceColumns = undefined;
+          current.queryWriteTargets = undefined;
           current.resultColumnComments = undefined;
           current.queryDisplaySourceColumns = undefined;
           current.queryEditabilityReason = undefined;
@@ -6513,6 +6575,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;
+        current.queryWriteTargets = undefined;
         current.resultColumnComments = undefined;
         current.queryDisplaySourceColumns = undefined;
         current.queryEditabilityReason = undefined;
@@ -7030,6 +7093,7 @@ export const useQueryStore = defineStore("query", () => {
     touchResult(tab, Date.now(), { reuseEstimatedBytes: true });
     tab.queryAnalysis = undefined;
     tab.querySourceColumns = undefined;
+    tab.queryWriteTargets = undefined;
     tab.resultColumnComments = undefined;
     tab.queryDisplaySourceColumns = undefined;
     tab.queryEditabilityReason = undefined;
@@ -7156,6 +7220,7 @@ export const useQueryStore = defineStore("query", () => {
 
     tab.queryAnalysis = snapshot.queryAnalysis;
     tab.querySourceColumns = snapshot.querySourceColumns;
+    tab.queryWriteTargets = snapshot.queryWriteTargets;
     tab.resultColumnComments = snapshot.resultColumnComments;
     tab.queryDisplaySourceColumns = snapshot.queryDisplaySourceColumns;
     tab.queryEditabilityReason = snapshot.queryEditabilityReason;
@@ -7551,6 +7616,7 @@ export const useQueryStore = defineStore("query", () => {
       useAgentCursor,
       filePath: options.filePath,
       format: options.format,
+      ...(options.format === "sql" && options.insertMode ? { insertMode: options.insertMode } : {}),
       includeSqlSheet: options.format === "xlsx" && options.includeSqlSheet === true,
       pageSize: settings.exportBatchSize,
       rowLimit,
@@ -7704,6 +7770,7 @@ export const useQueryStore = defineStore("query", () => {
     updateEditorViewport,
     updateEditorSelection,
     updateObjectBrowserViewport,
+    updateObjectBrowserSearch,
     updateNacosConfigEditorViewport,
     setAutoCommit,
     markManualTransactionDirty,
@@ -7720,6 +7787,7 @@ export const useQueryStore = defineStore("query", () => {
     openSqlServerActivityTrace,
     openMysqlDashboard,
     openPostgresDashboard,
+    openXuguDashboard,
     openNacosDashboard,
     openDamengUsers,
     openDamengRoles,

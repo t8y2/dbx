@@ -2362,6 +2362,76 @@ func TestRewriteOracleSTGeometrySkipsSetQueries(t *testing.T) {
 	}
 }
 
+func TestRewriteOracleSDOGeometrySelectStar(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT * FROM TEST_GEOM`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "SDO_GEOMETRY", DataTypeOwner: "PUBLIC"},
+				{Name: "NOTE", DataType: "VARCHAR2"},
+			}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT "ID", SDO_UTIL.TO_WKTGEOMETRY("GEOM") AS "GEOM", "NOTE" FROM TEST_GEOM`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSDOGeometryExplicitColumn(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.GEOM AS shape FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{{Name: "GEOM", DataType: "SDO_GEOMETRY", DataTypeOwner: "PUBLIC"}}, nil
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT SDO_UTIL.TO_WKTGEOMETRY(t."GEOM") AS shape FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestRewriteOracleSDOGeometryAsDeferredValue(t *testing.T) {
+	sqlText, err := rewriteOracleSelectSQL(
+		`SELECT t.ID, t.GEOM FROM TEST_GEOM t`,
+		func(schema, table string) ([]oracleColumnMeta, error) {
+			return []oracleColumnMeta{
+				{Name: "ID", DataType: "NUMBER"},
+				{Name: "GEOM", DataType: "SDO_GEOMETRY", DataTypeOwner: "PUBLIC"},
+			}, nil
+		},
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `SELECT t.ID, CASE WHEN t."GEOM" IS NULL THEN NULL ELSE '<SDO_GEOMETRY>' END AS "GEOM", CASE WHEN t."GEOM" IS NULL THEN NULL ELSE 'D:1' END AS "__DBX_LARGE_VALUE_BYTES_C_1" FROM TEST_GEOM t`
+	if sqlText != want {
+		t.Fatalf("rewriteOracleSelectSQL() = %s, want %s", sqlText, want)
+	}
+}
+
+func TestOracleSDOGeometryDoesNotRequireOwner(t *testing.T) {
+	if !isOracleSDOGeometry(oracleColumnMeta{DataType: "SDO_GEOMETRY", DataTypeOwner: "PUBLIC"}) {
+		t.Fatal("expected SDO_GEOMETRY via PUBLIC synonym to be recognized")
+	}
+	if !isOracleSDOGeometry(oracleColumnMeta{DataType: "sdo_geometry"}) {
+		t.Fatal("expected SDO_GEOMETRY to be recognized regardless of owner or case")
+	}
+	if isOracleSDOGeometry(oracleColumnMeta{DataType: "VARCHAR2"}) {
+		t.Fatal("unexpected rewrite for an unrelated data type")
+	}
+}
+
 func TestIsOracleExtprocAgentFailure(t *testing.T) {
 	cases := []struct {
 		name string

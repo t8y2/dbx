@@ -61,7 +61,7 @@ datastax-java-driver {
 		Host:     "url.example.com",
 		Database: "url_keyspace",
 		Username: "url-user",
-		Password: "url-password",
+		Password: testPlaceholderPassword(),
 		URLParams: url.Values{
 			"configfile":        []string{configPath},
 			"requesttimeout":    []string{"30s"},

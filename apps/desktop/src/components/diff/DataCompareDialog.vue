@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -87,6 +87,7 @@ const showModified = ref(true);
 const activeSessionId = ref<string | null>(props.sessionId ?? null);
 let syncPlanRequestId = 0;
 let initializingPrefill = false;
+let initializingPrefillGeneration = 0;
 let componentUnmounted = false;
 let shownSessionError = "";
 
@@ -201,8 +202,9 @@ function comparisonEndpointLabel(connectionId: string, database: string, schema:
   return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
 }
 
-function restoreDataCompareSession(session: DataCompareSession): void {
+async function restoreDataCompareSession(session: DataCompareSession): Promise<void> {
   const config = session.config;
+  const generation = ++initializingPrefillGeneration;
   initializingPrefill = true;
   try {
     sourceConnectionId.value = config.sourceConnectionId;
@@ -229,7 +231,8 @@ function restoreDataCompareSession(session: DataCompareSession): void {
     compareProgressTable.value = session.progress?.table ?? "";
     comparing.value = session.status === "running";
   } finally {
-    initializingPrefill = false;
+    await nextTick();
+    if (generation === initializingPrefillGeneration) initializingPrefill = false;
   }
 }
 
@@ -473,9 +476,9 @@ function buildSyncPlanTables() {
   return buildDataCompareSyncPlanTables(batchResults.value, targetSchema.value);
 }
 
-function updateSyncPlan(nextPlan: DataCompareSyncPlan): void {
-  syncPlan.value = nextPlan;
-  const session = getDataCompareSession(activeSessionId.value);
+function updateSyncPlan(nextPlan: DataCompareSyncPlan, sessionId = activeSessionId.value): void {
+  if (!componentUnmounted) syncPlan.value = nextPlan;
+  const session = getDataCompareSession(sessionId);
   if (session?.status === "completed") {
     session.syncPlan = nextPlan;
     session.batchResults = batchResults.value;
@@ -485,21 +488,22 @@ function updateSyncPlan(nextPlan: DataCompareSyncPlan): void {
 async function rebuildSyncPlan() {
   if (componentUnmounted) return;
   const requestId = ++syncPlanRequestId;
+  const sessionId = activeSessionId.value;
   const tables = buildSyncPlanTables();
   if (tables.length === 0) {
-    updateSyncPlan(emptyDataCompareSyncPlan());
+    updateSyncPlan(emptyDataCompareSyncPlan(), sessionId);
     planningSync.value = false;
     return;
   }
   planningSync.value = true;
   try {
     const plan = await api.buildDataCompareSyncPlan({ tables });
-    if (componentUnmounted || requestId !== syncPlanRequestId) return;
-    updateSyncPlan(plan);
+    if (requestId !== syncPlanRequestId) return;
+    updateSyncPlan(plan, sessionId);
   } catch (e: any) {
-    if (componentUnmounted || requestId !== syncPlanRequestId) return;
-    updateSyncPlan(emptyDataCompareSyncPlan());
-    toast(e?.message || String(e), 5000);
+    if (requestId !== syncPlanRequestId) return;
+    updateSyncPlan(emptyDataCompareSyncPlan(), sessionId);
+    if (!componentUnmounted) toast(e?.message || String(e), 5000);
   } finally {
     if (!componentUnmounted && requestId === syncPlanRequestId) planningSync.value = false;
   }
@@ -725,13 +729,14 @@ watch(
     const session = getDataCompareSession(sessionId);
     if (session) {
       activeSessionId.value = session.id;
-      restoreDataCompareSession(session);
+      await restoreDataCompareSession(session);
       applyDataCompareSession(session);
       return;
     }
 
     activeSessionId.value = null;
     if (props.prefillConnectionId) {
+      const generation = ++initializingPrefillGeneration;
       initializingPrefill = true;
       try {
         sourceConnectionId.value = props.prefillConnectionId;
@@ -746,7 +751,8 @@ watch(
           }
         }
       } finally {
-        initializingPrefill = false;
+        await nextTick();
+        if (generation === initializingPrefillGeneration) initializingPrefill = false;
       }
     }
   },
@@ -764,7 +770,6 @@ watch(
 );
 onBeforeUnmount(() => {
   componentUnmounted = true;
-  syncPlanRequestId++;
 });
 </script>
 

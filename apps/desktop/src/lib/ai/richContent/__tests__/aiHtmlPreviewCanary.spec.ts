@@ -7,7 +7,7 @@ import { AI_HTML_PREVIEW_CSP, buildSafeHtmlPreview } from "@/lib/ai/richContent/
 // survive verbatim into the wrapped document (a canary that was stripped proves
 // nothing) — the CSP shell, not content filtering, is what neutralizes it.
 const canaryVectors = [
-  '<script>document.title = "SCRIPT-RAN"; document.body.style.background = "red";</script>',
+  '<script>document.title = "SCRIPT-RAN"; document.body.style.background = "red"; fetch("https://canary.invalid/fetch");</script>',
   '<img src="https://canary.invalid/remote.png" alt="remote">',
   '<img src="https://canary.invalid/onerror.png" onerror="document.title = \'ONERROR-RAN\'" alt="onerror">',
   '<form action="https://canary.invalid/submit"><input type="submit" value="submit"></form>',

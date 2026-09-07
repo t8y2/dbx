@@ -1349,13 +1349,17 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         if (sampleNativeMemory) void appendNativeProcessMemoryLog(`export-sql-${stage}`, { exportId });
       };
 
-      logExportStage("start", {
-        context: context.value,
-        databaseType: databaseType.value,
-        exportAllRows: rowIds === undefined,
-        requestedRowCount: rowIds?.length ?? null,
-        hasCompleteLocalResult: hasCompleteLocalResult?.value ?? null,
-      }, true);
+      logExportStage(
+        "start",
+        {
+          context: context.value,
+          databaseType: databaseType.value,
+          exportAllRows: rowIds === undefined,
+          requestedRowCount: rowIds?.length ?? null,
+          hasCompleteLocalResult: hasCompleteLocalResult?.value ?? null,
+        },
+        true,
+      );
       const insertMode = await showSqlInsertModeDialog();
       if (insertMode === null) {
         logExportStage("cancelled", { stage: "insert-mode-dialog" });
@@ -1388,7 +1392,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           {
             columns: result.columns.length,
             rows: result.rows.length,
-            values: summarizeExportRows(result.rows),
+            values: isDebugLoggingEnabled() ? summarizeExportRows(result.rows) : undefined,
           },
           true,
         );
@@ -1398,7 +1402,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         logExportStage("row-remap-done", {
           columns: exportData.columns.length,
           rows: exportData.rows.length,
-          values: summarizeExportRows(exportData.rows),
+          values: isDebugLoggingEnabled() ? summarizeExportRows(exportData.rows) : undefined,
         });
 
         logExportStage("sql-build-start");

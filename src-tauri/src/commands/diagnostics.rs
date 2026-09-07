@@ -12,12 +12,11 @@ pub struct ProcessMemoryInfo {
 
 #[tauri::command]
 pub fn get_process_memory_info() -> ProcessMemoryInfo {
+    let pid = sysinfo::Pid::from_u32(std::process::id());
     let process_refresh = ProcessRefreshKind::new().with_memory();
-    let mut system = System::new_with_specifics(
-        RefreshKind::new().with_memory(MemoryRefreshKind::new()).with_processes(process_refresh),
-    );
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
-    let process = system.process(sysinfo::Pid::from(std::process::id() as usize));
+    let mut system = System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::new()));
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, process_refresh);
+    let process = system.process(pid);
 
     ProcessMemoryInfo {
         resident_bytes: process.map(|value| value.memory()).unwrap_or_default(),

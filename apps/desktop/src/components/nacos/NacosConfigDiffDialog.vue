@@ -70,17 +70,17 @@ const dialogOpen = computed({
 
 function inlineRowClass(type: NacosInlineDiffRow["type"]) {
   return {
-    "bg-red-500/20 text-red-50": type === "delete",
-    "bg-emerald-500/18 text-emerald-50": type === "insert",
-    "text-zinc-200": type === "equal",
+    "bg-red-500/20 text-red-700 dark:text-red-50": type === "delete",
+    "bg-emerald-500/18 text-emerald-700 dark:text-emerald-50": type === "insert",
+    "text-foreground": type === "equal",
   };
 }
 
 function inlineGutterClass(type: NacosInlineDiffRow["type"]) {
   return {
-    "text-red-300": type === "delete",
-    "text-emerald-300": type === "insert",
-    "text-zinc-500": type === "equal",
+    "text-red-600 dark:text-red-300": type === "delete",
+    "text-emerald-600 dark:text-emerald-300": type === "insert",
+    "text-muted-foreground": type === "equal",
   };
 }
 
@@ -214,9 +214,9 @@ onBeforeUnmount(() => detachScrollSync?.());
       <div v-else class="min-h-0 flex-1 bg-background px-5 py-4">
         <section class="flex h-full min-h-0 flex-col">
           <div class="mb-2 text-sm font-medium text-foreground">{{ t("nacos.inlineCompare") }}</div>
-          <div class="min-h-0 flex-1 overflow-auto rounded-sm border border-zinc-700 bg-[#1f1f1f] font-mono text-[13px] leading-6 text-zinc-200">
+          <div class="min-h-0 flex-1 overflow-auto rounded-sm border bg-background font-mono text-[13px] leading-6 text-foreground">
             <div v-for="row in inlineRows" :key="row.id" class="grid min-w-max grid-cols-[52px_22px_minmax(96rem,1fr)]" :class="inlineRowClass(row.type)">
-              <span class="select-none border-r border-white/8 pr-2 text-right" :class="inlineGutterClass(row.type)">{{ row.lineNumber ?? "" }}</span>
+              <span class="select-none border-r border-border pr-2 text-right" :class="inlineGutterClass(row.type)">{{ row.lineNumber ?? "" }}</span>
               <span class="select-none pl-2" :class="inlineGutterClass(row.type)">{{ inlinePrefix(row.type) }}</span>
               <pre class="whitespace-pre px-2"><template v-for="(segment, index) in row.segments" :key="index"><span :class="inlineRowSegmentClass(row.type, segment.changed)">{{ segment.value }}</span></template></pre>
             </div>

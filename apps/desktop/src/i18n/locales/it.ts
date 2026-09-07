@@ -7586,7 +7586,6 @@ export default withEnglishFallback({
     currentVersionContent: "Versione ufficiale attuale:",
     publishVersionContent: "Contenuto di questa pubblicazione:",
     confirmSaveTitle: "Rivedi modifiche configurazione Nacos",
-    confirmSaveMessage: "Salvare questa modifica? +{added} / -{removed} righe.",
     confirmDeleteTitle: "Elimina configurazione Nacos",
     confirmDeleteMessage: "Questo rimuove la configurazione selezionata da Nacos.",
     confirmInstanceTitle: "Aggiorna istanza Nacos",

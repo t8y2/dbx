@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, useId, watch } from "vue";
-import { Compartment, StateEffect, StateField, type Extension } from "@codemirror/state";
-import { StreamLanguage, ensureSyntaxTree } from "@codemirror/language";
+import { Compartment, StateEffect, StateField } from "@codemirror/state";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { Decoration, EditorView } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -59,7 +59,7 @@ import { executeWithProductionContextGuard } from "@/lib/database/productionExec
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { validateNacosConfigContent, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
-import { resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
+import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
@@ -504,37 +504,6 @@ function currentCustomThemeColors() {
   return activeTheme?.colors ?? settings.customThemeColors;
 }
 
-async function configLanguageExtension(format: string): Promise<Extension[]> {
-  switch (format) {
-    case "json": {
-      const { json } = await import("@codemirror/lang-json");
-      return [json()];
-    }
-    case "yaml": {
-      const { yaml } = await import("@codemirror/lang-yaml");
-      return [yaml()];
-    }
-    case "xml": {
-      const { xml } = await import("@codemirror/lang-xml");
-      return [xml()];
-    }
-    case "html": {
-      const { html } = await import("@codemirror/lang-html");
-      return [html({ matchClosingTags: false })];
-    }
-    case "properties": {
-      const { properties } = await import("@codemirror/legacy-modes/mode/properties");
-      return [StreamLanguage.define(properties)];
-    }
-    case "toml": {
-      const { toml } = await import("@codemirror/legacy-modes/mode/toml");
-      return [StreamLanguage.define(toml)];
-    }
-    default:
-      return [];
-  }
-}
-
 function configValidationHighlightExtension() {
   const decorationsFor = (state: import("@codemirror/state").EditorState, diagnostics: NacosConfigDiagnostic[]) => {
     const ranges = diagnostics
@@ -580,7 +549,7 @@ async function mountConfigEditor() {
     import("codemirror"),
     import("@codemirror/commands"),
     import("@codemirror/search"),
-    configLanguageExtension(format),
+    loadNacosConfigLanguage(format),
   ]);
   const editorSettings = settingsStore.editorSettings;
   configEditorFontSize.value = clampEditorFontSize(editorSettings.fontSize);

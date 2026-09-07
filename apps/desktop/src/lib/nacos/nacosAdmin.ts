@@ -565,13 +565,6 @@ export function createNacosSaveAsCopy(item: NacosConfigItem): NacosConfigItem {
   };
 }
 
-export interface NacosDiffSummary {
-  changed: boolean;
-  addedLines: number;
-  removedLines: number;
-  preview: string;
-}
-
 export type NacosDiffLineType = "equal" | "delete" | "insert" | "modify" | "padding";
 
 export interface NacosInlineSegment {
@@ -597,28 +590,6 @@ export interface NacosInlineDiffRow {
   content: string;
   type: Exclude<NacosDiffLineType, "modify" | "padding">;
   segments: NacosInlineSegment[];
-}
-
-export function summarizeNacosConfigDiff(before: string, after: string, maxPreviewLines = 40): NacosDiffSummary {
-  const changes = diffArrays(splitDiffLines(before), splitDiffLines(after));
-  const lines: string[] = [];
-  let addedLines = 0;
-  let removedLines = 0;
-
-  for (const change of changes) {
-    if (!change.added && !change.removed) continue;
-    const prefix = change.added ? "+" : "-";
-    for (const line of change.value) {
-      if (change.added) addedLines += 1;
-      else removedLines += 1;
-      if (lines.length < maxPreviewLines) lines.push(`${prefix} ${line}`);
-    }
-  }
-
-  const changed = addedLines > 0 || removedLines > 0;
-  if (!changed) return { changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." };
-  if (lines.length < addedLines + removedLines) lines.push("...");
-  return { changed: true, addedLines, removedLines, preview: lines.join("\n") };
 }
 
 function normalizeNacosDiffText(value: string): string {

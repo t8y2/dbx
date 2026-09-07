@@ -6890,7 +6890,6 @@ export default withEnglishFallback({
     currentVersionContent: "目前正式版本內容：",
     publishVersionContent: "本次發布內容：",
     confirmSaveTitle: "確認儲存 Nacos 配置",
-    confirmSaveMessage: "是否儲存這次配置變更？新增 {added} 行，刪除 {removed} 行。",
     confirmDeleteTitle: "刪除 Nacos 配置",
     confirmDeleteMessage: "此操作會從 Nacos 刪除所選配置。",
     confirmInstanceTitle: "更新 Nacos 實例",

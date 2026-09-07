@@ -9295,7 +9295,6 @@ export default {
     currentVersionContent: "Current official version:",
     publishVersionContent: "This release content:",
     confirmSaveTitle: "Review Nacos config changes",
-    confirmSaveMessage: "Save this config change? +{added} / -{removed} changed lines.",
     confirmDeleteTitle: "Delete Nacos config",
     confirmDeleteMessage: "This removes the selected config from Nacos.",
     confirmInstanceTitle: "Update Nacos instance",

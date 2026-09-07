@@ -9274,7 +9274,6 @@ export default withEnglishFallback({
     currentVersionContent: "当前正式版本内容：",
     publishVersionContent: "本次发布内容：",
     confirmSaveTitle: "确认保存 Nacos 配置",
-    confirmSaveMessage: "是否保存这次配置变更？新增 {added} 行，删除 {removed} 行。",
     confirmDeleteTitle: "删除 Nacos 配置",
     confirmDeleteMessage: "该操作会从 Nacos 删除所选配置。",
     confirmInstanceTitle: "更新 Nacos 实例",

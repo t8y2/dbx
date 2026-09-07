@@ -8395,7 +8395,6 @@ export default withEnglishFallback({
     currentVersionContent: "현재 공식 버전:",
     publishVersionContent: "이번 릴리스 내용:",
     confirmSaveTitle: "Nacos 구성 변경 검토",
-    confirmSaveMessage: "이 구성 변경을 저장하시겠습니까? +{added} / -{removed}줄 변경.",
     confirmDeleteTitle: "Nacos 구성 삭제",
     confirmDeleteMessage: "선택한 구성을 Nacos에서 제거합니다.",
     confirmInstanceTitle: "Nacos 인스턴스 업데이트",

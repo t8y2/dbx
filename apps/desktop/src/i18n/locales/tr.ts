@@ -9190,7 +9190,6 @@ export default withEnglishFallback({
     currentVersionContent: "Geçerli resmî sürüm:",
     publishVersionContent: "Bu yayının içeriği:",
     confirmSaveTitle: "Nacos yapılandırma değişikliklerini incele",
-    confirmSaveMessage: "Bu yapılandırma değişikliği kaydedilsin mi? +{added} / -{removed} satır değişti.",
     confirmDeleteTitle: "Nacos yapılandırmasını sil",
     confirmDeleteMessage: "Bu, seçili yapılandırmayı Nacos'tan kaldırır.",
     confirmInstanceTitle: "Nacos örneğini güncelle",

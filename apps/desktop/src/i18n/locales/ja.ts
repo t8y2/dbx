@@ -7625,7 +7625,6 @@ export default withEnglishFallback({
     currentVersionContent: "現在の正式バージョン：",
     publishVersionContent: "今回の公開内容：",
     confirmSaveTitle: "Nacos設定の変更を確認",
-    confirmSaveMessage: "この設定変更を保存しますか？ +{added} / -{removed} 行。",
     confirmDeleteTitle: "Nacos設定を削除",
     confirmDeleteMessage: "選択した設定をNacosから削除します。",
     confirmInstanceTitle: "Nacosインスタンスを更新",

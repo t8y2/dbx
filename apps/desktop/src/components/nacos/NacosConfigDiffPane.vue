@@ -147,7 +147,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="host" class="nacos-config-diff-pane h-full min-h-0 overflow-hidden rounded-sm border border-zinc-700 bg-[#1f1f1f] text-[13px] leading-6 text-zinc-200" />
+  <div ref="host" class="nacos-config-diff-pane h-full min-h-0 overflow-hidden rounded-sm border bg-background text-[13px] leading-6 text-foreground" />
 </template>
 
 <style>
@@ -158,6 +158,9 @@ onBeforeUnmount(() => {
   background: rgb(22 163 74 / 0.2);
 }
 .nacos-config-diff-pane .nacos-diff-line-padding {
+  background: rgb(113 113 122 / 0.15);
+}
+.dark .nacos-config-diff-pane .nacos-diff-line-padding {
   background: rgb(24 24 27 / 0.6);
 }
 .nacos-config-diff-pane .nacos-diff-line-active {

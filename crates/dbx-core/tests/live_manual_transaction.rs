@@ -153,6 +153,84 @@ async fn live_postgres_backup_snapshot_streams_after_server_deallocates_statemen
     let _ = std::fs::remove_file(db_path);
 }
 
+#[test]
+#[ignore = "requires DBX_LIVE_MANUAL_TXN_POSTGRES_* env vars pointing at writable PostgreSQL with pgvector"]
+fn live_postgres_backup_snapshot_streams_wide_pgvector_result() {
+    std::thread::Builder::new()
+        .name("dbx-live-pg-wide-vector".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build wide pgvector test runtime")
+                .block_on(live_postgres_backup_snapshot_streams_wide_pgvector_result_inner())
+        })
+        .expect("spawn wide pgvector test thread")
+        .join()
+        .expect("wide pgvector test thread should not panic");
+}
+
+async fn live_postgres_backup_snapshot_streams_wide_pgvector_result_inner() {
+    let mut config = live_config("DBX_LIVE_MANUAL_TXN_POSTGRES", DatabaseType::Postgres, 5432);
+    config.query_timeout_secs = 2;
+    let database = config.database.clone().expect("database");
+    let connection_id = config.id.clone();
+    let (state, db_path) = app_state_with_config(config).await;
+
+    if let Err(error) =
+        execute_sql_statement(&state, &connection_id, &database, "CREATE EXTENSION IF NOT EXISTS vector", None, None)
+            .await
+    {
+        eprintln!("skipping wide pgvector stream regression because the vector extension is unavailable: {error}");
+        let _ = std::fs::remove_file(db_path);
+        return;
+    }
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let schema = format!("dbx_7986_{}", &suffix[..12]);
+    let setup_sql = [
+        format!(r#"CREATE SCHEMA "{schema}""#),
+        format!(r#"CREATE TABLE "{schema}".wide_vector_probe (id int PRIMARY KEY, embedding vector(1536) NOT NULL)"#),
+        format!(
+            r#"INSERT INTO "{schema}".wide_vector_probe (id, embedding)
+               SELECT i, ('[' || array_to_string(array_fill((i % 10)::text, ARRAY[1536]), ',') || ']')::vector
+               FROM generate_series(1, 5000) AS source(i)"#
+        ),
+    ];
+    for sql in setup_sql {
+        execute_sql_statement(&state, &connection_id, &database, &sql, None, None)
+            .await
+            .expect("create wide pgvector stream fixture");
+    }
+
+    let snapshot =
+        begin_database_backup_snapshot_core(&state, &connection_id, &database).await.expect("begin snapshot");
+    let mut rows_seen = 0_u64;
+    let select_sql = format!(r#"SELECT id, embedding FROM "{schema}".wide_vector_probe ORDER BY id"#);
+    let streamed = stream_rows_in_manual_transaction(&state, &snapshot.session_id, &select_sql, 100, |batch| {
+        for row in &batch {
+            assert_eq!(row.len(), 2);
+            assert_eq!(row[1].as_array().map(Vec::len), Some(1536));
+        }
+        rows_seen += batch.len() as u64;
+        Ok(())
+    })
+    .await
+    .expect("stream wide pgvector result through backup snapshot");
+
+    rollback_manual_transaction(&state, &snapshot.session_id).await.expect("rollback snapshot");
+    assert_eq!(streamed, 5000);
+    assert_eq!(rows_seen, 5000);
+
+    execute_sql_statement(&state, &connection_id, &database, &format!(r#"DROP SCHEMA "{schema}" CASCADE"#), None, None)
+        .await
+        .expect("drop wide pgvector stream fixture");
+    let _ = std::fs::remove_file(db_path);
+}
+
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_MANUAL_TXN_POSTGRES_* env vars pointing at writable PostgreSQL"]
 async fn live_postgres_backup_snapshot_times_out_when_row_stream_stalls() {

@@ -1826,6 +1826,7 @@ mod tests {
             diff_type: "added".to_string(),
             object_type: Some("table".to_string()),
             name: "users".to_string(),
+            target_name: None,
             columns: Some(vec![ColumnDiff {
                 diff_type: "added".to_string(),
                 name: "id".to_string(),
@@ -1858,6 +1859,7 @@ mod tests {
                     diff_type: "removed".to_string(),
                     object_type: Some("table".to_string()),
                     name: "users".to_string(),
+                    target_name: None,
                     columns: Some(vec![ColumnDiff {
                         diff_type: "removed".to_string(),
                         name: "id".to_string(),
@@ -1987,6 +1989,7 @@ mod tests {
                 diff_type: "modified".to_string(),
                 object_type: Some("table".to_string()),
                 name: "users".to_string(),
+                target_name: None,
                 columns: Some(vec![]),
                 indexes: Some(vec![]),
                 foreign_keys: Some(vec![]),
@@ -2034,6 +2037,7 @@ mod tests {
                 diff_type: "added".to_string(),
                 object_type: Some("table".to_string()),
                 name: "test_table".to_string(),
+                target_name: None,
                 columns: Some(vec![]),
                 indexes: Some(vec![]),
                 foreign_keys: Some(vec![]),
@@ -2218,6 +2222,7 @@ mod tests {
             diff_type: "added".to_string(),
             object_type: Some("table".to_string()),
             name: "users".to_string(),
+            target_name: None,
             columns: Some(vec![]),
             indexes: Some(vec![]),
             foreign_keys: Some(vec![]),
@@ -2243,6 +2248,7 @@ mod tests {
                     diff_type: "removed".to_string(),
                     object_type: Some("table".to_string()),
                     name: "users".to_string(),
+                    target_name: None,
                     columns: Some(vec![]),
                     indexes: Some(vec![]),
                     foreign_keys: Some(vec![]),
@@ -2399,6 +2405,7 @@ mod tests {
             diff_type: "modified".to_string(),
             object_type: Some("TABLE".to_string()),
             name: "test_table".to_string(),
+            target_name: None,
             columns: Some(vec![col_diff]),
             ..Default::default()
         };

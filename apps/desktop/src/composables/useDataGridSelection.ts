@@ -43,9 +43,9 @@ const AUTO_SCROLL_EDGE_SIZE = 40;
 const AUTO_SCROLL_MAX_SPEED = 28;
 // Trackpad/mouse jitter during a plain click can move the pointer a few pixels between
 // mousedown and mouseup. Without a minimum drag distance, that jitter reads as an
-// intentional drag and turns a single click into a multi-cell/row selection. Guards the
-// same class of gesture as TAB_DRAG_HORIZONTAL_THRESHOLD in useTabDrag.ts, though that one
-// is tuned higher to also absorb touchscreen tap jitter, which doesn't apply here.
+// intentional drag and turns a single click into a multi-cell/row selection. Same class
+// of gesture as the group tab bar's horizontal tab-drag threshold, though that one is
+// tuned higher to also absorb touchscreen tap jitter, which doesn't apply here.
 const GRID_SELECTION_DRAG_THRESHOLD_PX = 12;
 type RowSelectionOperation = "replace" | "add" | "remove";
 
@@ -694,6 +694,18 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     return range.startCol <= colIndex && range.endCol >= colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;
   }
 
+  // Unlike columnIsSelected (used for header highlighting, where any column touched by a
+  // wider selection should light up), this requires the selected cell RANGE to cover this
+  // column only. An explicit multi-column header selection (hasColumnSelection) is left as-is:
+  // that's a deliberate user gesture (click/shift-click/ctrl-click headers), not a stray
+  // full-height cell range left over from selecting a block in the grid body.
+  function columnIsExclusivelySelected(colIndex: number): boolean {
+    if (hasColumnSelection.value) return selectedColumnIndexes.value.has(colIndex);
+    const range = selectedRange.value;
+    if (!range) return false;
+    return range.startCol === colIndex && range.endCol === colIndex && range.startRow === 0 && range.endRow >= displayItems.value.length - 1;
+  }
+
   function selectedRangeStart(): CellPosition | null {
     const range = selectedRange.value;
     if (!range) return null;
@@ -727,6 +739,7 @@ export function useDataGridSelection(options: UseDataGridSelectionOptions) {
     isCellSelectionDragConfirmed,
     cellIsSelected,
     columnIsSelected,
+    columnIsExclusivelySelected,
     selectedRangeStart,
     selectedRowIds,
     selectedColumnIndexes,

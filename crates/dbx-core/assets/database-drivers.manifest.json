@@ -1844,12 +1844,12 @@
     },
     {
       "dbType": "argo",
-      "label": "ArgoDB (Transwarp)",
+      "label": "星环Argo",
       "runtimeMode": "agent",
       "mcpMode": "bridge",
-      "agentKey": "hive",
-      "driverStoreVisible": false,
-      "driverStoreOrder": 23,
+      "agentKey": "argo",
+      "driverStoreVisible": true,
+      "driverStoreOrder": 50,
       "singleConnectionPool": false,
       "metadataConnectionScoped": false,
       "skipTcpProbe": true,
@@ -2397,6 +2397,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "etcd",
+      "driverProfiles": [
+        {
+          "profile": "etcd-v2",
+          "agentKey": "etcd2",
+          "label": "etcd 2.x (v2 API)",
+          "storeVisible": true,
+          "storeOrder": 49
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 39,
       "singleConnectionPool": false,
@@ -2437,11 +2446,11 @@
       "defaultPort": 2181,
       "supportLevel": "connect",
       "capabilities": {
-        "queryExecution": true,
+        "queryExecution": false,
         "metadataBrowse": false,
         "objectBrowser": false,
         "objectSource": false,
-        "schemaSearch": true,
+        "schemaSearch": false,
         "diagram": false,
         "tableDataEdit": false,
         "tableStructureEdit": false,
@@ -2642,6 +2651,15 @@
       "runtimeMode": "agent",
       "mcpMode": "bridge",
       "agentKey": "iris",
+      "driverProfiles": [
+        {
+          "profile": "cache",
+          "agentKey": "cache",
+          "label": "InterSystems Caché",
+          "storeVisible": true,
+          "storeOrder": 51
+        }
+      ],
       "driverStoreVisible": true,
       "driverStoreOrder": 42,
       "singleConnectionPool": true,

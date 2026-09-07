@@ -6,7 +6,21 @@ const contentAreaSource = readFileSync(new URL("../ContentArea.vue", import.meta
 describe("ContentArea completed query output", () => {
   it("re-evaluates the no-table fallback when tab activation resets the shared view", () => {
     expect(contentAreaSource).toContain("props.activeTab.isExecuting, props.activeOutputView] as const");
-    expect(contentAreaSource).toContain('emit("update:activeOutputView", result ? defaultViewForResult(result) : "summary")');
+    expect(contentAreaSource).toContain('emit("update:activeOutputView", props.activeTab.id, result ? defaultViewForResult(result) : "summary")');
+  });
+
+  it("scopes the output-view watcher to the shared result surface", () => {
+    expect(contentAreaSource).toContain("if (props.editorOnly) return;");
+  });
+});
+
+describe("ContentArea editor-only split sizing", () => {
+  it("keeps the editor pane at 100% in editor-only mode so no blank dead zone is left behind", () => {
+    // The shared result surface renders results in its own workspace pane, so
+    // this splitpanes has a single (editor) pane in editor-only mode. A purely
+    // reactive size prop does not re-normalize a lone pane, so any value below
+    // 100 would shrink the editor and leave the remainder as empty background.
+    expect(contentAreaSource).toContain("const editorPaneSize = computed(() => (props.editorOnly || !resultsPaneOpen.value ? 100 : 100 - resultsPaneSize.value));");
   });
 });
 

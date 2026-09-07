@@ -7,7 +7,9 @@
 export function normalizeJsonArgument(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) return "{}";
-  const withoutComments = stripMongoJsonComments(trimmed).trim();
+  const withRegexLiterals = replaceMongoRegexLiterals(trimmed);
+  if (!withRegexLiterals) return null;
+  const withoutComments = stripMongoJsonComments(withRegexLiterals).trim();
   if (!withoutComments) return "{}";
   const withoutEjsonDeserialize = replaceMongoEjsonDeserialize(withoutComments);
   // Rewrite mongo shell constructors that are not valid JSON into extended JSON
@@ -20,6 +22,160 @@ export function normalizeJsonArgument(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+const MONGO_REGEX_LITERAL_OPTIONS = new Set(["i", "m", "s", "u"]);
+// JS-only regex flags with no server-side meaning for a stored regex literal
+// (MongoDB's $regex has no global modifier) are dropped instead of failing
+// the whole command.
+const MONGO_REGEX_LITERAL_IGNORED_OPTIONS = new Set(["d", "g", "v", "y"]);
+
+interface MongoRegexLiteral {
+  end: number;
+  pattern: string;
+  options: string;
+}
+
+function mongoRegexLiteralAt(source: string, index: number): MongoRegexLiteral | null {
+  if (source[index] !== "/" || !isMongoRegexValuePosition(source, index)) return null;
+
+  return readMongoRegexLiteral(source, index);
+}
+
+function readMongoRegexLiteral(source: string, index: number): MongoRegexLiteral | null {
+  let cursor = index + 1;
+  let pattern = "";
+  let escaped = false;
+  let inCharacterClass = false;
+  let closed = false;
+  while (cursor < source.length) {
+    const current = source[cursor] ?? "";
+    if (current === "\n" || current === "\r" || current === "\u2028" || current === "\u2029") return null;
+    if (escaped) {
+      pattern += current;
+      escaped = false;
+      cursor += 1;
+      continue;
+    }
+    if (current === "\\") {
+      pattern += current;
+      escaped = true;
+      cursor += 1;
+      continue;
+    }
+    if (current === "[") inCharacterClass = true;
+    else if (current === "]" && inCharacterClass) inCharacterClass = false;
+    else if (current === "/" && !inCharacterClass) {
+      closed = true;
+      cursor += 1;
+      break;
+    }
+    pattern += current;
+    cursor += 1;
+  }
+  if (!closed) return null;
+
+  const options: string[] = [];
+  while (/[A-Za-z]/.test(source[cursor] ?? "")) {
+    const option = source[cursor] ?? "";
+    cursor += 1;
+    if (MONGO_REGEX_LITERAL_IGNORED_OPTIONS.has(option)) continue;
+    if (!MONGO_REGEX_LITERAL_OPTIONS.has(option) || options.includes(option)) return null;
+    options.push(option);
+  }
+  options.sort();
+  return { end: cursor, pattern, options: options.join("") };
+}
+
+function replaceMongoRegexLiterals(source: string): string | null {
+  let result = "";
+  let index = 0;
+
+  while (index < source.length) {
+    const char = source[index] ?? "";
+    if (char === '"' || char === "'") {
+      const start = index;
+      const quote = char;
+      index += 1;
+      let escaped = false;
+      while (index < source.length) {
+        const current = source[index] ?? "";
+        index += 1;
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === quote) break;
+      }
+      result += source.slice(start, index);
+      continue;
+    }
+
+    const commentEnd = mongoCommentEndAt(source, index);
+    if (commentEnd !== null) {
+      result += source.slice(index, commentEnd);
+      index = commentEnd;
+      continue;
+    }
+
+    if (char !== "/" || !isMongoRegexValuePosition(source, index)) {
+      result += char;
+      index += 1;
+      continue;
+    }
+
+    const literal = mongoRegexLiteralAt(source, index);
+    if (!literal) return null;
+    result += JSON.stringify({ $regularExpression: { pattern: literal.pattern, options: literal.options } });
+    index = literal.end;
+  }
+
+  return result;
+}
+
+function isMongoRegexValuePosition(source: string, index: number): boolean {
+  let previousSignificant: string | null = null;
+  let cursor = 0;
+
+  while (cursor < index) {
+    const char = source[cursor] ?? "";
+    if (char === '"' || char === "'") {
+      const quote = char;
+      cursor += 1;
+      let escaped = false;
+      while (cursor < index) {
+        const current = source[cursor] ?? "";
+        cursor += 1;
+        if (escaped) escaped = false;
+        else if (current === "\\") escaped = true;
+        else if (current === quote) break;
+      }
+      previousSignificant = "value";
+      continue;
+    }
+
+    const commentEnd = mongoCommentEndAt(source, cursor);
+    if (commentEnd !== null) {
+      cursor = Math.min(commentEnd, index);
+      continue;
+    }
+
+    if (char === "/" && isMongoRegexValuePrefix(previousSignificant)) {
+      const literal = readMongoRegexLiteral(source, cursor);
+      if (literal && literal.end <= index) {
+        previousSignificant = "value";
+        cursor = literal.end;
+        continue;
+      }
+    }
+
+    if (!/\s/.test(char)) previousSignificant = char;
+    cursor += 1;
+  }
+
+  return isMongoRegexValuePrefix(previousSignificant);
+}
+
+function isMongoRegexValuePrefix(previousSignificant: string | null): boolean {
+  return previousSignificant === null || previousSignificant === ":" || previousSignificant === "[" || previousSignificant === "," || previousSignificant === "(";
 }
 
 /** Object-shaped shell arg (options documents, etc.). */
@@ -82,6 +238,12 @@ export function splitTopLevel(source: string): string[] {
       continue;
     }
 
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
+      continue;
+    }
+
     if (char === '"' || char === "'") quote = char;
     else if (char === "{" || char === "[" || char === "(") depth += 1;
     else if (char === "}" || char === "]" || char === ")") depth -= 1;
@@ -116,6 +278,12 @@ export function findMatchingParen(source: string, openIndex: number): number {
       continue;
     }
 
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
+      continue;
+    }
+
     if (char === '"' || char === "'") quote = char;
     else if (char === "(") depth += 1;
     else if (char === ")") {
@@ -143,6 +311,11 @@ export function hasUnclosedMongoDelimiters(source: string): boolean {
     const commentEnd = mongoCommentEndAt(source, i);
     if (commentEnd !== null) {
       i = commentEnd - 1;
+      continue;
+    }
+    const regexLiteral = mongoRegexLiteralAt(source, i);
+    if (regexLiteral) {
+      i = regexLiteral.end - 1;
       continue;
     }
     if (char === '"' || char === "'") {

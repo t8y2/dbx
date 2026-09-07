@@ -5,8 +5,45 @@ import { useParams } from "next/navigation";
 import { LandingNav } from "@/components/landing/LandingNav";
 import { downloadLinksFor, formatSize, type AgentDownloadCatalog, type DownloadSource, type JreDisplayEntry, type NativeAgentDisplayEntry, type OfflineBundleEntry } from "@/lib/agentRegistry";
 import { Archive, Cpu, Database, Download, Plug, Search, Terminal, X } from "lucide-react";
+import { resolveLang, type DocsLang } from "@/lib/i18n";
 
 const i18n = {
+  tr: {
+    title: "Çevrimdışı Sürücü İndirmeleri",
+    subtitle: "Çevrimdışı kullanım için veritabanı sürücülerini ve JRE paketlerini indirin. İnternet erişimi olmayan ortamınızın ihtiyacı olan kaynağı arayın.",
+    jdbcPlugin: "JDBC Eklentisi",
+    jdbcPluginDesc: "Özel JDBC bağlantılarını kullanmadan önce bu isteğe bağlı DBX bileşenini kurun. Veritabanı üreticisinin JDBC sürücü JAR dosyaları yine ayrıca içe aktarılmalıdır.",
+    jdbcPluginFile: "Eklenti paketi",
+    jdbcPluginInstallHint: "Bu ZIP dosyasını DBX'te Ayarlar > Sürücü Yöneticisi > JDBC Sürücüleri > Yerel Kurulum bölümünden içe aktarın.",
+    bundles: "Çevrimdışı Paketler",
+    bundlesDesc: "Agent kaydını, veritabanı sürücülerini, yerel agent'ları ve uygun JRE'yi içeren, platforma özgü ZIP paketleri.",
+    drivers: "Veritabanı Sürücüleri",
+    driversDesc: "Java agent'ları için tek sürücülük .tar.zst paketleri. Hedef makinede yoksa uygun JRE'yi ayrıca kurun.",
+    nativeAgents: "Yerel Agent'lar",
+    nativeAgentsDesc: "DuckDB, Oracle, KingbaseES, XuguDB ve RabbitMQ için platforma özgü .tar.zst paketleri. Paketi doğrudan Sürücü Yöneticisi'nde içe aktarın.",
+    jre: "Java Çalışma Zamanı (JRE)",
+    jreDesc: "SQL Server ve Dameng gibi Java agent tabanlı veritabanı sürücülerinin kullandığı JRE paketleri.",
+    download: "İndir",
+    installMethod: "Kurulum",
+    version: "Sürüm",
+    size: "Boyut",
+    requiresJre: "JRE gerektirir",
+    platform: "Platform",
+    filename: "Dosya",
+    search: "Sürücü, platform, sürüm ara...",
+    noResults: "Eşleşen indirme yok.",
+    showing: "Gösterilen",
+    of: "/",
+    clearSearch: "Aramayı temizle",
+    mirrorHint: "CNB aynası, Çin anakarası ağlarında GitHub sürüm dosyaları için kullanılabilir.",
+    downloadSources: "İndirme kaynağı",
+    sources: {
+      github: "GitHub",
+      cnb: "CNB",
+      official: "Resmî",
+    },
+    downloadHint: "İnternet erişimi olmayan ortamlar için: platformunuza uygun paketi internet bağlantısı olan bir makinede indirin, çevrimdışı makineye taşıyın ve DBX'te Ayarlar > Sürücü Yöneticisi bölümünden içe aktarın. Sürücü ve JRE sekmelerini yalnızca tek tek dosyalara ihtiyacınız olduğunda kullanın.",
+  },
   en: {
     title: "Offline Driver Downloads",
     subtitle: "Download database drivers and JRE packages for offline use. Search for the exact resource your air-gapped environment needs.",
@@ -102,6 +139,12 @@ type NativeAgentGroup = {
   options: NativeAgentDisplayEntry[];
 };
 
+const OFFLINE_HEADING: Record<DocsLang, string> = {
+  en: "Offline Usage",
+  cn: "离线使用说明",
+  tr: "Çevrimdışı kullanım",
+};
+
 type DriverTranslations = (typeof i18n)["en"];
 
 function DownloadLinks({ url, t }: { url: string; t: DriverTranslations }) {
@@ -131,7 +174,7 @@ function matchesSearch(values: Array<string | number | undefined>, query: string
 export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloadCatalog }) {
   const params = useParams();
   const rawLang = params?.lang as string | undefined;
-  const lang: "en" | "cn" = rawLang === "cn" ? "cn" : "en";
+  const lang = resolveLang(rawLang ?? "en");
   const t = i18n[lang];
 
   const catalog = initialCatalog;
@@ -480,7 +523,7 @@ export function DriversClient({ initialCatalog }: { initialCatalog: AgentDownloa
             </div>
 
             <div className="landing-glass-card rounded-[10px] p-5 text-sm text-landing-muted leading-[1.65]">
-              <strong className="text-landing-ink">{lang === "cn" ? "离线使用说明" : "Offline Usage"}</strong>
+              <strong className="text-landing-ink">{OFFLINE_HEADING[lang]}</strong>
               <p className="mt-1">{t.downloadHint}</p>
             </div>
           </>

@@ -267,6 +267,70 @@ describe("useAppUpdater reopening the dialog from the toolbar", () => {
   });
 });
 
+describe("useAppUpdater failure state handling", () => {
+  interface UpdateInfo {
+    current_version: string;
+    latest_version: string;
+    update_available: boolean;
+    release_name: string;
+    release_url: string;
+    release_notes: string;
+  }
+
+  it("keeps the failed state visible while a retry is in flight and clears it on success", async () => {
+    apiMock.checkForUpdates.mockRejectedValueOnce(new Error("boom"));
+    const updater = mountUpdater();
+
+    await updater.checkUpdates();
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).not.toBe("");
+
+    const retry = deferred<UpdateInfo>();
+    apiMock.checkForUpdates.mockReturnValueOnce(retry.promise);
+    const pending = updater.checkUpdates();
+    await vi.waitFor(() => expect(updater.checkingUpdates.value).toBe(true));
+
+    // Mid-retry: the source switcher stays mounted (updateCheckFailed) and
+    // the dialog must not fall through to "up to date" with an empty version.
+    expect(updater.updateCheckFailed.value).toBe(true);
+    expect(updater.updateCheckMessage.value).not.toBe("");
+
+    retry.resolve({
+      current_version: "0.5.69",
+      latest_version: "0.5.69",
+      update_available: false,
+      release_name: "",
+      release_url: "",
+      release_notes: "",
+    });
+    await pending;
+
+    expect(updater.updateCheckFailed.value).toBe(false);
+    expect(updater.updateCheckMessage.value).toContain("0.5.69");
+  });
+
+  it("keeps the last update info when a silent background check fails", async () => {
+    apiMock.checkForUpdates.mockResolvedValueOnce({
+      current_version: "0.5.69",
+      latest_version: "0.5.70",
+      update_available: true,
+      release_name: "DBX v0.5.70",
+      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
+      release_notes: "",
+    });
+    const updater = mountUpdater();
+    await updater.checkUpdates({ silent: true });
+    expect(updater.updateInfo.value?.update_available).toBe(true);
+
+    apiMock.checkForUpdates.mockRejectedValueOnce(new Error("network down"));
+    await updater.checkUpdates({ silent: true });
+
+    expect(updater.updateInfo.value?.update_available).toBe(true);
+    expect(updater.updateCheckFailed.value).toBe(false);
+    expect(updater.showUpdateDialog.value).toBe(false);
+  });
+});
+
 describe("useAppUpdater ignore version", () => {
   it("persists the ignored latest version and closes the update dialog", async () => {
     const updater = mountUpdater();

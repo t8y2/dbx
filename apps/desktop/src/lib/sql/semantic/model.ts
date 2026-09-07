@@ -131,18 +131,6 @@ function updateIntroducesMutationTarget(tokens: readonly SqlSemanticToken[], upd
   return true;
 }
 
-function commaContinuesTableList(tokens: readonly SqlSemanticToken[], commaIndex: number): boolean {
-  const comma = tokens[commaIndex];
-  if (comma?.text !== ",") return false;
-  for (let index = commaIndex - 1; index >= 0; index -= 1) {
-    const item = tokens[index];
-    if (!item || item.depth !== comma.depth || item.kind !== "word") continue;
-    if (item.normalized === "from") return true;
-    if (item.normalized === "select" || item.normalized === "join" || TABLE_INTRODUCERS.has(item.normalized) || CLAUSE_BOUNDARIES.has(item.normalized)) return false;
-  }
-  return false;
-}
-
 /**
  * Finds concrete table-name tokens for visual highlighting without consulting
  * metadata. Only the final identifier in a qualified name is returned, so
@@ -153,11 +141,18 @@ export function sqlSemanticTableNameSpans(sql: string, options: SqlSemanticBuild
   const tokens = significantTokens(tokenizeSqlSemantic(sql, dialect.id));
   const spans: SqlSemanticSpan[] = [];
   const seen = new Set<string>();
+  const commaContinuesTableListByDepth = new Map<number, boolean>();
 
   for (let index = 0; index < tokens.length; index += 1) {
     const item = tokens[index];
+    if (!item) continue;
+    const commaContinuesTableList = item.text === "," && commaContinuesTableListByDepth.get(item.depth) === true;
+    if (item.kind === "word") {
+      if (item.normalized === "from") commaContinuesTableListByDepth.set(item.depth, true);
+      else if (item.normalized === "select" || item.normalized === "join" || TABLE_INTRODUCERS.has(item.normalized) || CLAUSE_BOUNDARIES.has(item.normalized)) commaContinuesTableListByDepth.set(item.depth, false);
+    }
     const introduced = item?.kind === "word" && TABLE_INTRODUCERS.has(item.normalized) && (item.normalized !== "update" || updateIntroducesMutationTarget(tokens, index));
-    if (!introduced && !commaContinuesTableList(tokens, index)) continue;
+    if (!introduced && !commaContinuesTableList) continue;
 
     let target = index + 1;
     while (TABLE_TARGET_MODIFIERS.has(tokens[target]?.normalized ?? "")) target += 1;

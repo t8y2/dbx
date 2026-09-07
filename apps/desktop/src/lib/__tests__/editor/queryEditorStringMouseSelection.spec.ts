@@ -2,7 +2,7 @@ import { EditorSelection, EditorState } from "@codemirror/state";
 import type { EditorView, ViewUpdate } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import { createQueryEditorStringMouseSelection } from "@/lib/editor/queryEditorStringMouseSelection";
-import { sqlStringContentRangeAt, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
+import { sqlStringContentRangeAt, trimSqlStringWildcardBoundaries, type SqlSemanticSelectionOptions } from "@/lib/editor/sqlSemanticSelectionRanges";
 
 function eventAt(position: number, assoc: -1 | 1 = 1, overrides: Partial<MouseEvent> = {}): MouseEvent {
   return {
@@ -136,17 +136,38 @@ describe("query editor SQL string mouse selection", () => {
     expect(reverse?.anchor).toBeGreaterThan(reverse?.head ?? Number.POSITIVE_INFINITY);
   });
 
-  it("maps the start selection and semantic analysis across document changes", () => {
-    const doc = "select 'alpha-beta'";
-    const state = EditorState.create({ doc, selection: EditorSelection.cursor(doc.length) });
-    const fixture = fakeView(state);
-    const start = eventAt(doc.indexOf("alpha"));
-    const style = createQueryEditorStringMouseSelection(fixture.view, start);
-    const transaction = state.update({ changes: { from: 0, insert: "-- " } });
-    fixture.setState(transaction.state);
-    style?.update({ docChanged: true, changes: transaction.changes, startState: state, state: transaction.state, view: fixture.view } as ViewUpdate);
+  it("skips leading and trailing LIKE wildcards when double-clicking a string", () => {
+    const cases: Array<{ doc: string; needle: string; expected: string }> = [
+      { doc: "select '%识别通配符%'", needle: "识别通配符", expected: "识别通配符" },
+      { doc: "select 'name' like '%foo%'", needle: "foo", expected: "foo" },
+      { doc: "select '%leading'", needle: "leading", expected: "leading" },
+      { doc: "select 'trailing_'", needle: "trailing", expected: "trailing" },
+      { doc: "select '__both__'", needle: "both", expected: "both" },
+      { doc: "select '%%multi%%'", needle: "multi", expected: "multi" },
+    ];
 
-    const selection = style?.get(eventAt(doc.indexOf("alpha") + 3), false, false);
-    expect(selection && transaction.state.sliceDoc(selection.main.from, selection.main.to)).toBe("alpha-beta");
+    for (const value of cases) {
+      const state = EditorState.create({ doc: value.doc });
+      const start = eventAt(value.doc.indexOf(value.needle));
+      const selection = createQueryEditorStringMouseSelection(fakeView(state).view, start)?.get(start, false, false);
+      expect(selection && value.doc.slice(selection.main.from, selection.main.to)).toBe(value.expected);
+    }
+  });
+
+  it("keeps a wildcard-only string intact so the double click still selects something", () => {
+    const doc = "select '%%'";
+    const state = EditorState.create({ doc });
+    const start = eventAt(doc.indexOf("%%") + 1);
+    const selection = createQueryEditorStringMouseSelection(fakeView(state).view, start)?.get(start, false, false);
+    expect(selection && doc.slice(selection.main.from, selection.main.to)).toBe("%%");
+  });
+
+  it("trimSqlStringWildcardBoundaries shrinks past boundary wildcards only", () => {
+    const doc = "%a_b%";
+    expect(trimSqlStringWildcardBoundaries(doc, { from: 0, to: doc.length })).toEqual({ from: 1, to: 4 });
+    // Inner underscore/percent are preserved; only the boundaries are trimmed.
+    expect(doc.slice(1, 4)).toBe("a_b");
+    // A range with no boundary wildcards is returned unchanged.
+    expect(trimSqlStringWildcardBoundaries("abc", { from: 0, to: 3 })).toEqual({ from: 0, to: 3 });
   });
 });

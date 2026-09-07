@@ -8,6 +8,7 @@ import { ChevronUp, ChevronDown, ChevronRight, TextSelect, X } from "@lucide/vue
 import { collectEditorSearchMatches, countEditorSearchMatches, createEditorSearchQuery, replaceEditorSearchMatches, type EditorSearchMatch } from "@/lib/editor/editorSearchQuery";
 import { appendSearchMatchSelection, findSearchMatch, isSearchAddSelectionModifier, selectionRangesForSearchMatches, type EditorSearchSelectionDirection } from "@/lib/editor/editorSearchSelection";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { vNamingStyleSupport } from "@/directives/vNamingStyleSupport";
 
 const props = defineProps<{
   view: EditorView | null;
@@ -501,6 +502,7 @@ defineExpose({
           <input
             ref="searchInputRef"
             v-model="searchText"
+            v-naming-style-support
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"
@@ -556,6 +558,7 @@ defineExpose({
           <input
             ref="replaceInputRef"
             v-model="replaceText"
+            v-naming-style-support
             autocapitalize="off"
             autocorrect="off"
             spellcheck="false"

@@ -101,7 +101,7 @@ describe("settings search", () => {
   });
 
   it("defines the WebDAV Web-runtime notice in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       expect(source, locale).toContain("syncWebDavWebDescription:");
     }
@@ -212,7 +212,7 @@ describe("settings search", () => {
   });
 
   it("defines the performance section title in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       expect(source, locale).toContain("performanceSection:");
     }

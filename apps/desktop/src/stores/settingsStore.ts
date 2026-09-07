@@ -26,11 +26,12 @@ import { normalizeSqlVariableSyntaxOverrides, type SqlVariableSyntaxOverrides } 
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS, normalizeTableColumnTemplateFields } from "@/lib/table/tableColumnTemplates";
 import { type DataTabReuseMode, DEFAULT_DATA_TAB_REUSE_MODE, normalizeDataTabReuseMode } from "@/lib/tabs/dataTabReuseMode";
 import { normalizeCompletionTriggerMode, type SqlCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
+import { DEFAULT_CSV_QUOTE_MODE, normalizeCsvQuoteMode, type CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { configureMetadataRuntimeCache, METADATA_CACHE_DEFAULT_MEMORY_MB, normalizeMetadataCacheMemoryMb } from "@/lib/metadata/metadataRuntimeCache";
 import type { AiApiStyle, AiAssistantMode, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiModelEffortPreference, AiProvider, AiReasoningLevel, AiTestConnectionResult } from "@/types/ai";
 import type { SqlShortcutAction, SqlSnippet, TableInfoTab } from "@/types/database";
 
-export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
+export type { AiApiStyle, AiAuthMethod, AiChatSelectionState, AiConfig, AiConfigItem, AiConfiguredModel, AiEffortLevel, AiEffortSelection, AiProvider, AiReasoningLevel, AiTestConnectionResult, CsvQuoteMode, DataTabReuseMode, SavedSqlOpenTargetMode, SqlCompletionTriggerMode };
 
 export interface DesktopSettings {
   show_tray_icon: boolean;
@@ -64,8 +65,16 @@ export interface McpConnectionPolicy {
   readOnly: boolean;
   allowDangerousSql: boolean;
   executionModeConfigured: boolean;
+  executionModePolicyVersion: number | null;
   databaseScope: "all" | "selected" | "none";
   allowedDatabases: string[];
+  databasePolicies: McpDatabasePolicy[];
+}
+
+export interface McpDatabasePolicy {
+  databaseName: string;
+  readOnly: boolean;
+  allowDangerousSql: boolean;
 }
 
 export type DesktopIconTheme = "default" | "black";
@@ -116,13 +125,33 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
   const connectionPolicies = Object.values(
     (policy?.connectionPolicies ?? []).reduce<Record<string, McpConnectionPolicy>>((rules, rule) => {
       if (!rule || typeof rule.connectionId !== "string" || !rule.connectionId.trim()) return rules;
+      const databaseScope = rule.databaseScope === "selected" || rule.databaseScope === "none" ? rule.databaseScope : "all";
+      const allowedDatabases = databaseScope === "selected" ? [...new Set((rule.allowedDatabases ?? []).filter((database): database is string => typeof database === "string" && database.trim().length > 0).map((database) => database.trim()))] : [];
+      const allowedDatabaseNames = new Set(allowedDatabases);
+      const databasePolicies = Object.values(
+        (databaseScope === "selected" ? (rule.databasePolicies ?? []) : []).reduce<Record<string, McpDatabasePolicy>>((policies, databasePolicy) => {
+          if (!databasePolicy || typeof databasePolicy.databaseName !== "string") return policies;
+          const databaseName = databasePolicy.databaseName.trim();
+          if (!databaseName || !allowedDatabaseNames.has(databaseName)) return policies;
+          const current = policies[databaseName];
+          const readOnly = current?.readOnly === true || databasePolicy.readOnly === true;
+          policies[databaseName] = {
+            databaseName,
+            readOnly,
+            allowDangerousSql: !readOnly && (current ? current.allowDangerousSql && databasePolicy.allowDangerousSql === true : databasePolicy.allowDangerousSql === true),
+          };
+          return policies;
+        }, {}),
+      );
       rules[rule.connectionId.trim()] = {
         connectionId: rule.connectionId.trim(),
         readOnly: rule.readOnly === true,
         allowDangerousSql: rule.readOnly !== true && rule.allowDangerousSql === true,
         executionModeConfigured: rule.executionModeConfigured !== false,
-        databaseScope: rule.databaseScope === "selected" || rule.databaseScope === "none" ? rule.databaseScope : "all",
-        allowedDatabases: rule.databaseScope === "selected" ? [...new Set((rule.allowedDatabases ?? []).filter((database): database is string => typeof database === "string" && database.trim().length > 0).map((database) => database.trim()))] : [],
+        executionModePolicyVersion: rule.executionModePolicyVersion === 1 ? 1 : null,
+        databaseScope,
+        allowedDatabases,
+        databasePolicies,
       };
       return rules;
     }, {}),
@@ -396,6 +425,22 @@ export const AI_PROVIDER_PARTNER_PRESETS: readonly AiPartnerProviderPreset[] = [
     apiKeyUrl: "https://www.jalapeno-cloud.ai/dbx",
     descriptionKey: "ai.jalapenoDescription",
   },
+  {
+    id: "hualong-ai",
+    label: "HuaLongAI",
+    iconPath: "/icons/ai/hualong-ai.png",
+    group: "partner",
+    provider: "openai-compatible",
+    endpoint: "https://api.hualong.online/v1",
+    model: "gpt-5.6-terra",
+    models: [{ name: "gpt-5.6-terra" }],
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+    websiteUrl: "https://api.hualong.online/",
+    apiKeyUrl: "https://api.hualong.online/",
+    descriptionKey: "ai.hualongDescription",
+  },
 ];
 
 function normalizeAiProviderEndpoint(endpoint: string): string {
@@ -429,6 +474,8 @@ const defaultConfigs: Record<AiProvider, Omit<AiConfig, "apiKey">> = Object.from
 ) as Record<AiProvider, Omit<AiConfig, "apiKey">>;
 
 const AI_REASONING_LEVELS: AiReasoningLevel[] = ["default", "minimal", "low", "medium", "high", "xhigh", "max"];
+export const AI_OUTPUT_TOKENS_MIN = 256;
+export const AI_OUTPUT_TOKENS_MAX = 1_000_000;
 const AI_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function normalizeAiReasoningLevel(value: unknown): AiReasoningLevel {
@@ -459,6 +506,8 @@ export function normalizeAiHeaders(value: unknown): Record<string, string> {
 
 export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined): AiConfig {
   const provider = config?.provider && config.provider in AI_PROVIDER_PRESETS ? config.provider : inferAiProviderFromConfig(config);
+  const rawMaxOutputTokens = config?.maxOutputTokens;
+  const maxOutputTokens = typeof rawMaxOutputTokens === "number" && Number.isFinite(rawMaxOutputTokens) && rawMaxOutputTokens >= AI_OUTPUT_TOKENS_MIN ? Math.min(AI_OUTPUT_TOKENS_MAX, Math.round(rawMaxOutputTokens)) : undefined;
   return {
     ...defaultConfigs[provider],
     ...config,
@@ -469,8 +518,10 @@ export function normalizeAiConfig(config: Partial<AiConfig> | null | undefined):
     authMethod: config?.authMethod ?? defaultConfigs[provider].authMethod,
     proxyEnabled: !!config?.proxyEnabled,
     proxyUrl: config?.proxyUrl ?? "",
+    skipTlsVerify: !!config?.skipTlsVerify,
     enableThinking: config?.enableThinking ?? true,
     reasoningLevel: normalizeAiReasoningLevel(config?.reasoningLevel),
+    maxOutputTokens,
     contextWindow: config?.contextWindow ?? undefined,
     codexCliPath: config?.codexCliPath?.trim() || undefined,
     codexCliEnv: normalizeAiEnv(config?.codexCliEnv),
@@ -540,8 +591,12 @@ const TAB_LAYOUT_MODES = ["scroll", "wrap"] as const;
 export type TabLayoutMode = (typeof TAB_LAYOUT_MODES)[number];
 const TAB_PLACEMENTS = ["top", "bottom", "left", "right"] as const;
 export type TabPlacement = (typeof TAB_PLACEMENTS)[number];
-const TAB_GROUP_MODES = ["none", "database-type", "connection"] as const;
+const TAB_GROUP_MODES = ["none", "database-type", "database", "connection"] as const;
 export type TabGroupMode = (typeof TAB_GROUP_MODES)[number];
+export interface TabGroupCustomization {
+  name?: string;
+  color?: string;
+}
 const TAB_SORT_MODES = ["manual", "created-asc", "title-asc"] as const;
 export type TabSortMode = (typeof TAB_SORT_MODES)[number];
 const DATA_GRID_RENDER_MODES = ["dom", "canvas"] as const;
@@ -677,6 +732,7 @@ export interface EditorSettings {
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
   tabGroupMode: TabGroupMode;
+  tabGroupCustomizations: Record<string, TabGroupCustomization>;
   tabSortMode: TabSortMode;
   appLayout: "separated" | "classic";
   pageSize: number;
@@ -702,6 +758,7 @@ export interface EditorSettings {
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
   dataGridTextFilterPanelHeight: number;
+  localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
   dataGridSearchMode: DataGridSearchMode;
   dataGridCopyExtractor: DataGridCopyPreference;
@@ -719,6 +776,7 @@ export interface EditorSettings {
   tableFontSize: number;
   structureEditorDensity: StructureEditorDensity;
   tableInfoActiveTab: TableInfoTab;
+  tableInfoDrawerPinned: boolean;
   tableInfoDrawerWidth: number;
   cellDetailDrawerWidth: number;
   cellDetailPanelLayout: CellDetailPanelLayout;
@@ -761,6 +819,7 @@ export interface EditorSettings {
   sqlShortcuts: SqlShortcutAction[];
   tableColumnTemplateFields: string[];
   exportBatchSize: number;
+  csvQuoteMode: CsvQuoteMode;
   /** Global Redis key-search templates; overridden by non-empty connection templates. */
   redisKeyTemplates: string[];
   exportRowLimitEnabled: boolean;
@@ -903,6 +962,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tabLayout: "scroll",
   tabPlacement: "top",
   tabGroupMode: "none",
+  tabGroupCustomizations: {},
   tabSortMode: "manual",
   appLayout: "classic",
   pageSize: 100,
@@ -927,6 +987,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
+  localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
   dataGridSearchMode: "filter",
   dataGridCopyExtractor: "smart",
@@ -944,6 +1005,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   tableFontSize: TABLE_FONT_SIZE_DEFAULT,
   structureEditorDensity: "compact",
   tableInfoActiveTab: "ddl",
+  tableInfoDrawerPinned: false,
   tableInfoDrawerWidth: 320,
   cellDetailDrawerWidth: 380,
   cellDetailPanelLayout: "bottom",
@@ -986,6 +1048,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sqlShortcuts: [],
   tableColumnTemplateFields: [...DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS],
   exportBatchSize: 2000,
+  csvQuoteMode: DEFAULT_CSV_QUOTE_MODE,
   redisKeyTemplates: [],
   exportRowLimitEnabled: false,
   exportRowLimit: 100000,
@@ -1052,6 +1115,20 @@ function normalizeTabPlacement(value: unknown): TabPlacement {
 
 function normalizeTabGroupMode(value: unknown): TabGroupMode {
   return TAB_GROUP_MODES.includes(value as TabGroupMode) ? (value as TabGroupMode) : DEFAULT_EDITOR_SETTINGS.tabGroupMode;
+}
+
+export function normalizeTabGroupCustomizations(value: unknown): Record<string, TabGroupCustomization> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const customizations: Record<string, TabGroupCustomization> = {};
+  for (const [rawKey, rawCustomization] of Object.entries(value as Record<string, unknown>).slice(0, 200)) {
+    const key = rawKey.trim().slice(0, 512);
+    if (!key || !rawCustomization || typeof rawCustomization !== "object" || Array.isArray(rawCustomization)) continue;
+    const customization = rawCustomization as Record<string, unknown>;
+    const name = typeof customization.name === "string" ? customization.name.trim().slice(0, 80) : "";
+    const color = typeof customization.color === "string" && /^#[0-9a-f]{6}$/i.test(customization.color.trim()) ? customization.color.trim().toLowerCase() : "";
+    if (name || color) customizations[key] = { ...(name ? { name } : {}), ...(color ? { color } : {}) };
+  }
+  return customizations;
 }
 
 function normalizeTabSortMode(value: unknown): TabSortMode {
@@ -1330,6 +1407,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
     tabGroupMode: normalizeTabGroupMode(settings.tabGroupMode),
+    tabGroupCustomizations: normalizeTabGroupCustomizations(settings.tabGroupCustomizations),
     tabSortMode: normalizeTabSortMode(settings.tabSortMode),
     appLayout: settings.appLayout ?? DEFAULT_EDITOR_SETTINGS.appLayout,
     pageSize: normalizeResultPageSize(settings.pageSize),
@@ -1354,6 +1432,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
+    localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
     dataGridSearchMode: normalizeDataGridSearchMode(settings.dataGridSearchMode),
     dataGridCopyExtractor: normalizeDataGridCopyPreference(settings.dataGridCopyExtractor),
@@ -1371,6 +1450,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     tableFontSize: normalizeTableFontSize(settings.tableFontSize),
     structureEditorDensity: normalizeStructureEditorDensity(settings.structureEditorDensity),
     tableInfoActiveTab: normalizeTableInfoTab(settings.tableInfoActiveTab),
+    tableInfoDrawerPinned: settings.tableInfoDrawerPinned === true,
     tableInfoDrawerWidth: normalizeDrawerWidth(settings.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth),
     cellDetailDrawerWidth: normalizeDrawerWidth(settings.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth),
     cellDetailPanelLayout: normalizeCellDetailPanelLayout(settings.cellDetailPanelLayout),
@@ -1456,6 +1536,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     sqlShortcuts: normalizeSqlShortcuts(settings.sqlShortcuts, existing?.sqlShortcuts),
     tableColumnTemplateFields: normalizeTableColumnTemplateFields(settings.tableColumnTemplateFields),
     exportBatchSize: typeof settings.exportBatchSize === "number" && settings.exportBatchSize >= 100 && settings.exportBatchSize <= 100000 ? Math.round(settings.exportBatchSize) : DEFAULT_EDITOR_SETTINGS.exportBatchSize,
+    csvQuoteMode: normalizeCsvQuoteMode(settings.csvQuoteMode),
     redisKeyTemplates: normalizeRedisKeyTemplates(settings.redisKeyTemplates),
     exportRowLimitEnabled: typeof settings.exportRowLimitEnabled === "boolean" ? settings.exportRowLimitEnabled : DEFAULT_EDITOR_SETTINGS.exportRowLimitEnabled,
     exportRowLimit: typeof settings.exportRowLimit === "number" && settings.exportRowLimit >= 100 && settings.exportRowLimit <= 2147483647 ? Math.round(settings.exportRowLimit) : DEFAULT_EDITOR_SETTINGS.exportRowLimit,
@@ -1509,6 +1590,18 @@ function editorSettingsPatchSnapshot(settings: Partial<EditorSettings>): Partial
   return JSON.parse(JSON.stringify(settings)) as Partial<EditorSettings>;
 }
 
+/** Keep only well-formed, non-empty template id lists keyed by db_type. */
+function normalizeTemplateIdsByDbType(value?: Record<string, string[]>): Record<string, string[]> {
+  if (!value) return {};
+  const out: Record<string, string[]> = {};
+  for (const [dbType, ids] of Object.entries(value)) {
+    if (!Array.isArray(ids)) continue;
+    const cleaned = [...new Set(ids.filter((id): id is string => typeof id === "string" && id.trim() !== "").map((id) => id.trim()))];
+    if (cleaned.length > 0) out[dbType] = cleaned;
+  }
+  return out;
+}
+
 export interface SettingsNavigationRequest {
   id: number;
   tab: string;
@@ -1521,6 +1614,10 @@ export const useSettingsStore = defineStore("settings", () => {
   const activeModel = ref<{ configId: string; modelId: string } | null>(null);
   const effortPreferences = ref<AiModelEffortPreference[]>([]);
   const defaultAiMode = ref<AiAssistantMode>("ask");
+  // Per-db_type prompt template defaults (explicit opt-in) and last-used
+  // fallback; both resolved when an AI panel mounts or its namespace changes.
+  const aiDefaultTemplatesByDbType = ref<Record<string, string[]>>({});
+  const aiLastUsedTemplatesByDbType = ref<Record<string, string[]>>({});
   const isAiConfigLoaded = ref(false);
   const aiConfigs = ref<AiConfigItem[]>([]);
   const desktopSettings = ref<DesktopSettings>({ ...DEFAULT_DESKTOP_SETTINGS });
@@ -1710,6 +1807,8 @@ export const useSettingsStore = defineStore("settings", () => {
     const savedSelection = await api.loadAiChatSelection().catch(() => null);
     effortPreferences.value = (savedSelection?.effortPreferences ?? []).filter((preference) => aiConfigs.value.some((config) => config.id === preference.configId));
     defaultAiMode.value = savedSelection?.defaultMode ?? "ask";
+    aiDefaultTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.defaultTemplatesByDbType);
+    aiLastUsedTemplatesByDbType.value = normalizeTemplateIdsByDbType(savedSelection?.lastUsedTemplatesByDbType);
 
     const savedActive = savedSelection?.active;
     const savedConfig = savedActive ? aiConfigs.value.find((config) => config.id === savedActive.configId) : undefined;
@@ -1848,6 +1947,57 @@ export const useSettingsStore = defineStore("settings", () => {
     persistAiChatSelection();
   }
 
+  /** Empty id list clears the db_type entry so unsetting a default is expressible. */
+  function setDefaultTemplatesForDbType(dbType: string, templateIds: string[]) {
+    if (!dbType) return;
+    const next = { ...aiDefaultTemplatesByDbType.value };
+    const cleaned = [...new Set(templateIds.map((id) => id.trim()).filter((id) => id !== ""))];
+    if (cleaned.length === 0) delete next[dbType];
+    else next[dbType] = cleaned;
+    aiDefaultTemplatesByDbType.value = next;
+    persistAiChatSelection();
+  }
+
+  /**
+   * Called on send: a non-empty selection is remembered for the db_type, while
+   * sending with every template deselected is an explicit choice that clears
+   * the remembered selection — otherwise the stale entry would resurrect the
+   * old templates the next time a panel opens.
+   */
+  function recordLastUsedTemplates(dbType: string, templateIds: string[]) {
+    if (!dbType) return;
+    if (templateIds.length === 0) {
+      if (!(dbType in aiLastUsedTemplatesByDbType.value)) return;
+      const next = { ...aiLastUsedTemplatesByDbType.value };
+      delete next[dbType];
+      aiLastUsedTemplatesByDbType.value = next;
+      persistAiChatSelection();
+      return;
+    }
+    aiLastUsedTemplatesByDbType.value = { ...aiLastUsedTemplatesByDbType.value, [dbType]: [...templateIds] };
+    persistAiChatSelection();
+  }
+
+  function removeTemplateFromDefaultAndLastUsed(templateId: string) {
+    const strip = (record: Record<string, string[]>): Record<string, string[]> => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+      for (const [dbType, ids] of Object.entries(record)) {
+        const filtered = ids.filter((id) => id !== templateId);
+        if (filtered.length !== ids.length) changed = true;
+        if (filtered.length > 0) next[dbType] = filtered;
+      }
+      // Identity-preserving no-op lets the caller skip a needless persist.
+      return changed ? next : record;
+    };
+    const nextDefaults = strip(aiDefaultTemplatesByDbType.value);
+    const nextLastUsed = strip(aiLastUsedTemplatesByDbType.value);
+    if (nextDefaults === aiDefaultTemplatesByDbType.value && nextLastUsed === aiLastUsedTemplatesByDbType.value) return;
+    aiDefaultTemplatesByDbType.value = nextDefaults;
+    aiLastUsedTemplatesByDbType.value = nextLastUsed;
+    persistAiChatSelection();
+  }
+
   function persistAiChatSelection() {
     pendingAiChatSelection = {
       version: 1,
@@ -1857,6 +2007,11 @@ export const useSettingsStore = defineStore("settings", () => {
         selection: { ...preference.selection },
       })),
       defaultMode: defaultAiMode.value,
+      // Match the backend's skip_serializing_if(empty): omit the per-db_type
+      // records entirely while nothing is configured so the payload stays
+      // identical to the pre-defaults format for users without template picks.
+      ...(Object.keys(aiDefaultTemplatesByDbType.value).length > 0 ? { defaultTemplatesByDbType: aiDefaultTemplatesByDbType.value } : {}),
+      ...(Object.keys(aiLastUsedTemplatesByDbType.value).length > 0 ? { lastUsedTemplatesByDbType: aiLastUsedTemplatesByDbType.value } : {}),
     };
     if (!aiChatSelectionSaveRunning) void flushAiChatSelection();
   }
@@ -1958,6 +2113,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tabLayout !== undefined) editorSettings.value.tabLayout = normalizeTabLayout(partial.tabLayout);
     if (partial.tabPlacement !== undefined) editorSettings.value.tabPlacement = normalizeTabPlacement(partial.tabPlacement);
     if (partial.tabGroupMode !== undefined) editorSettings.value.tabGroupMode = normalizeTabGroupMode(partial.tabGroupMode);
+    if (partial.tabGroupCustomizations !== undefined) editorSettings.value.tabGroupCustomizations = normalizeTabGroupCustomizations(partial.tabGroupCustomizations);
     if (partial.tabSortMode !== undefined) editorSettings.value.tabSortMode = normalizeTabSortMode(partial.tabSortMode);
     if (partial.appLayout !== undefined) editorSettings.value.appLayout = partial.appLayout;
     if (partial.pageSize !== undefined) editorSettings.value.pageSize = normalizeResultPageSize(partial.pageSize);
@@ -1990,6 +2146,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
+    if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
     if (partial.dataGridSearchMode !== undefined) editorSettings.value.dataGridSearchMode = normalizeDataGridSearchMode(partial.dataGridSearchMode);
     if (partial.dataGridCopyExtractor !== undefined) editorSettings.value.dataGridCopyExtractor = normalizeDataGridCopyPreference(partial.dataGridCopyExtractor);
@@ -2007,6 +2164,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.tableFontSize !== undefined) editorSettings.value.tableFontSize = normalizeTableFontSize(partial.tableFontSize);
     if (partial.structureEditorDensity !== undefined) editorSettings.value.structureEditorDensity = normalizeStructureEditorDensity(partial.structureEditorDensity);
     if (partial.tableInfoActiveTab !== undefined) editorSettings.value.tableInfoActiveTab = normalizeTableInfoTab(partial.tableInfoActiveTab);
+    if (partial.tableInfoDrawerPinned !== undefined) editorSettings.value.tableInfoDrawerPinned = partial.tableInfoDrawerPinned === true;
     if (partial.tableInfoDrawerWidth !== undefined) editorSettings.value.tableInfoDrawerWidth = normalizeDrawerWidth(partial.tableInfoDrawerWidth, 240, DEFAULT_EDITOR_SETTINGS.tableInfoDrawerWidth);
     if (partial.cellDetailDrawerWidth !== undefined) editorSettings.value.cellDetailDrawerWidth = normalizeDrawerWidth(partial.cellDetailDrawerWidth, 260, DEFAULT_EDITOR_SETTINGS.cellDetailDrawerWidth);
     if (partial.cellDetailPanelLayout !== undefined) editorSettings.value.cellDetailPanelLayout = normalizeCellDetailPanelLayout(partial.cellDetailPanelLayout);
@@ -2049,6 +2207,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.sqlShortcuts !== undefined) editorSettings.value.sqlShortcuts = normalizeSqlShortcuts(partial.sqlShortcuts);
     if (partial.tableColumnTemplateFields !== undefined) editorSettings.value.tableColumnTemplateFields = normalizeTableColumnTemplateFields(partial.tableColumnTemplateFields);
     if (partial.exportBatchSize !== undefined) editorSettings.value.exportBatchSize = Math.min(100000, Math.max(100, Math.round(partial.exportBatchSize)));
+    if (partial.csvQuoteMode !== undefined) editorSettings.value.csvQuoteMode = normalizeCsvQuoteMode(partial.csvQuoteMode);
     if (partial.redisKeyTemplates !== undefined) editorSettings.value.redisKeyTemplates = normalizeRedisKeyTemplates(partial.redisKeyTemplates);
     if (partial.exportRowLimitEnabled !== undefined) editorSettings.value.exportRowLimitEnabled = partial.exportRowLimitEnabled;
     if (partial.exportRowLimit !== undefined) editorSettings.value.exportRowLimit = Math.min(2147483647, Math.max(100, Math.round(partial.exportRowLimit)));
@@ -2229,6 +2388,11 @@ export const useSettingsStore = defineStore("settings", () => {
     activeEffort,
     defaultAiMode,
     setDefaultAiMode,
+    aiDefaultTemplatesByDbType,
+    aiLastUsedTemplatesByDbType,
+    setDefaultTemplatesForDbType,
+    recordLastUsedTemplates,
+    removeTemplateFromDefaultAndLastUsed,
     isAiConfigLoaded,
     aiConfigs,
     initAiConfigs,

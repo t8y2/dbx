@@ -151,4 +151,26 @@ describe("queryStore PostgreSQL EXPLAIN ANALYZE", () => {
 
     expect(mocks.buildExplainSql).toHaveBeenCalledWith("questdb", SOURCE_SQL);
   });
+
+  it("wraps a resolved statement whose variables were substituted before explain", async () => {
+    const resolvedSql = "SELECT 123";
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "shop", "Query", "query", "public");
+
+    await store.explainTabSql(tabId, resolvedSql, "postgres");
+
+    expect(mocks.buildExplainSql).toHaveBeenCalledWith("postgres", resolvedSql);
+  });
+
+  it("keeps the analyze flag for a resolved statement whose variables were substituted", async () => {
+    const resolvedSql = "SELECT 123";
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "shop", "Query", "query", "public");
+
+    await store.explainTabSql(tabId, resolvedSql, "postgres", "autotrace");
+
+    expect(mocks.buildExplainSql).toHaveBeenCalledWith("postgres", resolvedSql, "json", true);
+  });
 });

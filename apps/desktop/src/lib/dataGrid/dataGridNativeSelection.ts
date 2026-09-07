@@ -9,6 +9,9 @@ interface NativeSelectionBlockEnvironment {
         remove(className: string): void;
       };
     };
+    activeElement?: {
+      closest?(selector: string): unknown;
+    } | null;
   };
   getSelection?: () => { removeAllRanges(): void } | null;
   setTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout>;
@@ -40,10 +43,17 @@ function hasActiveBlockForEnvironment(environment: NativeSelectionBlockEnvironme
   return [...activeSelectionBlocks.values()].some((activeBlock) => activeBlock.environment.document?.documentElement === documentElement);
 }
 
+function activeElementUsesNativeSelection(environment: NativeSelectionBlockEnvironment): boolean {
+  return !!environment.document?.activeElement?.closest?.("input, textarea, [contenteditable='true'], [role='textbox']");
+}
+
 export function beginDataGridNativeSelectionBlock(owner: DataGridNativeSelectionBlockOwner, environment: NativeSelectionBlockEnvironment = defaultEnvironment()) {
   clearReleaseTimer(owner);
   activeSelectionBlocks.set(owner, { environment });
   environment.document?.documentElement?.classList.add(DATA_GRID_NATIVE_SELECTION_BLOCK_CLASS);
+  // Clearing the document selection while a text editor is focused can leave
+  // CodeMirror's caret visible but detach the browser's active editing range.
+  if (activeElementUsesNativeSelection(environment)) return;
   environment.getSelection?.()?.removeAllRanges();
 }
 

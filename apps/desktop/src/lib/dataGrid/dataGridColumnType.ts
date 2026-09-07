@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import { isElasticsearchCompatibleDatabaseType, type DatabaseType } from "@/types/database";
 
 /**
  * Resolve the data type to display in a data-grid column header.
@@ -32,6 +32,27 @@ export function resolveHeaderColumnType({ tableColumnType, resultColumnTypes, ac
 
 export function compactHeaderColumnType(dataType: string): string {
   return /^enum\s*\(/i.test(dataType.trim()) ? "enum" : dataType;
+}
+
+const CHARACTER_LENGTH_TYPE_PATTERN = /^(?:char|varchar|nchar|nvarchar|varchar2|nvarchar2|character|character\s+varying|national\s+character|national\s+character\s+varying)$/i;
+
+export interface MetadataColumnTypeLabel {
+  dataType: string;
+  characterMaximumLength?: number | null;
+  numericPrecision?: number | null;
+  numericScale?: number | null;
+}
+
+export function formatMetadataColumnTypeLabel({ dataType, characterMaximumLength, numericPrecision, numericScale }: MetadataColumnTypeLabel): string {
+  const typeName = dataType.trim();
+  if (!typeName || /\([^)]*\)\s*$/.test(typeName)) return typeName;
+  if (characterMaximumLength != null && characterMaximumLength > 0 && CHARACTER_LENGTH_TYPE_PATTERN.test(typeName)) {
+    return `${typeName}(${characterMaximumLength})`;
+  }
+  if (numericPrecision != null && /^(?:numeric|decimal)$/i.test(typeName)) {
+    return `${typeName}(${numericPrecision},${numericScale ?? 0})`;
+  }
+  return typeName;
 }
 
 /**
@@ -127,6 +148,9 @@ const NUMERIC_COLUMN_TYPE_BASES = new Set([
   "smallmoneyn",
   "binary_float",
   "binary_double",
+  // Elasticsearch numeric mapping types.
+  "half_float",
+  "scaled_float",
 ]);
 
 export function isNumericColumnType(dataType: string | undefined): boolean {
@@ -173,7 +197,15 @@ const INTEGER_COLUMN_TYPE_BASES = new Set([
   "uint128",
   "uint256",
   "year",
+  // Elasticsearch integer mapping types with unambiguous names.
+  "unsigned_long",
+  "token_count",
 ]);
+
+// Elasticsearch integer mapping types whose names collide with other
+// databases' non-integer types (Oracle LONG is a legacy text type, Informix
+// BYTE is binary), so they only apply to Elasticsearch-compatible databases.
+const ELASTICSEARCH_ONLY_INTEGER_COLUMN_TYPE_BASES = new Set(["byte", "short", "long"]);
 
 const STRING_COLUMN_TYPE_BASES = new Set([
   "varchar",
@@ -200,11 +232,20 @@ const STRING_COLUMN_TYPE_BASES = new Set([
   "character varying",
   "national character",
   "national character varying",
+  // Elasticsearch text-like mapping types.
+  "keyword",
+  "constant_keyword",
+  "wildcard",
+  "match_only_text",
+  "search_as_you_type",
+  "completion",
+  "ip",
+  "version",
 ]);
 
 const BOOLEAN_COLUMN_TYPE_BASES = new Set(["bool", "boolean", "bit"]);
-const TEMPORAL_COLUMN_TYPE_BASES = new Set(["date", "date32", "daten", "time", "time64", "timen", "timetz", "datetime", "datetime2", "datetime4", "datetime64", "datetimen", "datetimeoffset", "datetimeoffsetn", "smalldatetime", "timestamp", "timestampdty", "timestamptz", "interval"]);
-const STRUCTURED_COLUMN_TYPE_BASES = new Set(["json", "jsonb", "jsonpath", "xml", "xmltype", "array", "map", "tuple", "struct", "row", "object", "document", "variant"]);
+const TEMPORAL_COLUMN_TYPE_BASES = new Set(["date", "date_nanos", "date32", "daten", "time", "time64", "timen", "timetz", "datetime", "datetime2", "datetime4", "datetime64", "datetimen", "datetimeoffset", "datetimeoffsetn", "smalldatetime", "timestamp", "timestampdty", "timestamptz", "interval"]);
+const STRUCTURED_COLUMN_TYPE_BASES = new Set(["json", "jsonb", "jsonpath", "xml", "xmltype", "array", "map", "tuple", "struct", "row", "object", "nested", "flattened", "document", "variant"]);
 const IDENTIFIER_COLUMN_TYPE_BASES = new Set(["uuid", "uniqueidentifier", "rowid", "urowid"]);
 const BINARY_COLUMN_TYPE_BASES = new Set(["bytea", "blob", "tinyblob", "mediumblob", "longblob", "binary", "varbinary", "image", "raw", "long raw", "bfile"]);
 const SPATIAL_COLUMN_TYPE_BASES = new Set(["geometry", "geography", "sdo_geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection"]);
@@ -259,6 +300,7 @@ export function resolveDataGridTypeVisualKind(dataType: string | undefined, data
   if (array) return "structured";
   if (databaseType === "sqlserver" && (base === "timestamp" || base === "rowversion")) return "binary";
   if (databaseType === "postgres" && (base === "bit" || base === "bit varying")) return "binary";
+  if (isElasticsearchCompatibleDatabaseType(databaseType) && ELASTICSEARCH_ONLY_INTEGER_COLUMN_TYPE_BASES.has(base)) return "integer";
   if (INTEGER_COLUMN_TYPE_BASES.has(base)) return "integer";
   if (isNumericColumnType(dataType)) return "numeric";
   if (BOOLEAN_COLUMN_TYPE_BASES.has(base)) return "boolean";

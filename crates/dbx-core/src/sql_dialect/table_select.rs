@@ -209,9 +209,9 @@ pub fn build_table_data_select_sql_with_database(
     let table = if let Some(database) = jdbc_tdengine_database {
         qualified_table_name(Some(DatabaseType::Tdengine), Some(database), &options.table_name)
     // Doris / StarRocks multi-catalog: prefix the catalog for external-catalog tables.
-    } else if database_type == Some(DatabaseType::Iris) {
-        table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
-    } else if uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref()) {
+    } else if database_type == Some(DatabaseType::Iris)
+        || uses_connection_identifier_quote(database_type, options.identifier_quote.as_deref())
+    {
         table_data_qualified_table_name(database_type, schema, &options.table_name, options.identifier_quote.as_deref())
     } else if include_database_name {
         database_qualified_table_name(

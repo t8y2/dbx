@@ -3,13 +3,53 @@
 import { marked, Renderer } from "marked";
 import type { ChangelogIndexEntry, ChangelogRelease } from "@/lib/changelog";
 import { Tag } from "lucide-react";
+import type { DocsLang } from "@/lib/i18n";
 
 const sectionLabels: Record<string, Record<string, string>> = {
-  added: { en: "New Features", cn: "新功能" },
-  improved: { en: "Improvements", cn: "改进" },
-  fixed: { en: "Bug Fixes", cn: "问题修复" },
-  changed: { en: "Changes", cn: "变更" },
-  removed: { en: "Removed", cn: "移除" },
+  added: { en: "New Features", cn: "新功能", tr: "Yeni Özellikler" },
+  improved: { en: "Improvements", cn: "改进", tr: "İyileştirmeler" },
+  fixed: { en: "Bug Fixes", cn: "问题修复", tr: "Hata Düzeltmeleri" },
+  changed: { en: "Changes", cn: "变更", tr: "Değişiklikler" },
+  removed: { en: "Removed", cn: "移除", tr: "Kaldırılanlar" },
+};
+
+const listText: Record<DocsLang, { publishedOn: string; download: string; seeGitHub: string; loading: string; releaseList: string; versions: string; content: string; tocTitle: (tag: string) => string; tocSubtitle: string; currentContents: string }> = {
+  en: {
+    publishedOn: "Published on",
+    download: "Download",
+    seeGitHub: "See GitHub Release for details",
+    loading: "Loading release…",
+    releaseList: "Release list",
+    versions: "Versions",
+    content: "Changelog content",
+    tocTitle: (tag) => `In ${tag}`,
+    tocSubtitle: "Release contents",
+    currentContents: "Current release contents",
+  },
+  cn: {
+    publishedOn: "发布于",
+    download: "下载",
+    seeGitHub: "查看 GitHub Release 获取详情",
+    loading: "正在加载版本…",
+    releaseList: "版本列表",
+    versions: "版本列表",
+    content: "更新日志内容",
+    tocTitle: (tag) => `在 ${tag} 中`,
+    tocSubtitle: "更新内容",
+    currentContents: "当前版本目录",
+  },
+  tr: {
+    publishedOn: "Yayımlanma",
+    download: "İndir",
+    seeGitHub: "Ayrıntılar için GitHub Release sayfasına bakın",
+    loading: "Sürüm yükleniyor…",
+    releaseList: "Sürüm listesi",
+    versions: "Sürümler",
+    content: "Değişiklik günlüğü içeriği",
+    tocTitle: (tag) => `${tag} içinde`,
+    tocSubtitle: "Sürüm içeriği",
+    currentContents: "Geçerli sürüm içeriği",
+  },
 };
 
 // 与 .github/scripts/sync-changelog.mjs 的 SECTION_MAP 保持一致，
@@ -27,12 +67,14 @@ const sectionTypeByTitle: Record<string, string> = {
   Removed: "removed",
 };
 
-function formatDate(dateStr: string, lang: string) {
+const DATE_LOCALE: Record<DocsLang, string> = { en: "en-US", cn: "zh-CN", tr: "tr-TR" };
+
+function formatDate(dateStr: string, lang: DocsLang) {
   const date = new Date(dateStr);
   if (lang === "cn") {
     return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
   }
-  return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  return date.toLocaleDateString(DATE_LOCALE[lang], { year: "numeric", month: "long", day: "numeric" });
 }
 
 function releaseId(tag: string) {
@@ -105,7 +147,7 @@ function renderMarkdown(release: ChangelogRelease) {
 
 // TOC 必须与 renderMarkdown 数的是同一批 h3（跳过代码围栏里的 "### "），
 // 否则 parseBody 过滤掉无条目小节后，锚点序号会整体错位。
-function buildTocEntries(release: ChangelogRelease, lang: string) {
+function buildTocEntries(release: ChangelogRelease, lang: DocsLang) {
   const markdown = releaseDisplayMarkdown(release);
   const titles: string[] = [];
   let inFence = false;
@@ -127,14 +169,14 @@ function buildTocEntries(release: ChangelogRelease, lang: string) {
   }));
 }
 
-function ReleaseCard({ release, lang, isLoading, errorMessage }: { release: ChangelogRelease | null; lang: "en" | "cn"; isLoading: boolean; errorMessage?: string }) {
-  const text = lang === "cn" ? { publishedOn: "发布于", download: "下载", seeGitHub: "查看 GitHub Release 获取详情" } : { publishedOn: "Published on", download: "Download", seeGitHub: "See GitHub Release for details" };
+function ReleaseCard({ release, lang, isLoading, errorMessage }: { release: ChangelogRelease | null; lang: DocsLang; isLoading: boolean; errorMessage?: string }) {
+  const text = listText[lang];
 
   if (!release) {
     return (
       <section className="changelog-release changelog-release-loading" aria-busy="true">
         <div className="changelog-loading-inner">
-          <span>{errorMessage || (isLoading ? (lang === "cn" ? "正在加载版本…" : "Loading release…") : text.seeGitHub)}</span>
+          <span>{errorMessage || (isLoading ? text.loading : text.seeGitHub)}</span>
         </div>
       </section>
     );
@@ -166,17 +208,18 @@ function ReleaseCard({ release, lang, isLoading, errorMessage }: { release: Chan
   );
 }
 
-export function ChangelogList({ releaseIndex, selectedTag, release, lang, isLoading, errorMessage, onSelectRelease }: { releaseIndex: ChangelogIndexEntry[]; selectedTag: string; release: ChangelogRelease | null; lang: "en" | "cn"; isLoading: boolean; errorMessage?: string; onSelectRelease: (tag: string) => void }) {
+export function ChangelogList({ releaseIndex, selectedTag, release, lang, isLoading, errorMessage, onSelectRelease }: { releaseIndex: ChangelogIndexEntry[]; selectedTag: string; release: ChangelogRelease | null; lang: DocsLang; isLoading: boolean; errorMessage?: string; onSelectRelease: (tag: string) => void }) {
+  const t = listText[lang];
   const activeTag = release?.tag || selectedTag || releaseIndex[0]?.tag;
   const tocEntries = release ? buildTocEntries(release, lang) : [];
 
   return (
     <div className="changelog-shell">
-      <aside className="changelog-sidebar changelog-sidebar-left" aria-label={lang === "cn" ? "版本列表" : "Release list"}>
+      <aside className="changelog-sidebar changelog-sidebar-left" aria-label={t.releaseList}>
         <div className="changelog-sidebar-inner">
           <div className="changelog-sidebar-title">
             <Tag size={18} strokeWidth={1.8} />
-            <span>{lang === "cn" ? "版本列表" : "Versions"}</span>
+            <span>{t.versions}</span>
           </div>
           <nav className="changelog-version-list">
             {releaseIndex.map((entry) => (
@@ -188,15 +231,15 @@ export function ChangelogList({ releaseIndex, selectedTag, release, lang, isLoad
         </div>
       </aside>
 
-      <section className="changelog-content" aria-label={lang === "cn" ? "更新日志内容" : "Changelog content"}>
+      <section className="changelog-content" aria-label={t.content}>
         <ReleaseCard release={release} lang={lang} isLoading={isLoading} errorMessage={errorMessage} />
       </section>
 
       {release && tocEntries.length > 0 && (
-        <aside className="changelog-sidebar changelog-sidebar-right" aria-label={lang === "cn" ? "当前版本目录" : "Current release contents"}>
+        <aside className="changelog-sidebar changelog-sidebar-right" aria-label={t.currentContents}>
           <div className="changelog-sidebar-inner">
-            <p className="changelog-toc-title">{lang === "cn" ? `在 ${activeTag} 中` : `In ${activeTag}`}</p>
-            <p className="changelog-toc-subtitle">{lang === "cn" ? "更新内容" : "Release contents"}</p>
+            <p className="changelog-toc-title">{t.tocTitle(activeTag)}</p>
+            <p className="changelog-toc-subtitle">{t.tocSubtitle}</p>
             <nav className="changelog-toc-list">
               {tocEntries.map((entry) => (
                 <a key={entry.id} href={`#${entry.id}`}>

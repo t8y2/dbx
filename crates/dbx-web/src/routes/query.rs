@@ -394,15 +394,22 @@ pub async fn execute_query(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
 
@@ -411,7 +418,7 @@ pub async fn execute_query(
     let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.sql,
         req.schema.as_deref(),
         Some(cancel_token),
@@ -447,13 +454,20 @@ pub async fn execute_conditional_update(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
 
     let execution_id = req.execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let registered = state.app.running_queries.register_task_for_terminal_confirmation(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
     let response_timeout = dbx_core::query::query_timeout_duration(req.timeout_secs);
@@ -464,7 +478,7 @@ pub async fn execute_conditional_update(
         let result = dbx_core::query::execute_sql_statement_with_options_typed(
             &app,
             &req.connection_id,
-            &req.database,
+            &database,
             &req.sql,
             req.schema.as_deref(),
             Some(cancel_token),
@@ -524,15 +538,22 @@ pub async fn execute_multi(
     Json(req): Json<ExecuteQueryRequest>,
 ) -> Result<Response, AppError> {
     let allow_database_switch = req.client_session_id.as_deref().is_some_and(|id| !id.trim().is_empty());
-    super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, &req.sql, allow_database_switch)
-        .await?;
+    let database = super::mcp_policy::ensure_sql(
+        &state,
+        &headers,
+        &req.connection_id,
+        &req.database,
+        &req.sql,
+        allow_database_switch,
+    )
+    .await?;
     let requested_execution_id = req.execution_id.filter(|id| !id.trim().is_empty());
     let keep_timeout_reachable = requested_execution_id.is_some();
     let execution_id = requested_execution_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let registered = state.app.running_queries.register_task(
         execution_id.clone(),
-        RunningTaskMetadata::query(req.connection_id.clone(), req.database.clone(), req.client_session_id.clone()),
+        RunningTaskMetadata::query(req.connection_id.clone(), database.clone(), req.client_session_id.clone()),
     );
     let cancel_token = registered.token();
 
@@ -542,7 +563,7 @@ pub async fn execute_multi(
     let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.sql,
         req.schema.as_deref(),
         Some(cancel_token),
@@ -599,14 +620,15 @@ pub async fn execute_batch(
     headers: HeaderMap,
     Json(req): Json<ExecuteBatchRequest>,
 ) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    let database = super::mcp_policy::resolve_database(&state, &headers, &req.connection_id, &req.database).await?;
     for statement in &req.statements {
-        super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &req.database, statement, false).await?;
+        super::mcp_policy::ensure_sql(&state, &headers, &req.connection_id, &database, statement, false).await?;
     }
     tracing::debug!(connection_id = %req.connection_id, "execute_batch");
     let result = dbx_core::query::execute_statements(
         &state.app,
         &req.connection_id,
-        &req.database,
+        &database,
         &req.statements,
         req.schema.as_deref(),
         req.timeout_secs,

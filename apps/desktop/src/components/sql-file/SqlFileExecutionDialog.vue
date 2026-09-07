@@ -21,8 +21,9 @@ import { fetchSqlFileTargetOptions } from "@/composables/useDatabaseOptions";
 import { requiresSqlFileTargetDatabaseSelection } from "@/lib/connection/connectionLevelDatabaseBootstrap";
 import { cancelSqlFileExecution, executeSqlFiles, listenSqlFileProgress, previewSqlFile, type SqlFilePreview, type SqlFileProgress, type SqlFileStatus } from "@/lib/backend/api";
 import { buildDisplayFileNames, tooltipText as computeTooltipText } from "./sqlFilePreviewLabel";
-import { useExportTracker } from "@/composables/useExportTracker";
-import { Check, CheckSquare, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
+import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
+import { translateBackendError } from "@/i18n/backend-errors";
+import { Check, CheckSquare, ChevronRight, FileCode, FolderOpen, Loader2, Play, Square, X } from "@lucide/vue";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -93,6 +94,8 @@ const executionId = ref("");
 const progress = ref<SqlFileProgress | null>(null);
 const terminalStatus = ref<SqlFileStatus | "idle">("idle");
 const terminalError = ref("");
+const activeExecutionTask = ref<ExportTask | null>(null);
+const failureDetailsExpanded = ref(false);
 const refreshedTarget = ref(false);
 const MAX_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
 
@@ -152,6 +155,13 @@ const progressPercent = computed(() => {
   const current = Math.max(progress.value.statementIndex, attempted);
   if (current <= 0) return running.value ? 8 : 0;
   return Math.min(95, Math.max(8, Math.round((attempted / current) * 100)));
+});
+const sqlFileFailures = computed(() => activeExecutionTask.value?.sqlFileFailures ?? []);
+const sqlFileFailureCount = computed(() => sqlFileFailures.value.length + (activeExecutionTask.value?.sqlFileFailuresOmitted ?? 0));
+const unlistedTerminalError = computed(() => {
+  const error = progress.value?.error || terminalError.value;
+  if (!error || sqlFileFailures.value.some((failure) => failure.error === error)) return "";
+  return error;
 });
 function previewLineCount(item: SqlFilePreview) {
   return item.preview.split(/\r\n|\r|\n/).length;
@@ -220,6 +230,8 @@ function resetExecution() {
   progress.value = null;
   terminalStatus.value = "idle";
   terminalError.value = "";
+  activeExecutionTask.value = null;
+  failureDetailsExpanded.value = false;
   refreshedTarget.value = false;
   resetPerFileState();
 }
@@ -391,8 +403,10 @@ async function startExecution() {
   terminalStatus.value = "running";
   terminalError.value = "";
   progress.value = null;
+  activeExecutionTask.value = null;
+  failureDetailsExpanded.value = false;
   const taskLabel = previews.value.length === 1 ? previews.value[0]!.fileName : `${previews.value[0]!.fileName} (+${previews.value.length - 1})`;
-  addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
+  activeExecutionTask.value = addSqlFileTask(batchId, taskLabel, filePathDisplay.value);
 
   try {
     await store.ensureConnected(connectionId.value);
@@ -415,7 +429,6 @@ async function startExecution() {
         progress.value = next;
         terminalStatus.value = next.status;
         terminalError.value = next.error ?? terminalError.value;
-        updateSqlFileTask(batchId, next);
 
         // Detect per-file boundary events from the backend (populated only
         // during multi-file execution).  The backend emits a file-start
@@ -444,6 +457,12 @@ async function startExecution() {
             }
           }
         }
+
+        updateSqlFileTask(batchId, next, {
+          fileIndex: currentFileIndex.value >= 0 ? currentFileIndex.value : previews.value.length === 1 ? 0 : undefined,
+          fileName: currentFileName.value || (previews.value.length === 1 ? (displayFileNames.value.get(previews.value[0]!.filePath) ?? previews.value[0]!.fileName) : undefined),
+        });
+        if (next.status === "statementFailed") failureDetailsExpanded.value = true;
 
         if (isTerminalProgress(next.status)) {
           resolveTerminalProgress(next);
@@ -778,8 +797,29 @@ watch(
             </div>
           </div>
 
-          <div v-if="progress?.error || terminalError" class="max-w-full overflow-auto rounded-md border bg-destructive/5 p-2 text-xs text-destructive whitespace-pre-wrap">
-            {{ progress?.error || terminalError }}
+          <div v-if="sqlFileFailureCount > 0" class="min-w-0 space-y-1.5">
+            <button type="button" class="flex items-center gap-1 text-xs font-medium text-foreground hover:text-primary" :aria-expanded="failureDetailsExpanded" @click="failureDetailsExpanded = !failureDetailsExpanded">
+              <ChevronRight class="h-3.5 w-3.5 shrink-0 transition-transform" :class="{ 'rotate-90': failureDetailsExpanded }" />
+              {{ failureDetailsExpanded ? t("exportProgress.hideFailureDetails") : t("exportProgress.showFailureDetails", { count: sqlFileFailureCount }) }}
+            </button>
+            <div v-if="failureDetailsExpanded" class="max-h-[min(30vh,280px)] min-w-0 overflow-y-auto rounded-md border border-destructive/20 bg-destructive/5 text-xs">
+              <div v-for="failure in sqlFileFailures" :key="`${failure.fileIndex ?? -1}:${failure.statementIndex}`" class="border-b border-destructive/15 p-2.5 last:border-b-0">
+                <div class="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
+                  <span class="shrink-0">#{{ failure.statementIndex }}</span>
+                  <span v-if="failure.fileName" class="truncate text-muted-foreground" :title="failure.fileName">{{ failure.fileName }}</span>
+                </div>
+                <div v-if="failure.statementSummary" class="mt-1 max-w-full overflow-auto font-mono whitespace-pre-wrap break-words text-foreground">{{ failure.statementSummary }}</div>
+                <div class="mt-1 select-text whitespace-pre-wrap break-words text-destructive">{{ translateBackendError(t, failure.error) }}</div>
+                <div v-if="failure.truncated" class="mt-1 text-muted-foreground">{{ t("exportProgress.failureDetailTruncated") }}</div>
+              </div>
+              <div v-if="activeExecutionTask?.sqlFileFailuresOmitted" class="p-2.5 text-muted-foreground">
+                {{ t("exportProgress.failureDetailsOmitted", { count: activeExecutionTask.sqlFileFailuresOmitted }) }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="unlistedTerminalError" class="max-w-full overflow-auto rounded-md border bg-destructive/5 p-2 text-xs text-destructive whitespace-pre-wrap">
+            {{ translateBackendError(t, unlistedTerminalError) }}
           </div>
         </div>
       </div>

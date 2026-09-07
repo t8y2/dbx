@@ -1,0 +1,211 @@
+---
+title: Şema ve Veri Karşılaştırma
+description: Şemaları ya da tablo verisini karşılaştırın; farkları, tür eşlemelerini, etkiyi ve eşitleme SQL'ini inceleyip hedef ortama dağıtın.
+---
+
+DBX iki karşılaştırma iş akışı sunar:
+
+- **Şema Karşılaştırma**, nesneleri ve DDL'i karşılaştırır ve kaynaktan hedefe bir dağıtım betiği üretir
+- **Veri Karşılaştırma**, bir ya da daha çok tablodaki satırları anahtar sütunlara göre karşılaştırır ve seçilebilir ekleme, güncelleme ve silme SQL'i üretir
+
+İkisi de kaynağı istenen durum, hedefi ise incelenecek ya da eşitlenecek ortam olarak görür. Yönü ters çevirmek karşıt işlemleri üretir.
+
+<Callout type="warn">Karşılaştırma sonuçları ve üretilen SQL insan incelemesi gerektirir. Nesne silmeleri, satır silmeleri, tür dönüşümleri, lehçeler arası eşlemeler ve toplu eşitleme geri alınamayabilir. Önce üretimi yedekleyin ve geri dönüş planını hazırlayın.</Callout>
+
+## Şema Karşılaştırma İş Akışı
+
+<Steps>
+  <Step>
+    ### Bir yapılandırma seçin ya da oluşturun
+
+    Son kullanılan bir yapılandırmayı seçin ya da yeni bir tane oluşturun, yeniden adlandırın veya çoğaltın. Yapılandırmalar; kaynağı, hedefi ve seçenekleri yeniden kullanmak için JSON olarak içe/dışa aktarılabilir.
+
+  </Step>
+  <Step>
+    ### Kaynağı ve hedefi seçin
+
+    Her iki taraf için bağlantıyı, veritabanını ve şemayı seçin. Bunları yer değiştirebilirsiniz, ancak sonrasında dağıtım yönünü yeniden gözden geçirmelisiniz.
+
+  </Step>
+  <Step>
+    ### Karşılaştırma kapsamını yapılandırın
+
+    Tabloları, birincil anahtarları, yabancı anahtarları, benzersiz anahtarları, check kısıtlarını, görünümleri, işlevleri, dizinleri, dizileri, tetikleyicileri, kuralları, sahipleri ve desteklenen diğer nesneleri seçin. Seçenekler veritabanı türüne bağlıdır.
+
+  </Step>
+  <Step>
+    ### Karşılaştırın ve nesneleri seçin
+
+    DBX meta veriyi ve DDL'i okur, bir nesne ağacı oluşturur ve oluşturmaları, silmeleri, değişiklikleri ve bağımlılıkları işaretler. Gerçekten dağıtılacak nesneleri seçin.
+
+  </Step>
+  <Step>
+    ### DDL'i ve etkiyi inceleyin
+
+    Kaynak/hedef DDL'i, alan eşlemelerini, dağıtım betiğini, bağımlılıkları, olası çakışmaları ve etki raporunu inceleyin.
+
+  </Step>
+  <Step>
+    ### Dışa aktarın ya da dağıtın
+
+    `.sql` dosyasını kopyalayın/dışa aktarın ya da son onaydan sonra hedefe dağıtın. Desteklendiğinde bir işlem kullanın ve ifade düzeyindeki ilerleme ile sonuçları inceleyin.
+
+  </Step>
+</Steps>
+
+## Şema Fark Türleri
+
+| Durum | Anlamı | Tipik betik |
+| --- | --- | --- |
+| Kaynakta eklenmiş | Hedefte nesne yok | `CREATE` ya da sütun/dizin/kısıt ekleme |
+| Hedefte fazladan | Kaynakta nesne yok | `DROP` ya da sütun/dizin/kısıt kaldırma |
+| Değişmiş nesne | Tanımlar farklı | `ALTER`, yeniden oluşturma ya da kaynağı değiştirme |
+| Yeniden adlandırma adayı | Adlar farklı ama yapılar benzer | İnceleme gerektiren, benzerliğe dayalı yeniden adlandırma önerisi |
+| Uyumluluk çakışması | Kaynak tür ya da özellik hedefe doğrudan eşlenemiyor | Alan eşlemesi, düşürme ya da elle göç |
+
+Nesne ağacında filtreleyin ve seçin. Bir nesne yalnızca hedefte fazladan olduğu için otomatik silinmez; yine seçim ve son onay gerektirir.
+
+## Karşılaştırma Seçenekleri
+
+### Nesne Kapsamı
+
+Veritabanına bağlı olarak karşılaştırma şunları içerebilir:
+
+- Tablolar, sütunlar, sütun sırası ve birincil anahtarlar
+- Benzersiz anahtarlar, yabancı anahtarlar, check ve exclusion kısıtları
+- Dizinler, görünümler, işlevler, diziler, tetikleyiciler ve kurallar
+- Sahipler ve dizilerin geçerli değerleri
+
+Seçenekler lehçeye özgü varsayılanları yükler. Güvenilir meta verisi ya da eşitleme SQL'i olmayan nesneler gizlenir veya yalnızca fark olarak gösterilir.
+
+### Tablo Filtreleri
+
+- Dâhil etme ve hariç tutma desenleri
+- Her ikisi de eşleştiğinde öncelik
+- Toplu mod ve tablo adı desenleri
+- Sistem nesnelerinin görünürlüğü
+
+Filtreleme, yetkileri değil karşılaştırma kapsamını denetler. Geçerli hesabın okuyamadığı nesneler görünmez.
+
+### Yeniden Adlandırma Algılama
+
+Sütun ya da tablo yeniden adlandırma algılamasını etkinleştirin ve bir benzerlik eşiği belirleyin. Öneriler yapısal benzerliğe dayanır ve iş anlamını bilmez; veriyi, kısıtları, uygulama kodunu ve bağımlılıkları doğrulayın.
+
+### Lehçeler Arası Alan Eşlemesi
+
+Kaynak ve hedef türler farklı olduğunda kaynak lehçeyi, hedef lehçeyi, uyumluluk eşiğini ve alan eşlemelerini yapılandırın:
+
+- `VARCHAR(255)` içindeki uzunluk gibi parametreleri koruma
+- Uyumsuz parametreleri kaldırma
+- Özel hedef parametreleri verme
+
+Motorlar arası karşılaştırma yalnızca elden gelenin en iyisi olan uyumlu bir betik üretebilir. Karakter kümesi, collation, identity, diziler, bölümleme, depolama motorları, işlevler ve yetkiler çoğunlukla elle göç tasarımı gerektirir.
+
+## DDL, Bağımlılıklar ve Dağıtım İncelemesi
+
+Seçili nesneler için şunları inceleyin:
+
+- Kaynak ve hedef DDL
+- Nesne başına dağıtım SQL'i
+- Seçili tüm nesneler için betiğin tamamı
+- Bağımlılıklar ve ters bağımlılıklar
+- Alan eşlemeleri ve uyumluluk uyarıları
+- Oluşturma, değiştirme, silme sayıları ve etki özeti
+- Etkinleştirildiğinde ve üretilebildiğinde isteğe bağlı geri alma SQL'i
+
+Son dağıtım sayfası; hedef sunucuyu, veritabanını, şemayı, veritabanı sürümünü ve ifade sayısını yineler. Üretim koruması, çalıştırmadan önce açık onay ister.
+
+<Callout type="info">İşlem içinde çalıştırma, yalnızca hedef veritabanı ve ifadeler işlemsel DDL'i destekliyorsa tam geri alma sağlar. MySQL ve bazı veritabanları DDL'i örtük olarak uygular.</Callout>
+
+## Lehçe Anlamı
+
+DBX her şeyi genel DDL'e indirgemek yerine veritabanına özgü anlamı korumaya çalışır:
+
+- PostgreSQL/openGauss şemaları, dizileri, sahipleri, kuralları ve dizin özellikleri
+- MySQL uyumlu karakter kümesi, collation, identity ve dizin sözdizimi
+- Oracle, Dameng, GaussDB, KingbaseES ve benzeri tür ile niteleme davranışı
+- Doris/StarRocks, ClickHouse, Elasticsearch/Easysearch ve diğerleri yalnızca güvenilir biçimde desteklenen yapı kapsamında
+
+Desteklenen bir bağlantı, her nesnenin karşılaştırılabileceği ya da dağıtılabileceği anlamına gelmez. [Veritabanı Desteği](/tr/docs/databases) sayfasını ve sonuçtaki yetenek iletilerini kullanın.
+
+## Veri Karşılaştırma
+
+Veri Karşılaştırma, Şema Karşılaştırma'dan ayrıdır ve kaynak ile hedef tablolar arasındaki satırları karşılaştırır.
+
+<Steps>
+  <Step>
+    ### Kaynak ve hedef tabloları seçin
+
+    Bağlantıyı, veritabanını, şemayı ve tabloyu seçin. Toplu mod, birden çok kaynak tablo seçip bunları aynı adlı hedeflere eşleyebilir.
+
+  </Step>
+  <Step>
+    ### Anahtar sütunları seçin
+
+    Satırları benzersiz olarak belirleyen bir birincil ya da iş anahtarı seçin. Yanlış anahtarlar, güncellemeleri görünüşte ekleme ve silmeye dönüştürebilir.
+
+  </Step>
+  <Step>
+    ### Karşılaştırmayı çalıştırın
+
+    DBX iki tarafı da okur ve yalnızca kaynakta, yalnızca hedefte ve değişmiş satırları işaretler. Toplu mod; geçerli tabloyu, ilerlemeyi ve tablo başına hataları gösterir.
+
+  </Step>
+  <Step>
+    ### Farkları seçin
+
+    Eklemeleri, kaldırmaları ve değişiklikleri filtreleyin ve eşitlenecek satırları ya da alanları seçin. Bir ayrıntı önizleme sınırı, gösterilen veri hacmini denetler.
+
+  </Step>
+  <Step>
+    ### Eşitleme SQL'ini üretin ve çalıştırın
+
+    DBX, hedef lehçesinde `INSERT`, `UPDATE` ve `DELETE` ifadeleri üretir. Çalıştırmadan önce ifade sayısını ve hedefi inceleyin.
+
+  </Step>
+</Steps>
+
+### Veri Farkı Yönü
+
+| Durum | Anlamı | Hedefe eşitleme |
+| --- | --- | --- |
+| Eklenmiş | Satır yalnızca kaynakta var | `INSERT` üretilir |
+| Kaldırılmış | Satır yalnızca hedefte var | `DELETE` üretilir |
+| Değişmiş | Aynı anahtar, farklı anahtar dışı sütunlar | `UPDATE` üretilir |
+| Aynı | Satırlar eşleşiyor | İfade üretilmez |
+
+Silme eşitlemesi en yüksek riskli seçenektir. Hedefte yerele özgü veriye izin veriliyorsa kaldırmaları seçmeyin.
+
+## Karşılaştırma Öncesi Denetim Listesi
+
+- Kaynak ve hedef yönü doğru
+- Hesaplar eksiksiz meta veriyi, DDL'i ya da tablo verisini okuyabiliyor
+- Filtreler ve nesne seçimi gerekli bağımlılıkları içeriyor
+- Anahtar sütunlar benzersiz ve `NULL` durumunu doğru ele alıyor
+- Lehçeler arası eşlemeler duyarlığı ve anlamı koruyor
+- Hedefteki salt okunur ve üretim ayarları doğru
+- Yedekler var ve betikler bir test ortamında doğrulandı
+
+## Bilinen Sınırlar
+
+- Dinamik SQL, yordam davranışı, uygulama kodu ve dış ETL şema karşılaştırmasının dışındadır
+- Yeniden adlandırma algılaması bir benzerlik önerisidir, kesin bir sonuç değildir
+- Biçimlendirme farkları, anlamı aynı olan metin değişiklikleri üretebilir
+- Veri karşılaştırma seçili kapsamı okur ve filtrelenmemiş çok büyük tablolar için uygun değildir
+- İşlem geri alma hedef veritabanına bağlıdır
+- Yapılandırmalar bağlantı kimliklerini ve kapsamı içerir, veritabanı parolalarını içermez
+
+<Cards>
+  <Card title="Tek bir tabloyu düzenleyin" href="/tr/docs/table-structure">
+    Sütunları, dizinleri, yabancı anahtarları ve tetikleyicileri görsel olarak düzenleyin.
+  </Card>
+  <Card title="Veritabanını yedekleyin" href="/tr/docs/database-backup">
+    Riskli eşitlemeden önce elle ya da zamanlanmış mantıksal yedekler oluşturun.
+  </Card>
+  <Card title="Veri aktarın" href="/tr/docs/data-transfer">
+    Amaç satırları karşılaştırmak değil de tabloların tamamını taşımaksa bunu kullanın.
+  </Card>
+  <Card title="Üretim güvenliği" href="/tr/docs/production-safety">
+    Dağıtım ve veri eşitlemesi için üretim onayını inceleyin.
+  </Card>
+</Cards>

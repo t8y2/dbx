@@ -10,6 +10,7 @@ import "dayjs/locale/it";
 import "dayjs/locale/ja";
 import "dayjs/locale/ko";
 import "dayjs/locale/pt-br";
+import "dayjs/locale/tr";
 import { Copy, FileText, ListChecks, Settings } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import type { MeilisearchIndexOverview } from "@/lib/backend/tauri";
@@ -29,6 +30,7 @@ const DAYJS_LOCALES: Record<string, string> = {
   it: "it",
   ja: "ja",
   ko: "ko",
+  tr: "tr",
 };
 
 const props = defineProps<{

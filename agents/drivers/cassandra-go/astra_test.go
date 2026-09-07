@@ -20,11 +20,21 @@ import (
 	gocql "github.com/apache/cassandra-gocql-driver/v2"
 )
 
+// testPlaceholderPassword returns a stand-in for password fields in tests;
+// Astra treats the password as an opaque application token, so any non-empty
+// value exercises the same code path. Set DBX_TEST_PASSWORD to override.
+func testPlaceholderPassword() string {
+	if value := os.Getenv("DBX_TEST_PASSWORD"); value != "" {
+		return value
+	}
+	return "placeholder-auth-value"
+}
+
 func TestSecureConnectBundleBuildsAstraClusterWithoutHost(t *testing.T) {
 	bundlePath := writeTestSecureConnectBundle(t)
 	config, err := parseCassandraConfig(connectParams{
 		Username: "token",
-		Password: "astra-token",
+		Password: testPlaceholderPassword(),
 		URLParams: url.Values{
 			"secureconnectbundle": []string{bundlePath},
 			"requesttimeout":      []string{"9s"},
@@ -49,7 +59,7 @@ func TestSecureConnectBundleBuildsAstraClusterWithoutHost(t *testing.T) {
 		t.Fatalf("Astra cluster must use dialer placeholder hosts: %#v", cluster.Hosts)
 	}
 	credentials, ok := cluster.Authenticator.(*gocql.PasswordAuthenticator)
-	if !ok || credentials.Username != "token" || credentials.Password != "astra-token" {
+	if !ok || credentials.Username != "token" || credentials.Password != testPlaceholderPassword() {
 		t.Fatalf("unexpected Astra authenticator: %#v", cluster.Authenticator)
 	}
 	if cluster.Keyspace != "app" || cluster.Timeout != 9*time.Second || cluster.ConnectTimeout != 7*time.Second {
@@ -95,7 +105,7 @@ func TestSecureConnectBundleValidatesCredentialsAndAuthMode(t *testing.T) {
 
 	if _, err := parseCassandraConfig(connectParams{
 		Username: "token",
-		Password: "astra-token",
+		Password: testPlaceholderPassword(),
 		URLParams: url.Values{
 			"secureconnectbundle": []string{bundlePath},
 			"usekrb5":             []string{"true"},

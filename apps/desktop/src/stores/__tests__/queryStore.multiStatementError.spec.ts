@@ -1,5 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { isActiveResultLoading } from "@/lib/sql/queryExecutionState";
+import { BackendErrorException } from "@/lib/backend/errorUtils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -173,6 +174,42 @@ describe("queryStore multi-statement errors", () => {
     expect(tab.batchSqlExecution?.items[1]?.errorDetails).toEqual(structuredError);
     expect(tab.batchSqlExecution?.items[1]?.error).not.toBe(structuredError.code);
     expect(tab.batchSqlExecution?.items[1]?.error).not.toBe("[object Object]");
+    expect(tab.batchSqlExecution?.items[1]?.error).toContain("no such table: missing");
+  });
+
+  it("preserves the original message when a top-level structured error omits detail", async () => {
+    const structuredError = {
+      version: 1 as const,
+      code: "DBX-LEGACY-0001",
+      messageKey: "backendErrors.legacy",
+      messageParams: {},
+      source: "legacyBackend" as const,
+      operationOutcome: "unknown" as const,
+    };
+    const originalMessage = "ClickHouse error: table iceberg_backend.missing_table does not exist";
+    mocks.getConnectionConfig.mockReturnValue({
+      id: "clickhouse-1",
+      name: "ClickHouse",
+      db_type: "clickhouse",
+      database: "iceberg_backend",
+      query_timeout_secs: 30,
+    });
+    mocks.executeMulti.mockRejectedValue(
+      new BackendErrorException({
+        backendError: structuredError,
+        message: originalMessage,
+      }),
+    );
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("clickhouse-1", "iceberg_backend", "Query");
+
+    await store.executeTabSql(tabId, "SELECT * FROM missing_table");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.execution_error).toBe(true);
+    expect(tab.result?.rows[0]?.[0]).toContain(originalMessage);
+    expect(tab.batchSqlExecution?.items[0]?.error).toContain(originalMessage);
   });
 
   it("updates live per-statement progress before the batch promise resolves", async () => {

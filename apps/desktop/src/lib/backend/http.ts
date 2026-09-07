@@ -48,6 +48,7 @@ import type {
   SshConfigHostEntry,
   TunnelProfile,
 } from "@/types/database";
+import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
@@ -152,6 +153,7 @@ import type {
   ElasticsearchDeleteByQueryResult,
 } from "@/lib/backend/tauri";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
+import type { CsvQuoteMode } from "@/lib/export/csvQuoteMode";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   DataGridColumnDistinctValuesSqlOptions,
@@ -1868,10 +1870,8 @@ export async function saveMaxRetries(maxRetries: number): Promise<void> {
   if (!res.ok) throw await backendResponseError(res);
 }
 
-export interface OpenTabsStatePayload {
-  tabs: unknown[];
-  activeTabId: string | null;
-}
+export type { OpenTabsStatePayload, PersistedEditorGroup } from "@/lib/app/openTabsPersistence";
+import type { OpenTabsStatePayload } from "@/lib/app/openTabsPersistence";
 
 export async function loadEditorSettings(): Promise<unknown | null> {
   return loadBrowserAppState("editor_settings");
@@ -1889,6 +1889,10 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
     ? {
         tabs: payload.tabs,
         activeTabId: typeof payload.activeTabId === "string" ? payload.activeTabId : null,
+        ...(payload.groups !== undefined ? { groups: payload.groups } : {}),
+        ...(typeof payload.focusedGroupId === "string" ? { focusedGroupId: payload.focusedGroupId } : {}),
+        ...(payload.orientation === "vertical" || payload.orientation === "horizontal" ? { orientation: payload.orientation } : {}),
+        ...(Array.isArray(payload.sizes) ? { sizes: payload.sizes } : {}),
       }
     : null;
 }
@@ -1896,6 +1900,20 @@ export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> 
 export async function saveOpenTabsState(payload: OpenTabsStatePayload): Promise<void> {
   await saveBrowserAppState("open_tabs", payload);
 }
+
+export async function saveDetachedTabHandoff(_tabId: string, _handoff: DetachedTabHandoff): Promise<void> {}
+
+export async function loadDetachedTabHandoff(_tabId: string): Promise<DetachedTabHandoff | null> {
+  return null;
+}
+
+export async function listDetachedTabHandoffs(): Promise<DetachedTabHandoff[]> {
+  return [];
+}
+
+export async function deleteDetachedTabHandoff(_tabId: string): Promise<void> {}
+
+export async function approveDetachedWindowClose(): Promise<void> {}
 
 export async function loadSavedSqlEditorPositions(): Promise<unknown[] | null> {
   const value = await loadBrowserAppState("saved_sql_editor_positions");
@@ -2580,9 +2598,9 @@ export async function cancelQueryResultExport(exportId: string, executionId?: st
   });
 }
 
-export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[]): Promise<void> {
+export async function exportQueryResultCsv(filePath: string, columns: string[], rows: readonly (readonly XlsxCellValue[])[], csvQuoteMode: CsvQuoteMode = "all"): Promise<void> {
   const { formatCsv } = await import("@/lib/export/exportFormats");
-  const content = formatCsv(columns, rows as (string | number | boolean | null)[][]);
+  const content = formatCsv(columns, rows as (string | number | boolean | null)[][], csvQuoteMode);
   const fileName = filePath.split(/[\\/]/).pop() || "export.csv";
   const blob = new Blob(["\uFEFF", content], {
     type: "text/csv;charset=utf-8",
@@ -2619,6 +2637,11 @@ export async function exportQueryResultXlsx(
   rows: readonly (readonly XlsxCellValue[])[],
   numericColumnRightAlign?: boolean,
   autoFilter?: boolean,
+  // Accepted for signature parity with the Tauri backend but unused: the web
+  // builder writes every cell as `inlineStr`, so a temporal value keeps the
+  // text the grid already formatted (milliseconds included) and never goes
+  // through a `numFmt` display pattern.
+  _dateTimeFormat?: string,
 ): Promise<void> {
   const { buildXlsxWorkbook } = await import("@/lib/export/xlsxExport");
   const workbook = buildXlsxWorkbook({
@@ -2654,6 +2677,7 @@ export async function exportQueryResultsXlsx(
     autoFilter?: boolean;
   }[],
   autoFilter?: boolean,
+  _dateTimeFormat?: string,
 ): Promise<void> {
   const { buildXlsxWorkbookMulti } = await import("@/lib/export/xlsxExport");
   const workbook = buildXlsxWorkbookMulti(autoFilter === undefined ? worksheets : worksheets.map((worksheet) => ({ ...worksheet, autoFilter })));

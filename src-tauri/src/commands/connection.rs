@@ -420,7 +420,11 @@ mod tests {
         .await
         .unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::Sqlite(pool.clone()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::Sqlite(pool.clone()));
+            })
+            .await;
 
         let mut invalid = initial.clone();
         invalid.attached_databases.push(AttachedDatabaseConfig {
@@ -430,7 +434,7 @@ mod tests {
         let error = save_connection_configs(&state, &[invalid]).await.unwrap_err();
 
         assert!(error.contains("in-memory main database"), "{error}");
-        assert!(state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_some());
         assert_eq!(state.configs.read().await.get(&initial.id), Some(&initial));
         let retained = dbx_core::db::sqlite::execute_query(&pool, "SELECT value FROM retained;").await.unwrap();
         assert_eq!(retained.rows[0][0], serde_json::json!("yes"));
@@ -642,7 +646,11 @@ mod tests {
         let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
         let first = state.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
@@ -661,7 +669,7 @@ mod tests {
 
         let second = state.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!std::sync::Arc::ptr_eq(&first, &second));
-        assert!(!state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -677,7 +685,11 @@ mod tests {
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
         state.storage.save_connections(std::slice::from_ref(&updated)).await.unwrap();
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
-        state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(initial.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
 
         let loaded = load_connection_configs(&state).await.unwrap();
 
@@ -692,7 +704,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
         assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
-        assert!(!state.connections.read().await.contains_key(&initial.id));
+        assert!(state.pool_handle(&initial.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -804,11 +816,15 @@ mod tests {
             configs.insert(kept.id.clone(), kept.clone());
             configs.insert(removed.id.clone(), removed.clone());
         }
-        state.connections.write().await.insert(removed.id.clone(), PoolKind::MessageQueue);
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(removed.id.clone(), PoolKind::MessageQueue);
+            })
+            .await;
 
         save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
-        assert!(!state.connections.read().await.contains_key(&removed.id));
+        assert!(state.pool_handle(&removed.id).await.is_none());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1696,19 +1712,17 @@ pub async fn connect_db(
         ),
         DatabaseType::Redis => {
             let con = if db_config.uses_redis_cluster() {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Cluster(
-                    state.connect_redis_cluster(&id, &db_config).await?,
-                ))
+                db::redis_driver::RedisConnection::Cluster(state.connect_redis_cluster(&id, &db_config).await?)
             } else if db_config.uses_redis_sentinel() {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
                     state.connect_redis_sentinel(&id, &db_config).await?,
-                )))
+                ))
             } else {
-                PoolKind::Redis(db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
+                db::redis_driver::RedisConnection::Direct(tokio::sync::Mutex::new(
                     db::redis_driver::connect_standalone(&db_config, &host, port, connect_timeout).await?,
-                )))
+                ))
             };
-            con
+            PoolKind::Redis(Arc::new(con))
         }
         #[cfg(feature = "duckdb-sidecar")]
         DatabaseType::DuckDb => state.create_duckdb_pool(&db_config).await?,

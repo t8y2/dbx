@@ -14,7 +14,7 @@ describe("KvKeyBrowser edit dialog layout", () => {
   it("cancels the shared footer negative margin and preserves bottom safe spacing", () => {
     expect(browserSource).toContain('<DialogFooter class="mx-0 mb-0 shrink-0 gap-3 border-t bg-muted/10 px-6 py-5">');
     expect(browserSource).toContain('variant="outline" class="h-10 min-w-20"');
-    expect(browserSource).toContain('<Button class="h-10 min-w-20" :disabled="saving || readOnly"');
+    expect(browserSource).toContain('<Button class="h-10 min-w-20" :disabled="saving || !editKeyWritable"');
   });
 
   it("applies the same safe spacing to the history dialog footer", () => {

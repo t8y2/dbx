@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("../AiAssistant.vue", import.meta.url), "utf8");
-const localePaths = ["en", "es", "it", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
+const localePaths = ["en", "es", "it", "ja", "ko", "pt-BR", "tr", "zh-CN", "zh-TW"];
 
 describe("AI assistant write confirmation replacement", () => {
   it("renders a localized confirmation from the backend's semantic event", () => {

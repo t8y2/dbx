@@ -1,0 +1,124 @@
+---
+title: Bağlantı İçe Aktarma
+description: Navicat, DBeaver ve DataGrip'ten bağlantıları, grupları ve tanınan veritabanı profillerini içe aktarın.
+---
+
+DBX, diğer veritabanı araçlarından bağlantıları içe aktarabilir; böylece araç değiştirirken onlarca bağlantıyı elle yeniden oluşturmanız gerekmez.
+
+## Desteklenen Biçimler
+
+| Kaynak  | Biçim                         | Neler İçe Aktarılır                                      |
+| ------- | ------------------------------ | ---------------------------------------------------- |
+| Navicat | `.ncx` dışa aktarma dosyaları            | Sunucu, port, kullanıcı adı, veritabanı türü, bağlantı adı |
+| DBeaver | Bağlantı yapılandırma dosyaları | Sunucu, port, kullanıcı adı, veritabanı türü, bağlantı adı |
+| DataGrip | `dataSources.xml` gibi proje ya da genel dosyalar | JDBC URL'si, sürücü, bağlantı adı, gruplar ve okunabilir kimlik bilgileri |
+
+<Callout type="info">İçe aktarılan bağlantılar özgün bağlantı adını ve türünü korur. Diğer araçların şifreli biçimde sakladığı parolaların şifresi çözülemez — içe aktarmadan sonra parolaları yeniden girmeniz gerekir.</Callout>
+
+## Navicat Bağlantılarını İçe Aktarma
+
+<Steps>
+  <Step>
+    ### Navicat'ten Dışa Aktarın
+
+    Navicat'te taşımak istediğiniz bağlantıları seçin. **Dosya → Bağlantıları Dışa Aktar** ile `.ncx` dosyasını kaydedin.
+
+  </Step>
+  <Step>
+    ### İçe Aktarma İletişim Kutusunu Açın
+
+    DBX'te **Ayarlar → Bağlantıları İçe Aktar** bölümüne gidin ya da kenar çubuğu grup başlığına sağ tıklayıp **Bağlantıları İçe Aktar**'ı seçin.
+
+  </Step>
+  <Step>
+    ### NCX Dosyasını Seçin
+
+    Navicat'ten dışa aktardığınız `.ncx` dosyasını seçin.
+
+  </Step>
+  <Step>
+    ### İnceleyin ve Tamamlayın
+
+    DBX dosyayı ayrıştırır ve bulunan tüm bağlantıları listeler. Listeyi inceleyin, gereken yerlerde parolaları yeniden girin ve kaydedin.
+
+  </Step>
+</Steps>
+
+## DBeaver Bağlantılarını İçe Aktarma
+
+<Steps>
+  <Step>
+    ### DBeaver Yapılandırmasını Bulun
+
+    DBeaver bağlantıları çalışma alanı dizininde saklar. Tam yol işletim sisteminize ve DBeaver sürümünüze bağlıdır. Yaygın konumlardan biri `~/.local/share/DBeaverData/workspace6/General/.dbeaver/` dizinidir.
+
+  </Step>
+  <Step>
+    ### İçe Aktarma İletişim Kutusunu Açın
+
+    DBX'te **Ayarlar → Bağlantıları İçe Aktar** bölümüne gidin.
+
+  </Step>
+  <Step>
+    ### DBeaver Dosyalarını Seçin
+
+    DBeaver bağlantı yapılandırma dosyalarını seçin (`.dbeaver-data-sources.xml` veya benzeri).
+
+  </Step>
+  <Step>
+    ### İnceleyin ve Tamamlayın
+
+    DBX yapılandırmadan bağlantı ayrıntılarını çıkarır. Şifresi çözülemeyen parolaları yeniden girin.
+
+  </Step>
+</Steps>
+
+## DataGrip Bağlantılarını İçe Aktarma
+
+<Steps>
+  <Step>
+    ### Yapılandırmayı Seçin
+
+    DBX'te **DataGrip İçe Aktar**'ı seçin ve bir DataGrip projesinden ya da genel yapılandırmadan `dataSources.xml` dosyasını seçin. Aynı dizindeki eşleşen yerel dosya ek alanlar sağlayabilir.
+
+  </Step>
+  <Step>
+    ### Tür Algılamayı İnceleyin
+
+    DBX; sürücü başvurularını, veritabanı ürün adlarını, JDBC alt protokollerini ve sürücü sınıflarını birlikte değerlendirir. KingbaseES gibi veritabanları kendi DBX profiline eşlenir; bilinmeyen sürücüler genel JDBC olarak kalır.
+
+  </Step>
+  <Step>
+    ### Grupları İnceleyin
+
+    DataGrip grup yolları DBX bağlantı grupları olarak içe aktarılır, böylece proje düzeniniz korunur.
+
+  </Step>
+  <Step>
+    ### Kimlik Bilgilerini Tamamlayın
+
+    macOS'ta DBX, mümkün olduğunda DataGrip'in Anahtar Zinciri parolalarını okur. Diğer şifreli veya erişilemeyen kimlik bilgileri elle girilmelidir.
+
+  </Step>
+</Steps>
+
+## İçe Aktarmadan Sonra
+
+İçe aktarılan bağlantılar kenar çubuğunda elle oluşturulanların yanında görünür. Şunları yapmalısınız:
+
+- İçe aktarılan ayarların çalıştığını doğrulamak için **her bağlantıyı test edin**
+- Özgün parolası içe aktarılamayan bağlantılar için **parola belirleyin**
+- Üretim, hazırlık ve geliştirme ortamlarını ayırt etmek için **bağlantı renkleri atayın**
+- Gerektiren bağlantılar için **SSH tünellerini yapılandırın**
+- Sunucuda çok sayıda veritabanı varsa **görünür veritabanı filtrelerini ayarlayın**
+
+## İçe Aktarılamayanlar
+
+| Ayar                      | Nedeni                                                              |
+| ---------------------------- | ------------------------------------------------------------------- |
+| Şifreli parolalar          | Her araç kendine özgü şifreleme kullanır; parolalar yeniden girilmelidir |
+| SSH tünel anahtarları              | Anahtar dosyası yolları makineler arasında değişebilir; anahtar dosyasını yeniden seçin  |
+| Özel sürücü yapılandırmaları | Sürücü yolları ve sürümleri araca özgüdür                         |
+| Proxy ayarları               | Bağlantının Proxy sekmesinden yeniden yapılandırın                          |
+
+İçe aktarma bağlantı taslakları oluşturur; erişilebilir olduklarını kanıtlamaz. Kaydetmeden önce veritabanı profilini, JDBC URL'sini, SSL, SSH, proxy ve veritabanı alanlarını inceleyin, ardından içe aktarılan her bağlantıyı test edin.

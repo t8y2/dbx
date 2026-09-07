@@ -17,7 +17,7 @@ import { useGraphStore } from "@/lib/diagram/graph-store";
 import * as api from "@/lib/backend/api";
 import { DIAGRAM_SQL_TYPES, isSchemaAware as isSchemaAwareDatabase } from "@/lib/database/databaseCapabilities";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildDiagramJoinSql, buildDiagramRelationships, filterDiagramTables, mergeRelationshipsWithInferred, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramTable, isDraftTable, needsDiagramSync } from "@/lib/diagram/erDiagram";
+import { buildDiagramJoinSql, buildDiagramRelationships, diagramTableId, filterDiagramTables, mergeRelationshipsWithInferred, normalizeCustomDiagramRelationship, type CustomDiagramRelationship, type DiagramPosition, type DiagramTable, isDraftTable, needsDiagramSync } from "@/lib/diagram/erDiagram";
 import { createDraftTable } from "@/lib/diagram/draft-table";
 import { cardinalityPairFromChoice } from "@/lib/diagram/cardinality";
 import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabilities";
@@ -123,7 +123,10 @@ function handleEdgesChange(changes: EdgeChange[]) {
 function tableHeightsMap(): Record<string, number> {
   const heights: Record<string, number> = {};
   for (const table of tables.value) {
-    heights[table.name] = tableHeight(table);
+    const h = tableHeight(table);
+    heights[table.name] = h;
+    const key = getTableKey(table);
+    heights[key] = h;
   }
   return heights;
 }
@@ -292,6 +295,7 @@ const METADATA_BATCH_SIZE = 4;
 const connectionId = ref("");
 const database = ref("");
 const schema = ref("");
+const selectedSchemas = ref<string[]>([]);
 const databases = ref<string[]>([]);
 const schemas = ref<string[]>([]);
 const tables = ref<DiagramTable[]>([]);
@@ -391,9 +395,36 @@ const selectedConnection = computed(() => (connectionId.value ? store.getConfig(
 
 const isSchemaAware = computed(() => isSchemaAwareDatabase(selectedConnection.value?.db_type));
 
-const tableMap = computed(() => new Map(tables.value.map((table) => [table.name, table])));
+const isAllSchemasSelected = computed(() => isSchemaAware.value && schemas.value.length > 0 && schemas.value.every((s) => selectedSchemas.value.includes(s)));
 
-const allRelationships = computed(() => buildDiagramRelationships(tables.value, customRelationships.value));
+const isMultiSchema = computed(() => isSchemaAware.value && (selectedSchemas.value.length > 1 || isAllSchemasSelected.value));
+
+function getTableKey(table: { name: string; schema?: string }): string {
+  return diagramTableId(table, isMultiSchema.value);
+}
+
+const effectiveSchemaKey = computed(() => {
+  // Non-schema-aware drivers historically persisted with the database name
+  // in this slot (loadSchemas assigned schema = database); keep legacy keys.
+  if (!isSchemaAware.value) return database.value;
+  if (isAllSchemasSelected.value) return "__all__";
+  if (selectedSchemas.value.length === 1) return selectedSchemas.value[0];
+  if (selectedSchemas.value.length > 1) return selectedSchemas.value.slice().sort().join(",");
+  return schema.value || "";
+});
+
+const tableMap = computed(() => {
+  const map = new Map<string, DiagramTable>();
+  for (const table of tables.value) {
+    map.set(getTableKey(table), table);
+    if (!map.has(table.name)) {
+      map.set(table.name, table);
+    }
+  }
+  return map;
+});
+
+const allRelationships = computed(() => buildDiagramRelationships(tables.value, customRelationships.value, isMultiSchema.value));
 
 const relatedTableNames = computed(() => {
   const selected = props.focusTableNames?.filter((name) => name.trim());
@@ -415,36 +446,50 @@ const visibleTables = computed(() => {
     tableSearch.value,
   );
   if ((props.focusTableNames?.length ?? 0) > 1 && !showAllTables.value && !tableSearch.value.trim()) {
-    return filtered.filter((table) => relatedTableNames.value.has(table.name));
+    return filtered.filter((table) => relatedTableNames.value.has(table.name) || relatedTableNames.value.has(getTableKey(table)));
   }
   if (props.focusTableName && !showAllTables.value && !tableSearch.value.trim()) {
-    return filtered.filter((table) => relatedTableNames.value.has(table.name));
+    return filtered.filter((table) => relatedTableNames.value.has(table.name) || relatedTableNames.value.has(getTableKey(table)));
   }
   return filtered;
 });
 
 const visibleRelationships = computed(() => {
-  const baseRelationships = buildDiagramRelationships(visibleTables.value, customRelationships.value);
+  const baseRelationships = buildDiagramRelationships(visibleTables.value, customRelationships.value, isMultiSchema.value);
   if (!isAutoMatchEnabled()) return baseRelationships;
 
+  const visibleTableKeys = new Set(visibleTables.value.map((t) => getTableKey(t)));
   const visibleTableNames = new Set(visibleTables.value.map((t) => t.name));
-  const inferredVisible = matchResult.value.relationships.filter((r) => visibleTableNames.has(r.sourceTable) && visibleTableNames.has(r.targetTable));
+  // Inferred relationships carry plain table names; map them to composite node ids in multi-schema mode
+  const inferredVisible = matchResult.value.relationships
+    .filter((r) => (visibleTableKeys.has(r.sourceTable) || visibleTableNames.has(r.sourceTable)) && (visibleTableKeys.has(r.targetTable) || visibleTableNames.has(r.targetTable)))
+    .map((r) => {
+      const source = tableMap.value.get(r.sourceTable);
+      const target = tableMap.value.get(r.targetTable);
+      if (!source && !target) return r;
+      return {
+        ...r,
+        sourceTable: source ? getTableKey(source) : r.sourceTable,
+        targetTable: target ? getTableKey(target) : r.targetTable,
+      };
+    });
 
   return mergeRelationshipsWithInferred(baseRelationships, inferredVisible);
 });
 
 /** Tables/edges currently drawn on the canvas (excludes members of hidden layers). */
-const canvasVisibleTables = computed(() => visibleTables.value.filter((table) => isTableCanvasVisible(table.name, layerStore.layers)));
+const canvasVisibleTables = computed(() => visibleTables.value.filter((table) => isTableCanvasVisible(getTableKey(table), layerStore.layers) || isTableCanvasVisible(table.name, layerStore.layers)));
 
 const canvasVisibleRelationships = computed(() => visibleRelationships.value.filter((rel) => isTableCanvasVisible(rel.sourceTable, layerStore.layers) && isTableCanvasVisible(rel.targetTable, layerStore.layers)));
 
 const edgeObstacles = computed<ObstacleRect[]>(() => {
   const rects: ObstacleRect[] = [];
   for (const table of canvasVisibleTables.value) {
-    const pos = positions.value[table.name];
+    const key = getTableKey(table);
+    const pos = positions.value[key] || positions.value[table.name];
     if (!pos) continue;
     rects.push({
-      id: table.name,
+      id: key,
       kind: "table",
       x: pos.x,
       y: pos.y,
@@ -468,7 +513,7 @@ const edgeObstacles = computed<ObstacleRect[]>(() => {
 });
 provide(DIAGRAM_EDGE_OBSTACLES_KEY, edgeObstacles);
 
-const diagramReady = computed(() => !!connectionId.value && !!database.value && (!isSchemaAware.value || !!schema.value));
+const diagramReady = computed(() => !!connectionId.value && !!database.value && (!isSchemaAware.value || selectedSchemas.value.length > 0));
 
 const showRightPanel = computed(() => diagramReady.value && (showMatchPanel.value || !!inspectorTarget.value));
 
@@ -492,7 +537,8 @@ const canvasSize = computed(() => {
   let width = 960;
   let height = 540;
   for (const table of canvasVisibleTables.value) {
-    const position = positions.value[table.name];
+    const key = getTableKey(table);
+    const position = positions.value[key] || positions.value[table.name];
     if (!position) continue;
     width = Math.max(width, position.x + CARD_WIDTH + 80);
     height = Math.max(height, position.y + tableHeight(table) + 80);
@@ -528,12 +574,15 @@ async function applyAutoLayout(options?: { skipHistory?: boolean }) {
 
   if (!options?.skipHistory) recordHistory();
 
-  const diagramNodes: DiagramNode[] = layoutTables.map((table) => ({
-    id: table.name,
-    type: "table",
-    position: positions.value[table.name] ? { ...positions.value[table.name] } : { x: 0, y: 0 },
-    data: { table },
-  }));
+  const diagramNodes: DiagramNode[] = layoutTables.map((table) => {
+    const key = getTableKey(table);
+    return {
+      id: key,
+      type: "table",
+      position: positions.value[key] || positions.value[table.name] ? { ...(positions.value[key] || positions.value[table.name]) } : { x: 0, y: 0 },
+      data: { table },
+    };
+  });
   const diagramEdges: DiagramEdge[] = canvasVisibleRelationships.value.map((rel) => ({
     id: rel.id,
     source: rel.sourceTable,
@@ -621,7 +670,7 @@ async function handleLayerLayoutModeChanged(payload: { layerId: string; layoutMo
 }
 
 function openTableData(tableName: string) {
-  const table = tables.value.find((t) => t.name === tableName);
+  const table = tables.value.find((t) => getTableKey(t) === tableName || t.name === tableName);
   if (table && isDraftTable(table)) {
     openInspectorForTable(tableName);
     return;
@@ -630,8 +679,8 @@ function openTableData(tableName: string) {
   emit("open-target", {
     connectionId: connectionId.value,
     database: database.value,
-    schema: isSchemaAware.value ? schema.value || undefined : undefined,
-    tableName,
+    schema: isSchemaAware.value ? table?.schema || schema.value || undefined : undefined,
+    tableName: table?.name || tableName,
     tableType: "TABLE",
   });
 }
@@ -643,7 +692,7 @@ const canSyncStructure = computed(() => supportsTableStructureEditing(selectedCo
 
 function persistDraftAndLayers() {
   if (!connectionId.value || !database.value) return;
-  const schemaKey = schema.value || "";
+  const schemaKey = effectiveSchemaKey.value;
   saveDraftTables(tables.value, connectionId.value, database.value, schemaKey);
   saveLiveTablePatches(tables.value, connectionId.value, database.value, schemaKey);
   savePersistedLayers(layerStore.toJSON(), connectionId.value, database.value, schemaKey);
@@ -665,6 +714,7 @@ function handleCreateDraftTable(payload: { name: string; layerId: string | null;
   if (!canCreateDraftTable.value) return;
   recordHistory();
   const draft = createDraftTable(payload.name, { withDefaultId: payload.withDefaultId, databaseType: selectedConnection.value?.db_type });
+  draft.schema = selectedSchemas.value[0] || schema.value || undefined;
   tables.value = [...tables.value, draft];
   const targetLayerId = payload.layerId || layerStore.activeLayerId;
   const targetLayer = targetLayerId ? layerStore.layers.find((l) => l.id === targetLayerId) : undefined;
@@ -694,68 +744,125 @@ function handleCreateDraftTable(payload: { name: string; layerId: string | null;
     y = MARGIN + Math.floor(Object.keys(positions.value).length / 3) * 200;
   }
 
-  positions.value = { ...positions.value, [draft.name]: { x, y } };
+  const draftKey = getTableKey(draft);
+  positions.value = { ...positions.value, [draftKey]: { x, y }, [draft.name]: { x, y } };
   if (targetLayerId) {
-    layerStore.addTableToLayer(targetLayerId, draft.name);
+    layerStore.addTableToLayer(targetLayerId, draftKey);
     const layer = layerStore.layers.find((l) => l.id === targetLayerId);
     if (layer) sizeLayerToFit(layer, positions.value, tableHeightsMap());
   }
   persistDraftAndLayers();
   syncVueFlowNodes();
-  openInspectorForTable(draft.name);
+  openInspectorForTable(draftKey);
 }
 
 function handleInspectorUpdateTable(next: DiagramTable) {
   recordHistory();
   const targetName = inspectorTarget.value?.kind === "table" ? inspectorTarget.value.tableName : next.name;
-  const oldName = tables.value.find((t) => t.name === targetName)?.name;
-  if (!oldName) return;
-  tables.value = tables.value.map((t) => (t.name === oldName ? next : t));
+  // inspectorTarget may hold the composite canvas node id (`schema.table`) in multi-schema mode
+  const oldTable = tables.value.find((t) => t.name === targetName || getTableKey(t) === targetName);
+  if (!oldTable) return;
+  const oldKey = getTableKey(oldTable);
+  const oldName = oldTable.name;
+
+  // Accurately update ONLY the matched table instance, avoiding unintentional overwrite of same-name tables in other schemas
+  tables.value = tables.value.map((t) => (t === oldTable || getTableKey(t) === oldKey ? next : t));
   if (oldName !== next.name) {
-    const pos = positions.value[oldName];
-    const { [oldName]: _removed, ...rest } = positions.value;
-    positions.value = pos ? { ...rest, [next.name]: pos } : rest;
-    for (const layer of layerStore.layers) {
-      const idx = layer.tableNames.indexOf(oldName);
-      if (idx >= 0) layer.tableNames[idx] = next.name;
+    const newKey = getTableKey(next);
+    const pos = positions.value[oldKey] || positions.value[oldName];
+    const nextPositions = { ...positions.value };
+    delete nextPositions[oldKey];
+    delete nextPositions[oldName];
+    if (pos) {
+      nextPositions[newKey] = pos;
+      nextPositions[next.name] = pos;
     }
+    positions.value = nextPositions;
+    for (const layer of layerStore.layers) {
+      let modified = false;
+      for (const key of [oldKey, oldName]) {
+        const idx = layer.tableNames.indexOf(key);
+        if (idx >= 0) {
+          layer.tableNames[idx] = newKey;
+          modified = true;
+        }
+      }
+      if (modified) {
+        sizeLayerToFit(layer, positions.value, tableHeightsMap());
+      }
+    }
+    const oldCandidateNames = new Set([oldName, oldKey]);
     customRelationships.value = customRelationships.value.map((r) => ({
       ...r,
-      sourceTable: r.sourceTable === oldName ? next.name : r.sourceTable,
-      targetTable: r.targetTable === oldName ? next.name : r.targetTable,
+      sourceTable: oldCandidateNames.has(r.sourceTable) ? newKey : r.sourceTable,
+      targetTable: oldCandidateNames.has(r.targetTable) ? newKey : r.targetTable,
     }));
     saveCustomRelationships();
-    inspectorTarget.value = { kind: "table", tableName: next.name };
+    inspectorTarget.value = { kind: "table", tableName: newKey };
   }
   persistDraftAndLayers();
-  const layer = layerStore.getLayerByTable(next.name);
+  const layer = layerStore.getLayerByTable(next.name) || layerStore.getLayerByTable(getTableKey(next));
   if (layer) sizeLayerToFit(layer, positions.value, tableHeightsMap());
   syncVueFlowNodes();
 }
 
 function handleDeleteDraftTable(tableName: string) {
   recordHistory();
-  tables.value = tables.value.filter((t) => t.name !== tableName);
-  const { [tableName]: _removed, ...rest } = positions.value;
-  positions.value = rest;
-  const layer = layerStore.getLayerByTable(tableName);
-  if (layer) {
-    layerStore.removeTableFromLayer(layer.id, tableName);
-    sizeLayerToFit(layer, positions.value, tableHeightsMap());
+  const deletedTable = tables.value.find((table) => getTableKey(table) === tableName || table.name === tableName);
+  if (!deletedTable) return;
+  const targetKey = getTableKey(deletedTable);
+  const rawName = deletedTable.name;
+  const isUniqueName = tables.value.filter((t) => t.name === rawName).length === 1;
+
+  // Accurately filter out ONLY the deleted table by reference or canonical composite key
+  tables.value = tables.value.filter((t) => t !== deletedTable && getTableKey(t) !== targetKey);
+
+  const nextPositions = { ...positions.value };
+  delete nextPositions[targetKey];
+  delete nextPositions[tableName];
+  if (!isMultiSchema.value || isUniqueName) {
+    delete nextPositions[rawName];
   }
-  customRelationships.value = customRelationships.value.filter((r) => r.sourceTable !== tableName && r.targetTable !== tableName);
+  positions.value = nextPositions;
+
+  const targetNamesToClean = (!isMultiSchema.value || isUniqueName) && rawName !== targetKey ? [targetKey, rawName] : [targetKey];
+
+  for (const layer of layerStore.layers) {
+    let modified = false;
+    for (const name of targetNamesToClean) {
+      if (layer.tableNames.includes(name)) {
+        layerStore.removeTableFromLayer(layer.id, name);
+        modified = true;
+      }
+    }
+    if (modified) {
+      sizeLayerToFit(layer, positions.value, tableHeightsMap());
+    }
+  }
+
+  const removeRelSet = new Set(targetNamesToClean);
+  customRelationships.value = customRelationships.value.filter((r) => !removeRelSet.has(r.sourceTable) && !removeRelSet.has(r.targetTable));
   saveCustomRelationships();
-  if (inspectorTarget.value?.kind === "table" && inspectorTarget.value.tableName === tableName) {
+
+  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === targetKey || inspectorTarget.value.tableName === tableName)) {
     inspectorTarget.value = null;
   }
+
   persistDraftAndLayers();
   syncVueFlowNodes();
 }
 
 function handleDeleteLiveTable(tableName: string) {
   recordHistory();
+  const deletedTable = tables.value.find((table) => getTableKey(table) === tableName || table.name === tableName);
+  if (!deletedTable) return;
+  const targetKey = getTableKey(deletedTable);
+  const rawName = deletedTable.name;
+  const isUniqueName = tables.value.filter((t) => t.name === rawName).length === 1;
+
+  // Mark strictly the matched table as pendingDrop
   tables.value = tables.value.map((table) => {
-    if (table.name !== tableName || isDraftTable(table)) return table;
+    if ((table !== deletedTable && getTableKey(table) !== targetKey) || isDraftTable(table)) return table;
     return {
       ...table,
       pendingDrop: true,
@@ -763,22 +870,36 @@ function handleDeleteLiveTable(tableName: string) {
       droppedColumnNames: undefined,
     };
   });
-  const layer = layerStore.getLayerByTable(tableName);
-  if (layer) {
-    layerStore.removeTableFromLayer(layer.id, tableName);
-    sizeLayerToFit(layer, positions.value, tableHeightsMap());
+
+  const targetNamesToClean = (!isMultiSchema.value || isUniqueName) && rawName !== targetKey ? [targetKey, rawName] : [targetKey];
+
+  for (const layer of layerStore.layers) {
+    let modified = false;
+    for (const name of targetNamesToClean) {
+      if (layer.tableNames.includes(name)) {
+        layerStore.removeTableFromLayer(layer.id, name);
+        modified = true;
+      }
+    }
+    if (modified) {
+      sizeLayerToFit(layer, positions.value, tableHeightsMap());
+    }
   }
-  customRelationships.value = customRelationships.value.filter((r) => r.sourceTable !== tableName && r.targetTable !== tableName);
+
+  const removeRelSet = new Set(targetNamesToClean);
+  customRelationships.value = customRelationships.value.filter((r) => !removeRelSet.has(r.sourceTable) && !removeRelSet.has(r.targetTable));
   saveCustomRelationships();
-  if (inspectorTarget.value?.kind === "table" && inspectorTarget.value.tableName === tableName) {
+
+  if (inspectorTarget.value?.kind === "table" && (inspectorTarget.value.tableName === targetKey || inspectorTarget.value.tableName === tableName)) {
     inspectorTarget.value = null;
   }
+
   persistDraftAndLayers();
   syncVueFlowNodes();
 }
 
 function deleteTableFromDiagram(tableName: string) {
-  const table = tables.value.find((t) => t.name === tableName);
+  const table = tables.value.find((t) => t.name === tableName || getTableKey(t) === tableName);
   if (!table || table.pendingDrop) return;
   if (isDraftTable(table)) {
     handleDeleteDraftTable(tableName);
@@ -809,7 +930,7 @@ async function handleSyncedDraftTables(_names: string[]) {
 
 function syncVueFlowNodes() {
   const heights = tableHeightsMap();
-  const tableNodes = toVueFlowNodes(visibleTables.value, positions.value);
+  const tableNodes = toVueFlowNodes(visibleTables.value, positions.value, isMultiSchema.value);
   const layerNodes = toVueFlowLayerNodes(layerStore.layers);
   const vueEdges = toVueFlowEdges(visibleRelationships.value, positions.value, edgeWaypoints.value, heights, edgeHandleHints.value);
   setNodes([...layerNodes, ...tableNodes]);
@@ -818,7 +939,7 @@ function syncVueFlowNodes() {
 
 function relationshipStorageKey(): string {
   if (!connectionId.value || !database.value) return "";
-  return ["dbx", "diagram", "relationships", "v1", connectionId.value, database.value, schema.value || ""].join(":");
+  return ["dbx", "diagram", "relationships", "v1", connectionId.value, database.value, effectiveSchemaKey.value].join(":");
 }
 
 function isStoredRelationship(value: unknown): value is CustomDiagramRelationship {
@@ -857,7 +978,7 @@ function saveCustomRelationships() {
 
 function loadMatchData() {
   if (!connectionId.value || !database.value) return;
-  const querySchema = schema.value || database.value;
+  const querySchema = effectiveSchemaKey.value || database.value;
   matchConfirms.value = loadMatchConfirms(connectionId.value, database.value, querySchema);
   matchIgnores.value = loadMatchIgnores(connectionId.value, database.value, querySchema);
 
@@ -869,7 +990,7 @@ function loadMatchData() {
 
 function saveMatchData() {
   if (!connectionId.value || !database.value) return;
-  const querySchema = schema.value || database.value;
+  const querySchema = effectiveSchemaKey.value || database.value;
   saveMatchConfirms(matchConfirms.value, connectionId.value, database.value, querySchema);
   saveMatchIgnores(matchIgnores.value, connectionId.value, database.value, querySchema);
 }
@@ -1143,9 +1264,11 @@ async function loadDatabases(id: string) {
 async function loadSchemas() {
   schemas.value = [];
   schema.value = "";
+  selectedSchemas.value = [];
   if (!connectionId.value || !database.value) return;
   if (!isSchemaAware.value) {
     schema.value = database.value;
+    selectedSchemas.value = [database.value];
     return;
   }
 
@@ -1153,7 +1276,14 @@ async function loadSchemas() {
   try {
     const names = await api.listSchemas(connectionId.value, database.value);
     schemas.value = names;
-    schema.value = props.prefillSchema && names.includes(props.prefillSchema) ? props.prefillSchema : names.includes("public") ? "public" : (names[0] ?? "");
+    if (props.prefillSchema && names.includes(props.prefillSchema)) {
+      schema.value = props.prefillSchema;
+      selectedSchemas.value = [props.prefillSchema];
+    } else {
+      const defaultSchema = names.includes("public") ? "public" : (names[0] ?? "");
+      schema.value = defaultSchema;
+      selectedSchemas.value = defaultSchema ? [defaultSchema] : [];
+    }
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
   } finally {
@@ -1165,6 +1295,7 @@ async function setConnection(id: string) {
   connectionId.value = id;
   database.value = "";
   schema.value = "";
+  selectedSchemas.value = [];
   tables.value = [];
   customRelationships.value = [];
   positions.value = {};
@@ -1180,6 +1311,7 @@ async function setConnection(id: string) {
 async function setDatabase(value: string) {
   database.value = value;
   tables.value = [];
+  selectedSchemas.value = [];
   customRelationships.value = [];
   positions.value = {};
   matchConfirms.value = [];
@@ -1191,6 +1323,19 @@ async function setDatabase(value: string) {
 
 async function setSchema(value: string) {
   schema.value = value;
+  selectedSchemas.value = value ? [value] : [];
+  tables.value = [];
+  customRelationships.value = [];
+  positions.value = {};
+  matchConfirms.value = [];
+  matchIgnores.value = [];
+  matchResult.value = { relationships: [], conflicts: [], pending: [], stats: { total: 0, high: 0, medium: 0 } };
+  if (diagramReady.value) await loadDiagram();
+}
+
+async function setSelectedSchemas(values: string[]) {
+  selectedSchemas.value = [...values];
+  schema.value = values.length === 1 ? values[0] : "";
   tables.value = [];
   customRelationships.value = [];
   positions.value = {};
@@ -1209,6 +1354,7 @@ async function loadTableDiagramData(tableName: string, querySchema: string): Pro
     ]);
     return {
       name: tableName,
+      schema: querySchema,
       columns,
       foreignKeys,
       indexes: indexes.map((index) => ({
@@ -1227,8 +1373,8 @@ async function loadTableDiagramData(tableName: string, querySchema: string): Pro
     };
   } catch (e) {
     failedTableCount.value += 1;
-    console.warn(`[diagram] failed to load table metadata: ${tableName}`, e);
-    return { name: tableName, columns: [], foreignKeys: [], indexes: [] };
+    console.warn(`[diagram] failed to load table metadata: ${querySchema}.${tableName}`, e);
+    return { name: tableName, schema: querySchema, columns: [], foreignKeys: [], indexes: [] };
   }
 }
 
@@ -1243,24 +1389,38 @@ async function loadDiagram() {
   failedTableCount.value = 0;
   try {
     await store.ensureConnected(connectionId.value);
-    const querySchema = schema.value || database.value;
-    const tableInfos = await api.listTables(connectionId.value, database.value, querySchema);
-    const baseTables = tableInfos.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").sort((a, b) => a.name.localeCompare(b.name));
+    const targetSchemas = isSchemaAware.value ? selectedSchemas.value : [database.value];
+
+    const schemaTableLists = await Promise.all(
+      targetSchemas.map(async (sc) => {
+        try {
+          const list = await api.listTables(connectionId.value, database.value, sc);
+          return list.filter((table) => table.table_type !== "VIEW" && table.table_type !== "MATERIALIZED_VIEW").map((table) => ({ name: table.name, schema: sc }));
+        } catch (e) {
+          console.warn(`[diagram] failed to list tables for schema ${sc}`, e);
+          return [];
+        }
+      }),
+    );
+    const baseTables = schemaTableLists.flat().sort((a, b) => {
+      if (a.schema !== b.schema) return a.schema.localeCompare(b.schema);
+      return a.name.localeCompare(b.name);
+    });
     totalTableCount.value = baseTables.length;
 
     const loadedTables: DiagramTable[] = [];
     for (let index = 0; index < baseTables.length; index += METADATA_BATCH_SIZE) {
       const batch = baseTables.slice(index, index + METADATA_BATCH_SIZE);
-      const batchTables = await Promise.all(batch.map((table) => loadTableDiagramData(table.name, querySchema)));
+      const batchTables = await Promise.all(batch.map((item) => loadTableDiagramData(item.name, item.schema)));
       loadedTables.push(...batchTables);
       loadedTableCount.value = loadedTables.length;
     }
 
     tables.value = loadedTables;
-    const schemaKey = schema.value || "";
+    const schemaKey = effectiveSchemaKey.value;
     const drafts = loadDraftTables(connectionId.value, database.value, schemaKey);
-    const liveNames = new Set(loadedTables.map((t) => t.name));
-    const pendingDrafts = drafts.filter((d) => !liveNames.has(d.name));
+    const liveKeys = new Set(loadedTables.map((t) => getTableKey(t)));
+    const pendingDrafts = drafts.filter((d) => !liveKeys.has(getTableKey(d)) && !liveKeys.has(d.name));
     if (pendingDrafts.length) {
       tables.value = [...loadedTables, ...pendingDrafts];
     }
@@ -1268,9 +1428,26 @@ async function loadDiagram() {
     tables.value = applyLiveTablePatches(tables.value, livePatches);
     saveDraftTables(tables.value.filter(isDraftTable), connectionId.value, database.value, schemaKey);
     saveLiveTablePatches(tables.value, connectionId.value, database.value, schemaKey);
-    const savedLayers = loadPersistedLayers(connectionId.value, database.value, schema.value || "");
+    const savedLayers = loadPersistedLayers(connectionId.value, database.value, schemaKey);
     if (savedLayers.length) {
       layerStore.loadLayers(savedLayers);
+      if (isMultiSchema.value) {
+        const rawNameCounts = new Map<string, number>();
+        for (const table of tables.value) {
+          rawNameCounts.set(table.name, (rawNameCounts.get(table.name) ?? 0) + 1);
+        }
+        for (const layer of layerStore.layers) {
+          layer.tableNames = layer.tableNames.map((name) => {
+            if (!name.includes(".")) {
+              const matchedTable = tables.value.find((t) => t.name === name);
+              if (matchedTable && rawNameCounts.get(name) === 1 && matchedTable.schema) {
+                return `${matchedTable.schema}.${matchedTable.name}`;
+              }
+            }
+            return name;
+          });
+        }
+      }
     }
     loadCustomRelationships();
     loadMatchData();
@@ -1295,15 +1472,17 @@ async function loadDiagram() {
 
 /** Restore saved table positions, or run layer-aware LTR layout when none exist. */
 async function restoreOrInitializeLayout() {
-  const schemaKey = schema.value || "";
+  const schemaKey = effectiveSchemaKey.value;
+  const tableKeys = tables.value.map((t) => getTableKey(t));
   const tableNames = tables.value.map((t) => t.name);
   const savedPositions = loadPersistedPositions(connectionId.value, database.value, schemaKey);
 
-  if (hasUsablePersistedPositions(savedPositions, tableNames)) {
+  if (hasUsablePersistedPositions(savedPositions, tableKeys) || hasUsablePersistedPositions(savedPositions, tableNames)) {
     const next: Record<string, DiagramPosition> = {};
-    for (const name of tableNames) {
-      const pos = savedPositions[name];
-      if (pos) next[name] = { ...pos };
+    for (const table of tables.value) {
+      const key = getTableKey(table);
+      const pos = savedPositions[key] || savedPositions[table.name];
+      if (pos) next[key] = { ...pos };
     }
     positions.value = next;
     fillMissingTablePositions();
@@ -1321,17 +1500,18 @@ async function restoreOrInitializeLayout() {
 /** Place tables that have no saved position into their layer (or canvas grid). */
 function fillMissingTablePositions() {
   const heights = tableHeightsMap();
-  const missing = tables.value.filter((t) => !positions.value[t.name]);
+  const missing = tables.value.filter((t) => !positions.value[getTableKey(t)] && !positions.value[t.name]);
   if (missing.length === 0) return;
 
   for (const table of missing) {
-    const layer = layerStore.getLayerByTable(table.name);
+    const key = getTableKey(table);
+    const layer = layerStore.getLayerByTable(key) || layerStore.getLayerByTable(table.name);
     if (layer?.position) {
       const memberPositions = layer.tableNames.map((name) => positions.value[name]).filter((pos): pos is DiagramPosition => !!pos);
       if (memberPositions.length === 0) {
         positions.value = {
           ...positions.value,
-          [table.name]: {
+          [key]: {
             x: layer.position.x + LAYER_CONTENT_PADDING,
             y: layer.position.y + LAYER_HEADER_HEIGHT + LAYER_CONTENT_PADDING,
           },
@@ -1347,14 +1527,14 @@ function fillMissingTablePositions() {
         }
         positions.value = {
           ...positions.value,
-          [table.name]: { x: leftMost, y: maxBottom + GAP_Y / 2 },
+          [key]: { x: leftMost, y: maxBottom + GAP_Y / 2 },
         };
       }
     } else {
       const count = Object.keys(positions.value).length;
       positions.value = {
         ...positions.value,
-        [table.name]: {
+        [key]: {
           x: MARGIN + (count % 3) * (CARD_WIDTH + GAP_X),
           y: MARGIN + Math.floor(count / 3) * 200,
         },
@@ -1394,6 +1574,15 @@ async function applyInitialLayerAwareLayout() {
   });
 
   const nextPositions: Record<string, DiagramPosition> = { ...positions.value, ...result.positions };
+  for (const table of layoutTables) {
+    const key = getTableKey(table);
+    if (result.positions[table.name] && !nextPositions[key]) {
+      nextPositions[key] = result.positions[table.name];
+    }
+    if (result.positions[key] && !nextPositions[table.name]) {
+      nextPositions[table.name] = result.positions[key];
+    }
+  }
   positions.value = nextPositions;
 
   for (const updated of result.layers) {
@@ -1707,7 +1896,7 @@ function exportFormatLabel(format: DiagramExportFormat): string {
 
 async function exportDiagram(format: DiagramExportFormat) {
   try {
-    const scopeName = isSchemaAware.value && schema.value ? `${database.value}-${schema.value}` : database.value;
+    const scopeName = isSchemaAware.value && effectiveSchemaKey.value ? `${database.value}-${effectiveSchemaKey.value}` : database.value;
     const defaultPath = diagramExportFileName(selectedConnection.value?.name ?? "", scopeName, diagramMode.value, format);
 
     let saved = false;
@@ -1722,12 +1911,13 @@ async function exportDiagram(format: DiagramExportFormat) {
         meta: {
           connectionName: selectedConnection.value?.name ?? "",
           database: database.value,
-          schema: schema.value,
+          schema: effectiveSchemaKey.value,
           mode: diagramMode.value,
           exportedAt: new Date().toISOString(),
         },
         tables: visibleTables.value.map((table) => ({
           name: table.name,
+          schema: table.schema,
           columns: table.columns.map((column) => ({
             name: column.name,
             dataType: column.data_type,
@@ -1877,6 +2067,7 @@ onUnmounted(() => {
         :connection-id="connectionId"
         :database="database"
         :schema="schema"
+        :selected-schemas="selectedSchemas"
         :databases="databases"
         :schemas="schemas"
         :sql-connections="sqlConnections"
@@ -1904,6 +2095,7 @@ onUnmounted(() => {
         @set-connection="setConnection"
         @set-database="setDatabase"
         @set-schema="setSchema"
+        @set-selected-schemas="setSelectedSchemas"
         @update:table-search="(value) => (tableSearch = value)"
         @set-diagram-mode="setDiagramMode"
         @toggle-match-panel="handleToggleMatchPanel"
@@ -1926,6 +2118,7 @@ onUnmounted(() => {
             <LayerPanel
               :tables="tables"
               :record-history="recordHistory"
+              :is-multi-schema="isMultiSchema"
               class="h-full overflow-y-auto"
               @add-layer="handleAddLayer"
               @layer-changed="handleLayerChanged"
@@ -2133,7 +2326,7 @@ onUnmounted(() => {
                         <SelectValue :placeholder="t('diagram.sourceTable')" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem v-for="table in tables" :key="`source-${table.name}`" :value="table.name" :disabled="table.columns.length === 0">{{ table.name }}</SelectItem>
+                        <SelectItem v-for="table in tables" :key="`source-${getTableKey(table)}`" :value="getTableKey(table)" :disabled="table.columns.length === 0">{{ getTableKey(table) }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <Select v-model="relationshipDraft.sourceColumn">
@@ -2160,7 +2353,7 @@ onUnmounted(() => {
                         <SelectValue :placeholder="t('diagram.targetTable')" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem v-for="table in tables" :key="`target-${table.name}`" :value="table.name" :disabled="table.columns.length === 0">{{ table.name }}</SelectItem>
+                        <SelectItem v-for="table in tables" :key="`target-${getTableKey(table)}`" :value="getTableKey(table)" :disabled="table.columns.length === 0">{{ getTableKey(table) }}</SelectItem>
                       </SelectContent>
                     </Select>
                     <Select v-model="relationshipDraft.targetColumn">
@@ -2194,6 +2387,6 @@ onUnmounted(() => {
   </Dialog>
 
   <CreateDraftTableDialog v-model:open="showCreateTableDialog" :layers="layerStore.layers" :active-layer-id="layerStore.activeLayerId" :existing-names="tables.map((t) => t.name)" @create="handleCreateDraftTable" />
-  <DiagramSyncDialog v-model:open="showSyncDialog" :tables="tables" :connection-id="connectionId" :database="database" :schema="schema" :database-type="selectedConnection?.db_type" @synced="handleSyncedDraftTables" />
+  <DiagramSyncDialog v-model:open="showSyncDialog" :tables="tables" :connection-id="connectionId" :database="database" :schema="schema || selectedSchemas[0] || ''" :database-type="selectedConnection?.db_type" @synced="handleSyncedDraftTables" />
   <DangerConfirmDialog v-model:open="showRefreshConfirm" :title="t('diagram.refresh')" :message="t('diagram.refreshConfirm')" :confirm-label="t('diagram.refresh')" @confirm="confirmRefreshDiagram" />
 </template>

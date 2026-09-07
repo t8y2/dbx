@@ -33,7 +33,6 @@ describe("useDataGridConditionEditor", () => {
     value.value = "status = cust";
     await nextTick();
     await vi.waitFor(() => expect(editor.suggestions.value.map((item) => item.value)).toEqual(["customer_id", "customer_name"]));
-    expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(0);
     expect(editor.navigate(1)).toBe(true);
     expect(editor.highlightedIndex.value).toBe(1);

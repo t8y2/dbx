@@ -362,15 +362,19 @@ function validateRollbackRelease(rollbackRelease, latestRelease) {
   }
 
   const version = formatVersion(rollbackVersion);
+  // Rollback targets may predate the aarch64 -> arm64 dmg rename, so either
+  // asset name satisfies the Apple Silicon requirement.
   const requiredAssets = [
-    "latest.json",
-    `DBX_${version}_aarch64.dmg`,
-    `DBX_${version}_x64.dmg`,
-    `DBX_${version}_x64-setup.exe`,
-    `DBX_${version}_arm64-setup.exe`,
+    ["latest.json"],
+    [`DBX_${version}_arm64.dmg`, `DBX_${version}_aarch64.dmg`],
+    [`DBX_${version}_x64.dmg`],
+    [`DBX_${version}_x64-setup.exe`],
+    [`DBX_${version}_arm64-setup.exe`],
   ];
   const assetNames = new Set(rollbackRelease.assets.map((asset) => asset.name));
-  const missingAssets = requiredAssets.filter((asset) => !assetNames.has(asset));
+  const missingAssets = requiredAssets
+    .filter((candidates) => !candidates.some((asset) => assetNames.has(asset)))
+    .map((candidates) => candidates.join(" or "));
   if (missingAssets.length > 0) {
     fail(`Rollback target ${rollbackRelease.tagName} is missing required distribution assets: ${missingAssets.join(", ")}`);
   }

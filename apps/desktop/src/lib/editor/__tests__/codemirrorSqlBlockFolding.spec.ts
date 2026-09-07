@@ -3,12 +3,12 @@ import { ensureSyntaxTree, foldable } from "@codemirror/language";
 import { Compartment, EditorState } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
-import { collectUnionBranchFoldRanges, sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
+import { collectUnionBranchFoldRanges, createSqlBlockFoldService, sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 
-function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "mysql"): EditorState {
+function stateFor(doc: string, dialectName: "mysql" | "postgres" | "sqlserver" = "mysql", folding = sqlBlockFoldService): EditorState {
   const state = EditorState.create({
     doc,
-    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName) }), sqlBlockFoldService],
+    extensions: [langSql.sql({ dialect: createDbxCodeMirrorSqlDialect(langSql, dialectName) }), folding],
   });
   ensureSyntaxTree(state, doc.length, 5_000);
   return state;
@@ -21,6 +21,65 @@ function foldedTextAtLine(state: EditorState, lineNumber: number): string | null
 }
 
 describe("sqlBlockFoldService", () => {
+  it.each(["elasticsearch", "easysearch", "meilisearch"] as const)("folds one %s REST request without a semicolon", (databaseType) => {
+    const sql = `POST /orders/_search
+{
+  "query": { "match_all": {} }
+}`;
+    const state = stateFor(sql, "mysql", createSqlBlockFoldService(databaseType));
+
+    expect(sql).not.toContain(";");
+    expect(foldedTextAtLine(state, 1)).toBe('\n{\n  "query": { "match_all": {} }\n}');
+  });
+
+  it("folds multiple REST requests independently", () => {
+    const sql = `POST /orders/_search
+{
+  "query": { "match_all": {} }
+}
+
+GET /orders/_count
+{
+  "query": { "term": { "status": "paid" } }
+}`;
+    const state = stateFor(sql);
+
+    expect(sql).not.toContain(";");
+    expect(foldedTextAtLine(state, 1)).toBe('\n{\n  "query": { "match_all": {} }\n}');
+    expect(foldedTextAtLine(state, 6)).toBe('\n{\n  "query": { "term": { "status": "paid" } }\n}');
+  });
+
+  it("keeps REST request comments and blank lines outside individual folds", () => {
+    const sql = `# first request
+POST /orders/_search
+{
+  "query": { "match_all": {} }
+}
+
+// second request
+POST /orders/_search
+{
+  "query": { "term": { "status": "paid" } }
+}`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 2)).toBe('\n{\n  "query": { "match_all": {} }\n}');
+    expect(foldedTextAtLine(state, 8)).toBe('\n{\n  "query": { "term": { "status": "paid" } }\n}');
+  });
+
+  it("keeps ordinary SQL block and CASE folding unchanged", () => {
+    const sql = `BEGIN
+  SELECT CASE
+    WHEN status = 'paid' THEN 1
+    ELSE 0
+  END;
+END`;
+    const state = stateFor(sql);
+
+    expect(foldedTextAtLine(state, 1)).toContain("SELECT CASE");
+    expect(foldedTextAtLine(state, 2)).toBe("\n    WHEN status = 'paid' THEN 1\n    ELSE 0\n  ");
+  });
+
   it("folds a BEGIN...END block, from the end of the BEGIN line to the start of END", () => {
     const sql = "CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\nEND";
     const state = stateFor(sql);

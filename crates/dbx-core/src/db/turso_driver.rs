@@ -222,6 +222,8 @@ pub async fn list_indexes(client: &TursoClient, _schema: &str, table: &str) -> R
             included_columns: None,
             comment: None,
             key_is_expression: Vec::new(),
+            column_opclasses: vec![],
+            constraint_backed: false,
         });
     }
 

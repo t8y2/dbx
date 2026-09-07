@@ -198,14 +198,14 @@ export function fitCanvasText(ctx: CanvasRenderingContext2D, text: string, maxWi
   return result;
 }
 
-export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true): number {
-  const overlayWidth = canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey, showCellDetail);
+export function canvasDataGridActionReservedWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true, canOpenExternalUrl = false): number {
+  const overlayWidth = canvasDataGridActionOverlayWidth(canQuickDownload, canNavigateForeignKey, showCellDetail, canOpenExternalUrl);
   return overlayWidth > 0 ? overlayWidth + 6 : 0;
 }
 
 /** 悬浮按钮组宽度：每个已启用按钮 20px + 2px 间距。 */
-export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true): number {
-  return (showCellDetail ? 22 : 0) + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0);
+export function canvasDataGridActionOverlayWidth(canQuickDownload: boolean, canNavigateForeignKey = false, showCellDetail = true, canOpenExternalUrl = false): number {
+  return (showCellDetail ? 22 : 0) + (canQuickDownload ? 22 : 0) + (canNavigateForeignKey ? 22 : 0) + (canOpenExternalUrl ? 22 : 0);
 }
 
 export function resolveCanvasCellTextLayout(options: { drawX: number; colWidth: number; dpr: number; isRightAlign: boolean; reservedWidth?: number }): { textAnchorX: number; maxWidth: number } {

@@ -7,6 +7,7 @@ import { Dialog, DialogHeader, DialogTitle, DialogFooter, DialogScrollContent } 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, FileCode, FileJson, FileSpreadsheet, FileText, FileUp, Loader2, RefreshCw, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -28,7 +29,7 @@ import {
   type TableImportWizardStep,
 } from "@/lib/table/tableImport";
 import { getDataTypeOptions } from "@/lib/table/tableStructureEditorState";
-import { tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { metadataSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import type { ColumnInfo } from "@/types/database";
 import * as api from "@/lib/backend/api";
 
@@ -63,7 +64,29 @@ interface BatchImportTask {
 }
 
 const SKIP_VALUE = "__skip__";
+const TARGET_COLUMNS_TIMEOUT_MS = 15000;
+const TARGET_COLUMNS_TIMEOUT = Symbol("target-columns-timeout");
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(TARGET_COLUMNS_TIMEOUT), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 const targetColumns = ref<ColumnInfo[]>([]);
+const loadedTargetTableName = ref("");
+const existingTableNames = ref<string[]>([]);
+const selectedExistingTable = ref(props.prefillTable || "");
 const targetMode = ref<ImportTargetMode>(props.prefillTable ? "existing" : "create");
 const newTableName = ref("");
 const selectedSource = ref<string | File | null>(null);
@@ -75,6 +98,7 @@ const columnMapping = ref<Record<string, string>>({});
 const columnDataTypes = ref<Record<string, string>>({});
 const dynamicDataTypeOptions = ref<string[]>([]);
 const loadingDataTypeOptions = ref(false);
+const loadingExistingTables = ref(false);
 const loadingTarget = ref(false);
 const loadingPreview = ref(false);
 const importMode = ref<api.TableImportMode>("append");
@@ -101,6 +125,8 @@ let previewReloadTimer: ReturnType<typeof setTimeout> | null = null;
 let importElapsedTimer: ReturnType<typeof setInterval> | null = null;
 let importStartedAt = 0;
 let dataTypeOptionsRequestId = 0;
+let existingTablesRequestId = 0;
+let targetColumnsRequestId = 0;
 let previewRequestId = 0;
 let batchEncodingRequestId = 0;
 
@@ -131,9 +157,11 @@ const wizardSteps: Array<{ value: TableImportWizardStep; labelKey: string }> = [
 
 const selectedConnection = computed(() => (props.prefillConnectionId ? store.getConfig(props.prefillConnectionId) : undefined));
 const structureDatabaseType = computed(() => tableStructureDatabaseTypeForConnection(selectedConnection.value));
+const targetSchema = computed(() => metadataSchemaForConnection(selectedConnection.value, props.prefillDatabase || "", props.prefillSchema));
 const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(structureDatabaseType.value), Object.values(columnDataTypes.value)));
-const hasExistingTarget = computed(() => !!props.prefillTable);
-const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : props.prefillTable || ""));
+const hasExistingTarget = computed(() => !!props.prefillTable || loadingExistingTables.value || existingTableNames.value.length > 0);
+const targetTableName = computed(() => (targetMode.value === "create" ? newTableName.value.trim() : selectedExistingTable.value));
+const existingTargetMetadataReady = computed(() => targetMode.value !== "existing" || (!loadingTarget.value && !!selectedExistingTable.value && loadedTargetTableName.value === selectedExistingTable.value));
 const targetColumnNames = computed(() => targetColumns.value.map((column) => column.name));
 const mappedColumns = computed<api.TableImportColumnMapping[]>(() => {
   const currentPreview = preview.value;
@@ -159,7 +187,7 @@ const requiredUnmappedColumns = computed(() =>
 );
 const isBatchImport = computed(() => targetMode.value === "create" && batchTasks.value.length > 1);
 const canImport = computed(() => {
-  if (running.value || !props.prefillConnectionId) return false;
+  if (running.value || !props.prefillConnectionId || !existingTargetMetadataReady.value) return false;
   if (!isBatchImport.value) return !!preview.value && !!targetTableName.value && mappingValidation.value.valid;
   const tableNames = batchTasks.value.map((task) => task.tableName.trim().toLowerCase());
   if (new Set(tableNames).size !== tableNames.length) return false;
@@ -171,8 +199,8 @@ const canImport = computed(() => {
 const canGoBack = computed(() => wizardStep.value !== "source" && wizardStep.value !== "execution" && !running.value);
 const canGoNext = computed(() => {
   if (wizardStep.value === "source") return !!selectedSource.value && !!sourceFormat.value;
-  if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value;
-  if (wizardStep.value === "mapping") return mappingValidation.value.valid;
+  if (wizardStep.value === "options") return !!preview.value && !!targetTableName.value && existingTargetMetadataReady.value;
+  if (wizardStep.value === "mapping") return existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
 });
 const rawProgressPercent = computed(() => tableImportProgressPercent(progress.value));
@@ -236,11 +264,16 @@ function resetState() {
   liveElapsedMs.value = 0;
   previewRequestId++;
   batchEncodingRequestId++;
+  existingTablesRequestId++;
+  targetColumnsRequestId++;
   if (previewReloadTimer) {
     clearTimeout(previewReloadTimer);
     previewReloadTimer = null;
   }
   targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  existingTableNames.value = [];
+  selectedExistingTable.value = props.prefillTable || "";
   targetMode.value = props.prefillTable ? "existing" : "create";
   newTableName.value = "";
   selectedSource.value = null;
@@ -263,6 +296,8 @@ function resetState() {
   importMode.value = "append";
   batchSize.value = 500;
   loadingPreview.value = false;
+  loadingExistingTables.value = false;
+  loadingTarget.value = false;
   running.value = false;
   cancelling.value = false;
   importId.value = "";
@@ -465,18 +500,58 @@ async function loadDataTypeOptions() {
   }
 }
 
+async function loadExistingTables() {
+  if (props.prefillTable || loadingExistingTables.value || existingTableNames.value.length || !props.prefillConnectionId || !props.prefillDatabase) return;
+  const requestId = ++existingTablesRequestId;
+  loadingExistingTables.value = true;
+  errorMessage.value = "";
+  try {
+    await store.ensureConnected(props.prefillConnectionId);
+    const tables = await api.listTables(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, undefined, undefined, undefined, ["TABLE"]);
+    if (requestId !== existingTablesRequestId) return;
+    existingTableNames.value = tables.map((table) => table.name);
+  } catch (e: any) {
+    if (requestId === existingTablesRequestId) {
+      existingTableNames.value = [];
+      errorMessage.value = String(e?.message || e);
+    }
+  } finally {
+    if (requestId === existingTablesRequestId) loadingExistingTables.value = false;
+  }
+}
+
 async function loadTargetColumns() {
-  if (targetMode.value !== "existing" || !props.prefillConnectionId || !props.prefillDatabase || !props.prefillTable) return;
+  const tableName = selectedExistingTable.value;
+  if (targetMode.value !== "existing" || !props.prefillConnectionId || !props.prefillDatabase || !tableName) {
+    targetColumnsRequestId++;
+    targetColumns.value = [];
+    loadedTargetTableName.value = "";
+    columnMapping.value = {};
+    loadingTarget.value = false;
+    return;
+  }
+  const requestId = ++targetColumnsRequestId;
+  targetColumns.value = [];
+  loadedTargetTableName.value = "";
+  columnMapping.value = {};
   loadingTarget.value = true;
   errorMessage.value = "";
   try {
     await store.ensureConnected(props.prefillConnectionId);
-    targetColumns.value = await api.getColumns(props.prefillConnectionId, props.prefillDatabase, props.prefillSchema || props.prefillDatabase, props.prefillTable);
+    const columns = await withTimeout(api.getColumns(props.prefillConnectionId, props.prefillDatabase, targetSchema.value, tableName), TARGET_COLUMNS_TIMEOUT_MS);
+    if (requestId !== targetColumnsRequestId) return;
+    targetColumns.value = columns;
+    loadedTargetTableName.value = tableName;
     applyAutoMapping();
   } catch (e: any) {
-    errorMessage.value = String(e?.message || e);
+    if (requestId === targetColumnsRequestId) {
+      targetColumns.value = [];
+      loadedTargetTableName.value = "";
+      columnMapping.value = {};
+      errorMessage.value = e === TARGET_COLUMNS_TIMEOUT ? t("tableImport.targetColumnsTimeout") : String(e?.message || e);
+    }
   } finally {
-    loadingTarget.value = false;
+    if (requestId === targetColumnsRequestId) loadingTarget.value = false;
   }
 }
 
@@ -671,8 +746,8 @@ function canOpenStep(step: TableImportWizardStep) {
   if (running.value || step === "execution") return false;
   if (step === "source") return true;
   if (step === "options") return !!selectedSource.value;
-  if (step === "mapping") return !!preview.value;
-  if (step === "review") return !!preview.value && mappingValidation.value.valid;
+  if (step === "mapping") return !!preview.value && existingTargetMetadataReady.value;
+  if (step === "review") return !!preview.value && existingTargetMetadataReady.value && mappingValidation.value.valid;
   return false;
 }
 
@@ -749,7 +824,7 @@ async function startImport() {
         importId: importId.value,
         connectionId: props.prefillConnectionId,
         database: props.prefillDatabase || "",
-        schema: props.prefillSchema || "",
+        schema: targetSchema.value,
         table: tableName,
         filePath: currentPreview.filePath,
         sourceRef: currentPreview.sourceRef || null,
@@ -835,7 +910,7 @@ async function startBatchImport() {
           importId: importId.value,
           connectionId: props.prefillConnectionId,
           database: props.prefillDatabase || "",
-          schema: props.prefillSchema || "",
+          schema: targetSchema.value,
           table: task.tableName,
           filePath: task.preview.filePath,
           sourceRef: task.preview.sourceRef || null,
@@ -992,6 +1067,7 @@ watch(textEncoding, schedulePreviewReloadAfterEncodingChange);
 watch([newTableName, columnMapping, columnDataTypes], saveActiveBatchTask, { deep: true });
 watch(wizardStep, (step) => {
   if (step !== "mapping") closeDataTypePicker();
+  if (step === "options") void loadExistingTables();
 });
 watch(targetMode, (mode) => {
   if (mode === "existing") {
@@ -999,12 +1075,18 @@ watch(targetMode, (mode) => {
     dynamicDataTypeOptions.value = [];
     void loadTargetColumns();
   } else {
+    targetColumnsRequestId++;
     targetColumns.value = [];
+    loadedTargetTableName.value = "";
+    loadingTarget.value = false;
     importMode.value = "append";
     applyAutoMapping();
     applySuggestedColumnDataTypes();
     void loadDataTypeOptions();
   }
+});
+watch(selectedExistingTable, () => {
+  if (targetMode.value === "existing") void loadTargetColumns();
 });
 
 watch(rawProgressPercent, (percent) => {
@@ -1144,7 +1226,7 @@ watch(rawProgressPercent, (percent) => {
               <div class="grid grid-cols-2 gap-2">
                 <button type="button" class="rounded-md border px-3 py-2 text-left text-xs" :class="targetMode === 'existing' ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" :disabled="!hasExistingTarget" @click="targetMode = 'existing'">
                   <div class="font-medium">{{ t("tableImport.existingTable") }}</div>
-                  <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ props.prefillTable || t("tableImport.noExistingTarget") }}</div>
+                  <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ selectedExistingTable || t("tableImport.noExistingTarget") }}</div>
                 </button>
                 <button type="button" class="rounded-md border px-3 py-2 text-left text-xs" :class="targetMode === 'create' ? 'border-primary bg-primary/5' : 'hover:bg-muted/30'" @click="targetMode = 'create'">
                   <div class="font-medium">{{ t("tableImport.createTable") }}</div>
@@ -1155,9 +1237,22 @@ watch(rawProgressPercent, (percent) => {
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.targetTableName") }}</Label>
               <Input v-if="targetMode === 'create'" v-model="newTableName" class="h-8 text-xs font-mono" />
-              <div v-else class="flex h-8 items-center rounded-md border px-2 text-xs">
+              <div v-else-if="props.prefillTable" class="flex h-8 items-center rounded-md border px-2 text-xs">
                 <span class="truncate">{{ props.prefillTable }}</span>
               </div>
+              <SearchableSelect
+                v-else
+                :model-value="selectedExistingTable"
+                :options="existingTableNames"
+                :placeholder="t('tableImport.noExistingTarget')"
+                :search-placeholder="t('tableImport.searchExistingTables')"
+                :empty-text="t('tableImport.noTables')"
+                :loading-text="t('tableImport.loadingTables')"
+                :loading="loadingExistingTables"
+                :disabled="loadingExistingTables || !existingTableNames.length"
+                trigger-class="h-8 font-mono text-xs"
+                @update:model-value="(value) => (selectedExistingTable = value)"
+              />
             </div>
           </div>
 
@@ -1479,8 +1574,11 @@ watch(rawProgressPercent, (percent) => {
           <Loader2 class="h-3.5 w-3.5 animate-spin" />
           {{ t("common.loading") }}
         </div>
-        <div v-if="errorMessage && wizardStep !== 'execution'" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          {{ errorMessage }}
+        <div v-if="errorMessage && wizardStep !== 'execution'" class="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <span class="flex-1">{{ errorMessage }}</span>
+          <Button v-if="targetMode === 'existing' && !loadingTarget && !existingTargetMetadataReady" variant="outline" size="sm" class="h-6 px-2 text-xs" @click="loadTargetColumns()">
+            {{ t("tableImport.retry") }}
+          </Button>
         </div>
       </div>
 

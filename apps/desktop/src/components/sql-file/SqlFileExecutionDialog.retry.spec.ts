@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, reactive } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   refreshDatabaseTreeNode: vi.fn(),
   requestConfirmation: vi.fn(),
   toast: vi.fn(),
+  trackerTask: undefined as any,
   unlisten: vi.fn(),
   updateSqlFileTask: vi.fn(),
   uuid: vi.fn(),
@@ -61,7 +62,7 @@ vi.mock("@/lib/backend/api", () => ({
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
-  return { Check: Icon, CheckSquare: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
+  return { Check: Icon, CheckSquare: Icon, ChevronRight: Icon, FileCode: Icon, FolderOpen: Icon, Loader2: Icon, Play: Icon, Square: Icon, X: Icon };
 });
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: passthrough("div"),
@@ -151,6 +152,34 @@ function deferred() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.progressHandler = undefined;
+  mocks.trackerTask = undefined;
+  mocks.addSqlFileTask.mockImplementation((exportId: string, tableName: string, filePath: string) => {
+    mocks.trackerTask = reactive({
+      exportId,
+      kind: "sql-file",
+      tableName,
+      format: "sql",
+      filePath,
+      rowsExported: 0,
+      totalRows: null,
+      status: "Running",
+      errorMessage: null,
+      sqlFileFailures: [],
+      sqlFileFailuresOmitted: 0,
+    });
+    return mocks.trackerTask;
+  });
+  mocks.updateSqlFileTask.mockImplementation((_executionId: string, next: Record<string, any>, context?: { fileIndex?: number; fileName?: string }) => {
+    if (next.status === "statementFailed" && next.error) {
+      mocks.trackerTask.sqlFileFailures.push({
+        statementIndex: next.statementIndex,
+        statementSummary: next.statementSummary,
+        error: next.error,
+        ...(context?.fileIndex === undefined ? {} : { fileIndex: context.fileIndex }),
+        ...(context?.fileName ? { fileName: context.fileName } : {}),
+      });
+    }
+  });
   mocks.ensureConnected.mockResolvedValue(undefined);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
   mocks.openFileDialog.mockResolvedValue(["/tmp/first.sql", "/tmp/second.sql"]);
@@ -216,5 +245,54 @@ describe("SqlFileExecutionDialog retries", () => {
     await vi.waitFor(() => expect(root!.textContent).toContain("sqlFile.status.cancelled"));
     expect(root!.querySelector("table")).toBeNull();
     expect(mocks.executeSqlFiles).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows every statement failure in order after continue-on-error completion", async () => {
+    await mountReadyDialog();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 1, failureCount: 1, statementSummary: "INSERT bad_one", error: "unknown column one" }));
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 2, failureCount: 2, statementSummary: "INSERT bad_two", error: "unknown column two" }));
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 3, failureCount: 3, statementSummary: "INSERT bad_three", error: "syntax error three" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 4, successCount: 1, failureCount: 3 }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(root!.textContent).toContain("syntax error three"));
+
+    const text = root!.textContent ?? "";
+    expect(text).toContain("unknown column one");
+    expect(text).toContain("unknown column two");
+    expect(text.indexOf("INSERT bad_one")).toBeLessThan(text.indexOf("INSERT bad_two"));
+    expect(text.indexOf("INSERT bad_two")).toBeLessThan(text.indexOf("INSERT bad_three"));
+  });
+
+  it("shows the first statement failure when stop-on-error becomes terminal", async () => {
+    await mountReadyDialog();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 1, failureCount: 1, statementSummary: "INSERT stop_here", error: "stop-on-error failure" }));
+      mocks.progressHandler?.(progress(request.executionId, "error", { statementIndex: 1, failureCount: 1, statementSummary: "INSERT stop_here", error: "stop-on-error failure" }));
+    });
+
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(root!.textContent).toContain("stop-on-error failure"));
+
+    expect(root!.textContent?.match(/stop-on-error failure/g)).toHaveLength(1);
+    expect(root!.textContent).toContain("INSERT stop_here");
+  });
+
+  it("clears statement failure details before an early retry failure", async () => {
+    await mountReadyDialog();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request: { executionId: string }) => {
+      mocks.progressHandler?.(progress(request.executionId, "statementFailed", { statementIndex: 1, failureCount: 1, statementSummary: "INSERT stale", error: "stale statement failure" }));
+      mocks.progressHandler?.(progress(request.executionId, "done", { statementIndex: 2, successCount: 1, failureCount: 1 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(root!.textContent).toContain("stale statement failure"));
+
+    mocks.ensureConnected.mockRejectedValueOnce(new Error("retry connection failed"));
+    findButton("sqlFile.execute").click();
+
+    await vi.waitFor(() => expect(root!.textContent).toContain("retry connection failed"));
+    expect(root!.textContent).not.toContain("stale statement failure");
   });
 });

@@ -65,6 +65,18 @@ describe("treeNodeClick", () => {
     expect(treeNodeRowAction("meilisearch-system", false, "double")).toBe("toggle");
   });
 
+  it("opens etcd workspaces on one click regardless of object activation preference", () => {
+    for (const type of ["etcd-root", "etcd-access-control", "etcd-dashboard"] as const) {
+      expect(isDirectNavigationTreeNode(type), type).toBe(true);
+      expect(shouldActivateTreeNodeOnSingleClick(type, "double"), type).toBe(true);
+      const action = treeNodeRowAction(type, false, "double");
+      expect(action, type).toBe("toggle");
+      expect(isRepeatableNavigationTreeNode(type), type).toBe(true);
+      expect(shouldRunTreeNodeRowAction(action, 2, isRepeatableNavigationTreeNode(type)), type).toBe(true);
+      expect(shouldRunTreeNodeRowAction(action, 3, isRepeatableNavigationTreeNode(type)), type).toBe(true);
+    }
+  });
+
   it("keeps Nacos namespace and access-control navigation responsive during rapid row switching", () => {
     for (const type of ["nacos-namespace", "nacos-access-control"] as const) {
       expect(isDirectNavigationTreeNode(type), type).toBe(true);

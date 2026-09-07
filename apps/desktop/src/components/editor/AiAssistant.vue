@@ -38,6 +38,7 @@ import {
   Table2,
   Play,
   Square,
+  Star,
   Trash2,
   Terminal,
   Wand2,
@@ -73,6 +74,7 @@ import {
   resolveAiDatabaseTarget,
   resolveAiNamespaceSelection,
   resolveDefaultAiSchema,
+  aiDatabaseTypeForConnection,
   aiSchemaSelectionSupported,
   runAgentStream,
   isVectorDbType,
@@ -135,6 +137,8 @@ import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { effortSelectionEquals, runtimeEffortFromPreference } from "@/lib/ai/aiEffortPreference";
 import { useAiModelCatalog } from "@/composables/useAiModelCatalog";
 import { ACTIVE_TEMPLATES_TOTAL_MAX, promptTemplateCharacterCount } from "@/types/promptTemplate";
+import { capTemplateIdsToCharLimit, resolveAutoTemplateIds, resolveDefaultTemplateIds } from "@/lib/ai/promptTemplateDefaults";
+import { databaseManifestEntry } from "@/lib/database/databaseDriverManifest";
 
 import type { AgentEvent } from "@/lib/backend/tauri";
 import { buildAiAgentPlan } from "@/lib/ai/aiAgentPlan";
@@ -438,19 +442,70 @@ watch(
 
 // Retry store load on selector open if prior init failed (e.g. backend not yet ready at mount)
 watch(showTemplateSelector, (open) => {
-  if (open) void promptTemplateStore.ensureLoaded();
+  // Retry load on selector open if prior init failed, then apply pending
+  // per-db_type defaults that were skipped when the initial load failed.
+  if (open) void promptTemplateStore.ensureLoaded().then(() => void maybeApplyAutoTemplates());
 });
 
-// Reset template selection when the user switches to a different connection,
-// database, or schema — a new namespace context warrants a fresh selection.
+// Auto-apply per-db_type prompt template defaults once both the AI selection
+// (which carries the defaults) and the template list have loaded. Only this
+// one-time resolution and the namespace watcher below write the selection
+// implicitly; manual edits in between are never overwritten.
+// Template defaults/last-used are keyed by the connection's effective AI
+// database type (gbase → mysql/informix, doris-over-mysql protocol, jdbc →
+// inferred dialect) so resolution matches the dialect the AI pipeline and
+// prompt selection actually use — the same axis aiDatabaseTypeForConnection
+// established for schema selection.
+const templateDbType = computed(() => (props.connection ? aiDatabaseTypeForConnection(props.connection) : undefined));
+const aiTemplateNamespaceKey = computed(() => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`);
+let autoTemplatesInitialized = false;
+function applyResolvedTemplateIds(ids: string[]) {
+  activeTemplateIds.value = capTemplateIdsToCharLimit(ids, promptTemplateStore.templates, ACTIVE_TEMPLATES_TOTAL_MAX);
+}
+async function maybeApplyAutoTemplates() {
+  if (autoTemplatesInitialized || !settings.isAiConfigLoaded) return;
+  const namespaceAtStart = aiTemplateNamespaceKey.value;
+  if (!(await promptTemplateStore.ensureLoaded())) return;
+  autoTemplatesInitialized = true;
+  // A namespace switch during the await already ran the defaults-only
+  // resolution below; applying defaults-or-last-used now would violate the
+  // switch contract and could overwrite a manual selection made meanwhile.
+  if (namespaceAtStart !== aiTemplateNamespaceKey.value) return;
+  // Panel-open resolution: explicit defaults, else the db_type's last-used.
+  applyResolvedTemplateIds(
+    resolveAutoTemplateIds({
+      dbType: templateDbType.value,
+      defaultTemplatesByDbType: settings.aiDefaultTemplatesByDbType,
+      lastUsedTemplatesByDbType: settings.aiLastUsedTemplatesByDbType,
+    }),
+  );
+}
 watch(
-  // Return a stable primitive key: a fresh array literal is never Object.is-equal to the
-  // previous one, so a getter returning `[id, database]` fires on every dependency
-  // invalidation (e.g. the 30s backup scheduler replacing connection objects) even when the
-  // id/database values are unchanged — spuriously clearing the selection mid agent-run.
-  () => `${props.connection?.id ?? ""}::${props.tab?.database ?? ""}::${props.tab?.schema ?? ""}`,
+  () => settings.isAiConfigLoaded,
+  () => void maybeApplyAutoTemplates(),
+  { immediate: true },
+);
+
+// Reset template selection when the user switches to a different connection,
+// database, or schema — a new namespace context warrants a fresh selection:
+// the new db_type's default templates when the user configured any (explicit
+// opt-in), otherwise empty, preserving the pre-defaults clear-on-switch
+// contract. Last-used templates are intentionally not restored here: that
+// would silently re-select templates on every namespace switch.
+watch(
+  // The key is a stable primitive string (see aiTemplateNamespaceKey): a fresh
+  // array literal is never Object.is-equal to the previous one, so a getter
+  // returning `[id, database]` fires on every dependency invalidation (e.g.
+  // the 30s backup scheduler replacing connection objects) even when the
+  // id/database values are unchanged — spuriously clearing the selection mid
+  // agent-run.
+  aiTemplateNamespaceKey,
   () => {
-    activeTemplateIds.value = [];
+    if (!settings.isAiConfigLoaded || !promptTemplateStore.isLoaded) {
+      activeTemplateIds.value = [];
+      return;
+    }
+    applyResolvedTemplateIds(resolveDefaultTemplateIds(templateDbType.value, settings.aiDefaultTemplatesByDbType));
   },
 );
 
@@ -489,6 +544,14 @@ const templateSelectorTriggerLabel = computed(() => {
   }
   return templateSelectorLabel.value;
 });
+const currentDbType = computed(() => templateDbType.value);
+function isDefaultTemplateForCurrentDb(id: string): boolean {
+  const dbType = currentDbType.value;
+  return !!dbType && (settings.aiDefaultTemplatesByDbType[dbType]?.includes(id) ?? false);
+}
+function currentDbTypeLabel(): string {
+  return currentDbType.value ? (databaseManifestEntry(currentDbType.value)?.label ?? currentDbType.value) : "";
+}
 const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const csvFileInputRef = ref<HTMLInputElement | null>(null);
 const shouldAutoScroll = ref(true);
@@ -2823,6 +2886,13 @@ async function send() {
     globalInstructions: promptTemplateStore.globalInstructions,
     activeTemplates: [...activeTemplates.value],
   };
+  // Remember what was actually sent for this db_type so panels opened later can
+  // restore it when no explicit per-db_type defaults are configured. This runs
+  // for empty selections too: the store clears the remembered entry so a
+  // deselected-everything send is not resurrected on the next panel open.
+  if (templateDbType.value) {
+    settings.recordLastUsedTemplates(templateDbType.value, [...activeTemplateIds.value]);
+  }
 
   const selectedTableMentions = auto ? [] : [...selectedMentions.value];
   const selectedSqlFiles = auto ? [] : [...selectedSqlFileMentions.value];
@@ -4846,7 +4916,10 @@ async function openExternalUrl(url: string) {
                           <Check v-if="activeTemplateIds.includes(tpl.id)" class="h-3 w-3" />
                         </div>
                         <div class="flex-1 truncate text-left">
-                          <div class="font-medium">{{ tpl.name }}</div>
+                          <div class="flex items-center gap-1 font-medium">
+                            <span class="truncate">{{ tpl.name }}</span>
+                            <Star v-if="isDefaultTemplateForCurrentDb(tpl.id)" class="h-3 w-3 shrink-0 text-amber-500" :title="t('ai.templateDefaultBadgeTitle', { type: currentDbTypeLabel() })" />
+                          </div>
                           <div class="text-[10px] text-muted-foreground truncate">{{ tpl.content.slice(0, 60) }}</div>
                         </div>
                       </button>

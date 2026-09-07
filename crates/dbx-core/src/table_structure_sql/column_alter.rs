@@ -14,7 +14,7 @@ use super::util::{
 use crate::table_structure_sql::ColumnExtra;
 
 pub fn build_single_column_alter_sql(options: SingleColumnAlterSqlOptions) -> TableStructureSqlResult {
-    let capabilities = capabilities_for(options.database_type);
+    let capabilities = capabilities_for(options.database_type, options.driver_profile.as_deref());
     let dialect = capabilities.dialect;
     let table = qualified_table(dialect, options.schema.as_deref(), &options.table_name);
     let database_label = database_label(options.database_type);

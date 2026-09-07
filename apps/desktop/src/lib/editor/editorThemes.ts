@@ -4,6 +4,12 @@ import { customUiAppearance, type AppCustomUiColors, type AppThemeAppearance, ty
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
+// @codemirror/lang-sql tags dialect builtin-list words (COUNT, DATE_FORMAT, ...) as
+// standard(name) — not standard(variableName), which is a *child* tag of name and so never
+// matches a token tagged with the parent. Shared so both editor theme builders below stay in
+// sync with what the SQL tokenizer actually emits.
+export const SQL_BUILTIN_HIGHLIGHT_TAG = tags.standard(tags.name);
+
 type CodeMirrorStyleSpec = Parameters<typeof import("@codemirror/view").EditorView.theme>[0];
 type LucideIconNode = Array<[string, Record<string, string>]>;
 
@@ -165,7 +171,7 @@ function createCustomTheme(EditorView: typeof import("@codemirror/view").EditorV
     { tag: tags.definition(tags.variableName), color: c.variable },
     { tag: tags.function(tags.variableName), color: c.function },
     { tag: tags.function(tags.propertyName), color: c.function },
-    { tag: tags.standard(tags.variableName), color: c.builtin },
+    { tag: SQL_BUILTIN_HIGHLIGHT_TAG, color: c.builtin },
     { tag: tags.propertyName, color: c.property },
     { tag: tags.operator, color: c.operator },
     { tag: tags.compareOperator, color: c.operator },
@@ -563,7 +569,7 @@ function createIdeEditorTheme(EditorView: typeof import("@codemirror/view").Edit
     { tag: [tags.typeName, tags.typeOperator, tags.unit], color: c.type },
     { tag: [tags.name, tags.variableName, tags.definition(tags.variableName)], color: c.variable },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.function(tags.name), tags.macroName], color: c.function },
-    { tag: [tags.standard(tags.variableName), tags.special(tags.name)], color: c.builtin },
+    { tag: [SQL_BUILTIN_HIGHLIGHT_TAG, tags.special(tags.name)], color: c.builtin },
     { tag: [tags.propertyName, tags.labelName, tags.annotation], color: c.property },
     { tag: [tags.operator, tags.compareOperator, tags.logicOperator, tags.arithmeticOperator, tags.derefOperator], color: c.operator },
     { tag: [tags.punctuation, tags.separator, tags.paren, tags.brace, tags.bracket, tags.angleBracket], color: c.punctuation },
@@ -763,6 +769,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ...(opts?.scrollable ? { ".cm-scroller": { overflowX: "auto", overflowY: "auto" } } : {}),
     ".cm-content": {
       fontFamily: `var(${EDITOR_FONT_FAMILY_CSS_VAR}, ${defaults?.family ?? "monospace"})`,
+      // Ligature fonts (Fira Code, Cascadia Code, JetBrains Mono, ...) combine
+      // runs like `--`/`==` into a single shaped glyph. CodeMirror repaints
+      // edited lines by patching individual character spans, and that
+      // per-keystroke patching can race the browser's ligature reshaping when
+      // the same character is typed repeatedly in place, leaving earlier
+      // characters unpainted until something else forces a repaint (dbx#7900).
+      // Disabling ligatures here avoids the reshaping entirely, matching the
+      // same fix already applied to DataGridConditionEditor.vue.
+      fontVariantLigatures: "none",
+      fontFeatureSettings: '"liga" 0, "calt" 0',
       lineHeight: "1.6",
       padding: "0",
     },
@@ -772,9 +788,16 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
     ".cm-selectionLayer .cm-selectionBackground": {
       display: "none",
     },
+    // 光标是零宽元素，可见部分只来自 border-left。在 WebView 页面缩放（uiScale）下
+    // 1 CSS px 不再映射为整数设备像素，1.2px 的小数边框加上 transform 造成的独立绘制层
+    // 会被 WebKit 舍入丢弃，表现为光标在部分列/部分窗口宽度下不显示。
+    // 因此：用 margin-top 代替 transform（不产生绘制层），并给边框整数宽度。
+    // 颜色仍由各主题的 borderLeftColor 提供，无需改动主题。
     ".cm-cursor": {
       height: "1.6em !important",
-      transform: "translateY(-0.3em)",
+      marginTop: "-0.3em",
+      borderLeftWidth: "2px",
+      marginLeft: "-1px",
     },
     ".cm-trimmedSelection": {
       backgroundColor: `var(${EDITOR_SELECTION_BACKGROUND_CSS_VAR}, rgb(148 163 184 / 38%))`,
@@ -810,6 +833,10 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       width: "1px",
       zIndex: "10",
     },
+    // Single lines render vertically centered here. Wrapped lines are anchored
+    // to the first visual row by createQueryEditorLineNumberAlignmentExtension,
+    // which sets an inline `align-items: flex-start` (inline style survives
+    // CodeMirror's className rebuild, unlike a toggled class).
     ".cm-lineNumbers .cm-gutterElement": {
       alignItems: "center",
       cursor: "pointer",
@@ -817,9 +844,6 @@ export function buildEditorFontThemeRules(opts?: { fixedHeight?: boolean; scroll
       justifyContent: "flex-end",
       paddingRight: "8px",
       userSelect: "none",
-    },
-    ".cm-lineNumbers .cm-gutterElement.cm-db-wrapped-line-number": {
-      alignItems: "flex-start",
     },
     ".cm-run-statement-gutter": {
       minWidth: "28px",
@@ -973,6 +997,15 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       color: "var(--popover-foreground) !important",
       outline: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--primary) 22%, transparent)"),
     },
+    ".cm-tooltip.cm-tooltip-autocomplete > ul > li.cm-batch-column-selection-action": {
+      background: "var(--popover)",
+      borderRadius: "0",
+      borderTop: colorMixValue("1px solid var(--border)", "1px solid color-mix(in oklch, var(--border) 82%, var(--foreground) 18%)"),
+      bottom: "0",
+      boxShadow: "0 -6px 12px rgb(0 0 0 / 0.06)",
+      position: "sticky",
+      zIndex: "1",
+    },
     ".cm-completionIcon": {
       alignItems: "center",
       display: "inline-flex",
@@ -989,7 +1022,13 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       backgroundColor: "currentColor",
       content: "''",
       display: "block",
-      height: "14px",
+      height: "15px",
+      // The pseudo element must be pinned to the icon box: with `left`/`top`
+      // left auto, engines disagree on the static position of an absolutely
+      // positioned child of a flex container, and WebKit places it far enough
+      // left for `overflow: hidden` to cut off half the glyph.
+      left: "0",
+      top: "0",
       position: "absolute",
       WebkitMaskImage: "var(--dbx-completion-icon-mask)",
       WebkitMaskPosition: "center",
@@ -999,7 +1038,7 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
       maskPosition: "center",
       maskRepeat: "no-repeat",
       maskSize: "14px 14px",
-      width: "14px",
+      width: "15px",
     },
     ".cm-completionIcon:after": {
       content: "'none'",

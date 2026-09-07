@@ -1374,12 +1374,13 @@ function collectSetStatementVariables(sql: string, start: number, declared: Set<
 
 function collectSelectAssignmentVariables(sql: string, start: number, declared: Set<string>, databaseType?: DatabaseType): number {
   let i = start;
+  let depth = 0;
   while (i < sql.length) {
     const ch = sql[i];
     const next = sql[i + 1];
-    if (ch === ";") return i + 1;
-    if (isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
-    if (matchesWord(sql, i, "from")) return i;
+    if (ch === ";" && depth === 0) return i + 1;
+    if (depth === 0 && isLineStatementStart(sql, i) && isSqlStatementKeyword(sql, i)) return i;
+    if (databaseType !== "mysql" && matchesWord(sql, i, "from")) return i;
     if (ch === "'" || ch === '"' || ch === "`") {
       i = skipQuoted(sql, i, ch);
       continue;
@@ -1400,6 +1401,23 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
       i = skipLine(sql, i + 1);
       continue;
     }
+    if (databaseType === "mysql" && ch === "(") {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (databaseType === "mysql" && ch === ")") {
+      depth = Math.max(0, depth - 1);
+      i += 1;
+      continue;
+    }
+    if (databaseType === "mysql" && depth === 0 && matchesWord(sql, i, "into")) {
+      const targetEnd = collectMysqlSelectIntoTargets(sql, i + "into".length, declared);
+      if (targetEnd !== null) {
+        i = targetEnd;
+        continue;
+      }
+    }
     if (ch === "@") {
       const name = readParameterName(sql, i + 1);
       if (name && next !== "@" && sql[i - 1] !== "@" && isSetAssignmentTarget(sql, i + 1 + name.length)) {
@@ -1411,6 +1429,21 @@ function collectSelectAssignmentVariables(sql: string, start: number, declared: 
     i += 1;
   }
   return i;
+}
+
+function collectMysqlSelectIntoTargets(sql: string, start: number, declared: Set<string>): number | null {
+  let i = skipSqlWhitespaceAndComments(sql, start);
+  let found = false;
+  while (i < sql.length && sql[i] === "@" && sql[i + 1] !== "@" && sql[i - 1] !== "@") {
+    const name = readParameterName(sql, i + 1);
+    if (!name) break;
+    declared.add(name.toLowerCase());
+    found = true;
+    i = skipSqlWhitespaceAndComments(sql, i + 1 + name.length);
+    if (sql[i] !== ",") break;
+    i = skipSqlWhitespaceAndComments(sql, i + 1);
+  }
+  return found ? i : null;
 }
 
 function collectRoutineDefinitionVariables(sql: string, start: number, declared: Set<string>, databaseType?: DatabaseType): number {

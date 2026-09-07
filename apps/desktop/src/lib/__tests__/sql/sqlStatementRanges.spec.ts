@@ -109,6 +109,34 @@ BEGIN
   NULL;
 END;`;
 
+// Mirrors the SP_ETL_LOG procedure from the 2026-09-01 ArgoDB session: PL/SQL-style
+// body with semicolons inside INSERT statements plus a block comment header. The
+// frontend splitter must keep the whole definition as ONE statement — otherwise
+// "execute current statement" sends only the first fragment
+// (`CREATE ... IS BEGIN INSERT INTO ...`) and the server returns 42000 + 1101.
+const argoProcedureFixture = `CREATE OR REPLACE PROCEDURE SP_ETL_LOG
+(
+  II_DATDATE       IN INT, --数据日期
+  IV_SCHEMA_NAME   IN STRING --模式名
+)
+/****************************************
+@AUTHOR:xiangxu
+#0.20150906-xiangxu-处理执行信息插入日志表
+*****************************************/
+IS
+BEGIN
+  INSERT INTO dws.ETL_LOG
+  (
+    DATA_DATE,
+    SCHEMA_NAME
+  )
+  VALUES
+  (
+    II_DATDATE,
+    IV_SCHEMA_NAME
+  );
+END;`;
+
 const gaussDbDollarQuotedFunctionScript = `DROP FUNCTION IF EXISTS dbx_issue_4572_tmp_md5_uuid;
 
 CREATE OR REPLACE FUNCTION dbx_issue_4572_tmp_md5_uuid (v_str IN TEXT) RETURNS varchar(36) LANGUAGE PLPGSQL IMMUTABLE AS $function$
@@ -325,6 +353,38 @@ describe("splitSqlStatementRanges", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 1", "SELECT 2", "SELECT 3"]);
   });
 
+  // Issue #7832 shape: MySQL GROUP BY over a LEFT JOIN with an aggregated
+  // derived table, COUNT(DISTINCT IF(...)) in the projection, and inline
+  // `-- 中文` line comments. The splitter must keep it a single statement and
+  // cursor-statement extraction must always include the trailing GROUP BY, so
+  // the executed SQL keeps the query's row cardinality.
+  it("keeps a commented MySQL GROUP BY query as one statement including the GROUP BY (issue #7832)", () => {
+    const sql = [
+      "SELECT",
+      "  base.brand_name",
+      " ,base.stall_id",
+      " ,base.floor",
+      " ,COUNT(1) total_invite -- 邀约数量",
+      " ,SUM(IFNULL(base.ver_status, 0)) sign_num -- 签到数量",
+      " ,SUM(IFNULL(dr.draw_count, 0)) draw_num -- 抽奖次数",
+      " ,SUM(IFNULL(dr.draw_user_num, 0)) draw_user_num -- 抽奖人数",
+      " ,COUNT(distinct IF(base.ver_status = 1, base.mobile, null)) sign_and_draw_user_num",
+      "FROM v_form_data_1786326962 base",
+      "LEFT JOIN (",
+      "  SELECT id, SUM(IFNULL(hx_status, 0)) draw_count, COUNT(distinct IF(hx_status = 1, mobile, null)) draw_user_num",
+      "  FROM v_form_data_1786326962_coupon",
+      "  GROUP BY id",
+      ") dr ON base.id = dr.id",
+      "GROUP BY base.brand_name, base.stall_id, base.floor",
+    ].join("\n");
+    const ranges = splitSqlStatementRanges(sql, "mysql");
+    expect(rangeSqlTexts(ranges)).toEqual([sql.trim()]);
+    for (const position of [0, indexOf(sql, "total_invite"), indexOf(sql, "sign_and_draw_user_num"), sql.indexOf("GROUP BY") + 5, sql.length - 1]) {
+      const range = statementRangeAtCursor(sql, position, "mysql");
+      expect(range?.sql).toContain("GROUP BY base.brand_name, base.stall_id, base.floor");
+    }
+  });
+
   it("keeps a trailing statement without a semicolon", () => {
     const sql = "SELECT 1;\nSELECT 2";
     const ranges = splitSqlStatementRanges(sql);
@@ -339,6 +399,20 @@ describe("splitSqlStatementRanges", () => {
   it("handles doubled single quotes as escaped quotes", () => {
     const sql = "SELECT 'it''s; ok';\nSELECT 2";
     expect(rangeSqlTexts(splitSqlStatementRanges(sql))).toEqual(["SELECT 'it''s; ok'", "SELECT 2"]);
+  });
+
+  it("treats backslash as a literal inside single quotes for standard SQL (issue #8189)", () => {
+    // ESCAPE '\' is a complete one-char string in standard SQL; the closing quote must not be
+    // swallowed, so the following statement keeps its own range (and thus its run button).
+    const sql = "SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\';\nSELECT * FROM USER;";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "postgres"))).toEqual(["SELECT * FROM MAXRELATIONSHIP m WHERE m.PARENT LIKE 'A\\_%' ESCAPE '\\'", "SELECT * FROM USER"]);
+    // No databaseType (generic) must behave the same as a standard-SQL dialect.
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql)).length).toBe(2);
+  });
+
+  it("keeps backslash-escaped quotes as one string for MySQL (no regression)", () => {
+    const sql = "SELECT 'a\\'b; still string';\nSELECT 2";
+    expect(rangeSqlTexts(splitSqlStatementRanges(sql, "mysql"))).toEqual(["SELECT 'a\\'b; still string'", "SELECT 2"]);
   });
 
   it("ignores semicolons inside double-quoted identifiers", () => {
@@ -442,6 +516,17 @@ describe("splitSqlStatementRanges", () => {
 
   it("keeps issue #2405 Oracle PL/SQL block together without a slash delimiter", () => {
     expect(rangeSqlTexts(splitSqlStatementRanges(oracleIssue2405PlSql, "oracle"))).toEqual([oracleIssue2405PlSql]);
+  });
+
+  it("keeps ArgoDB PL/SQL procedure bodies together (frontend splitter, mirrors backend argo_split tests)", () => {
+    expect(rangeSqlTexts(splitSqlStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+    expect(hasMultipleExecutionTargets(argoProcedureFixture, "argo")).toBe(false);
+    expect(rangeSqlTexts(executableStatementRanges(argoProcedureFixture, "argo"))).toEqual([argoProcedureFixture]);
+  });
+
+  it("statement at cursor inside an ArgoDB procedure body returns the whole definition", () => {
+    const range = statementRangeAtCursor(argoProcedureFixture, indexOf(argoProcedureFixture, "ETL_LOG", 2), "argo");
+    expect(range?.sql.trim()).toBe(argoProcedureFixture.trim());
   });
 
   it("keeps consecutive nested Oracle blocks inside their procedure", () => {
@@ -842,6 +927,67 @@ GET /_cat/indices`;
     const sql = "UPDATE users\nSET name = 'a'\nWHERE id = 1\nSELECT * FROM users;";
     const range = statementRangeAtCursor(sql, indexOf(sql, "name"));
     expect(range?.sql.trim()).toBe("UPDATE users\nSET name = 'a'\nWHERE id = 1");
+  });
+
+  it("keeps StarRocks asynchronous materialized-view clauses in the CREATE statement", () => {
+    const createSql = `CREATE MATERIALIZED VIEW mv_monthly_events
+PARTITION BY date_trunc('month', event_time)
+DISTRIBUTED BY RANDOM BUCKETS 1
+REFRESH ASYNC
+AS
+SELECT
+  id,
+  event_time,
+  amount
+FROM base_events`;
+    const sql = `${createSql}\nREFRESH MATERIALIZED VIEW mv_monthly_events;`;
+
+    for (const marker of ["CREATE", "PARTITION", "DISTRIBUTED", "REFRESH ASYNC", "SELECT", "base_events"]) {
+      expect(statementRangeAtCursor(sql, indexOf(sql, marker), "starrocks")?.sql.trim()).toBe(createSql);
+    }
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH MATERIALIZED"), "starrocks")?.sql.trim()).toBe("REFRESH MATERIALIZED VIEW mv_monthly_events");
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([createSql, "REFRESH MATERIALIZED VIEW mv_monthly_events"]);
+  });
+
+  it("keeps StarRocks scheduled materialized-view clauses in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_daily_events
+REFRESH SCHEDULE EVERY (INTERVAL 1 DAY)
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks manual materialized-view refresh in the CREATE statement", () => {
+    const sql = `CREATE MATERIALIZED VIEW mv_manual_events
+REFRESH MANUAL
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(sql, indexOf(sql, "REFRESH"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(statementRangeAtCursor(sql, indexOf(sql, "SELECT"), "starrocks")?.sql.trim()).toBe(sql);
+    expect(rangeSqlTexts(executableStatementRanges(sql, "starrocks"))).toEqual([sql]);
+  });
+
+  it("keeps StarRocks deferred and immediate refresh modifiers with async on the next line", () => {
+    const deferredSql = `CREATE MATERIALIZED VIEW mv_deferred_events
+REFRESH DEFERRED ASYNC
+AS
+SELECT id FROM base_events`;
+    const immediateSql = `CREATE MATERIALIZED VIEW mv_immediate_events
+REFRESH IMMEDIATE
+ASYNC
+AS
+SELECT id FROM base_events`;
+
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(deferredSql, indexOf(deferredSql, "SELECT"), "starrocks")?.sql.trim()).toBe(deferredSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "REFRESH"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(statementRangeAtCursor(immediateSql, indexOf(immediateSql, "ASYNC"), "starrocks")?.sql.trim()).toBe(immediateSql);
+    expect(rangeSqlTexts(executableStatementRanges(deferredSql, "starrocks"))).toEqual([deferredSql]);
+    expect(rangeSqlTexts(executableStatementRanges(immediateSql, "starrocks"))).toEqual([immediateSql]);
   });
 
   it("keeps MySQL ALTER TABLE column comments with the column definition", () => {

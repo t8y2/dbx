@@ -1,0 +1,163 @@
+---
+title: Veritabanı Test Laboratuvarı
+description: DBX geliştirme ve doğrulaması için yinelenebilir, yerel veritabanı örnekleri başlatın.
+---
+
+Veritabanı Test Laboratuvarı; DBX'i gerçek veritabanı sürümlerine karşı test etmek için küçük, sürümü sabitlenmiş Docker Compose ortamları sunar. Her tarif; adlandırılmış bir veri birimi, bir sağlık denetimi, doğrulama sırasında oluşturulan başlangıç verisi ya da duman testi verisi kullanır ve varsayılan olarak `127.0.0.1` üzerinde dinler.
+
+<Callout type="warning">Varsayılan parola `123456`, ancak portlar varsayılan olarak yalnızca yerel makineden erişilebilir. Uzaktan erişime izin vermek için açıkça `DB_BIND_ADDRESS=0.0.0.0` ayarlayın, `DB_PASSWORD` değerini değiştirin ve olağan güvenlik duvarı denetimlerinizi uygulayın. Bu ortamlar geliştirme içindir, üretim dağıtımı için değil.</Callout>
+
+## Kullanılabilir tarifler
+
+| Veritabanı | Sürüm dizini | Resmî özgün imaj | Compose'un kullandığı CNB imajı | Varsayılan sunucu portu | Kapsayıcı adı |
+| --- | --- | --- | --- | ---: | --- |
+| ClickHouse | `clickhouse/24.8` | `clickhouse/clickhouse-server:24.8.14.39` | `docker.cnb.cool/znb/images/clickhouse-server:24.8.14.39` | `10600` | `dbx-clickhouse-24.8` |
+| Consul | `consul/2.0.2` | `hashicorp/consul:2.0.2` | `docker.cnb.cool/znb/images/consul:2.0.2` | `10900` | `dbx-consul-2.0.2` |
+| Elasticsearch | `elasticsearch/6.8` | `docker.elastic.co/elasticsearch/elasticsearch:6.8` | `docker.cnb.cool/znb/images/elasticsearch:6.8` | `11500` | `dbx-elasticsearch-6.8` |
+| etcd | `etcd/3.5` | `quay.io/coreos/etcd:v3.5.21` | `quay.io/coreos/etcd:v3.5.21` | `10710` | `dbx-etcd-3.5` |
+| etcd | `etcd/3.7` | `gcr.io/etcd-development/etcd:v3.7.0` | `docker.cnb.cool/znb/images/etcd:v3.7.0` | `10700` | `dbx-etcd-3.7` |
+| Kafka | `kafka/4.3` | `apache/kafka:4.3.1` | `docker.cnb.cool/znb/images/kafka:4.3.1` | `11300` | `dbx-kafka-4.3` |
+| MariaDB | `mariadb/10.11` | `mariadb:10.11.11` | `docker.cnb.cool/znb/images/mariadb:10.11.11` | `10200` | `dbx-mariadb-10.11` |
+| MongoDB | `mongodb/5.0` | `mongo:5.0.5` | `docker.cnb.cool/znb/images/mongo:5.0.5` | `10400` | `dbx-mongodb-5.0` |
+| MongoDB | `mongodb/8.2` | `mongo:8.2.3-noble` | `docker.cnb.cool/znb/images/mongo:8.2.3-noble` | `10401` | `dbx-mongodb-8.2` |
+| MySQL | `mysql/5.7` | `mysql:5.7.44` | `docker.cnb.cool/znb/images/mysql:5.7.44` | `10100` | `dbx-mysql-5.7` |
+| MySQL | `mysql/8.4` | `mysql:8.4.6` | `docker.cnb.cool/znb/images/mysql:8.4.6` | `10101` | `dbx-mysql-8.4` |
+| Nacos | `nacos/2.5` | `nacos/nacos-server:v2.5.2` | `docker.cnb.cool/znb/images/nacos-server:v2.5.2` | `11000` | `dbx-nacos-2.5` |
+| Nacos | `nacos/3.2` | `nacos/nacos-server:v3.2.3` | `docker.cnb.cool/znb/images/nacos-server:v3.2.3` | `11003` | `dbx-nacos-3.2` |
+| PostgreSQL | `postgresql/14.23` | `postgres:14.23` | `docker.cnb.cool/znb/images/postgres:14.23` | `10300` | `dbx-postgresql-14.23` |
+| PostgreSQL | `postgresql/17.4` | `postgres:17.4` | `docker.cnb.cool/znb/images/postgres:17.4` | `10301` | `dbx-postgresql-17.4` |
+| Pulsar | `pulsar/4.2` | `apachepulsar/pulsar:4.2.3` | `docker.cnb.cool/znb/images/pulsar:4.2.3` | `11400` | `dbx-pulsar-4.2` |
+| Qdrant | `qdrant/1.8` | `qdrant/qdrant:v1.8.3` | `docker.cnb.cool/znb/images/qdrant:v1.8.3` | `11200` | `dbx-qdrant-1.8` |
+| Redis | `redis/3.0.7` | `redis:3.0.7-alpine` | `docker.cnb.cool/znb/images/redis:3.0.7-alpine` | `10500` | `dbx-redis-3.0.7` |
+| Redis | `redis/7.4` | `redis:7.4.9-alpine` | `docker.cnb.cool/znb/images/redis:7.4.9-alpine` | `10501` | `dbx-redis-7.4` |
+| r-nacos | `rnacos/0.8` | `qingpan/rnacos:v0.8.5` | `docker.cnb.cool/znb/images/rnacos:v0.8.5` | `11100` | `dbx-rnacos-0.8` |
+| ZooKeeper | `zookeeper/3.9` | `zookeeper:3.9.5` | `docker.cnb.cool/znb/images/zookeeper:3.9.5` | `10800` | `dbx-zookeeper-3.9` |
+
+Her ürün kendine ayrılmış bir `101xx`-`115xx` sunucu portu aralığını kullanır ve doğrulayıcı, bildirilen her varsayılan eşlemenin doğru aralıkta ve genel olarak benzersiz olduğunu denetler. Varsayılan parola `123456`, varsayılan veritabanı ise `dbx` şeklindedir. Redis'te adlandırılmış veritabanı olmadığından DB 0 ile `dbx:` duman testi anahtar öneki kullanılır. Compose, CNB imaj sütununu kullanır; resmî özgün imaj sütunu, kaynak izlenebilirliği ve doğrudan indirme için özgün imaj başvurusunu korur. Redis 3.0.7 yalnızca amd64 içindir; arm64 makinelerde komut bir mimari uyarısı yazar ve Docker öykünme kullanır. Diğer tüm tarifler hem amd64 hem arm64 destekler.
+
+Nacos; `nacos` yöneticisini, `123456` parolasını ve varsayılan `public` ad alanını kullanır. V2; HTTP, gRPC ve Raft için `11000`, `11001` ve `11002` sunucu portlarını; V3 ise HTTP `11003`, web konsolu `11004`, gRPC `11005` ve Raft `11006` portlarını kullanır. İki sürüm varsayılan olarak birlikte çalışabilir.
+
+```bash
+DB_PORT=11030 NACOS_CONSOLE_PORT=11031 NACOS_GRPC_PORT=11032 NACOS_RAFT_PORT=11033 make db DB=nacos@3.2
+```
+
+r-nacos; `admin` yöneticisini ve `123456` parolasını kullanır. DBX tarifi HTTP, gRPC ve web konsolu sunucu portlarını varsayılan olarak `11100`, `11101` ve `11102` yapar; özgün tek düğümlü Compose dosyası ise `8848:8848`, `9848:9848` ve `10848:10848` portlarını yayımlar.
+
+```bash
+DB_PORT=11130 RNACOS_GRPC_PORT=11131 RNACOS_CONSOLE_PORT=11132 make db DB=rnacos@0.8
+```
+
+etcd; `root` kullanıcısını `123456` parolasıyla oluşturur, root rolünü verir ve ardından kimlik doğrulamayı etkinleştirir. Varsayılan istemci ve eş portları `10700` ile `10701`'dir. Özgün Docker komutunun portlarını kullanmak için şunu çalıştırın:
+
+```bash
+DB_PORT=2379 ETCD_PEER_PORT=2380 make db DB=etcd@3.7
+```
+
+Qdrant, yönetici API anahtarı olarak `123456` kullanır. DBX'te kullanıcı adını boş bırakın ve anahtarı parola olarak girin; böylece sürücü onu `api-key` HTTP başlığında gönderir. HTTP ve gRPC portları varsayılan olarak `11200` ve `11201`'dir. Özgün Docker komutundaki portları kullanmak için şunu çalıştırın:
+
+```bash
+DB_PORT=6333 QDRANT_GRPC_PORT=6334 make db DB=qdrant@1.8
+```
+
+ZooKeeper, `/dbx` düğümünü korumak için `root` / `123456` Digest kimlik bilgilerini kullanır. Varsayılan sunucu portu `10800`'dür; özgün Docker komutuyla eşleşmek için `DB_PORT=2181` kullanın. ZooKeeper'ın Digest ACL modeli, genel bir oturum açma anahtarı sunmak yerine tek tek düğümleri korur.
+
+Kafka ve Pulsar bilinçli olarak kimlik doğrulaması olmayan, tek düğümlü geliştirme tarifleridir. Kafka PLAINTEXT, Pulsar ise tek düğüm modunu kullanır; bu yüzden hiçbirini uzaktan erişime açmayın. Kafka'nın olağan portu için `DB_PORT=9092 make db DB=kafka@4.3`, Pulsar'ın olağan portları için `DB_PORT=6650 PULSAR_WEB_PORT=8080 make db DB=pulsar@4.2` kullanın.
+
+Redis 3.0.7 ve Redis 7.4.9 bilinçli olarak uyumluluğun iki ucunu kapsar. Redis 3, ACL'lerden, RESP3'ten, Stream'lerden ve pek çok modern komuttan öncedir; Redis 7 ise güncel protokolü ve komut kümesini kapsar. 6.2 ile 7.4'ü birlikte tutmak bu laboratuvara daha az uyumluluk kapsamı sağlardı.
+
+Consul; `agent -dev -client=0.0.0.0 -ui` ile ACL'siz, tek düğümlü bir geliştirme agent'ı olarak çalışır. HTTP API'si ile arayüzü, gRPC ve DNS sunucu portları varsayılan olarak `10900`, `10901` ve `10902`'dir; DNS hem TCP hem UDP üzerinden yayımlanır. Olağan yerel portlar `8500`, `8502` ve `8600` ile eşleşmek için şu komutu kullanın:
+
+```bash
+DB_PORT=8500 CONSUL_GRPC_PORT=8502 CONSUL_DNS_PORT=8600 make db DB=consul@2.0.2
+```
+
+Elasticsearch 6.8; makine öğrenmesi özellikleri kapalı, kimlik doğrulaması olmayan tek düğümlü bir geliştirme kümesi olarak çalışır. HTTP API'si ve taşıma sunucu portları varsayılan olarak `11500` ve `11501`'dir; özgün portlar `9200` ve `9300` ile eşleşmek için şu komutu kullanın:
+
+```bash
+DB_PORT=9200 ELASTICSEARCH_TRANSPORT_PORT=9300 make db DB=elasticsearch@6.8
+```
+
+Depodaki her tarifin benzersiz bir varsayılan sunucu portu ayrımı vardır, bu yüzden sürümler ve ürünler aynı anda çalışabilir. `DB_PORT` değerini yalnızca yerel bir politika farklı bir sunucu portu gerektirdiğinde kullanın:
+
+```bash
+DB_PORT=10150 make db DB=mysql@5.7
+make db DB=mysql@8.4
+```
+
+## Bir ortamı başlatma ve doğrulama
+
+Komutları depo kökünden çalıştırın. Kullanılabilir tarifleri listeleyin, ardından bir veritabanı ve sürüm seçin:
+
+```bash
+make db
+make db-list
+make db DB=postgresql@17.4
+make db-verify DB=postgresql@17.4
+make db DB=rnacos@0.8
+make db DB=consul@2.0.2
+make db DB=elasticsearch@6.8
+```
+
+Parametresiz `make db`, şu anda desteklenen tüm kopyala-yapıştır başlatma komutlarını ve isteğe bağlı parametreleri yazar. `DB=ürün@sürüm` ile Compose sağlık denetimini bekler ve DBX bağlantı alanlarını yazar. DBX'in desteklediği veritabanı türleri için ayrıca önceden doldurulmuş bir `dbx://connection/new` derin bağlantısı da yazar. Buna etcd, Consul, Nacos 2, Nacos 3 ve r-nacos dâhildir; Nacos tarifleri doğru bağlantı profilini otomatik seçer ve Nacos 3 ayrı konsol portu yerine API portunu kullanır. DBX Masaüstü'nde yeni bağlantı iletişim kutusunu açmak için bağlantıyı bir tarayıcıya kopyalayın ya da `open '<bağlantı>'` çalıştırın. İşletim sisteminin `dbx://` protokolünü kaydetmesi için DBX Masaüstü'nü kullanmadan önce bir kez kurup açın. Bağlantı bir veritabanı parolası ya da Consul ACL belirteci içerebilir, bu yüzden onu ortak terminal geçmişinde, günlüklerde ya da biletlerde saklamayın. Kafka ve Pulsar gibi uyumlu bir DBX bağlantı türü olmayan tarifler, derin bağlantı bulunmadığını açıkça bildirir. `db-verify` ayrıca tarifin duman testi komutunu veritabanı kapsayıcısı içinde çalıştırır ve beklenen çıktıyı denetler. Veritabanına özgü bir düzeltmeyi bildirmeden önce tercih edilen komut budur.
+
+## Komutlar ve değişkenler
+
+| Make hedefi | Amacı |
+| --- | --- |
+| `make db-list` | Veritabanı sürümlerini, kapsayıcıdan sunucuya port eşlemelerini, imajları ve desteklenen platformları listeler |
+| `make db DB=ürün@sürüm` | Ortamı oluşturur, hazır olmasını bekler ve bağlantı alanlarını yazar |
+| `make db-verify DB=ürün@sürüm` | Başlatır ve duman testlerini çalıştırır |
+| `make db-down DB=ürün@sürüm` | Veri birimini koruyarak ortamı durdurur |
+| `make db-reset DB=ürün@sürüm CONFIRM=1` | Ortamı ve veri birimini siler |
+| `make db-check` | Her tarifi ve Compose dosyasını doğrular |
+
+`DB_BIND_ADDRESS` sunucu tarafındaki bağlanma adresini, `DB_PORT` sunucu tarafındaki portu, `DB_PASSWORD` ise varsayılan parolayı değiştirir. Örneğin:
+
+```bash
+DB_PORT=13306 DB_PASSWORD=local-secret make db-verify DB=mysql@8.4
+```
+
+Uzaktan erişim açıkça etkinleştirilmelidir:
+
+```bash
+DB_BIND_ADDRESS=0.0.0.0 DB_PASSWORD=local-secret make db DB=mysql@8.4
+```
+
+`db-reset` bilinçli olarak korumalıdır: `CONFIRM=1` ayarlanmadıkça adlandırılmış bir birimi kaldırmaz. Redis'te imaj başlangıç dizini geleneği yoktur; `init/README.md` dosyası, `verify` tarafından oluşturulan ve okunan duman testi anahtarını belgeler. Tanılama için gerektiğinde daha alt düzeydeki `info`, `status`, `logs` ve `shell` komutları `pnpm db:env -- <komut> <ürün> <sürüm>` biçiminde kullanılabilir.
+
+## Sekme tamamlama
+
+Depo; Make hedefleri ve `DB=ürün@sürüm` değerleri için dinamik tamamlama içerir. Geçerli tarif dizinlerini okuduğu için yeni eklenen sürümler, tamamlama betiklerini düzenlemeye gerek kalmadan görünür.
+
+```bash
+# Bash
+source deploy/database/completion/dbx-make.bash
+
+# Zsh
+autoload -Uz compinit && compinit
+source deploy/database/completion/_dbx-make.zsh
+
+# PowerShell
+. .\deploy\database\completion\Dbx.Make.ps1
+```
+
+Bu komutları yazdırmak için `make db-completion` çalıştırın. Uygun dosyayı kaynak olarak ekledikten sonra bir tarif seçmek için `make db DB=` ifadesinin ardından Tab tuşuna basın. Make hedeflerinin kendisi POSIX kabuk koşullarından kaçınır, bu yüzden PowerShell, Git Bash ya da WSL içinde GNU Make ile çalışırlar; Docker Desktop ile Node.js/pnpm kurulu olmalıdır.
+
+## Tarif ekleme
+
+`deploy/database/<ürün>/<sürüm>/` altına şunları içeren bir dizin ekleyin:
+
+```text
+recipe.json
+compose.yaml
+init/
+```
+
+`recipe.json`, DBX bağlantı alanlarını ve duman testi komut dizisini sağlar. Duman testleri için kabuk dizesi kullanmayın: komutlar argüman dizisi olarak çalıştırılır. Compose dosyaları bir imajı sabitlemeli, adlandırılmış bir birim ile sağlık denetimi kullanmalı, port bağlamalarını varsayılan olarak `${DB_BIND_ADDRESS:-127.0.0.1}` yapmalı ve `container_name` değerini `dbx-<ürün>-<sürüm>` olarak ayarlamalıdır.
+
+Bitirmek için şunları çalıştırın:
+
+```bash
+pnpm test:db-env
+make db-check
+```

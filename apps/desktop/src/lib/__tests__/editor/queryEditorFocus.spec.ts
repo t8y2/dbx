@@ -45,7 +45,7 @@ describe("QueryEditor auto focus wiring", () => {
   });
 
   it("enables auto focus for query tabs", () => {
-    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?\sauto-focus\s[\s\S]*?:model-value="activeTab\.sql"/);
+    expect(contentAreaSource).toMatch(/<QueryEditor[\s\S]*?:\s*auto-focus="autoFocus !== false"\s[\s\S]*?:model-value="activeTab\.sql"/);
   });
 });
 

@@ -2495,6 +2495,22 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::StartTableRead, serde_json::to_value(params).map_err(|e| e.to_string())?).await
     }
 
+    pub async fn start_table_read_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: AgentTableReadStartParams,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, String> {
+        self.invalidate_cached_query();
+        self.call_method_with_timeout_and_cancel(
+            AgentMethod::StartTableRead,
+            serde_json::to_value(params).map_err(|e| e.to_string())?,
+            timeout_duration,
+            cancel_token,
+        )
+        .await
+    }
+
     pub async fn fetch_table_read_page<T: DeserializeOwned + Send + 'static>(
         &mut self,
         session_id: &str,
@@ -2504,6 +2520,23 @@ impl AgentDriverClient {
             AgentMethod::FetchTableReadPage,
             serde_json::to_value(AgentTableReadPageParams { session_id: session_id.to_string(), page_size })
                 .map_err(|e| e.to_string())?,
+        )
+        .await
+    }
+
+    pub async fn fetch_table_read_page_with_timeout_and_cancel<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        session_id: &str,
+        page_size: usize,
+        timeout_duration: Option<Duration>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout_and_cancel(
+            AgentMethod::FetchTableReadPage,
+            serde_json::to_value(AgentTableReadPageParams { session_id: session_id.to_string(), page_size })
+                .map_err(|e| e.to_string())?,
+            timeout_duration,
+            cancel_token,
         )
         .await
     }
@@ -2525,9 +2558,15 @@ impl AgentDriverClient {
         database: Option<&str>,
         statements: &[String],
         schema: Option<&str>,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
         self.invalidate_cached_query();
-        self.call_method(AgentMethod::ExecuteTransaction, agent_transaction_params(database, statements, schema)).await
+        self.call_method_with_timeout(
+            AgentMethod::ExecuteTransaction,
+            agent_transaction_params(database, statements, schema),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn execute_transaction_typed<T: DeserializeOwned + Send + 'static>(
@@ -2535,10 +2574,15 @@ impl AgentDriverClient {
         database: Option<&str>,
         statements: &[String],
         schema: Option<&str>,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, AgentCallError> {
         self.invalidate_cached_query();
-        self.call_method_typed(AgentMethod::ExecuteTransaction, agent_transaction_params(database, statements, schema))
-            .await
+        self.call_method_typed_with_timeout(
+            AgentMethod::ExecuteTransaction,
+            agent_transaction_params(database, statements, schema),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn begin_manual_transaction<T: DeserializeOwned + Send + 'static>(
@@ -4128,7 +4172,7 @@ mod tests {
         let script_path = std::env::temp_dir().join(format!("dbx-agent-{prefix}-{}.py", uuid::Uuid::new_v4()));
         std::fs::write(
             &script_path,
-            r#"import json, sys, threading
+            r#"import json, sys, threading, time
 print(json.dumps({'ready': True}), flush=True)
 state_lock = threading.Lock()
 output_lock = threading.Lock()
@@ -4179,7 +4223,7 @@ def respond(req):
 
     session_id = params.get('agentSessionId', '__legacy__')
     with session_lock(session_id):
-        if method == 'execute_query':
+        if method in ('execute_query', 'start_table_read'):
             sql = params.get('sql', '')
             with state_lock:
                 query_count += 1
@@ -4194,7 +4238,16 @@ def respond(req):
             if sql == 'error':
                 write_response(req, error='synthetic query error')
                 return
+            if method == 'start_table_read':
+                write_response(req, {'rows': [], 'session_id': None, 'has_more': False})
+                return
             write_response(req, {'sql': sql, 'count': current_count})
+            return
+        if method == 'execute_transaction':
+            statements = params.get('statements', [])
+            if statements == ['slow']:
+                time.sleep(1.2)
+            write_response(req, {'ok': True})
             return
         write_response(req, {'ok': True})
 
@@ -4292,6 +4345,34 @@ for line in sys.stdin:
             .unwrap();
         assert!(started.elapsed() < Duration::from_millis(500));
         assert_eq!(runtime_counter(&runtime, "cancel_count").await, 2);
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn table_read_uses_the_supplied_rpc_timeout() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("table-read-timeout-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "table-read-session".to_string());
+        let params = AgentTableReadStartParams {
+            sql: "slow table export".to_string(),
+            database: Some("TEST".to_string()),
+            schema: Some("APP".to_string()),
+            page_size: 100,
+            max_rows: 100,
+            fetch_size: Some(100),
+            timeout_secs: Some(1),
+        };
+
+        let error = client
+            .start_table_read_with_timeout_and_cancel::<serde_json::Value>(
+                params,
+                Some(Duration::from_millis(75)),
+                Some(CancellationToken::new()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("Agent RPC call timed out"));
 
         runtime.kill();
         let _ = std::fs::remove_file(script_path);
@@ -4422,7 +4503,10 @@ for line in sys.stdin:
             )
             .await
             .unwrap();
-        client.execute_transaction::<serde_json::Value>(None, &["UPDATE t SET a = 2".to_string()], None).await.unwrap();
+        client
+            .execute_transaction::<serde_json::Value>(None, &["UPDATE t SET a = 2".to_string()], None, None)
+            .await
+            .unwrap();
         client
             .execute_query_cached_with_timeout::<serde_json::Value>(
                 "transaction-invalidation".to_string(),
@@ -4446,6 +4530,42 @@ for line in sys.stdin:
         assert!(client.cached_query.is_some());
         client.disconnect().await.unwrap();
         assert!(client.cached_query.is_none());
+
+        runtime.kill();
+        let _ = std::fs::remove_file(script_path);
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_typed_applies_timeout_when_agent_stalls() {
+        let (runtime, script_path) = spawn_stateful_test_runtime("transaction-timeout-test").await;
+        let mut client = AgentDriverClient::shared_session(runtime.clone(), "transaction-timeout-session".to_string());
+
+        // A single slow statement with a short timeout must surface a typed timeout
+        // error instead of waiting for the agent indefinitely.
+        let error = client
+            .execute_transaction_typed::<serde_json::Value>(
+                None,
+                &["slow".to_string()],
+                None,
+                Some(Duration::from_millis(75)),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AgentCallError::Timeout {
+                stage: AgentErrorStage::Execute,
+                operation_outcome: AgentOperationOutcome::Unknown,
+            }
+        ));
+
+        // A fast transaction with a comfortable timeout still succeeds and
+        // invalidates the cached query, proving the timeout path did not break it.
+        let result: serde_json::Value = client
+            .execute_transaction_typed(None, &["UPDATE t SET a = 2".to_string()], None, Some(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
 
         runtime.kill();
         let _ = std::fs::remove_file(script_path);
@@ -5016,7 +5136,11 @@ for line in sys.stdin:
     #[test]
     fn exposes_table_read_protocol_wrappers() {
         let _start_table_read = AgentDriverClient::start_table_read::<serde_json::Value>;
+        let _start_table_read_with_timeout_and_cancel =
+            AgentDriverClient::start_table_read_with_timeout_and_cancel::<serde_json::Value>;
         let _fetch_table_read_page = AgentDriverClient::fetch_table_read_page::<serde_json::Value>;
+        let _fetch_table_read_page_with_timeout_and_cancel =
+            AgentDriverClient::fetch_table_read_page_with_timeout_and_cancel::<serde_json::Value>;
         let _close_table_read_session = AgentDriverClient::close_table_read_session::<serde_json::Value>;
     }
 

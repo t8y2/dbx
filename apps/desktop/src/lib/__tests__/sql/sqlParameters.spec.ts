@@ -269,6 +269,29 @@ describe("extractSqlParameters", () => {
     expect(extractSqlParameters(sql)).toEqual(["tenant_id"]);
   });
 
+  it("ignores MySQL user variables targeted by SELECT INTO", () => {
+    const sql = `
+      select project_id,
+             year(date_sub(review_date, interval 1 month)),
+             month(date_sub(review_date, interval 1 month))
+        into @project_id, @year, @month
+        from cms_dynamic_cost_review
+       where id = '9f03cb27-a553-11f1-8af2-48dc2d090a1c';
+      select @project_id, @year, @month;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual([]);
+  });
+
+  it("keeps ordinary MySQL template parameters around SELECT INTO targets", () => {
+    const sql = `
+      select project_id from cms_dynamic_cost_review where id = @input_id into @project_id;
+      select @project_id where @tenant_id > 0;
+    `;
+
+    expect(extractSqlParameters(sql, { databaseType: "mysql" })).toEqual(["input_id", "tenant_id"]);
+  });
+
   it("ignores SQL Server procedure parameters declared in routine definitions", () => {
     const sql = `
       create procedure dbo.search_orders

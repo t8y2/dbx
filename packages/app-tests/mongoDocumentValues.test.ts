@@ -61,6 +61,13 @@ test("preserves date-shaped Mongo strings instead of guessing Date", () => {
   assert.equal(parseMongoDocumentInputValue('"2025-08-14 02:25:43.718"'), "2025-08-14 02:25:43.718");
 });
 
+test("preserves plain text that only resembles Mongo JSON input", () => {
+  for (const value of ["{plain text", "[plain text", '"plain text']) {
+    assert.doesNotThrow(() => parseMongoDocumentInputValue(value));
+    assert.equal(parseMongoDocumentInputValue(value), value);
+  }
+});
+
 test("preserves existing date-shaped Mongo string fields on grid update", () => {
   const original = {
     _id: "1",

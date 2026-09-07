@@ -972,7 +972,11 @@ fn decode_pg_text_wkb(value: &str) -> Option<super::wkb::DecodedGeometry> {
         .or_else(|| trimmed.strip_prefix("\\x"))
         .or_else(|| trimmed.strip_prefix("\\X"))
         .unwrap_or(trimmed);
-    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !matches!(&hex[..2], "00" | "01") || !hex.is_ascii() {
+    // `is_ascii()` must be checked before slicing `hex[..2]`: multibyte UTF-8
+    // text (e.g. Redshift simple-query values probed with an unknown column
+    // type) would otherwise panic on a non-char byte boundary and abort the
+    // process under `panic = "abort"`.
+    if hex.len() < 10 || !hex.len().is_multiple_of(2) || !hex.is_ascii() || !matches!(&hex[..2], "00" | "01") {
         return None;
     }
     let bytes = hex
@@ -1413,12 +1417,34 @@ fn postgres_select_stream_outcome(stream: tokio_postgres::RowStream) -> Postgres
     PostgresSelectStreamOutcome::Binary { stream, metadata }
 }
 
+async fn prepare_unnamed_select_metadata(
+    client: &deadpool_postgres::Client,
+    sql: &str,
+) -> Result<PreparedSelectMetadata, tokio_postgres::Error> {
+    // query_typed_raw sends Describe and Execute together. If its result has an
+    // unknown user-defined type, tokio-postgres then resolves that type with a
+    // second query on the same connection before returning the RowStream. A
+    // large result can fill the connection buffers and block that type lookup.
+    // Describe once without executing so custom types are cached before the
+    // actual unnamed stream starts. The stream remains unnamed to tolerate
+    // server-side prepared statement loss in snapshot/proxy environments.
+    let stmt = client.prepare(sql).await?;
+    Ok(prepared_select_metadata(stmt.columns()))
+}
+
 async fn start_postgres_select_stream(
     client: &deadpool_postgres::Client,
     sql: &str,
     force_unnamed: bool,
 ) -> Result<PostgresSelectStreamOutcome, tokio_postgres::Error> {
     if force_unnamed || postgres_client_uses_unnamed_statements(client) {
+        let metadata = prepare_unnamed_select_metadata(client, sql).await?;
+        if let Some(unsupported_type) = metadata.unsupported_type {
+            return Ok(PostgresSelectStreamOutcome::TextFallback {
+                column_types: metadata.column_types,
+                unsupported_type,
+            });
+        }
         return postgres_query_unnamed(client, sql).await.map(postgres_select_stream_outcome);
     }
 
@@ -2021,20 +2047,45 @@ async fn stream_query_rows_text_on_client(
 }
 
 pub async fn connect(url: &str, fallback_timeout: Duration) -> Result<Pool, String> {
+    connect_with_max_connections(url, fallback_timeout, 10).await
+}
+
+/// Creates a PostgreSQL pool with an explicit checkout bound.
+///
+/// Session-scoped DBX pools use a single connection so temporary tables and
+/// other connection-local state cannot migrate between physical clients.
+pub async fn connect_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    max_connections: usize,
+) -> Result<Pool, String> {
     #[cfg(all(windows, target_vendor = "win7"))]
     {
-        connect_with_optional_local_timezone(url, fallback_timeout, None).await
+        connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, None, max_connections).await
     }
 
     #[cfg(not(all(windows, target_vendor = "win7")))]
     {
         let timezone = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
-        connect_with_local_timezone(url, fallback_timeout, &timezone).await
+        connect_with_local_timezone_with_max_connections(url, fallback_timeout, &timezone, max_connections).await
     }
 }
 
+/// Test-only thin wrappers (the library now connects through
+/// `connect_with_max_connections`, which carries the pool bound).
+#[cfg(test)]
 async fn connect_with_local_timezone(url: &str, fallback_timeout: Duration, timezone: &str) -> Result<Pool, String> {
-    connect_with_optional_local_timezone(url, fallback_timeout, Some(timezone)).await
+    connect_with_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: &str,
+    max_connections: usize,
+) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, Some(timezone), max_connections)
+        .await
 }
 
 /// Identity of one physical backend connection for notice attribution:
@@ -2225,23 +2276,33 @@ async fn drain_postgres_notices(client: &deadpool_postgres::Client) -> Vec<Query
     }
 }
 
+#[cfg(test)]
 async fn connect_with_optional_local_timezone(
     url: &str,
     fallback_timeout: Duration,
     timezone: Option<&str>,
 ) -> Result<Pool, String> {
+    connect_with_optional_local_timezone_with_max_connections(url, fallback_timeout, timezone, 10).await
+}
+
+async fn connect_with_optional_local_timezone_with_max_connections(
+    url: &str,
+    fallback_timeout: Duration,
+    timezone: Option<&str>,
+    max_connections: usize,
+) -> Result<Pool, String> {
     let url_with_keepalive = inject_postgres_keepalive_params(url);
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let timeout = super::parse_connect_timeout_with_fallback(url, fallback_timeout);
 
-    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout).await;
+    let first_attempt = connect_postgres_pool_attempt(&url_with_keepalive, timeout, max_connections).await;
     let (pool, client) = match first_attempt {
         Err(error) if postgres_error_should_retry_without_tls(&error) => {
             let Some(fallback_url) = postgres_ssl_fallback_url(&url_with_keepalive) else {
                 return Err(error);
             };
             log::info!("PostgreSQL TLS handshake failed in sslmode=prefer; retrying without TLS");
-            connect_postgres_pool_attempt(&fallback_url, timeout).await?
+            connect_postgres_pool_attempt(&fallback_url, timeout, max_connections).await?
         }
         result => result?,
     };
@@ -2263,6 +2324,7 @@ async fn connect_with_optional_local_timezone(
 async fn connect_postgres_pool_attempt(
     url: &str,
     timeout: Duration,
+    max_connections: usize,
 ) -> Result<(Pool, deadpool_postgres::Client), String> {
     let postgres_url = postgres_connection_url(url)?;
     super::with_connection_timeout("PostgreSQL", timeout, async {
@@ -2298,7 +2360,7 @@ async fn connect_postgres_pool_attempt(
             )
         };
         let pool = Pool::builder(mgr)
-            .max_size(10)
+            .max_size(max_connections.max(1))
             .runtime(Runtime::Tokio1)
             .wait_timeout(Some(timeout))
             .create_timeout(Some(timeout))
@@ -3766,23 +3828,31 @@ async fn list_indexes_for_relations_with_sql(
     for row in &rows {
         let Ok(relid) = row.try_get::<_, i64>(0) else { continue };
         let all_cols: Vec<String> = row.try_get::<_, Vec<String>>(2).unwrap_or_default();
-        let nkeyatts = row.try_get::<_, Option<i16>>(7).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
+        let all_opclasses: Vec<Option<String>> = row.try_get::<_, Vec<Option<String>>>(3).unwrap_or_default();
+        let nkeyatts = row.try_get::<_, Option<i16>>(8).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
         let split_at = nkeyatts.min(all_cols.len());
         let key_cols = all_cols[..split_at].to_vec();
+        let key_opclasses = if all_opclasses.len() == all_cols.len() {
+            all_opclasses[..split_at].to_vec()
+        } else {
+            vec![None; split_at]
+        };
         let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
-        let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(10).unwrap_or_default();
+        let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(11).unwrap_or_default();
         let key_is_expression =
             if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
         result.entry(relid).or_default().push(IndexInfo {
             name: pg_row_try_string(row, 1),
             columns: key_cols,
-            is_unique: pg_row_try_bool(row, 3).unwrap_or(false),
-            is_primary: pg_row_try_bool(row, 4).unwrap_or(false),
-            filter: row.try_get::<_, Option<String>>(5).ok().flatten(),
-            index_type: row.try_get::<_, Option<String>>(6).ok().flatten(),
+            is_unique: pg_row_try_bool(row, 4).unwrap_or(false),
+            is_primary: pg_row_try_bool(row, 5).unwrap_or(false),
+            filter: row.try_get::<_, Option<String>>(6).ok().flatten(),
+            index_type: row.try_get::<_, Option<String>>(7).ok().flatten(),
             included_columns: if included.is_empty() { None } else { Some(included) },
-            comment: row.try_get::<_, Option<String>>(9).ok().flatten(),
+            comment: row.try_get::<_, Option<String>>(10).ok().flatten(),
             key_is_expression,
+            column_opclasses: key_opclasses,
+            constraint_backed: false,
         });
     }
     Ok(result)
@@ -3799,7 +3869,8 @@ fn postgres_indexes_for_relations_query_tiers() -> [&'static str; 2] {
 // line up, and result columns are read positionally.
 fn postgres_indexes_for_relations_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
@@ -3812,8 +3883,10 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_am am ON am.oid = i.relam \
-             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
+             JOIN LATERAL unnest(ix.indkey, ix.indclass) WITH ORDINALITY AS k(attnum, class_oid, n) ON true \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
+             LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
+             LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
              WHERE t.oid = ANY($1::bigint[]) \
              GROUP BY t.oid, i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY t.oid, i.relname"
@@ -3824,7 +3897,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
 fn postgres_indexes_for_relations_compat_sql() -> &'static str {
     "SELECT t.oid::bigint AS relid, i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, true)) \
+               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -3832,6 +3905,19 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS columns, \
+             ARRAY( \
+               SELECT CASE WHEN oc.opcdefault THEN NULL \
+                           ELSE oc.opcname \
+                      END \
+               FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
+               LEFT JOIN pg_attribute a \
+                 ON a.attrelid = t.oid \
+                AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
+                AND a.attnum > 0 \
+               LEFT JOIN pg_opclass oc \
+                 ON oc.oid = (string_to_array(ix.indclass::text, ' '))[pos.n]::oid \
+               ORDER BY pos.n \
+             ) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
@@ -3925,8 +4011,12 @@ fn postgres_foreign_keys_for_relations_sql() -> &'static str {
 // the schema/table arrays through their shared subscript so the fallback stays
 // one bounded query and preserves each relation tuple's position.
 // WITH ORDINALITY is equally unavailable before 9.4, so pair conkey/confkey
-// positions with generate_series over the array length plus plain subscripts —
-// the same pre-9.4 technique the index compat SQL relies on.
+// positions with generate_series plus plain subscripts — the same pre-9.4
+// technique the index compat SQL relies on. The series bounds must stay
+// constant: before PostgreSQL 9.3 a FROM item's function arguments cannot
+// reference an earlier FROM item (implicit LATERAL), so bound the series by
+// INDEX_MAX_KEYS (32, stable across PostgreSQL 9–18) and cap the ordinal with
+// a join-condition guard instead.
 fn postgres_foreign_keys_for_relations_compat_sql() -> &'static str {
     "SELECT rel.rel_schema, rel.rel_table, \
      con.conname AS constraint_name, \
@@ -3945,7 +4035,7 @@ fn postgres_foreign_keys_for_relations_compat_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid \
      JOIN pg_catalog.pg_namespace ref_n ON ref_n.oid = ref_c.relnamespace \
-     CROSS JOIN generate_series(1, array_length(con.conkey, 1)) AS fk(ord) \
+     JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1) \
      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = (con.conkey)[fk.ord] AND NOT a.attisdropped \
      JOIN pg_catalog.pg_attribute ref_a ON ref_a.attrelid = ref_c.oid AND ref_a.attnum = (con.confkey)[fk.ord] AND NOT ref_a.attisdropped \
      WHERE con.contype = 'f' AND n.nspname = rel.rel_schema AND c.relname = rel.rel_table \
@@ -7277,7 +7367,8 @@ async fn execute_query_with_max_rows_inner(
 // Sibling of `postgres_indexes_for_relations_sql` (~line 3288), for a single
 // (schema, table) instead of a batch of oids — see the note there.
 const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
-             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) ORDER BY k.n) AS columns, \
+             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, false)) ORDER BY k.n) AS columns, \
+             array_agg(CASE WHEN oc.opcdefault THEN NULL ELSE quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname) END ORDER BY k.n) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
@@ -7291,8 +7382,10 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              JOIN pg_class i ON i.oid = ix.indexrelid \
              JOIN pg_namespace n ON n.oid = t.relnamespace \
              JOIN pg_am am ON am.oid = i.relam \
-             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
+             JOIN LATERAL unnest(ix.indkey, ix.indclass) WITH ORDINALITY AS k(attnum, class_oid, n) ON true \
              LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
+             LEFT JOIN pg_opclass oc ON oc.oid = k.class_oid \
+             LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace \
              WHERE t.oid = (CASE WHEN $1 = '' THEN quote_ident($2) ELSE quote_ident($1) || '.' || quote_ident($2) END)::regclass \
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indisvalid, ix.indisprimary, ix.indpred, ix.indrelid, am.amname, ix.indnkeyatts, ix.indkey \
              ORDER BY i.relname";
@@ -7301,7 +7394,7 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
 // 3312) — see the note on `POSTGRES_INDEXES_SQL` above.
 const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ARRAY( \
-               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, true)) \
+               SELECT COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, pos.n, false)) \
                FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
                LEFT JOIN pg_attribute a \
                  ON a.attrelid = t.oid \
@@ -7309,6 +7402,19 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS columns, \
+             ARRAY( \
+               SELECT CASE WHEN oc.opcdefault THEN NULL \
+                           ELSE oc.opcname \
+                      END \
+               FROM generate_series(1, array_length(string_to_array(ix.indkey::text, ' '), 1)) AS pos(n) \
+               LEFT JOIN pg_attribute a \
+                 ON a.attrelid = t.oid \
+                AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
+                AND a.attnum > 0 \
+               LEFT JOIN pg_opclass oc \
+                 ON oc.oid = (string_to_array(ix.indclass::text, ' '))[pos.n]::oid \
+               ORDER BY pos.n \
+             ) AS column_opclasses, \
              (ix.indisunique AND ix.indisvalid) AS is_unique, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
@@ -7407,6 +7513,16 @@ pub(crate) async fn postgres_relation_relkind(
     row.map(|row| row.try_get::<_, String>(0)).transpose().map_err(pg_error_to_string)
 }
 
+/// Compute per-column operator classes from `pg_opclass` joined via
+/// `pg_index.indclass`. For each key column position, the schema-qualified
+/// opclass (`quote_ident(nspname) || '.' || quote_ident(opcname)`) is returned
+/// unless the class is the type's default (`oc.opcdefault`), so DDL regeneration
+/// resolves the opclass regardless of `search_path`. This applies to every key
+/// position, including expression keys (`a.attname IS NULL`): the per-column
+/// `pg_get_indexdef(indexrelid, colno, pretty)` call returns only the bare
+/// expression text (PostgreSQL sets `attrsOnly = (colno != 0)`, so the
+/// opclass/COLLATE/DESC block is skipped — see `ruleutils.c`), so the opclass
+/// must be read from `indclass` rather than parsed out of that text.
 async fn list_indexes_with_sql(
     client: &deadpool_postgres::Client,
     sql: &str,
@@ -7419,25 +7535,33 @@ async fn list_indexes_with_sql(
         .iter()
         .map(|row| {
             let all_cols: Vec<String> = row.try_get::<_, Vec<String>>(1).unwrap_or_default();
-            let nkeyatts = row.try_get::<_, Option<i16>>(6).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
+            let all_opclasses: Vec<Option<String>> = row.try_get::<_, Vec<Option<String>>>(2).unwrap_or_default();
+            let nkeyatts = row.try_get::<_, Option<i16>>(7).ok().flatten().unwrap_or(all_cols.len() as i16) as usize;
             let split_at = nkeyatts.min(all_cols.len());
             let key_cols = all_cols[..split_at].to_vec();
+            let key_opclasses = if all_opclasses.len() == all_cols.len() {
+                all_opclasses[..split_at].to_vec()
+            } else {
+                vec![None; split_at]
+            };
             let included = if split_at < all_cols.len() { all_cols[split_at..].to_vec() } else { vec![] };
             // `a.attname IS NULL` at a given key position means that key part came back from
             // pg_get_indexdef (a functional/expression key part), not from a real column (#6295).
-            let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(9).unwrap_or_default();
+            let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(10).unwrap_or_default();
             let key_is_expression =
                 if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
             IndexInfo {
                 name: pg_row_try_string(row, 0),
                 columns: key_cols,
-                is_unique: pg_row_try_bool(row, 2).unwrap_or(false),
-                is_primary: pg_row_try_bool(row, 3).unwrap_or(false),
-                filter: row.try_get::<_, Option<String>>(4).ok().flatten(),
-                index_type: row.try_get::<_, Option<String>>(5).ok().flatten(),
+                is_unique: pg_row_try_bool(row, 3).unwrap_or(false),
+                is_primary: pg_row_try_bool(row, 4).unwrap_or(false),
+                filter: row.try_get::<_, Option<String>>(5).ok().flatten(),
+                index_type: row.try_get::<_, Option<String>>(6).ok().flatten(),
                 included_columns: if included.is_empty() { None } else { Some(included) },
-                comment: row.try_get::<_, Option<String>>(8).ok().flatten(),
+                comment: row.try_get::<_, Option<String>>(9).ok().flatten(),
                 key_is_expression,
+                column_opclasses: key_opclasses,
+                constraint_backed: false,
             }
         })
         .collect())
@@ -7495,8 +7619,11 @@ fn postgres_foreign_keys_sql() -> &'static str {
 }
 
 // Pre-9.4 sibling of `postgres_foreign_keys_sql`: WITH ORDINALITY requires
-// PostgreSQL 9.4, so pair conkey/confkey positions with generate_series over
-// the array length plus plain subscripts.
+// PostgreSQL 9.4, so pair conkey/confkey positions with generate_series plus
+// plain subscripts. The series bounds must stay constant: before PostgreSQL
+// 9.3 a FROM item's function arguments cannot reference an earlier FROM item
+// (implicit LATERAL), so bound the series by INDEX_MAX_KEYS (32, stable across
+// PostgreSQL 9–18) and cap the ordinal with a join-condition guard instead.
 fn postgres_foreign_keys_compat_sql() -> &'static str {
     "SELECT con.conname AS constraint_name, \
      a.attname AS column_name, \
@@ -7510,7 +7637,7 @@ fn postgres_foreign_keys_compat_sql() -> &'static str {
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
      JOIN pg_catalog.pg_class ref_c ON ref_c.oid = con.confrelid \
      JOIN pg_catalog.pg_namespace ref_n ON ref_n.oid = ref_c.relnamespace \
-     CROSS JOIN generate_series(1, array_length(con.conkey, 1)) AS fk(ord) \
+     JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1) \
      JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = (con.conkey)[fk.ord] AND NOT a.attisdropped \
      JOIN pg_catalog.pg_attribute ref_a ON ref_a.attrelid = ref_c.oid AND ref_a.attnum = (con.confkey)[fk.ord] AND NOT ref_a.attisdropped \
      WHERE con.contype = 'f' AND n.nspname = $1 AND c.relname = $2 \
@@ -7850,6 +7977,39 @@ fn postgres_sequence_last_values_sql() -> &'static str {
      WHERE c.relkind = 'S' AND n.nspname = $1"
 }
 
+// PostgreSQL 9.x sibling of `postgres_sequences_sql`: the `pg_sequence` catalog
+// (and the `pg_sequence_last_value` function used below) were only added in
+// PostgreSQL 10. Older servers still expose the same properties through the
+// portable `information_schema.sequences` view, which is what openGauss's
+// tier already relies on for the same reason.
+fn postgres_sequences_compat_sql() -> &'static str {
+    "SELECT s.sequence_name, \
+      COALESCE(s.data_type::text, 'bigint'), \
+      COALESCE(s.start_value::text, '1'), \
+      COALESCE(s.minimum_value::text, '1'), \
+      COALESCE(s.maximum_value::text, '9223372036854775807'), \
+      COALESCE(s.increment::text, '1'), \
+      COALESCE(s.cycle_option::text, 'NO') \
+     FROM information_schema.sequences s \
+     WHERE s.sequence_schema = $1 \
+     ORDER BY s.sequence_name"
+}
+
+// Pre-PG10 servers have no `pg_sequence_last_value(oid)` function to read an
+// arbitrary sequence's current value from a single batched query, so the
+// compat tier falls back to querying each sequence relation directly (the
+// pre-10 way of reading `last_value`), one round trip per sequence.
+async fn postgres_sequence_last_value_compat(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    sequence_name: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let qualified = format!("{}.{}", pg_quote_ident(schema), pg_quote_ident(sequence_name));
+    let sql = format!("SELECT last_value::text FROM {qualified}");
+    let rows = postgres_query_cached(client, &sql, &[]).await?;
+    Ok(rows.first().and_then(|row| row.try_get::<_, Option<String>>(0).ok().flatten()))
+}
+
 fn opengauss_sequence_last_values_sql() -> &'static str {
     "SELECT c.relname, (pg_sequence_last_value(c.oid)).last_value::text \
      FROM pg_class c \
@@ -7898,15 +8058,58 @@ async fn list_sequences_with_sql(
 }
 
 pub async fn list_sequences(pool: &Pool, schema: &str, with_last_values: bool) -> Result<Vec<SequenceInfo>, String> {
-    // PostgreSQL 10+ stores sequence properties in pg_sequence.
-    list_sequences_with_sql(
-        pool,
-        schema,
-        with_last_values,
-        postgres_sequences_sql(),
-        postgres_sequence_last_values_sql(),
-    )
-    .await
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+
+    // PostgreSQL 10+ stores sequence properties in pg_sequence; older servers
+    // fall back to the portable information_schema.sequences view.
+    let (rows, is_legacy) = match postgres_query_cached(&client, postgres_sequences_sql(), &[&schema]).await {
+        Ok(rows) => (rows, false),
+        Err(primary_error) => match postgres_query_cached(&client, postgres_sequences_compat_sql(), &[&schema]).await {
+            Ok(rows) => {
+                log::debug!(
+                    "[postgres][sequences:compat-used] pg_sequence catalog unavailable ({}); serving sequence metadata from information_schema.sequences",
+                    pg_error_to_string(primary_error)
+                );
+                (rows, true)
+            }
+            Err(_) => return Err(primary_error.to_string()),
+        },
+    };
+
+    let mut sequences: Vec<SequenceInfo> = rows
+        .iter()
+        .map(|row| SequenceInfo {
+            name: pg_row_try_string(row, 0),
+            data_type: pg_row_try_string(row, 1),
+            start_value: pg_row_try_string(row, 2),
+            min_value: pg_row_try_string(row, 3),
+            max_value: pg_row_try_string(row, 4),
+            increment: pg_row_try_string(row, 5),
+            cycle: pg_row_try_string(row, 6) == "YES",
+            last_value: None,
+        })
+        .collect();
+
+    if with_last_values {
+        if is_legacy {
+            for seq in sequences.iter_mut() {
+                if let Ok(Some(value)) = postgres_sequence_last_value_compat(&client, schema, &seq.name).await {
+                    seq.last_value = Some(value);
+                }
+            }
+        } else if let Ok(rows) = postgres_query_cached(&client, postgres_sequence_last_values_sql(), &[&schema]).await {
+            for row in rows {
+                let name: String = pg_row_try_string(&row, 0);
+                if let Ok(Some(value)) = row.try_get::<_, Option<String>>(1) {
+                    if let Some(seq) = sequences.iter_mut().find(|s| s.name == name) {
+                        seq.last_value = Some(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(sequences)
 }
 
 pub async fn list_opengauss_sequences(
@@ -9354,6 +9557,17 @@ mod tests {
         assert_eq!(pg_text_fallback_value("SRID=4326;point(1 2)", None), (serde_json::json!("point(1 2)"), Some(4326)));
     }
 
+    #[test]
+    fn postgres_text_fallback_does_not_panic_on_multibyte_text() {
+        // Redshift reads decode every simple-query value through the hex-WKB
+        // probe with an unknown column type, so ordinary multibyte text must
+        // pass through instead of slicing at a non-char byte boundary.
+        for value in ["中文字符测试数据", "🚚运输状态标签", "0101中文不是几何数据"] {
+            assert_eq!(pg_text_fallback_value(value, None), (serde_json::json!(value), None));
+            assert_eq!(pg_text_fallback_value(value, Some(PgColType::Geometry)), (serde_json::json!(value), None));
+        }
+    }
+
     struct DockerPostgres {
         name: String,
         port: u16,
@@ -9380,6 +9594,16 @@ mod tests {
     }
 
     async fn start_docker_postgres() -> Option<DockerPostgres> {
+        start_docker_postgres_image("postgres:16-alpine", &[]).await
+    }
+
+    // PostgreSQL 9.3 (pre-pg_sequence/pg_sequence_last_value) only ships an
+    // amd64 image, so Apple Silicon hosts need explicit emulation.
+    async fn start_docker_postgres_9_3() -> Option<DockerPostgres> {
+        start_docker_postgres_image("postgres:9.3", &["--platform", "linux/amd64"]).await
+    }
+
+    async fn start_docker_postgres_image(image: &str, extra_args: &[&str]) -> Option<DockerPostgres> {
         if !docker_ready() {
             eprintln!("skipping docker-backed postgres test because Docker is unavailable");
             return None;
@@ -9389,12 +9613,9 @@ mod tests {
         let container = DockerPostgres { name: format!("dbx-postgres-enum-{}", uuid::Uuid::new_v4()), port };
 
         let status = Command::new("docker")
+            .args(["run", "-d", "--rm", "--name", &container.name])
+            .args(extra_args)
             .args([
-                "run",
-                "-d",
-                "--rm",
-                "--name",
-                &container.name,
                 "-e",
                 "POSTGRES_PASSWORD=postgres",
                 "-e",
@@ -9403,7 +9624,7 @@ mod tests {
                 "POSTGRES_DB=postgres",
                 "-p",
                 &format!("{port}:5432"),
-                "postgres:16-alpine",
+                image,
             ])
             .status()
             .expect("start docker postgres");
@@ -10090,6 +10311,28 @@ mod tests {
         assert!(!opengauss_sql.contains("unnest"));
         assert!(opengauss_sql.contains("con.conkey::text"));
         assert!(opengauss_sql.contains("con.confkey::text"));
+    }
+
+    #[test]
+    fn postgres_foreign_key_compat_sql_keeps_series_bounds_lateral_free() {
+        // Before PostgreSQL 9.3 a FROM item's function arguments cannot
+        // reference an earlier FROM item (implicit LATERAL), so the compat
+        // tiers must keep the generate_series bounds constant at
+        // INDEX_MAX_KEYS and cap the ordinal with a join-condition guard.
+        // The pg_attribute subscripts must still pair conkey/confkey by the
+        // guarded ordinal so composite keys stay aligned.
+        for compat_sql in [postgres_foreign_keys_compat_sql(), postgres_foreign_keys_for_relations_compat_sql()] {
+            assert!(!compat_sql.contains("generate_series(1, array_length"));
+            assert!(compat_sql.contains("JOIN generate_series(1, 32) AS fk(ord) ON fk.ord <= array_length(con.conkey, 1)"));
+            assert!(compat_sql.contains("(con.conkey)[fk.ord]"));
+            assert!(compat_sql.contains("(con.confkey)[fk.ord]"));
+            assert!(!compat_sql.contains("LATERAL"));
+            assert!(!compat_sql.contains("WITH ORDINALITY"));
+        }
+        // The modern tiers keep explicit JOIN LATERAL and stay gated behind
+        // the compat fallback.
+        assert!(postgres_foreign_keys_sql().contains("JOIN LATERAL"));
+        assert!(postgres_foreign_keys_for_relations_sql().contains("JOIN LATERAL"));
     }
 
     #[test]
@@ -11202,6 +11445,33 @@ mod tests {
     }
 
     #[test]
+    fn postgres_sequences_compat_sql_avoids_pg10_only_catalog() {
+        let sql = postgres_sequences_compat_sql();
+        assert!(!sql.contains("pg_sequence"));
+        assert!(sql.contains("information_schema.sequences"));
+        assert!(sql.contains("sequence_schema = $1"));
+    }
+
+    #[tokio::test]
+    async fn list_sequences_falls_back_on_postgres_9_without_pg_sequence_catalog() {
+        let Some(container) = start_docker_postgres_9_3().await else {
+            return;
+        };
+
+        let pool = connect(&container.url(), Duration::from_secs(5)).await.expect("connect postgres 9.3");
+        execute_query(&pool, "CREATE SEQUENCE demo_seq START 5").await.expect("create sequence");
+        execute_query(&pool, "SELECT nextval('demo_seq')").await.expect("advance sequence");
+
+        let sequences = list_sequences(&pool, "public", true).await.expect("list_sequences should not 500 on PG9");
+
+        let demo_seq = sequences.iter().find(|s| s.name == "demo_seq").expect("demo_seq present");
+        assert_eq!(demo_seq.last_value.as_deref(), Some("5"));
+        assert_eq!(demo_seq.start_value, "5");
+        assert_eq!(demo_seq.increment, "1");
+        assert!(!demo_seq.cycle);
+    }
+
+    #[test]
     fn extension_member_query_filters_only_owned_relations_and_routines() {
         let sql = list_extension_member_objects_sql();
 
@@ -12259,6 +12529,26 @@ mod tests {
     }
 
     #[test]
+    fn postgres_index_metadata_schema_qualifies_opclass() {
+        // The LATERAL (modern) index-introspection SQL returns each non-default
+        // opclass schema-qualified (`quote_ident(nspname) || '.' || quote_ident(opcname)`)
+        // and joins `pg_namespace` on `opcnamespace`, so DDL regeneration resolves
+        // opclasses (e.g. `gin_trgm_ops` from `pg_trgm`) regardless of `search_path`.
+        // The compat (pre-LATERAL) fallback keeps bare `oc.opcname` — no regression,
+        // just no schema-qualification for the rare old-PG × non-default-schema case.
+        for sql in [POSTGRES_INDEXES_SQL, postgres_indexes_for_relations_sql()] {
+            assert!(
+                sql.contains("quote_ident(opcns.nspname) || '.' || quote_ident(oc.opcname)"),
+                "expected schema-qualified opclass in {sql}"
+            );
+            assert!(
+                sql.contains("LEFT JOIN pg_namespace opcns ON opcns.oid = oc.opcnamespace"),
+                "expected opcnamespace join in {sql}"
+            );
+        }
+    }
+
+    #[test]
     fn postgres_owner_metadata_casts_relkind_to_text() {
         assert!(POSTGRES_OWNERS_SQL.contains("c.relkind::text AS relkind"));
         assert!(POSTGRES_OWNERS_SQL.contains("c.relkind IN ('r', 'v', 'm', 'S', 'f', 'p')"));
@@ -13243,6 +13533,12 @@ mod tests {
         .expect("stream unnamed query inside backup snapshot");
         assert_eq!(columns, vec!["value"]);
         assert_eq!(rows[0][0], serde_json::json!(45));
+        let prepared_count = client
+            .query_typed_one("SELECT count(*)::int8 FROM pg_prepared_statements", &[])
+            .await
+            .expect("count server-side prepared statements")
+            .get::<_, i64>(0);
+        assert_eq!(prepared_count, 0, "snapshot stream metadata preparation must not retain a named statement");
         client.execute_typed("SELECT 1", &[]).await.expect("snapshot remains usable");
         client.execute_typed("ROLLBACK", &[]).await.expect("rollback backup snapshot");
     }

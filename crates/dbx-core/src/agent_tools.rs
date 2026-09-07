@@ -1872,7 +1872,11 @@ for line in sys.stdin:
         let state = Arc::new(AppState::new(storage));
         let connection = agent_test_connection("dameng-1", "Dameng", DatabaseType::Dameng, "APPDB");
         state.configs.write().await.insert(connection.id.clone(), connection);
-        state.connections.write().await.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("dameng-1:APPDB".to_string(), PoolKind::agent(client));
+            })
+            .await;
 
         let read = ToolCall {
             id: "read".to_string(),
@@ -1936,7 +1940,11 @@ for line in sys.stdin:
         let state = Arc::new(AppState::new(storage));
         let connection = agent_test_connection("mysql-1", "MySQL", DatabaseType::Mysql, "rs_main");
         state.configs.write().await.insert(connection.id.clone(), connection);
-        state.connections.write().await.insert("mysql-1:rs_main".to_string(), PoolKind::agent(client));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert("mysql-1:rs_main".to_string(), PoolKind::agent(client));
+            })
+            .await;
 
         let sql = "SHOW TRIGGERS FROM `rs_main` LIKE 'trg_order_items_after_%';";
         let call = ToolCall {

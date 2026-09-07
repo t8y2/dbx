@@ -91,6 +91,7 @@ import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFi
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { isXuguPublicSynonymTreeNode, isXuguSchedulerJobTreeNode, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
+import { xuguDatafileDetailRows, xuguTablespaceDetailRows } from "@/lib/sidebar/xuguTablespaces";
 // --- Drag and Drop ---
 import { useDragSort } from "@/composables/useDragSort";
 import { sidebarTreeRuntimeKey } from "@/lib/sidebar/sidebarTreeRuntime";
@@ -478,6 +479,22 @@ function cleanTooltipValue(value: string | number | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+function formatXuguStorageDetailValue(key: string, value: string): string {
+  if (key === "currentSize" || key === "maxSize" || key === "stepSize") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) {
+      if (key === "maxSize" && numeric === -1) return t("tree.xuguStorage.unlimited");
+      return `${numeric} MB`;
+    }
+  }
+  if (key === "mediaError") {
+    const normalized = value.toUpperCase();
+    if (["F", "FALSE", "0", "N"].includes(normalized)) return t("tree.xuguStorage.no");
+    if (["T", "TRUE", "1", "Y"].includes(normalized)) return t("tree.xuguStorage.yes");
+  }
+  return value;
+}
+
 function isLocalFileConnection(config: Pick<ConnectionConfig, "db_type" | "port">): boolean {
   return config.db_type === "sqlite" || config.db_type === "duckdb" || config.db_type === "access" || (config.db_type === "h2" && config.port === 0);
 }
@@ -569,6 +586,22 @@ const detailTooltip = computed(() => {
       { label: t("objects.createdAt"), value: cleanTooltipValue(trigger.created_at) },
       { label: t("objects.comment"), value: cleanTooltipValue(trigger.comment), multiline: true },
     ].filter((row) => row.value);
+    return rows.length ? { rows } : null;
+  }
+  if (node.type === "tablespace" && node.xuguTablespace && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
+    const rows: DetailTooltipRow[] = xuguTablespaceDetailRows(node.xuguTablespace).map((row) => ({
+      label: t(`tree.xuguStorage.${row.key}`),
+      value: formatXuguStorageDetailValue(row.key, row.value),
+      multiline: row.multiline,
+    }));
+    return rows.length ? { rows } : null;
+  }
+  if (node.type === "datafile" && node.xuguDatafile && node.connectionId && effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)) === "xugu") {
+    const rows: DetailTooltipRow[] = xuguDatafileDetailRows(node.xuguDatafile).map((row) => ({
+      label: t(`tree.xuguStorage.${row.key}`),
+      value: formatXuguStorageDetailValue(row.key, row.value),
+      multiline: row.multiline,
+    }));
     return rows.length ? { rows } : null;
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
@@ -1473,13 +1506,13 @@ function onKeydown(event: KeyboardEvent) {
             'tree-item-connection-tint': connectionColor,
             'hover:bg-accent': node.type !== 'connection',
             'hover:bg-sidebar-accent': node.type === 'connection',
-            rounded: !selectionVisual.rowSelected,
             'tree-item-active': selectionVisual.rowSelected,
             'tree-item-active--selection-set': selectionVisual.usesSelectionSetHighlight && selectionVisual.rowSelected,
             'tree-item-highlight': highlighted,
           },
         ]"
         :tabindex="selectionVisual.selected || selectionVisual.multiSelected ? 0 : -1"
+        :data-node-id="node.id"
         :style="rowStyle"
         @click="onClick"
         @dblclick="onDoubleClick"
@@ -1713,7 +1746,17 @@ function onKeydown(event: KeyboardEvent) {
 .tree-item-connection-tint::before {
   content: "";
   position: absolute;
-  inset: 0 -9999px;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* Bleed the tint to the sidebar scroller's own width (see container-type on
+     .connection-tree-scroller) rather than an unbounded -9999px, which used
+     to inflate the scroller's scrollWidth once sidebarAllowHorizontalScroll
+     turned on overflow-x (issue #8061). max() keeps the tint on rows wider
+     than the scroller; the plain % line is the fallback for engines that
+     drop cqw units. */
+  width: 100%;
+  width: max(100%, 100cqw);
   z-index: 0;
   background-color: var(--tree-connection-row-bg);
   border-radius: inherit;
@@ -1740,7 +1783,7 @@ function onKeydown(event: KeyboardEvent) {
   position: sticky;
   top: 0;
   z-index: 2;
-  background-color: var(--background);
+  background-color: var(--sidebar);
 }
 
 .tree-item-connection-tint:hover::before {
@@ -1768,7 +1811,13 @@ function onKeydown(event: KeyboardEvent) {
 .tree-table-search-control::before {
   content: "";
   position: absolute;
-  inset: 0 -9999px;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* See .tree-item-connection-tint::before above: bound to the scroller's
+     own width instead of -9999px so this can't inflate scrollWidth. */
+  width: 100%;
+  width: max(100%, 100cqw);
   z-index: 0;
   background-color: var(--tree-table-search-row-bg);
   pointer-events: none;

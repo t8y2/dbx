@@ -390,6 +390,33 @@ describe("DataGridConditionEditor quote completion", () => {
     vi.unstubAllGlobals();
   });
 
+  it("expands when a multiline value is pasted even if each line fits", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const width = 320;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "where id in ()");
+    mockTextareaMetrics(input, { clientWidth: 320, scrollWidth: 320, clientHeight: 24, scrollHeight: 72 });
+    input.focus();
+    await nextTick();
+    expect(document.body.querySelector(".data-grid-topbar-condition-input--expanded")).toBeNull();
+
+    input.value = "where id in (60792411\n580019433\n1035062084)";
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    expect(document.body.querySelector(".data-grid-topbar-condition-input--expanded")).toBeTruthy();
+    vi.unstubAllGlobals();
+  });
+
   it("preserves the caret offset when focus moves into the expanded textarea", async () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
       const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : 140;

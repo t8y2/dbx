@@ -695,6 +695,7 @@ const stripSections = computed(() => {
   const fixed = { key: "fixed", pinned: true, entries: pinnedStripEntries.value };
   const regular = { key: "regular", pinned: false, entries: regularStripEntries.value };
   if (isVerticalLayout.value) return [fixed, regular];
+  if (props.tabs.some((tab) => tab.pinned) && !props.tabs.some((tab) => !tab.pinned) && !showSpecialPageTabs.value) return [fixed];
   if (!hasHorizontalFixedRows.value) return [regular];
   return settingsStore.editorSettings.tabPlacement === "top" ? [regular, fixed] : [fixed, regular];
 });
@@ -1175,7 +1176,15 @@ watch(
 );
 
 watch(
-  () => [props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"), props.specialPageTabs?.settingsOpen, props.specialPageTabs?.driverStoreOpen, settingsStore.editorSettings.tabLayout, compactTabTitle.value],
+  () => [
+    props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"),
+    props.specialPageTabs?.settingsOpen,
+    props.specialPageTabs?.driverStoreOpen,
+    settingsStore.editorSettings.tabLayout,
+    settingsStore.editorSettings.tabGroupMode,
+    compactTabTitle.value,
+    Array.from(collapsedTabGroups.value).sort().join("|"),
+  ],
   () => {
     // Tab content can change without changing the scroll container's size.
     // Re-measure after Vue has committed the new pills to avoid stale overflow controls.

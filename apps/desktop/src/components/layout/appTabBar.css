@@ -178,6 +178,21 @@
   height: 2rem;
 }
 
+/* Wrap mode must keep the old multi-line behavior inside each semantic
+ * section, including when pinned and regular sections are rendered. */
+.app-tab-scroll.wrap-mode .tab-section-frame--horizontal,
+.app-tab-scroll.wrap-mode .tab-section--horizontal {
+  display: flex;
+  width: auto;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  flex: none;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
 .app-tab-pill {
   background-color: var(--app-tab-background);
 }

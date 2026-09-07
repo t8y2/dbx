@@ -9,6 +9,8 @@ import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/c
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { buildDataGridCopyInsertStatement, buildDataGridCopyUpdateStatements, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert } from "@/lib/export/exportFormats";
+import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
+import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -1088,11 +1090,54 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function exportSql(rowIds?: number[]) {
     await runExclusiveExport(async () => {
+      const exportId = uuid();
+      const exportStartedAt = performance.now();
+      const logExportStage = (stage: string, details: Record<string, unknown> = {}, sampleNativeMemory = false) => {
+        if (!isDebugLoggingEnabled()) return;
+        appendDebugLog("info", `[DBX][export:sql:${stage}]`, {
+          exportId,
+          elapsedMs: Math.round(performance.now() - exportStartedAt),
+          ...details,
+          browserMemory: getBrowserMemorySnapshot(),
+        });
+        if (sampleNativeMemory) void appendNativeProcessMemoryLog(`export-sql-${stage}`, { exportId });
+      };
+
+      logExportStage(
+        "start",
+        {
+          context: context.value,
+          databaseType: databaseType.value,
+          exportAllRows: rowIds === undefined,
+          requestedRowCount: rowIds?.length ?? null,
+          hasCompleteLocalResult: hasCompleteLocalResult?.value ?? null,
+        },
+        true,
+      );
       try {
+        logExportStage("result-fetch-start");
         if (await exportFullTableDataViaBackend("sql", rowIds)) return;
 
         const result = await resultToExport(rowIds);
+        logExportStage(
+          "result-ready",
+          {
+            columns: result.columns.length,
+            rows: result.rows.length,
+            values: summarizeExportRows(result.rows),
+          },
+          true,
+        );
+
+        logExportStage("row-remap-start");
         const exportData = sqlInsertExportData(result);
+        logExportStage("row-remap-done", {
+          columns: exportData.columns.length,
+          rows: exportData.rows.length,
+          values: summarizeExportRows(exportData.rows),
+        });
+
+        logExportStage("sql-build-start");
         const content = await formatSqlInsert({
           databaseType: databaseType.value,
           schema: tableMeta.value?.schema,
@@ -1101,9 +1146,22 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           columnTypes: exportData.columnTypes,
           rows: exportData.rows,
         });
-        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql");
+        logExportStage(
+          "sql-build-done",
+          {
+            sqlChars: content.length,
+          },
+          true,
+        );
+        logExportStage("save-start", { contentChars: content.length }, true);
+        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql", { exportId, operation: "sql-insert-all" });
+        logExportStage("done", { contentChars: content.length });
         toast(t("grid.exported"));
       } catch (e: any) {
+        logExportStage("error", {
+          errorName: e?.name || typeof e,
+          errorMessage: e?.message || String(e),
+        });
         toast(t("grid.exportFailed", { message: e?.message || String(e) }), 5000);
       }
     });
@@ -1195,7 +1253,19 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   };
 }
 
-async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string) {
+async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string, diagnostics: { exportId?: string; operation?: string } = {}) {
+  const logSaveStage = (stage: string, details: Record<string, unknown> = {}) => {
+    if (!isDebugLoggingEnabled()) return;
+    appendDebugLog("info", `[DBX][export:save:${stage}]`, {
+      ...diagnostics,
+      filterName,
+      filterExt,
+      contentChars: content.length,
+      ...details,
+      browserMemory: getBrowserMemorySnapshot(),
+    });
+  };
+  logSaveStage("start");
   if (isTauriRuntime()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
@@ -1203,7 +1273,9 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
       defaultPath: defaultFileName,
       filters: [{ name: filterName, extensions: [filterExt] }],
     });
+    logSaveStage("dialog-result", { selected: !!path });
     if (path) await writeTextFile(path, content);
+    if (path) logSaveStage("write-done");
     return;
   }
 
@@ -1214,6 +1286,7 @@ async function saveTextFile(content: string, defaultFileName: string, filterName
   a.download = defaultFileName;
   a.click();
   URL.revokeObjectURL(url);
+  logSaveStage("browser-download-triggered");
 }
 
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {

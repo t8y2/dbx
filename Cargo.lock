@@ -1872,6 +1872,7 @@ dependencies = [
  "rustls 0.23.40",
  "serde",
  "serde_json",
+ "sysinfo",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",

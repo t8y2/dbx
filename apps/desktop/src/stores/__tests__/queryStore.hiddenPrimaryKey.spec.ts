@@ -557,6 +557,61 @@ describe("queryStore hidden primary key editing", () => {
     }
   });
 
+  it("uses a qualified Oracle ROWID from a joined query as the synthetic row key", async () => {
+    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
+    getColumns.mockImplementation(async (_connectionId: string, _database: string, _schema: string, tableName: string) =>
+      tableName === "USERS"
+        ? [
+            { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+            { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
+          ]
+        : [{ name: "LABEL", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }],
+    );
+    lookupLocalCompletionTables.mockReturnValue([
+      { name: "USERS", type: "table", schema: "APP" },
+      { name: "ORDERS", type: "table", schema: "APP" },
+    ]);
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: "APP",
+        tableName: "USERS",
+        selectStar: false,
+        sources: [
+          { key: "t:0", schema: "APP", tableName: "USERS", alias: "t" },
+          { key: "o:1", schema: "APP", tableName: "ORDERS", alias: "o" },
+        ],
+        columns: [
+          { sourceName: "ROWID", sourceQualifier: "t", sourceKey: "t:0", resultName: "ROWID", expression: "t.ROWID" },
+          { sourceName: "NAME", sourceQualifier: "t", sourceKey: "t:0", resultName: "NAME", expression: "t.NAME" },
+          { sourceName: "LABEL", sourceQualifier: "o", sourceKey: "o:1", resultName: "LABEL", expression: "o.LABEL" },
+        ],
+      },
+    });
+    executeMulti.mockResolvedValue([
+      {
+        columns: ["ROWID", "NAME", "LABEL"],
+        rows: [["AAAPr9AAEAAAACXAAA", "Alice", "Order"]],
+        affected_rows: 0,
+        execution_time_ms: 1,
+      },
+    ]);
+
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("oracle-1", "ORCL", "Query");
+    store.setAutoCommit(tabId, true);
+
+    await store.executeTabSql(tabId, "SELECT t.ROWID, t.NAME, o.LABEL FROM APP.USERS t LEFT JOIN APP.ORDERS o ON o.USER_ID = t.ID");
+
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    await vi.waitFor(() => expect(tab.result?.columns).toEqual(["ROWID", "NAME", "LABEL"]));
+    await vi.waitFor(() => expect(tab.querySourceColumns).toEqual(["__DBX_ROWID", "NAME", undefined]), { timeout: 5000 });
+    expect(tab.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]);
+    expect(tab.queryAnalysis).toBeDefined();
+    expect(tab.queryEditabilityReason).toBeUndefined();
+  }, 10_000);
+
   it("uses the configured current schema to keep an unqualified Oracle base-table query editable", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", default_schema: "APP", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([

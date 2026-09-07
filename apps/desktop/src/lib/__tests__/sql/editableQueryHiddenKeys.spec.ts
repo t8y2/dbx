@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildQueryWithHiddenPrimaryKeys, hiddenResultColumnIndexes } from "@/lib/sql/editableQueryHiddenKeys";
-import { analyzeEditableQueryEditability, sourceColumnsForResult } from "@/lib/sql/sqlAnalysis";
+import { analyzeEditableQueryEditability, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sql/sqlAnalysis";
 
 describe("editable query hidden primary keys", () => {
   it("appends quoted MySQL primary keys without changing the visible projection", () => {
@@ -214,6 +214,35 @@ describe("editable query hidden primary keys", () => {
     expect(analyzeEditableQueryEditability("select id, count(*) total from jobs group by id")).toEqual({ editable: false, reason: "aggregation" });
     expect(analyzeEditableQueryEditability("select * from jobs j join users u on u.id = j.user_id")).toEqual({ editable: false, reason: "complex-source" });
     expect(analyzeEditableQueryEditability("select id from jobs union select id from archived_jobs")).toEqual({ editable: false, reason: "set-operation" });
+  });
+
+  it("maps a qualified Oracle ROWID projection to the synthetic row key", () => {
+    const analysis: EditableQueryInfo = {
+      schema: "APP",
+      tableName: "USERS",
+      selectStar: false,
+      columns: [
+        { sourceName: "ROWID", sourceQualifier: "t", sourceKey: "t:0", resultName: "ROWID", expression: "t.ROWID" },
+        { sourceName: "NAME", sourceQualifier: "t", sourceKey: "t:0", resultName: "NAME", expression: "t.NAME" },
+        { sourceName: "LABEL", sourceQualifier: "o", sourceKey: "o:1", resultName: "LABEL", expression: "o.LABEL" },
+      ],
+    };
+
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "t:0", "oracle")).toBe(true);
+    expect(sourceColumnsForResult(analysis, ["ROWID", "NAME", "LABEL"], "t:0", "oracle", ["__DBX_ROWID"])).toEqual(["__DBX_ROWID", "NAME", undefined]);
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID", "NAME", "LABEL"], analysis, "o:1", "oracle")).toBe(false);
+  });
+
+  it("does not assign an unqualified multi-source ROWID to a target table", () => {
+    const analysis: EditableQueryInfo = {
+      schema: "APP",
+      tableName: "USERS",
+      selectStar: false,
+      columns: [{ sourceName: "ROWID", resultName: "ROWID", expression: "ROWID" }],
+    };
+
+    expect(allPrimaryKeysPresent(["__DBX_ROWID"], ["ROWID"], analysis, "t:0", "oracle")).toBe(false);
+    expect(sourceColumnsForResult(analysis, ["ROWID"], "t:0", "oracle", ["__DBX_ROWID"])).toEqual([undefined]);
   });
 
   it("resolves appended aliases to result indexes", () => {

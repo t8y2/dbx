@@ -65,6 +65,22 @@ pub async fn save_mcp_global_policy(
     Ok(Json(()))
 }
 
+pub async fn preview_mcp_result_protection(
+    Json(request): Json<dbx_core::mcp_result_protection::ResultProtectionPreview>,
+) -> Result<Json<Vec<dbx_core::mcp_result_protection::ResultProtectionHit>>, AppError> {
+    dbx_core::mcp_result_protection::preview_result_protection(request).map(Json).map_err(AppError::from)
+}
+
+pub async fn mcp_result_source_metadata(
+    State(state): State<Arc<WebState>>,
+    Json(request): Json<dbx_core::mcp_result_protection::ResultSourceMetadataRequest>,
+) -> Result<Json<dbx_core::mcp_result_protection::ResultSourceMetadata>, AppError> {
+    dbx_core::mcp_result_protection::result_source_metadata(&state.app, &request)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebMcpHttpStatus {

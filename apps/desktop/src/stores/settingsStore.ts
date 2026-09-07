@@ -60,6 +60,7 @@ export interface McpGlobalPolicy {
   configured: boolean;
   /** MCP query timeout override in seconds. null/undefined = inherit the connection; 0 = no limit. */
   queryTimeoutSecs: number | null;
+  resultProtection: import("@/lib/mcp/mcpResultProtection").McpResultProtectionPolicy;
 }
 
 export interface McpGroupPolicy {
@@ -127,6 +128,7 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
+  resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
@@ -195,6 +197,7 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
+    resultProtection: policy?.resultProtection ?? { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
   };
 }
 
@@ -1818,6 +1821,7 @@ export const useSettingsStore = defineStore("settings", () => {
         connectionPolicies: next.connectionPolicies,
         groupPolicies: next.groupPolicies,
         queryTimeoutSecs: next.queryTimeoutSecs,
+        resultProtection: next.resultProtection,
       });
     } catch (error) {
       mcpGlobalPolicy.value = previous;

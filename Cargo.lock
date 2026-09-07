@@ -2096,6 +2096,7 @@ dependencies = [
  "flate2",
  "font-kit",
  "futures",
+ "hmac 0.12.1",
  "httpdate",
  "iana-time-zone",
  "insta",

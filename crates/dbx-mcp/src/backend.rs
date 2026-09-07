@@ -11,6 +11,7 @@ use dbx_core::{
     connection::AppState,
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
+    mcp_result_protection::{ResultSource, ResultSourceMetadata, ResultSourceMetadataRequest},
     models::connection::{ConnectionConfig, DatabaseType},
     storage::{DesktopSettings, McpGlobalPolicy, McpGlobalPolicyState, Storage},
 };
@@ -126,9 +127,14 @@ fn is_false(value: &bool) -> bool {
 
 impl From<dbx_core::query::ExecuteMultiResult> for BatchStatementResult {
     fn from(result: dbx_core::query::ExecuteMultiResult) -> Self {
-        let error_message = result.error.as_ref().and_then(|error| error.detail().map(str::to_owned)).or_else(|| {
-            result.result.rows.first().and_then(|row| row.first()).and_then(Value::as_str).map(str::to_owned)
-        });
+        let error_message = result
+            .execution_error
+            .then(|| {
+                result.error.as_ref().and_then(|error| error.detail().map(str::to_owned)).or_else(|| {
+                    result.result.rows.first().and_then(|row| row.first()).and_then(Value::as_str).map(str::to_owned)
+                })
+            })
+            .flatten();
         Self {
             result: result.result,
             execution_error: result.execution_error,
@@ -154,11 +160,15 @@ fn batch_statement_result_from_json(value: &Value) -> Result<BatchStatementResul
         .map_err(|error| format!("Invalid execute-multi statement envelope: {error} (element: {value})"))?;
     let execution_error = value.get("execution_error").and_then(Value::as_bool).unwrap_or(false);
     let statement_index = value.get("statement_index").and_then(Value::as_u64).map(|index| index as usize);
-    let error_message = value
-        .pointer("/error/detail")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned));
+    let error_message = execution_error
+        .then(|| {
+            value
+                .pointer("/error/detail")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| value.pointer("/rows/0/0").and_then(Value::as_str).map(str::to_owned))
+        })
+        .flatten();
     Ok(BatchStatementResult { result, execution_error, statement_index, error_message, merged: false })
 }
 
@@ -226,6 +236,21 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, database, sql, max_rows, timeout_secs);
         Err("SQL queries are not supported by this backend.".to_string())
     }
+    /// Return unformatted data so MCP protection runs before either response
+    /// channel is serialized, preserving the query's schema/session options.
+    async fn execute_query_with_options(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        if schema.is_some() || options.client_session_id.is_some() {
+            return Err("Raw query options are not supported by this backend.".to_string());
+        }
+        self.execute_query(connection, database, sql, options.max_rows, options.timeout_secs).await
+    }
     /// Execute a multi-statement SQL script, returning one result per statement.
     ///
     /// The script text is split using the database-dialect-aware splitter so
@@ -284,6 +309,15 @@ pub trait DbxBackend: Send + Sync {
     ) -> Result<Vec<ColumnInfo>, String> {
         let _ = (connection, database, schema, table);
         Err("Column metadata is not supported by this backend.".to_string())
+    }
+    async fn result_source_metadata(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        source: &ResultSource,
+    ) -> Result<ResultSourceMetadata, String> {
+        let _ = (connection, database, source);
+        Err(dbx_core::mcp_result_protection::SOURCE_UNRESOLVED.to_string())
     }
     /// List stored routines (procedures/functions) for a schema. `routine_types`
     /// filters by object type ("PROCEDURE"/"FUNCTION"); `None` returns both.
@@ -572,6 +606,7 @@ impl LocalBackend {
 
     pub async fn open(path: &Path) -> Result<Self, String> {
         let storage = Storage::open(path).await?;
+        storage.load_mcp_global_policy().await?;
         let configs = storage.load_connections().await?;
         let desktop_settings = storage.load_desktop_settings().await.unwrap_or_default();
         let data_dir = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -760,6 +795,26 @@ impl DbxBackend for LocalBackend {
         .await
     }
 
+    async fn execute_query_with_options(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        dbx_core::query::execute_sql_statement_with_options(
+            &self.state,
+            &connection.id,
+            database,
+            sql,
+            schema,
+            None,
+            options,
+        )
+        .await
+    }
+
     async fn execute_batch(
         &self,
         connection: &ConnectionConfig,
@@ -839,6 +894,23 @@ impl DbxBackend for LocalBackend {
         table: &str,
     ) -> Result<Vec<ColumnInfo>, String> {
         dbx_core::schema::get_columns_core(&self.state, &connection.id, database, schema, table).await
+    }
+
+    async fn result_source_metadata(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        source: &ResultSource,
+    ) -> Result<ResultSourceMetadata, String> {
+        dbx_core::mcp_result_protection::result_source_metadata(
+            &self.state,
+            &ResultSourceMetadataRequest {
+                connection_id: connection.id.clone(),
+                database: database.to_string(),
+                source: source.clone(),
+            },
+        )
+        .await
     }
 
     async fn list_routines(
@@ -966,6 +1038,32 @@ impl DbxBackend for LocalBackend {
 
 #[async_trait]
 impl DbxBackend for WebBackend {
+    async fn result_source_metadata(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        source: &ResultSource,
+    ) -> Result<ResultSourceMetadata, String> {
+        self.ensure_connected(connection).await?;
+        let request = ResultSourceMetadataRequest {
+            connection_id: connection.id.clone(),
+            database: database.to_string(),
+            source: source.clone(),
+        };
+        self.request(
+            reqwest::Method::POST,
+            "/api/app-settings/mcp-policy/source-metadata",
+            Some(
+                serde_json::to_value(request)
+                    .map_err(|_| dbx_core::mcp_result_protection::SOURCE_UNRESOLVED.to_string())?,
+            ),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|_| dbx_core::mcp_result_protection::SOURCE_UNRESOLVED.to_string())
+    }
+
     async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
         self.request(reqwest::Method::GET, "/api/app-settings/mcp-policy", None)
             .await?
@@ -1163,6 +1261,34 @@ impl DbxBackend for WebBackend {
             reqwest::Method::POST,
             "/api/query/execute",
             Some(json!({ "connectionId": connection.id, "database": database, "sql": sql, "timeoutSecs": agent_tools::agent_query_timeout_secs(timeout_secs, Some(connection)) })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid query response: {error}"))
+    }
+
+    async fn execute_query_with_options(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        schema: Option<&str>,
+        sql: &str,
+        options: dbx_core::query::QueryExecutionOptions,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::POST,
+            "/api/query/execute",
+            Some(json!({
+                "connectionId": connection.id,
+                "database": database,
+                "schema": schema,
+                "sql": sql,
+                "maxRows": options.max_rows,
+                "clientSessionId": options.client_session_id,
+                "timeoutSecs": agent_tools::agent_query_timeout_secs(options.timeout_secs, Some(connection)),
+            })),
         )
         .await?
         .json()
@@ -2257,6 +2383,7 @@ mod tests {
             connection_policies: Vec::new(),
             group_policies: Vec::new(),
             query_timeout_secs: None,
+            result_protection: Default::default(),
         }
     }
 

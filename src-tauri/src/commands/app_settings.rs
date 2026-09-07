@@ -167,6 +167,13 @@ pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: Mcp
 }
 
 #[tauri::command]
+pub fn preview_mcp_result_protection(
+    request: dbx_core::mcp_result_protection::ResultProtectionPreview,
+) -> Result<Vec<dbx_core::mcp_result_protection::ResultProtectionHit>, String> {
+    dbx_core::mcp_result_protection::preview_result_protection(request)
+}
+
+#[tauri::command]
 pub async fn load_editor_settings(state: State<'_, Arc<AppState>>) -> Result<Option<serde_json::Value>, String> {
     state.storage.load_editor_settings().await
 }

@@ -281,13 +281,119 @@ fn add_mq_routes(router: Router<Arc<WebState>>) -> Router<Arc<WebState>> {
     router
 }
 
+fn mcp_diagnostic_filter<S: tracing::Subscriber>() -> impl tracing_subscriber::layer::Filter<S> {
+    tracing_subscriber::filter::dynamic_filter_fn(|metadata, _| {
+        metadata.target() != dbx_core::mcp_result_protection::AUDIT_LOG_TARGET
+            && dbx_core::mcp_result_protection::diagnostic_log_allowed(metadata.target())
+    })
+}
+
+fn mcp_audit_filter<S: tracing::Subscriber>() -> impl tracing_subscriber::layer::Filter<S> {
+    tracing_subscriber::filter::filter_fn(|metadata| {
+        metadata.is_event() && metadata.target() == dbx_core::mcp_result_protection::AUDIT_LOG_TARGET
+    })
+}
+
+#[cfg(test)]
+mod mcp_diagnostics_tests {
+    use std::{
+        io::Write,
+        sync::{Arc, Mutex},
+    };
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mcp_diagnostic_filter_rechecks_warmed_callsites_and_excludes_span_data_from_audits() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "mcp_diagnostics_tests::diagnostic_worker", "--ignored", "--nocapture"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    #[ignore = "isolates the process-lifetime diagnostic guard"]
+    fn diagnostic_worker() {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(bytes.clone());
+        let audit_capture = capture.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new("trace"))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || capture.clone())
+                    .with_filter(super::mcp_diagnostic_filter()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_writer(move || audit_capture.clone())
+                    .with_filter(super::mcp_audit_filter()),
+            );
+        fn diagnostic(value: &str) {
+            tracing::info!(target: "dbx_test_driver", value);
+            log::info!(target: "dbx_test_driver", "{value}");
+        }
+        subscriber.init();
+        let request = serde_json::from_value(serde_json::json!({
+            "policy": { "default": { "enabled": true, "rules": [{ "id": "mask", "columnPattern": "phone", "action": "mask" }] } },
+            "connectionId": "conn", "database": "db", "column": "phone", "dataType": "text", "value": "preview-secret"
+        })).unwrap();
+        dbx_core::mcp_result_protection::preview_result_protection(request).unwrap();
+        assert!(dbx_core::mcp_result_protection::diagnostic_log_allowed("dbx_test_driver"));
+        diagnostic("before-enabled");
+        let span = tracing::info_span!("prior_span", value = "prior-span-secret");
+        span.in_scope(|| {
+            dbx_core::mcp_result_protection::activate_diagnostic_protection();
+            diagnostic("hidden-cell-secret");
+            tracing::info!(target: "dbx_core::mcp_result_protection", rule = "native-audit-rule");
+            dbx_core::mcp_result_protection::audit_hits(
+                "conn",
+                "db",
+                &[dbx_core::mcp_result_protection::ResultProtectionHit {
+                    rule_id: "safe-audit-rule".to_string(),
+                    column: "hidden-column-secret".to_string(),
+                    action: dbx_core::mcp_result_protection::ResultProtectionAction::Mask,
+                }],
+            );
+        });
+        let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("before-enabled"));
+        assert!(output.contains("safe-audit-rule"));
+        assert!(output.contains("native-audit-rule"));
+        for secret in ["preview-secret", "hidden-cell-secret", "prior-span-secret", "hidden-column-secret"] {
+            assert!(!output.contains(secret), "Diagnostic log exposed a synthetic secret: {output}");
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dbx_web=info,tower_http=info".parse().unwrap()),
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "dbx_web=info,tower_http=info,dbx_core::mcp_result_protection=info".parse().unwrap()
+            }),
         )
+        .with(tracing_subscriber::fmt::layer().with_filter(mcp_diagnostic_filter()))
+        .with(tracing_subscriber::fmt::layer().with_filter(mcp_audit_filter()))
         .init();
 
     rustls::crypto::aws_lc_rs::default_provider().install_default().expect("Failed to install rustls crypto provider");
@@ -303,6 +409,8 @@ async fn main() {
         let db_path = data_dir.join("dbx.db");
         let storage = Storage::open(&db_path).await.expect("Failed to open storage");
         storage.migrate_from_json(&data_dir).await.expect("Failed to migrate JSON data");
+        // Activate the log guard before MCP can receive and trace its first request.
+        let _ = storage.load_mcp_global_policy().await;
 
         // Initialize core dialect registry and load external plugin dialects
         register_core_dialects();
@@ -1048,6 +1156,8 @@ async fn main() {
             "/app-settings/mcp-policy",
             get(routes::app_settings::load_mcp_global_policy).put(routes::app_settings::save_mcp_global_policy),
         )
+        .route("/app-settings/mcp-policy/preview", post(routes::app_settings::preview_mcp_result_protection))
+        .route("/app-settings/mcp-policy/source-metadata", post(routes::app_settings::mcp_result_source_metadata))
         .route("/app-settings/mcp-http-status", get(routes::app_settings::load_web_mcp_http_status))
         .route(
             "/app-settings/max-agent-turns",

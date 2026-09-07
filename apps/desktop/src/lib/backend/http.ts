@@ -1815,6 +1815,10 @@ export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return get("/api/app-settings/mcp-policy");
 }
 
+export async function previewMcpResultProtection(request: import("@/lib/mcp/mcpResultProtection").ResultProtectionPreview): Promise<import("@/lib/mcp/mcpResultProtection").ResultProtectionHit[]> {
+  return post("/api/app-settings/mcp-policy/preview", request);
+}
+
 export async function saveMcpGlobalPolicy(policy: Omit<McpGlobalPolicy, "configured">): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/mcp-policy"), {
     method: "PUT",

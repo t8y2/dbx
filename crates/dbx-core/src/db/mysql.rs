@@ -1377,6 +1377,18 @@ fn mysql_async_tcp_host(host: &str) -> &str {
     host
 }
 
+pub(crate) fn database_name_for_result_protection(url: &str) -> Option<String> {
+    if mysql_connection_session_variables(url).is_some() {
+        return None;
+    }
+    let tls_url = mysql_tls_url(url).ok()?;
+    let options = mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).ok()?;
+    if !options.init().is_empty() || !options.setup().is_empty() {
+        return None;
+    }
+    options.db_name().map(str::to_string)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MySqlTlsUrl {
     url: String,

@@ -65,6 +65,11 @@ fn resolve_dialect(dialect: &str) -> Box<dyn sqlparser::dialect::Dialect> {
     }
 }
 
+pub(crate) fn parse_sql_for_result_protection(sql: &str, database_type: DatabaseType) -> Result<Vec<Statement>, ()> {
+    let dialect = resolve_dialect(normalize_dialect(&format!("{database_type:?}")));
+    Parser::parse_sql(dialect.as_ref(), sql).map_err(|_| ())
+}
+
 /// Classify a single SQL statement into a risk level using AST analysis.
 fn classify_statement(stmt: &Statement, detect_select_into: bool) -> SqlRisk {
     match stmt {

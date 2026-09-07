@@ -53,6 +53,7 @@ pub mod hbase_ops;
 pub mod history;
 pub mod jdbc;
 pub mod mcp_policy;
+pub mod mcp_result_protection;
 pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;

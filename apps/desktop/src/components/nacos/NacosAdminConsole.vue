@@ -59,6 +59,7 @@ import { executeWithProductionContextGuard } from "@/lib/database/productionExec
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { validateNacosConfigContent, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
+import { resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
@@ -158,10 +159,12 @@ const historyPageSize = ref(20);
 const historyTotal = ref(0);
 const historyViewingItem = ref<NacosConfigHistoryItem | null>(null);
 const historyViewingContent = ref("");
+const historyViewingFormat = ref("text");
 const historyViewingLoading = ref(false);
 const historyCompareOpen = ref(false);
 const historyCompareCurrent = ref("");
 const historyCompareContent = ref("");
+const historyCompareFormat = ref("text");
 const historyCompareLoading = ref(false);
 const historyCompareItem = ref<NacosConfigHistoryItem | null>(null);
 const pendingHistoryRollback = ref<NacosConfigHistoryItem | null>(null);
@@ -1680,9 +1683,11 @@ async function viewConfigHistory(item: NacosConfigHistoryItem) {
   await nextTick();
   historyViewingItem.value = item;
   historyViewingContent.value = "";
+  historyViewingFormat.value = resolveNacosConfigFormat(item.configType, item.dataId);
   historyViewingLoading.value = true;
   const detail = await loadHistoryDetail(item);
   historyViewingContent.value = detail?.content || "";
+  historyViewingFormat.value = resolveNacosConfigFormat(detail?.configType || item.configType, detail?.dataId || item.dataId);
   historyViewingLoading.value = false;
 }
 
@@ -1690,6 +1695,7 @@ function closeHistoryDetail() {
   historyViewingItem.value = null;
   historyViewingContent.value = "";
   historyViewingLoading.value = false;
+  historyViewingFormat.value = "text";
 }
 
 async function compareConfigHistory(item: NacosConfigHistoryItem) {
@@ -1699,10 +1705,12 @@ async function compareConfigHistory(item: NacosConfigHistoryItem) {
   historyCompareItem.value = item;
   historyCompareCurrent.value = "";
   historyCompareContent.value = "";
+  historyCompareFormat.value = resolveNacosConfigFormat(item.configType, item.dataId);
   try {
     const [current, history] = await Promise.all([api.nacosGetConfig(props.connectionId, selectedConfigOriginalKey.value), api.nacosGetConfigHistory(props.connectionId, historyKeyFor(item))]);
     historyCompareCurrent.value = current.content || "";
     historyCompareContent.value = history.content || "";
+    historyCompareFormat.value = resolveNacosConfigFormat(history.configType || item.configType || current.configType, history.dataId || item.dataId);
   } catch (error) {
     await handleRNacosConsoleError(error, () => compareConfigHistory(item), "history");
     historyCompareOpen.value = false;
@@ -3341,7 +3349,7 @@ function openNacosConsole() {
       </DialogContent>
     </Dialog>
 
-    <NacosConfigDiffDialog v-model:open="pendingConfigSave" :before="originalConfigContent" :after="configContent" :loading="savingConfig" @confirm="saveConfig" />
+    <NacosConfigDiffDialog v-model:open="pendingConfigSave" :before="originalConfigContent" :after="configContent" :format="resolveNacosConfigFormat(configType, configDataId)" :loading="savingConfig" @confirm="saveConfig" />
 
     <NacosContentSearchDialog
       v-model:open="searchOpen"
@@ -3394,6 +3402,7 @@ function openNacosConsole() {
       :read-only="readOnly"
       :viewing-item="historyViewingItem"
       :viewing-content="historyViewingContent"
+      :viewing-format="historyViewingFormat"
       :viewing-loading="historyViewingLoading"
       @load="loadConfigHistory"
       @view="viewConfigHistory"
@@ -3433,6 +3442,7 @@ function openNacosConsole() {
       :after-label="t('nacos.historyVersionContent')"
       :before="historyCompareCurrent"
       :after="historyCompareContent"
+      :format="historyCompareFormat"
       :loading="historyCompareLoading"
       :show-confirm="!readOnly"
       :confirm-label="t('nacos.rollback')"

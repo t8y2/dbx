@@ -165,6 +165,9 @@ describe("AiHtmlPreview", () => {
     expect(srcdoc).toContain("Content-Security-Policy");
     expect(srcdoc).toContain("default-src 'none'");
     expect(srcdoc).toContain(content);
+    // The wide preview must override DialogContent's max-w-sm at every
+    // breakpoint, including narrow desktop windows and mobile-sized WebViews.
+    expect(root?.innerHTML).toContain("max-w-[min(1100px,calc(100vw-32px))]");
     // The dialog title is the same preview label used for the inline card.
     expect(root?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe("ai.htmlPreviewLabel");
 

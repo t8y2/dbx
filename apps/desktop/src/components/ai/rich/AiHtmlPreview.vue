@@ -126,7 +126,9 @@ async function saveSafeHtml() {
        bytes. This is pure UX magnification: the zero-trust boundary does not
        change, there is no path here that hands raw HTML to the OS browser. -->
   <Dialog :open="previewExpanded" @update:open="previewExpanded = $event">
-    <DialogContent class="sm:max-w-[min(1100px,92vw)] flex h-[85vh] flex-col">
+    <!-- Match other large dialogs: override DialogContent's 384px default at
+         every breakpoint while keeping 16px viewport gutters. -->
+    <DialogContent class="max-w-[min(1100px,calc(100vw-32px))] flex h-[85vh] flex-col">
       <DialogHeader class="shrink-0">
         <DialogTitle>{{ t("ai.htmlPreviewLabel") }}</DialogTitle>
         <DialogDescription>{{ t("ai.htmlExpandPreviewHint") }}</DialogDescription>

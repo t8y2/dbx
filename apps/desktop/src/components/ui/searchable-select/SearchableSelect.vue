@@ -55,6 +55,9 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   "update:open": [value: boolean];
+  "option-hover": [value: string];
+  "option-highlight": [value: string | undefined];
+  "option-leave": [];
 }>();
 
 defineSlots<{
@@ -145,6 +148,7 @@ watch(
 
 watch([highlightIndex, filteredOptions], () => {
   void scrollHighlightedOptionIntoView();
+  emit("option-highlight", filteredOptions.value[highlightIndex.value]);
 });
 
 const activeHelpContent = computed(() => (activeHelpOption.value ? props.optionTooltip(activeHelpOption.value) : undefined));
@@ -155,6 +159,7 @@ function activateHelpForHighlightedOption() {
 
 function activateHelpForOption(option: string) {
   activeHelpOption.value = props.optionTooltip(option) ? option : undefined;
+  emit("option-hover", option);
 }
 
 async function updateHelpPanelOffset() {
@@ -251,7 +256,7 @@ function handleKeydown(event: KeyboardEvent) {
             <span v-if="!searchText" class="pointer-events-none absolute left-[25px] top-1/2 -translate-y-1/2 text-sm text-muted-foreground">{{ searchPlaceholder }}</span>
             <Input ref="searchInput" :model-value="searchText" class="h-6 border-0 pl-6 pr-2 text-sm caret-foreground shadow-none focus-visible:ring-0" @update:model-value="(value) => (searchText = String(value))" @keydown="handleKeydown" />
           </div>
-          <div ref="listContainer" class="dbx-searchable-select-list max-h-64 overflow-y-auto py-1" @scroll="updateHelpPanelOffset">
+          <div ref="listContainer" class="dbx-searchable-select-list max-h-64 overflow-y-auto py-1" @scroll="updateHelpPanelOffset" @pointerleave="emit('option-leave')">
             <div v-if="loading" class="px-2 py-2 text-sm text-muted-foreground">
               {{ loadingText }}
             </div>

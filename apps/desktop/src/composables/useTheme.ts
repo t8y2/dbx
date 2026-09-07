@@ -35,7 +35,11 @@ function isLinuxTauriRuntime() {
 const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
-const themePalette = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const savedThemePaletteValue = ref<AppThemePalette>(normalizeAppThemePalette(savedThemePalette));
+const previewedThemePalette = ref<AppThemePalette | null>(null);
+// Consumers use the effective palette so editor and canvas surfaces preview in
+// lockstep with the document-level theme classes.
+const themePalette = computed<AppThemePalette>(() => previewedThemePalette.value ?? savedThemePaletteValue.value);
 function parseStoredCustomUiColors(raw: string | null): AppCustomUiColors | null {
   if (!raw) return null;
   try {
@@ -75,6 +79,16 @@ function setupSystemThemeListener() {
   isListeningForSystemTheme = true;
 }
 
+function applyThemePalette() {
+  if (typeof document === "undefined") return;
+
+  const doc = document.documentElement;
+  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
+  const paletteClass = getAppThemePaletteClass(themePalette.value);
+  if (paletteClass) doc.classList.add(paletteClass);
+  applyCustomUiColors();
+}
+
 function applyTheme() {
   if (typeof document === "undefined") return;
 
@@ -83,12 +97,9 @@ function applyTheme() {
 
   doc.classList.add("disable-transitions");
   doc.classList.toggle("dark", dark);
-  for (const className of APP_THEME_PALETTE_CLASS_NAMES) doc.classList.remove(className);
-  const paletteClass = getAppThemePaletteClass(themePalette.value);
-  if (paletteClass) doc.classList.add(paletteClass);
+  applyThemePalette();
   doc.dataset.cornerStyle = cornerStyle.value;
   doc.style.colorScheme = dark ? "dark" : "light";
-  applyCustomUiColors();
 
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
@@ -123,9 +134,24 @@ function setThemeMode(mode: AppThemeMode) {
 }
 
 function setThemePalette(palette: AppThemePalette) {
-  themePalette.value = palette;
+  savedThemePaletteValue.value = palette;
+  previewedThemePalette.value = null;
   safeLocalStorageSet(APP_THEME_PALETTE_STORAGE_KEY, palette);
   applyTheme();
+}
+
+function previewThemePalette(palette: AppThemePalette) {
+  if (themePalette.value === palette) return;
+  previewedThemePalette.value = palette;
+  // Palette previews do not change the OS/window mode, so avoid the native
+  // Tauri write performed by applyTheme().
+  applyThemePalette();
+}
+
+function clearThemePalettePreview() {
+  if (previewedThemePalette.value === null) return;
+  previewedThemePalette.value = null;
+  applyThemePalette();
 }
 
 function applyCustomUiColors() {
@@ -180,5 +206,5 @@ export function useTheme() {
     setThemeMode(isDark.value ? "light" : "dark");
   }
 
-  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
+  return { isDark, themeMode, themePalette, customUiColors, customUiColorsDark, activeCustomUiColors, cornerStyle, applyTheme, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle, toggleTheme };
 }

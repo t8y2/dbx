@@ -205,6 +205,7 @@ import { apiUrl, webPath } from "@/lib/common/webPath";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, normalizeCustomFontFamilyInput, readableFontFamily, SYSTEM_UI_FONT_FAMILY } from "@/lib/app/appFonts";
 import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSystemFontNames } from "@/lib/app/fontFamilyOptions";
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
+import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
 import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
@@ -221,10 +222,35 @@ const connectionStore = useConnectionStore();
 const savedSqlStore = useSavedSqlStore();
 const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
-const { isDark, themeMode, themePalette, activeCustomUiColors, cornerStyle, setThemeMode, setThemePalette, setCustomUiColors, resetCustomUiColors, setCornerStyle } = useTheme();
+const { isDark, themeMode, themePalette, activeCustomUiColors, cornerStyle, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle } = useTheme();
+const { previewUiFontFamily, clearUiFontFamilyPreview } = useUiFontFamilyPreview();
 
 function updateCustomUiColor(key: keyof AppCustomUiColors, value: string) {
   setCustomUiColors({ ...activeCustomUiColors.value, [key]: value });
+}
+
+function onThemePaletteSelect(value: unknown) {
+  if (typeof value === "string") setThemePalette(value as AppThemePalette);
+}
+
+function onThemePaletteOpenChange(open: boolean) {
+  if (!open) clearThemePalettePreview();
+}
+
+function previewUiFontOption(value: string | undefined) {
+  if (value) previewUiFontFamily(value);
+}
+
+function restoreUiFontFamilyPreview() {
+  previewUiFontFamily(editUiFontFamily.value);
+}
+
+function onUiFontFamilyOpenChange(open: boolean) {
+  if (open) {
+    void loadSystemFontOptions();
+  } else {
+    restoreUiFontFamilyPreview();
+  }
 }
 
 const appThemePaletteOptions = computed(
@@ -1141,6 +1167,20 @@ watch(
       editMetadataCacheMaxMemoryMb.value = settingsStore.desktopSettings.metadata_cache_max_memory_mb;
       editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
+    } else {
+      clearThemePalettePreview();
+      clearUiFontFamilyPreview();
+    }
+  },
+  { immediate: true },
+);
+
+watch(
+  () => settingsStore.settingsPageActive,
+  (active) => {
+    if (isSettingsPage.value && !active) {
+      clearThemePalettePreview();
+      clearUiFontFamilyPreview();
     }
   },
   { immediate: true },
@@ -1685,7 +1725,10 @@ function onTableFontFamilyChange(v: any) {
 }
 
 function onUiFontFamilyChange(v: any) {
-  if (typeof v === "string") editUiFontFamily.value = v;
+  if (typeof v === "string") {
+    editUiFontFamily.value = v;
+    previewUiFontFamily(v);
+  }
 }
 
 const themeSelectValue = computed(() => {
@@ -3310,6 +3353,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  clearThemePalettePreview();
+  clearUiFontFamilyPreview();
   cleanupTableColumnTemplatePointerDrag();
   cleanupTruncationObservers();
 });
@@ -5275,7 +5320,7 @@ onUnmounted(() => {
                   </div>
                   <div class="flex items-center gap-2">
                     <div class="min-w-0 flex-1">
-                      <Select :model-value="themePalette" @update:model-value="(value) => setThemePalette(value as AppThemePalette)">
+                      <Select :model-value="themePalette" @update:model-value="onThemePaletteSelect" @update:open="onThemePaletteOpenChange">
                         <SelectTrigger class="h-8 w-full gap-1">
                           <SelectValue :placeholder="t('settings.selectColorTheme')">
                             <span v-if="selectedThemePaletteOption" class="flex min-w-0 items-center gap-1">
@@ -5289,8 +5334,8 @@ onUnmounted(() => {
                             </span>
                           </SelectValue>
                         </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value">
+                        <SelectContent @pointerleave="clearThemePalettePreview">
+                          <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value" @pointerenter="previewThemePalette(option.value)" @focus="previewThemePalette(option.value)">
                             <div class="flex items-center gap-2">
                               <span class="h-3 w-3 rounded-full border border-border shadow-xs" :style="{ background: option.previewColor }" />
                               {{ option.label }}
@@ -5369,7 +5414,10 @@ onUnmounted(() => {
                     :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
                     @update:model-value="onUiFontFamilyChange"
-                    @update:open="(open: boolean) => open && loadSystemFontOptions()"
+                    @update:open="onUiFontFamilyOpenChange"
+                    @option-hover="previewUiFontOption"
+                    @option-highlight="previewUiFontOption"
+                    @option-leave="restoreUiFontFamilyPreview"
                   >
                     <template #trigger-label="{ label, loading }">
                       <span class="truncate" :style="{ fontFamily: editUiFontFamily }">

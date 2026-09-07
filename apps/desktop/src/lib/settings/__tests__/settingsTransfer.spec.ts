@@ -115,6 +115,13 @@ describe("settingsTransfer", () => {
     expect(result.error.detail).toContain("toolbarItems");
   });
 
+  it("rejects toolbar flags that the normalizer would coerce", () => {
+    const result = parseSettingsTransferFile(fileWith({ toolbarItems: { exclusiveRightSidebarPanels: "no" } }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.detail).toContain("toolbarItems");
+  });
+
   it("rejects empty active custom theme ids", () => {
     const result = parseSettingsTransferFile(fileWith({ activeCustomThemeId: "  " }));
     expect(result.ok).toBe(false);
@@ -218,6 +225,42 @@ describe("settingsTransfer", () => {
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;
+    expect(result.error.detail).toContain("customThemes");
+  });
+
+  it("rejects custom theme items with wrong-typed optional background and foreground colors", () => {
+    const validTheme = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const background = parseSettingsTransferFile(
+      fileWith({
+        customThemes: [{ ...validTheme, id: "t1", name: "T1", colors: { ...validTheme.colors, background: {} } }],
+      }),
+    );
+    expect(background.ok).toBe(false);
+    if (background.ok) return;
+    expect(background.error.detail).toContain("customThemes");
+
+    const foreground = parseSettingsTransferFile(
+      fileWith({
+        customThemes: [{ ...validTheme, id: "t1", name: "T1", colors: { ...validTheme.colors, foreground: 5 } }],
+      }),
+    );
+    expect(foreground.ok).toBe(false);
+  });
+
+  it("accepts custom theme items with optional background and foreground colors", () => {
+    const base = DEFAULT_EDITOR_SETTINGS.customThemes[0];
+    const validTheme = { ...base, id: "t1", name: "T1", colors: { ...base.colors, background: "#282c34", foreground: "#abb2bf" } };
+    const result = parseSettingsTransferFile(fileWith({ customThemes: [validTheme] }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.customThemes).toEqual([validTheme]);
+  });
+
+  it("rejects null custom theme items instead of crashing", () => {
+    const result = parseSettingsTransferFile(fileWith({ customThemes: [null] }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) return;
+    expect(result.error.code).toBe("invalid-fields");
     expect(result.error.detail).toContain("customThemes");
   });
 

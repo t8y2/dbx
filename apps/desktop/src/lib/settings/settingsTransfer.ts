@@ -299,13 +299,26 @@ function valueKindShape(defaults: Record<string, unknown>): Record<string, strin
 const CUSTOM_THEME_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_COLORS as unknown as Record<string, unknown>);
 const CUSTOM_THEME_DDL_COLORS_SHAPE = valueKindShape(DEFAULT_CUSTOM_THEME_DDL_COLORS as unknown as Record<string, unknown>);
 
+/**
+ * Optional color keys of a custom editor theme. They are absent from
+ * DEFAULT_CUSTOM_THEME_COLORS, so the defaults-derived shape above cannot
+ * cover them and a wrong-typed value (e.g. `background: {}`) would otherwise
+ * pass validation and reach the persisted settings.
+ */
+const CUSTOM_THEME_OPTIONAL_COLOR_KEYS = ["background", "foreground"] as const;
+
+function hasValidOptionalColorKinds(value: unknown): boolean {
+  if (!isPlainObject(value)) return false;
+  return CUSTOM_THEME_OPTIONAL_COLOR_KEYS.every((key) => value[key] === undefined || typeof value[key] === "string");
+}
+
 function hasRequiredValueKinds(value: unknown, shape: Record<string, string>): boolean {
   if (!isPlainObject(value)) return false;
   return Object.entries(shape).every(([key, kind]) => typeof value[key] === kind);
 }
 
 function isCustomThemeItem(value: unknown): boolean {
-  return isPlainObject(value) && isNonEmptyTrimmedString(value.id) && isNonEmptyTrimmedString(value.name) && hasRequiredValueKinds(value.colors, CUSTOM_THEME_COLORS_SHAPE) && hasRequiredValueKinds(value.ddlColors, CUSTOM_THEME_DDL_COLORS_SHAPE);
+  return isPlainObject(value) && isNonEmptyTrimmedString(value.id) && isNonEmptyTrimmedString(value.name) && hasRequiredValueKinds(value.colors, CUSTOM_THEME_COLORS_SHAPE) && hasValidOptionalColorKinds(value.colors) && hasRequiredValueKinds(value.ddlColors, CUSTOM_THEME_DDL_COLORS_SHAPE);
 }
 
 // The store normalizer only writes #rrggbb values, matching normalizeDataGridTypeColors.
@@ -348,6 +361,17 @@ function isRawShortcutSettingsShape(value: unknown): boolean {
   return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !SHORTCUT_ACTION_IDS.has(key) || typeof entry === "string");
 }
 
+/**
+ * Raw shape: every known toolbar key must already be a boolean.
+ * normalizeToolbarItems coerces `exclusiveRightSidebarPanels` with `!== false`
+ * (and fills the rest with nullish defaults), so a non-boolean like "no" would
+ * otherwise be silently turned into `true` and pass the normalized round-trip
+ * check. Unknown keys stay ignored for forward compatibility.
+ */
+function isRawToolbarItemsShape(value: unknown): boolean {
+  return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
+}
+
 const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
 
 function isSqlVariableSyntaxOverridesShape(value: unknown, isAllowedToggle: (toggle: unknown) => boolean): boolean {
@@ -381,13 +405,17 @@ const NESTED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: un
  * normalization. This rejects payloads the normalizer would silently repair
  * by dropping entries or substituting defaults — importing those would
  * overwrite the user's data (custom schemes, snippets, formatter options, …)
- * with sanitized defaults instead of surfacing the malformed file.
+ * with sanitized defaults instead of surfacing the malformed file. Running
+ * them before the normalizer also keeps `normalizeEditorSettings` from
+ * throwing on malformed containers it does not sanitize (e.g. a null item
+ * inside `customThemes`).
  */
 const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (value: unknown) => boolean>> = {
   customThemes: (value) => isArrayOfShape(value, isCustomThemeItem),
   dataGridTypeColorSchemes: (value) => isArrayOfShape(value, isDataGridTypeColorSchemeItem),
   tableColumnTemplateFields: isStringArray,
   shortcuts: isRawShortcutSettingsShape,
+  toolbarItems: isRawToolbarItemsShape,
   sqlFormatter: isCompleteSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,
@@ -402,15 +430,17 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
  * the file passed the checks, so a rejected file can never partially modify
  * the settings draft.
  *
- * Scalar values (boolean/number/string) must survive the store's own
- * normalizer unchanged — an out-of-domain enum or a clamped number comes
- * back different and rejects the import. Pass-through fields (see
- * PASS_THROUGH_FIELD_VALIDATORS) get an explicit domain check instead,
- * because the normalizer keeps them as-is. Objects and arrays are sanitized
- * through the same normalizer and must additionally satisfy a full nested
- * schema (see NESTED_FIELD_VALIDATORS / RAW_STRUCTURED_FIELD_VALIDATORS):
- * malformed nested payloads are rejected instead of being silently repaired
- * or persisted.
+ * Raw JSON-kind and raw structured checks (see
+ * RAW_STRUCTURED_FIELD_VALIDATORS) run first, before the normalizer, so a
+ * malformed container is reported as `invalid-fields` instead of throwing
+ * inside a store normalizer. Scalar values (boolean/number/string) must
+ * survive the store's own normalizer unchanged — an out-of-domain enum or a
+ * clamped number comes back different and rejects the import. Pass-through
+ * fields (see PASS_THROUGH_FIELD_VALIDATORS) get an explicit domain check
+ * instead, because the normalizer keeps them as-is. Objects and arrays are
+ * sanitized through the same normalizer and must additionally satisfy a full
+ * nested schema (see NESTED_FIELD_VALIDATORS): malformed nested payloads are
+ * rejected instead of being silently repaired or persisted.
  */
 export function parseSettingsTransferFile(text: string): { ok: true; value: ParsedSettingsTransfer } | { ok: false; error: SettingsTransferParseError } {
   if (exceedsSettingsTransferSizeLimit(text)) {
@@ -438,6 +468,27 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   const presentKeys = EDITOR_SETTINGS_DRAFT_KEYS.filter((key) => key in editor);
   if (presentKeys.length === 0) return { ok: false, error: { code: "empty-settings" } };
 
+  // Validate the raw file values BEFORE the normalizer runs. Some store
+  // normalizers assume well-formed containers (e.g. customThemes items must
+  // expose `name`) and throw on malformed input instead of sanitizing it, so
+  // a broken file must be rejected here and surface as `invalid-fields`
+  // rather than crashing the parse.
+  const invalidKeys: string[] = [];
+  for (const key of presentKeys) {
+    const raw = editor[key];
+    if (jsonKindOf(raw) !== EXPECTED_JSON_KINDS.get(key)) {
+      invalidKeys.push(key);
+      continue;
+    }
+    const rawValidator = RAW_STRUCTURED_FIELD_VALIDATORS[key];
+    if (rawValidator && !rawValidator(raw)) {
+      invalidKeys.push(key);
+    }
+  }
+  if (invalidKeys.length > 0) {
+    return { ok: false, error: { code: "invalid-fields", detail: invalidKeys.slice(0, 5).join(", ") } };
+  }
+
   // Run the imported values through the same normalizer the store applies on
   // load. Defaults are cloned first so the shared constant can never be
   // mutated by a malformed file.
@@ -448,19 +499,9 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   const normalized = normalizeEditorSettings(probe);
 
   const imported: Partial<EditorSettings> = {};
-  const invalidKeys: string[] = [];
   for (const key of presentKeys) {
     const raw = editor[key];
     const value = (normalized as unknown as Record<string, unknown>)[key];
-    if (jsonKindOf(raw) !== EXPECTED_JSON_KINDS.get(key)) {
-      invalidKeys.push(key);
-      continue;
-    }
-    const rawValidator = RAW_STRUCTURED_FIELD_VALIDATORS[key];
-    if (rawValidator && !rawValidator(raw)) {
-      invalidKeys.push(key);
-      continue;
-    }
     const validator = PASS_THROUGH_FIELD_VALIDATORS[key] ?? NESTED_FIELD_VALIDATORS[key];
     if (validator && !validator(value)) {
       invalidKeys.push(key);

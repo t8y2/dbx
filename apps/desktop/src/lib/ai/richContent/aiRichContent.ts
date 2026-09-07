@@ -33,13 +33,13 @@ export interface AiRichBlockFlags {
   closed: boolean;
 }
 
-export interface AiRichBlockHandler<T> {
+export interface AiRichBlockHandler<T = AiMessageRichSegment> {
   /** The raw fenced language tag this handler owns (lowercase). */
   language: string;
   parse: (content: string, flags: AiRichBlockFlags) => T | null;
 }
 
-function chartHandler(): AiRichBlockHandler<AiMessageChartSegment> {
+function chartHandler(): AiRichBlockHandler {
   return {
     language: "chart-json",
     parse(content, flags) {
@@ -56,7 +56,7 @@ function chartHandler(): AiRichBlockHandler<AiMessageChartSegment> {
  * `aiMessageRender.ts` performs the lookup BEFORE `normalizeAiCodeLanguage`, so
  * a SQL/SHELL tag never collides with a rich tag.
  */
-export const AI_RICH_BLOCK_HANDLERS: Record<string, AiRichBlockHandler<AiMessageChartSegment>> = {
+export const AI_RICH_BLOCK_HANDLERS: Record<string, AiRichBlockHandler> = {
   "chart-json": chartHandler(),
 };
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AI_RICH_BLOCK_HANDLERS, isAiRichBlockLanguage } from "@/lib/ai/richContent/aiRichContent";
 import { parseAiChartSpec } from "@/lib/ai/richContent/aiChartSpec";
 
-const validBar = JSON.stringify({ type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [120, 200] }] });
+const validBar = JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [120, 200] }] });
 const invalidBar = "{ not json";
 
 describe("AI_RICH_BLOCK_HANDLERS", () => {
@@ -29,7 +29,7 @@ describe("AI_RICH_BLOCK_HANDLERS", () => {
   it("returns null when a closed chart-json block fails validation", () => {
     const handler = AI_RICH_BLOCK_HANDLERS["chart-json"];
     expect(handler.parse(invalidBar, { closed: true })).toBeNull();
-    expect(handler.parse(JSON.stringify({ type: "pie", data: [{ name: "A", value: -1 }] }), { closed: true })).toBeNull();
+    expect(handler.parse(JSON.stringify({ version: 1, type: "pie", data: [{ name: "A", value: -1 }] }), { closed: true })).toBeNull();
   });
 
   it("does not treat sql/bash/json as rich block languages", () => {

@@ -428,12 +428,12 @@ function buildRichContentPromptLines(isZh: boolean): string[] {
         [
           "你可以输出 ```chart-json 代码块来渲染图表（V1 支持 line/bar/pie）。仅在图表能实质改善回答时使用，例如视觉对比、趋势、分布或占比；一条回复最多一个。",
           "示例（line/bar）：```chart-json",
-          `{"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"收入","data":[120,200,150]}]}`,
+          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"收入","data":[120,200,150]}]}`,
           "```",
           "示例（pie）：```chart-json",
-          `{"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
+          `{"version":1,"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
           "```",
-          "数据需真实来自已执行的查询结果；图表数据应完整、不加截断符。",
+          "图表数据必须来自当前可验证的数据上下文（查询结果、附件、用户提供的数据等），不得编造；数据应完整、不加截断符。",
           "不要输出 ```html 代码块，除非用户明确要求。",
         ].join("\n"),
       ]
@@ -441,12 +441,12 @@ function buildRichContentPromptLines(isZh: boolean): string[] {
         [
           "You may emit a ```chart-json code block to render a chart (V1 supports line/bar/pie). Use it only when a visual comparison, trend, distribution, or share materially improves the answer; at most one chart per reply.",
           "Example (line/bar): ```chart-json",
-          `{"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"Revenue","data":[120,200,150]}]}`,
+          `{"version":1,"type":"line","xAxis":{"values":["Jan","Feb","Mar"]},"series":[{"name":"Revenue","data":[120,200,150]}]}`,
           "```",
           "Example (pie): ```chart-json",
-          `{"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
+          `{"version":1,"type":"pie","data":[{"name":"A","value":40},{"name":"B","value":60}]}`,
           "```",
-          "Chart data must come from real executed query results and be complete (no truncation markers).",
+          "Chart data must be grounded in actual available data (query results, attachments, provided values) and never invented; keep it complete, no truncation markers.",
           "Do not emit ```html code blocks unless the user explicitly asks for them.",
         ].join("\n"),
       ];

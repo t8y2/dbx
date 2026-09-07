@@ -39,7 +39,7 @@ export interface AiMessageRendererOptions {
   markdown: (text: string) => string;
   highlightCode?: (content: string, lang: string) => string;
   /** Resolves a fenced raw lang to a rich handler (chart-json, ...). */
-  richHandlers?: Record<string, AiRichBlockHandler<AiMessageChartSegment>>;
+  richHandlers?: Record<string, AiRichBlockHandler>;
 }
 
 const DEFAULT_MAX_ENTRIES = 100;

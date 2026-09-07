@@ -13,7 +13,7 @@
  * refer to that allowed raw input only.
  */
 
-/** Version gate: V1 only understands version 1; a missing `version` defaults to 1. */
+/** Version gate: V1 only understands version 1; the protocol requires an explicit `version` field. */
 export const AI_CHART_VERSION = 1;
 
 /** Max raw JSON length (characters) — protects JSON.parse and ECharts from giant inputs. */
@@ -67,8 +67,9 @@ export type AiChartSpecResult = { ok: true; spec: AiChartSpec } | { ok: false; r
  *
  * Rules (PRD "chart-json 受控 schema"):
  * - JSON.parse failure → deterministic `{ ok: false, reason: "invalid JSON" }`.
- * - `version` defaults to 1 when absent; only an explicit value !== 1 is
- *   rejected with `"unsupported chart version: X"`.
+ * - `version` is a REQUIRED protocol field; V1 only supports 1. A missing
+ *   `version` is rejected with `"chart version is required"`; an explicit value
+ *   !== 1 is rejected with `"unsupported chart version: X"`.
  * - `xAxis.values` (category axis) keeps `string | number` values as-is — never
  *   numeric coercion — only requiring non-empty, within bounds, and each string
  *   ≤ 256 chars.
@@ -100,10 +101,13 @@ export function parseAiChartSpec(content: string): AiChartSpecResult {
 
   const spec = parsed as Record<string, unknown>;
 
-  // Version gate is lenient by default: a missing version counts as 1.
-  const version = spec.version === undefined ? AI_CHART_VERSION : spec.version;
-  if (version !== AI_CHART_VERSION) {
-    return { ok: false, reason: `unsupported chart version: ${String(version)}`, raw };
+  // Version is a required protocol field: a missing version is a malformed
+  // block, and only version 1 is supported in V1.
+  if (spec.version === undefined) {
+    return { ok: false, reason: "chart version is required", raw };
+  }
+  if (spec.version !== AI_CHART_VERSION) {
+    return { ok: false, reason: `unsupported chart version: ${String(spec.version)}`, raw };
   }
 
   const type = spec.type;

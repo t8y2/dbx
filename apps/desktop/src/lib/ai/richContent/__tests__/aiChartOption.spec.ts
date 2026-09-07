@@ -14,7 +14,7 @@ function specOf(json: string): AiChartSpec {
 
 describe("buildAiChartOption", () => {
   it("builds a bar option with a category xAxis and value yAxis", () => {
-    const option = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [1, 2] }] })), light);
+    const option = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [1, 2] }] })), light);
     expect(option.xAxis).toMatchObject({ type: "category", data: ["Jan", "Feb"] });
     expect(option.yAxis).toMatchObject({ type: "value" });
     if (Array.isArray(option.series)) {
@@ -26,10 +26,10 @@ describe("buildAiChartOption", () => {
   });
 
   it("uses smooth:true for line charts only", () => {
-    const line = buildAiChartOption(specOf(JSON.stringify({ type: "line", xAxis: { values: ["a", "b"] }, series: [{ name: "s", data: [1, 2] }] })), light);
+    const line = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "line", xAxis: { values: ["a", "b"] }, series: [{ name: "s", data: [1, 2] }] })), light);
     if (Array.isArray(line.series)) expect(line.series[0]).toMatchObject({ type: "line", smooth: true });
 
-    const bar = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { values: ["a", "b"] }, series: [{ name: "s", data: [1, 2] }] })), light);
+    const bar = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["a", "b"] }, series: [{ name: "s", data: [1, 2] }] })), light);
     if (Array.isArray(bar.series)) expect(bar.series[0]).toMatchObject({ type: "bar", smooth: false });
   });
 
@@ -37,6 +37,7 @@ describe("buildAiChartOption", () => {
     const option = buildAiChartOption(
       specOf(
         JSON.stringify({
+          version: 1,
           type: "pie",
           data: [
             { name: "A", value: 40 },
@@ -60,31 +61,31 @@ describe("buildAiChartOption", () => {
   });
 
   it("applies axis label colors from the theme (dark vs light)", () => {
-    const lightOption = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
-    const darkOption = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), dark);
+    const lightOption = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
+    const darkOption = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), dark);
     expect(lightOption.xAxis).toMatchObject({ axisLabel: { color: "#666" } });
     expect(darkOption.xAxis).toMatchObject({ axisLabel: { color: "#aaa" } });
   });
 
   it("applies legend text colors from the theme", () => {
-    const lightOption = buildAiChartOption(specOf(JSON.stringify({ type: "pie", data: [{ name: "A", value: 1 }] })), light);
-    const darkOption = buildAiChartOption(specOf(JSON.stringify({ type: "pie", data: [{ name: "A", value: 1 }] })), dark);
+    const lightOption = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "pie", data: [{ name: "A", value: 1 }] })), light);
+    const darkOption = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "pie", data: [{ name: "A", value: 1 }] })), dark);
     expect(lightOption.legend).toMatchObject({ textStyle: { color: "#333" } });
     expect(darkOption.legend).toMatchObject({ textStyle: { color: "#ccc" } });
   });
 
   it("sets a title when the spec carries one", () => {
-    const option = buildAiChartOption(specOf(JSON.stringify({ type: "bar", title: "Sales", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
+    const option = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", title: "Sales", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
     expect(option.title).toMatchObject({ text: "Sales" });
   });
 
   it("omits the title when the spec has none", () => {
-    const option = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
+    const option = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["a"] }, series: [{ name: "s", data: [1] }] })), light);
     expect(option.title).toBeUndefined();
   });
 
   it("uses axis names from xAxis/yAxis labels", () => {
-    const option = buildAiChartOption(specOf(JSON.stringify({ type: "bar", xAxis: { label: "Month", values: ["a"] }, yAxis: { label: "Amount" }, series: [{ name: "s", data: [1] }] })), light);
+    const option = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "bar", xAxis: { label: "Month", values: ["a"] }, yAxis: { label: "Amount" }, series: [{ name: "s", data: [1] }] })), light);
     expect(option.xAxis).toMatchObject({ name: "Month" });
     expect(option.yAxis).toMatchObject({ name: "Amount" });
   });

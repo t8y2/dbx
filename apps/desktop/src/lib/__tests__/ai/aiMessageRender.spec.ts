@@ -206,7 +206,7 @@ describe("createAiMessageRenderer", () => {
 
 describe("createAiMessageRenderer rich chart segments", () => {
   const markdown = (text: string) => `<p>${text}</p>`;
-  const chartJson = JSON.stringify({ type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [120, 200] }] });
+  const chartJson = JSON.stringify({ version: 1, type: "bar", xAxis: { values: ["Jan", "Feb"] }, series: [{ name: "Revenue", data: [120, 200] }] });
 
   it("routes a closed chart-json fence to a chart segment", () => {
     const renderer = createAiMessageRenderer({ markdown });

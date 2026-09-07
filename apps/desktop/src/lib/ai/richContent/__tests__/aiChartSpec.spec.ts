@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AI_CHART_VERSION, parseAiChartSpec, AI_CHART_MAX_JSON_CHARS, AI_CHART_MAX_SERIES, AI_CHART_MAX_POINTS_PER_ARRAY, AI_CHART_MAX_TOTAL_POINTS, AI_CHART_MAX_CATEGORY_STRING_LENGTH } from "@/lib/ai/richContent/aiChartSpec";
 
 const barSpec = (overrides: Record<string, unknown> = {}) => ({
+  version: 1,
   type: "bar",
   xAxis: { values: ["Jan", "Feb", "Mar"] },
   series: [{ name: "Revenue", data: [120, 200, 150] }],
@@ -21,7 +22,7 @@ describe("parseAiChartSpec", () => {
   });
 
   it("accepts a valid line chart", () => {
-    const result = parseAiChartSpec(JSON.stringify({ type: "line", xAxis: { values: [1, 2, 3] }, series: [{ name: "s", data: [1.5, -2, 0] }] }));
+    const result = parseAiChartSpec(JSON.stringify({ version: 1, type: "line", xAxis: { values: [1, 2, 3] }, series: [{ name: "s", data: [1.5, -2, 0] }] }));
     expect(result.ok).toBe(true);
   });
 
@@ -33,6 +34,7 @@ describe("parseAiChartSpec", () => {
   it("accepts a valid pie chart with a single zero slice", () => {
     const result = parseAiChartSpec(
       JSON.stringify({
+        version: 1,
         type: "pie",
         data: [
           { name: "A", value: 40 },
@@ -55,10 +57,11 @@ describe("parseAiChartSpec", () => {
     if (!result.ok) expect(result.reason).toBe("invalid JSON");
   });
 
-  it("treats a missing version as 1 (lenient default)", () => {
-    const result = parseAiChartSpec(JSON.stringify(barSpec()));
-    expect(result.ok).toBe(true);
-    if (result.ok && result.spec.type === "bar") expect(result.spec.version).toBe(1);
+  it("rejects a missing version (required protocol field)", () => {
+    const { version: _omitted, ...missing } = barSpec();
+    const result = parseAiChartSpec(JSON.stringify(missing));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("chart version is required");
   });
 
   it("accepts an explicit version 1", () => {
@@ -104,7 +107,7 @@ describe("parseAiChartSpec", () => {
 
   it("rejects non-finite pie values ('NaN', 'Infinity', non-numeric)", () => {
     for (const data of [[{ name: "A", value: "NaN" }], [{ name: "A", value: "Infinity" }], [{ name: "A", value: "n/a" }]]) {
-      const result = parseAiChartSpec(JSON.stringify({ type: "pie", data }));
+      const result = parseAiChartSpec(JSON.stringify({ version: 1, type: "pie", data }));
       expect(result.ok).toBe(false);
     }
   });
@@ -114,7 +117,7 @@ describe("parseAiChartSpec", () => {
     expect(bar.ok).toBe(true);
     if (bar.ok && bar.spec.type === "bar") expect(bar.spec.series[0].data).toEqual([12, 3.5, 0]);
 
-    const pie = parseAiChartSpec(JSON.stringify({ type: "pie", data: [{ name: "A", value: "42" }] }));
+    const pie = parseAiChartSpec(JSON.stringify({ version: 1, type: "pie", data: [{ name: "A", value: "42" }] }));
     expect(pie.ok).toBe(true);
     if (pie.ok && pie.spec.type === "pie") expect(pie.spec.data[0].value).toBe(42);
   });
@@ -136,10 +139,11 @@ describe("parseAiChartSpec", () => {
   });
 
   it("rejects a pie with no data or all-zero data", () => {
-    expect(parseAiChartSpec(JSON.stringify({ type: "pie", data: [] })).ok).toBe(false);
+    expect(parseAiChartSpec(JSON.stringify({ version: 1, type: "pie", data: [] })).ok).toBe(false);
     expect(
       parseAiChartSpec(
         JSON.stringify({
+          version: 1,
           type: "pie",
           data: [
             { name: "A", value: 0 },
@@ -153,6 +157,7 @@ describe("parseAiChartSpec", () => {
   it("rejects negative pie values", () => {
     const result = parseAiChartSpec(
       JSON.stringify({
+        version: 1,
         type: "pie",
         data: [
           { name: "A", value: -1 },

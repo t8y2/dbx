@@ -6682,6 +6682,8 @@ export default {
     dataGridDisplay: "Data grid display",
     dataGridFilterView: "Table filter view",
     dataGridFilterViewDescription: "Use a filter popover, a fixed conditions panel, or a compact text conditions panel.",
+    dataGridAutoHideFilterBuilder: "Automatically hide filter editor after applying",
+    dataGridAutoHideFilterBuilderDescription: "When disabled, the filter editor stays open after applying so you can continue editing.",
     dataGridFilterViewPreview: "Effect preview",
     dataGridFilterViewPreviewExpand: "Expand effect preview",
     dataGridFilterViewPreviewCollapse: "Collapse effect preview",

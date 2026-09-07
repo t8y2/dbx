@@ -784,6 +784,7 @@ export interface EditorSettings {
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
+  dataGridAutoHideFilterBuilder: boolean;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
@@ -1014,6 +1015,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
+  dataGridAutoHideFilterBuilder: true,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
@@ -1460,6 +1462,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
+    dataGridAutoHideFilterBuilder: settings.dataGridAutoHideFilterBuilder ?? DEFAULT_EDITOR_SETTINGS.dataGridAutoHideFilterBuilder,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
@@ -2177,6 +2180,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
+    if (partial.dataGridAutoHideFilterBuilder !== undefined) editorSettings.value.dataGridAutoHideFilterBuilder = partial.dataGridAutoHideFilterBuilder;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);

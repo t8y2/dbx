@@ -2444,7 +2444,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
   appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-  filterBuilderOpen.value = false;
+  if (settingsStore.editorSettings.dataGridAutoHideFilterBuilder) filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 

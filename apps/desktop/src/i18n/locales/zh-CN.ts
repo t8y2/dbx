@@ -6665,6 +6665,8 @@ export default withEnglishFallback({
     dataGridDisplay: "数据表格显示",
     dataGridFilterView: "表格筛选视图",
     dataGridFilterViewDescription: "选择弹出式快捷筛选、固定条件面板或紧凑文本条件面板。",
+    dataGridAutoHideFilterBuilder: "应用筛选后自动隐藏条件编辑器",
+    dataGridAutoHideFilterBuilderDescription: "关闭后，应用筛选后仍保留条件编辑器，方便继续调整。",
     dataGridFilterViewPreview: "效果预览",
     dataGridFilterViewPreviewExpand: "展开效果预览",
     dataGridFilterViewPreviewCollapse: "收起效果预览",

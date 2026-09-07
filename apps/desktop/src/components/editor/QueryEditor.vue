@@ -2296,6 +2296,31 @@ function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
   return codeMirrorNextSnippetField?.(view) ?? false;
 }
 
+function acceptSqlServerCompletionOnSpace(view: EditorViewType): boolean {
+  if (props.databaseType !== "sqlserver" || codeMirrorCompletionStatus?.(view.state) !== "active") return false;
+  const completionType = codeMirrorSelectedCompletion?.(view.state)?.type;
+  if (completionType !== "keyword" && completionType !== "table" && completionType !== "column") return false;
+  if (!(codeMirrorAcceptCompletion?.(view) ?? false)) return false;
+
+  const selection = view.state.selection.main;
+  if (!selection.empty) return true;
+  const cursor = selection.head;
+  const previousCharacter = cursor > 0 ? view.state.sliceDoc(cursor - 1, cursor) : "";
+  if (/\s/.test(previousCharacter)) return true;
+
+  const nextCharacter = view.state.sliceDoc(cursor, cursor + 1);
+  if (/\s/.test(nextCharacter)) {
+    view.dispatch({ selection: { anchor: cursor + 1 }, scrollIntoView: true });
+  } else {
+    view.dispatch({
+      changes: { from: cursor, insert: " " },
+      selection: { anchor: cursor + 1 },
+      scrollIntoView: true,
+    });
+  }
+  return true;
+}
+
 function clearPendingCompletionTab() {
   if (pendingCompletionTabTimer === null) return;
   clearTimeout(pendingCompletionTabTimer);
@@ -6168,6 +6193,7 @@ onMounted(async () => {
       vimModeComp.of(vimModeExtension(initialSettings.vimModeEnabled)),
       defaultKeymapComp.of(defaultKeymapExtension()),
       keymap.of([...searchKeymapWithoutModD(searchKeymap), ...historyKeymap, ...foldKeymap, ...completionKeymap]),
+      Prec.highest(keymap.of([{ key: "Space", run: acceptSqlServerCompletionOnSpace }])),
       sqlLanguageComp.of(buildSqlLanguageExtension()),
       sqlSemanticHighlightComp.of(buildSqlSemanticHighlightExtension()),
       tooltips({ parent: tooltipParent }),

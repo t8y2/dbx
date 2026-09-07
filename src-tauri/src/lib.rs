@@ -1754,6 +1754,7 @@ pub fn run() {
             commands::app_settings::load_transfer_task_library,
             commands::app_settings::save_transfer_task_library,
             commands::app_settings::load_native_debug_logs,
+            commands::diagnostics::get_process_memory_info,
             commands::support_info::get_app_support_info,
             commands::cloud_sync::webdav_sync_test,
             commands::cloud_sync::webdav_password_status,

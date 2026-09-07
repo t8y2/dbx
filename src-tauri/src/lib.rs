@@ -1508,6 +1508,7 @@ pub fn run() {
             append_startup_probe(format!("opening storage file=dbx.db data_dir_mode={data_dir_mode}"));
             let storage = tauri::async_runtime::block_on(async {
                 let s = Storage::open(&db_path).await.expect("Failed to open storage");
+                let _ = s.load_mcp_global_policy().await;
                 eprintln!("[STARTUP]   Storage::open in {:?}", t.elapsed());
                 append_startup_probe(format!("storage opened in {:?}", t.elapsed()));
                 let t2 = Instant::now();
@@ -1519,6 +1520,7 @@ pub fn run() {
             let desktop_settings = tauri::async_runtime::block_on(storage.load_desktop_settings()).unwrap_or_default();
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
+                    .filter(|metadata| dbx_core::mcp_result_protection::diagnostic_log_allowed(metadata.target()))
                     .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                     .format(|out, message, record| {
                         out.finish(format_args!(
@@ -1736,6 +1738,7 @@ pub fn run() {
             commands::app_settings::save_pinned_tree_node_ids,
             commands::app_settings::load_mcp_global_policy,
             commands::app_settings::save_mcp_global_policy,
+            commands::app_settings::preview_mcp_result_protection,
             commands::mcp_http_server::load_mcp_http_server_settings,
             commands::mcp_http_server::save_mcp_http_server_settings,
             commands::mcp_http_server::mcp_http_server_status,

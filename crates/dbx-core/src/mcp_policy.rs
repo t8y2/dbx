@@ -174,6 +174,18 @@ pub fn ensure_sql_database_execution_scope(
     active_database: &str,
     sql: &str,
 ) -> Result<(), String> {
+    if policy.result_protection.has_database_overrides(&connection.id)
+        && (crate::sql_risk::mcp_sql_has_forbidden_database_switch(sql, connection.db_type)
+            || crate::mcp_result_protection::query_has_unbound_database(sql, connection.db_type, active_database)
+            || sql_references_disallowed_database(
+                sql,
+                &connection.db_type,
+                active_database,
+                &[active_database.to_string()],
+            ))
+    {
+        return Err(crate::mcp_result_protection::SOURCE_UNRESOLVED.to_string());
+    }
     let Some(rule) = policy.connection_policies.iter().find(|rule| rule.connection_id == connection.id) else {
         return Ok(());
     };

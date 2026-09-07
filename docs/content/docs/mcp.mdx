@@ -212,6 +212,48 @@ Clients must supply `Authorization: Bearer <DBX_WEB_MCP_TOKEN>`. Browser-based c
 
 `dbx_open_table` and `dbx_execute_and_show` require the DBX desktop app and are unavailable in Web mode or when scoped policy hides UI tools. Whether other tools need Desktop depends on whether the connection uses native execution or a bridge/Agent path.
 
+## Result Data Protection
+
+**Settings → MCP → Result data protection** filters data on the MCP server before it reaches an AI client. It is off by default. Update both DBX and every standalone MCP server before relying on this policy; older MCP binaries do not enforce it.
+
+1. Select the global default, or add a connection/database override. Database names are exact matches. A database override replaces connection settings, which replace global settings; rule lists are not merged. Removing an override restores inheritance.
+2. Add rules manually or explicitly add the credential, phone, identity-number, and email templates. Review their patterns and actions before enabling the scope.
+3. Test synthetic samples, enable protection, and save. Preview returns matching columns, rule IDs, and actions, not sample values. Unsaved drafts do not change the active policy.
+
+Database overrides are supported on native MySQL, PostgreSQL, SQL Server, and SQLite (`main` only, with no attached databases). Requested and configured database names must exactly match the live catalog; aliases and case variants are not accepted, except that SQLite request labels normalize to `main`. Catalog access is required, and URL options must not redirect the database or run custom MySQL `sessionVariables`. These connections reject cross-database SQL, initialization scripts, existing stateful sessions, and merged transactional batches, even in disabled or name-only scopes. Queries use fresh bound sessions where the driver supports them. Metadata value suppression and routine-source restrictions also apply to disabled database scopes on these connections. Use a global or connection policy for other engines, including MongoDB; Redis rejects data operations when database overrides exist.
+
+With any database override, SQL tools accept only verified `SELECT` structures using ordinary named tables (or literal-only queries). `SHOW`, `CALL`, DML/DDL, `TABLE`, CTEs, set operations, derived/table-valued sources, `SELECT INTO`, ordinary function calls (including in predicates or ordering), and executable comments are refused, including in disabled/name-only scopes. Built-in expression syntax such as `TRIM` and `SUBSTRING` is still subject to the selected protection mode. This checks explicit database references; disabled/name-only scopes do not verify the underlying sources of views or synonyms. Database privileges must still restrict those sources.
+
+Rules combine optional, case-insensitive regular expressions for column name, database-reported data type, and value with schema/table restrictions. All configured conditions must match. Column rules check both a direct source column and its output alias. Value rules act on the whole matched cell, not a substring. Missing required types or unresolved restricted sources fail closed.
+
+| Action | Result |
+| --- | --- |
+| Remove | Omit the entire matching column, or a matching JSON property |
+| Fixed mask | Replace a non-null value with `[REDACTED]` |
+| Partial mask | Keep the configured leading/trailing characters; mask short values entirely |
+| Stable hash | Return an HMAC-SHA256 pseudonym using a locally generated, persisted key |
+| Deny | Reject the response without query data |
+
+Deny and remove take precedence; otherwise the first matching transformation wins. Matching uses original values. A value-based remove match in any returned row removes the column from all rows. Partial masking is not allowed on JSON containers; mask/remove the container or protect nested keys. Keep the hash key private and stable to preserve pseudonyms. Hashes still reveal equality and are not anonymous data.
+
+### Strict and Name-Only Modes
+
+**Strict** accepts direct columns (including `phone AS remark`) or a sole unmodified `*` from one verified base table. It verifies native metadata, binds execution to that relation, and rejects views, generated/computed columns, PostgreSQL parents with inherited/partition children, joins, CTEs, subqueries, unions, projected functions/concatenation/JSON extraction, unknown driver provenance, and ambiguous metadata. Native MySQL, PostgreSQL, SQLite, and SQL Server are supported when complete metadata is available; compatibility fallbacks, Agent/JDBC, and external-driver paths cannot establish this guarantee. For PostgreSQL and SQL Server, qualify the schema or configure a default schema. MySQL database and SQL Server schema names must exactly match the catalog. Stateful sessions, connection initialization scripts (including MySQL URL `sessionVariables`), and multi-statement transactional batches are unsupported in strict mode.
+
+**Name only** is an explicitly weaker boundary. It tracks simple direct aliases where possible, but expressions, views, functions, and transformed/renamed values can bypass field-name rules. It does not protect against arbitrary SQL transformations. Schema/table-restricted rules still fail closed when their source cannot be resolved.
+
+Both modes recursively process JSON objects, arrays, and JSON-encoded object/array strings. Strict mode rejects malformed JSON-like values and excessive nesting. Ordinary free text is not automatically classified: `remark = 'Call 13812345678'` is unchanged by a `phone` field-name rule. Add a value-format rule or mask/remove the free-text column. Templates intentionally do not enable broad value detection.
+
+### Output and Operations
+
+`dbx_execute_query` and every `dbx_execute_batch` result use the same filtered data for text `content` and `structuredContent`. Messages, raw attachments, and raw database errors are withheld. Metadata tools omit defaults, comments, and value-bearing annotations; routine source retrieval is blocked for protected scopes. MongoDB supports name-only filtering; Redis results are refused while their scope is protected. `dbx_execute_and_show` retains existing desktop permissions and returns only status to MCP.
+
+Invalid rules, unavailable policy, unsupported provenance, or processing failures return a data-free error, never raw results. Invalid saves retain the previous policy. MCP connection duplication preserves protection overrides. Filtering never widens connection/database/tool allowlists, read-only restrictions, confirmed SQL, production protection, or database-account privileges.
+
+Once an enabled persisted policy is used, DBX suppresses non-audit diagnostic logs in that host process until restart, including after protection is disabled. This covers driver tasks that can outlive requests. Preview does not enable this suppression. Audit events contain only connection/database identifiers, validated rule IDs, and actions, never SQL, sample/cell values, or dynamic column/JSON keys. Database-server and third-party infrastructure logs remain under their administrators' controls.
+
+<Callout type="warn">Filtering does not replace database least privilege. It cannot identify every sensitive free-text value, trace data previously copied into ordinary columns, or prevent all statistical inference and side effects when arbitrary SQL is permitted. Keep credentials, SQL permissions, and exposed tools narrowly scoped.</Callout>
+
 ## Safety and Environment Variables
 
 DBX stores one authoritative MCP policy under **Settings → MCP** and reloads it for every request:

@@ -191,6 +191,7 @@ import SettingsTransferPanel from "@/components/settings/SettingsTransferPanel.v
 import McpResourceScopePicker from "@/components/settings/McpResourceScopePicker.vue";
 import McpDatabaseScopePicker from "@/components/settings/McpDatabaseScopePicker.vue";
 import McpAuthorizationStepper from "@/components/settings/McpAuthorizationStepper.vue";
+import McpResultProtectionEditor from "@/components/settings/McpResultProtectionEditor.vue";
 import ScheduledDatabaseBackupSettings from "@/components/backup/ScheduledDatabaseBackupSettings.vue";
 import SqlFormatterSettingsPanel from "./SqlFormatterSettingsPanel.vue";
 import { APP_CUSTOM_UI_COLOR_DEFS, APP_THEME_PALETTES, type AppCornerStyle, type AppCustomUiColors, type AppThemeAppearance, type AppThemeMode, type AppThemePalette } from "@/lib/app/appTheme";
@@ -2576,7 +2577,7 @@ async function exportDebugLogs() {
 type McpConfigTab = "claude" | "cursor" | "codebuddy" | "zcode" | "trae" | "vscode" | "windsurf" | "codex" | "deepseek-harness" | "opencode" | "pi" | "cherry-studio" | "qoder";
 type McpCopyKind = "install" | "uninstall" | "http-endpoint" | "http-token" | "http-config" | `${McpConfigTab}-config`;
 type McpTransportTab = "stdio" | "http";
-type McpManagementTab = "access" | "permissions";
+type McpManagementTab = "access" | "permissions" | "result-protection";
 
 const mcpStatus = ref<McpServerStatus | null>(null);
 const mcpStatusLoading = ref(false);
@@ -2718,6 +2719,16 @@ async function saveMcpPolicy(partial: {
     await settingsStore.updateMcpGlobalPolicy(partial);
   } catch (e: any) {
     toast(t("settings.mcpPolicySaveFailed", { error: e?.message || String(e) }), 5000);
+  } finally {
+    mcpPolicySaving.value = false;
+  }
+}
+
+async function saveMcpResultProtection(resultProtection: import("@/lib/mcp/mcpResultProtection").McpResultProtectionPolicy) {
+  if (mcpPolicyControlsDisabled.value) throw new Error(t("settings.mcpResultUnavailable"));
+  mcpPolicySaving.value = true;
+  try {
+    await settingsStore.updateMcpGlobalPolicy({ resultProtection });
   } finally {
     mcpPolicySaving.value = false;
   }
@@ -8374,9 +8385,10 @@ LIMIT 100;</pre
               </div>
 
               <Tabs v-model="mcpManagementTab" class="space-y-4">
-                <TabsList class="grid h-9 w-full grid-cols-2">
-                  <TabsTrigger value="access">{{ t("settings.mcpManagementAccess") }}</TabsTrigger>
-                  <TabsTrigger value="permissions">{{ t("settings.mcpManagementPermissions") }}</TabsTrigger>
+                <TabsList class="grid h-auto min-h-9 w-full grid-cols-3">
+                  <TabsTrigger value="access" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpManagementAccess") }}</TabsTrigger>
+                  <TabsTrigger value="permissions" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpManagementPermissions") }}</TabsTrigger>
+                  <TabsTrigger value="result-protection" class="min-w-0 whitespace-normal text-center">{{ t("settings.mcpResultProtectionTitle") }}</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="access" class="m-0 space-y-6">
@@ -8805,6 +8817,9 @@ LIMIT 100;</pre
                       </div>
                     </template>
                   </McpAuthorizationStepper>
+                </TabsContent>
+                <TabsContent value="result-protection" class="m-0">
+                  <McpResultProtectionEditor :policy="settingsStore.mcpGlobalPolicy.resultProtection" :connections="mcpSelectableConnections" :disabled="mcpPolicyControlsDisabled" :save-policy="saveMcpResultProtection" />
                 </TabsContent>
                 <div v-if="mcpManagementTab === 'access'" class="space-y-5 border-t border-border/60 pt-5 sm:ml-1">
                   <div class="space-y-3">

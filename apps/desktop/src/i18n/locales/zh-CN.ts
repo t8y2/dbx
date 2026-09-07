@@ -2939,6 +2939,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "{type} 的默认模板",
     exportMarkdown: "导出为 Markdown",
     analysis: "AI 分析",
+    chartDownloadPng: "下载 PNG",
+    chartDownloadFailed: "图表图片下载失败",
+    chartData: "图表数据",
   },
   contextMenu: {
     openConnection: "打开连接",

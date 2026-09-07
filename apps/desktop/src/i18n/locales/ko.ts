@@ -2826,6 +2826,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "{type}의 기본 템플릿",
     exportMarkdown: "Markdown으로 내보내기",
     analysis: "AI 분석",
+    chartDownloadPng: "PNG 다운로드",
+    chartDownloadFailed: "차트 이미지를 다운로드하지 못했습니다",
+    chartData: "차트 데이터",
   },
   contextMenu: {
     openConnection: "연결 열기",

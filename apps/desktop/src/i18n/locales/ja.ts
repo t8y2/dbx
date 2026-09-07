@@ -2856,6 +2856,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "{type} のデフォルトテンプレート",
     exportMarkdown: "Markdown としてエクスポート",
     analysis: "AI 分析",
+    chartDownloadPng: "PNGをダウンロード",
+    chartDownloadFailed: "グラフ画像をダウンロードできませんでした",
+    chartData: "グラフのデータ",
     agentSteps: {
       generated: "SQL生成完了",
       noSql: "SQLが見つかりません",

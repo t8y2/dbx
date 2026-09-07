@@ -3007,6 +3007,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "{type} için varsayılan şablon",
     exportMarkdown: "Markdown Olarak Dışa Aktar",
     analysis: "Yapay Zekâ Analizi",
+    chartDownloadPng: "PNG İndir",
+    chartDownloadFailed: "Grafik görüntüsü indirilemedi",
+    chartData: "Grafik verileri",
   },
   contextMenu: {
     openConnection: "Bağlantıyı Aç",

@@ -96,4 +96,19 @@ describe("buildAiChartOption", () => {
     expect(option.dataZoom).toHaveLength(2);
     expect(option.xAxis).toMatchObject({ axisLabel: { rotate: 35, overflow: "truncate" } });
   });
+
+  it("keeps the dense-axis slider at the canvas bottom edge and lifts the legend above it", () => {
+    const dense = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "line", xAxis: { values: Array.from({ length: 13 }, (_, i) => `day-${i}`) }, series: [{ name: "s", data: Array.from({ length: 13 }, (_, i) => i) }] })), light);
+    if (Array.isArray(dense.dataZoom)) {
+      const slider = dense.dataZoom.find((zoom) => typeof zoom === "object" && zoom !== null && "type" in zoom && (zoom as { type?: string }).type === "slider") as { bottom?: number; height?: number } | undefined;
+      expect(slider?.bottom).toBe(0);
+      expect(slider?.height).toBe(16);
+    }
+    expect(dense.legend).toMatchObject({ bottom: 32 });
+    expect(dense.grid).toMatchObject({ bottom: 76 });
+
+    const sparse = buildAiChartOption(specOf(JSON.stringify({ version: 1, type: "line", xAxis: { values: ["a", "b"] }, series: [{ name: "s", data: [1, 2] }] })), light);
+    expect(sparse.dataZoom).toBeUndefined();
+    expect(sparse.legend).toMatchObject({ bottom: 0 });
+  });
 });

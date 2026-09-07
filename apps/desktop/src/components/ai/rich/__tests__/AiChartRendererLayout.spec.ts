@@ -16,4 +16,12 @@ describe("AiChartRenderer layout", () => {
     expect(rendererSource).toContain('await import("@tauri-apps/plugin-fs")');
     expect(rendererSource).toContain("await writeFile(path, new Uint8Array(await blob.arrayBuffer()))");
   });
+
+  it("surfaces download failures through a localized toast instead of a hardcoded English tooltip", () => {
+    expect(rendererSource).toContain("t('ai.chartDownloadPng')");
+    expect(rendererSource).toContain('toast(t("ai.chartDownloadFailed"))');
+    expect(rendererSource).not.toContain('title="Download PNG"');
+    expect(rendererSource).not.toContain('aria-label="Download PNG"');
+    expect(rendererSource).toContain('t("ai.chartData")');
+  });
 });

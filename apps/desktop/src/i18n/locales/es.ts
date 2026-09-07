@@ -2820,6 +2820,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "Plantilla predeterminada para {type}",
     exportMarkdown: "Exportar como Markdown",
     analysis: "AI Analysis",
+    chartDownloadPng: "Descargar PNG",
+    chartDownloadFailed: "No se pudo descargar la imagen del gráfico",
+    chartData: "Datos del gráfico",
     agentSteps: {
       generated: "SQL generado",
       noSql: "No se encontró SQL",

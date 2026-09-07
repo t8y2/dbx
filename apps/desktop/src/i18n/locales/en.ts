@@ -3016,6 +3016,9 @@ export default {
     templateDefaultBadgeTitle: "Default template for {type}",
     exportMarkdown: "Export as Markdown",
     analysis: "AI Analysis",
+    chartDownloadPng: "Download PNG",
+    chartDownloadFailed: "Failed to download chart image",
+    chartData: "Chart data",
   },
   contextMenu: {
     openConnection: "Open Connection",

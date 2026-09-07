@@ -2822,6 +2822,9 @@ export default withEnglishFallback({
     templateDefaultBadgeTitle: "Modelo padrão para {type}",
     exportMarkdown: "Exportar como Markdown",
     analysis: "AI Analysis",
+    chartDownloadPng: "Baixar PNG",
+    chartDownloadFailed: "Falha ao baixar a imagem do gráfico",
+    chartData: "Dados do gráfico",
     agentSteps: {
       generated: "SQL gerado",
       noSql: "Nenhum SQL encontrado",

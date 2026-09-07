@@ -2934,6 +2934,9 @@ export default withEnglishFallback({
     editResend: "重新傳送",
     editCancel: "取消",
     cannotDeleteActiveConfig: "無法刪除當前活躍的配置，請先切換到其他配置",
+    chartDownloadPng: "下載 PNG",
+    chartDownloadFailed: "圖表圖片下載失敗",
+    chartData: "圖表資料",
   },
   contextMenu: {
     openConnection: "開啟連線",

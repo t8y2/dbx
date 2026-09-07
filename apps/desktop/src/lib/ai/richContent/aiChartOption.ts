@@ -40,13 +40,16 @@ export function buildAiChartOption(spec: AiChartSpec, theme: AiChartTheme): ECha
   }
 
   const denseCategories = spec.xAxis.values.length > 12;
+  // The slider dataZoom band owns the canvas bottom edge (bottom: 0). The legend
+  // must sit ABOVE that band — an unplaced legend (bottom: 0) would overlap the
+  // slider and make both unreadable on dense axes.
   return {
     aria,
     tooltip: { trigger: "axis" },
-    legend: { bottom: 0, textStyle: legendTextStyle(theme) },
+    legend: denseCategories ? { bottom: 32, textStyle: legendTextStyle(theme) } : { bottom: 0, textStyle: legendTextStyle(theme) },
     title: spec.title ? { text: spec.title, left: "center", textStyle: { color: theme.isDark ? "#ccc" : "#333", fontSize: 13 } } : undefined,
     grid: { left: 60, right: 20, top: spec.title ? 40 : 20, bottom: denseCategories ? 76 : 40 },
-    dataZoom: denseCategories ? [{ type: "inside" }, { type: "slider", bottom: 8, height: 16 }] : undefined,
+    dataZoom: denseCategories ? [{ type: "inside" }, { type: "slider", bottom: 0, height: 16 }] : undefined,
     xAxis: {
       type: "category",
       name: spec.xAxis.label ?? undefined,

@@ -639,7 +639,7 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
     }
 
     let row_number_order = order_by_index
-        .map(|index| statement[index..].trim().to_string())
+        .map(|index| statement_for_sql_suffix(statement[index..].trim()))
         .unwrap_or_else(|| "ORDER BY (SELECT NULL)".to_string());
     let end = offset + limit;
     Some(format!(
@@ -3030,6 +3030,21 @@ mod tests {
         let generated = result.sql.expect("build SQL Server page SQL");
         assert!(generated.contains("FROM (SELECT\n*\nFROM\ncode\n-- WHERE\n-- ccode = '1002'\n) dbx_page_source"));
         assert!(!generated.contains("-- ccode = '1002') dbx_page_source"));
+    }
+
+    #[test]
+    fn sqlserver_later_page_keeps_row_number_window_after_comment_after_order_by() {
+        let sql = "SELECT\n*\nFROM\ncode\nORDER BY\nccode -- sort";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        let generated = result.sql.expect("build SQL Server page SQL");
+        assert!(generated.contains("ROW_NUMBER() OVER (ORDER BY\nccode -- sort\n) AS [__dbx_row_num]"));
+        assert!(!generated.contains("-- sort) AS [__dbx_row_num]"));
     }
 
     #[test]

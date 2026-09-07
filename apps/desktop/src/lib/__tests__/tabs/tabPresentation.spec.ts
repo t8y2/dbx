@@ -428,7 +428,7 @@ describe("shared tab presentation helpers", () => {
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {
     const activeClassic = tabColorStyle(queryTab({}), true, true);
-    expect(activeClassic?.boxShadow).toContain("var(--ring)");
+    expect(activeClassic?.boxShadow).toContain("var(--foreground)");
     const inactiveModern = tabColorStyle(queryTab({}), false, false);
     expect(inactiveModern?.borderColor).toBeUndefined();
   });

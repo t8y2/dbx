@@ -43,6 +43,7 @@ import {
   ScrollText,
   ShieldCheck,
   Square,
+  Table,
   Table2,
   TableProperties,
   TerminalSquare,
@@ -701,7 +702,7 @@ function iconFor(row: ObjectBrowserRow) {
   if (row.type === "SEQUENCE") return ListTree;
   if (row.type === "PACKAGE" || row.type === "PACKAGE_BODY") return Package;
   if (row.type === "TYPE" || row.type === "TYPE_BODY") return Braces;
-  return Table2;
+  return Table;
 }
 
 function typeLabel(row: ObjectBrowserRow) {
@@ -910,7 +911,8 @@ function groupedFilteredRows() {
 }
 
 function iconClass(type: ObjectBrowserRow["type"]) {
-  if (type === "VIEW" || type === "MATERIALIZED_VIEW") return "text-purple-500";
+  if (type === "VIEW") return "text-purple-500";
+  if (type === "MATERIALIZED_VIEW") return "text-indigo-500";
   if (type === "PROCEDURE") return "text-blue-500";
   if (type === "FUNCTION") return "text-amber-500";
   if (type === "TRIGGER") return "text-rose-500";

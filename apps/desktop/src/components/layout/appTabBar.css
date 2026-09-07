@@ -31,6 +31,139 @@
   overflow: visible !important;
 }
 
+/* Horizontal tab bars keep pinned tabs in their own row. Vertical bars use
+ * the same strip for both sections so pinned tabs remain at the top. */
+.app-tab-bar.horizontal-fixed-tabs {
+  height: 4.5rem !important;
+  min-height: 4.5rem;
+}
+
+.app-tab-bar.horizontal-fixed-tabs > div:has(.horizontal-fixed-tabs-scroll) {
+  height: 100% !important;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.horizontal-fixed-tabs-scroll {
+  height: 100% !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 0 !important;
+  overscroll-behavior-x: none;
+  overflow-x: hidden !important;
+  overflow-y: hidden !important;
+}
+
+.tab-section-frame--vertical,
+.tab-section--vertical {
+  display: contents;
+}
+
+.tab-section-frame--horizontal {
+  display: contents;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 100%;
+  height: 2.25rem;
+  min-height: 2.25rem;
+  max-height: 2.25rem;
+  flex: 0 0 2.25rem;
+  overflow: hidden;
+}
+
+.tab-section--horizontal {
+  display: flex;
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  align-items: center;
+  gap: 0;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section--horizontal {
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: none;
+  touch-action: pan-x;
+  scrollbar-width: none;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section--horizontal::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-section--horizontal > * {
+  flex-shrink: 0;
+}
+
+/* The fixed two-row layout does not need the trailing flex spacer. Keeping it
+ * in the max-content row would manufacture horizontal overflow even when all
+ * tabs already fit. */
+.horizontal-fixed-tabs-scroll .tab-section--horizontal > [data-tauri-drag-region] {
+  width: 0;
+  min-width: 0;
+  flex: 0 0 0;
+}
+
+/* Keep the overflow affordance out of the measurement box. Otherwise its own
+ * width reduces the scroll viewport and can create a false overflow state. */
+.tab-overflow-control {
+  padding: 0;
+  background: transparent;
+}
+
+.has-tab-overflow-control .app-tab-strip {
+  padding-inline-end: 2.5rem;
+}
+
+.has-tab-overflow-control .app-tab-scrollbar {
+  inset-inline-end: 2.5rem;
+}
+
+/* In the two-row layout, only the first row shares its right edge with the
+ * overflow button. The fixed row must retain the full width of its own strip. */
+.horizontal-fixed-tabs .has-tab-overflow-control .app-tab-strip {
+  padding-inline-end: 0;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control {
+  padding-inline-end: 2.5rem;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control .app-tab-scrollbar {
+  inset-inline-end: 2.5rem;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:not(:first-child) .app-tab-scrollbar {
+  inset-inline-end: 0;
+}
+
+.horizontal-fixed-tabs .tab-overflow-control {
+  box-sizing: border-box;
+  width: 2.5rem;
+  padding-inline: 1px;
+  height: 2.25rem !important;
+  align-items: center;
+}
+
+.tab-overflow-control > * {
+  max-width: 100%;
+}
+
+.tab-overflow-control button {
+  width: 36px;
+  min-width: 0;
+  border-color: color-mix(in oklch, var(--foreground) 18%, var(--border));
+  background-color: color-mix(in oklch, var(--muted) 72%, var(--background));
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+
 /* 经典布局 + 多行模式：优化多行标签显示 */
 .app-tab-scroll.classic-wrap {
   row-gap: 0.25rem;
@@ -50,6 +183,18 @@
 
 .app-tab-pill[data-active-tab="false"]:hover {
   background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill {
+  border: 0.5px solid color-mix(in oklch, var(--foreground) 14%, var(--border));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill[data-active-tab="true"] {
+  border-color: color-mix(in oklch, var(--foreground) 42%, var(--border));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill[data-active-tab="false"]:hover {
+  border-color: color-mix(in oklch, var(--foreground) 28%, var(--border));
 }
 
 .dirty-tab-marker {

@@ -106,7 +106,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(overflowFilter).not.toContain("tabSearchQuery");
     const overflowOpenWatch = sourceBetween("watch(tabOverflowOpen", "const showOverflowControl");
     expect(overflowOpenWatch).toContain('tabOverflowSearchQuery.value = "";');
-    const stripFilter = sourceBetween("const filteredPinnedTabs", "const stripEntries");
+    const stripFilter = sourceBetween("const filteredPinnedTabs", "function buildStripEntries");
     expect(stripFilter).toContain("tabSearchQuery.value.trim()");
     expect(stripFilter).not.toContain("tabOverflowSearchQuery");
     expect(source).toContain('<Input v-model="tabOverflowSearchQuery" data-group-tab-search-input');

@@ -30,39 +30,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import {
-  AlertTriangle,
-  ArrowDown,
-  ArrowDownUp,
-  ArrowRight,
-  CalendarClock,
-  ChevronDown,
-  ChevronsLeft,
-  ChevronsRight,
-  Code2,
-  Copy,
-  Database,
-  Gauge,
-  KeyRound,
-  ListFilter,
-  Maximize2,
-  Minimize2,
-  Network,
-  Package,
-  PanelTop,
-  Pencil,
-  PencilRuler,
-  Pin,
-  RotateCcw,
-  RotateCw,
-  Search,
-  Settings,
-  ShieldCheck,
-  Table2,
-  TableProperties,
-  X,
-  Activity,
-} from "@lucide/vue";
+import { ArrowDown, ArrowDownUp, ArrowRight, ChevronDown, ChevronsLeft, ChevronsRight, Copy, ListFilter, Maximize2, Minimize2, Package, PanelTop, Pencil, Pin, RotateCcw, RotateCw, Search, Settings, X } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -70,8 +38,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
+import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -83,7 +51,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -123,6 +91,10 @@ const connectionStore = useConnectionStore();
 const { toast } = useToast();
 const tabsContainerRef = ref<HTMLElement | null>(null);
 const { hasTabOverflow, scrollThumbLeftPercent, scrollThumbWidthPercent, isScrollbarDragging, updateScrollButtons, onTabsWheel, startScrollbarDrag } = useTabScroll(tabsContainerRef);
+const fixedTabsRowRef = ref<HTMLElement | null>(null);
+const regularTabsRowRef = ref<HTMLElement | null>(null);
+const fixedTabsScroll = useTabScroll(fixedTabsRowRef);
+const regularTabsScroll = useTabScroll(regularTabsRowRef);
 const editingTabId = ref<string | null>(null);
 const editingTitle = ref("");
 // Drag suppression must survive pointerup: the browser fires click *after*
@@ -204,6 +176,7 @@ function getSpecialPageTabMenuItems(surface: "settings" | "driverStore"): Contex
   ];
 }
 
+const hasHorizontalFixedRows = computed(() => !isVerticalLayout.value && props.tabs.some((tab) => tab.pinned) && (props.tabs.some((tab) => !tab.pinned) || showSpecialPageTabs.value));
 const tabBarClass = computed(() => [
   isVerticalLayout.value
     ? `vertical-tab-layout h-full w-60 flex-col bg-background ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
@@ -211,6 +184,7 @@ const tabBarClass = computed(() => [
       ? "bg-muted"
       : `bg-background ${settingsStore.editorSettings.tabPlacement === "bottom" ? "border-t" : "border-b"}`,
   isVerticalLayout.value && props.tabBarCollapsed ? "vertical-tab-layout--collapsed" : "",
+  hasHorizontalFixedRows.value ? "horizontal-fixed-tabs" : "",
 ]);
 const tabsContainerStyle = computed<CSSProperties>(() => ({
   msOverflowStyle: "none",
@@ -248,7 +222,40 @@ watch(tabOverflowOpen, (open) => {
   }
 });
 
-const showOverflowControl = computed(() => props.tabs.length > 0 && hasTabOverflow.value && !isWrapLayout.value && !isVerticalLayout.value);
+function setTabSectionRef(key: string, element: Element | null) {
+  const row = element instanceof HTMLElement ? element : null;
+  if (key === "fixed") {
+    fixedTabsRowRef.value = row;
+  } else {
+    regularTabsRowRef.value = row;
+  }
+}
+
+function tabSectionScroll(key: string) {
+  return key === "fixed" ? fixedTabsScroll : regularTabsScroll;
+}
+
+function tabSectionThumbStyle(key: string): CSSProperties {
+  const scroll = tabSectionScroll(key);
+  return {
+    insetInlineStart: `${scroll.scrollThumbLeftPercent.value}%`,
+    width: `${scroll.scrollThumbWidthPercent.value}%`,
+  };
+}
+
+function onHorizontalTabWheel(event: WheelEvent) {
+  // A trackpad can emit vertical and horizontal deltas together. Only let a
+  // clearly horizontal gesture reach the row's native horizontal scroller.
+  if (Math.abs(event.deltaX) < Math.abs(event.deltaY)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
+const showOverflowControl = computed(() => {
+  const hasOverflow = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value : hasTabOverflow.value;
+  return props.tabs.length > 0 && hasOverflow && !isWrapLayout.value && !isVerticalLayout.value;
+});
 const tabTailDragRegionClass = computed(() => (showOverflowControl.value || isWrapLayout.value || isVerticalLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
 
 watch(
@@ -646,28 +653,33 @@ const filteredRegularTabs = computed(() => {
   return query ? sortedRegularTabs.value.filter((tab) => tabMatchesSearch(tab, query)) : sortedRegularTabs.value;
 });
 
-const stripEntries = computed<StripEntry[]>(() => {
+function buildStripEntries(section: QueryTab[], pinned: boolean): StripEntry[] {
   const entries: StripEntry[] = [];
   const grouping = settingsStore.editorSettings.tabGroupMode !== "none";
-  for (const [section, pinned] of [
-    [filteredPinnedTabs.value, true],
-    [filteredRegularTabs.value, false],
-  ] as const) {
-    section.forEach((tab, index) => {
-      const first = grouping && (index === 0 || tabGroupKey(section[index - 1]!) !== tabGroupKey(tab));
-      const last = grouping && (index === section.length - 1 || tabGroupKey(section[index + 1]!) !== tabGroupKey(tab));
-      if (first) {
-        const groupKey = tabGroupKey(tab);
-        entries.push({ kind: "header", key: `header:${tab.id}`, tab, pinned, count: section.filter((item) => tabGroupKey(item) === groupKey).length });
-      }
-      // Searching must reveal collapsed clusters, matching the upstream bar.
-      if (grouping && !tabSearchQuery.value.trim() && isTabGroupCollapsed(tab)) {
-        return;
-      }
-      entries.push({ kind: "tab", key: tab.id, tab, groupFirst: first, groupLast: last, grouping });
-    });
-  }
+  section.forEach((tab, index) => {
+    const first = grouping && (index === 0 || tabGroupKey(section[index - 1]!) !== tabGroupKey(tab));
+    const last = grouping && (index === section.length - 1 || tabGroupKey(section[index + 1]!) !== tabGroupKey(tab));
+    if (first) {
+      const groupKey = tabGroupKey(tab);
+      entries.push({ kind: "header", key: `header:${tab.id}`, tab, pinned, count: section.filter((item) => tabGroupKey(item) === groupKey).length });
+    }
+    // Searching must reveal collapsed clusters, matching the upstream bar.
+    if (grouping && !tabSearchQuery.value.trim() && isTabGroupCollapsed(tab)) {
+      return;
+    }
+    entries.push({ kind: "tab", key: tab.id, tab, groupFirst: first, groupLast: last, grouping });
+  });
   return entries;
+}
+
+const pinnedStripEntries = computed(() => buildStripEntries(filteredPinnedTabs.value, true));
+const regularStripEntries = computed(() => buildStripEntries(filteredRegularTabs.value, false));
+const stripSections = computed(() => {
+  const fixed = { key: "fixed", pinned: true, entries: pinnedStripEntries.value };
+  const regular = { key: "regular", pinned: false, entries: regularStripEntries.value };
+  if (isVerticalLayout.value) return [fixed, regular];
+  if (!hasHorizontalFixedRows.value) return [regular];
+  return settingsStore.editorSettings.tabPlacement === "top" ? [regular, fixed] : [fixed, regular];
 });
 
 function tabColorStyle(tab: QueryTab): CSSProperties | undefined {
@@ -1146,10 +1158,19 @@ watch(
 );
 
 watch(
-  () => props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}`).join("|"),
+  () => [props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"), props.specialPageTabs?.settingsOpen, props.specialPageTabs?.driverStoreOpen, settingsStore.editorSettings.tabLayout],
   () => {
-    nextTick(updateScrollButtons);
+    // Tab content can change without changing the scroll container's size.
+    // Re-measure after Vue has committed the new pills to avoid stale overflow controls.
+    nextTick(() =>
+      requestAnimationFrame(() => {
+        updateScrollButtons();
+        fixedTabsScroll.updateScrollButtons();
+        regularTabsScroll.updateScrollButtons();
+      }),
+    );
   },
+  { flush: "post" },
 );
 
 watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?.driverStoreActive, () => settingsStore.editorSettings.tabPlacement, () => props.tabBarCollapsed], () => {
@@ -1191,185 +1212,205 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
         <component :is="tabBarCollapseIcon" class="h-4 w-4" />
       </button>
     </div>
-    <div class="flex w-full min-w-0 shrink-0 overflow-hidden" :class="isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2'">
+    <div class="relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl }]">
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
-        <div v-if="showOverflowControl" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
+        <div v-if="showOverflowControl && !hasHorizontalFixedRows" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
         </div>
         <div
           ref="tabsContainerRef"
           class="app-tab-scroll flex w-full min-w-0 flex-1"
           :class="[
-            isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-1.5 overflow-x-auto py-1.5',
+            isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1' : isClassicLayout ? 'h-full items-center overflow-x-auto' : 'h-full items-center gap-0 overflow-x-auto py-1.5',
             isWrapLayout ? 'wrap-mode' : '',
             isWrapLayout && isClassicLayout ? 'classic-wrap' : '',
+            hasHorizontalFixedRows ? 'horizontal-fixed-tabs-scroll' : '',
           ]"
           :style="tabsContainerStyle"
-          @scroll="!isVerticalLayout && updateScrollButtons()"
-          @wheel="!isVerticalLayout && onTabsWheel($event)"
+          @scroll="!isVerticalLayout && !hasHorizontalFixedRows && updateScrollButtons()"
+          @wheel="!isVerticalLayout && !hasHorizontalFixedRows && onTabsWheel($event)"
         >
-          <template v-for="entry in stripEntries" :key="entry.key">
-            <CustomContextMenu v-if="entry.kind === 'header'" :items="() => getTabGroupMenuItems(entry.tab)" v-slot="{ onContextMenu }">
-              <button
-                type="button"
-                class="tab-group-header"
-                :class="{ 'tab-group-header--collapsed': isTabGroupCollapsed(entry.tab), 'tab-group-header--active': isTabGroupActive(entry.tab) }"
-                :style="tabGroupStyle(entry.tab)"
-                :aria-expanded="!isTabGroupCollapsed(entry.tab)"
-                :title="tabGroupLabel(entry.tab)"
-                @click="toggleTabGroup(entry.tab)"
-                @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
+          <template v-for="section in stripSections" :key="section.key">
+            <div
+              class="tab-section-frame"
+              :class="[
+                isVerticalLayout ? 'tab-section-frame--vertical' : ['tab-section-frame--horizontal', isClassicLayout && !hasHorizontalFixedRows ? 'h-full' : ''],
+                { 'tab-section-frame--with-overflow-control': hasHorizontalFixedRows && section.key === stripSections[0]?.key && showOverflowControl },
+              ]"
+            >
+              <div
+                v-if="hasHorizontalFixedRows && tabSectionScroll(section.key).hasTabOverflow.value"
+                class="app-tab-scrollbar"
+                :class="[section.pinned ? 'app-tab-scrollbar--bottom' : '', { 'app-tab-scrollbar--dragging': tabSectionScroll(section.key).isScrollbarDragging.value }]"
+                @pointerdown="tabSectionScroll(section.key).startScrollbarDrag($event)"
               >
-                <span class="tab-group-header-content">
-                  <span class="tab-group-marker" aria-hidden="true" />
-                  <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
-                  <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(entry.tab) ? '-rotate-90' : ''" aria-hidden="true" />
-                  <span class="tab-group-label">{{ tabGroupLabel(entry.tab) }}</span>
-                  <span v-if="isTabGroupCollapsed(entry.tab)" class="tab-group-count">{{ entry.count }}</span>
-                </span>
-              </button>
-            </CustomContextMenu>
-            <CustomContextMenu v-else :items="getTabMenuItems(entry.tab)" v-slot="{ onContextMenu }">
-              <div :class="isClassicLayout && !isVerticalLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
-                <Tooltip>
-                  <TooltipTrigger as-child>
-                    <div
-                      class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                      :class="[
-                        isClassicLayout
-                          ? ['h-full border-r border-border/80 font-medium dark:border-border/45', isTabActive(entry.tab) ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
-                          : ['h-7 rounded-md border', isTabActive(entry.tab) ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
-                        {
-                          'tab-group-tab': entry.grouping,
-                          'tab-group-tab--first': entry.grouping && entry.groupFirst,
-                          'tab-group-tab--last': entry.grouping && entry.groupLast,
-                        },
-                      ]"
-                      :style="[tabColorStyle(entry.tab), entry.grouping ? tabGroupStyle(entry.tab) : undefined, tabDropStyle(entry.tab)]"
-                      :data-active-tab="isTabActive(entry.tab)"
-                      :data-tab-id="entry.tab.id"
-                      @pointerdown="handleTabPointerDown($event, entry.tab)"
-                      @click="handleTabClick(entry.tab)"
-                      @dblclick="handleTabDoubleClick(entry.tab, $event)"
-                      @mousedown.middle.prevent="closeTab(entry.tab)"
+                <div class="app-tab-scrollbar__thumb" :style="tabSectionThumbStyle(section.key)" />
+              </div>
+              <div
+                :ref="(element) => setTabSectionRef(section.key, element as Element | null)"
+                class="tab-section"
+                :class="isVerticalLayout ? 'tab-section--vertical' : ['tab-section--horizontal', isClassicLayout && !hasHorizontalFixedRows ? 'h-full' : '']"
+                @scroll="hasHorizontalFixedRows && tabSectionScroll(section.key).updateScrollButtons()"
+                @wheel="hasHorizontalFixedRows && onHorizontalTabWheel($event)"
+              >
+                <template v-for="entry in section.entries" :key="entry.key">
+                  <CustomContextMenu v-if="entry.kind === 'header'" :items="() => getTabGroupMenuItems(entry.tab)" v-slot="{ onContextMenu }">
+                    <button
+                      type="button"
+                      class="tab-group-header"
+                      :class="{ 'tab-group-header--collapsed': isTabGroupCollapsed(entry.tab), 'tab-group-header--active': isTabGroupActive(entry.tab) }"
+                      :style="tabGroupStyle(entry.tab)"
+                      :aria-expanded="!isTabGroupCollapsed(entry.tab)"
+                      :title="tabGroupLabel(entry.tab)"
+                      @click="toggleTabGroup(entry.tab)"
+                      @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
                     >
-                      <TabExecutionStatus :tab="entry.tab">
-                        <span class="shrink-0" :class="tabIconClass(entry.tab)">
-                          <AlertTriangle v-if="entry.tab.externalSqlFileMissing" class="h-3.5 w-3.5" />
-                          <Table2 v-else-if="entry.tab.mode === 'data' || entry.tab.mode === 'mongo' || entry.tab.mode === 'redis' || entry.tab.mode === 'hbase'" class="h-3.5 w-3.5" />
-                          <DatabaseIcon v-else-if="entry.tab.mode === 'mq'" :db-type="tabDatabaseIconType(entry.tab)" class="h-3.5 w-3.5" />
-                          <TableProperties v-else-if="entry.tab.mode === 'vector'" class="h-3.5 w-3.5" />
-                          <KeyRound v-else-if="entry.tab.mode === 'etcd' || entry.tab.mode === 'zookeeper' || entry.tab.mode === 'consul'" class="h-3.5 w-3.5" />
-                          <Gauge v-else-if="entry.tab.mode === 'consul-overview' || entry.tab.mode === 'etcd-dashboard' || entry.tab.mode === 'mysql-dashboard' || entry.tab.mode === 'postgres-dashboard' || entry.tab.mode === 'nacos-dashboard'" class="h-3.5 w-3.5" />
-                          <ShieldCheck v-else-if="entry.tab.mode === 'etcd-access-control'" class="h-3.5 w-3.5" />
-                          <Network v-else-if="entry.tab.mode === 'nacos'" class="h-3.5 w-3.5" />
-                          <Database v-else-if="entry.tab.mode === 'databases'" class="h-3.5 w-3.5" />
-                          <TableProperties v-else-if="entry.tab.mode === 'objects'" class="h-3.5 w-3.5" />
-                          <PencilRuler v-else-if="entry.tab.mode === 'structure'" class="h-3.5 w-3.5" />
-                          <CalendarClock v-else-if="entry.tab.mode === 'dameng-jobs'" class="h-3.5 w-3.5" />
-                          <Activity v-else-if="entry.tab.mode === 'processlist' || entry.tab.mode === 'sqlserver-trace'" class="h-3.5 w-3.5" />
-                          <Gauge v-else-if="entry.tab.mode === 'dolt-version-control'" class="h-3.5 w-3.5" />
-                          <Code2 v-else class="h-3.5 w-3.5" />
-                        </span>
-                      </TabExecutionStatus>
-                      <span v-if="isTabBarCollapsed && isDirtyTab(entry.tab)" class="compact-dirty-tab-marker" aria-hidden="true" />
-                      <input
-                        v-if="editingTabId === entry.tab.id && !isTabBarCollapsed"
-                        v-model="editingTitle"
-                        :data-tab-title-input="entry.tab.id"
-                        :aria-label="t('contextMenu.renameTab')"
-                        class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
-                        @click.stop
-                        @mousedown.stop
-                        @keydown.enter.prevent="commitRenameTab(entry.tab)"
-                        @keydown.escape.prevent="cancelRenameTab"
-                        @blur="commitRenameTab(entry.tab)"
-                      />
-                      <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
-                        <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
-                        <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabDisplayTitle(entry.tab, t) }}</span>
+                      <span class="tab-group-header-content">
+                        <span class="tab-group-marker" aria-hidden="true" />
+                        <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
+                        <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(entry.tab) ? '-rotate-90' : ''" aria-hidden="true" />
+                        <span class="tab-group-label">{{ tabGroupLabel(entry.tab) }}</span>
+                        <span v-if="isTabGroupCollapsed(entry.tab)" class="tab-group-count">{{ entry.count }}</span>
                       </span>
-                      <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
-                      <button v-if="entry.tab.pinned && !isTabBarCollapsed" class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0" :aria-label="t('contextMenu.unpinTab')" :title="t('contextMenu.unpinTab')" @pointerdown.stop @click.stop="queryStore.togglePinnedTab(entry.tab.id)">
-                        <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
-                      </button>
-                      <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
+                    </button>
+                  </CustomContextMenu>
+                  <CustomContextMenu v-else-if="entry.kind === 'tab'" :items="getTabMenuItems(entry.tab)" v-slot="{ onContextMenu }">
+                    <div :class="isClassicLayout && !isVerticalLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+                      <Tooltip>
+                        <TooltipTrigger as-child>
+                          <div
+                            class="app-tab-pill group flex cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                            :class="[
+                              isClassicLayout
+                                ? ['h-full border-r border-border/80 font-medium dark:border-border/45', isTabActive(entry.tab) ? 'bg-background text-foreground' : 'text-foreground/70 hover:text-foreground/90']
+                                : ['h-7 rounded-md border', isTabActive(entry.tab) ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
+                              {
+                                'tab-group-tab': entry.grouping,
+                                'tab-group-tab--first': entry.grouping && entry.groupFirst,
+                                'tab-group-tab--last': entry.grouping && entry.groupLast,
+                              },
+                            ]"
+                            :style="[tabColorStyle(entry.tab), entry.grouping ? tabGroupStyle(entry.tab) : undefined, tabDropStyle(entry.tab)]"
+                            :data-active-tab="isTabActive(entry.tab)"
+                            :data-tab-id="entry.tab.id"
+                            @pointerdown="handleTabPointerDown($event, entry.tab)"
+                            @click="handleTabClick(entry.tab)"
+                            @dblclick="handleTabDoubleClick(entry.tab, $event)"
+                            @mousedown.middle.prevent="closeTab(entry.tab)"
+                          >
+                            <TabExecutionStatus :tab="entry.tab">
+                              <span class="shrink-0" :class="tabIconClass(entry.tab)">
+                                <TabModeIcon :tab="entry.tab" class="h-3.5 w-3.5" />
+                              </span>
+                            </TabExecutionStatus>
+                            <span v-if="isTabBarCollapsed && isDirtyTab(entry.tab)" class="compact-dirty-tab-marker" aria-hidden="true" />
+                            <input
+                              v-if="editingTabId === entry.tab.id && !isTabBarCollapsed"
+                              v-model="editingTitle"
+                              :data-tab-title-input="entry.tab.id"
+                              :aria-label="t('contextMenu.renameTab')"
+                              class="h-5 min-w-0 flex-1 rounded border border-ring bg-background px-1.5 text-xs font-normal text-foreground outline-none"
+                              @click.stop
+                              @mousedown.stop
+                              @keydown.enter.prevent="commitRenameTab(entry.tab)"
+                              @keydown.escape.prevent="cancelRenameTab"
+                              @blur="commitRenameTab(entry.tab)"
+                            />
+                            <span v-else-if="!isTabBarCollapsed" class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden text-foreground">
+                              <span v-if="isDirtyTab(entry.tab)" aria-hidden="true" class="dirty-tab-marker">*</span>
+                              <span class="min-w-0 flex-1 truncate" :style="tabTitleStyle(entry.tab)">{{ tabDisplayTitle(entry.tab, t) }}</span>
+                            </span>
+                            <ReadOnlySessionControl v-if="!isTabBarCollapsed" :connection-id="entry.tab.connectionId" compact />
+                            <button
+                              v-if="entry.tab.pinned && !isTabBarCollapsed"
+                              class="rounded p-0.5 text-primary hover:bg-muted-foreground/20 shrink-0"
+                              :aria-label="t('contextMenu.unpinTab')"
+                              :title="t('contextMenu.unpinTab')"
+                              @pointerdown.stop
+                              @click.stop="queryStore.togglePinnedTab(entry.tab.id)"
+                            >
+                              <Pin class="h-3 w-3 fill-current" aria-hidden="true" />
+                            </button>
+                            <button v-if="!isTabBarCollapsed" class="rounded hover:bg-muted-foreground/20 p-0.5 shrink-0" :aria-label="t('contextMenu.closeTab')" :title="t('contextMenu.closeTab')" @pointerdown.stop @click.stop="closeTab(entry.tab)">
+                              <X class="h-3 w-3" />
+                            </button>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent :side="tabTooltipSide" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
+                          <template v-for="line in tabTooltipLines(entry.tab, t)" :key="line.label">
+                            <span class="font-medium opacity-70">{{ line.label }}</span>
+                            <span>{{ line.value }}</span>
+                          </template>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                  </CustomContextMenu>
+                </template>
+                <template v-if="!section.pinned && showSpecialPageTabs">
+                  <CustomContextMenu v-if="specialPageTabs?.settingsOpen" :items="getSpecialPageTabMenuItems('settings')" v-slot="{ onContextMenu }">
+                    <div
+                      data-settings-page-tab
+                      class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                      :class="specialPageTabClass(!!specialPageTabs?.settingsActive)"
+                      :style="specialPageTabStyle(!!specialPageTabs?.settingsActive)"
+                      :data-active-tab="specialPageTabs?.settingsActive"
+                      :title="t('settings.title')"
+                      :aria-label="t('settings.title')"
+                      :aria-pressed="!!specialPageTabs?.settingsActive"
+                      role="button"
+                      tabindex="0"
+                      @click="emit('activate-settings')"
+                      @keydown.enter.self.prevent="emit('activate-settings')"
+                      @keydown.space.self.prevent="emit('activate-settings')"
+                      @contextmenu="onContextMenu"
+                      @mousedown.middle.prevent="emit('close-settings')"
+                    >
+                      <Settings class="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
+                      <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("settings.title") }}</span>
+                      <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-settings')">
                         <X class="h-3 w-3" />
                       </button>
                     </div>
-                  </TooltipTrigger>
-                  <TooltipContent :side="tabTooltipSide" class="text-xs grid grid-cols-[auto_1fr] gap-x-2">
-                    <template v-for="line in tabTooltipLines(entry.tab, t)" :key="line.label">
-                      <span class="font-medium opacity-70">{{ line.label }}</span>
-                      <span>{{ line.value }}</span>
-                    </template>
-                  </TooltipContent>
-                </Tooltip>
+                  </CustomContextMenu>
+                  <CustomContextMenu v-if="specialPageTabs?.driverStoreOpen" :items="getSpecialPageTabMenuItems('driverStore')" v-slot="{ onContextMenu }">
+                    <div
+                      data-driver-store-tab
+                      class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
+                      :class="specialPageTabClass(!!specialPageTabs?.driverStoreActive)"
+                      :style="specialPageTabStyle(!!specialPageTabs?.driverStoreActive)"
+                      :data-active-tab="specialPageTabs?.driverStoreActive"
+                      :title="t('toolbar.driverManager')"
+                      :aria-label="t('toolbar.driverManager')"
+                      :aria-pressed="!!specialPageTabs?.driverStoreActive"
+                      role="button"
+                      tabindex="0"
+                      @click="emit('activate-driver-store')"
+                      @keydown.enter.self.prevent="emit('activate-driver-store')"
+                      @keydown.space.self.prevent="emit('activate-driver-store')"
+                      @contextmenu="onContextMenu"
+                      @mousedown.middle.prevent="emit('close-driver-store')"
+                    >
+                      <Package class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("toolbar.driverManager") }}</span>
+                      <span v-if="!isTabBarCollapsed && (specialPageTabs?.driverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
+                        {{ (specialPageTabs?.driverUpdateCount ?? 0) > 99 ? "99+" : specialPageTabs?.driverUpdateCount }}
+                      </span>
+                      <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-driver-store')">
+                        <X class="h-3 w-3" />
+                      </button>
+                    </div>
+                  </CustomContextMenu>
+                </template>
+                <div v-if="!section.pinned" :class="tabTailDragRegionClass" data-tauri-drag-region />
               </div>
-            </CustomContextMenu>
+            </div>
           </template>
-          <template v-if="showSpecialPageTabs">
-            <CustomContextMenu v-if="specialPageTabs?.settingsOpen" :items="getSpecialPageTabMenuItems('settings')" v-slot="{ onContextMenu }">
-              <div
-                data-settings-page-tab
-                class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                :class="specialPageTabClass(!!specialPageTabs?.settingsActive)"
-                :style="specialPageTabStyle(!!specialPageTabs?.settingsActive)"
-                :data-active-tab="specialPageTabs?.settingsActive"
-                :title="t('settings.title')"
-                :aria-label="t('settings.title')"
-                :aria-pressed="!!specialPageTabs?.settingsActive"
-                role="button"
-                tabindex="0"
-                @click="emit('activate-settings')"
-                @keydown.enter.self.prevent="emit('activate-settings')"
-                @keydown.space.self.prevent="emit('activate-settings')"
-                @contextmenu="onContextMenu"
-                @mousedown.middle.prevent="emit('close-settings')"
-              >
-                <Settings class="h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />
-                <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("settings.title") }}</span>
-                <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-settings')">
-                  <X class="h-3 w-3" />
-                </button>
-              </div>
-            </CustomContextMenu>
-            <CustomContextMenu v-if="specialPageTabs?.driverStoreOpen" :items="getSpecialPageTabMenuItems('driverStore')" v-slot="{ onContextMenu }">
-              <div
-                data-driver-store-tab
-                class="app-tab-pill group flex shrink-0 cursor-default items-center gap-1 px-2 text-xs transition-colors whitespace-nowrap select-none"
-                :class="specialPageTabClass(!!specialPageTabs?.driverStoreActive)"
-                :style="specialPageTabStyle(!!specialPageTabs?.driverStoreActive)"
-                :data-active-tab="specialPageTabs?.driverStoreActive"
-                :title="t('toolbar.driverManager')"
-                :aria-label="t('toolbar.driverManager')"
-                :aria-pressed="!!specialPageTabs?.driverStoreActive"
-                role="button"
-                tabindex="0"
-                @click="emit('activate-driver-store')"
-                @keydown.enter.self.prevent="emit('activate-driver-store')"
-                @keydown.space.self.prevent="emit('activate-driver-store')"
-                @contextmenu="onContextMenu"
-                @mousedown.middle.prevent="emit('close-driver-store')"
-              >
-                <Package class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                <span v-if="!isTabBarCollapsed" class="min-w-0 flex-1 truncate">{{ t("toolbar.driverManager") }}</span>
-                <span v-if="!isTabBarCollapsed && (specialPageTabs?.driverUpdateCount ?? 0) > 0" class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium leading-none text-white" :aria-label="t('toolbar.updatableDriverCount')">
-                  {{ (specialPageTabs?.driverUpdateCount ?? 0) > 99 ? "99+" : specialPageTabs?.driverUpdateCount }}
-                </span>
-                <button v-if="!isTabBarCollapsed" class="shrink-0 rounded p-0.5 hover:bg-muted-foreground/20" :aria-label="t('common.close')" :title="t('common.close')" @click.stop="emit('close-driver-store')">
-                  <X class="h-3 w-3" />
-                </button>
-              </div>
-            </CustomContextMenu>
-          </template>
-          <div :class="tabTailDragRegionClass" data-tauri-drag-region />
         </div>
       </div>
-      <div v-if="showOverflowControl" class="relative z-30 flex shrink-0 items-center">
+      <div v-if="showOverflowControl" class="tab-overflow-control absolute right-0 top-0 z-30 flex h-full items-center">
         <Popover v-model:open="tabOverflowOpen">
           <PopoverTrigger as-child>
-            <button type="button" class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
+            <button type="button" class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/60 bg-background text-foreground/70 hover:border-border hover:text-foreground" :aria-label="t('tabs.openTabs')" :title="t('tabs.openTabs')">
               <ChevronDown class="h-4 w-4" />
             </button>
           </PopoverTrigger>
@@ -1397,10 +1438,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   "
                 >
                   <TabExecutionStatus :tab="tab">
-                    <DatabaseIcon v-if="tab.mode === 'mq'" :db-type="tabDatabaseIconType(tab)" class="h-3.5 w-3.5 shrink-0" />
-                    <AlertTriangle v-else-if="tab.externalSqlFileMissing" class="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                    <component :is="Code2" v-else-if="tab.mode === 'query'" class="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-                    <component :is="Table2" v-else class="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <TabModeIcon :tab="tab" class="h-3.5 w-3.5 shrink-0" />
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>

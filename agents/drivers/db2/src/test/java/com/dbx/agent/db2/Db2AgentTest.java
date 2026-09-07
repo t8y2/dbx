@@ -4,6 +4,7 @@ import com.dbx.agent.DatabaseAgent;
 import com.dbx.agent.ConnectParams;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
+import com.dbx.agent.ObjectSource;
 import com.dbx.agent.TableInfo;
 import com.dbx.agent.test.JdbcFakeExecutionBehaviorTest;
 import com.dbx.agent.test.JdbcMetadataSqlFake;
@@ -124,6 +125,69 @@ class Db2AgentTest extends JdbcFakeExecutionBehaviorTest {
         assertEquals("MY_VIEW", objects.get(0).getName());
         assertEquals("VIEW", objects.get(0).getObject_type());
         assertEquals("Test view comment", objects.get(0).getComment());
+    }
+
+    @Test
+    void viewObjectSourceReadsDefinitionFromSyscatViews() {
+        Db2Agent agent = new Db2Agent();
+        AtomicReference<String> executedSql = new AtomicReference<>();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            executedSql,
+            row("TEXT", "CREATE VIEW APP.EMP_VIEW AS SELECT ID, NAME FROM APP.EMPLOYEE")
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "EMP_VIEW", "VIEW");
+
+        assertEquals("CREATE VIEW APP.EMP_VIEW AS SELECT ID, NAME FROM APP.EMPLOYEE", source.getSource());
+        assertEquals("SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = ? AND VIEWNAME = ?", executedSql.get());
+    }
+
+    @Test
+    void routineObjectSourceStillReadsSyscatRoutines() {
+        Db2Agent agent = new Db2Agent();
+        AtomicReference<String> executedSql = new AtomicReference<>();
+        TestSupport.setPrivateConnection(agent, preparedConnection(
+            executedSql,
+            row("TEXT", "BEGIN SELECT 1 FROM SYSIBM.SYSDUMMY1; END")
+        ));
+
+        ObjectSource source = agent.getObjectSource("APP", "MY_PROC", "PROCEDURE");
+
+        assertEquals("BEGIN SELECT 1 FROM SYSIBM.SYSDUMMY1; END", source.getSource());
+        assertEquals("SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?", executedSql.get());
+    }
+
+    private static Connection preparedConnection(AtomicReference<String> executedSql, Map<String, Object>... rows) {
+        final ResultSet resultSet = rows(rows);
+        return proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                String name = method.getName();
+                if ("prepareStatement".equals(name)) {
+                    executedSql.set(String.valueOf(args[0]));
+                    return proxy(PreparedStatement.class, new MethodHandler() {
+                        @Override
+                        public Object handle(Method stmtMethod, Object[] stmtArgs) {
+                            String m = stmtMethod.getName();
+                            if ("setString".equals(m) || "setObject".equals(m) || "setInt".equals(m)) {
+                                return null;
+                            }
+                            if ("executeQuery".equals(m)) {
+                                return resultSet;
+                            }
+                            if ("close".equals(m)) {
+                                return null;
+                            }
+                            return defaultValue(stmtMethod.getReturnType());
+                        }
+                    });
+                }
+                if ("isClosed".equals(name)) {
+                    return false;
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
     }
 
     private static Connection preparedConnection(Map<String, Object>... rows) {

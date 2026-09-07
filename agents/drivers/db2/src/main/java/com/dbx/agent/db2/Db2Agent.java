@@ -218,7 +218,11 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     public ObjectSource getObjectSource(String schema, String name, String objectType) {
         return unchecked(() -> {
-            String sql = "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?";
+            String normalizedType = objectType == null ? "" : objectType.trim().toUpperCase(Locale.ROOT);
+            // View definitions live in SYSCAT.VIEWS; SYSCAT.ROUTINES only covers procedures and functions.
+            String sql = "VIEW".equals(normalizedType)
+                ? "SELECT TEXT FROM SYSCAT.VIEWS WHERE VIEWSCHEMA = ? AND VIEWNAME = ?"
+                : "SELECT TEXT FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ? AND ROUTINENAME = ?";
             String source;
             try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
                 stmt.setString(1, schema);

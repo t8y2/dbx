@@ -157,7 +157,7 @@
 }
 
 .tab-overflow-control button {
-  width: 36px;
+  width: 32px;
   min-width: 0;
   border-color: color-mix(in oklch, var(--foreground) 18%, var(--border));
   background-color: color-mix(in oklch, var(--muted) 72%, var(--background));

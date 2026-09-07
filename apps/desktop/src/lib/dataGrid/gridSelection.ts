@@ -121,6 +121,10 @@ function displayValue(value: GridCellValue): string {
   return String(value);
 }
 
+function tsvValue(value: GridCellValue): string {
+  return value === null ? "" : displayValue(value);
+}
+
 function csvValue(value: GridCellValue | string): string {
   const text = typeof value === "string" ? value : displayValue(value);
   return `"${text.replace(/"/g, '""')}"`;
@@ -134,7 +138,7 @@ function sqlValue(value: GridCellValue): string {
 }
 
 export function formatSelectionAsTsv(selection: SelectionData, includeHeader = false): string {
-  const body = selection.rows.map((row) => row.map(displayValue).join("\t")).join("\n");
+  const body = selection.rows.map((row) => row.map(tsvValue).join("\t")).join("\n");
   if (!includeHeader) return body;
   return [selection.columns.join("\t"), body].filter(Boolean).join("\n");
 }

@@ -84,7 +84,7 @@ test("formats selected cells as TSV, CSV, JSON, and SQL values", () => {
     ],
   };
 
-  assert.equal(formatSelectionAsTsv(selection), 'Ada\tmath\nBob\tquote "here"\nO\'Hara\tNULL');
+  assert.equal(formatSelectionAsTsv(selection), 'Ada\tmath\nBob\tquote "here"\nO\'Hara\t');
   assert.equal(formatSelectionAsCsv(selection), '"name","note"\n"Ada","math"\n"Bob","quote ""here"""\n"O\'Hara","NULL"');
   assert.equal(
     formatSelectionAsJson(selection),

@@ -29,6 +29,18 @@ describe("gridSelection", () => {
     ).toBe("id\tname\n1\tAda\n2\tLin");
   });
 
+  it("keeps NULL cells empty in TSV selections", () => {
+    expect(
+      formatSelectionAsTsv({
+        columns: ["id", "name"],
+        rows: [
+          [1, null],
+          [2, "Lin"],
+        ],
+      }),
+    ).toBe("1\t\n2\tLin");
+  });
+
   it("summarizes empty selections", () => {
     expect(summarizeSelection({ columns: [], rows: [] })).toEqual({
       cellCount: 0,

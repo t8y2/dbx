@@ -154,6 +154,7 @@ import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGrid/dataGridColumnFilter";
+import { shouldExpandConditionInput } from "@/lib/dataGrid/conditionInputExpansion";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
@@ -699,7 +700,13 @@ function conditionInputTextWidth(input: HTMLTextAreaElement): number {
 }
 
 function conditionInputShouldExpand(input: HTMLTextAreaElement): boolean {
-  return input.value.length > 0 && conditionInputTextWidth(input) > input.clientWidth + 1;
+  return shouldExpandConditionInput({
+    value: input.value,
+    textWidth: conditionInputTextWidth(input),
+    contentHeight: conditionInputContentHeight(input),
+    inputWidth: input.clientWidth,
+    inputHeight: input.clientHeight,
+  });
 }
 
 function conditionInputContentHeight(input: HTMLTextAreaElement): number {
@@ -1062,10 +1069,6 @@ function collapseConditionInputAfterBlur(kind: ConditionInputKind) {
 function resizeFocusedConditionInputs() {
   resizeConditionInput("where");
   resizeConditionInput("orderBy");
-}
-
-function normalizeConditionInputValue(value: string) {
-  return value.replace(/\s*\r?\n\s*/g, " ");
 }
 
 function updateConditionSuggestionPosition(kind: ConditionInputKind) {
@@ -2223,14 +2226,8 @@ function onWhereFilterInput(event: Event) {
   const input = event.target instanceof HTMLTextAreaElement ? event.target : null;
   if (!input) return;
   suppressNextWhereWatchResize = true;
-  const nextValue = normalizeConditionInputValue(input.value);
-  if (nextValue !== input.value) {
-    whereFilterInput.value = nextValue;
-    previousWhereFilterInputValue = nextValue;
-    nextTick(() => input.setSelectionRange(nextValue.length, nextValue.length));
-    resizeConditionInput("where", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
-    return;
-  }
+  const nextValue = input.value;
+  whereFilterInput.value = nextValue;
   if (
     insertedSqlSingleQuoteAtCaret({
       previousValue: previousWhereFilterInputValue,
@@ -2464,11 +2461,7 @@ function onOrderByInput(event: Event) {
   const input = event.target instanceof HTMLTextAreaElement ? event.target : null;
   if (!input) return;
   suppressNextOrderByWatchResize = true;
-  const nextValue = normalizeConditionInputValue(input.value);
-  if (nextValue !== input.value) {
-    orderByInput.value = nextValue;
-    nextTick(() => input.setSelectionRange(nextValue.length, nextValue.length));
-  }
+  orderByInput.value = input.value;
   resizeConditionInput("orderBy", { expandFromFocus: true, focusOverlay: true, immediateHeight: true });
 }
 

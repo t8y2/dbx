@@ -151,6 +151,46 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void supportsCommitAndRollbackForInteractiveTransactions() {
+        List<String> calls = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, transactionConnection(calls));
+
+        agent.beginManualTransaction(null);
+        Assertions.assertEquals(List.of("setAutoCommit:false"), calls);
+        agent.commitManualTransaction();
+        Assertions.assertEquals(List.of("setAutoCommit:false", "commit", "setAutoCommit:true"), calls);
+
+        agent.beginManualTransaction(null);
+        agent.rollbackManualTransaction();
+        Assertions.assertEquals(
+            List.of("setAutoCommit:false", "commit", "setAutoCommit:true", "setAutoCommit:false", "rollback", "setAutoCommit:true"),
+            calls
+        );
+    }
+
+    @Test
+    void failedCommitKeepsTransactionOpenSoItCanBeRolledBack() throws SQLException {
+        List<String> calls = new ArrayList<>();
+        boolean[] failCommit = {true};
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        Connection connection = transactionConnection(calls, failCommit);
+        TestSupport.setPrivateConnection(agent, connection);
+
+        agent.beginManualTransaction(null);
+        Assertions.assertThrows(RuntimeException.class, agent::commitManualTransaction);
+        Assertions.assertFalse(connection.getAutoCommit());
+
+        failCommit[0] = false;
+        Assertions.assertDoesNotThrow(agent::rollbackManualTransaction);
+        Assertions.assertTrue(connection.getAutoCommit());
+        Assertions.assertEquals(
+            List.of("setAutoCommit:false", "commit", "rollback", "setAutoCommit:true"),
+            calls
+        );
+    }
+
+    @Test
     void synchronizesSessionTimeoutForEveryQueryEntryPoint() {
         List<String> sql = new ArrayList<>();
         List<Integer> queryTimeouts = new ArrayList<>();
@@ -607,6 +647,37 @@ class OceanBaseOracleAgentTest {
 
     private static Connection executionConnection(List<String> sql) {
         return executionConnection(sql, new ArrayList<>(), List.of());
+    }
+
+    private static Connection transactionConnection(List<String> calls) {
+        return transactionConnection(calls, new boolean[] {false});
+    }
+
+    private static Connection transactionConnection(List<String> calls, boolean[] failCommit) {
+        boolean[] autoCommit = {true};
+        return proxy(Connection.class, (method, args) -> {
+            switch (method.getName()) {
+                case "getAutoCommit":
+                    return autoCommit[0];
+                case "setAutoCommit":
+                    autoCommit[0] = (Boolean) args[0];
+                    calls.add("setAutoCommit:" + autoCommit[0]);
+                    return null;
+                case "commit":
+                    calls.add("commit");
+                    if (failCommit[0]) {
+                        throw new SQLException("commit failed");
+                    }
+                    return null;
+                case "rollback":
+                    calls.add("rollback");
+                    return null;
+                case "isClosed":
+                    return false;
+                default:
+                    return defaultValue(method.getReturnType());
+            }
+        });
     }
 
     private static Connection executionConnection(

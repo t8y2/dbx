@@ -12,6 +12,8 @@ import java.util.function.Supplier;
 final class JdbcSchemaSwitcher {
     private static final Map<Connection, ResetState> RESET_STATE_BY_CONNECTION =
         Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Map<Connection, Boolean> PRESERVED_BY_CONNECTION =
+        Collections.synchronizedMap(new WeakHashMap<>());
 
     private JdbcSchemaSwitcher() {
     }
@@ -27,6 +29,9 @@ final class JdbcSchemaSwitcher {
         Supplier<String> resetSchemaSql
     ) throws Exception {
         if (schema == null || schema.trim().isEmpty()) {
+            if (isPreserved(conn)) {
+                return;
+            }
             if (!restore(conn, true)) {
                 throw new SQLException("Failed to restore the original JDBC schema context");
             }
@@ -70,7 +75,20 @@ final class JdbcSchemaSwitcher {
         RESET_STATE_BY_CONNECTION.remove(conn);
     }
 
+    static void preserve(Connection conn) {
+        PRESERVED_BY_CONNECTION.put(conn, Boolean.TRUE);
+    }
+
+    static void releasePreserved(Connection conn) {
+        PRESERVED_BY_CONNECTION.remove(conn);
+    }
+
+    private static boolean isPreserved(Connection conn) {
+        return PRESERVED_BY_CONNECTION.containsKey(conn);
+    }
+
     private static boolean restore(Connection conn, boolean preserveOnFailure) {
+        PRESERVED_BY_CONNECTION.remove(conn);
         ResetState resetState = RESET_STATE_BY_CONNECTION.remove(conn);
         if (resetState == null) {
             return true;

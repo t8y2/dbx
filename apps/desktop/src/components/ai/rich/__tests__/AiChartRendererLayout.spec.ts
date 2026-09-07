@@ -20,6 +20,8 @@ describe("AiChartRenderer layout", () => {
   it("surfaces download failures through a localized toast instead of a hardcoded English tooltip", () => {
     expect(rendererSource).toContain("t('ai.chartDownloadPng')");
     expect(rendererSource).toContain('toast(t("ai.chartDownloadFailed"))');
+    const savePath = rendererSource.slice(rendererSource.indexOf("await writeFile(path, new Uint8Array(await blob.arrayBuffer()))"));
+    expect(savePath).toContain('} catch {\n    toast(t("ai.chartDownloadFailed"));\n  }');
     expect(rendererSource).not.toContain('title="Download PNG"');
     expect(rendererSource).not.toContain('aria-label="Download PNG"');
     expect(rendererSource).toContain('t("ai.chartData")');

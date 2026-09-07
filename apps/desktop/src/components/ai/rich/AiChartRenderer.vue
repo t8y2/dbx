@@ -111,8 +111,7 @@ async function downloadPng() {
     anchor.click();
     URL.revokeObjectURL(url);
   } catch {
-    // A denied save dialog or fs permission must not surface as an unhandled
-    // rejection; the user chose to back out, so just stay quiet.
+    toast(t("ai.chartDownloadFailed"));
   }
 }
 </script>

@@ -59,6 +59,7 @@ const emit = defineEmits<{
   connectFailed: [message: string];
   openDriverStore: [focus?: DriverStoreFocus];
   openTunnelProfileSettings: [];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   openLineageTarget: [
     target: {
       connectionId: string;
@@ -319,6 +320,7 @@ watch(
     :prefill-table="dialogs.databaseExportPrefillTable.value"
     :prefill-tables="dialogs.databaseExportPrefillTables.value"
     :prefill-all-databases="dialogs.databaseExportAllDatabases.value"
+    @open-connection-settings="emit('openConnectionSettings', $event, 'advanced')"
   />
   <ConfigConnectionSelectDialog
     v-if="dialogs.showConfigConnectionSelectDialog.value"

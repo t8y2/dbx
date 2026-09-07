@@ -17,8 +17,9 @@ import { buildSelectedTablesPayload, isDatabaseExportTableSelectionValid } from 
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { useToast } from "@/composables/useToast";
 import { Input } from "@/components/ui/input";
-import { Download, Square, CheckSquare, Search, X, Loader2 } from "@lucide/vue";
+import { Download, Square, CheckSquare, Search, X, Loader2, Wrench } from "@lucide/vue";
 import { formatDataTransferDuration, useExportTracker } from "@/composables/useExportTracker";
+import { isQueryTimeoutErrorMessage } from "@/lib/sql/queryError";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -33,6 +34,10 @@ const props = defineProps<{
   prefillTable?: string;
   prefillTables?: string[];
   prefillAllDatabases?: boolean;
+}>();
+
+const emit = defineEmits<{
+  openConnectionSettings: [connectionId: string];
 }>();
 
 // Connection / Database / Schema selectors
@@ -72,6 +77,7 @@ const exportProgress = ref<ExportProgress | null>(null);
 const exportId = ref("");
 const exportDone = ref(false);
 const exportError = ref<string | null>(null);
+const exportWarning = ref<string | null>(null);
 const exportCancelled = ref(false);
 const exportStartedAt = ref<number | null>(null);
 const exportFinishedAt = ref<number | null>(null);
@@ -162,6 +168,12 @@ function toastDatabaseExportCompletion(errorCount: number, errorSummary: string 
   }
   toast(t("databaseExport.exportSuccess"), 3000);
 }
+
+const canChangeQueryTimeout = computed(() =>
+  !!connectionId.value &&
+  !!exportWarning.value &&
+  isQueryTimeoutErrorMessage(exportWarning.value),
+);
 
 async function loadDatabases(connId: string) {
   if (!connId) return;
@@ -334,6 +346,7 @@ async function startExport() {
   exportFinishedAt.value = null;
   exportDone.value = false;
   exportError.value = null;
+  exportWarning.value = null;
   exportCancelled.value = false;
   exportProgress.value = {
     exportId: exportId.value,
@@ -380,11 +393,13 @@ async function startExport() {
           if (progress.status === "Done") {
             finishExportTiming();
             exportDone.value = true;
+            exportWarning.value = progress.errorSummary ?? null;
             isExporting.value = false;
             toastDatabaseExportCompletion(progress.errorCount ?? 0, progress.errorSummary ?? null);
           } else if (progress.status === "Error") {
             finishExportTiming();
             exportError.value = progress.error;
+            exportWarning.value = null;
             isExporting.value = false;
           } else if (progress.status === "Cancelled") {
             finishExportTiming();
@@ -397,6 +412,7 @@ async function startExport() {
     );
   } catch (e: any) {
     exportError.value = e?.message || String(e);
+    exportWarning.value = null;
     const lastProgress = exportProgress.value as api.ExportProgress | null;
     const fallbackProgress: api.ExportProgress = {
       exportId: exportId.value,
@@ -440,6 +456,7 @@ async function startAllDatabasesExport() {
   exportFinishedAt.value = null;
   exportDone.value = false;
   exportError.value = null;
+  exportWarning.value = null;
   exportCancelled.value = false;
   batchDatabaseIndex.value = 0;
   batchRowsExported.value = 0;
@@ -532,6 +549,7 @@ async function startAllDatabasesExport() {
               if (progress.status === "Error") {
                 finishExportTiming();
                 exportError.value = progress.error;
+                exportWarning.value = null;
                 isExporting.value = false;
               } else if (progress.status === "Cancelled") {
                 finishExportTiming();
@@ -551,6 +569,7 @@ async function startAllDatabasesExport() {
 
     if (!exportError.value && !exportCancelled.value) {
       exportDone.value = true;
+      exportWarning.value = batchFirstErrorSummary;
       finishExportTiming();
       isExporting.value = false;
       const finalProgress: api.ExportProgress = {
@@ -575,6 +594,7 @@ async function startAllDatabasesExport() {
     }
   } catch (e: any) {
     exportError.value = e?.message || String(e);
+    exportWarning.value = null;
     updateDatabaseExportTask(batchId, {
       exportId: batchId,
       currentObject: t("databaseExport.allDatabasesTask", { count: dbs.length }),
@@ -629,6 +649,7 @@ function resetState() {
   exportProgress.value = null;
   exportDone.value = false;
   exportError.value = null;
+  exportWarning.value = null;
   exportCancelled.value = false;
   exportStartedAt.value = null;
   exportFinishedAt.value = null;
@@ -939,6 +960,15 @@ watch(
           <!-- Status messages -->
           <div v-if="exportDone" class="text-xs text-green-600 font-medium">
             {{ t("databaseExport.exportSuccess") }}
+          </div>
+          <div v-if="exportDone && exportWarning" class="space-y-2">
+            <div class="whitespace-pre-wrap break-words text-xs text-amber-600 dark:text-amber-400">
+              {{ exportWarning }}
+            </div>
+            <Button v-if="canChangeQueryTimeout" variant="outline" size="sm" @click="emit('openConnectionSettings', connectionId)">
+              <Wrench class="mr-1 h-3.5 w-3.5" />
+              {{ t("editor.changeQueryTimeout") }}
+            </Button>
           </div>
           <div v-else-if="exportError" class="text-xs text-destructive font-medium">
             {{ t("databaseExport.exportError", { error: exportError }) }}

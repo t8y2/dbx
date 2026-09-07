@@ -3744,6 +3744,10 @@ onUnmounted(() => {
             setConnectionDialogOpen(false);
             openSettings('tunnels');
           "
+          @open-connection-settings="
+            setConnectionDialogOpen(false);
+            openConnectionSettings($event, 'advanced');
+          "
           @open-lineage-target="openLineageTarget"
           @open-database-search-target="openDatabaseSearchTarget"
           @open-diagram-target="openDiagramTarget"

@@ -4589,6 +4589,11 @@ export interface TransferRequest {
 export interface TransferOwnershipPreview {
   missingOwners: string[];
   targetOwner: string;
+  rebuild?: {
+    sql: string;
+    tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
+    warnings: string[];
+  };
 }
 
 export interface TransferProgress {

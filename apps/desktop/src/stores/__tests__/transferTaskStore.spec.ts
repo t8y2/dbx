@@ -82,6 +82,37 @@ describe("transferTaskStore", () => {
     expect(store.tasks[0]?.config.quoteTargetColumnNames).toBe(true);
   });
 
+  it("loads a legacy rebuild task as append without restoring its previous confirmation", async () => {
+    vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
+      version: 1,
+      folders: [],
+      tasks: [{ id: "legacy-rebuild", name: "legacy rebuild", config: makeConfig({ mode: "upsert", dropTargetBeforeCreate: true, dropTargetConfirmed: true }) }],
+    });
+    const store = useTransferTaskStore();
+
+    await store.initFromStorage();
+
+    expect(store.getTask("legacy-rebuild")?.config).toMatchObject({ mode: "append", dropTargetBeforeCreate: true, dropTargetConfirmed: false });
+  });
+
+  it("saves mutually exclusive rebuild options without persisting request confirmation", async () => {
+    const store = useTransferTaskStore();
+
+    const task = await store.saveTask({ name: "rebuild", config: makeConfig({ mode: "overwrite", dropTargetBeforeCreate: true, dropTargetConfirmed: true }) });
+
+    expect(task.config).toMatchObject({ mode: "append", dropTargetBeforeCreate: true, dropTargetConfirmed: false });
+    const persisted = vi.mocked(api.saveTransferTaskLibrary).mock.calls.at(-1)?.[0] as TransferTaskLibrary;
+    expect(persisted.tasks[0]?.config).toMatchObject({ mode: "append", dropTargetBeforeCreate: true, dropTargetConfirmed: false });
+  });
+
+  it.each(["append", "overwrite", "upsert"] as const)("keeps ordinary %s tasks unchanged while dropping stale confirmation", async (mode) => {
+    const store = useTransferTaskStore();
+
+    const task = await store.saveTask({ name: mode, config: makeConfig({ mode, dropTargetBeforeCreate: false, dropTargetConfirmed: true }) });
+
+    expect(task.config).toMatchObject({ mode, dropTargetBeforeCreate: false, dropTargetConfirmed: false });
+  });
+
   it("refuses to overwrite a persisted library with invalid entries", async () => {
     vi.mocked(api.loadTransferTaskLibrary).mockResolvedValue({
       version: 1,

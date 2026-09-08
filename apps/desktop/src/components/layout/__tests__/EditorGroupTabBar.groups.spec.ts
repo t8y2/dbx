@@ -129,6 +129,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
   it("uses compact group pills and places the accent next to content for horizontal bars", () => {
     expect(source).toContain('isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout"');
     expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
+    expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
@@ -138,6 +139,8 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain("row-gap: 0.375rem;");
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)");
+    expect(sharedStyles).toContain('[data-group-mode="none"] .tab-section--horizontal');
+    expect(sharedStyles).toContain("column-gap: 4px;");
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode)");
     expect(sharedStyles).toContain("bottom: 0.375rem;");
     expect(sharedStyles).toContain("bottom: 0.25rem;");

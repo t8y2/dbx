@@ -1293,6 +1293,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
     :style="tabBarStyle"
     data-main-tab-bar
     :data-group-id="groupId"
+    :data-group-mode="settingsStore.editorSettings.tabGroupMode"
     :data-placement="settingsStore.editorSettings.tabPlacement"
   >
     <!-- Compact vertical toolbar: search, grouping preference, collapse. -->

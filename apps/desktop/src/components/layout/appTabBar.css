@@ -159,6 +159,12 @@
   flex-shrink: 0;
 }
 
+/* Keep grouped tabs flush so their accent forms one continuous rule. With
+ * grouping disabled, flex gap also behaves correctly at wrapped line starts. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout)[data-group-mode="none"] .tab-section--horizontal {
+  column-gap: 4px;
+}
+
 /* The fixed two-row layout does not need the trailing flex spacer. Keeping it
  * in the max-content row would manufacture horizontal overflow even when all
  * tabs already fit. */

@@ -735,34 +735,26 @@ describe("queryStore hidden primary key editing", () => {
     expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toEqual([2]);
   });
 
-  it("resolves the Oracle current schema before adding ROWID to an unqualified keyless table query", async () => {
+  it("executes an unqualified Oracle query without enumerating objects when its type is unknown", async () => {
     getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
     getColumns.mockResolvedValue([
       { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
       { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
     ]);
-    listTables.mockResolvedValue([{ name: "CUSTOMERS", table_type: "TABLE" }]);
-    analyzeEditableQueryEditability.mockImplementation(async (sql: string) => {
-      const hidden = sql.includes("__DBX_PK_0");
-      return {
-        editable: true,
-        analysis: {
-          schema: undefined,
-          tableName: "CUSTOMERS",
-          selectStar: !hidden,
-          columns: hidden
-            ? [
-                { star: true, sourceKey: "CUSTOMERS:0", resultName: "*", expression: "*" },
-                { resultName: "__DBX_PK_0", expression: "ROWIDTOCHAR(ROWID)" },
-              ]
-            : [],
-        },
-      };
+    listTables.mockReturnValue(new Promise(() => undefined));
+    analyzeEditableQueryEditability.mockResolvedValue({
+      editable: true,
+      analysis: {
+        schema: undefined,
+        tableName: "CUSTOMER_VIEW",
+        selectStar: true,
+        columns: [],
+      },
     });
     executeMulti.mockResolvedValue([
       {
-        columns: ["ID", "NAME", "__DBX_PK_0"],
-        rows: [[1, "Alice", "AAAPr9AAEAAAACXAAA"]],
+        columns: ["ID", "NAME"],
+        rows: [[1, "Alice"]],
         affected_rows: 0,
         execution_time_ms: 1,
       },
@@ -773,45 +765,16 @@ describe("queryStore hidden primary key editing", () => {
     const tabId = store.createTab("oracle-1", "ORCL", "Query");
     store.setAutoCommit(tabId, true);
 
-    await store.executeTabSql(tabId, "SELECT * FROM CUSTOMERS");
+    const execution = store.executeTabSql(tabId, "SELECT * FROM CUSTOMER_VIEW");
+    await vi.waitFor(() => expect(executeMulti).toHaveBeenCalled(), { timeout: 250 });
+    await execution;
 
-    expect(listTables).toHaveBeenCalledWith("oracle-1", "ORCL", "", "CUSTOMERS");
-    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", 'SELECT CUSTOMERS.*, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM CUSTOMERS', undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
-    expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toEqual([2]);
-    await vi.waitFor(() => expect(store.tabs.find((item) => item.id === tabId)?.tableMeta?.primaryKeys).toEqual(["__DBX_ROWID"]));
-
-    await store.executeTabSql(tabId, "SELECT * FROM CUSTOMERS");
-    expect(listTables).toHaveBeenCalledOnce();
-  });
-
-  it("keeps an unqualified Oracle view read-only after resolving it in the current schema", async () => {
-    getConnectionConfig.mockReturnValue({ id: "oracle-1", name: "Oracle", db_type: "oracle", database: "ORCL", query_timeout_secs: 30 });
-    getColumns.mockResolvedValue([
-      { name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
-      { name: "NAME", data_type: "VARCHAR2(100)", is_nullable: true, column_default: null, is_primary_key: false, extra: null },
-    ]);
-    listTables.mockResolvedValue([{ name: "CUSTOMERS", table_type: "VIEW" }]);
-    analyzeEditableQueryEditability.mockResolvedValue({
-      editable: true,
-      analysis: {
-        schema: undefined,
-        tableName: "CUSTOMERS",
-        selectStar: true,
-        columns: [],
-      },
-    });
-    executeMulti.mockResolvedValue([{ columns: ["ID", "NAME"], rows: [[1, "Alice"]], affected_rows: 0, execution_time_ms: 1 }]);
-
-    const { useQueryStore } = await import("@/stores/queryStore");
-    const store = useQueryStore();
-    const tabId = store.createTab("oracle-1", "ORCL", "Query");
-    store.setAutoCommit(tabId, true);
-
-    await store.executeTabSql(tabId, "SELECT * FROM CUSTOMERS");
-
-    expect(listTables).toHaveBeenCalledWith("oracle-1", "ORCL", "", "CUSTOMERS");
-    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMERS", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
-    expect(store.tabs.find((item) => item.id === tabId)?.result?.hidden_column_indexes).toBeUndefined();
+    expect(listTables).not.toHaveBeenCalled();
+    expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMER_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
+    const tab = store.tabs.find((item) => item.id === tabId)!;
+    expect(tab.result?.hidden_column_indexes).toBeUndefined();
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
+    expect(tab.queryAnalysis).toBeUndefined();
   });
 
   it("does not check Oracle ROWID eligibility when query metadata returns no columns", async () => {

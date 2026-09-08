@@ -4838,6 +4838,9 @@ export const useQueryStore = defineStore("query", () => {
   async function resolveOracleRowIdSafety(tab: QueryTab, loaded: LoadedEditableSource, databaseType: DatabaseType): Promise<boolean> {
     if (oracleRowIdIsSafeForQuery(tab, loaded)) return true;
     if (loaded.tableMeta.tableType?.trim()) return false;
+    // Never enumerate an Oracle schema on the query execution path: large
+    // schemas can make this optional editability check take minutes (#8462).
+    if (databaseType === "oracle") return false;
 
     const connection = useConnectionStore().getConfig(tab.connectionId!);
     const schema = loaded.tableMeta.schema?.trim() || tab.schema?.trim() || connection?.default_schema?.trim() || "";

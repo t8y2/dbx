@@ -23,7 +23,13 @@ function activateTabDocumentSource(): string {
 
 test("uncached tab activation restores the saved cursor and scroll position", () => {
   const source = activateTabDocumentSource();
-  assert.match(source, /if \(!cached\) \{[\s\S]*?swapEditorDocument\(doc\);[\s\S]*?restoreEditorSelection\(\);[\s\S]*?restoreEditorViewport\(\);[\s\S]*?return;/, "the swapEditorDocument branch must restore selection and viewport before returning");
+  assert.match(source, /if \(!cached\) \{[\s\S]*?swapEditorDocument\(doc\);[\s\S]*?restoreEditorSelection\([^;]*\);[\s\S]*?restoreEditorViewport\([^;]*\);[\s\S]*?return;/, "the swapEditorDocument branch must restore selection and viewport before returning");
+});
+
+test("uncached tabs without saved state do not inherit the previous tab position", () => {
+  const source = activateTabDocumentSource();
+  assert.match(source, /restoreEditorSelection\(props\.initialSelection \?\? \{ anchor: 0, head: 0 \}\);/);
+  assert.match(source, /restoreEditorViewport\(props\.initialViewport \?\? \{ scrollTop: 0, scrollLeft: 0 \}\);/);
 });
 
 test("cached tab activation keeps restoring selection and viewport", () => {
@@ -34,5 +40,5 @@ test("cached tab activation keeps restoring selection and viewport", () => {
 
 test("viewport restore prefers the per-tab saved viewport", () => {
   const source = readFileSync(path.resolve("apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
-  assert.match(source, /function restoreEditorViewport\(\) \{[\s\S]*?const viewport = props\.initialViewport \?\? latestViewport;/);
+  assert.match(source, /function restoreEditorViewport\(viewport = props\.initialViewport \?\? latestViewport\) \{/);
 });

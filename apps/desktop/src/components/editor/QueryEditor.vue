@@ -6709,8 +6709,10 @@ function activateTabDocument(prevTabId: string | undefined, tabId: string | unde
     // beyond MAX_CACHED_TAB_STATES): restore the tab's saved cursor and scroll
     // position exactly like the cached-state branch, otherwise the swapped-in
     // document keeps whatever scroll offset the dispatch left behind (#8374).
-    restoreEditorSelection();
-    restoreEditorViewport();
+    // A brand-new tab has no saved state, so reset it instead of falling back
+    // to the previous tab's latest position (#8378).
+    restoreEditorSelection(props.initialSelection ?? { anchor: 0, head: 0 });
+    restoreEditorViewport(props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 });
     return;
   }
   // setState swaps doc, selection, undo history and all fields at once, but it
@@ -7066,10 +7068,10 @@ function flushEditorSelection() {
   if (latestSelection) emitEditorSelection(latestSelection);
 }
 
-function restoreEditorSelection() {
-  const selection = normalizedEditorSelection(props.initialSelection ?? latestSelection, props.modelValue.length);
-  if (!view.value || !selection) return;
-  view.value.dispatch({ selection });
+function restoreEditorSelection(selection = props.initialSelection ?? latestSelection) {
+  const normalizedSelection = normalizedEditorSelection(selection, props.modelValue.length);
+  if (!view.value || !normalizedSelection) return;
+  view.value.dispatch({ selection: normalizedSelection });
 }
 
 function restoreEditorFocus() {
@@ -7108,8 +7110,7 @@ function flushEditorViewport() {
   if (latestViewport) emitEditorViewport(latestViewport);
 }
 
-function restoreEditorViewport() {
-  const viewport = props.initialViewport ?? latestViewport;
+function restoreEditorViewport(viewport = props.initialViewport ?? latestViewport) {
   if (!view.value || !viewport) return;
   const restoreScroll = () => {
     if (!view.value) return;

@@ -94,7 +94,17 @@ describe("EditorGroupTabBar semantic tab groups", () => {
   });
 
   it("hides collapsed cluster pills but reveals them while searching", () => {
-    expect(source).toContain("grouping && !tabSearchQuery.value.trim() && isTabGroupCollapsed(tab)");
+    expect(source).toContain("grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)");
+    expect(sharedStyles).toContain(".tab-group-entry--collapsed");
+  });
+
+  it("remeasures overflow after a single-row group expansion finishes", () => {
+    expect(source).toContain('@transitionend.self="handleTabGroupTransitionEnd"');
+    const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
+    expect(handler).toContain('event.propertyName !== "max-width"');
+    expect(handler).toContain("refreshHorizontalTabOverflow();");
+    expect(source).toContain('return "tab-tail-overflow-spacer flex-none self-stretch";');
+    expect(sharedStyles).toContain(".tab-tail-overflow-spacer[data-tauri-drag-region]");
   });
 
   it("keeps the overflow search scoped to the popover list without filtering the strip", () => {
@@ -117,12 +127,21 @@ describe("EditorGroupTabBar semantic tab groups", () => {
   });
 
   it("uses compact group pills and places the accent next to content for horizontal bars", () => {
+    expect(source).toContain('isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout"');
     expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
     expect(sharedStyles).toContain('.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after");
+    expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
+    expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
+    expect(sharedStyles).toContain("row-gap: 0.375rem;");
+    expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)");
+    expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode)");
+    expect(sharedStyles).toContain("bottom: 0.375rem;");
+    expect(sharedStyles).toContain("bottom: 0.25rem;");
+    expect(sharedStyles).toContain("scroll-margin-inline-end: 1px;");
   });
 
   function sourceBetween(start: string, end: string): string {
@@ -298,10 +317,11 @@ describe("EditorGroupTabBar group behavior", () => {
     expect(headers.map((header) => header.title)).toEqual(["mysql-1", "pg-1"]);
     expect(host.querySelectorAll("[data-tab-id]").length).toBe(3);
 
-    // Collapse the pg cluster: its pills hide, the count badge appears.
+    // Collapse the pg cluster: its pills contract, the count badge appears.
     headers[1]!.click();
     await settle();
-    expect(Array.from(host.querySelectorAll("[data-tab-id]")).map((pill) => pill.getAttribute("data-tab-id"))).toEqual([my]);
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(2);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(3);
     const pgHeader = host.querySelectorAll<HTMLButtonElement>(".tab-group-header")[1]!;
     expect(pgHeader.querySelector(".tab-group-count")?.textContent).toBe("2");
     expect(pgHeader.getAttribute("aria-expanded")).toBe("false");
@@ -335,7 +355,8 @@ describe("EditorGroupTabBar group behavior", () => {
     // Collapsing one "app" cluster leaves the other same-name cluster expanded.
     headers[0]!.click();
     await settle();
-    expect(Array.from(host.querySelectorAll("[data-tab-id]")).map((pill) => pill.getAttribute("data-tab-id"))).toEqual([pgConn, pgApp]);
+    expect(host.querySelectorAll(".tab-group-entry--collapsed")).toHaveLength(1);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(3);
 
     app.unmount();
     host.remove();

@@ -178,6 +178,7 @@ function getSpecialPageTabMenuItems(surface: "settings" | "driverStore"): Contex
 
 const hasHorizontalFixedRows = computed(() => !isVerticalLayout.value && props.tabs.some((tab) => tab.pinned) && (props.tabs.some((tab) => !tab.pinned) || showSpecialPageTabs.value));
 const tabBarClass = computed(() => [
+  isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout",
   isVerticalLayout.value
     ? `vertical-tab-layout h-full w-60 flex-col bg-background ${settingsStore.editorSettings.tabPlacement === "right" ? "border-l" : "border-r"}`
     : isClassicLayout.value
@@ -273,7 +274,11 @@ const showOverflowControl = computed(() => {
   const hasOverflow = hasHorizontalFixedRows.value ? fixedTabsScroll.hasTabOverflow.value || regularTabsScroll.hasTabOverflow.value || hasHorizontalRowOverflow() : hasTabOverflow.value;
   return props.tabs.length > 0 && hasOverflow && !isWrapLayout.value && !isVerticalLayout.value;
 });
-const tabTailDragRegionClass = computed(() => (showOverflowControl.value || isWrapLayout.value || isVerticalLayout.value ? "w-0 flex-none self-stretch" : "min-w-8 flex-1 self-stretch"));
+const tabTailDragRegionClass = computed(() => {
+  if (isWrapLayout.value || isVerticalLayout.value) return "w-0 flex-none self-stretch";
+  if (showOverflowControl.value) return "tab-tail-overflow-spacer flex-none self-stretch";
+  return "min-w-8 flex-1 self-stretch";
+});
 
 watch(
   () => props.tabBarCollapsed,
@@ -482,6 +487,18 @@ function restoreTabScrollPosition(position: { fixed: number; regular: number }) 
   if (regularTabsRowRef.value) regularTabsRowRef.value.scrollLeft = position.regular;
 }
 
+function refreshHorizontalTabOverflow() {
+  updateScrollButtons();
+  fixedTabsScroll.updateScrollButtons();
+  regularTabsScroll.updateScrollButtons();
+  tabLayoutRevision.value += 1;
+}
+
+function handleTabGroupTransitionEnd(event: TransitionEvent) {
+  if (event.propertyName !== "max-width") return;
+  refreshHorizontalTabOverflow();
+}
+
 function toggleTabGroup(tab: QueryTab) {
   preserveTabScrollPosition();
   const groupId = tabGroupId(tab);
@@ -489,7 +506,7 @@ function toggleTabGroup(tab: QueryTab) {
   if (next.has(groupId)) next.delete(groupId);
   else next.add(groupId);
   collapsedTabGroups.value = next;
-  nextTick(updateScrollButtons);
+  nextTick(refreshHorizontalTabOverflow);
 }
 
 function tabGroupIdsInPane() {
@@ -500,21 +517,13 @@ function tabGroupIdsInPane() {
 function collapseAllTabGroups() {
   preserveTabScrollPosition();
   collapsedTabGroups.value = new Set(tabGroupIdsInPane());
-  nextTick(() => {
-    updateScrollButtons();
-    fixedTabsScroll.updateScrollButtons();
-    regularTabsScroll.updateScrollButtons();
-  });
+  nextTick(refreshHorizontalTabOverflow);
 }
 
 function expandAllTabGroups() {
   preserveTabScrollPosition();
   collapsedTabGroups.value = new Set();
-  nextTick(() => {
-    updateScrollButtons();
-    fixedTabsScroll.updateScrollButtons();
-    regularTabsScroll.updateScrollButtons();
-  });
+  nextTick(refreshHorizontalTabOverflow);
 }
 
 function expandTabGroupForTab(tabId: string | null) {
@@ -701,7 +710,7 @@ type StripEntry = { kind: "header"; key: string; tab: QueryTab; pinned: boolean;
 /**
  * Flattens the strip's two sections (pinned, then regular) into render
  * entries: a group header before each semantic cluster, then that cluster's
- * pills. Collapsed clusters contribute no tab entries, only their header.
+ * pills. Collapsed pills remain mounted so their visibility can animate.
  */
 function tabMatchesSearch(tab: QueryTab, query: string) {
   const title = tabDisplayTitle(tab, t).toLocaleLowerCase();
@@ -731,10 +740,6 @@ function buildStripEntries(section: QueryTab[], pinned: boolean): StripEntry[] {
     if (first) {
       const groupKey = tabGroupKey(tab);
       entries.push({ kind: "header", key: `header:${tab.id}`, tab, pinned, count: section.filter((item) => tabGroupKey(item) === groupKey).length });
-    }
-    // Searching must reveal collapsed clusters, matching the upstream bar.
-    if (grouping && !tabSearchQuery.value.trim() && isTabGroupCollapsed(tab)) {
-      return;
     }
     entries.push({ kind: "tab", key: tab.id, tab, groupFirst: first, groupLast: last, grouping });
   });
@@ -1282,7 +1287,14 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
 
 <template>
   <!-- data-main-tab-bar is the drag-back hit-test anchor: dropping a detached window over ANY pane's strip returns the tab. -->
-  <div class="app-tab-bar group-tabbar relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[tabBarClass, { 'ring-2 ring-primary ring-inset': detachedDropTarget }]" :style="tabBarStyle" data-main-tab-bar :data-group-id="groupId" :data-placement="settingsStore.editorSettings.tabPlacement">
+  <div
+    class="app-tab-bar group-tabbar relative flex w-full min-w-0 shrink-0 overflow-hidden"
+    :class="[tabBarClass, isWrapLayout ? 'tab-wrap-mode' : '', { 'ring-2 ring-primary ring-inset': detachedDropTarget }]"
+    :style="tabBarStyle"
+    data-main-tab-bar
+    :data-group-id="groupId"
+    :data-placement="settingsStore.editorSettings.tabPlacement"
+  >
     <!-- Compact vertical toolbar: search, grouping preference, collapse. -->
     <div v-if="isVerticalLayout" class="flex shrink-0 items-center gap-0.5 border-b p-1.5" :class="isTabBarCollapsed ? 'justify-center' : ''">
       <div v-if="!isTabBarCollapsed" class="relative min-w-0 flex-1">
@@ -1372,7 +1384,13 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                     </button>
                   </CustomContextMenu>
                   <CustomContextMenu v-else-if="entry.kind === 'tab'" :items="getTabMenuItems(entry.tab)" v-slot="{ onContextMenu }">
-                    <div :class="isClassicLayout && !isVerticalLayout ? 'h-full' : ''" @contextmenu="onContextMenu">
+                    <div
+                      :class="['tab-group-entry', isClassicLayout && !isVerticalLayout ? 'h-full' : '', { 'tab-group-entry--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab) }]"
+                      :aria-hidden="entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)"
+                      :inert="entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)"
+                      @contextmenu="onContextMenu"
+                      @transitionend.self="handleTabGroupTransitionEnd"
+                    >
                       <Tooltip>
                         <TooltipTrigger as-child>
                           <div
@@ -1383,6 +1401,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                                 : ['h-7 rounded-md border', isTabActive(entry.tab) ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
                               {
                                 'tab-group-tab': entry.grouping,
+                                'tab-group-tab--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab),
                                 'tab-group-tab--first': entry.grouping && entry.groupFirst,
                                 'tab-group-tab--last': entry.grouping && entry.groupLast,
                               },

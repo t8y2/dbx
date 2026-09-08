@@ -36,7 +36,7 @@ describe("ContentArea object browser refresh wiring", () => {
   });
 
   it("exposes object and active table-info reloads as refresh", () => {
-    expect(objectBrowserSource).toMatch(/function refresh\(\): boolean \{\s+void reload\(\);\s+void refreshActiveTableInfo\(\);\s+return true;\s+\}/);
+    expect(objectBrowserSource).toMatch(/function refresh\(\): boolean \{\s+void reload\(\{ preserveExistingRows: true \}\);\s+void refreshActiveTableInfo\(\);\s+return true;\s+\}/);
     expect(objectBrowserSource).toContain("defineExpose({ focusSearch, refresh });");
   });
 

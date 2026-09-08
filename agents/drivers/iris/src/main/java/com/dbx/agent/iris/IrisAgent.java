@@ -67,10 +67,22 @@ public final class IrisAgent extends ConfiguredJdbcAgent {
 
     @Override
     protected Object resultValue(ResultSet rs, int index, int sqlType) {
-        if (sqlType == Types.OTHER) {
-            return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
+        switch (sqlType) {
+            case Types.BIGINT:
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+                // InterSystems can expose values outside the Java primitive range
+                // implied by its JDBC metadata. Preserve them without narrowing.
+                return unchecked(() -> {
+                    Object value = rs.getBigDecimal(index);
+                    return rs.wasNull() ? null : value;
+                });
+            case Types.OTHER:
+                return unchecked(() -> JdbcExecutor.normalizeResultValue(rs.getObject(index)));
+            default:
+                return super.resultValue(rs, index, sqlType);
         }
-        return super.resultValue(rs, index, sqlType);
     }
 
     @Override

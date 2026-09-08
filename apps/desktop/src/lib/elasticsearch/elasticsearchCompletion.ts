@@ -242,7 +242,7 @@ function pathItems(context: ElasticsearchCompletionContext, indices: string[]): 
 
 function indexItems(prefix: string, indices: string[]): ElasticsearchCompletionItem[] {
   return indices
-    .filter((index) => matchesFuzzyPrefix(index, prefix))
+    .filter((index) => matchesIndexFuzzyPrefix(index, prefix))
     .slice(0, 100)
     .map((index) => ({
       label: index,
@@ -371,6 +371,18 @@ function readWordPrefix(text: string, cursor: number): { prefix: string; from: n
 
 function matchesPrefix(value: string, prefix: string): boolean {
   return value.toLowerCase().startsWith(prefix.toLowerCase());
+}
+
+function matchesIndexFuzzyPrefix(value: string, prefix: string): boolean {
+  const normalizedValue = value.toLowerCase();
+  const normalizedPrefix = prefix.toLowerCase();
+  let from = 0;
+  for (const char of normalizedPrefix) {
+    const position = normalizedValue.indexOf(char, from);
+    if (position < 0) return false;
+    from = position + char.length;
+  }
+  return true;
 }
 
 function matchesFuzzyPrefix(value: string, prefix: string): boolean {

@@ -45,13 +45,15 @@ pub const DROP_TARGET_EXTERNAL_DEPENDENCIES: &str = "TRANSFER_DROP_TARGET_EXTERN
 /// silently loses engine metadata (ClickHouse ENGINE/ORDER BY/TTL, QuestDB designated
 /// timestamp), and managed-table DROP that also deletes the warehouse data files
 /// (Hive/Spark/Kyuubi/Impala/Argo).
+///
+/// Oracle, Dameng and OceanBase-Oracle are additionally excluded even though they support
+/// table rename: their constraint and index names are schema-unique, and the rename
+/// pre-pass has not yet learned to release those names on the backup tables, so a rebuilt
+/// table reusing the source DDL would collide (ORA-00955 / "already an object named").
 const DROP_TARGET_SUPPORTED: &[DatabaseType] = &[
     DatabaseType::Mysql,
     DatabaseType::Postgres,
-    DatabaseType::Oracle,
     DatabaseType::SqlServer,
-    DatabaseType::Dameng,
-    DatabaseType::OceanbaseOracle,
     DatabaseType::Kingbase,
     DatabaseType::Gaussdb,
     DatabaseType::OpenGauss,
@@ -363,12 +365,12 @@ pub async fn ensure_no_external_incoming_foreign_keys(
     }
 }
 
-/// Check incoming foreign keys and dependent views before any rename and again
-/// before deleting the backup collection.
+/// Check incoming foreign keys and dependent views before the first rename.
 ///
-/// Server catalogs retain the current user's metadata visibility. An empty result
-/// is not permission to cascade: cleanup must still use restrictive drops and retain
-/// backups when a dependency is hidden from metadata or created concurrently.
+/// This is the only dependency gate: it runs before any table is renamed aside, because a
+/// foreign key from outside the collection or a dependent view would follow the rename onto
+/// the backup. Cleanup later relies on `break_backup_foreign_key_graph` plus restrictive
+/// drops, not on a second pass of this check.
 pub async fn ensure_no_external_table_dependencies(
     state: &AppState,
     target_pool_key: &str,

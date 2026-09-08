@@ -7390,6 +7390,64 @@ async fn close_hive_server_transfer_cursor(state: &AppState, pool_key: &str, cur
 /// Returns a map from source table name to backup table name for the tables that were
 /// renamed. Tables absent from the target are skipped and absent from the map, which
 /// is what tells the main pass to create them without a backup to clean up.
+///
+/// SQL Server: the `sp_rename` object kind for a schema-unique backup object name that
+/// survived the table rename, so the pre-pass can rename it aside.
+#[derive(Clone, Copy)]
+enum SqlServerBackupObjectKind {
+    /// Primary-key / unique constraint: backed by a same-named index, so it is renamed as
+    /// `sp_rename 'schema.table.name', ..., 'INDEX'`.
+    KeyIndex,
+    /// Foreign-key / default / check constraint: renamed as `sp_rename 'schema.name', ..., 'OBJECT'`
+    /// (the object name is schema-qualified, NOT table-qualified — a table-qualified name
+    /// raises 15248 "ambiguous @objname").
+    Constraint,
+    /// Plain (non-constraint) index: `sp_rename 'schema.table.name', ..., 'INDEX'`.
+    Index,
+}
+
+/// SQL Server: list the schema-unique constraint and index names that survive a table
+/// rename, so the rebuild pre-pass can rename them aside and free the names.
+async fn get_sqlserver_backup_object_names(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(String, SqlServerBackupObjectKind)>, String> {
+    let object = if schema.is_empty() {
+        table.replace('\'', "''")
+    } else {
+        format!("{}.{}", schema.replace('\'', "''"), table.replace('\'', "''"))
+    };
+    let sql = format!(
+        "SELECT name, CAST(0 AS int) AS kind FROM sys.objects \
+         WHERE parent_object_id = OBJECT_ID('{object}') AND type IN ('PK','UQ') \
+         UNION ALL \
+         SELECT name, CAST(1 AS int) AS kind FROM sys.objects \
+         WHERE parent_object_id = OBJECT_ID('{object}') AND type IN ('F','D','C') \
+         UNION ALL \
+         SELECT i.name, CAST(2 AS int) AS kind FROM sys.indexes i \
+         WHERE i.object_id = OBJECT_ID('{object}') \
+           AND i.is_primary_key = 0 AND i.is_unique_constraint = 0 AND i.name IS NOT NULL",
+    );
+    let result = execute_read_on_pool(state, pool_key, &sql).await?;
+    let mut objects = Vec::new();
+    for row in &result.rows {
+        let Some(name) = row.first().and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let kind = match row.get(1).and_then(serde_json::Value::as_i64) {
+            Some(1) => SqlServerBackupObjectKind::Constraint,
+            Some(2) => SqlServerBackupObjectKind::Index,
+            _ => SqlServerBackupObjectKind::KeyIndex,
+        };
+        if !name.is_empty() {
+            objects.push((name.to_string(), kind));
+        }
+    }
+    Ok(objects)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn rename_tables_to_backup<F>(
     state: &Arc<AppState>,
@@ -7615,6 +7673,60 @@ where
                     renamed_objects.push(format!("sequence {} -> {}", sequence.name, backup_sequence_name));
                 }
 
+                crate::transfer_rebuild::record_rebuild_step(state, &request.transfer_id, table, renamed_objects)
+                    .await?;
+            } else if target_db_type == DatabaseType::SqlServer {
+                // SQL Server: `sp_rename` on the table does NOT rename its schema-unique
+                // constraints or indexes. They keep their original names, so a rebuilt table
+                // reusing the source DDL would collide ("There is already an object named").
+                // Rename them aside now to free the names.
+                let objects =
+                    get_sqlserver_backup_object_names(state, target_pool_key, &request.target_schema, backup_name)
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to list constraints and indexes on backup table '{backup_name}': {e}")
+                        })?;
+                let mut renamed_objects = Vec::new();
+                for (object_name, kind) in objects {
+                    if is_cancelled(&request.transfer_id).await {
+                        return Err("Cancelled".to_string());
+                    }
+                    let backup_object_name = crate::transfer_rebuild::backup_table_name(
+                        target_db_type,
+                        &request.transfer_id,
+                        &format!("{}.{}#object:{}", request.source_schema, table, object_name),
+                        &object_name,
+                    )?;
+                    // Key/plain indexes are table-qualified and renamed as INDEX; constraints
+                    // are schema-qualified (NOT table-qualified) and renamed as OBJECT.
+                    let (qualified_object, object_type, object_label) = match kind {
+                        SqlServerBackupObjectKind::KeyIndex | SqlServerBackupObjectKind::Index => {
+                            let qualified = if request.target_schema.is_empty() {
+                                format!("{backup_name}.{object_name}")
+                            } else {
+                                format!("{}.{backup_name}.{object_name}", request.target_schema)
+                            };
+                            (qualified, "INDEX", "index")
+                        }
+                        SqlServerBackupObjectKind::Constraint => {
+                            let qualified = if request.target_schema.is_empty() {
+                                object_name.clone()
+                            } else {
+                                format!("{}.{object_name}", request.target_schema)
+                            };
+                            (qualified, "OBJECT", "constraint")
+                        }
+                    };
+                    let rename_sql =
+                        format!("EXEC sp_rename N'{qualified_object}', N'{backup_object_name}', N'{object_type}';");
+                    execute_on_pool(state, target_pool_key, &rename_sql).await.map_err(|e| {
+                        format!(
+                            "Failed to rename {object_label} '{object_name}' on backup table '{backup_name}' to \
+                             '{backup_object_name}': {e}"
+                        )
+                    })?;
+                    renamed_objects.push(format!("{object_label} {object_name} -> {backup_object_name}"));
+                }
                 crate::transfer_rebuild::record_rebuild_step(state, &request.transfer_id, table, renamed_objects)
                     .await?;
             } else {
@@ -8451,6 +8563,45 @@ async fn break_backup_foreign_key_graph(
                     log::warn!(
                         "[transfer] failed to drop foreign key constraint {name} on backup {backup_table}: {error}"
                     );
+                }
+            }
+        } else if target_db_type == DatabaseType::SqlServer {
+            let sqlserver_client = {
+                let pool_handle = state.pool_handle(target_pool_key).await;
+                match pool_handle.as_ref() {
+                    Some(PoolKind::SqlServer(client)) => Some(client.clone()),
+                    _ => None,
+                }
+            };
+            if let Some(client) = &sqlserver_client {
+                // Collect the foreign-key names while holding the client lock, then drop it
+                // before executing the ALTERs through `execute_on_pool` (which re-acquires it).
+                let foreign_keys = {
+                    let mut client = client.lock().await;
+                    match db::sqlserver::list_foreign_keys(&mut client, &request.target_schema, backup_table).await {
+                        Ok(foreign_keys) => foreign_keys,
+                        Err(error) => {
+                            log::warn!("[transfer] failed to list foreign keys on backup {backup_table}: {error}");
+                            continue;
+                        }
+                    }
+                };
+                for name in foreign_keys.iter().map(|fk| fk.name.as_str()).collect::<Vec<_>>() {
+                    let drop_fk = format!(
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        qualified_table(
+                            backup_table,
+                            &request.target_schema,
+                            &target_db_type,
+                            request.target_catalog.as_deref()
+                        ),
+                        quote_identifier(name, &target_db_type)
+                    );
+                    if let Err(error) = execute_on_pool(state, target_pool_key, &drop_fk).await {
+                        log::warn!(
+                            "[transfer] failed to drop foreign key constraint {name} on backup {backup_table}: {error}"
+                        );
+                    }
                 }
             }
         }

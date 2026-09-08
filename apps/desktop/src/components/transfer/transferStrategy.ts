@@ -13,7 +13,7 @@ export function transferStrategyOptions(strategy: TransferStrategy): Pick<Transf
   return { mode: strategy === "rebuild" ? "append" : strategy, dropTargetBeforeCreate: strategy === "rebuild" };
 }
 
-const REBUILD_TARGET_TYPES = new Set<DatabaseType>(["mysql", "postgres", "oracle", "sqlserver", "dameng", "oceanbase-oracle", "kingbase", "gaussdb", "opengauss", "kwdb", "goldendb", "sqlite", "duckdb", "cloudflare-d1"]);
+const REBUILD_TARGET_TYPES = new Set<DatabaseType>(["mysql", "postgres", "sqlserver", "kingbase", "gaussdb", "opengauss", "kwdb", "goldendb", "sqlite", "duckdb", "cloudflare-d1"]);
 
 export function rebuildUnavailableReason(content: TransferContent, targetType: DatabaseType | undefined): "dataOnly" | "unsupported" | undefined {
   if (content === "dataOnly") return "dataOnly";

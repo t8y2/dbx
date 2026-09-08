@@ -1016,7 +1016,9 @@ async fn main() {
         .route(
             "/sql-file/preview",
             post(routes::sql_file::preview_sql_file)
-                .layer(DefaultBodyLimit::max(routes::sql_file::SQL_FILE_UPLOAD_MAX_BYTES.saturating_add(1024 * 1024))),
+                // Upper bound only; the effective (possibly lower) limit configured via
+                // Settings > SQL File Size is enforced inside the handler at request time.
+                .layer(DefaultBodyLimit::max(routes::sql_file::sql_file_upload_hard_cap_bytes())),
         )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
@@ -1056,6 +1058,11 @@ async fn main() {
         .route(
             "/app-settings/max-retries",
             get(routes::app_settings::load_max_retries).put(routes::app_settings::save_max_retries),
+        )
+        .route(
+            "/app-settings/sql-file-upload-max-bytes",
+            get(routes::app_settings::load_sql_file_upload_max_bytes)
+                .put(routes::app_settings::save_sql_file_upload_max_mb),
         )
         .route("/app-settings/config/decrypt", post(routes::app_settings::decrypt_config))
         // Cloud sync

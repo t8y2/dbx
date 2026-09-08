@@ -9,6 +9,13 @@ use tokio_util::sync::CancellationToken;
 use crate::connection::{AppState, PoolKind};
 use crate::db;
 use crate::models::connection::DatabaseType;
+
+pub const DEFAULT_SQL_FILE_UPLOAD_MAX_MB: u32 = 200;
+pub const MAX_SQL_FILE_UPLOAD_MAX_MB: u32 = 4096;
+
+pub fn clamp_sql_file_upload_max_mb(value: u32) -> u32 {
+    value.clamp(1, MAX_SQL_FILE_UPLOAD_MAX_MB)
+}
 use crate::query::{
     execute_sql_statement_with_options, pool_error_action, wait_for_query_opt, DbOperationBudget, PoolErrorAction,
     QueryExecutionOptions,

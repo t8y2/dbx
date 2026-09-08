@@ -23,6 +23,31 @@ use crate::state::WebState;
 const PENDING_SQL_FILE_PROGRESS_CHANNEL_TTL: Duration = Duration::from_secs(30);
 const SQL_FILE_UPLOAD_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 pub const SQL_FILE_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
+const SQL_FILE_UPLOAD_MIN_BYTES: usize = 1024 * 1024;
+const SQL_FILE_UPLOAD_MAX_BYTES_LIMIT: usize = 4096 * 1024 * 1024;
+
+pub fn sql_file_upload_max_bytes_from_value(value: Option<&str>) -> usize {
+    let mb = value
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        .unwrap_or(SQL_FILE_UPLOAD_MAX_BYTES);
+    mb.clamp(SQL_FILE_UPLOAD_MIN_BYTES, SQL_FILE_UPLOAD_MAX_BYTES_LIMIT)
+}
+
+pub fn sql_file_upload_hard_cap_bytes() -> usize {
+    SQL_FILE_UPLOAD_MAX_BYTES_LIMIT.saturating_add(1024 * 1024)
+}
+
+async fn sql_file_upload_limit(state: &WebState) -> usize {
+    let max_mb = state
+        .app
+        .storage
+        .load_sql_file_upload_max_mb()
+        .await
+        .unwrap_or(dbx_core::sql_file_import::DEFAULT_SQL_FILE_UPLOAD_MAX_MB);
+    sql_file_upload_max_bytes_from_value(Some(&max_mb.to_string()))
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,12 +74,9 @@ pub async fn preview_sql_file(
     if let Some(field) = multipart.next_field().await.map_err(|e| AppError::from(e.to_string()))? {
         let file_name = field.file_name().unwrap_or("upload.sql").to_string();
         let data = field.bytes().await.map_err(|e| AppError::from(e.to_string()))?;
-        if data.len() > SQL_FILE_UPLOAD_MAX_BYTES {
-            return Err(AppError::from(format!(
-                "File too large: {} bytes (max {} bytes)",
-                data.len(),
-                SQL_FILE_UPLOAD_MAX_BYTES
-            )));
+        let upload_limit = sql_file_upload_limit(&state).await;
+        if data.len() > upload_limit {
+            return Err(AppError::from(format!("File too large: {} bytes (max {} bytes)", data.len(), upload_limit)));
         }
 
         let file_path = safe_uploaded_sql_path(&tmp_dir, &file_name)?;
@@ -135,12 +157,13 @@ pub async fn execute_sql_file(
             None,
         ));
         for file_path in &file_paths {
+            let upload_limit = sql_file_upload_limit(&state_clone).await;
             match std::fs::metadata(file_path) {
-                Ok(meta) if meta.len() > SQL_FILE_UPLOAD_MAX_BYTES as u64 => {
+                Ok(meta) if meta.len() > upload_limit as u64 => {
                     progress_emitter.emit(sql_file_error_progress(
                         &req.execution_id,
                         started_at,
-                        format!("File too large: {} bytes (max {} bytes)", meta.len(), SQL_FILE_UPLOAD_MAX_BYTES),
+                        format!("File too large: {} bytes (max {} bytes)", meta.len(), upload_limit),
                     ));
                     cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
                     return;
@@ -278,7 +301,20 @@ pub async fn cancel_sql_file(
 mod tests {
     use std::time::Duration;
 
-    use super::{cleanup_sql_file_uploads_older_than, safe_uploaded_sql_path, validated_uploaded_sql_path};
+    use super::{
+        cleanup_sql_file_uploads_older_than, safe_uploaded_sql_path, sql_file_upload_max_bytes_from_value,
+        validated_uploaded_sql_path, SQL_FILE_UPLOAD_MAX_BYTES,
+    };
+
+    #[test]
+    fn sql_file_upload_limit_defaults_and_clamps() {
+        assert_eq!(sql_file_upload_max_bytes_from_value(None), SQL_FILE_UPLOAD_MAX_BYTES);
+        assert_eq!(sql_file_upload_max_bytes_from_value(Some("")), SQL_FILE_UPLOAD_MAX_BYTES);
+        assert_eq!(sql_file_upload_max_bytes_from_value(Some("0")), SQL_FILE_UPLOAD_MAX_BYTES);
+        assert_eq!(sql_file_upload_max_bytes_from_value(Some("512")), 512 * 1024 * 1024);
+        assert_eq!(sql_file_upload_max_bytes_from_value(Some("1")), 1024 * 1024);
+        assert_eq!(sql_file_upload_max_bytes_from_value(Some("99999")), 4096 * 1024 * 1024);
+    }
 
     #[test]
     fn uploaded_sql_paths_are_unique_and_keep_the_extension() {

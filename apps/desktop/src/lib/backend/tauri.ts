@@ -717,6 +717,14 @@ export async function loadMaxAgentTurns(): Promise<number> {
   return invoke("load_max_agent_turns");
 }
 
+export async function loadSqlFileUploadMaxBytes(): Promise<number> {
+  return 200 * 1024 * 1024;
+}
+
+export async function saveSqlFileUploadMaxMb(_sqlFileUploadMaxMb: number): Promise<void> {
+  // No-op on desktop: SQL files are streamed directly from disk, no server upload cap applies.
+}
+
 export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   return invoke("save_max_agent_turns", { maxAgentTurns });
 }

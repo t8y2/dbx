@@ -38,6 +38,7 @@ const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
 const SNIPPET_SYNC_IDS_KEY: &str = "snippet_sync_ids";
@@ -2050,7 +2051,7 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY];
+            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -2662,6 +2663,39 @@ impl Storage {
             .and_then(serde_json::Value::as_u64)
             .map(|value| crate::ai::clamp_max_retries(value.min(u32::MAX as u64) as u32))
             .unwrap_or(crate::ai::DEFAULT_MAX_RETRIES))
+    }
+
+    pub async fn save_sql_file_upload_max_mb(&self, max_mb: u32) -> Result<(), String> {
+        let max_mb = crate::sql_file_import::clamp_sql_file_upload_max_mb(max_mb);
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(
+                SQL_FILE_UPLOAD_MAX_MB_KEY.to_string(),
+                serde_json::Value::Number(serde_json::Number::from(max_mb)),
+            );
+            let json = serde_json::Value::Object(settings).to_string();
+            conn.execute("INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)", [json])
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn load_sql_file_upload_max_mb(&self) -> Result<u32, String> {
+        let settings = self.load_app_settings_json().await?;
+        Ok(settings
+            .get(SQL_FILE_UPLOAD_MAX_MB_KEY)
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| crate::sql_file_import::clamp_sql_file_upload_max_mb(value.min(u32::MAX as u64) as u32))
+            .unwrap_or(crate::sql_file_import::DEFAULT_SQL_FILE_UPLOAD_MAX_MB))
     }
 }
 
@@ -7195,6 +7229,39 @@ mod tests {
         storage.save_app_settings_json(&stale_settings).await.unwrap();
 
         assert_eq!(storage.load_max_retries().await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn sql_file_upload_max_mb_defaults_and_persists_clamped() {
+        let path = temp_db_path("sql-file-upload-max-mb");
+        let storage = Storage::open(&path).await.unwrap();
+
+        assert_eq!(
+            storage.load_sql_file_upload_max_mb().await.unwrap(),
+            crate::sql_file_import::DEFAULT_SQL_FILE_UPLOAD_MAX_MB
+        );
+
+        storage.save_sql_file_upload_max_mb(512).await.unwrap();
+        assert_eq!(storage.load_sql_file_upload_max_mb().await.unwrap(), 512);
+
+        // Values above the cap are clamped so raw DB edits cannot bypass the limit.
+        storage.save_sql_file_upload_max_mb(u32::MAX).await.unwrap();
+        assert_eq!(
+            storage.load_sql_file_upload_max_mb().await.unwrap(),
+            crate::sql_file_import::MAX_SQL_FILE_UPLOAD_MAX_MB
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_file_upload_max_mb_survives_stale_app_settings_save() {
+        let path = temp_db_path("sql-file-upload-max-mb-stale-save");
+        let storage = Storage::open(&path).await.unwrap();
+        let stale_settings = storage.load_app_settings_json().await.unwrap();
+
+        storage.save_sql_file_upload_max_mb(256).await.unwrap();
+        storage.save_app_settings_json(&stale_settings).await.unwrap();
+
+        assert_eq!(storage.load_sql_file_upload_max_mb().await.unwrap(), 256);
     }
 
     #[tokio::test]

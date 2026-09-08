@@ -138,6 +138,8 @@ import {
   saveMaxAgentTurns,
   loadMaxRetries,
   saveMaxRetries,
+  loadSqlFileUploadMaxBytes,
+  saveSqlFileUploadMaxMb,
   saveWebdavSyncSecretsPreference,
   saveWebdavSavedPassword,
   saveSnippetSavedToken,
@@ -2389,6 +2391,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
+  { value: "sqlFile", label: t("settings.sqlFileSizeTab") },
   ...(isWeb ? [] : [{ value: "backups" as const, label: t("databaseBackup.title") }]),
   { value: "tunnels", label: t("settings.tunnelsTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
@@ -2399,7 +2402,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "sqlFile", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
@@ -3847,6 +3850,7 @@ watch(activeSettingsTab, async (tab) => {
     await promptTemplateStore.ensureLoaded();
     editGlobalInstructions.value = promptTemplateStore.globalInstructions;
   }
+  if (tab === "sqlFile" && isWeb) void loadWebSqlFileUploadMaxMbSetting();
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
@@ -4152,6 +4156,52 @@ function maxRetriesOutOfRange(value: number | undefined): boolean {
 function normalizeMaxRetries(value: number | undefined): number {
   const rounded = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 2;
   return Math.min(10, Math.max(0, rounded));
+}
+
+const editWebSqlFileUploadMaxMb = ref<number | undefined>(undefined);
+const webSqlFileUploadMaxMbSaving = ref(false);
+const webSqlFileUploadMaxMbLoaded = ref(false);
+const webSqlFileUploadMaxMbLoading = ref(false);
+const webSqlFileUploadMaxMbLoadError = ref("");
+
+async function loadWebSqlFileUploadMaxMbSetting() {
+  if (webSqlFileUploadMaxMbLoaded.value || webSqlFileUploadMaxMbLoading.value) return;
+  webSqlFileUploadMaxMbLoading.value = true;
+  webSqlFileUploadMaxMbLoadError.value = "";
+  try {
+    const bytes = await loadSqlFileUploadMaxBytes();
+    editWebSqlFileUploadMaxMb.value = Math.round(bytes / (1024 * 1024));
+    webSqlFileUploadMaxMbLoaded.value = true;
+  } catch (e: any) {
+    webSqlFileUploadMaxMbLoadError.value = e?.message || String(e);
+    toast(webSqlFileUploadMaxMbLoadError.value, 5000);
+  } finally {
+    webSqlFileUploadMaxMbLoading.value = false;
+  }
+}
+
+function normalizeWebSqlFileUploadMaxMb(value: number | undefined): number {
+  const rounded = typeof value === "number" && Number.isFinite(value) ? Math.round(value) : 200;
+  return Math.min(MAX_EXTERNAL_SQL_EDITOR_FILE_MB, Math.max(MIN_EXTERNAL_SQL_EDITOR_FILE_MB, rounded));
+}
+
+function webSqlFileUploadMaxMbOutOfRange(value: number | undefined): boolean {
+  return typeof value === "number" && (value < MIN_EXTERNAL_SQL_EDITOR_FILE_MB || value > MAX_EXTERNAL_SQL_EDITOR_FILE_MB);
+}
+
+async function saveWebSqlFileUploadMaxMbSetting() {
+  if (!webSqlFileUploadMaxMbLoaded.value) return;
+  const clamped = normalizeWebSqlFileUploadMaxMb(editWebSqlFileUploadMaxMb.value);
+  webSqlFileUploadMaxMbSaving.value = true;
+  try {
+    await saveSqlFileUploadMaxMb(clamped);
+    editWebSqlFileUploadMaxMb.value = clamped;
+    toast(t("settings.sqlFileUploadMaxMbSaved"));
+  } catch (e: any) {
+    toast(e?.message || String(e), 5000);
+  } finally {
+    webSqlFileUploadMaxMbSaving.value = false;
+  }
 }
 
 // AI Config Delete Confirmation
@@ -6973,26 +7023,6 @@ onUnmounted(() => {
                 </div>
                 <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
-                    <Label for="external-sql-editor-max-mb">
-                      {{ t("settings.externalSqlEditorMaxMb") }}
-                    </Label>
-                    <p class="text-xs text-muted-foreground">
-                      {{ t("settings.externalSqlEditorMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
-                    </p>
-                  </div>
-                  <Input
-                    id="external-sql-editor-max-mb"
-                    type="number"
-                    inputmode="numeric"
-                    class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
-                    :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
-                    :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
-                    :model-value="editExternalSqlEditorMaxMb"
-                    @input="updateExternalSqlEditorMaxMbInput"
-                  />
-                </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                  <div class="space-y-1">
                     <Label for="infinite-scroll">
                       {{ t("settings.infiniteScroll") }}
                     </Label>
@@ -7464,6 +7494,55 @@ onUnmounted(() => {
                       </tbody>
                     </table>
                   </div>
+                </div>
+              </div>
+            </section>
+
+            <section v-else-if="activeSettingsTab === 'sqlFile'" data-settings-search-id="sqlFile" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('sqlFile')]">
+              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="external-sql-editor-max-mb">
+                    {{ t("settings.externalSqlEditorMaxMb") }}
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.externalSqlEditorMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
+                  </p>
+                </div>
+                <Input
+                  id="external-sql-editor-max-mb"
+                  type="number"
+                  inputmode="numeric"
+                  class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                  :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
+                  :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
+                  :model-value="editExternalSqlEditorMaxMb"
+                  @input="updateExternalSqlEditorMaxMbInput"
+                />
+              </div>
+              <div v-if="isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="space-y-1">
+                  <Label for="web-sql-file-upload-max-mb">
+                    {{ t("settings.webSqlFileUploadMaxMb") }}
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    {{ t("settings.webSqlFileUploadMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
+                  </p>
+                </div>
+                <div class="flex shrink-0 items-center gap-2">
+                  <Input
+                    id="web-sql-file-upload-max-mb"
+                    v-model.number="editWebSqlFileUploadMaxMb"
+                    type="number"
+                    inputmode="numeric"
+                    class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                    :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
+                    :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
+                    :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbLoading"
+                    :aria-invalid="webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)"
+                  />
+                  <Button type="button" size="sm" variant="outline" :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbSaving || webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)" @click="saveWebSqlFileUploadMaxMbSetting">
+                    {{ t("settings.save") }}
+                  </Button>
                 </div>
               </div>
             </section>

@@ -130,6 +130,25 @@ pub async fn load_max_retries(State(state): State<Arc<WebState>>) -> Result<Json
     state.app.storage.load_max_retries().await.map(Json).map_err(AppError::from)
 }
 
+pub async fn load_sql_file_upload_max_bytes(State(state): State<Arc<WebState>>) -> Result<Json<u32>, AppError> {
+    let max_mb = state.app.storage.load_sql_file_upload_max_mb().await.map_err(AppError::from)?;
+    Ok(Json(max_mb.saturating_mul(1024 * 1024)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSqlFileUploadMaxMbRequest {
+    pub sql_file_upload_max_mb: u32,
+}
+
+pub async fn save_sql_file_upload_max_mb(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveSqlFileUploadMaxMbRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_sql_file_upload_max_mb(body.sql_file_upload_max_mb).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn save_max_retries(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveMaxRetriesRequest>,

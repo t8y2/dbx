@@ -1848,6 +1848,19 @@ export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
 
+export async function loadSqlFileUploadMaxBytes(): Promise<number> {
+  return get("/api/app-settings/sql-file-upload-max-bytes");
+}
+
+export async function saveSqlFileUploadMaxMb(sqlFileUploadMaxMb: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/sql-file-upload-max-bytes"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sqlFileUploadMaxMb }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
 export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/max-agent-turns"), {
     method: "PUT",

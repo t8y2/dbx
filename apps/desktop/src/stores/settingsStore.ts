@@ -821,6 +821,7 @@ export interface EditorSettings {
   sidebarGlobalSearchLocal: boolean;
   autoSelectActiveSidebarNode: boolean;
   sidebarBrowseObjectsOnDatabaseActivation: boolean;
+  sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: number;
   openTabsRestoreMode: OpenTabsRestoreMode;
   disconnectTabHandlingMode: DisconnectTabHandlingMode;
   dataTabReuseMode: DataTabReuseMode;
@@ -949,6 +950,7 @@ export const EDITOR_THEMES: {
 const EDITOR_THEME_VALUES = new Set<EditorTheme>(EDITOR_THEMES.map((theme) => theme.value));
 
 export const EXECUTE_MODE_CURRENT_DEFAULT_VERSION = 1;
+export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
@@ -1052,6 +1054,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   sidebarGlobalSearchLocal: false,
   autoSelectActiveSidebarNode: false,
   sidebarBrowseObjectsOnDatabaseActivation: false,
+  sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   openTabsRestoreMode: "all",
   disconnectTabHandlingMode: "close-tabs",
   dataTabReuseMode: DEFAULT_DATA_TAB_REUSE_MODE,
@@ -1506,6 +1509,10 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
           ? // The legacy false value only disabled single-click browsing; double-click still opened the browser.
             true
           : DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation,
+    sidebarBrowseObjectsOnDatabaseActivationMigrationVersion:
+      typeof settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion === "number" && settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion >= SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION
+        ? Math.floor(settings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion)
+        : SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
     openTabsRestoreMode: normalizeOpenTabsRestoreMode(
       (settings as Partial<EditorSettings>).openTabsRestoreMode,
       (
@@ -1737,11 +1744,17 @@ export const useSettingsStore = defineStore("settings", () => {
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
           const savedSettings = saved as Partial<EditorSettings>;
           const normalized = normalizeEditorSettings(savedSettings);
+          const needsSidebarBrowseObjectsMigration = savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion !== SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+          if (needsSidebarBrowseObjectsMigration) {
+            // Before this migration, a false value still preserved double-click browsing.
+            normalized.sidebarBrowseObjectsOnDatabaseActivation = true;
+            normalized.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion = SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+          }
           editorSettings.value = normalized;
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsTabNavigationShortcutMigration) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }

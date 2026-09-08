@@ -50,6 +50,19 @@ test("round-trips query transaction mode", () => {
   assert.equal(restored.tabs[0]?.autoCommit, false);
 });
 
+test("round-trips editor selection and viewport", () => {
+  const saved = serializeOpenTabs([
+    queryTab({
+      editorSelection: { anchor: 8, head: 8 },
+      editorViewport: { scrollTop: 120, scrollLeft: 16 },
+    }),
+  ]);
+  const restored = restoreOpenTabsState(JSON.stringify(saved), "tab-1");
+
+  assert.deepEqual(restored.tabs[0]?.editorSelection, { anchor: 8, head: 8 });
+  assert.deepEqual(restored.tabs[0]?.editorViewport, { scrollTop: 120, scrollLeft: 16 });
+});
+
 test("serializes object source query tabs with save context", () => {
   const saved = serializeOpenTabs([
     queryTab({

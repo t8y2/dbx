@@ -75,6 +75,7 @@ export interface ContentAreaSurfaceEmits {
   editorCursorChange: [tabId: string, pos: number];
   editorViewportChange: [tabId: string, viewport: { scrollTop: number; scrollLeft: number }];
   editorSelectionStateChange: [tabId: string, selection: { anchor: number; head: number }];
+  editorStateFlushed: [tabId: string];
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];

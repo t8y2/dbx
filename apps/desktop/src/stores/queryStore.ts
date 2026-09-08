@@ -2227,6 +2227,8 @@ export const useQueryStore = defineStore("query", () => {
       database: t.database,
       schema: t.schema,
       sql: t.sql,
+      editorViewport: t.editorViewport,
+      editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
       externalSqlPath: t.externalSqlPath,
       externalSqlFileVersion: t.externalSqlFileVersion,
@@ -3234,6 +3236,13 @@ export const useQueryStore = defineStore("query", () => {
         viewport: tab.editorViewport,
       }),
     );
+  }
+
+  function flushEditorState(id: string): Promise<void> {
+    const tab = tabs.value.find((item) => item.id === id);
+    if (!tab) return Promise.resolve();
+    persistSavedSqlEditorPosition(tab);
+    return flushPendingPersist();
   }
 
   function queueSavedSqlEditorPositionPersist(tab: QueryTab | undefined) {
@@ -7770,6 +7779,7 @@ export const useQueryStore = defineStore("query", () => {
     updateDataGridHiddenColumnKeys,
     updateEditorViewport,
     updateEditorSelection,
+    flushEditorState,
     updateObjectBrowserViewport,
     updateObjectBrowserSearch,
     updateNacosConfigEditorViewport,

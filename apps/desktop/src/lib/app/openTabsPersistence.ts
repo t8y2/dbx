@@ -25,6 +25,8 @@ export interface SavedOpenTab {
   catalog?: string;
   schema?: string;
   sql: string;
+  editorViewport?: QueryTab["editorViewport"];
+  editorSelection?: QueryTab["editorSelection"];
   originalSql?: string;
   savedSqlId?: string;
   externalSqlPath?: string;
@@ -108,6 +110,24 @@ function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: str
   return "";
 }
 
+function restoredEditorSelection(tab: SavedOpenTab, docLength: number): QueryTab["editorSelection"] {
+  const selection = tab.editorSelection;
+  if (!selection || !Number.isFinite(selection.anchor) || !Number.isFinite(selection.head)) return undefined;
+  return {
+    anchor: Math.min(Math.max(0, Math.trunc(selection.anchor)), docLength),
+    head: Math.min(Math.max(0, Math.trunc(selection.head)), docLength),
+  };
+}
+
+function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
+  const viewport = tab.editorViewport;
+  if (!viewport || !Number.isFinite(viewport.scrollTop) || !Number.isFinite(viewport.scrollLeft)) return undefined;
+  return {
+    scrollTop: Math.max(0, viewport.scrollTop),
+    scrollLeft: Math.max(0, viewport.scrollLeft),
+  };
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   return tabs.map((tab) => ({
     id: tab.id,
@@ -119,6 +139,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.catalog !== undefined ? { catalog: tab.catalog } : {}),
     schema: tab.schema,
     sql: shouldPersistTabSql(tab) ? tab.sql : "",
+    ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
+    ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
     // Plain query tabs always round-trip originalSql. External-file tabs only persist it
     // while dirty so their disk baseline survives restart without duplicating clean SQL.
     ...(tab.originalSql !== undefined && !tab.savedSqlId && (!tab.externalSqlPath || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
@@ -212,8 +234,8 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         isCancelling: false,
         queryExecutionStartedAt: undefined,
         executingResultRunId: undefined,
-        editorViewport: undefined,
-        editorSelection: undefined,
+        editorViewport: restoredEditorViewport(tab),
+        editorSelection: restoredEditorSelection(tab, typeof tab.sql === "string" ? tab.sql.length : 0),
         isExplaining: false,
         originalSql: restoredOriginalSql(tab, mode, typeof tab.sql === "string" ? tab.sql : ""),
         resultEvicted: mode === "data" ? undefined : tab.resultEvicted,

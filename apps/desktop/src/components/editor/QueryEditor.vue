@@ -244,6 +244,7 @@ const emit = defineEmits<{
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
   selectionStateChange: [selection: { anchor: number; head: number }];
+  editorStateFlushed: [];
   sendSelectionToAi: [sql: string];
 }>();
 
@@ -6983,6 +6984,7 @@ function pauseQueryEditorBackgroundWork() {
   cancelBatchColumnSelectionRefresh();
   flushEditorViewport();
   flushEditorSelection();
+  emit("editorStateFlushed");
   clearTableNavigationHover();
   clearPendingCompletionEnter();
   clearPendingCompletionTab();

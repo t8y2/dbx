@@ -3083,6 +3083,7 @@ export default {
     editColumn: "Edit Column",
     editIndex: "Edit Index",
     refreshChildren: "Refresh",
+    collapseAll: "Collapse All",
     expandAll: "Expand All",
     tableNameFilters: "Filters...",
     tableNameFiltersDescription: "Show only object names that match the include list, then hide names that match the exclude list. One SQL LIKE pattern per line.",

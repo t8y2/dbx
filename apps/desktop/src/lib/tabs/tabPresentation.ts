@@ -154,8 +154,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
-    if (compact) return schema || tab.title;
-    return schema ? `${schema}@${database}` : `${tab.title}@${database}`;
+    const objectScope = tab.catalog ? `${tab.catalog}.${database}` : database;
+    if (compact) return schema || objectScope;
+    return schema ? `${schema}@${objectScope}` : objectScope;
   }
   if (tab.mode === "users") {
     if (compact) return t("tabs.users");

@@ -402,7 +402,7 @@
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header-content {
   height: 1.625rem;
-  border-radius: 9999px;
+  border-radius: var(--dbx-radius-md);
   padding-inline: 0.4rem 0.5rem;
   background: var(--tab-group-soft);
 }
@@ -568,6 +568,10 @@
     0 3px 9px color-mix(in srgb, var(--tab-group-color, var(--foreground)) 8%, transparent);
 }
 
+.vertical-tab-layout .tab-group-tab[data-active-tab="true"] {
+  background-color: var(--tab-group-soft);
+}
+
 .vertical-tab-layout .app-tab-scroll > * {
   width: 100%;
   flex: none;
@@ -643,7 +647,7 @@
 .vertical-tab-layout .tab-group-header-content {
   width: 100%;
   height: 100%;
-  border-radius: 0.5rem;
+  border-radius: var(--dbx-radius-md);
   padding-inline: 0.55rem;
 }
 

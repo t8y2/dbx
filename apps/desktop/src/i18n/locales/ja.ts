@@ -3006,6 +3006,7 @@ export default withEnglishFallback({
     editColumn: "列を編集",
     editIndex: "インデックスを編集",
     refreshChildren: "更新",
+    collapseAll: "すべて折りたたむ",
     expandAll: "すべて展開",
     tableNameFilters: "フィルター...",
     tableNameFiltersDescription: "Include リストに一致するオブジェクト名だけを表示し、Exclude リストに一致する名前を非表示にします。1 行に 1 つの SQL LIKE パターンを入力します。",

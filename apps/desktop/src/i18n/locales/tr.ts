@@ -3057,6 +3057,7 @@ export default withEnglishFallback({
     editColumn: "Sütunu Düzenle",
     editIndex: "Dizini Düzenle",
     refreshChildren: "Yenile",
+    collapseAll: "Tümünü daralt",
     expandAll: "Tümünü Genişlet",
     tableNameFilters: "Filtreler...",
     tableNameFiltersDescription: "Yalnızca dâhil etme listesiyle eşleşen nesne adlarını göster, ardından hariç tutma listesiyle eşleşen adları gizle. Her satıra bir SQL LIKE deseni yazın.",

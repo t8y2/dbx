@@ -3006,6 +3006,7 @@ export default withEnglishFallback({
     editColumn: "编辑字段",
     editIndex: "编辑索引",
     refreshChildren: "刷新",
+    collapseAll: "全部折叠",
     expandAll: "展开全部",
     tableNameFilters: "过滤器...",
     tableNameFiltersDescription: "先仅显示命中 include 列表的对象名称，再隐藏命中 exclude 列表的对象名称。每行一个 SQL LIKE 模式。",

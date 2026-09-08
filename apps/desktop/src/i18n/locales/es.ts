@@ -2984,6 +2984,7 @@ export default withEnglishFallback({
     editColumn: "Editar columna",
     editIndex: "Editar índice",
     refreshChildren: "Actualizar",
+    collapseAll: "Contraer todo",
     expandAll: "Expandir todo",
     tableNameFilters: "Filtros...",
     tableNameFiltersDescription: "Muestra solo objetos que coincidan con include y oculta los que coincidan con exclude. Un patrón SQL LIKE por línea.",

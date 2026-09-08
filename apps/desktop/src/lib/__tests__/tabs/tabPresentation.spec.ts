@@ -168,6 +168,14 @@ describe("query result grid identity", () => {
 });
 
 describe("tab group presentation", () => {
+  it("does not expose the internal objects mode in object browser tab titles", () => {
+    const store = useConnectionStore();
+    store.connections = [{ id: "conn-1", name: "PostgreSQL", db_type: "postgres", driver_profile: "postgres", database: "app" } as ConnectionConfig];
+
+    expect(tabDisplayTitle(queryTab({ mode: "objects", title: "app objects" }), translate)).toBe("db");
+    expect(tabDisplayTitle(queryTab({ mode: "objects", title: "public objects", objectBrowser: { schema: "public" } }), translate)).toBe("public@db");
+  });
+
   it("uses the live database and branch context for Dolt version control tabs", () => {
     const store = useConnectionStore();
     store.connections = [{ id: "conn-1", name: "Production Dolt", db_type: "mysql", driver_profile: "dolt", database: "app" } as ConnectionConfig];

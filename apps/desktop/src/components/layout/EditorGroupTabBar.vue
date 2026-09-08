@@ -30,7 +30,7 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDown, ArrowDownUp, ArrowRight, ChevronDown, ChevronsLeft, ChevronsRight, Copy, ListFilter, Maximize2, Minimize2, Package, PanelTop, Pencil, Pin, RotateCcw, RotateCw, Search, Settings, X } from "@lucide/vue";
+import { ArrowDown, ArrowDownUp, ArrowRight, ChevronDown, ChevronsDownUp, ChevronsLeft, ChevronsRight, ChevronsUpDown, Copy, ListFilter, Maximize2, Minimize2, Package, PanelTop, Pencil, Pin, RotateCcw, RotateCw, Search, Settings, X } from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -416,6 +416,7 @@ const sortedPinnedTabs = computed(() => sortDisplayedTabs(props.tabs.filter((tab
 const sortedRegularTabs = computed(() => sortDisplayedTabs(props.tabs.filter((tab) => !tab.pinned)));
 
 const collapsedTabGroups = ref<Set<string>>(new Set());
+const pendingTabScrollRestore = ref<{ fixed: number; regular: number } | null>(null);
 const tabGroupPalette = ["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"];
 const tabGroupEditorOpen = ref(false);
 const editingTabGroupKey = ref("");
@@ -469,13 +470,51 @@ function isTabGroupActive(tab: QueryTab) {
   return section.some((item) => tabGroupKey(item) === groupKey && isTabActive(item));
 }
 
+function preserveTabScrollPosition() {
+  pendingTabScrollRestore.value = {
+    fixed: fixedTabsRowRef.value?.scrollLeft ?? 0,
+    regular: regularTabsRowRef.value?.scrollLeft ?? 0,
+  };
+}
+
+function restoreTabScrollPosition(position: { fixed: number; regular: number }) {
+  if (fixedTabsRowRef.value) fixedTabsRowRef.value.scrollLeft = position.fixed;
+  if (regularTabsRowRef.value) regularTabsRowRef.value.scrollLeft = position.regular;
+}
+
 function toggleTabGroup(tab: QueryTab) {
+  preserveTabScrollPosition();
   const groupId = tabGroupId(tab);
   const next = new Set(collapsedTabGroups.value);
   if (next.has(groupId)) next.delete(groupId);
   else next.add(groupId);
   collapsedTabGroups.value = next;
   nextTick(updateScrollButtons);
+}
+
+function tabGroupIdsInPane() {
+  if (settingsStore.editorSettings.tabGroupMode === "none") return [];
+  return [...new Set(props.tabs.map((tab) => tabGroupId(tab)))];
+}
+
+function collapseAllTabGroups() {
+  preserveTabScrollPosition();
+  collapsedTabGroups.value = new Set(tabGroupIdsInPane());
+  nextTick(() => {
+    updateScrollButtons();
+    fixedTabsScroll.updateScrollButtons();
+    regularTabsScroll.updateScrollButtons();
+  });
+}
+
+function expandAllTabGroups() {
+  preserveTabScrollPosition();
+  collapsedTabGroups.value = new Set();
+  nextTick(() => {
+    updateScrollButtons();
+    fixedTabsScroll.updateScrollButtons();
+    regularTabsScroll.updateScrollButtons();
+  });
 }
 
 function expandTabGroupForTab(tabId: string | null) {
@@ -625,6 +664,19 @@ function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
       action: () => resetTabGroupCustomization(tab),
       icon: RotateCcw,
       visible: !!(customization?.name || customization?.color),
+    },
+    { label: "", separator: true },
+    {
+      label: t("contextMenu.collapseAll"),
+      action: collapseAllTabGroups,
+      icon: ChevronsDownUp,
+      visible: settingsStore.editorSettings.tabGroupMode !== "none",
+    },
+    {
+      label: t("contextMenu.expandAll"),
+      action: expandAllTabGroups,
+      icon: ChevronsUpDown,
+      visible: settingsStore.editorSettings.tabGroupMode !== "none",
     },
     { label: "", separator: true },
     ...getTabPreferenceMenuItems(),
@@ -1175,6 +1227,10 @@ watch(
   },
 );
 
+watch(isVerticalLayout, (vertical) => {
+  if (!vertical) tabSearchQuery.value = "";
+});
+
 watch(
   () => [
     props.tabs.map((tab) => `${tab.id}:${tab.pinned ? "1" : "0"}:${tab.title}:${tab.mode}`).join("|"),
@@ -1188,13 +1244,26 @@ watch(
   () => {
     // Tab content can change without changing the scroll container's size.
     // Re-measure after Vue has committed the new pills to avoid stale overflow controls.
+    const scrollPositionToRestore = pendingTabScrollRestore.value;
+    pendingTabScrollRestore.value = null;
     nextTick(() =>
       requestAnimationFrame(() => {
         tabLayoutRevision.value++;
         updateScrollButtons();
         fixedTabsScroll.updateScrollButtons();
         regularTabsScroll.updateScrollButtons();
-        nextTick(() => requestAnimationFrame(revealActiveTabAfterLayout));
+        if (scrollPositionToRestore) {
+          nextTick(() =>
+            requestAnimationFrame(() => {
+              restoreTabScrollPosition(scrollPositionToRestore);
+              updateScrollButtons();
+              fixedTabsScroll.updateScrollButtons();
+              regularTabsScroll.updateScrollButtons();
+            }),
+          );
+        } else {
+          nextTick(() => requestAnimationFrame(revealActiveTabAfterLayout));
+        }
       }),
     );
   },

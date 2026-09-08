@@ -2876,6 +2876,7 @@ export default withEnglishFallback({
     editColumn: "컬럼 편집",
     editIndex: "인덱스 편집",
     refreshChildren: "새로고침",
+    collapseAll: "모두 접기",
     expandAll: "모두 펼치기",
     tableNameFilters: "필터...",
     tableNameFiltersDescription: "포함 목록과 일치하는 객체 이름만 표시한 다음 제외 목록과 일치하는 이름을 숨깁니다. 한 줄에 하나의 SQL LIKE 패턴.",

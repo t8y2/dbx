@@ -6587,16 +6587,15 @@ fn build_postgres_ownership_statement(statement: &PostgresOwnershipStatement, ow
 
 /// Build the SQL plan preview for a `drop_target_before_create` transfer.
 ///
-/// Pure planning: it resolves target names, derives backup names, and prepares the CREATE
-/// DDL through the exact same helpers the actual pass runs — but executes nothing. The
-/// returned `sql` is a human-readable, phase-grouped rendering of the rename/create/cleanup
-/// statements, so the confirmation dialog never has to fake a DROP.
+/// Pure planning and deliberately lightweight: it resolves target names, derives backup
+/// names, and renders the rename/drop statements — but it does *not* read per-table column
+/// metadata or prepare the full CREATE DDL, so a large selection previews quickly and the
+/// confirmation dialog stays readable. The destructive steps (rename aside, drop the backup
+/// after success) are the ones shown; the CREATE step is summarized rather than expanded.
 async fn build_rebuild_preview(
     state: &Arc<AppState>,
     request: &TransferRequest,
-    source_db_type: &DatabaseType,
     target_db_type: &DatabaseType,
-    source_pool_key: &str,
     target_pool_key: &str,
 ) -> Result<TransferRebuildPreview, String> {
     // Resolve target names first, exactly like the rename pre-pass, so the preview cannot
@@ -6630,40 +6629,9 @@ async fn build_rebuild_preview(
 
     let mut tables = Vec::with_capacity(resolved.len());
     let mut rename_statements: Vec<String> = Vec::new();
-    let mut create_statements: Vec<String> = Vec::new();
     let mut drop_statements: Vec<String> = Vec::new();
 
     for (table, target_table, preexisting) in &resolved {
-        let columns = get_columns_for_transfer(
-            state,
-            source_pool_key,
-            &request.source_connection_id,
-            &request.source_database,
-            &request.source_schema,
-            table,
-            request.source_catalog.as_deref(),
-        )
-        .await
-        .map_err(|error| {
-            format!("Failed to read source columns for '{table}' while building the rebuild preview: {error}")
-        })?;
-
-        let prepared = ddl_plan::prepare_table_ddl(
-            state,
-            request,
-            table,
-            target_table,
-            source_db_type,
-            target_db_type,
-            source_pool_key,
-            &columns,
-            None,
-            &HashMap::new(),
-        )
-        .await
-        .map_err(|error| format!("Failed to plan CREATE TABLE for '{table}': {error}"))?;
-        create_statements.push(prepared.ddl);
-
         let backup_table = if *preexisting {
             let backup = crate::transfer_rebuild::backup_table_name(
                 *target_db_type,
@@ -6702,11 +6670,14 @@ async fn build_rebuild_preview(
 
     let mut phases: Vec<String> = Vec::new();
     if !rename_statements.is_empty() {
-        phases.push(format!("-- Backup existing target tables\n{}", rename_statements.join(";\n")));
+        phases.push(format!("-- 1. Backup existing target tables\n{}", rename_statements.join(";\n")));
     }
-    phases.push(format!("-- Create target tables\n{}", create_statements.join(";\n")));
+    phases.push(format!(
+        "-- 2. Recreate the {} selected table(s) from the source structure and transfer the selected data",
+        resolved.len()
+    ));
     if !drop_statements.is_empty() {
-        phases.push(format!("-- Cleanup backups after success\n{}", drop_statements.join(";\n")));
+        phases.push(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")));
     }
 
     let warnings = if resolved.iter().any(|(_, _, preexisting)| !preexisting) {
@@ -6756,10 +6727,7 @@ pub async fn preview_transfer_ownership(
     // Rebuild transfers additionally expose the rename/create/cleanup SQL plan so the
     // confirmation dialog shows the real statements it is about to run.
     let rebuild = if request.drop_target_before_create {
-        Some(
-            build_rebuild_preview(state, request, source_db_type, target_db_type, source_pool_key, target_pool_key)
-                .await?,
-        )
+        Some(build_rebuild_preview(state, request, target_db_type, target_pool_key).await?)
     } else {
         None
     };

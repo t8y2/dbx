@@ -102,9 +102,9 @@ async fn transfer_rebuild_preview_plans_without_executing_ddl() {
     for table in &rebuild.tables {
         assert!(table.backup_table.is_some(), "preexisting targets must carry a backup name: {table:?}");
     }
-    assert!(rebuild.sql.contains("-- Backup existing target tables"), "{}", rebuild.sql);
-    assert!(rebuild.sql.contains("-- Create target tables"), "{}", rebuild.sql);
-    assert!(rebuild.sql.contains("-- Cleanup backups after success"), "{}", rebuild.sql);
+    assert!(rebuild.sql.contains("-- 1. Backup existing target tables"), "{}", rebuild.sql);
+    assert!(rebuild.sql.contains("-- 2. Recreate the"), "{}", rebuild.sql);
+    assert!(rebuild.sql.contains("-- 3. Drop backups after success"), "{}", rebuild.sql);
 
     // The preview must be pure planning: neither table may have been renamed aside.
     for table in ["orders", "users"] {

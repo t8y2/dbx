@@ -1403,6 +1403,9 @@ function resolveToolbarTab(tabId?: string) {
 function formatActiveSql(tabId?: string) {
   const tab = resolveToolbarTab(tabId);
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
+  const connection = connectionStore.getConfig(tab.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
+  if (!canFormatSqlForDatabaseType(databaseType)) return;
   formatSqlRequest.value = {
     id: (formatSqlRequest.value?.id ?? 0) + 1,
     tabId: tab.id,

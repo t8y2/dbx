@@ -353,6 +353,94 @@ async fn local_backend_picks_up_connections_added_after_startup_without_reload()
 }
 
 #[tokio::test]
+async fn local_backend_replaces_pool_after_connection_config_changes() {
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let first_data_path = directory.path().join("first.sqlite");
+    let second_data_path = directory.path().join("second.sqlite");
+    drop(Storage::open(&first_data_path).await.expect("create first SQLite database"));
+    drop(Storage::open(&second_data_path).await.expect("create second SQLite database"));
+    let first_data_path = first_data_path.canonicalize().expect("canonicalize first SQLite path");
+    let second_data_path = second_data_path.canonicalize().expect("canonicalize second SQLite path");
+
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let mut connection: ConnectionConfig = serde_json::from_value(json!({
+        "id": "updated-sqlite",
+        "name": "updated-sqlite",
+        "db_type": "sqlite",
+        "host": first_data_path.to_string_lossy(),
+        "port": 0,
+        "username": "",
+        "password": "",
+        "database": "",
+        "ssl": false
+    }))
+    .expect("initial connection config");
+    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save initial connection");
+
+    let backend = LocalBackend::open(&db_path).await.expect("open local backend");
+    let initial_result = backend
+        .execute_query(&connection, "", "PRAGMA database_list", None, None)
+        .await
+        .expect("query initial database");
+    assert_eq!(initial_result.rows[0][2], json!(first_data_path.to_string_lossy()));
+
+    connection.host = second_data_path.to_string_lossy().into_owned();
+    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save updated connection");
+    let updated = backend.load_connections().await.expect("reload updated connection");
+    let updated = updated.first().expect("updated connection");
+
+    let updated_result =
+        backend.execute_query(updated, "", "PRAGMA database_list", None, None).await.expect("query updated database");
+    assert_eq!(updated_result.rows[0][2], json!(second_data_path.to_string_lossy()));
+}
+
+#[tokio::test]
+async fn local_backend_replaces_pool_after_connection_is_deleted_and_recreated() {
+    let directory = tempdir().expect("temporary data directory");
+    let db_path = directory.path().join("dbx.db");
+    let first_data_path = directory.path().join("first.sqlite");
+    let second_data_path = directory.path().join("second.sqlite");
+    drop(Storage::open(&first_data_path).await.expect("create first SQLite database"));
+    drop(Storage::open(&second_data_path).await.expect("create second SQLite database"));
+    let first_data_path = first_data_path.canonicalize().expect("canonicalize first SQLite path");
+    let second_data_path = second_data_path.canonicalize().expect("canonicalize second SQLite path");
+
+    let storage = Storage::open(&db_path).await.expect("open storage");
+    let connection: ConnectionConfig = serde_json::from_value(json!({
+        "id": "recreated-sqlite",
+        "name": "recreated-sqlite",
+        "db_type": "sqlite",
+        "host": first_data_path.to_string_lossy(),
+        "port": 0,
+        "username": "",
+        "password": "",
+        "database": "",
+        "ssl": false
+    }))
+    .expect("initial connection config");
+    storage.save_connections(std::slice::from_ref(&connection)).await.expect("save initial connection");
+
+    let backend = LocalBackend::open(&db_path).await.expect("open local backend");
+    let initial_result = backend
+        .execute_query(&connection, "", "PRAGMA database_list", None, None)
+        .await
+        .expect("query initial database");
+    assert_eq!(initial_result.rows[0][2], json!(first_data_path.to_string_lossy()));
+
+    assert!(backend.remove_connection_for_mcp(&connection.id).await.expect("remove connection"));
+    let mut recreated = connection;
+    recreated.host = second_data_path.to_string_lossy().into_owned();
+    let recreated = backend.add_connection_for_mcp(recreated).await.expect("recreate connection");
+
+    let recreated_result = backend
+        .execute_query(&recreated, "", "PRAGMA database_list", None, None)
+        .await
+        .expect("query recreated database");
+    assert_eq!(recreated_result.rows[0][2], json!(second_data_path.to_string_lossy()));
+}
+
+#[tokio::test]
 #[cfg(feature = "duckdb-sidecar")]
 async fn local_backend_uses_the_installed_duckdb_sidecar() {
     let directory = tempdir().expect("temporary data directory");

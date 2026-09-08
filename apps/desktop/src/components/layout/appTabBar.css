@@ -109,7 +109,8 @@
   align-items: stretch !important;
   justify-content: flex-start;
   flex-wrap: nowrap;
-  gap: 0 !important;
+  column-gap: 0 !important;
+  row-gap: 0.375rem !important;
   overflow: visible !important;
 }
 

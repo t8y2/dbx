@@ -142,6 +142,8 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain('[data-group-mode="none"] .tab-section--horizontal');
     expect(sharedStyles).toContain("column-gap: 4px;");
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode)");
+    expect(sharedStyles).toContain(".horizontal-fixed-tabs-scroll.wrap-mode");
+    expect(sharedStyles).toContain("row-gap: 0.375rem !important;");
     expect(sharedStyles).toContain("bottom: 0.375rem;");
     expect(sharedStyles).toContain("bottom: 0.25rem;");
     expect(sharedStyles).toContain("scroll-margin-inline-end: 1px;");

@@ -179,7 +179,7 @@ import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, 
 import { DEFAULT_SQL_VARIABLE_SYNTAX_TOGGLES, normalizeSqlVariableSyntaxOverrides, SQL_VARIABLE_SYNTAX_DATABASE_TYPES, SQL_VARIABLE_SYNTAX_KEYS, SQL_VARIABLE_SYNTAX_TOKENS, type SqlVariableSyntaxOverrides, type SqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { buildMcpCherryStudioConfig, buildMcpCodexConfig, buildMcpDeepSeekHarnessConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpPiConfig, buildMcpQoderConfig, buildMcpTraeConfig, buildMcpVsCodeConfig, mcpWebBackendUrl, type McpLaunchConfig } from "@/lib/mcp/mcpConfigTemplates";
 import { beginMcpStatusRequest, mcpUpdateAvailability } from "@/lib/mcp/mcpUpdateStatus";
-import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
+import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, MCP_TOOL_OPTIONS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedToolName, type McpExecutionMode } from "@/lib/mcp/mcpPolicySelection";
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
@@ -2858,25 +2858,7 @@ function onMcpResourceScopeChange(scope: { allowedGroupIds: string[]; allowedCon
 
 type McpConnectionExecutionMode = "read_only" | "safe_write" | "high_risk_write";
 
-const mcpToolOptions = [
-  { name: "dbx_list_connections", labelKey: "settings.mcpToolListConnections" },
-  { name: "dbx_list_databases", labelKey: "settings.mcpToolListDatabases" },
-  { name: "dbx_list_tables", labelKey: "settings.mcpToolListTables" },
-  { name: "dbx_describe_table", labelKey: "settings.mcpToolDescribeTable" },
-  { name: "dbx_list_routines", labelKey: "settings.mcpToolListRoutines" },
-  { name: "dbx_get_routine_source", labelKey: "settings.mcpToolGetRoutineSource" },
-  { name: "dbx_get_schema_context", labelKey: "settings.mcpToolGetSchemaContext" },
-  { name: "dbx_execute_query", labelKey: "settings.mcpToolExecuteQuery" },
-  { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },
-  { name: "dbx_close_session", labelKey: "settings.mcpToolCloseSession" },
-  { name: "dbx_execute_redis_command", labelKey: "settings.mcpToolExecuteRedisCommand" },
-  { name: "dbx_send_message", labelKey: "settings.mcpToolSendMessage" },
-  { name: "dbx_add_connection", labelKey: "settings.mcpToolAddConnection" },
-  { name: "dbx_duplicate_connection", labelKey: "settings.mcpToolDuplicateConnection" },
-  { name: "dbx_remove_connection", labelKey: "settings.mcpToolRemoveConnection" },
-  { name: "dbx_open_table", labelKey: "settings.mcpToolOpenTable" },
-  { name: "dbx_execute_and_show", labelKey: "settings.mcpToolExecuteAndShow" },
-] as const;
+const mcpToolOptions = MCP_TOOL_OPTIONS;
 
 const mcpAllowedToolNames = computed(() => settingsStore.mcpGlobalPolicy.allowedToolNames);
 
@@ -2885,9 +2867,7 @@ function mcpToolAllowed(name: string): boolean {
 }
 
 function onMcpToolAllowedChange(name: string, allowed: boolean) {
-  const current = mcpAllowedToolNames.value ?? mcpToolOptions.map((tool) => tool.name);
-  const next = allowed ? [...new Set([...current, name])] : current.filter((tool) => tool !== name);
-  void saveMcpPolicy({ allowedToolNames: next });
+  void saveMcpPolicy({ allowedToolNames: toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, allowed) });
 }
 
 const mcpConnectionPolicyConnections = computed(() => {

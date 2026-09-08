@@ -6764,6 +6764,7 @@ export default withEnglishFallback({
     mcpToolGetRoutineSource: "루틴 소스",
     mcpToolGetSchemaContext: "Schema 컨텍스트",
     mcpToolExecuteQuery: "SQL / Mongo 명령 실행",
+    mcpToolExecuteBatch: "SQL 배치 실행",
     mcpToolOpenSession: "쿼리 세션 열기",
     mcpToolCloseSession: "쿼리 세션 닫기",
     mcpToolExecuteRedisCommand: "Redis 명령 실행",

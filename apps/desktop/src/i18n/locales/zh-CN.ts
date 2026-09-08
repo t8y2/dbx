@@ -7470,6 +7470,7 @@ export default withEnglishFallback({
     mcpToolGetRoutineSource: "存储过程源码",
     mcpToolGetSchemaContext: "Schema 上下文",
     mcpToolExecuteQuery: "执行 SQL / Mongo 命令",
+    mcpToolExecuteBatch: "批量执行 SQL",
     mcpToolOpenSession: "打开查询会话",
     mcpToolCloseSession: "关闭查询会话",
     mcpToolExecuteRedisCommand: "执行 Redis 命令",

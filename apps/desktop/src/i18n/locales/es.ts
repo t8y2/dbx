@@ -7011,6 +7011,7 @@ export default withEnglishFallback({
     mcpToolGetRoutineSource: "Código de rutina",
     mcpToolGetSchemaContext: "Contexto de Schema",
     mcpToolExecuteQuery: "Ejecutar SQL / comandos Mongo",
+    mcpToolExecuteBatch: "Ejecutar lote SQL",
     mcpToolOpenSession: "Abrir sesión de consulta",
     mcpToolCloseSession: "Cerrar sesión de consulta",
     mcpToolExecuteRedisCommand: "Ejecutar comando Redis",

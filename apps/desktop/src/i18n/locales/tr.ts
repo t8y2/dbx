@@ -7379,6 +7379,7 @@ export default withEnglishFallback({
     mcpToolGetRoutineSource: "Yordam kaynağı",
     mcpToolGetSchemaContext: "Şema bağlamı",
     mcpToolExecuteQuery: "SQL / Mongo komutlarını çalıştır",
+    mcpToolExecuteBatch: "SQL toplu işlemini çalıştır",
     mcpToolOpenSession: "Sorgu oturumu aç",
     mcpToolCloseSession: "Sorgu oturumunu kapat",
     mcpToolExecuteRedisCommand: "Redis komutunu çalıştır",

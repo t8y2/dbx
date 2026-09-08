@@ -7485,6 +7485,7 @@ export default {
     mcpToolGetRoutineSource: "Routine source",
     mcpToolGetSchemaContext: "Schema context",
     mcpToolExecuteQuery: "Execute SQL / Mongo commands",
+    mcpToolExecuteBatch: "Execute SQL batch",
     mcpToolOpenSession: "Open query session",
     mcpToolCloseSession: "Close query session",
     mcpToolExecuteRedisCommand: "Execute Redis command",

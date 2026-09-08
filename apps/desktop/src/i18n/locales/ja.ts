@@ -7018,6 +7018,7 @@ export default withEnglishFallback({
     mcpToolGetRoutineSource: "ルーチンソース",
     mcpToolGetSchemaContext: "Schema コンテキスト",
     mcpToolExecuteQuery: "SQL / Mongo コマンドを実行",
+    mcpToolExecuteBatch: "SQL バッチを実行",
     mcpToolOpenSession: "クエリセッションを開く",
     mcpToolCloseSession: "クエリセッションを閉じる",
     mcpToolExecuteRedisCommand: "Redis コマンドを実行",

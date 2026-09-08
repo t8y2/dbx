@@ -3752,7 +3752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_shard_doc_support_falls_back_to_offset_paging() {
+    async fn missing_shard_doc_support_falls_back_to_scroll_paging() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = serve_responses(
@@ -3761,7 +3761,10 @@ mod tests {
                 (200, r#"{"id":"pit-1"}"#.to_string()),
                 (400, missing_shard_doc_error_body()),
                 (200, "{}".to_string()),
-                (200, one_hit_response()),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-1","hits":{"total":{"value":42,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
             ],
         )
         .await;
@@ -3774,9 +3777,9 @@ mod tests {
         assert!(requests[1].starts_with("POST /_search "), "{}", requests[1]);
         assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
         assert!(requests[2].starts_with("DELETE /_pit "), "{}", requests[2]);
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
         assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
-        assert!(requests[3].contains(r#""from":0"#), "{}", requests[3]);
+        assert!(!requests[3].contains(r#""from":0"#), "{}", requests[3]);
         assert_eq!(result.documents.len(), 1);
         assert_eq!(result.total, 42);
 
@@ -3785,11 +3788,14 @@ mod tests {
             super::EsSearchCursor::Page(page) => page,
             super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
         };
-        assert_eq!(page.mode, super::EsPageMode::Offset { from: 1 });
+        assert_eq!(
+            page.mode,
+            super::EsPageMode::Scroll { scroll_id: "scroll-1".to_string(), keep_alive: "1m".to_string() }
+        );
     }
 
     #[tokio::test]
-    async fn offset_fallback_is_remembered_for_the_connection() {
+    async fn scroll_fallback_is_remembered_for_the_connection() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = serve_responses(
@@ -3805,17 +3811,13 @@ mod tests {
         .await;
 
         let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
-        let first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
-        let second =
-            super::find_documents_with_cursor(&client, "products", 1, None, None, first.next_cursor.as_deref())
-                .await
-                .unwrap();
+        let _first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let second = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
         let requests = server.await.unwrap();
 
         // 探测结果记在连接上：第二次查询不再尝试开 PIT。
         assert_eq!(requests.len(), 5);
-        assert!(requests[4].starts_with("POST /products/_search "), "{}", requests[4]);
-        assert!(requests[4].contains(r#""from":1"#), "{}", requests[4]);
+        assert!(requests[4].starts_with("POST /products/_search?scroll=1m "), "{}", requests[4]);
         assert_eq!(second.documents.len(), 1);
     }
 
@@ -3844,7 +3846,7 @@ mod tests {
         let requests = server.await.unwrap();
 
         // 偶发 5xx 只回退这一次请求，下一次查询仍旧先试 PIT。
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
         assert!(requests[4].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[4]);
     }
 
@@ -3918,7 +3920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offset_fallback_keeps_track_total_hits_off_and_breaks_sort_ties() {
+    async fn scroll_fallback_keeps_track_total_hits_off_and_preserves_requested_sort() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = serve_responses(
@@ -3939,8 +3941,9 @@ mod tests {
         let requests = server.await.unwrap();
 
         let fallback = &requests[3];
-        // 多页 from/size 之间没有快照，需要 `_doc` 打散并列值造成的页边界抖动。
-        assert!(fallback.contains(r#""sort":[{"created_at":{"order":"desc"}},"_doc"]"#), "{fallback}");
+        // Scroll 持有搜索快照，保留用户的排序即可，无需追加 `_doc`。
+        assert!(fallback.starts_with("POST /products/_search?scroll=1m "), "{fallback}");
+        assert!(fallback.contains(r#""sort":[{"created_at":{"order":"desc"}}]"#), "{fallback}");
         // 回退路径不加 track_total_hits：那会让每页都对整个索引做一次精确计数，
         // 而这条路径针对的正是老的大集群。
         assert!(!fallback.contains("track_total_hits"), "{fallback}");
@@ -4001,7 +4004,7 @@ mod tests {
 
         assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
         assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
         assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
         assert_eq!(result.rows.len(), 1);
         // 分页计划要拿索引真实总数来算总页数。

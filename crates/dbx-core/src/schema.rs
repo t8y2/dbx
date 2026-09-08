@@ -1711,12 +1711,8 @@ async fn external_driver_oracle_columns_via_sql(
     }
 }
 
-fn should_query_oracle_columns_via_sql_first(
-    db_type: &DatabaseType,
-    client_session_id: Option<&str>,
-) -> bool {
-    *db_type == DatabaseType::Oracle
-        && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
+fn should_query_oracle_columns_via_sql_first(db_type: &DatabaseType, client_session_id: Option<&str>) -> bool {
+    *db_type == DatabaseType::Oracle && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
 }
 
 fn oracle_object_statistics_sql(schema: &str) -> String {

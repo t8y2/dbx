@@ -6427,7 +6427,8 @@ async fn get_columns_with_sql(
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let tiers = [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL];
-    query_with_non_empty_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table)).await
+    query_with_non_empty_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table))
+        .await
 }
 
 fn pg_quote_literal(value: &str) -> String {

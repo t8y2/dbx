@@ -15,7 +15,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 | --- | --- |
 | Databases | MySQL and PostgreSQL |
 | Platform | DBX Desktop |
-| Output | One `.sql` file per database/schema target |
+| Output | The default template creates one directory per scheduled run, containing one `.sql` file per database/schema target; the directory structure can be customized with a template |
 | Frequency | Every N hours, daily at a time, or weekly on a weekday and time |
 | Contents | Table structure, data, database objects, and optional `DROP TABLE IF EXISTS` |
 | Table scope | All, include by pattern, or exclude by pattern |
@@ -68,7 +68,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
   <Step>
     ### Set directory and frequency
 
-    Select a local destination directory and configure hourly, daily, or weekly timing. DBX previews the next run.
+    Select a local destination directory, choose a relative run-directory template, and configure hourly, daily, or weekly timing. Templates support `{schedule}`, `{date}`, `{timestamp}`, and `{runId}`. The default template includes `{runId}` for extra isolation, but you can use timestamp-only directories such as `dbx-backup_{timestamp}`. DBX previews the next run.
 
   </Step>
   <Step>
@@ -118,7 +118,7 @@ Cancellation stops remaining exports. On failure or cancellation, DBX attempts t
 
 ## Retention and History
 
-Each schedule has a retention count. Older runs beyond the limit are pruned from history and their files are deleted. Individual backup runs and files can also be removed manually.
+Each schedule has a retention count. Older runs beyond the limit are pruned from history and their files are deleted. The default run directory includes a unique run ID, while directory templates can be customized to fit your workflow. Individual backup runs and files can also be removed manually.
 
 <Callout type="warn">The destination directory still needs independent OS, NAS, or object-storage backup. Saving to another folder on the same disk does not protect against disk failure, ransomware, or loss of the machine.</Callout>
 

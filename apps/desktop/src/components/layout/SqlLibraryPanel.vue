@@ -16,6 +16,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { externalSqlEditorMaxBytes } from "@/lib/sql/sqlFileOpen";
 import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { savedSqlFolderBranchFileCount } from "@/lib/savedSql/savedSqlFolderCounts";
 import { collectSavedSqlDirectoryImportFiles } from "@/lib/savedSql/savedSqlDirectoryImport";
@@ -231,7 +232,7 @@ async function importDirectoryIntoLibrary(targetFolder?: SavedSqlFolder) {
         takenNamesByFolder.set(folderKey, takenNames);
       }
       const path = file.path;
-      const content = await api.readExternalSqlFile(path);
+      const content = await api.readExternalSqlFile(path, externalSqlEditorMaxBytes(settingsStore.editorSettings.externalSqlEditorMaxMb));
       const displayName = uniqueImportedName(file.name, takenNames);
       await savedSqlStore.saveFile({
         connectionId: importTarget.connectionId,

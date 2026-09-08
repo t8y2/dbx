@@ -506,13 +506,15 @@ test("defaults sidebar activation to single click", () => {
   assert.equal(normalizeEditorSettings({}).sidebarActivation, "single");
 });
 
-test("defaults database activation browsing to off and migrates the previous single-click setting", () => {
+test("preserves object browsing for legacy sidebar settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({}).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: true }).sidebarBrowseObjectsOnDatabaseActivation, true);
+  assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false }).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: "yes" as any }).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: true } as any).sidebarBrowseObjectsOnDatabaseActivation, true);
-  assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: false } as any).sidebarBrowseObjectsOnDatabaseActivation, false);
+  assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: false } as any).sidebarBrowseObjectsOnDatabaseActivation, true);
+  assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false, sidebarOpenDatabaseOnSingleClick: true } as any).sidebarBrowseObjectsOnDatabaseActivation, false);
 });
 
 test("defaults active tab sidebar selection to off", () => {

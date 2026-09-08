@@ -3337,6 +3337,7 @@ export default withEnglishFallback({
     dropEventSuccess: "事件已刪除 {name}",
     editObject: "編輯物件",
     createEvent: "新建事件",
+    collapseAll: "全部摺疊",
   },
   visibleDatabases: {
     title: "顯示資料庫",

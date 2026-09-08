@@ -11,8 +11,9 @@ use crate::nacos::port::NacosAdmin;
 use crate::nacos::search::{begin_operation, finish_operation};
 use crate::nacos::service::{ensure_connection_writable, get_admin};
 use crate::nacos::types::{
-    NacosBatchItemResult, NacosBatchPreview, NacosBatchPreviewItem, NacosBatchReport, NacosConfigItem, NacosConfigKey,
-    NacosConfigSelectionScope, NacosConfigSelector, NacosConfigTransferRequest, NacosConfigUpsert, NacosConflictPolicy,
+    NacosBatchItemResult, NacosBatchPreview, NacosBatchPreviewDiff, NacosBatchPreviewItem, NacosBatchReport,
+    NacosConfigItem, NacosConfigKey, NacosConfigSelectionScope, NacosConfigSelector, NacosConfigTransferRequest,
+    NacosConfigUpsert, NacosConflictPolicy,
 };
 
 const PAGE_SIZE: u32 = 500;
@@ -64,7 +65,7 @@ pub async fn preview_import(
     archive_path: &Path,
 ) -> Result<NacosBatchPreview, String> {
     let configs = read_archive(archive_path, target_namespace).await?;
-    preview_configs(admin, &configs).await
+    preview_configs(admin, &configs, false).await
 }
 
 pub async fn apply_import(
@@ -85,7 +86,7 @@ pub async fn preview_transfer(
     request: &NacosConfigTransferRequest,
 ) -> Result<NacosBatchPreview, String> {
     let configs = transfer_configs(source_admin, request).await?;
-    preview_configs(target_admin, &configs).await
+    preview_configs(target_admin, &configs, true).await
 }
 
 pub async fn apply_transfer(
@@ -330,6 +331,7 @@ async fn resolve_selector(
 async fn preview_configs(
     admin: Arc<dyn NacosAdmin>,
     configs: &[NacosConfigUpsert],
+    include_diff: bool,
 ) -> Result<NacosBatchPreview, String> {
     let mut items = Vec::with_capacity(configs.len());
     let mut target_snapshots = Vec::with_capacity(configs.len());
@@ -344,6 +346,17 @@ async fn preview_configs(
             created += 1;
             "create"
         };
+        let diff = if include_diff {
+            target.as_ref().and_then(|target| {
+                target.content.as_ref().map(|before_content| NacosBatchPreviewDiff {
+                    before_content: before_content.clone(),
+                    after_content: config.content.clone(),
+                    format: config.config_type.clone(),
+                })
+            })
+        } else {
+            None
+        };
         target_snapshots.push(target);
         items.push(NacosBatchPreviewItem {
             namespace: config.namespace.clone().unwrap_or_default(),
@@ -351,6 +364,7 @@ async fn preview_configs(
             data_id: config.data_id.clone(),
             status: status.to_string(),
             message: None,
+            diff,
         });
     }
     Ok(NacosBatchPreview {
@@ -370,7 +384,7 @@ async fn apply_configs(
     expected_plan_hash: &str,
     policy: &NacosConflictPolicy,
 ) -> Result<NacosBatchReport, String> {
-    let preview = preview_configs(admin.clone(), &configs).await?;
+    let preview = preview_configs(admin.clone(), &configs, false).await?;
     if preview.plan_hash != expected_plan_hash {
         return Err(
             "NACOS_ERROR[stalePreview]: Nacos import/copy preview is stale; preview again before applying".to_string()
@@ -750,7 +764,7 @@ mod tests {
     }
 
     async fn preview_hash(admin: Arc<MockAdmin>, configs: &[NacosConfigUpsert]) -> String {
-        preview_configs(admin, configs).await.unwrap().plan_hash
+        preview_configs(admin, configs, false).await.unwrap().plan_hash
     }
 
     #[tokio::test]
@@ -1106,5 +1120,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(published.content.as_deref(), Some("value"));
+    }
+
+    #[tokio::test]
+    async fn transfer_preview_includes_conflict_content_diff() {
+        let source_admin = source_admin_with_config();
+        let target_admin = Arc::new(MockAdmin::default());
+        target_admin.insert(NacosConfigItem {
+            data_id: "app".to_string(),
+            group: "SOURCE_GROUP".to_string(),
+            namespace: "target-ns".to_string(),
+            app_name: None,
+            desc: None,
+            tags: None,
+            config_type: Some("text".to_string()),
+            md5: Some("target-md5".to_string()),
+            encrypted_data_key: None,
+            content: Some("old value".to_string()),
+        });
+
+        let preview = preview_transfer(source_admin, target_admin, &transfer_request(None)).await.unwrap();
+        let diff = preview.items[0].diff.as_ref().expect("conflicting transfer should include a diff");
+
+        assert_eq!(preview.items[0].status, "conflict");
+        assert_eq!(diff.before_content, "old value");
+        assert_eq!(diff.after_content, "value");
+        assert_eq!(diff.format.as_deref(), Some("text"));
     }
 }

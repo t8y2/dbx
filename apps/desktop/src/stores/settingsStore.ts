@@ -1744,7 +1744,7 @@ export const useSettingsStore = defineStore("settings", () => {
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
           const savedSettings = saved as Partial<EditorSettings>;
           const normalized = normalizeEditorSettings(savedSettings);
-          const needsSidebarBrowseObjectsMigration = savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion !== SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
+          const needsSidebarBrowseObjectsMigration = typeof savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion !== "number" || savedSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion < SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION;
           if (needsSidebarBrowseObjectsMigration) {
             // Before this migration, a false value still preserved double-click browsing.
             normalized.sidebarBrowseObjectsOnDatabaseActivation = true;

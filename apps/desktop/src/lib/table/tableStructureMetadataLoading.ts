@@ -23,7 +23,7 @@ export function visibleTableStructureRefreshScope(activeTab: TableInfoTab): Tabl
     case "triggers":
       return { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: true, tableComment: true };
     case "ddl":
-      return { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: false, tableComment: false };
+      return { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: false, tableComment: true };
   }
 }
 

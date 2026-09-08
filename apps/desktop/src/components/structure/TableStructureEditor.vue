@@ -1146,6 +1146,8 @@ function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
 
 let sqlPreviewRequestId = 0;
 let structureLoadRequestId = 0;
+let tableCommentLoadRequestId = 0;
+let tableCommentLoadPromise: Promise<void> | null = null;
 let tableOwnerLoadRequestId = 0;
 let tableOwnerRolesLoadRequestId = 0;
 let mysqlAutoIncrementLoadRequestId = 0;
@@ -1834,7 +1836,8 @@ async function reloadStructureFromDatabase() {
   ddlDraft.value = null;
   if (refreshDdl) {
     ddlFetched.value = false;
-    await Promise.all([fetchDdl(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    await Promise.all([fetchDdl(true), loadVisibleTableComment(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    markDraftHydratedAndSync();
   } else {
     await Promise.all([loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true }), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
   }
@@ -1869,6 +1872,40 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
 
 function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
+}
+
+async function loadVisibleTableComment(force = false, preserveDraft = false) {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  const catalog = props.catalog;
+  if (!structureCapabilities.value.comment || !connectionId || !database || !tableName) return;
+  if (!force && loadedMetadataFacets.has("comment")) return;
+  if (!force && tableCommentLoadPromise) return tableCommentLoadPromise;
+
+  const requestId = ++tableCommentLoadRequestId;
+  const loadPromise = (async () => {
+    try {
+      await store.ensureConnected(connectionId);
+      const { value } = await loadCachedTableComment({ connectionId, database, schema, tableName, catalog }, force);
+      if (requestId !== tableCommentLoadRequestId) return;
+      if (connectionId !== props.connectionId || database !== props.database || schema !== metadataSchema.value || tableName !== props.tableName || (catalog || "") !== (props.catalog || "")) return;
+      if (value === undefined) return;
+      const hasCommentDraft = tableComment.value !== originalTableComment.value;
+      originalTableComment.value = value;
+      if (!preserveDraft || !hasCommentDraft) tableComment.value = value;
+      loadedMetadataFacets.add("comment");
+    } catch (error) {
+      if (requestId === tableCommentLoadRequestId) console.warn("[DBX][structure-editor:comment-metadata-failed]", error);
+    }
+  })();
+  tableCommentLoadPromise = loadPromise;
+  try {
+    await loadPromise;
+  } finally {
+    if (tableCommentLoadPromise === loadPromise) tableCommentLoadPromise = null;
+  }
 }
 
 async function loadMysqlAutoIncrementCounter(preserveDraft = false) {
@@ -3737,7 +3774,7 @@ onMounted(() => {
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else if (activeTab.value === "ddl") {
-    void fetchDdl();
+    void Promise.all([fetchDdl(), loadVisibleTableComment()]).then(markDraftHydratedAndSync);
   } else {
     void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
@@ -3879,6 +3916,7 @@ watch(
     () => props.tableName,
     newTableName,
     tableComment,
+    originalTableComment,
     mysqlAutoIncrementValue,
     originalMysqlAutoIncrementValue,
     mysqlAutoIncrementLoading,
@@ -3963,7 +4001,7 @@ watch(refreshVersion, (version, previous) => {
 async function loadActiveTableStructureMetadataIfNeeded() {
   if (!structureEditorReady || isCreateMode.value) return;
   if (activeTab.value === "ddl") {
-    await fetchDdl();
+    await Promise.all([ddlLoading.value ? Promise.resolve() : fetchDdl(), loadVisibleTableComment(false, true)]);
     return;
   }
   if (loading.value || secondaryMetadataLoading.value) return;

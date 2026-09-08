@@ -1056,11 +1056,7 @@ const confirmationStrategy = computed(() => (confirmationRequest.value ? transfe
 const rebuildConfirmationDetails = computed(() => {
   const rebuild = confirmationPreview.value?.rebuild;
   if (!rebuild) return "";
-  const tables = rebuild.tables.map((table) => {
-    const mapping = `${table.sourceTable} → ${table.targetTable}`;
-    return table.backupTable ? `${mapping}\n${t("transfer.rebuildBackupTable", { table: table.backupTable })}` : mapping;
-  });
-  return [confirmationSummary.value, ...tables, ...rebuild.warnings].filter(Boolean).join("\n");
+  return [confirmationSummary.value, t("transfer.rebuildSummary", { count: rebuild.tables.length }), ...rebuild.warnings].filter(Boolean).join("\n");
 });
 
 function requestTransferConfirmation(request: api.TransferRequest, preview: api.TransferOwnershipPreview): Promise<boolean> {
@@ -1365,7 +1361,6 @@ async function saveConfigTask() {
                 </Select>
               </div>
               <p v-if="rebuildDisabledHint" class="text-xs text-muted-foreground">{{ rebuildDisabledHint }}</p>
-              <p v-else-if="targetTableStrategy === 'rebuild'" class="text-xs text-muted-foreground">{{ t("transfer.rebuildHint") }}</p>
               <div class="flex items-center gap-3">
                 <Label class="text-xs shrink-0">{{ t("transfer.targetTableNameCase") }}</Label>
                 <Select v-model="targetTableNameCase">

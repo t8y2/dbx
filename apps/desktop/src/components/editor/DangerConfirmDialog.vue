@@ -146,7 +146,7 @@ async function copyFullCode() {
 
       <div class="py-4 min-w-0">
         <p class="text-sm text-muted-foreground mb-3">{{ message || t("dangerDialog.message") }}</p>
-        <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line">{{ detailsText }}</p>
+        <p v-if="detailsText" class="text-xs text-muted-foreground mb-3 whitespace-pre-line max-h-40 overflow-auto">{{ detailsText }}</p>
         <slot name="options" />
         <div v-if="code" data-testid="danger-code-container" class="min-w-0">
           <div data-testid="danger-code-actions" class="mb-1 flex items-center justify-end gap-0.5">

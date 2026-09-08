@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 64 * 1024 * 1024;
-const MIN_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 1 * 1024 * 1024;
+const MIN_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES_LIMIT: u64 = 4096 * 1024 * 1024;
 
 fn clamp_external_sql_editor_limit(max_size_bytes: Option<u64>) -> u64 {

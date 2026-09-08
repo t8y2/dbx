@@ -178,6 +178,23 @@ describe("data grid paint theme", () => {
     expect(dark.cellDirty).toBe("rgb(94, 75, 26)");
   });
 
+  it("keeps the whole-row selection clearly deeper than the pale selection overlay", () => {
+    const emptyCssVariable = () => "";
+    const light = resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: false });
+    const dark = resolveDataGridPaintTheme({ getVar: emptyCssVariable, isDark: true });
+
+    expect(light.rowSelected).toBe("rgb(96, 165, 250)");
+    expect(light.rowSelectedDirty).toBe("rgb(199, 185, 120)");
+    expect(light.rowNumberSelected).toBe("rgb(96, 165, 250)");
+    expect(dark.rowSelected).toBe("rgb(30, 74, 128)");
+    expect(dark.rowSelectedDirty).toBe("rgb(100, 94, 52)");
+    expect(dark.rowNumberSelected).toBe("rgb(30, 74, 128)");
+
+    // 整行选中必须比选区覆盖淡色指示更醒目：与白色背景的对比度更高
+    expect(contrastRatio(light.rowSelected, "rgb(255, 255, 255)")).toBeGreaterThan(contrastRatio(light.cellSelected, "rgb(255, 255, 255)"));
+    expect(contrastRatio(light.rowSelected, "rgb(255, 255, 255)")).toBeGreaterThanOrEqual(1.5);
+  });
+
   it("honors an explicit --data-grid-cell-selected-border token when provided in light mode", () => {
     const vars: Record<string, string> = {
       "--background": "rgb(255, 255, 255)",

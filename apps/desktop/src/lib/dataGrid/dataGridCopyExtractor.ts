@@ -29,6 +29,7 @@ export const DATA_GRID_DEFAULT_COPY_PREFERENCES: readonly DataGridCopyPreference
 ];
 
 export const DATA_GRID_EXTRACTOR_CONTRACT_VERSION = 1 as const;
+export const DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION = 1 as const;
 
 export const DATA_GRID_COPY_EXTRACTOR_DESCRIPTORS: Record<DataGridCopyExtractorId, { category: DataGridExtractorCategory; separatorBefore?: boolean }> = {
   raw: { category: "raw" },

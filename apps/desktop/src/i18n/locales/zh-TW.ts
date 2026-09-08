@@ -2948,6 +2948,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "仍要複製",
     htmlCopyRiskRemember: "本次工作階段不再詢問",
     htmlCopyRiskToast: "已複製。此 AI 產生的 HTML 在 DBX 外開啟可能執行指令碼或存取網路。",
+    exportConversation: "匯出對話",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "使用者",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "此回覆產生失敗",
+    conversationExportEmpty: "尚無可匯出的訊息",
   },
   contextMenu: {
     openConnection: "開啟連線",

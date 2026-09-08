@@ -49,6 +49,7 @@ import {
   Search,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -171,6 +172,7 @@ import { visibleToActualIndex } from "@/lib/ai/aiMessageEdit";
 import { shouldShowReasoningCharCount, reasoningCharCountClass } from "@/lib/ai/aiReasoningPresentation";
 import { saveTextFile } from "@/lib/export/saveTextFile";
 import { buildAiAnalysisExport } from "@/lib/export/aiAnalysisExport";
+import { buildAiConversationExport, type AiConversationExportFormat } from "@/lib/export/aiConversationExport";
 import { buildAiConversationSearchIndex, filterAiConversationSearchIndex } from "@/lib/ai/aiConversationSearch";
 import AiAttachmentCard from "@/components/editor/AiAttachmentCard.vue";
 import { resolveAiMessageCopyText } from "@/lib/ai/aiMessageCopy";
@@ -249,6 +251,9 @@ interface ChatMessage {
   /** Image payloads stay in memory only and are never written to conversation storage. */
   imageAttachments?: AiImageAttachment[];
   reasoning?: string;
+  /** Set when this message's generation failed; persisted with the conversation
+   *  so the export failure marker survives reloads and locale switches. */
+  failed?: boolean;
   isThinking?: boolean;
   agentSteps?: AiAgentStepItem[];
   /** Hidden system-generated context summary; not rendered in chat UI but included in LLM history.
@@ -3202,7 +3207,10 @@ async function send() {
     if (generationCanContinue()) {
       const message = e instanceof Error ? e.message : String(e);
       const msg = runMessages[assistantIdx];
-      if (msg) msg.content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
+      if (msg) {
+        msg.content = `${t("ai.requestFailed")}\n\n${translateBackendError(t, message)}`;
+        msg.failed = true;
+      }
       if (detachedRun) finishDesktopAiRun(detachedRun, "failed");
     }
   } finally {
@@ -3680,6 +3688,73 @@ async function exportMessageAsMarkdown(msg: ChatMessage) {
   }
 }
 
+/**
+ * Conversation-level export (#6467 PR3): dumps the visible transcript as a
+ * Markdown or HTML report. Same source boundary as the UI — `visibleMessages`
+ * already drops `contextSummary` — and the builder skips it again defensively.
+ */
+/** True when the current conversation's run ended in failure/interruption —
+ *  either transport (desktop run registry, or the web fallback status map).
+ *  Background-failed turns keep their partial content without the persisted
+ *  `failed` flag, so the export also consults the run status to mark them. */
+function isCurrentRunFailed(): boolean {
+  if (!conversationId.value) return false;
+  const run = backgroundAiRunsEnabled ? desktopAiRun<ChatMessage>(conversationId.value) : undefined;
+  const status = run?.status ?? conversationRunStatus.get(conversationId.value);
+  return status === "failed" || status === "interrupted";
+}
+
+async function exportConversationAs(format: AiConversationExportFormat) {
+  try {
+    const runFailed = isCurrentRunFailed();
+    // A failed/interrupted run is always answering the LATEST user turn, so only
+    // an assistant reply that came after it can belong to the failed run. When a
+    // restart interrupts the turn before its first delta, the last reply in the
+    // transcript belongs to the preceding successful turn and must stay unmarked.
+    const transcript = visibleMessages.value;
+    let lastUserIndex = -1;
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      if (transcript[i].role === "user") {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    let failedTurnAssistant: ChatMessage | undefined;
+    for (let i = transcript.length - 1; i > lastUserIndex; i--) {
+      const candidate = transcript[i];
+      if (candidate.role === "assistant" && candidate.content) {
+        failedTurnAssistant = candidate;
+        break;
+      }
+    }
+    const result = buildAiConversationExport({
+      connectionName: props.connection?.name,
+      dateLabel: new Date().toLocaleString(),
+      messages: visibleMessages.value.map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+        kind: msg.kind,
+        failed: msg.failed === true || (runFailed && msg === failedTurnAssistant),
+      })),
+      format,
+      labels: {
+        analysisLabel: t("ai.analysis"),
+        userLabel: t("ai.conversationRoleUser"),
+        assistantLabel: t("ai.conversationRoleAssistant"),
+        failedLabel: t("ai.conversationFailedMarker"),
+      },
+    });
+    if (!result) {
+      toast(t("ai.conversationExportEmpty"), 5000);
+      return;
+    }
+    await saveTextFile(result.content, result.defaultFileName, format === "markdown" ? "Markdown" : "HTML", format === "markdown" ? "md" : "html");
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    toast(t("grid.exportFailed", { message }), 5000);
+  }
+}
+
 function clearMessages() {
   // If a request is still in flight, abandon it before wiping the transcript it
   // was writing into. abandonInFlightRequest() invalidates the active generation
@@ -3736,6 +3811,7 @@ function buildConversationSnapshot(targetConversationId: string, targetMessages:
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
+      ...(m.failed ? { failed: true } : {}),
     })),
     // The conversation's single queued "send later" input, persisted so it
     // survives a restart (parent PRD §5).
@@ -3852,6 +3928,7 @@ async function persistPendingInputRecovery(conversation: AiConversation, message
       ...(m.mentions?.length ? { mentions: m.mentions } : {}),
       ...(m.reasoning ? { reasoning: m.reasoning } : {}),
       ...(m.kind ? { kind: m.kind } : {}),
+      ...(m.failed ? { failed: true } : {}),
     })),
     queuedInput: conversation.queuedInput,
     createdAt: conversation.createdAt,
@@ -3884,6 +3961,7 @@ function chatMessagesFromConversation(conv: AiConversation): ChatMessage[] {
     mentions: Array.isArray(m.mentions) ? (m.mentions as AiMessageMention[]) : undefined,
     reasoning: m.reasoning,
     kind: m.kind,
+    failed: m.failed === true ? true : undefined,
   }));
 }
 
@@ -4403,6 +4481,17 @@ async function openExternalUrl(url: string) {
         {{ chatTitle }}
       </span>
       <ProductionContextBadge v-if="productionContext.active" compact />
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('ai.exportConversation')" :aria-label="t('ai.exportConversation')">
+            <FileDown class="h-3.5 w-3.5" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem @click="exportConversationAs('markdown')">{{ t("ai.conversationExportMarkdown") }}</DropdownMenuItem>
+          <DropdownMenuItem @click="exportConversationAs('html')">{{ t("ai.conversationExportHtml") }}</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <Button variant="ghost" size="icon" class="h-6 w-6" @click="startNewChat" :title="t('ai.newChat')">
         <MessageSquarePlus class="h-3.5 w-3.5" />
       </Button>

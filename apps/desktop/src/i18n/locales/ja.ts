@@ -2870,6 +2870,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "それでもコピー",
     htmlCopyRiskRemember: "このセッションでは今後確認しない",
     htmlCopyRiskToast: "コピーしました。このAI生成HTMLは、DBXの外部で開くとスクリプトを実行したりネットワークへアクセスしたりする可能性があります。",
+    exportConversation: "会話をエクスポート",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "ユーザー",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "この返信の生成に失敗しました",
+    conversationExportEmpty: "エクスポートできるメッセージがありません",
     agentSteps: {
       generated: "SQL生成完了",
       noSql: "SQLが見つかりません",

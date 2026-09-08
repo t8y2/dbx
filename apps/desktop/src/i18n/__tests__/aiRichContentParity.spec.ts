@@ -26,10 +26,22 @@ const locales: Array<[string, Record<string, unknown>]> = [
 // the user runs, and a missing key would leak raw keys into the toolbar.
 const AI_HTML_PREVIEW_KEYS = ["htmlPreviewLabel", "htmlExpandPreview", "htmlExpandPreviewHint", "htmlSaveSafe", "htmlSaveFailed", "htmlCopySource", "htmlCopyRiskBody", "htmlCopyRiskAccept", "htmlCopyRiskRemember", "htmlCopyRiskToast"] as const;
 
+// Keys the conversation export (PR3 of #6467) adds to the `ai` namespace —
+// header menu entry, report role labels, failure marker, and empty-state copy.
+const AI_CONVERSATION_EXPORT_KEYS = ["exportConversation", "conversationExportMarkdown", "conversationExportHtml", "conversationRoleUser", "conversationRoleAssistant", "conversationFailedMarker", "conversationExportEmpty"] as const;
+
 describe("AI rich content locale parity", () => {
   it.each(locales)("%s exposes the full ai.html* key set with non-empty copy", (_name, locale) => {
     const ai = (locale as { ai: Record<string, unknown> }).ai;
     for (const key of AI_HTML_PREVIEW_KEYS) {
+      expect(ai[key], `${_name}: ai.${key}`).toBeTypeOf("string");
+      expect(ai[key] as string, `${_name}: ai.${key}`).not.toHaveLength(0);
+    }
+  });
+
+  it.each(locales)("%s exposes the full conversation-export key set with non-empty copy", (_name, locale) => {
+    const ai = (locale as { ai: Record<string, unknown> }).ai;
+    for (const key of AI_CONVERSATION_EXPORT_KEYS) {
       expect(ai[key], `${_name}: ai.${key}`).toBeTypeOf("string");
       expect(ai[key] as string, `${_name}: ai.${key}`).not.toHaveLength(0);
     }

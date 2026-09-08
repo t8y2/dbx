@@ -217,7 +217,11 @@ describe("AI assistant uses platform-specific conversation lifecycle", () => {
     expect(catchBody).not.toContain("messages.value[assistantIdx].content =");
     expect(catchBody).toContain("generationCanContinue()");
     expect(catchBody).toContain("const msg = runMessages[assistantIdx];");
-    expect(catchBody).toContain("if (msg) msg.content =");
+    expect(catchBody).toContain("if (msg) {");
+    expect(catchBody).toContain("msg.content =");
+    // The failure flag rides along with the prefix text (#6467 PR3): the export
+    // derives its failure marker from this state, not from the localized text.
+    expect(catchBody).toContain("msg.failed = true;");
   });
 
   it("send()'s finally block only mutates shared state (isGenerating, currentSessionId) when still current", () => {

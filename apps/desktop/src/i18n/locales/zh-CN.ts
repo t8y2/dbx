@@ -2970,6 +2970,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "仍要复制",
     htmlCopyRiskRemember: "本会话不再询问",
     htmlCopyRiskToast: "已复制。此 AI 生成的 HTML 在 DBX 外打开可能执行脚本或访问网络。",
+    exportConversation: "导出对话",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "用户",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "此回复生成失败",
+    conversationExportEmpty: "暂无可导出的消息",
   },
   contextMenu: {
     openConnection: "打开连接",

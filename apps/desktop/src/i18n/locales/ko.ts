@@ -2840,6 +2840,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "그래도 복사",
     htmlCopyRiskRemember: "이 세션에서 다시 묻지 않기",
     htmlCopyRiskToast: "복사되었습니다. 이 AI 생성 HTML은 DBX 외부에서 열면 스크립트를 실행하거나 네트워크에 접근할 수 있습니다.",
+    exportConversation: "대화 내보내기",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "사용자",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "이 응답 생성에 실패했습니다",
+    conversationExportEmpty: "내보낼 메시지가 없습니다",
   },
   contextMenu: {
     openConnection: "연결 열기",

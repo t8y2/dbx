@@ -5351,6 +5351,7 @@ mod tests {
                 mentions: None,
                 reasoning: None,
                 kind: None,
+                failed: None,
                 covered_messages: None,
             }],
             queued_input: None,

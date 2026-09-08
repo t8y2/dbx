@@ -3047,6 +3047,13 @@ export default {
     htmlCopyRiskAccept: "Copy anyway",
     htmlCopyRiskRemember: "Don't ask again this session",
     htmlCopyRiskToast: "Copied. This AI-generated HTML may execute scripts or access the network when opened outside DBX.",
+    exportConversation: "Export conversation",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "User",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "This reply failed to generate",
+    conversationExportEmpty: "No messages to export yet",
   },
   contextMenu: {
     openConnection: "Open Connection",

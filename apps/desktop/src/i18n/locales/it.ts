@@ -2728,6 +2728,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "Copia comunque",
     htmlCopyRiskRemember: "Non chiedere più in questa sessione",
     htmlCopyRiskToast: "Copiato. Questo HTML generato dall'IA può eseguire script o accedere alla rete se aperto fuori da DBX.",
+    exportConversation: "Esporta conversazione",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "Utente",
+    conversationRoleAssistant: "IA",
+    conversationFailedMarker: "Generazione di questa risposta non riuscita",
+    conversationExportEmpty: "Nessun messaggio da esportare",
     agentSteps: {
       generated: "SQL generato",
       noSql: "Nessun SQL trovato",

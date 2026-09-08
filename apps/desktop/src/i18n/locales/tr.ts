@@ -3021,6 +3021,13 @@ export default withEnglishFallback({
     htmlCopyRiskAccept: "Yine de kopyala",
     htmlCopyRiskRemember: "Bu oturumda tekrar sorma",
     htmlCopyRiskToast: "Kopyalandı. Bu AI tarafından oluşturulan HTML, DBX dışında açıldığında betik çalıştırabilir veya ağa erişebilir.",
+    exportConversation: "Sohbeti dışa aktar",
+    conversationExportMarkdown: "Markdown",
+    conversationExportHtml: "HTML",
+    conversationRoleUser: "Kullanıcı",
+    conversationRoleAssistant: "AI",
+    conversationFailedMarker: "Bu yanıt oluşturulamadı",
+    conversationExportEmpty: "Dışa aktarılacak mesaj yok",
   },
   contextMenu: {
     openConnection: "Bağlantıyı Aç",

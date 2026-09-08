@@ -569,6 +569,10 @@ pub struct AiChatMessage {
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Set on the assistant message whose generation failed; persisted so the
+    /// export failure marker survives reloads and locale switches (#6467 PR3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covered_messages: Option<usize>,
 }

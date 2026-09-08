@@ -211,6 +211,7 @@ const sortDirection = ref<ObjectBrowserSortDirection>("asc");
 const loadingSchemas = ref(false);
 const loadingObjects = ref(false);
 const refreshingObjects = ref(false);
+const scaffoldRefreshError = ref("");
 const sourceLoading = ref(false);
 const sourceContent = ref("");
 const sourceError = ref("");
@@ -2822,6 +2823,11 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
   // the toolbar icon — the newest request owns the spinner state from here.
   loadingObjects.value = false;
   refreshingObjects.value = false;
+  scaffoldRefreshError.value = "";
+  // True when we are revalidating on top of visible rows (a stale-cache scaffold, or a
+  // same-instance refresh) — a failure then keeps the rows and raises a non-blocking
+  // banner instead of replacing the whole list with a full-area error.
+  let scaffoldRefresh = false;
   const schema = needsSchema.value ? selectedSchema.value || "" : props.database;
   const request = objectBrowserRowsLoadGuard.start(objectBrowserRowsCacheScope(schema));
   const cacheWriteToken = createObjectBrowserRowsCacheWriteToken(request.scope);
@@ -2844,6 +2850,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     applyObjectBrowserRows(cached.rows);
     finishOnce();
     if (!cached.stale) return;
+    scaffoldRefresh = true;
     refreshingObjects.value = true;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
@@ -2851,6 +2858,7 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     // current rows (same-instance refresh) and rows exist, refresh without blanking.
     const keepExisting = options?.preserveExistingRows && rows.value.length > 0;
     if (keepExisting) {
+      scaffoldRefresh = true;
       refreshingObjects.value = true;
     } else {
       loadingObjects.value = true;
@@ -2866,7 +2874,13 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
     if (props.connection.db_type !== "mongodb") void loadObjectStatistics(request, cacheWriteToken, cachedAt);
   } catch (e: any) {
     if (!objectBrowserRowsLoadGuard.isCurrent(request)) return;
-    error.value = translateBackendError(t, e);
+    // Keep visible rows on a background revalidate failure — surface a lightweight
+    // banner rather than replacing the scaffold (or same-instance refresh) list.
+    if (scaffoldRefresh) {
+      scaffoldRefreshError.value = translateBackendError(t, e);
+    } else {
+      error.value = translateBackendError(t, e);
+    }
   } finally {
     if (objectBrowserRowsLoadGuard.isCurrent(request)) {
       loadingObjects.value = false;
@@ -3413,6 +3427,10 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
       </Button>
     </div>
 
+    <div v-if="scaffoldRefreshError" role="status" class="flex h-8 shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 text-xs text-destructive">
+      <RefreshCw class="h-3 w-3 shrink-0" />
+      <span class="min-w-0 truncate">{{ scaffoldRefreshError }}</span>
+    </div>
     <div v-if="loadingObjects" class="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">
       <Loader2 class="h-4 w-4 animate-spin" />
       {{ t("objects.loading") }}

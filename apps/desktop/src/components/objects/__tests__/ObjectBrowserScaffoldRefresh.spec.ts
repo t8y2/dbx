@@ -43,4 +43,16 @@ describe("ObjectBrowser scaffold refresh race", () => {
     expect(functionBody("loadObjects")).toContain("refreshingObjects.value = true;");
     expect(functionBody("loadObjects")).toContain("loadingObjects.value = true;");
   });
+
+  it("keeps visible rows on a background revalidate failure (scaffold-preserving error)", () => {
+    expect(source).toContain('const scaffoldRefreshError = ref("");');
+    const body = functionBody("loadObjects");
+    // A scaffold/refresh revalidate failure must route to the non-blocking banner
+    // (scaffoldRefreshError) and keep the visible rows, not replace them with the
+    // blocking full-area error.
+    expect(body).toContain("scaffoldRefresh = true;");
+    expect(body).toContain("if (scaffoldRefresh) {");
+    expect(body).toContain("scaffoldRefreshError.value = translateBackendError(t, e)");
+    expect(source).toContain('v-if="scaffoldRefreshError"');
+  });
 });

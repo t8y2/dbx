@@ -832,7 +832,9 @@ async fn connection_database_type_for_pool_key(state: &AppState, pool_key: &str)
 }
 
 fn schema_for_execution_context(db_type: Option<DatabaseType>, schema: Option<&str>) -> Option<&str> {
-    if matches!(db_type, Some(DatabaseType::Iris)) {
+    // SQL Server has no session-level schema switch. Data-grid DML already uses
+    // qualified names, while legacy jTDS can mis-handle schema as catalog.
+    if matches!(db_type, Some(DatabaseType::Iris | DatabaseType::SqlServer)) {
         None
     } else {
         schema
@@ -4965,6 +4967,7 @@ async fn begin_transaction_session(
             (TxnConnection::Mysql(Some(conn)), probe_pool_key.clone())
         }
         TxnPoolHandle::Agent => {
+            let db_type = connection_database_type(state, connection_id).await;
             let client_session_id = format!("manual-txn-{}", uuid::Uuid::new_v4());
             let agent_pool_key =
                 state.get_or_create_pool_for_session(connection_id, pool_database, Some(&client_session_id)).await?;
@@ -4980,7 +4983,9 @@ async fn begin_transaction_session(
             };
             let begin_result = {
                 let mut locked = client.lock().await;
-                locked.begin_manual_transaction::<serde_json::Value>(schema).await
+                locked
+                    .begin_manual_transaction::<serde_json::Value>(schema_for_execution_context(db_type, schema))
+                    .await
             };
             if let Err(error) = begin_result {
                 let _ = state.close_client_session_pool(connection_id, pool_database, &client_session_id).await;
@@ -6821,6 +6826,18 @@ for line in sys.stdin:
             'rows': [[req['params']['sql']]], 'affected_rows': 0, 'execution_time_ms': 1,
             'truncated': False, 'session_id': None, 'has_more': False
         }
+    elif req['method'] in ('execute_batch', 'execute_transaction'):
+        if req['params'].get('schema') is not None:
+            print(json.dumps({
+                'jsonrpc': '2.0', 'id': req['id'],
+                'error': {'code': -1, 'message': 'legacy SQL Server schema switch attempted'}
+            }), flush=True)
+            continue
+        result = {
+            'columns': [], 'column_types': [], 'column_sortables': [], 'rows': [],
+            'affected_rows': 1, 'execution_time_ms': 1, 'truncated': False,
+            'session_id': None, 'has_more': False
+        }
     else:
         result = {}
     print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': result}), flush=True)
@@ -6878,6 +6895,25 @@ for line in sys.stdin:
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].result.rows, vec![vec![serde_json::Value::String(sql.to_string())]]);
+
+        runtime.kill();
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sqlserver_agent_write_paths_do_not_request_schema_switch() {
+        let (state, dir, runtime) = sqlserver_agent_echo_state().await;
+        let statements = ["UPDATE [dbo].[users] SET [active] = 1 WHERE [id] = 7".to_string()];
+
+        let batch = execute_statements(&state, "conn-1", "", &statements, Some("dbo"), None).await.unwrap();
+        let transaction =
+            execute_statements_in_transaction_on_pool(&state, "conn-1", "conn-1", "", &statements, Some("dbo"), None)
+                .await
+                .unwrap();
+
+        assert_eq!(batch.affected_rows, 1);
+        assert_eq!(transaction.affected_rows, 1);
 
         runtime.kill();
         drop(state);
@@ -9300,8 +9336,9 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn iris_execution_context_omits_schema() {
+    fn agent_execution_context_omits_unsupported_schema_switches() {
         assert_eq!(schema_for_execution_context(Some(DatabaseType::Iris), Some("SQLUser")), None);
+        assert_eq!(schema_for_execution_context(Some(DatabaseType::SqlServer), Some("dbo")), None);
         assert_eq!(schema_for_execution_context(Some(DatabaseType::Oracle), Some("APP")), Some("APP"));
         assert_eq!(schema_for_execution_context(None, Some("APP")), Some("APP"));
     }

@@ -1223,13 +1223,13 @@ async fn live_postgres_transfer_creates_selected_sequence_before_referencing_tab
 async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let connection_id = format!("pg-drop-rebuild-{suffix}");
-    let database = "postgres";
     let source_schema = format!("drop_src_{}", &suffix[..12]);
     let target_schema = format!("drop_tgt_{}", &suffix[..12]);
 
-    let config = postgres_test_config(&connection_id, database);
-    let url = format!("postgresql://{}@{}:{}/{}", config.username, config.host, config.port, database);
+    let url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
     let pool = postgres::connect(&url, std::time::Duration::from_secs(5)).await.expect("live PG connection");
+    let database = query_text(&pool, "SELECT current_database()").await;
+    let config = postgres_test_config(&connection_id, &database);
 
     // Source: orders(id, name, extra_col) + secondary index on name
     postgres::execute_batch(
@@ -1266,6 +1266,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
     let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(connection_id.clone(), config);
 
     let pool_key = format!("{}:{}", connection_id, database);
     state
@@ -1298,7 +1299,6 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
         batch_size: 1000,
     };
 
-    // __DBX_DROP_REBUILD_TEST_MARKER_1__
     // Execute rename pre-pass + transfer + backup cleanup
     let backup_names =
         rename_tables_to_backup(&state, &request, &request.tables, DatabaseType::Postgres, &pool_key, |_| {})
@@ -1373,7 +1373,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
 
     // Verify index rebuilt: idx_orders_name exists on the new table
     assert_eq!(
-        schema_count(
+        query_text(
             &pool,
             &format!(
                 "SELECT COUNT(*)::text FROM pg_indexes WHERE schemaname = '{target_schema}' \
@@ -1400,7 +1400,7 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
 
     // Verify data: stale row gone, source row present
     assert_eq!(
-        schema_count(&pool, &format!("SELECT COUNT(*)::text FROM {target_schema}.orders WHERE id = 99")).await,
+        query_text(&pool, &format!("SELECT COUNT(*)::text FROM {target_schema}.orders WHERE id = 99")).await,
         "0",
         "stale target row must be gone"
     );
@@ -1426,4 +1426,323 @@ async fn live_postgres_transfer_drop_target_rebuilds_structure_and_indexes() {
         &[format!("DROP SCHEMA {source_schema} CASCADE"), format!("DROP SCHEMA {target_schema} CASCADE")],
     )
     .await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+struct PostgresRebuildFixture {
+    state: Arc<AppState>,
+    source_pool: deadpool_postgres::Pool,
+    target_pool: deadpool_postgres::Pool,
+    source_pool_key: String,
+    target_pool_key: String,
+    request: TransferRequest,
+    _storage_dir: tempfile::TempDir,
+}
+
+impl PostgresRebuildFixture {
+    async fn new(label: &str, tables: &[&str]) -> Self {
+        let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+        let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+        let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+        let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+        let source_database = query_text(&source_pool, "SELECT current_database()").await;
+        let target_database = query_text(&target_pool, "SELECT current_database()").await;
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let source_schema = format!("dbx_{label}_src_{}", &suffix[..8]);
+        let target_schema = format!("dbx_{label}_dst_{}", &suffix[..8]);
+        let source_connection_id = format!("{label}-source-{suffix}");
+        let target_connection_id = format!("{label}-target-{suffix}");
+        let source_pool_key = format!("{source_connection_id}:{source_database}");
+        let target_pool_key = format!("{target_connection_id}:{target_database}");
+        let storage_dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(Storage::open(&storage_dir.path().join("storage.db")).await.unwrap()));
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+                connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+            })
+            .await;
+        {
+            let mut configs = state.configs.write().await;
+            configs.insert(source_connection_id.clone(), postgres_test_config(&source_connection_id, &source_database));
+            configs.insert(target_connection_id.clone(), postgres_test_config(&target_connection_id, &target_database));
+        }
+        postgres::execute_query(&source_pool, &format!("CREATE SCHEMA {source_schema}")).await.unwrap();
+        postgres::execute_query(&target_pool, &format!("CREATE SCHEMA {target_schema}")).await.unwrap();
+        Self {
+            state,
+            source_pool,
+            target_pool,
+            source_pool_key,
+            target_pool_key,
+            request: TransferRequest {
+                transfer_id: format!("{label}-{suffix}"),
+                source_connection_id,
+                source_database,
+                source_schema,
+                source_catalog: None,
+                target_connection_id,
+                target_database,
+                target_schema,
+                target_catalog: None,
+                tables: tables.iter().map(|table| (*table).to_string()).collect(),
+                create_table: true,
+                drop_target_before_create: true,
+                drop_target_confirmed: true,
+                content: TransferContent::default(),
+                objects: Vec::new(),
+                mode: TransferMode::Append,
+                target_table_name_case: TransferTableNameCase::Preserve,
+                quote_target_column_names: true,
+                ownership_policy: TransferOwnershipPolicy::Preserve,
+                batch_size: 100,
+            },
+            _storage_dir: storage_dir,
+        }
+    }
+
+    async fn rename(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        rename_tables_to_backup(
+            &self.state,
+            &self.request,
+            &self.request.tables,
+            DatabaseType::Postgres,
+            &self.target_pool_key,
+            |_| {},
+        )
+        .await
+    }
+
+    async fn transfer(&self, backups: &std::collections::HashMap<String, String>) -> Result<u64, String> {
+        transfer_table(
+            &self.state,
+            &self.request,
+            &self.request.tables[0],
+            0,
+            &DatabaseType::Postgres,
+            &DatabaseType::Postgres,
+            &self.source_pool_key,
+            &self.target_pool_key,
+            &std::collections::HashMap::new(),
+            &mut Vec::new(),
+            Some(backups),
+            |_| {},
+        )
+        .await
+    }
+
+    async fn drop_backups(&self, backups: &std::collections::HashMap<String, String>) -> Result<(), String> {
+        drop_backup_tables(
+            &self.state,
+            &self.request,
+            DatabaseType::Postgres,
+            &self.target_pool_key,
+            backups,
+            &self.request.tables,
+        )
+        .await
+    }
+
+    async fn cleanup(&self) {
+        postgres::execute_query(&self.source_pool, &format!("DROP SCHEMA {} CASCADE", self.request.source_schema))
+            .await
+            .unwrap();
+        postgres::execute_query(&self.target_pool, &format!("DROP SCHEMA {} CASCADE", self.request.target_schema))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_transfer_rebuilds_same_named_serial_sequence() {
+    let fixture = PostgresRebuildFixture::new("serial_rebuild", &["orders"]).await;
+    let source_schema = &fixture.request.source_schema;
+    let target_schema = &fixture.request.target_schema;
+    postgres::execute_batch(
+        &fixture.source_pool,
+        &[
+            format!("CREATE TABLE {source_schema}.orders (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"),
+            format!("INSERT INTO {source_schema}.orders (id, name) VALUES (42, 'source')"),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(
+        &fixture.target_pool,
+        &[
+            format!("CREATE TABLE {target_schema}.orders (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"),
+            format!("INSERT INTO {target_schema}.orders (id, name) VALUES (99, 'old target')"),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let result = async {
+        let backups = fixture.rename().await?;
+        let backup = backups.get("orders").expect("original target must have a backup");
+        assert_eq!(fixture.transfer(&backups).await?, 1);
+        assert_eq!(
+            query_text(&fixture.target_pool, &format!("SELECT name FROM {target_schema}.{backup} WHERE id = 99")).await,
+            "old target",
+            "original data remains recoverable until successful cleanup"
+        );
+        let new_sequence =
+            query_text(&fixture.target_pool, &format!("SELECT pg_get_serial_sequence('{target_schema}.orders', 'id')"))
+                .await;
+        let old_sequence = query_text(
+            &fixture.target_pool,
+            &format!("SELECT pg_get_serial_sequence('{target_schema}.{backup}', 'id')"),
+        )
+        .await;
+        assert!(!new_sequence.is_empty() && !old_sequence.is_empty());
+        assert_ne!(new_sequence, old_sequence, "new table and backup must own independent sequences");
+
+        fixture.drop_backups(&backups).await?;
+        assert_eq!(
+            query_scalar(
+                &fixture.target_pool,
+                &format!("INSERT INTO {target_schema}.orders (name) VALUES ('after rebuild') RETURNING id")
+            )
+            .await,
+            json!(43),
+            "dropping the backup must preserve the rebuilt sequence, synchronized to transferred data"
+        );
+        assert_eq!(
+            query_text(&fixture.target_pool, &format!("SELECT name FROM {target_schema}.orders WHERE id=42")).await,
+            "source"
+        );
+        assert_eq!(
+            query_scalar(&fixture.target_pool, &format!("SELECT to_regclass('{old_sequence}')::text")).await,
+            serde_json::Value::Null,
+            "backup cleanup must also remove the old owned sequence"
+        );
+        Ok::<_, String>(())
+    }
+    .await;
+    fixture.cleanup().await;
+    result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_transfer_rebuilds_indexes_with_shared_long_prefix() {
+    let fixture = PostgresRebuildFixture::new("long_indexes", &["orders"]).await;
+    let source_schema = &fixture.request.source_schema;
+    let target_schema = &fixture.request.target_schema;
+    // Both identifiers fit PostgreSQL's 63-byte limit but share their first 46 bytes.
+    let index_a = format!("{}first", "i".repeat(46));
+    let index_b = format!("{}second", "i".repeat(46));
+    for (pool, schema, row) in [
+        (&fixture.source_pool, source_schema, "(1, 'source', 7)"),
+        (&fixture.target_pool, target_schema, "(99, 'old target', 9)"),
+    ] {
+        postgres::execute_batch(
+            pool,
+            &[
+                format!("CREATE TABLE {schema}.orders (id INT PRIMARY KEY, name TEXT NOT NULL, amount INT)"),
+                format!("CREATE INDEX {index_a} ON {schema}.orders (name)"),
+                format!("CREATE INDEX {index_b} ON {schema}.orders (amount)"),
+                format!("INSERT INTO {schema}.orders VALUES {row}"),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    let result = async {
+        let backups = fixture.rename().await?;
+        let backup = backups.get("orders").expect("original target must have a backup");
+        assert_eq!(fixture.transfer(&backups).await?, 1);
+        fixture.drop_backups(&backups).await?;
+        let indexes = postgres::execute_query(
+            &fixture.target_pool,
+            &format!(
+                "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = '{target_schema}' \
+                 AND tablename = 'orders' AND indexname IN ('{index_a}', '{index_b}') ORDER BY indexname"
+            ),
+        )
+        .await?;
+        assert_eq!(indexes.rows.len(), 2, "both secondary indexes must survive rebuild; got {:?}", indexes.rows);
+        assert_eq!(indexes.rows[0][0], json!(index_a));
+        assert!(indexes.rows[0][1].as_str().unwrap().contains("(name)"));
+        assert_eq!(indexes.rows[1][0], json!(index_b));
+        assert!(indexes.rows[1][1].as_str().unwrap().contains("(amount)"));
+        assert_eq!(
+            query_text(&fixture.target_pool, &format!("SELECT name FROM {target_schema}.orders WHERE id=1")).await,
+            "source"
+        );
+        assert_eq!(
+            query_scalar(&fixture.target_pool, &format!("SELECT to_regclass('{target_schema}.{backup}')::text")).await,
+            serde_json::Value::Null,
+            "successful rebuild must remove the backup"
+        );
+        Ok::<_, String>(())
+    }
+    .await;
+    fixture.cleanup().await;
+    result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_transfer_rebuild_rejects_target_only_view_before_any_rename() {
+    let fixture = PostgresRebuildFixture::new("external_view", &["first_table", "orders"]).await;
+    let source_schema = &fixture.request.source_schema;
+    let target_schema = &fixture.request.target_schema;
+    for (pool, schema, row) in [
+        (&fixture.source_pool, source_schema, "(1, 'source')"),
+        (&fixture.target_pool, target_schema, "(99, 'old target')"),
+    ] {
+        postgres::execute_batch(
+            pool,
+            &[
+                format!("CREATE TABLE {schema}.first_table (id INT PRIMARY KEY, name TEXT NOT NULL)"),
+                format!("CREATE TABLE {schema}.orders (id INT PRIMARY KEY, name TEXT NOT NULL)"),
+                format!("INSERT INTO {schema}.first_table VALUES {row}"),
+                format!("INSERT INTO {schema}.orders VALUES {row}"),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    postgres::execute_query(
+        &fixture.target_pool,
+        &format!("CREATE VIEW {target_schema}.target_only_orders AS SELECT id, name FROM {target_schema}.orders"),
+    )
+    .await
+    .unwrap();
+    let catalog_snapshot_sql = format!(
+        "SELECT c.relname, c.oid::text, c.relkind::text FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = '{target_schema}' ORDER BY c.relname"
+    );
+    let before = postgres::execute_query(&fixture.target_pool, &catalog_snapshot_sql).await.unwrap().rows;
+    let result = fixture.rename().await;
+    let after = postgres::execute_query(&fixture.target_pool, &catalog_snapshot_sql).await.unwrap().rows;
+
+    // Collect observations before cleanup so even a missing preflight leaves no schemas behind.
+    let rows = postgres::execute_query(
+        &fixture.target_pool,
+        &format!(
+            "SELECT 'first_table', id, name FROM {target_schema}.first_table \
+             UNION ALL SELECT 'orders', id, name FROM {target_schema}.orders \
+             UNION ALL SELECT 'target_only_orders', id, name FROM {target_schema}.target_only_orders ORDER BY 1"
+        ),
+    )
+    .await;
+    fixture.cleanup().await;
+
+    let error = result.expect_err("target-only dependent view must reject the whole plan before any table rename");
+    assert!(error.contains("target_only_orders"), "preflight must identify the dependent view: {error}");
+    assert_eq!(after, before, "all original table, index and view identities must remain unchanged");
+    assert_eq!(
+        rows.unwrap().rows,
+        vec![
+            vec![json!("first_table"), json!(99), json!("old target")],
+            vec![json!("orders"), json!(99), json!("old target")],
+            vec![json!("target_only_orders"), json!(99), json!("old target")],
+        ],
+        "preflight rejection must preserve both selected tables and the target-only view's result"
+    );
 }

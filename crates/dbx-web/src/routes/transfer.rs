@@ -436,37 +436,12 @@ pub async fn start_transfer(
             }
         }
 
-        // The rename pre-pass left one backup per rebuilt table. Drop them only now that
-        // every table has succeeded, and before the deferred foreign key ALTERs below: on
-        // MySQL a constraint name is unique per database, so a backup still holding the
-        // source constraint name makes the ALTER fail.
-        if let Some(backup_names) = backup_names.as_ref() {
-            if failed_tables.is_empty() {
-                if let Err(e) = transfer::drop_backup_tables(
-                    &app,
-                    &req,
-                    target_db_type,
-                    &target_pool_key,
-                    backup_names,
-                    &backup_drop_order,
-                )
-                .await
-                {
-                    failed_tables.push(e);
-                }
-            } else {
-                log::warn!(
-                    "[transfer] keeping {} backup table(s) because {} table(s) failed",
-                    backup_names.len(),
-                    failed_tables.len()
-                );
-            }
-        }
-
         // Add any foreign keys deferred during MySQL-family table creation now that
         // every selected table exists — see transfer_table's use of
         // strip_inline_foreign_key_constraint_lines for why these can't be created
-        // inline (a foreign key cycle has no valid CREATE TABLE order at all).
+        // inline (a foreign key cycle has no valid CREATE TABLE order at all). The
+        // rename pre-pass already freed the backup constraint names, so these re-create
+        // the original names without colliding.
         let mut failed_fk_tables: Vec<String> = Vec::new();
         let mut failed_fk_count = 0usize;
         for (table, alter_sql) in &pending_fk_alters {
@@ -533,6 +508,33 @@ pub async fn start_transfer(
         // Send done
         if !object_outcome.failed.is_empty() {
             failed_tables.push(format!("schema objects ({})", object_outcome.failed.len()));
+        }
+
+        // The rename pre-pass left one backup per rebuilt table. Drop them only now that
+        // every table, every deferred foreign key and every selected schema object has
+        // succeeded — a failure anywhere above keeps the originals recoverable under
+        // their backup names.
+        if let Some(backup_names) = backup_names.as_ref() {
+            if failed_tables.is_empty() {
+                if let Err(e) = transfer::drop_backup_tables(
+                    &app,
+                    &req,
+                    target_db_type,
+                    &target_pool_key,
+                    backup_names,
+                    &backup_drop_order,
+                )
+                .await
+                {
+                    failed_tables.push(e);
+                }
+            } else {
+                log::warn!(
+                    "[transfer] keeping {} backup table(s) because {} step(s) failed",
+                    backup_names.len(),
+                    failed_tables.len()
+                );
+            }
         }
         let skip_suffix = if !object_outcome.skipped.is_empty() && failed_tables.is_empty() {
             format!("，跳过 {} 个已存在对象", object_outcome.skipped.len())

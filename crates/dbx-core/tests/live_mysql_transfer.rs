@@ -1223,16 +1223,26 @@ async fn live_mysql_transfer_drop_target_parent_child_foreign_key() {
             "2"
         );
 
-        // Drop backups before executing deferred FK ALTERs (constraint name collision prevention).
-        drop_backup_tables(&state, &request, DatabaseType::Mysql, &target_pool_key, &backup_names, &tables_for_rename)
-            .await?;
-
         // Restore the foreign key: this is where the deferred `ADD CONSTRAINT fk_emp_dept` runs.
         for (table, alter_sql) in pending_fk_alters {
             if let Err(e) = execute_on_pool(&state, &target_pool_key, &alter_sql).await {
                 return Err(format!("Failed to restore foreign key on table {}: {}", table, e));
             }
         }
+
+        // Every original table must still be recoverable after the required FK restoration.
+        for backup in backup_names.values() {
+            assert_eq!(
+                schema_count(
+                    &setup_pool,
+                    &format!("TABLES WHERE TABLE_SCHEMA = '{target_database}' AND TABLE_NAME = '{backup}'")
+                )
+                .await,
+                "1"
+            );
+        }
+        drop_backup_tables(&state, &request, DatabaseType::Mysql, &target_pool_key, &backup_names, &tables_for_rename)
+            .await?;
 
         // Foreign key is back and enforces referential integrity.
         assert_eq!(
@@ -1534,9 +1544,8 @@ async fn live_mysql_transfer_drop_target_rejects_external_incoming_fk() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Verifies circular foreign key topology handling: when table A references B and B references A,
-/// the rename pre-pass uses children-first ordering which produces a valid DROP order. The backup
-/// cleanup must handle this by dropping both backup tables in a single statement to avoid FK errors.
+/// A circular FK graph has no valid sequential DROP order. Rebuild must restore both new FKs
+/// while every backup still exists, then safely remove only the backup graph.
 #[tokio::test]
 #[ignore = "requires live MySQL connection via DBX_LIVE_MYSQL_TRANSFER_* env vars"]
 async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
@@ -1554,20 +1563,21 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
          CREATE TABLE `{source_database}`.`users` (id INT PRIMARY KEY, name VARCHAR(32), group_id INT);\
          CREATE TABLE `{source_database}`.`groups` (id INT PRIMARY KEY, name VARCHAR(32), owner_id INT);\
          ALTER TABLE `{source_database}`.`users` ADD CONSTRAINT `fk_user_group` \
-             FOREIGN KEY (group_id) REFERENCES `groups`(id);\
+             FOREIGN KEY (group_id) REFERENCES `groups`(id) ON UPDATE CASCADE ON DELETE RESTRICT;\
          ALTER TABLE `{source_database}`.`groups` ADD CONSTRAINT `fk_group_owner` \
-             FOREIGN KEY (owner_id) REFERENCES `users`(id);\
+             FOREIGN KEY (owner_id) REFERENCES `users`(id) ON UPDATE RESTRICT ON DELETE CASCADE;\
          INSERT INTO `{source_database}`.`users` VALUES (1, 'Alice', NULL);\
          INSERT INTO `{source_database}`.`groups` VALUES (10, 'Admins', 1);\
          UPDATE `{source_database}`.`users` SET group_id = 10 WHERE id = 1;\
          CREATE TABLE `{target_database}`.`users` (id INT PRIMARY KEY, name VARCHAR(32), group_id INT);\
          CREATE TABLE `{target_database}`.`groups` (id INT PRIMARY KEY, name VARCHAR(32), owner_id INT);\
          ALTER TABLE `{target_database}`.`users` ADD CONSTRAINT `fk_user_group` \
-             FOREIGN KEY (group_id) REFERENCES `groups`(id);\
+             FOREIGN KEY (group_id) REFERENCES `groups`(id) ON UPDATE CASCADE ON DELETE RESTRICT;\
          ALTER TABLE `{target_database}`.`groups` ADD CONSTRAINT `fk_group_owner` \
-             FOREIGN KEY (owner_id) REFERENCES `users`(id);\
+             FOREIGN KEY (owner_id) REFERENCES `users`(id) ON UPDATE RESTRICT ON DELETE CASCADE;\
          INSERT INTO `{target_database}`.`users` VALUES (99, 'Stale', NULL);\
-         INSERT INTO `{target_database}`.`groups` VALUES (98, 'Obsolete', 99)"
+         INSERT INTO `{target_database}`.`groups` VALUES (98, 'Obsolete', 99);\
+         UPDATE `{target_database}`.`users` SET group_id = 98 WHERE id = 99"
     );
     mysql::execute_query(&setup_pool, &setup, true).await.unwrap();
 
@@ -1603,7 +1613,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
     };
 
     let test_result = async {
-        // Children-first ordering for rename: breaks the cycle
+        // Sorting alone cannot break a cycle; renaming must retain the backup relationships.
         let (tables_for_rename, fk_map) = sort_tables_by_fk_dependency_with_foreign_keys(
             &state,
             &connection_id,
@@ -1614,7 +1624,7 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         )
         .await?;
 
-        // Rename pre-pass succeeds by dropping FKs temporarily
+        // Backup FKs must remain enforceable while their original names are freed for the new tables.
         let backup_names = rename_tables_to_backup(
             &state,
             &request,
@@ -1625,6 +1635,27 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
         )
         .await?;
         assert_eq!(backup_names.len(), 2, "both tables must be backed up");
+
+        for (table, referenced_table, update_rule, delete_rule) in [
+            ("users", "groups", "CASCADE", "RESTRICT"),
+            ("groups", "users", "RESTRICT", "CASCADE"),
+        ] {
+            let backup = &backup_names[table];
+            let referenced_backup = &backup_names[referenced_table];
+            assert_eq!(
+                schema_count(
+                    &setup_pool,
+                    &format!(
+                        "REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = '{target_database}' \
+                         AND TABLE_NAME = '{backup}' AND REFERENCED_TABLE_NAME = '{referenced_backup}' \
+                         AND UPDATE_RULE = '{update_rule}' AND DELETE_RULE = '{delete_rule}'"
+                    )
+                )
+                .await,
+                "1",
+                "backup FK for {table} must preserve both its referenced backup and update/delete rules"
+            );
+        }
 
         // Main transfer
         let mut pending_fk_alters: Vec<(String, String)> = Vec::new();
@@ -1664,7 +1695,40 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
             "1"
         );
 
-        // Cleanup: drop_backup_tables must handle circular FK by dropping both backups together
+        // Required FK restoration precedes cleanup, so a restoration failure retains all originals.
+        for (table, alter_sql) in pending_fk_alters {
+            execute_on_pool(&state, &target_pool_key, &alter_sql)
+                .await
+                .map_err(|e| format!("Failed to restore FK on {table} while backups are retained: {e}"))?;
+        }
+        for (table, id, name) in [("users", 99, "Stale"), ("groups", 98, "Obsolete")] {
+            let backup = &backup_names[table];
+            assert_eq!(
+                query_text(&setup_pool, &format!("SELECT name FROM `{target_database}`.`{backup}` WHERE id = {id}")).await,
+                name,
+                "original data must remain available after all new FKs are restored"
+            );
+        }
+        for (table, referenced_table, constraint, update_rule, delete_rule) in [
+            ("users", "groups", "fk_user_group", "CASCADE", "RESTRICT"),
+            ("groups", "users", "fk_group_owner", "RESTRICT", "CASCADE"),
+        ] {
+            assert_eq!(
+                schema_count(
+                    &setup_pool,
+                    &format!(
+                        "REFERENTIAL_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = '{target_database}' \
+                         AND TABLE_NAME = '{table}' AND REFERENCED_TABLE_NAME = '{referenced_table}' \
+                         AND CONSTRAINT_NAME = '{constraint}' AND UPDATE_RULE = '{update_rule}' AND DELETE_RULE = '{delete_rule}'"
+                    )
+                )
+                .await,
+                "1",
+                "new FK for {table} must point at the new table with its source rules before backups are dropped"
+            );
+        }
+
+        // Cleanup must handle the backup-only cycle without affecting restored target constraints.
         drop_backup_tables(&state, &request, DatabaseType::Mysql, &target_pool_key, &backup_names, &tables_for_rename)
             .await?;
 
@@ -1682,13 +1746,6 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
             );
         }
 
-        // Restore FKs
-        for (table, alter_sql) in pending_fk_alters {
-            execute_on_pool(&state, &target_pool_key, &alter_sql)
-                .await
-                .map_err(|e| format!("Failed to restore FK on {table}: {e}"))?;
-        }
-
         // Circular FK constraints restored
         assert_eq!(
             schema_count(
@@ -1702,6 +1759,15 @@ async fn live_mysql_transfer_drop_target_circular_foreign_keys() {
             "2",
             "both FK constraints must be restored"
         );
+
+        let invalid_insert = mysql::execute_query(
+            &setup_pool,
+            &format!("INSERT INTO `{target_database}`.`users` VALUES (7, 'invalid', 999)"),
+            false,
+        )
+        .await
+        .expect_err("restored FK must reject missing references after backup cleanup");
+        assert!(invalid_insert.to_lowercase().contains("foreign key"), "{invalid_insert}");
 
         Ok::<_, String>(())
     }

@@ -32,9 +32,9 @@ vi.mock("@/lib/backend/api", () => ({
 
 const mountedApps: App[] = [];
 
-function messageAt(index: number): MqttMessage {
+function messageAt(index: number, topic = "device/status"): MqttMessage {
   return {
-    topic: "device/status",
+    topic,
     payloadBase64: btoa(`payload-${index}`),
     payloadText: `payload-${index}`,
     qos: 0,
@@ -124,5 +124,37 @@ describe("MQTT 控制台消息暂停自动滚动 (issue #5615)", () => {
     await nextTick();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mqttGetMessagesMock).toHaveBeenCalled();
+  });
+});
+
+describe("MQTT 控制台暂停后选择消息 (issue #8353)", () => {
+  it("点击暂停后的消息内容时不会重新获取并替换消息", async () => {
+    mqttGetMessagesMock.mockResolvedValue([messageAt(0, "device/other")]);
+    const container = await mountConsole();
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+    expect(container.textContent).toContain("payload-0");
+    expect(container.textContent).toContain("消息：device/status");
+
+    const pauseButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("暂停"));
+    expect(pauseButton).toBeTruthy();
+    pauseButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await nextTick();
+
+    mqttGetMessagesMock.mockClear();
+    mqttGetMessagesMock.mockResolvedValue([messageAt(1, "device/other")]);
+    const messageRow = Array.from(container.querySelectorAll(".cursor-pointer")).find((element) => element.textContent?.includes("payload-0"));
+    expect(messageRow).toBeTruthy();
+    messageRow?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(mqttGetMessagesMock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("payload-0");
+    expect(container.textContent).not.toContain("payload-1");
+    expect(container.textContent).toContain("消息：device/status");
+    expect(container.textContent).not.toContain("消息：device/other");
   });
 });

@@ -3197,6 +3197,10 @@ mod tests {
 
     use crate::connection::{AppState, PoolKind};
     use crate::models::connection::{ConnectionConfig, DatabaseConnectionInfo, DatabaseType};
+    #[cfg(unix)]
+    use crate::plugins::{
+        InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
+    };
     use crate::storage::Storage;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -3571,6 +3575,9 @@ mod tests {
         config.connection_string = Some(" jdbc:mysql://127.0.0.1:3306/demo ".to_string());
         assert!(is_mysql_external_driver_config(&config));
 
+        config.jdbc_driver_class = Some("com.example.AoeMysqlDriver".to_string());
+        assert!(!is_mysql_external_driver_config(&config));
+
         config.connection_string = Some("jdbc:mariadb://127.0.0.1:3306/demo".to_string());
         config.jdbc_driver_class = Some("com.mysql.cj.jdbc.Driver".to_string());
         assert!(!is_mysql_external_driver_config(&config));
@@ -3580,6 +3587,94 @@ mod tests {
 
         config.jdbc_driver_class = Some("org.mariadb.jdbc.Driver".to_string());
         assert!(!is_mysql_external_driver_config(&config));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mysql_external_driver_ddl_falls_back_to_generic_source() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("dbx-mysql-wrapper-ddl-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("plugin.sh");
+        let calls = dir.join("calls.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"executeQuery"'*)
+      echo executeQuery >> '{}'
+      printf '{{"id":%s,"error":{{"message":"SHOW CREATE TABLE is not supported"}}}}\n' "$id"
+      ;;
+    *'"method":"getObjectSource"'*)
+      echo getObjectSource >> '{}'
+      printf '{{"id":%s,"result":{{"source":"CREATE TABLE fallback_ddl"}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                calls.display(),
+                calls.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let plugin = InstalledPlugin {
+            manifest: PluginManifest {
+                id: "jdbc".to_string(),
+                name: "JDBC".to_string(),
+                version: "test".to_string(),
+                protocol_version: 1,
+                description: String::new(),
+                executable: Some("plugin.sh".to_string()),
+                drivers: vec![PluginDriverManifest {
+                    id: "jdbc".to_string(),
+                    label: "JDBC".to_string(),
+                    kind: "external".to_string(),
+                    database_type: Some("jdbc".to_string()),
+                }],
+            },
+            path: dir.clone(),
+        };
+        let session = std::sync::Arc::new(
+            PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
+        );
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let mut config = test_connection_config(DatabaseType::Jdbc);
+        config.id = "mysql-wrapper".to_string();
+        config.database = Some("demo".to_string());
+        config.connection_string = Some("jdbc:mysql://127.0.0.1:3306/demo".to_string());
+        config.jdbc_driver_class = Some("com.example.AoeMysqlDriver".to_string());
+        state.configs.write().await.insert(config.id.clone(), config.clone());
+        state
+            .update_connection_pools(|connections| {
+                connections.insert(
+                    "mysql-wrapper".to_string(),
+                    PoolKind::ExternalDriver {
+                        driver_id: "jdbc".to_string(),
+                        config: std::sync::Arc::new(config),
+                        session,
+                    },
+                );
+            })
+            .await;
+
+        let ddl = super::get_table_ddl_core(&state, "mysql-wrapper", "demo", "", "orders", None)
+            .await
+            .expect("generic DDL should be returned after SHOW CREATE TABLE fails");
+
+        assert_eq!(ddl, "CREATE TABLE fallback_ddl");
+        assert_eq!(std::fs::read_to_string(&calls).unwrap(), "executeQuery\ngetObjectSource\n");
+
+        state.shutdown(Duration::from_secs(1)).await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7824,10 +7919,16 @@ async fn get_table_ddl_once(
                 let session = session.clone();
                 return external_driver_oracle_ddl(session, config.as_ref(), database, schema, table).await;
             }
-            if external_driver_uses_mysql_ddl(config.as_ref()) {
+            if external_driver_uses_mysql_ddl(config.as_ref())
+                || (config.db_type == DatabaseType::Jdbc && mysql_external_driver_url(config.as_ref()) == Some(true))
+            {
                 let config = config.clone();
                 let session = session.clone();
-                return external_driver_mysql_ddl(session, config.as_ref(), database, schema, table).await;
+                let result = external_driver_mysql_ddl(session.clone(), config.as_ref(), database, schema, table).await;
+                if result.is_err() && config.db_type == DatabaseType::Jdbc {
+                    return external_driver_jdbc_ddl(session, config.as_ref(), database, schema, table).await;
+                }
+                return result;
             }
             if external_driver_uses_generic_ddl(config.as_ref()) {
                 let config = config.clone();
@@ -8120,9 +8221,8 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
         return false;
     }
 
-    let connection_string = config.connection_string.as_deref().map(str::trim).filter(|value| !value.is_empty());
     let driver_class = config.jdbc_driver_class.as_deref().map(str::trim).filter(|value| !value.is_empty());
-    let mysql_url = connection_string.map(|value| value.to_ascii_lowercase().starts_with("jdbc:mysql:"));
+    let mysql_url = mysql_external_driver_url(config);
     let mysql_driver = driver_class.map(|value| matches!(value, "com.mysql.cj.jdbc.Driver" | "com.mysql.jdbc.Driver"));
 
     match (mysql_url, mysql_driver) {
@@ -8131,6 +8231,15 @@ fn is_mysql_external_driver_config(config: &ConnectionConfig) -> bool {
         (None, Some(driver_matches)) => driver_matches,
         (None, None) => false,
     }
+}
+
+fn mysql_external_driver_url(config: &ConnectionConfig) -> Option<bool> {
+    config
+        .connection_string
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase().starts_with("jdbc:mysql:"))
 }
 
 fn is_oracle_external_driver_config(config: &ConnectionConfig) -> bool {

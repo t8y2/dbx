@@ -5,6 +5,8 @@ import {
   DatabaseBackupConnectionQueue,
   databaseBackupAggregateExportStatus,
   databaseBackupFilePath,
+  databaseBackupRunDirectory,
+  databaseBackupRunDirectoryPatternIsValid,
   databaseBackupProgressPercent,
   databaseBackupRunsToPrune,
   databaseBackupScheduleIsDue,
@@ -131,6 +133,22 @@ test("backup file names are unique and safe for schema-aware exports", () => {
   const path = databaseBackupFilePath("C:\\backups", "Nightly: prod", "app/private", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd");
 
   assert.equal(path, "C:\\backups\\dbx-backup__Nightly_ prod__20260716-020304__app_private__12345678.sql");
+});
+
+test("scheduled runs render a user-defined relative directory template", () => {
+  const directory = databaseBackupRunDirectory(
+    "C:\\backups",
+    "archives/{schedule}/{date}/{timestamp}-{runId}",
+    "Nightly: prod",
+    new Date(2026, 6, 16, 2, 3, 4),
+    "12345678-abcd",
+  );
+
+  assert.equal(directory, "C:\\backups\\archives\\Nightly_ prod\\20260716\\20260716020304-12345678");
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("{schedule}/{runId}"), true);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("dbx-backup_{timestamp}"), true);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("../{runId}"), false);
+  assert.equal(databaseBackupRunDirectoryPatternIsValid("daily"), true);
 });
 
 test("retention pruning keeps the newest successful runs", () => {

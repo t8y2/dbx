@@ -2374,24 +2374,59 @@ pub async fn export_destination_identity_needs_confirmation(
     Ok(cfg!(target_os = "macos") && matches!(recorded_identity, Some(Some(ExportDestinationIdentity::LegacyDevice(_)))))
 }
 
+/// Verifies the nearest persisted destination ancestor before a new child is
+/// created. Scheduled runs always create new leaf directories, so checking
+/// only the leaf would otherwise bypass the configured destination's mount
+/// identity protection.
+async fn ensure_recorded_export_destination_ancestor(
+    state: &crate::connection::AppState,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let mut ancestor = dir.parent();
+    while let Some(candidate) = ancestor {
+        let recorded_identity = state
+            .storage
+            .load_state(&export_destination_state_key(candidate))
+            .await?
+            .map(|(bytes, _content_type)| ExportDestinationIdentity::decode(&bytes))
+            .transpose()?;
+
+        if let Some(recorded_identity) = recorded_identity {
+            if !candidate.is_dir() {
+                return Err(format!(
+                    "Backup directory {} is missing. Its parent {} was configured or previously used for exports, so dbx will not recreate a child directory automatically -- if this is on a removable or network drive, reconnect it and try again.",
+                    dir.display(),
+                    candidate.display()
+                ));
+            }
+            if let Some(recorded_identity) = recorded_identity {
+                let current_identity = export_destination_identity_for_path(candidate);
+                if recorded_export_destination_identity_mismatch(&recorded_identity, current_identity.as_ref()) {
+                    return Err(format!(
+                        "Backup directory {} now resolves to a different filesystem than the configured parent {}. Refusing to create a child directory automatically -- make sure the correct removable or network drive is connected before running the backup.",
+                        dir.display(),
+                        candidate.display()
+                    ));
+                }
+            }
+            return Ok(());
+        }
+        ancestor = candidate.parent();
+    }
+    Ok(())
+}
+
 /// Ensures `dir` exists for an export destination, without ever silently
 /// recreating a directory that previously produced a successful export (or
 /// was recorded via [`record_export_destination_identity`]) and has since
-/// disappeared. Auto-creating on every run is what the original fix for
-/// #6109 did, but that is unsafe for a destination on a removable or network
-/// drive: if the mount is temporarily gone when a run executes, blindly
-/// recreating the path resurrects it on the local root filesystem and the
-/// export "succeeds" while silently writing to the wrong disk. A directory
-/// dbx has never seen before is safe to create (normal first-time
-/// configuration of a local folder); a directory dbx has seen before but
-/// that is now missing, or that now resolves to a different filesystem than
-/// last time, is refused instead. See #6327.
+/// disappeared. Auto-creating on every run is unsafe for a destination on a
+/// removable or network drive: a missing mount could be recreated on the
+/// local filesystem. A new directory is safe to create only after any
+/// recorded parent destination has been verified. See #6327.
 ///
-/// Returns the device identity that was just verified (or recorded for a
-/// newly created directory), if the current platform can determine one, so
-/// the caller can re-verify it against the file it actually opens -- the
-/// directory check here and the later `File::create` are separate
-/// operations, and the mount can change in between.
+/// Returns the identity that was just verified (or recorded for a newly
+/// created directory), so the caller can re-verify it against the file it
+/// actually opens.
 async fn ensure_export_destination_dir(
     state: &crate::connection::AppState,
     dir: &std::path::Path,
@@ -2428,6 +2463,11 @@ async fn ensure_export_destination_dir(
                 dir.display()
             ));
         }
+        // A run-specific child directory is intentionally new on every
+        // scheduled backup. Before creating it, still honor a recorded parent
+        // destination so a missing external/NAS mount is never recreated on
+        // the local filesystem merely because this child has no state yet.
+        ensure_recorded_export_destination_ancestor(state, dir).await?;
         std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create backup directory: {e}"))?;
     }
 
@@ -5917,6 +5957,29 @@ mod tests {
 
         assert!(result.is_err(), "a mount that was recorded at configuration time must not be silently recreated");
         assert!(!destination.exists(), "the backup directory must not be resurrected on the wrong filesystem");
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn ensure_export_destination_dir_refuses_a_new_child_when_its_recorded_parent_is_missing() {
+        let scratch = std::env::temp_dir().join(format!("dbx-export-dest-child-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let state = test_app_state(&scratch).await;
+
+        let destination = scratch.join("mounted-drive").join("backups");
+        std::fs::create_dir_all(&destination).unwrap();
+        record_export_destination_identity(&state, &destination)
+            .await
+            .expect("the configured root should be recorded before scheduled runs begin");
+
+        std::fs::remove_dir_all(scratch.join("mounted-drive")).unwrap();
+        let run_directory = destination.join("dbx-backup__nightly__20260908-220000__12345678");
+
+        let result = ensure_export_destination_dir(&state, &run_directory).await;
+
+        assert!(result.is_err(), "a unique run directory must not recreate a missing configured parent");
+        assert!(!run_directory.exists(), "the run directory must not be created on the local filesystem");
 
         let _ = std::fs::remove_dir_all(&scratch);
     }

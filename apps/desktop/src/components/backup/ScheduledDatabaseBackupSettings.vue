@@ -16,14 +16,25 @@ import DatabaseBackupConfigFields from "@/components/backup/DatabaseBackupConfig
 import { useToast } from "@/composables/useToast";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
-import { nextDatabaseBackupRunAt, normalizeDatabaseBackupTablePatterns, supportsScheduledDatabaseBackup, type DatabaseBackupExecutionConfig, type DatabaseBackupFile, type DatabaseBackupRun, type DatabaseBackupSchedule } from "@/lib/backup/scheduledDatabaseBackup";
+import {
+  DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
+  databaseBackupRunDirectory,
+  databaseBackupRunDirectoryPatternIsValid,
+  nextDatabaseBackupRunAt,
+  normalizeDatabaseBackupTablePatterns,
+  supportsScheduledDatabaseBackup,
+  type DatabaseBackupExecutionConfig,
+  type DatabaseBackupFile,
+  type DatabaseBackupRun,
+  type DatabaseBackupSchedule,
+} from "@/lib/backup/scheduledDatabaseBackup";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
-const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRun, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
+const { schedules, runs, activeScheduleIds, activeRunIds, cancellingRunIds, activeRuns, saveSchedule, setScheduleEnabled, deleteSchedule, deleteRuns, renameRun, runSchedule, runOneShot, cancelRun } = useScheduledDatabaseBackups();
 
 const scheduleDialogOpen = ref(false);
 const oneShotDialogOpen = ref(false);
@@ -32,10 +43,11 @@ const deleteRunDialogOpen = ref(false);
 const renameRunDialogOpen = ref(false);
 const editingScheduleId = ref("");
 const pendingDeleteSchedule = ref<DatabaseBackupSchedule | null>(null);
-const pendingDeleteRun = ref<DatabaseBackupRun | null>(null);
+const pendingDeleteRunIds = ref<string[]>([]);
 const pendingRenameRun = ref<DatabaseBackupRun | null>(null);
 const renameRunName = ref("");
 const loadingDatabases = ref(false);
+const databaseLoadError = ref("");
 const saving = ref(false);
 const oneShotStarting = ref(false);
 const databaseOptions = ref<string[]>([]);
@@ -43,6 +55,7 @@ const allDatabases = ref(true);
 const selectedDatabases = ref<string[]>([]);
 const tablePatternsInput = ref("");
 const expandedRunIds = reactive(new Set<string>());
+const selectedRunIds = reactive(new Set<string>());
 const historyConnectionId = ref("");
 const historyConnectionPickerOpen = ref(false);
 const historyConnectionSearch = ref("");
@@ -71,6 +84,9 @@ const filteredRuns = computed(() =>
     return historyStatus.value === "all" || historyStatus.value === run.status;
   }),
 );
+const selectableFilteredRuns = computed(() => filteredRuns.value.filter((run) => !activeRunIds.has(run.id)));
+const selectedRuns = computed(() => sortedRuns.value.filter((run) => selectedRunIds.has(run.id) && !activeRunIds.has(run.id)));
+const allSelectableRunsSelected = computed(() => selectableFilteredRuns.value.length > 0 && selectableFilteredRuns.value.every((run) => selectedRunIds.has(run.id)));
 const selectedHistoryConnectionName = computed(() => historyConnections.value.find((connection) => connection.id === historyConnectionId.value)?.name || t("databaseBackup.allConnections"));
 const weekdays = computed(() => [
   { value: 0, label: t("databaseBackup.weekdays.sunday") },
@@ -113,6 +129,7 @@ function newScheduleDraft(connectionId = sqlConnections.value[0]?.id ?? ""): Dat
     timeOfDay: "02:00",
     weekday: 1,
     retentionCount: 10,
+    runDirectoryPattern: DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
     createdAt: now.toISOString(),
     updatedAt: now.toISOString(),
     nextRunAt: "",
@@ -138,9 +155,13 @@ const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = draft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
-  return !!draft.value.name.trim() && !!draft.value.connectionId && !!draft.value.destinationDirectory.trim() && hasContent && hasDatabaseScope && hasTableScope && !saving.value && !loadingDatabases.value;
+  return !!draft.value.name.trim() && !!draft.value.connectionId && !!draft.value.destinationDirectory.trim() && databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") && hasContent && hasDatabaseScope && hasTableScope && !saving.value && !loadingDatabases.value;
 });
 const nextRunPreview = computed(() => nextDatabaseBackupRunAt(draft.value, new Date()));
+const runDirectoryPreview = computed(() => {
+  if (!draft.value.destinationDirectory.trim() || !databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "")) return "";
+  return databaseBackupRunDirectory(draft.value.destinationDirectory, draft.value.runDirectoryPattern || "", draft.value.name.trim() || t("databaseBackup.defaultScheduleName"), nextRunPreview.value, "preview01");
+});
 const canStartOneShot = computed(() => {
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
@@ -221,6 +242,7 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
   const generation = ++databaseLoadGeneration;
   const connectionId = targetDraft.connectionId;
   databaseOptions.value = [];
+  databaseLoadError.value = "";
   if (!preserveSelection) {
     selectedDatabases.value = [];
     allDatabases.value = true;
@@ -234,20 +256,43 @@ async function loadDatabases(dialog: BackupDialogKind, targetDraft: DatabaseBack
   }
   loadingDatabases.value = true;
   try {
-    await connectionStore.ensureConnected(connectionId);
-    const config = connectionStore.getConfig(connectionId);
-    const names = config?.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((database) => database.name);
+    const loadNames = async () => {
+      await connectionStore.ensureConnected(connectionId);
+      const config = connectionStore.getConfig(connectionId);
+      return config?.db_type === "dameng" ? await fetchNamespaceOptionsForConnection(connectionId, config) : (await api.listDatabases(connectionId)).map((database) => database.name);
+    };
+    let names: string[];
+    try {
+      names = await loadNames();
+    } catch (error) {
+      // A connection can be closed by MySQL after the store's recent health
+      // check. Mark it stale and retry the read once through a fresh pool.
+      if (!connectionStore.recordConnectionLostError(connectionId, error)) throw error;
+      names = await loadNames();
+    }
     if (!databaseLoadIsCurrent(generation, dialog, targetDraft, connectionId)) return;
     databaseOptions.value = names;
     if (preserveSelection) {
       const selected = new Set(selectedDatabases.value);
       selectedDatabases.value = names.filter((database) => selected.has(database));
     }
-  } catch (error: any) {
-    if (databaseLoadIsCurrent(generation, dialog, targetDraft, connectionId)) toast(error?.message || String(error), 5000);
+  } catch {
+    if (databaseLoadIsCurrent(generation, dialog, targetDraft, connectionId)) {
+      databaseLoadError.value = t("databaseBackup.databaseListLoadFailed", { name: connectionName(connectionId) });
+    }
   } finally {
     if (generation === databaseLoadGeneration) loadingDatabases.value = false;
   }
+}
+
+function resetDatabaseScope(targetDraft: DatabaseBackupExecutionConfig) {
+  databaseOptions.value = [];
+  databaseLoadError.value = "";
+  allDatabases.value = true;
+  selectedDatabases.value = [];
+  targetDraft.tableFilterMode = "all";
+  targetDraft.tablePatterns = [];
+  tablePatternsInput.value = "";
 }
 
 async function openCreateSchedule() {
@@ -255,11 +300,8 @@ async function openCreateSchedule() {
   editingScheduleId.value = "";
   const nextDraft = newScheduleDraft();
   draft.value = nextDraft;
-  allDatabases.value = true;
-  selectedDatabases.value = [];
-  tablePatternsInput.value = "";
+  resetDatabaseScope(nextDraft);
   scheduleDialogOpen.value = true;
-  await loadDatabases("schedule", draft.value, false);
 }
 
 async function openEditSchedule(schedule: DatabaseBackupSchedule) {
@@ -269,15 +311,40 @@ async function openEditSchedule(schedule: DatabaseBackupSchedule) {
   allDatabases.value = schedule.databases.length === 0;
   selectedDatabases.value = [...schedule.databases];
   tablePatternsInput.value = schedule.tablePatterns.join(", ");
+  databaseLoadError.value = "";
   scheduleDialogOpen.value = true;
-  await loadDatabases("schedule", draft.value, true);
+  if (!allDatabases.value) await loadDatabases("schedule", draft.value, true);
 }
 
 async function changeConnection(connectionId: string) {
   const dialog: BackupDialogKind = oneShotDialogOpen.value ? "one-shot" : "schedule";
   const targetDraft = dialog === "one-shot" ? oneShotDraft.value : draft.value;
+  const wasSelectingSpecificDatabases = !allDatabases.value;
   targetDraft.connectionId = connectionId;
-  await loadDatabases(dialog, targetDraft, false);
+  databaseOptions.value = [];
+  databaseLoadError.value = "";
+  selectedDatabases.value = [];
+  targetDraft.tableFilterMode = "all";
+  targetDraft.tablePatterns = [];
+  tablePatternsInput.value = "";
+  if (!wasSelectingSpecificDatabases) {
+    allDatabases.value = true;
+    return;
+  }
+  allDatabases.value = false;
+  await loadDatabases(dialog, targetDraft, true);
+}
+
+async function setAllDatabases(value: boolean) {
+  allDatabases.value = value;
+  databaseLoadError.value = "";
+  if (value) {
+    selectedDatabases.value = [];
+    return;
+  }
+  const dialog: BackupDialogKind = oneShotDialogOpen.value ? "one-shot" : "schedule";
+  const targetDraft = dialog === "one-shot" ? oneShotDraft.value : draft.value;
+  await loadDatabases(dialog, targetDraft, true);
 }
 
 function toggleDatabase(database: string) {
@@ -316,11 +383,8 @@ async function openOneShotBackup() {
   scheduleDialogOpen.value = false;
   const nextDraft = newBackupConfig();
   oneShotDraft.value = nextDraft;
-  allDatabases.value = true;
-  selectedDatabases.value = [];
-  tablePatternsInput.value = "";
+  resetDatabaseScope(nextDraft);
   oneShotDialogOpen.value = true;
-  await loadDatabases("one-shot", oneShotDraft.value, false);
 }
 
 async function startOneShotBackup() {
@@ -403,9 +467,28 @@ function confirmDeleteSchedule() {
   pendingDeleteSchedule.value = null;
 }
 
-function requestDeleteRun(run: DatabaseBackupRun) {
-  pendingDeleteRun.value = run;
+function toggleRunSelected(runId: string, selected: boolean) {
+  if (selected) selectedRunIds.add(runId);
+  else selectedRunIds.delete(runId);
+}
+
+function toggleAllFilteredRuns(selected: boolean) {
+  for (const run of selectableFilteredRuns.value) toggleRunSelected(run.id, selected);
+}
+
+function requestDeleteRuns(runIds: readonly string[]) {
+  const ids = runIds.filter((runId) => !activeRunIds.has(runId));
+  if (ids.length === 0) return;
+  pendingDeleteRunIds.value = ids;
   deleteRunDialogOpen.value = true;
+}
+
+function requestDeleteRun(run: DatabaseBackupRun) {
+  requestDeleteRuns([run.id]);
+}
+
+function requestDeleteSelectedRuns() {
+  requestDeleteRuns(selectedRuns.value.map((run) => run.id));
 }
 
 function requestRenameRun(run: DatabaseBackupRun) {
@@ -424,14 +507,18 @@ function confirmRenameRun() {
   toast(t("databaseBackup.backupRenamed"), 2500);
 }
 
-async function confirmDeleteRun() {
-  const run = pendingDeleteRun.value;
-  if (!run) return;
+async function confirmDeleteRuns() {
+  const runIds = pendingDeleteRunIds.value;
+  if (runIds.length === 0) return;
   try {
-    await deleteRun(run.id);
+    await deleteRuns(runIds);
+    for (const runId of runIds) {
+      selectedRunIds.delete(runId);
+      expandedRunIds.delete(runId);
+    }
     deleteRunDialogOpen.value = false;
-    pendingDeleteRun.value = null;
-    toast(t("databaseBackup.backupDeleted"), 2500);
+    pendingDeleteRunIds.value = [];
+    toast(runIds.length === 1 ? t("databaseBackup.backupDeleted") : t("databaseBackup.backupsDeleted", { count: runIds.length }), 2500);
   } catch (error: any) {
     toast(error?.message || String(error), 5000);
   }
@@ -589,10 +676,30 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           </Select>
         </div>
       </div>
+      <div v-if="selectableFilteredRuns.length > 0" class="flex flex-wrap items-center gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+        <label class="flex cursor-pointer items-center gap-2 text-sm">
+          <input data-backup-history-select-all type="checkbox" class="h-4 w-4 rounded border-border accent-primary" :checked="allSelectableRunsSelected" @change="toggleAllFilteredRuns(($event.target as HTMLInputElement).checked)" />
+          {{ t("databaseBackup.selectAllFiltered") }}
+        </label>
+        <span v-if="selectedRuns.length > 0" class="text-sm text-muted-foreground">{{ t("databaseBackup.selectedRuns", { count: selectedRuns.length }) }}</span>
+        <Button v-if="selectedRuns.length > 0" data-backup-delete-selected variant="destructive" size="sm" @click="requestDeleteSelectedRuns">
+          <Trash2 class="mr-2 h-4 w-4" />
+          {{ t("databaseBackup.deleteSelected") }}
+        </Button>
+      </div>
       <div class="overflow-hidden rounded-md border border-border/70">
         <div v-if="filteredRuns.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ historyConnectionId || historyBackupMethod !== "all" || historyStatus !== "all" ? t("databaseBackup.noFilteredHistory") : t("databaseBackup.noHistory") }}</div>
         <template v-for="run in filteredRuns" :key="run.id">
-          <div class="grid gap-2 border-b border-border/70 px-3 py-3 last:border-b-0 md:grid-cols-[auto_minmax(0,1fr)_auto] md:items-center">
+          <div class="grid gap-2 border-b border-border/70 px-3 py-3 last:border-b-0 md:grid-cols-[auto_auto_minmax(0,1fr)_auto] md:items-center">
+            <input
+              data-backup-history-select
+              type="checkbox"
+              class="h-4 w-4 rounded border-border accent-primary"
+              :checked="selectedRunIds.has(run.id)"
+              :disabled="activeRunIds.has(run.id)"
+              :aria-label="t('databaseBackup.selectRun', { name: run.displayName || run.scheduleName })"
+              @change="toggleRunSelected(run.id, ($event.target as HTMLInputElement).checked)"
+            />
             <Button variant="ghost" size="icon" class="h-7 w-7" :disabled="run.files.length === 0" :title="t('databaseBackup.showFiles')" @click="toggleRunExpanded(run.id)">
               <ChevronDown v-if="expandedRunIds.has(run.id)" class="h-4 w-4" />
               <ChevronRight v-else class="h-4 w-4" />
@@ -683,12 +790,24 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           :database-options="databaseOptions"
           :table-patterns-input="tablePatternsInput"
           :loading-databases="loadingDatabases"
+          :database-load-error="databaseLoadError"
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
-          @update:all-databases="(value: boolean) => (allDatabases = value)"
+          @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
         />
+
+        <div class="space-y-2">
+          <Label>{{ t("databaseBackup.runDirectoryPattern") }}</Label>
+          <Input v-model="draft.runDirectoryPattern" data-backup-run-directory-pattern :aria-invalid="!databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')" />
+          <p class="text-xs text-muted-foreground">{{ t("databaseBackup.runDirectoryPatternHint") }}</p>
+          <div v-if="runDirectoryPreview" data-backup-run-directory-preview class="space-y-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
+            <div class="text-xs font-medium text-muted-foreground">{{ t("databaseBackup.runDirectoryPreview") }}</div>
+            <div class="break-all font-mono text-xs text-foreground">{{ runDirectoryPreview }}</div>
+          </div>
+          <p v-if="!databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')" class="text-xs text-destructive">{{ t("databaseBackup.runDirectoryPatternInvalid") }}</p>
+        </div>
 
         <div class="grid gap-4 sm:grid-cols-3">
           <div class="space-y-2">
@@ -760,10 +879,11 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         :database-options="databaseOptions"
         :table-patterns-input="tablePatternsInput"
         :loading-databases="loadingDatabases"
+        :database-load-error="databaseLoadError"
         @change-connection="changeConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
-        @update:all-databases="(value: boolean) => (allDatabases = value)"
+        @update:all-databases="setAllDatabases"
         @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
       />
 
@@ -799,10 +919,16 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
       <DialogHeader
         ><DialogTitle>{{ t("databaseBackup.deleteBackup") }}</DialogTitle></DialogHeader
       >
-      <p class="text-sm text-muted-foreground">{{ t("databaseBackup.deleteBackupConfirm", { count: pendingDeleteRun?.files.length || 0 }) }}</p>
+      <p class="text-sm text-muted-foreground">
+        {{
+          pendingDeleteRunIds.length === 1
+            ? t("databaseBackup.deleteBackupConfirm", { count: runs.find((run) => run.id === pendingDeleteRunIds[0])?.files.length || 0 })
+            : t("databaseBackup.deleteBackupsConfirm", { count: pendingDeleteRunIds.length, files: pendingDeleteRunIds.reduce((total, runId) => total + (runs.find((run) => run.id === runId)?.files.length || 0), 0) })
+        }}
+      </p>
       <DialogFooter>
         <Button variant="outline" @click="deleteRunDialogOpen = false">{{ t("common.cancel") }}</Button>
-        <Button variant="destructive" @click="confirmDeleteRun">{{ t("databaseBackup.delete") }}</Button>
+        <Button variant="destructive" @click="confirmDeleteRuns">{{ t("databaseBackup.delete") }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

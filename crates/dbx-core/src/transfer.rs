@@ -8887,7 +8887,7 @@ where
         .get(&table)
         .map(|foreign_keys| HashMap::from([(table.clone(), foreign_keys.clone())]))
         .unwrap_or_default();
-    let preexisting_backup_names = preexisting_backup_names.map(|m| m.clone());
+    let preexisting_backup_names = preexisting_backup_names.cloned();
     // Kept outside the spawned task: `request` moves into it, and the error path below
     // still needs the backup's qualified name to point the user at their data.
     let backup_for_this_table = request

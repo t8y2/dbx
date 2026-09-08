@@ -341,3 +341,10 @@ test("copies plain string hash rows without JSON reformatting", () => {
   assert.equal(redisHashRowCopyText('{"id":1}', "1", "field"), '{"id":1}');
   assert.equal(redisHashRowCopyText('{"id":1}', "1", "fieldValue"), '{"id":1}\t1');
 });
+
+test("copies the value target without resolving the field", () => {
+  // The default row copy must stay a pure value read: a hash row always has a
+  // field, but the value path must not depend on the field being copyable.
+  assert.equal(redisHashRowCopyText(undefined, blobFromText("S"), "value"), "S");
+});
+

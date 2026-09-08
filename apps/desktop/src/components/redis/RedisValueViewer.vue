@@ -3130,11 +3130,11 @@ defineExpose({ focusSearch });
                   @click.stop="viewMember(formatValue(row.value.field), row.value.value, { kind: 'hash', field: redisBlobText(row.value.field), canEdit: redisBlobText(row.value.field) != null && canEditRedisMemberDetail('hash', row.value.value) })"
                   ><Eye class="w-3 h-3"
                 /></Button>
-                <div class="flex h-5 shrink-0 overflow-hidden rounded opacity-0 group-hover:opacity-100" @click.stop>
+                <div class="flex h-5 shrink-0 overflow-hidden rounded opacity-0 group-hover:opacity-100 has-[[data-state=open]]:opacity-100" @click.stop>
                   <Button data-redis-copy-value variant="ghost" size="icon" class="h-5 w-[18px] rounded-none px-0" :title="t('grid.copyValue')" :aria-label="t('grid.copyValue')" @click="copyHashRow(row.value, 'value')"><Copy class="w-3 h-3" /></Button>
-                  <DropdownMenu>
+                  <DropdownMenu :key="row.id">
                     <DropdownMenuTrigger as-child>
-                      <Button data-redis-copy-menu variant="ghost" size="icon" class="h-5 w-3.5 rounded-none border-l px-0" :title="t('redis.copyOptions')" :aria-label="t('redis.copyOptions')"><ChevronDown class="h-2.5 w-2.5" /></Button>
+                      <Button data-redis-copy-menu variant="ghost" size="icon" class="h-5 w-4 rounded-none border-l px-0" :title="t('redis.copyOptions')" :aria-label="t('redis.copyOptions')"><ChevronDown class="h-2.5 w-2.5" /></Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" class="w-44">
                       <DropdownMenuItem data-redis-copy-item-field @select="copyHashRow(row.value, 'field')">{{ t("redis.copyField") }}</DropdownMenuItem>

@@ -389,10 +389,9 @@ export type RedisHashRowCopyTarget = "field" | "value" | "fieldValue";
  * result pastes into a spreadsheet as two columns, matching the grid's TSV copy.
  */
 export function redisHashRowCopyText(field: unknown, value: unknown, target: RedisHashRowCopyTarget): string {
+  if (target === "value") return redisMemberCopyText(value);
   const fieldText = redisMemberCopyText(field);
-  if (target === "field") return fieldText;
-  const valueText = redisMemberCopyText(value);
-  return target === "fieldValue" ? `${fieldText}\t${valueText}` : valueText;
+  return target === "field" ? fieldText : `${fieldText}\t${redisMemberCopyText(value)}`;
 }
 
 export function redisClipboardSafeText(value: string): string {

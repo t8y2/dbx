@@ -939,7 +939,7 @@ function refreshQueryEditorCompletionCache(): boolean {
 
 function reloadUnavailableDataTab() {
   const { whereInput, orderBy } = restoredDataTabReloadFilters(props.activeTab);
-  emit("reload", props.activeTab.id, undefined, whereInput, orderBy);
+  emit("reload", props.activeTab.id, undefined, undefined, whereInput, orderBy);
 }
 
 function refreshData(): boolean {

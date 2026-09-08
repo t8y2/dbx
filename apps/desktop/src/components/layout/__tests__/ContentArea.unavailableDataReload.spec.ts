@@ -15,7 +15,8 @@ describe("ContentArea restored data-tab refresh", () => {
 
   it("passes the restored tab's own WHERE/ORDER BY into the reload event", () => {
     expect(contentAreaSource).toContain("const { whereInput, orderBy } = restoredDataTabReloadFilters(props.activeTab);");
-    // tabId-first contract: the reload event carries the owning tab's id.
-    expect(contentAreaSource).toContain(`emit("reload", props.activeTab.id, undefined, whereInput, orderBy);`);
+    // The tabId-first contract still reserves the sql and searchText slots before
+    // the restored filters. Omitting either placeholder shifts ORDER BY into WHERE.
+    expect(contentAreaSource).toContain(`emit("reload", props.activeTab.id, undefined, undefined, whereInput, orderBy);`);
   });
 });

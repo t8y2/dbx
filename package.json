@@ -36,6 +36,7 @@
     "test:ai-html-canary": "node scripts/ai-html-runtime-canary.mjs",
     "bench:redis-key-search": "node scripts/bench/redis-key-search.mjs",
     "bench:mongodb-count": "node scripts/bench/mongodb-count.mjs",
+    "bench:sidebar-large-schema": "vitest bench apps/desktop/src/lib/sidebar/sidebarLargeSchema.bench.ts",
     "bench:table-import": "cargo run -p dbx-core --no-default-features --example table_import_bench --release --",
     "lint": "oxlint --vue-plugin apps/desktop/src",
     "fmt": "oxfmt \"apps/desktop/src/**/*.{ts,vue}\"",

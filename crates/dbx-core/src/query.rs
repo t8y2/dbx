@@ -1924,6 +1924,15 @@ async fn do_execute_typed(
         PoolKind::Sqlite(p) => {
             let p = p.clone();
             let max_rows = options.max_rows;
+            // SQLite execution runs in spawn_blocking, so cancelling only the
+            // awaitable future leaves the pooled connection occupied. Interrupt
+            // the native statement as soon as the shared cancellation registry
+            // receives the request so the same client session can run again.
+            if let Some(execution_id) = options.execution_id.as_deref() {
+                if let Ok(interrupt) = p.with_connection(|conn| Ok(conn.get_interrupt_handle())) {
+                    state.running_queries.register_interrupt(execution_id, move || interrupt.interrupt());
+                }
+            }
             wait_for_query_opt(cancel_token, query_timeout, db::sqlite::execute_query_with_max_rows(&p, sql, max_rows))
                 .await
         }
@@ -5946,6 +5955,7 @@ pub async fn rollback_manual_transaction(state: &AppState, txn_session_id: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_cancel::RunningTaskMetadata;
 
     #[test]
     fn redshift_queries_prefer_text_protocol() {
@@ -6179,6 +6189,137 @@ mod tests {
         // just like any other statement failure.
         let result = db::sqlite::execute_query(&pool, "SELECT COUNT(*) AS n FROM t").await.expect("count rows");
         assert_eq!(result.rows[0][0], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn sqlite_cancelled_query_can_execute_again_on_same_client_session() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage = Storage::open(&dir.path().join("storage.db")).await.expect("open test storage");
+        let state = Arc::new(AppState::new(storage));
+        let connection_id = "sqlite-cancel-session";
+        let client_session_id = "query-tab-8414";
+        let execution_id = "sqlite-cancel-execution";
+        let db_path = dir.path().join("query.db");
+        std::fs::File::create(&db_path).expect("create SQLite database file");
+        let mut config = test_connection_config(DatabaseType::Sqlite);
+        config.id = connection_id.to_string();
+        config.host = db_path.to_string_lossy().into_owned();
+        config.query_timeout_secs = 0;
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        let pool_key = state
+            .get_or_create_pool_for_session(connection_id, Some(""), Some(client_session_id))
+            .await
+            .expect("create SQLite query-tab session pool");
+        let sqlite = match state.pool_handle(&pool_key).await.expect("SQLite pool") {
+            PoolKind::Sqlite(pool) => pool,
+            _ => panic!("expected SQLite pool"),
+        };
+        db::sqlite::execute_query(&sqlite, "CREATE TABLE t (value TEXT)").await.expect("create test table");
+
+        let cleanup_interrupt =
+            sqlite.with_connection(|conn| Ok(conn.get_interrupt_handle())).expect("get SQLite interrupt handle");
+        let started = Arc::new(AtomicBool::new(false));
+        let started_by_sqlite = started.clone();
+        sqlite
+            .with_connection(|conn| {
+                conn.create_scalar_function(
+                    "dbx_test_query_started",
+                    0,
+                    rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                    move |_ctx| {
+                        started_by_sqlite.store(true, Ordering::SeqCst);
+                        Ok(1_i64)
+                    },
+                )
+                .map_err(|error| error.to_string())
+            })
+            .expect("register query-start marker");
+
+        let registered = state.running_queries.register_task(
+            execution_id.to_string(),
+            RunningTaskMetadata::query(connection_id, "", Some(client_session_id.to_string())),
+        );
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            execute_sql_statement_with_options_typed(
+                first_state.as_ref(),
+                connection_id,
+                "",
+                "INSERT INTO t (value) SELECT 'slow' FROM (WITH RECURSIVE cnt(x) AS (SELECT dbx_test_query_started() UNION ALL SELECT x + 1 FROM cnt WHERE x < 100000000) SELECT x FROM cnt)",
+                None,
+                Some(registered.token()),
+                QueryExecutionOptions {
+                    client_session_id: Some(client_session_id.to_string()),
+                    execution_id: Some(execution_id.to_string()),
+                    timeout_secs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+
+        let started_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !started.load(Ordering::SeqCst) {
+            assert!(!first.is_finished(), "slow SQLite query exited before it started");
+            assert!(std::time::Instant::now() < started_deadline, "slow SQLite query did not start");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(state.running_queries.cancel(execution_id), "query cancellation was not registered");
+        let first_result = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("cancelled SQLite query did not return")
+            .expect("join cancelled SQLite query")
+            .expect_err("cancelled SQLite query unexpectedly succeeded");
+        assert!(
+            matches!(first_result, QueryExecutionError::Canceled { .. }),
+            "unexpected cancellation error: {first_result}"
+        );
+
+        let next_execution_id = "sqlite-cancel-execution-next";
+        let next_registered = state.running_queries.register_task(
+            next_execution_id.to_string(),
+            RunningTaskMetadata::query(connection_id, "", Some(client_session_id.to_string())),
+        );
+        let next_state = state.clone();
+        let mut next = tokio::spawn(async move {
+            execute_sql_statement_with_options_typed(
+                next_state.as_ref(),
+                connection_id,
+                "",
+                "SELECT 1",
+                None,
+                Some(next_registered.token()),
+                QueryExecutionOptions {
+                    client_session_id: Some(client_session_id.to_string()),
+                    execution_id: Some(next_execution_id.to_string()),
+                    timeout_secs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+        });
+        let next_wait = tokio::time::timeout(Duration::from_secs(2), &mut next).await;
+        let next_timed_out = next_wait.is_err();
+        if next_timed_out {
+            // Keep the regression test bounded even on the unfixed implementation:
+            // the manually retained handle interrupts the still-running blocking
+            // SQLite statement so the test runtime can shut down cleanly.
+            cleanup_interrupt.interrupt();
+        }
+        let next_result = match next_wait {
+            Ok(result) => result.expect("join follow-up SQLite query"),
+            Err(_) => tokio::time::timeout(Duration::from_secs(2), &mut next)
+                .await
+                .expect("follow-up SQLite query did not finish after cleanup interrupt")
+                .expect("join follow-up SQLite query after cleanup"),
+        };
+        assert!(!next_timed_out, "same query-tab SQLite session remained blocked after cancellation");
+        let next_result = next_result.expect("follow-up SELECT 1 failed");
+        assert_eq!(next_result.rows, vec![vec![serde_json::json!(1)]]);
     }
 
     #[tokio::test]

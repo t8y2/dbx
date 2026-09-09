@@ -901,6 +901,20 @@ async fn list_transfer_tables_isolated(
     task.await.map_err(|error| format!("Transfer table metadata task failed: {error}"))?
 }
 
+async fn get_transfer_table_comment_isolated(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    let task = tokio::spawn(async move {
+        crate::schema::get_table_comment_core(&state, &connection_id, &database, &schema, &table).await
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Transfer table comment task failed: {error}"))?
+}
+
 async fn resolve_transfer_target_table_name(
     state: &Arc<AppState>,
     request: &TransferRequest,
@@ -2047,7 +2061,12 @@ fn sqlserver_row_number_page_sql(
     )
 }
 
-fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<&str>) -> String {
+fn postgres_index_column_sql(
+    column: &str,
+    is_expression: bool,
+    opclass: Option<&str>,
+    key_options: Option<i16>,
+) -> String {
     // The base key text: a real column is quoted as an identifier; an expression/functional
     // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
     // opclass — see `crates/dbx-core/src/db/postgres.rs`), so quoting the whole thing as
@@ -2056,9 +2075,17 @@ fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<
     // The opclass is read separately from `pg_index.indclass` for every key position
     // (including expression keys) and appended uniformly — it never lives inside the
     // expression text, so there is no duplication risk.
-    match opclass.filter(|o| !o.is_empty()) {
+    let with_opclass = match opclass.filter(|o| !o.is_empty()) {
         Some(opc) => format!("{base} {opc}"),
         None => base,
+    };
+    match key_options {
+        Some(options) => format!(
+            "{with_opclass} {} NULLS {}",
+            if options & 1 != 0 { "DESC" } else { "ASC" },
+            if options & 2 != 0 { "FIRST" } else { "LAST" }
+        ),
+        None => with_opclass,
     }
 }
 
@@ -2084,7 +2111,12 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
             .map(|(i, column)| {
                 let is_expr = index.key_is_expression.get(i).copied().unwrap_or(false);
                 let opclass = index.column_opclasses.get(i).and_then(|o| o.as_deref());
-                postgres_index_column_sql(column, is_expr, opclass)
+                let key_options = index
+                    .index_type
+                    .as_deref()
+                    .filter(|index_type| index_type.eq_ignore_ascii_case("btree"))
+                    .and_then(|_| index.key_options.get(i).copied());
+                postgres_index_column_sql(column, is_expr, opclass, key_options)
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -3524,7 +3556,7 @@ fn generate_comment_ddl_with_column_quoting(
         if let Some(comment) = table_comment {
             let trimmed = comment.trim();
             if !trimmed.is_empty() {
-                let escaped = trimmed.replace('\'', "''");
+                let escaped = comment.replace('\'', "''");
                 statements.push(format!("COMMENT ON TABLE {full_table} IS '{escaped}'"));
             }
         }
@@ -3536,7 +3568,7 @@ fn generate_comment_ddl_with_column_quoting(
             if trimmed.is_empty() {
                 continue;
             }
-            let escaped = trimmed.replace('\'', "''");
+            let escaped = comment.replace('\'', "''");
             let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
 
             match target_db {
@@ -8196,23 +8228,37 @@ where
             ),
         };
 
-    // Fetch source table comment. Keep this list-tables metadata chain on its
-    // own task stack, just like the target-table lookup above.
-    let table_comment = list_transfer_tables_isolated(
-        state.clone(),
-        request.source_connection_id.clone(),
-        request.source_database.clone(),
-        request.source_schema.clone(),
-        request.source_catalog.clone(),
-        *source_db_type,
-        table.to_string(),
-        1,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .next()
-    .and_then(|table| table.comment);
+    // PostgreSQL's table list filter is fuzzy, so it cannot identify the
+    // requested table's comment when similarly named tables exist.
+    let table_comment = if *source_db_type == DatabaseType::Postgres {
+        get_transfer_table_comment_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            table.to_string(),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        // Keep the list-tables metadata chain on its own task stack, just like
+        // the target-table lookup above.
+        list_transfer_tables_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            request.source_catalog.clone(),
+            *source_db_type,
+            table.to_string(),
+            1,
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .and_then(|table| table.comment)
+    };
 
     // Get source columns (deduplicate by name).
     //
@@ -11684,16 +11730,20 @@ mod tests {
     #[test]
     fn postgres_comment_ddl_generates_column_and_table_comments() {
         let cols = vec![
-            db::ColumnInfo { comment: Some("主键".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some(" 主键's ".to_string()), ..test_column("id", "int") },
             db::ColumnInfo { comment: Some("名称".to_string()), ..test_column("name", "varchar(100)") },
         ];
 
-        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some("项目表"));
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some(" 项目表 "));
 
-        assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
-        assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
-        assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+        assert_eq!(
+            stmts,
+            vec![
+                "COMMENT ON TABLE \"public\".\"items\" IS ' 项目表 '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"id\" IS ' 主键''s '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -12828,6 +12878,7 @@ mod tests {
             comment: Some("lookup index".to_string()),
             key_is_expression: vec![true],
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
         let foreign_keys = vec![
@@ -12882,6 +12933,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12906,6 +12958,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![None, None],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12936,6 +12989,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12961,6 +13015,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![Some("text_pattern_ops".to_string()), None],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12969,6 +13024,62 @@ mod tests {
         assert_eq!(
             sql,
             vec!["CREATE INDEX IF NOT EXISTS \"users_name_status_idx\" ON \"public\".\"users\" USING btree (\"name\" text_pattern_ops, \"status\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_preserves_per_key_ordering_and_include_columns() {
+        let indexes = vec![db::IndexInfo {
+            name: "event_order_idx".to_string(),
+            columns: vec![
+                "created_at".to_string(),
+                "tenant_id".to_string(),
+                "score".to_string(),
+                "lower(payload)".to_string(),
+            ],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: Some(vec!["payload".to_string()]),
+            comment: None,
+            key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![None, None, None, None],
+            key_options: vec![1, 0, 2, 3],
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"event_order_idx\" ON \"public\".\"event_log\" USING btree (\"created_at\" DESC NULLS LAST, \"tenant_id\" ASC NULLS LAST, \"score\" ASC NULLS FIRST, lower(payload) DESC NULLS FIRST) INCLUDE (\"payload\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_ignores_access_method_options_for_non_btree_indexes() {
+        let indexes = vec![db::IndexInfo {
+            name: "events_payload_idx".to_string(),
+            columns: vec!["payload".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![None],
+            key_options: vec![3],
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "events", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"events_payload_idx\" ON \"public\".\"events\" USING gin (\"payload\")"
+                .to_string()]
         );
     }
 
@@ -12985,6 +13096,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 

@@ -2624,7 +2624,9 @@ async function findExactSemanticDiagnosticTable(table: SqlTableReference, scope?
     return localExact;
   }
 
-  const remoteMatches = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, false, scope?.schema ?? props.schema, target.catalog);
+  const remoteMatches = await connectionStore.listCompletionTables(props.connectionId, target.database, table.name, MAX_COMPLETION_TABLES, target.schema, false, scope?.schema ?? props.schema, target.catalog, {
+    verifySchemaMetadata: !!target.schema,
+  });
   cachedTables = mergeCompletionTables(cachedTables, remoteMatches);
   return remoteMatches.find((item) => completionTablesMatch(item, table)) ?? null;
 }
@@ -4940,6 +4942,13 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
 
   const cteDefs = extractCteDefinitions(fullDoc);
   for (const refTable of completionContext.referencedTables) {
+    if (refTable.columns?.length) {
+      columnsByTable.set(
+        refTable.name,
+        refTable.columns.map((name) => ({ name, table: refTable.name, schema: refTable.schema })),
+      );
+      continue;
+    }
     if (isVirtualCompletionTableReference(refTable)) continue;
     const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());
     if (cteDef) {

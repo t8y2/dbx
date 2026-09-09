@@ -3212,6 +3212,7 @@ mod tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         };
         let mut filtered = index("uq_active_code", &["active_code"], true, false);
@@ -8345,6 +8346,7 @@ async fn external_driver_gaussdb_m_indexes(
                     comment: current_comment.clone(),
                     key_is_expression: current_is_expression.clone(),
                     column_opclasses: vec![],
+                    key_options: Vec::new(),
                     constraint_backed: false,
                 });
             }
@@ -8416,6 +8418,7 @@ async fn external_driver_gaussdb_m_indexes(
             comment: current_comment,
             key_is_expression: current_is_expression,
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         });
     }
@@ -10477,6 +10480,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -10503,6 +10507,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {
@@ -10555,6 +10560,7 @@ mod ddl_tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
         let partition_info = db::postgres::PostgresTablePartitionInfo {

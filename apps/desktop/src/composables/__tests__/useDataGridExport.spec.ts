@@ -7,7 +7,7 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { extractDataGridSelection } from "@/lib/backend/api";
+import { extractDataGridSelection, exportQueryResultJson } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
 
@@ -46,6 +46,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...original,
     extractDataGridSelection: vi.fn(),
+    exportQueryResultJson: vi.fn(),
   };
 });
 
@@ -70,6 +71,7 @@ function createMongoExportState(options: {
   mongoUpdateTarget?: false;
   contextColumn?: number;
   syntheticContext?: boolean;
+  fullExportResult?: UseDataGridExportOptions["fullExportResult"];
 }) {
   const items = options.items ?? [options.item];
   const selectedRowIds = options.selectedRowIds ?? new Set<number>();
@@ -99,6 +101,7 @@ function createMongoExportState(options: {
     getRowItem: (rowId) => items.find((item) => item.id === rowId),
     selectedRowIds: ref(selectedRowIds),
     hasRowSelection: computed(() => selectedRowIds.size > 0),
+    fullExportResult: options.fullExportResult,
   };
   return useDataGridExport(state);
 }
@@ -1508,6 +1511,33 @@ describe("useDataGridExport prepared row statements", () => {
     await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(false);
     expect(extractDataGridSelection).not.toHaveBeenCalled();
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("preserves Mongo Extended JSON objects and dates in JSON exports", async () => {
+    const columns = ["_id", "valueMap", "createdTime"];
+    const mongoCopyDocument = {
+      _id: { $oid: "6a9fb51db2f0c46b94002f26" },
+      valueMap: { field1: "10147E", field2: "0" },
+      createdTime: { $date: "2026-09-08T07:11:25.458Z" },
+    };
+    const item = { ...row(["6a9fb51db2f0c46b94002f26", JSON.stringify(mongoCopyDocument.valueMap), 'ISODate("2026-09-08T07:11:25.458Z")']), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns,
+      item,
+      mongoDocuments: [mongoCopyDocument],
+      fullExportResult: async () => ({
+        columns,
+        column_types: ["", "", "datetime"],
+        rows: [item.data as [string, string, string]],
+        mongo_copy_documents: [mongoCopyDocument],
+        affected_rows: 1,
+        execution_time_ms: 1,
+      }),
+    });
+
+    await state.exportJson();
+
+    expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), columns, [[mongoCopyDocument._id, mongoCopyDocument.valueMap, mongoCopyDocument.createdTime]]);
   });
 });
 

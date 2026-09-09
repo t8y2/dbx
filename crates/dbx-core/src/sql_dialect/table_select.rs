@@ -267,11 +267,12 @@ pub fn build_table_data_select_sql_with_database(
     };
     let order_by = options.order_by.as_deref().filter(|order| !order.trim().is_empty()).or(default_order_by.as_deref());
     let order = order_by.map(|order_by| format!(" ORDER BY {order_by}")).unwrap_or_default();
-    // Oracle join views can raise ORA-01445 when ROWID is selected; keep the
-    // synthetic ROWID fallback scoped to base-table reads.
+    // Oracle views with DISTINCT/GROUP BY raise ORA-01446 when ROWID is
+    // selected. Missing object metadata must therefore fail closed instead of
+    // being treated as a base table.
     let include_oracle_row_id = options.include_row_id
         && uses_oracle_row_id(database_type)
-        && !is_view_table_type(options.table_type.as_deref());
+        && is_oracle_base_table_type(options.table_type.as_deref());
     let include_xugu_row_id =
         options.include_row_id && uses_xugu_row_id(database_type) && !is_view_table_type(options.table_type.as_deref());
     let offset = options.offset.unwrap_or(0);
@@ -528,6 +529,10 @@ pub(crate) fn uses_connection_identifier_quote(
 
 fn is_view_table_type(table_type: Option<&str>) -> bool {
     table_type.is_some_and(|value| value.to_ascii_uppercase().contains("VIEW"))
+}
+
+fn is_oracle_base_table_type(table_type: Option<&str>) -> bool {
+    table_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("TABLE"))
 }
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {

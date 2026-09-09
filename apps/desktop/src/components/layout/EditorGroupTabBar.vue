@@ -1483,7 +1483,6 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                                 : ['h-7 rounded-md border', isTabActive(entry.tab) ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
                               {
                                 'tab-group-tab': entry.grouping,
-                                'tab-group-tab--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab),
                                 'tab-group-tab--first': entry.grouping && entry.groupFirst,
                                 'tab-group-tab--last': entry.grouping && entry.groupLast,
                               },

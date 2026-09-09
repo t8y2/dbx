@@ -126,7 +126,6 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain("max-width: var(--tab-group-entry-expanded-width, 100%)");
     expect(sharedStyles).toMatch(/\.tab-group-entry\[data-tab-group-id\] > \.tab-group-tab\s*\{[^}]*width:\s*var\(--tab-group-entry-expanded-width, auto\);[^}]*min-width:\s*var\(--tab-group-entry-expanded-width, max-content\) !important;[^}]*flex:\s*none;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
-    expect(sharedStyles).not.toContain(".tab-group-entry--collapsed .tab-group-tab--collapsed");
     const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
     expect(handler).toContain('event.propertyName !== "max-width"');
     expect(handler).toContain("refreshHorizontalTabOverflow();");

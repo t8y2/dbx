@@ -738,11 +738,6 @@
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
-  transition:
-    max-width 140ms ease,
-    max-height 140ms ease,
-    margin 140ms ease,
-    opacity 100ms ease;
 }
 
 /* Wrapped tabs must retain their intrinsic row height. Collapsed groups use

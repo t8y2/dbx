@@ -42,6 +42,7 @@ describe("DataGrid tab-switch view snapshots", () => {
   });
 
   it("gates every restore on identity, renderer, and probe", () => {
+    expect(restoreSource).toContain("if (!structuredFilterHydrationReady.value) return;");
     expect(restoreSource).toContain("if (snapshot.viewGeneration !== props.viewGeneration) return;");
     expect(restoreSource).toContain('if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;');
     expect(restoreSource).toContain("if (snapshot.probe !== currentViewProbe()) return;");
@@ -99,5 +100,12 @@ describe("DataGrid tab-switch view snapshots", () => {
     expect(restoreSource).toContain('toast(t("grid.viewSnapshotSelectionNotRestored")');
     // The notice stays one-shot per owner+generation.
     expect(dataGridSource).toContain("shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)");
+  });
+
+  it("retries after asynchronous structured-filter hydration", () => {
+    expect(dataGridSource).toContain("structuredFilterHydrationReady.value = false;");
+    expect(dataGridSource).toContain("structuredFilterHydrationReady.value = true;");
+    expect(dataGridSource).toContain("nextTick(restoreTabSwitchViewSnapshot);");
+    expect(dataGridSource).toContain("structuredFilterHydrationRequestId");
   });
 });

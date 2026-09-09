@@ -5282,6 +5282,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "データのみの転送では再構築できません。「構造とデータ」または「構造のみ」を選択してください。",
     rebuildUnsupportedDisabled: "選択したターゲットエンジンはテーブルの再構築をサポートしていません。",
     rebuildPreviewUnavailable: "バックエンドから再構築計画が返されなかったため、転送は開始されていません。再構築プレビューに対応したバックエンドで再試行してください。",
+    rebuildMissingTargets: "存在しないターゲットテーブルがあります。バックアップなしで直接作成されます。",
     previewFailed: "転送を準備できませんでした：{message}",
     start: "転送開始",
     startConfirmTitle: "転送の開始確認",

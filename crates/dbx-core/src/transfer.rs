@@ -239,7 +239,6 @@ pub struct TransferOwnershipPreview {
 pub struct TransferRebuildPreview {
     pub sql: String,
     pub tables: Vec<TransferRebuildPreviewTable>,
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6853,13 +6852,7 @@ async fn build_rebuild_preview(
         phases.push(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")));
     }
 
-    let warnings = if resolved.iter().any(|(_, _, preexisting)| !preexisting) {
-        vec!["Some target tables do not exist yet and will be created without a backup.".to_string()]
-    } else {
-        Vec::new()
-    };
-
-    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables, warnings })
+    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables })
 }
 
 pub async fn preview_transfer_ownership(

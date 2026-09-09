@@ -4947,6 +4947,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "데이터만 전송할 때는 재구축할 수 없습니다. 구조 및 데이터 또는 구조만을 선택하세요.",
     rebuildUnsupportedDisabled: "선택한 대상 엔진은 대상 테이블 재구축을 지원하지 않습니다.",
     rebuildPreviewUnavailable: "백엔드가 재구축 계획을 반환하지 않아 전송을 시작하지 않았습니다. 재구축 미리 보기를 지원하는 백엔드에서 다시 시도하세요.",
+    rebuildMissingTargets: "존재하지 않는 대상 테이블이 있습니다. 백업 없이 바로 생성됩니다.",
     previewFailed: "전송을 준비할 수 없습니다: {message}",
     start: "이전 시작",
     startConfirmTitle: "전송 시작 확인",

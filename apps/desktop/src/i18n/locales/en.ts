@@ -5615,6 +5615,7 @@ export default {
     rebuildDataOnlyDisabled: "Rebuild is unavailable for data-only transfers. Select structure and data or structure only.",
     rebuildUnsupportedDisabled: "The selected target engine does not support rebuilding target tables.",
     rebuildPreviewUnavailable: "The backend did not provide a rebuild plan. The transfer has not started; refresh the preview with a backend that supports rebuild.",
+    rebuildMissingTargets: "Some target tables do not exist yet and will be created without a backup.",
     previewFailed: "Could not prepare the transfer: {message}",
     start: "Start Transfer",
     startConfirmTitle: "Confirm transfer",

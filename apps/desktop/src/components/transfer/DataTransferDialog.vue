@@ -1048,7 +1048,7 @@ const confirmationSummary = computed(() => {
   if (!request) return "";
   const source = `${getConnectionName(request.sourceConnectionId)}.${request.sourceDatabase}.${request.sourceSchema}`;
   const target = `${getConnectionName(request.targetConnectionId)}.${request.targetDatabase}.${request.targetSchema}`;
-  const count = request.objects.reduce((total, selection) => total + selection.names.length, 0);
+  const count = request.tables.length + request.objects.reduce((total, selection) => total + selection.names.length, 0);
   return t("transfer.startConfirmMessage", { source, target, count });
 });
 
@@ -1056,7 +1056,8 @@ const confirmationStrategy = computed(() => (confirmationRequest.value ? transfe
 const rebuildConfirmationDetails = computed(() => {
   const rebuild = confirmationPreview.value?.rebuild;
   if (!rebuild) return "";
-  return [confirmationSummary.value, t("transfer.rebuildSummary", { count: rebuild.tables.length }), ...rebuild.warnings].filter(Boolean).join("\n");
+  const missingTargets = rebuild.tables.some((table) => !table.backupTable);
+  return [confirmationSummary.value, t("transfer.rebuildSummary", { count: rebuild.tables.length }), missingTargets ? t("transfer.rebuildMissingTargets") : ""].filter(Boolean).join("\n");
 });
 
 function requestTransferConfirmation(request: api.TransferRequest, preview: api.TransferOwnershipPreview): Promise<boolean> {

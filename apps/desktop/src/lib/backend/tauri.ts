@@ -4644,7 +4644,6 @@ export interface TransferOwnershipPreview {
   rebuild?: {
     sql: string;
     tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
-    warnings: string[];
   };
 }
 

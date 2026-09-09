@@ -4570,6 +4570,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "僅資料模式不支援重建，請選擇「結構和資料」或「僅結構」。",
     rebuildUnsupportedDisabled: "目前目標引擎不支援重建目標表。",
     rebuildPreviewUnavailable: "後端未傳回重建計畫，傳輸尚未開始。請使用支援重建預覽的後端後重新預覽。",
+    rebuildMissingTargets: "部分目標資料表尚不存在，將直接建立（無備份）。",
     previewFailed: "無法準備傳輸：{message}",
     start: "開始傳輸",
     startConfirmTitle: "確認開始傳輸",

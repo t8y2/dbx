@@ -5255,6 +5255,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "A reconstrução não está disponível para transferências apenas de dados. Selecione estrutura e dados ou apenas estrutura.",
     rebuildUnsupportedDisabled: "O mecanismo de destino selecionado não oferece suporte à reconstrução das tabelas de destino.",
     rebuildPreviewUnavailable: "O backend não retornou um plano de reconstrução. A transferência não foi iniciada; atualize a prévia com um backend compatível.",
+    rebuildMissingTargets: "Algumas tabelas de destino ainda não existem e serão criadas sem backup.",
     previewFailed: "Não foi possível preparar a transferência: {message}",
     start: "Iniciar transferência",
     startConfirmTitle: "Confirmar transferência",

@@ -5599,6 +5599,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "仅数据模式不支持重建，请选择“结构和数据”或“仅结构”。",
     rebuildUnsupportedDisabled: "当前目标引擎不支持重建目标表。",
     rebuildPreviewUnavailable: "后端未返回重建计划，传输尚未开始。请使用支持重建预览的后端后重新预览。",
+    rebuildMissingTargets: "部分目标表尚不存在，将直接创建（无备份）。",
     previewFailed: "无法准备传输：{message}",
     start: "开始传输",
     startConfirmTitle: "确认开始传输",

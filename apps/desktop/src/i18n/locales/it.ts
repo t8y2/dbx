@@ -5253,6 +5253,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "La ricostruzione non è disponibile per i trasferimenti di soli dati. Selezionare struttura e dati oppure solo struttura.",
     rebuildUnsupportedDisabled: "Il motore di destinazione selezionato non supporta la ricostruzione delle tabelle di destinazione.",
     rebuildPreviewUnavailable: "Il backend non ha restituito un piano di ricostruzione. Il trasferimento non è iniziato; aggiornare l’anteprima con un backend compatibile.",
+    rebuildMissingTargets: "Alcune tabelle di destinazione non esistono ancora e verranno create senza backup.",
     previewFailed: "Impossibile preparare il trasferimento: {message}",
     start: "Avvia Trasferimento",
     startConfirmTitle: "Conferma trasferimento",

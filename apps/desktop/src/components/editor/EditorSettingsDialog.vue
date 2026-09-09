@@ -67,6 +67,7 @@ import {
   normalizeAiHeaders,
   getAiProviderPreset,
   getAiProviderPresetId,
+  getAiProviderPresetDefaultEndpoint,
   getAiProviderPresetOption,
   isAiPartnerProviderPreset,
   type AiProvider,
@@ -247,7 +248,7 @@ import { METADATA_CACHE_HARD_MAX_MEMORY_MB, METADATA_CACHE_MIN_MEMORY_MB, normal
 import { databaseManifestEntry, manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
 import { buildConnectionGroupIdPathMap, connectionGroupDestinationRows, connectionIdsInGroups } from "@/lib/sidebar/sidebarLayout";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
@@ -4368,7 +4369,7 @@ function aiSelectProvider(presetId: string) {
   aiEditProvider.value = provider;
   aiEditApiKey.value = "";
   aiEditAuthMethod.value = preset.authMethod;
-  aiEditEndpoint.value = preset.endpoint;
+  aiEditEndpoint.value = getAiProviderPresetDefaultEndpoint(preset, locale.value);
   aiEditModel.value = preset.group === "partner" ? preset.model : "";
   aiEditLegacyModels.value = preset.group === "partner" ? [...(preset.models ?? [])] : [];
   aiEditApiStyle.value = preset.apiStyle;

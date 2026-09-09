@@ -486,6 +486,13 @@ export function getAiProviderPresetOption(id: string): AiProviderPreset | AiPart
   return AI_PROVIDER_PARTNER_PRESETS.find((preset) => preset.id === id) ?? AI_PROVIDER_PRESETS[id as AiProvider] ?? AI_PROVIDER_PRESETS.custom;
 }
 
+export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | AiPartnerProviderPreset, locale: string): string {
+  if (preset.provider === "minimax" && locale === "zh-CN") {
+    return "https://api.minimaxi.com/v1";
+  }
+  return preset.endpoint;
+}
+
 export function getAiProviderPresetId(provider: AiProvider, endpoint = ""): string {
   const preset = getAiProviderPreset(provider, endpoint);
   return "id" in preset ? preset.id : provider;

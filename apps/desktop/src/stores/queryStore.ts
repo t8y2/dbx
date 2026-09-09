@@ -4676,6 +4676,30 @@ export const useQueryStore = defineStore("query", () => {
     oracleLobPreview: boolean;
   }
 
+  function oracleCompletionTableType(tab: QueryTab, metadataDbType: string, database: string, schema: string, tableName: string, catalog?: string): string | undefined {
+    if (metadataDbType !== "oracle" && metadataDbType !== "oceanbase-oracle") return undefined;
+    const resolvedSchema = schema.trim();
+    if (!resolvedSchema) return undefined;
+    const normalizeIdentifier = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
+    const targetName = normalizeIdentifier(tableName);
+    const targetSchema = normalizeIdentifier(resolvedSchema);
+    const targetCatalog = catalog?.trim() ? normalizeIdentifier(catalog) : undefined;
+    const matches = useConnectionStore()
+      .lookupLocalCompletionTables(tab.connectionId!, database, tableName, 20, resolvedSchema, catalog)
+      .filter((table) => normalizeIdentifier(table.name) === targetName && normalizeIdentifier(table.schema) === targetSchema && (!targetCatalog || normalizeIdentifier(table.catalog) === targetCatalog));
+    if (matches.length !== 1) return undefined;
+    const match = matches[0]!;
+    return match.tableType?.trim() || match.type?.toUpperCase();
+  }
+
+  function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
+    if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
+    // An unknown Oracle object may be a view whose query shape rejects ROWID
+    // and whose rows cannot be mapped safely for writes. Keep the result
+    // read-only until the object tree or tab metadata confirms its type.
+    return databaseType !== "oracle" || !!loaded.tableMeta.tableType?.trim();
+  }
+
   function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
@@ -4730,7 +4754,8 @@ export const useQueryStore = defineStore("query", () => {
     // Keep SQL Server writes unqualified unless the SELECT source explicitly
     // named a schema, so SELECT and UPDATE resolve the same object.
     const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
-    const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
+    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || conn?.default_schema || "", metadataTableName, metadataCatalog);
+    const knownTableType = localTableType ?? (tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined);
     return {
       source: metadataSource,
       analysis: normalizeUppercaseFoldedQueryAnalysis(metadataDbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
@@ -5129,7 +5154,7 @@ export const useQueryStore = defineStore("query", () => {
           const primaryKeys = loaded.tableMeta.primaryKeys;
           const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result!.columns, loaded.source.key, dbType as DatabaseType, primaryKeys);
           const primaryKeysPresent = primaryKeysPresentForSource(dbType, primaryKeys, tab.result!.columns, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
-          const keylessAllowed = sources.length === 1 && canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys);
+          const keylessAllowed = sources.length === 1 && canUseQueryKeylessRowPredicate(dbType as DatabaseType, loaded);
           const primaryKeySet = new Set(primaryKeys);
           const editableSourceColumnCount = (sourceColumns ?? []).filter((column) => column && !primaryKeySet.has(column)).length;
           return {
@@ -5154,7 +5179,7 @@ export const useQueryStore = defineStore("query", () => {
           const resultIndex = tab.result.columns.findIndex((column) => column.toLowerCase() === syntheticRowIdProjection.alias.toLowerCase());
           if (resultIndex >= 0) sourceColumns[resultIndex] = DBX_ROWID_COLUMN;
         }
-        if (primaryKeys.length === 0 && !canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys)) {
+        if (primaryKeys.length === 0 && !canUseQueryKeylessRowPredicate(dbType as DatabaseType, loaded)) {
           return {
             queryAnalysis: undefined,
             querySourceColumns: undefined,

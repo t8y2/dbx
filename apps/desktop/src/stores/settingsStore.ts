@@ -788,7 +788,7 @@ export interface EditorSettings {
   columnWidthDensity: ColumnWidthDensity;
   dataGridQuickEntry: boolean;
   dataGridFilterEditorView: DataGridFilterEditorView;
-  dataGridAutoHideFilterBuilder: boolean;
+  dataGridKeepFilterEditorExpanded: boolean;
   dataGridTextFilterPanelHeight: number;
   localFilterPopoverWidth: number;
   dataGridRenderMode: DataGridRenderMode;
@@ -1024,7 +1024,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
-  dataGridAutoHideFilterBuilder: true,
+  dataGridKeepFilterEditorExpanded: false,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
@@ -1368,6 +1368,8 @@ function normalizeTableInfoTab(value: unknown): TableInfoTab {
 export function normalizeEditorSettings(settings: Partial<EditorSettings>, existing?: EditorSettings): EditorSettings {
   const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const legacySidebarOpenDatabaseOnSingleClick = (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick;
+  const legacyDataGridAutoHideFilterBuilder = (settings as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown }).dataGridAutoHideFilterBuilder;
+  const hasDataGridKeepFilterEditorExpanded = Object.prototype.hasOwnProperty.call(settings, "dataGridKeepFilterEditorExpanded");
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
@@ -1479,7 +1481,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
-    dataGridAutoHideFilterBuilder: settings.dataGridAutoHideFilterBuilder ?? DEFAULT_EDITOR_SETTINGS.dataGridAutoHideFilterBuilder,
+    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),
@@ -1611,6 +1613,20 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     defaultTransactionMode: normalizeDefaultTransactionMode(settings.defaultTransactionMode),
     backgroundImage: normalizeBackgroundImageSettings(settings.backgroundImage),
   };
+}
+
+/**
+ * Cloud snapshots are applied as partial settings updates rather than loaded
+ * through `normalizeEditorSettings`. Translate the removed inverse flag here
+ * so older snapshots retain their behavior on every incremental update path.
+ */
+function migrateLegacyFilterEditorExpansionPatch(partial: Partial<EditorSettings>): Partial<EditorSettings> {
+  const patch = partial as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown };
+  const { dataGridAutoHideFilterBuilder: legacyAutoHide, ...current } = patch;
+  if (Object.prototype.hasOwnProperty.call(patch, "dataGridKeepFilterEditorExpanded") || typeof legacyAutoHide !== "boolean") {
+    return current;
+  }
+  return { ...current, dataGridKeepFilterEditorExpanded: !legacyAutoHide };
 }
 
 function loadLegacyEditorSettings(): EditorSettings | null {
@@ -2223,7 +2239,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.columnWidthDensity !== undefined) editorSettings.value.columnWidthDensity = normalizeColumnWidthDensity(partial.columnWidthDensity);
     if (partial.dataGridQuickEntry !== undefined) editorSettings.value.dataGridQuickEntry = partial.dataGridQuickEntry;
     if (partial.dataGridFilterEditorView !== undefined) editorSettings.value.dataGridFilterEditorView = normalizeDataGridFilterEditorView(partial.dataGridFilterEditorView);
-    if (partial.dataGridAutoHideFilterBuilder !== undefined) editorSettings.value.dataGridAutoHideFilterBuilder = partial.dataGridAutoHideFilterBuilder;
+    if (partial.dataGridKeepFilterEditorExpanded !== undefined) editorSettings.value.dataGridKeepFilterEditorExpanded = partial.dataGridKeepFilterEditorExpanded === true;
     if (partial.dataGridTextFilterPanelHeight !== undefined) editorSettings.value.dataGridTextFilterPanelHeight = normalizeDataGridTextFilterPanelHeight(partial.dataGridTextFilterPanelHeight);
     if (partial.localFilterPopoverWidth !== undefined) editorSettings.value.localFilterPopoverWidth = normalizeDrawerWidth(partial.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth);
     if (partial.dataGridRenderMode !== undefined) editorSettings.value.dataGridRenderMode = normalizeDataGridRenderMode(partial.dataGridRenderMode);
@@ -2309,10 +2325,11 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {
-    applyEditorSettingsPatch(partial);
-    markEditorSettingsPatch(partial);
+    const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+    applyEditorSettingsPatch(patch);
+    markEditorSettingsPatch(patch);
     if (!isEditorSettingsLoaded.value) {
-      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(partial));
+      pendingEditorSettingsPatches.push(editorSettingsPatchSnapshot(patch));
       return;
     }
     saveEditorSettings();
@@ -2332,16 +2349,17 @@ export const useSettingsStore = defineStore("settings", () => {
     return enqueueEditorSettingsAtomicMutation(async () => {
       await initEditorSettings();
       const previous = editorSettingsSnapshot(editorSettings.value);
-      applyEditorSettingsPatch(partial);
-      const revision = markEditorSettingsPatch(partial);
+      const patch = migrateLegacyFilterEditorExpansionPatch(partial);
+      applyEditorSettingsPatch(patch);
+      const revision = markEditorSettingsPatch(patch);
       try {
         await persistCurrentEditorSettings();
       } catch (error) {
         const restored = editorSettingsSnapshot(editorSettings.value) as unknown as Record<string, unknown>;
         const previousSettings = previous as unknown as Record<string, unknown>;
         let changed = false;
-        for (const key of Object.keys(partial) as (keyof EditorSettings)[]) {
-          if (partial[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
+        for (const key of Object.keys(patch) as (keyof EditorSettings)[]) {
+          if (patch[key] === undefined || editorSettingsFieldRevisions.get(key) !== revision) continue;
           restored[key] = previousSettings[key];
           editorSettingsFieldRevisions.set(key, ++editorSettingsPatchRevision);
           changed = true;

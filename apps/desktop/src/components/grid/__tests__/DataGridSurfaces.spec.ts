@@ -138,6 +138,16 @@ beforeEach(() => {
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
 describe("DataGrid canvas surfaces", () => {
+  it("keeps condition and text filter editors open when persistent expansion is enabled", () => {
+    expect(dataGridSource).toContain('const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");');
+    expect(dataGridSource).toContain("const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);");
+    expect(dataGridSource).toContain("get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,");
+    expect(dataGridSource).toContain("if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;");
+    expect(dataGridSource).toContain('v-model:filter-builder-open="effectiveFilterBuilderOpen"');
+    expect(dataGridSource).toContain("filterEditorView === 'conditions' && effectiveFilterBuilderOpen");
+    expect(dataGridSource).toContain("filterEditorView === 'text' && effectiveFilterBuilderOpen");
+  });
+
   it("asks before an expensive Elasticsearch cursor jump", () => {
     expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
     expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');

@@ -7214,8 +7214,8 @@ export default withEnglishFallback({
     customUiBorder: "枠線",
     customUiSidebar: "サイドバー",
     shortcutConvertNamingStyle: "命名スタイルの切り替え",
-    dataGridAutoHideFilterBuilder: "フィルター適用後に条件エディターを自動的に非表示にする",
-    dataGridAutoHideFilterBuilderDescription: "オフにすると、フィルター適用後も条件エディターが残り、調整を続けやすくなります。",
+    dataGridKeepFilterEditorExpanded: "フィルターエディターを常に展開する",
+    dataGridKeepFilterEditorExpandedDescription: "条件ビューとテキストビューでエディターを常に展開します。",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

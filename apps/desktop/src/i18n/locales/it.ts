@@ -7162,8 +7162,8 @@ export default withEnglishFallback({
     customUiBorder: "Bordo",
     customUiSidebar: "Barra laterale",
     shortcutConvertNamingStyle: "Cambia stile di denominazione",
-    dataGridAutoHideFilterBuilder: "Nascondi automaticamente l'editor delle condizioni dopo l'applicazione dei filtri",
-    dataGridAutoHideFilterBuilderDescription: "Se disattivata, dopo l'applicazione dei filtri l'editor delle condizioni rimane per ulteriori modifiche.",
+    dataGridKeepFilterEditorExpanded: "Mantieni espanso l'editor dei filtri",
+    dataGridKeepFilterEditorExpandedDescription: "Mantiene sempre espanso l'editor nelle viste Condizioni e Testo.",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

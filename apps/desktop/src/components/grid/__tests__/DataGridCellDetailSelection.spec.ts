@@ -5,6 +5,13 @@ const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url),
 const largeValueSource = readFileSync(new URL("../../../composables/useDataGridLargeValues.ts", import.meta.url), "utf8");
 
 describe("DataGrid cell detail selection", () => {
+  it("selects the first available cell when opening Mongo JSON preview without a selection", () => {
+    const togglePreview = dataGridSource.match(/function toggleMongoJsonPreview[\s\S]*?\n\}/)?.[0];
+    expect(togglePreview).toContain("if (showMongoJsonPreview.value)");
+    expect(togglePreview).toContain("!currentSelectedCellPosition() && displayItems.value.length > 0 && visibleColumnIndexes.value.length > 0");
+    expect(togglePreview).toContain("selectSingleCell(0, 0)");
+  });
+
   it("keeps Canvas hover state while the renderer swaps drawing surfaces", () => {
     expect(dataGridSource).toContain("function isCanvasGridInteractionTarget(target: Node): boolean");
     expect(dataGridSource).toContain("canvasOverlayRef.value?.contains(target) === true");

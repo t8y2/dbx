@@ -71,6 +71,7 @@ describe("jdbc dialect inference", () => {
         driver_label: "CacheDB",
       }),
     ).toBe("iris");
+    expect(inferJdbcDialect({ db_type: "jdbc", driver_profile: "cache" })).toBe("iris");
   });
 
   it("uses IRIS table preview dialect for generic JDBC IRIS connections", () => {

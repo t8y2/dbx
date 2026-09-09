@@ -1,5 +1,6 @@
 import { computed, getCurrentScope, nextTick, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter } from "vue";
 import { dataGridSearchMatchKey } from "@/lib/dataGrid/canvasDataGridRenderer";
+import { loadDataGridSearchState, saveDataGridSearchState } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 
 export type DataGridSearchMatch = {
   kind: "cell" | "column";
@@ -18,6 +19,10 @@ export type UseDataGridSearchOptions<Row> = {
   getCellSearchText: (row: Row, columnIndex: number) => string;
   debounceMs?: number;
   onNavigate?: (match: DataGridSearchMatch) => void;
+  /** 按标签页键控的持久化键；不传则该宿主不参与搜索状态保留。 */
+  persistenceKey?: MaybeRefOrGetter<string | undefined>;
+  /** 列签名，用于避免把陈旧搜索恢复到结构不同的结果上。 */
+  persistenceScopeKey?: MaybeRefOrGetter<string>;
 };
 
 const SEARCH_TOKEN_SEPARATOR = /[\s,()><=!&|]+/;
@@ -72,11 +77,30 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
     searchTimer = undefined;
   }
 
+  // A single-use token rather than a boolean flag: it is immune to Vue's async
+  // watcher flush and self-invalidates if the user types during the restore window.
+  let restoreToken: { searchText: string; matchIndex: number } | null = null;
+
   watch(searchText, (value) => {
     clearTimer();
     const query = value.trim().toLowerCase();
+    const restoring = restoreToken !== null && restoreToken.searchText === value;
     if (!query) deferredSearchText.value = "";
+    // Restoring is not typing: resolve the query now so the row set (and, in
+    // "filter" search mode, the content height) is settled before the grid's
+    // scroll restore measures it.
+    else if (restoring) deferredSearchText.value = query;
     else searchTimer = setTimeout(() => (deferredSearchText.value = query), options.debounceMs ?? 150);
+
+    if (restoring) {
+      // Returning to a tab must not reopen the typeahead popup.
+      suggestions.value = [];
+      suggestionIndex.value = -1;
+      return;
+    }
+    // The user typed before the restore resolved: drop the token so the query they
+    // are writing keeps the normal debounce, index reset and auto-navigate.
+    restoreToken = null;
 
     const lastToken = value.trim().split(SEARCH_TOKEN_SEPARATOR).pop()?.toLowerCase() ?? "";
     suggestions.value = lastToken
@@ -88,7 +112,20 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
   });
 
   watch(matchKeys, (value) => {
-    currentMatchIndex.value = value.length ? 0 : -1;
+    const restored = restoreToken;
+    restoreToken = null;
+    if (!value.length) {
+      currentMatchIndex.value = -1;
+      return;
+    }
+    if (restored) {
+      // Re-entering the tab must not scroll to the first match: the grid's own
+      // scroll restore owns the viewport (#8524). Clamp because the match list may
+      // have shifted while the tab was away.
+      currentMatchIndex.value = Math.min(Math.max(restored.matchIndex, 0), value.length - 1);
+      return;
+    }
+    currentMatchIndex.value = 0;
     const firstMatch = matchAt(0);
     if (firstMatch) nextTick(() => options.onNavigate?.(firstMatch));
   });
@@ -126,6 +163,41 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
     suggestions.value = [];
   }
 
+  /**
+   * Must be called from onMounted, never from the setup body: watch(matchKeys)
+   * eagerly evaluates its source, and seeding a non-empty query would push
+   * matchState past its empty-query early return into `options.rows`, which the
+   * host declares later in its own setup (#8524).
+   */
+  function restorePersistedState(): boolean {
+    const key = toValue(options.persistenceKey);
+    if (!key) return false;
+    const state = loadDataGridSearchState(key, toValue(options.persistenceScopeKey) ?? "");
+    if (!state) return false;
+    overlayVisible.value = state.overlayVisible;
+    // An empty query never re-triggers the searchText watcher, so the token would
+    // never be consumed — only arm it when there is text to restore.
+    if (!state.searchText) return state.overlayVisible;
+    restoreToken = { searchText: state.searchText, matchIndex: state.currentMatchIndex };
+    searchText.value = state.searchText;
+    return true;
+  }
+
+  if (options.persistenceKey) {
+    watch(
+      [searchText, deferredSearchText, overlayVisible, currentMatchIndex],
+      () =>
+        saveDataGridSearchState(toValue(options.persistenceKey), {
+          scopeKey: toValue(options.persistenceScopeKey) ?? "",
+          searchText: searchText.value,
+          deferredSearchText: deferredSearchText.value,
+          overlayVisible: overlayVisible.value,
+          currentMatchIndex: currentMatchIndex.value,
+        }),
+      { flush: "post" },
+    );
+  }
+
   function onKeydown(event: KeyboardEvent) {
     const pair = SEARCH_PAIRS[event.key];
     const input = event.target as HTMLInputElement;
@@ -152,7 +224,7 @@ export function useDataGridSearch<Row>(options: UseDataGridSearchOptions<Row>) {
 
   if (getCurrentScope()) onScopeDispose(clearTimer);
 
-  return { searchText, deferredSearchText, overlayVisible, currentMatchIndex, suggestions, suggestionIndex, matches, matchKeys, matchCount, matchAt, matchSet, currentMatch, acceptSuggestion, navigateSuggestion, navigateMatch, close, onKeydown };
+  return { searchText, deferredSearchText, overlayVisible, currentMatchIndex, suggestions, suggestionIndex, matches, matchKeys, matchCount, matchAt, matchSet, currentMatch, acceptSuggestion, navigateSuggestion, navigateMatch, close, onKeydown, restorePersistedState };
 }
 
 function dataGridSearchMatchFromKey(key: number): DataGridSearchMatch {

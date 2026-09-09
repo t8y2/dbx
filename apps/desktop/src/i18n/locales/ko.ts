@@ -6878,8 +6878,8 @@ export default withEnglishFallback({
     csvQuoteModeAll: "모든 필드",
     csvQuoteModeNecessary: "필수 필드만",
     shortcutConvertNamingStyle: "네이밍 스타일 전환",
-    dataGridAutoHideFilterBuilder: "필터 적용 후 조건 편집기 자동 숨기기",
-    dataGridAutoHideFilterBuilderDescription: "끄면 필터를 적용한 후에도 조건 편집기가 유지되어 계속 조정하기 편리합니다.",
+    dataGridKeepFilterEditorExpanded: "필터 편집기 항상 펼치기",
+    dataGridKeepFilterEditorExpandedDescription: "조건 및 텍스트 보기에서 편집기를 항상 펼칩니다.",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

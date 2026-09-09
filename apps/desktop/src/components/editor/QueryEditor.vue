@@ -219,6 +219,7 @@ function queryEditorSelectionLanguage(): "sql" | "text" {
 
 const COMPLETION_REMOTE_LATENCY_BUDGET_MS = 120;
 const COMPLETION_DEBOUNCE_DELAY_MS = 150;
+const COMPLETION_TRIGGER_DEFER_DELAY_MS = 50;
 const COMPLETION_TAB_RETRY_DELAY_MS = 16;
 const COMPLETION_TAB_MAX_WAIT_MS = COMPLETION_DEBOUNCE_DELAY_MS + COMPLETION_REMOTE_LATENCY_BUDGET_MS + 100;
 const COMPLETION_ENTER_MAX_WAIT_MS = 125;
@@ -630,6 +631,7 @@ let semanticDiagnostics: SqlSemanticDiagnostic[] = [];
 let semanticDiagnosticTimer: ReturnType<typeof setTimeout> | null = null;
 let semanticDiagnosticRunId = 0;
 let pendingSemanticDiagnosticPreserveOutsideRanges = false;
+let deferredCompletionTriggerTimer: ReturnType<typeof setTimeout> | null = null;
 let editorIsActive = true;
 let tableReferenceDropListenerRegistered = false;
 let imeCompositionActive = false;
@@ -4750,6 +4752,25 @@ function scheduleSqlCompletionStart(currentView: EditorViewType, delayMs = 0) {
   }, delayMs);
 }
 
+function clearDeferredCompletionTrigger() {
+  if (deferredCompletionTriggerTimer === null) return;
+  clearTimeout(deferredCompletionTriggerTimer);
+  deferredCompletionTriggerTimer = null;
+}
+
+function scheduleDeferredCompletionTrigger(currentView: EditorViewType, insertedText: string, removedText: string) {
+  clearDeferredCompletionTrigger();
+  const expectedDoc = currentView.state.doc;
+  const expectedPosition = currentView.state.selection.main.head;
+  deferredCompletionTriggerTimer = setTimeout(() => {
+    deferredCompletionTriggerTimer = null;
+    if (view.value !== currentView || currentView.state.doc !== expectedDoc || currentView.state.selection.main.head !== expectedPosition || isEditorComposing(currentView)) return;
+    if (shouldStartSqlCompletionAfterInput(insertedText, removedText, currentView)) {
+      scheduleSqlCompletionStart(currentView);
+    }
+  }, COMPLETION_TRIGGER_DEFER_DELAY_MS);
+}
+
 function flushImeComposition() {
   const currentView = view.value;
   if (!currentView || !pendingImeModelEmit) return;
@@ -5934,10 +5955,13 @@ onMounted(async () => {
     queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
   ];
   const MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS = 32;
+  const SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100;
+  const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
   buildSqlSemanticHighlightExtension = () => [
     ViewPlugin.fromClass(
       class {
         decorations: import("@codemirror/view").DecorationSet;
+        private refreshTimer: ReturnType<typeof setTimeout> | null = null;
         private cachedDoc: import("@codemirror/state").Text | null = null;
         private cachedSql = "";
         private cachedDialectId = "";
@@ -5953,7 +5977,34 @@ onMounted(async () => {
         }
 
         update(update: import("@codemirror/view").ViewUpdate) {
-          if (update.docChanged || update.viewportChanged) this.decorations = this.buildDecorations(update.view);
+          const refreshRequested = update.transactions.some((transaction) => transaction.effects.some((effect) => effect.is(refreshSqlSemanticHighlightEffect)));
+          if (update.docChanged) {
+            this.decorations = this.decorations.map(update.changes);
+            this.scheduleRefresh(update.view);
+            return;
+          }
+          if (refreshRequested || update.viewportChanged) {
+            this.cancelRefresh();
+            this.decorations = this.buildDecorations(update.view);
+          }
+        }
+
+        scheduleRefresh(currentView: import("@codemirror/view").EditorView) {
+          if (this.refreshTimer !== null) return;
+          this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            if (currentView.dom.isConnected) currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
+          }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
+        }
+
+        cancelRefresh() {
+          if (this.refreshTimer === null) return;
+          clearTimeout(this.refreshTimer);
+          this.refreshTimer = null;
+        }
+
+        destroy() {
+          this.cancelRefresh();
         }
 
         buildDecorations(currentView: import("@codemirror/view").EditorView) {
@@ -6255,9 +6306,7 @@ onMounted(async () => {
               removedText += update.startState.doc.sliceString(fromA, toA);
             });
             const suppressCompletionAutoStart = consumeSqlCompletionAutoStartSuppression();
-            if (!suppressCompletionAutoStart && shouldStartSqlCompletionAfterInput(insertedText, removedText, update.view)) {
-              scheduleSqlCompletionStart(update.view);
-            }
+            if (!suppressCompletionAutoStart) scheduleDeferredCompletionTrigger(update.view, insertedText, removedText);
           }
           if (update.transactions.some((tr) => tr.isUserEvent("input.paste"))) {
             resyncCaretAfterPaste(update.view);
@@ -6990,6 +7039,7 @@ function pauseQueryEditorBackgroundWork() {
   clearTableNavigationHover();
   clearPendingCompletionEnter();
   clearPendingCompletionTab();
+  clearDeferredCompletionTrigger();
   executionViewportOwnership.reset();
   editorIsActive = false;
   clearScheduledSemanticDiagnostics();

@@ -6623,6 +6623,8 @@ export default withEnglishFallback({
     dataGridDisplay: "Veri tablosu görünümü",
     dataGridFilterView: "Tablo filtresi görünümü",
     dataGridFilterViewDescription: "Filtre açılır penceresi, sabit koşullar paneli ya da sıkışık metin koşulları paneli kullanın.",
+    dataGridKeepFilterEditorExpanded: "Filtre düzenleyicisini açık tut",
+    dataGridKeepFilterEditorExpandedDescription: "Koşullar ve Metin görünümlerinde düzenleyiciyi her zaman açık tutar.",
     dataGridFilterViewPreview: "Etki önizlemesi",
     dataGridFilterViewPreviewExpand: "Etki önizlemesini genişlet",
     dataGridFilterViewPreviewCollapse: "Etki önizlemesini daralt",

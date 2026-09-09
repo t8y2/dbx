@@ -184,16 +184,42 @@
 /* Keep the overflow affordance out of the measurement box. Otherwise its own
  * width reduces the scroll viewport and can create a false overflow state. */
 .tab-overflow-control {
+  box-sizing: border-box;
+  width: 34px;
+  flex: 0 0 34px;
   padding: 0;
   background: transparent;
+  justify-content: flex-end;
 }
 
 .has-tab-overflow-control .app-tab-strip {
-  padding-inline-end: 2.5rem;
+  padding-inline-end: 2.125rem;
 }
 
 .has-tab-overflow-control .app-tab-scrollbar {
-  inset-inline-end: 2.5rem;
+  inset-inline-end: 2.125rem;
+}
+
+/* The top-row overflow control overlays a small reserved area. Blend that
+ * area into the tab strip so the gap before the button does not read as an
+ * opaque empty block while keeping the button itself fully visible. */
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control {
+  isolation: isolate;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline: -0.25rem 0;
+  background: color-mix(in srgb, var(--background) 48%, transparent);
+  pointer-events: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control button {
+  position: relative;
+  z-index: 1;
 }
 
 /* In the two-row layout, only the first row shares its right edge with the

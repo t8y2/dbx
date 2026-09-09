@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
+import az from "../../apps/desktop/src/i18n/locales/az.ts";
 import en from "../../apps/desktop/src/i18n/locales/en.ts";
 import es from "../../apps/desktop/src/i18n/locales/es.ts";
 import it from "../../apps/desktop/src/i18n/locales/it.ts";
@@ -81,7 +82,7 @@ test("ContentArea wires server messages into the switcher and the messages view"
 });
 
 test("every locale defines the query message strings", () => {
-  const locales = { en, es, it, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+  const locales = { az, en, es, it, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
 
   for (const [name, locale] of Object.entries(locales)) {
     assert.ok(locale.queryMessages.empty.length > 0, `${name}: queryMessages.empty`);

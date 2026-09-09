@@ -220,6 +220,34 @@ const zhCN = {
 };
 
 export const meilisearchManagementMessages = {
+  az: {
+    ...en,
+    systemManagement: "Sistemin idarə edilməsi",
+    overview: "Ümumi baxış",
+    apiKeys: "API açarları",
+    tasks: "Tapşırıqlar",
+    health: "İşlək vəziyyət",
+    version: "Versiya",
+    indexCount: "İndekslər",
+    totalDocuments: "Sənədlərin ümumi sayı",
+    keyCount: "Açarlar",
+    refresh: "Yenilə",
+    rowActions: "Əməliyyatlar",
+    previous: "Əvvəlki",
+    next: "Növbəti",
+    createKey: "Açar yarat",
+    editKey: "Açarı redaktə et",
+    deleteKey: "Açarı sil",
+    noKeys: "API açarları tapılmadı",
+    filters: "Süzgəclər",
+    applyFilters: "Süzgəcləri tətbiq et",
+    receivedDocuments: "Qəbul edilmiş sənədlər",
+    indexedDocuments: "İndekslənmiş sənədlər",
+    noTasks: "Tapşırıqlar tapılmadı",
+    cancelTask: "Tapşırığı ləğv et",
+    deleteTaskHistory: "Tapşırıq tarixçəsini sil",
+    readOnlyDisabled: "Bu əlaqə yalnız oxumaq üçündür; idarəetmə əməliyyatları deaktivdir.",
+  },
   en,
   "zh-CN": zhCN,
   "zh-TW": {
@@ -415,6 +443,7 @@ export const meilisearchManagementMessages = {
   },
 } as const;
 
+export const meilisearchManagementAz = meilisearchManagementMessages.az;
 export const meilisearchManagementEn = meilisearchManagementMessages.en;
 export const meilisearchManagementZhCN = meilisearchManagementMessages["zh-CN"];
 export const meilisearchManagementZhTW = meilisearchManagementMessages["zh-TW"];

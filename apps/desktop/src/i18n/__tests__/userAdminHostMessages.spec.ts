@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import itLocale from "@/i18n/locales/it";
@@ -16,7 +17,7 @@ describe("user administration Host translations", () => {
   });
 
   it("provides localized Host-change labels in every non-English locale", () => {
-    const locales = { es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
+    const locales = { az, es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW };
     for (const [locale, messages] of Object.entries(locales)) {
       expect(messages.userAdmin.changeHost, locale).not.toBe(en.userAdmin.changeHost);
       expect(messages.userAdmin.newHost, locale).not.toBe(en.userAdmin.newHost);

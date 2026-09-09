@@ -30,4 +30,14 @@ describe("omitDdlIdentifierQuotes", () => {
     const ddl = 'CREATE TABLE "CamelCase" ("lowercase" NUMBER, "WITH SPACE" NUMBER, "ORDER" NUMBER)';
     expect(omitDdlIdentifierQuotes(ddl, "oracle")).toBe(ddl);
   });
+
+  it("removes quotes from ordinary uppercase Dameng identifiers", () => {
+    const ddl = 'CREATE TABLE "DBX_TEST"."PRODUCTS" ("ID" INT, "NAME" VARCHAR(128)) STORAGE (ON "MAIN", CLUSTERBTR)';
+    expect(omitDdlIdentifierQuotes(ddl, "dameng")).toBe("CREATE TABLE DBX_TEST.PRODUCTS (ID INT, NAME VARCHAR(128)) STORAGE (ON MAIN, CLUSTERBTR)");
+  });
+
+  it("keeps quotes required by Dameng case, naming, and reserved-word rules", () => {
+    const ddl = 'CREATE TABLE "CamelCase" ("lowercase" INT, "WITH SPACE" INT, "ORDER" INT, "A$B" INT)';
+    expect(omitDdlIdentifierQuotes(ddl, "dameng")).toBe(ddl);
+  });
 });

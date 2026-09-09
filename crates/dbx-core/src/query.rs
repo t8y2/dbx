@@ -1294,7 +1294,7 @@ fn options_for_sequential_statements(
 ) -> QueryExecutionOptions {
     let mut statement_options = options.clone();
     if statement_count <= 1
-        || !matches!(db_type, Some(DatabaseType::Kingbase | DatabaseType::Vastbase))
+        || !matches!(db_type, Some(DatabaseType::Kingbase | DatabaseType::Vastbase | DatabaseType::Oracle))
         || statement_options.result_session_id.is_some()
     {
         return statement_options;
@@ -9742,7 +9742,7 @@ for line in sys.stdin:
             ..Default::default()
         };
 
-        for db_type in [DatabaseType::Kingbase, DatabaseType::Vastbase] {
+        for db_type in [DatabaseType::Kingbase, DatabaseType::Vastbase, DatabaseType::Oracle] {
             let adjusted = options_for_sequential_statements(&options, 2, Some(db_type));
 
             assert_eq!(adjusted.page_size, None);
@@ -9785,7 +9785,7 @@ for line in sys.stdin:
     fn other_databases_keep_multi_statement_cursor_options() {
         let options = QueryExecutionOptions { max_rows: Some(100_000), page_size: Some(100), ..Default::default() };
 
-        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Oracle));
+        let adjusted = options_for_sequential_statements(&options, 2, Some(DatabaseType::Dameng));
 
         assert_eq!(adjusted.page_size, Some(100));
         assert_eq!(adjusted.max_rows, Some(100_000));

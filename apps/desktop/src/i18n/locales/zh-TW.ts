@@ -2041,6 +2041,7 @@ export default withEnglishFallback({
     searchColumn: "搜尋欄/註解...",
     noColumnsFound: "未找到欄",
     dataUnavailable: "資料表資料需要重新載入。",
+    viewSnapshotSelectionNotRestored: "已還原上次的檢視位置，但過大的選取範圍未能保留。",
     dataUnavailableHintPrefix: "按 ",
     dataUnavailableHintSuffix: " 或點擊下方重新整理來重新載入。",
     queryError: "查詢出錯",

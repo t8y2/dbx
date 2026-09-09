@@ -2038,6 +2038,7 @@ export default withEnglishFallback({
     queryError: "Errore Query",
     saveErrorTitle: "Impossibile salvare le modifiche",
     dataUnavailable: "I dati della tabella devono essere ricaricati.",
+    viewSnapshotSelectionNotRestored: "La vista precedente è stata ripristinata, ma la selezione era troppo grande per essere mantenuta.",
     dataUnavailableHintPrefix: "Premi ",
     dataUnavailableHintSuffix: " o fai clic su Aggiorna qui sotto per ricaricare.",
     refresh: "Aggiorna",

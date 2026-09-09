@@ -2014,6 +2014,7 @@ export default withEnglishFallback({
     queryError: "쿼리 오류",
     saveErrorTitle: "변경사항 저장 실패",
     dataUnavailable: "테이블 데이터를 다시 불러와야 합니다.",
+    viewSnapshotSelectionNotRestored: "이전 보기 위치는 복원했지만 선택 범위가 너무 커서 복원하지 못했습니다.",
     cachedResultUnavailable: "캐시된 결과가 없거나 호환되지 않습니다.",
     reexecuteQuery: "쿼리 다시 실행",
     dataUnavailableHintPrefix: "",

@@ -2191,6 +2191,7 @@ export default {
     queryError: "Query Error",
     saveErrorTitle: "Failed to Save Changes",
     dataUnavailable: "Table data needs to be reloaded.",
+    viewSnapshotSelectionNotRestored: "The previous view was restored, but its selection was too large to keep.",
     cachedResultUnavailable: "The cached result is missing or incompatible.",
     reexecuteQuery: "Run query again",
     dataUnavailableHintPrefix: "Press ",

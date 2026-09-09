@@ -2050,6 +2050,7 @@ export default withEnglishFallback({
     queryError: "クエリエラー",
     saveErrorTitle: "変更の保存に失敗しました",
     dataUnavailable: "テーブルデータを再読み込みする必要があります。",
+    viewSnapshotSelectionNotRestored: "前回の表示位置は復元しましたが、選択範囲が大きすぎるため復元できませんでした。",
     dataUnavailableHintPrefix: "",
     dataUnavailableHintSuffix: " を押すか、下の更新ボタンをクリックして再読み込みしてください。",
     refresh: "更新",

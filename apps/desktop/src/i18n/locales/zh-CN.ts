@@ -2115,6 +2115,7 @@ export default withEnglishFallback({
     queryError: "查询出错",
     saveErrorTitle: "数据修改保存失败",
     dataUnavailable: "表数据需要重新加载。",
+    viewSnapshotSelectionNotRestored: "已恢复上次的视图位置，但过大的选择范围未能保留。",
     dataUnavailableHintPrefix: "按 ",
     dataUnavailableHintSuffix: " 或点击下方刷新按钮重新加载。",
     cachedResultUnavailable: "缓存结果缺失或不兼容。",

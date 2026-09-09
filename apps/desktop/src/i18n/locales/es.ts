@@ -2040,6 +2040,7 @@ export default withEnglishFallback({
     queryError: "Error de consulta",
     saveErrorTitle: "Error al guardar los cambios",
     dataUnavailable: "Los datos de la tabla deben volver a cargarse.",
+    viewSnapshotSelectionNotRestored: "Se restauró la vista anterior, pero la selección era demasiado grande para conservarla.",
     dataUnavailableHintPrefix: "Presiona ",
     dataUnavailableHintSuffix: " o haz clic en Actualizar abajo para recargar.",
     refresh: "Actualizar",

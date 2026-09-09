@@ -2192,6 +2192,7 @@ export default withEnglishFallback({
     queryError: "Sorğu xətası",
     saveErrorTitle: "Dəyişiklikləri yadda saxlamaq alınmadı",
     dataUnavailable: "Cədvəl məlumatları yenidən yüklənməlidir.",
+    viewSnapshotSelectionNotRestored: "Əvvəlki görünüş bərpa edildi, lakin seçim çox böyük olduğu üçün saxlanılmadı.",
     cachedResultUnavailable: "Keşlənmiş nəticə yoxdur və ya uyğun deyil.",
     reexecuteQuery: "Sorğunu yenidən işlət",
     dataUnavailableHintPrefix: "Basın: ",

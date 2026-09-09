@@ -141,7 +141,7 @@ const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readon
     "compactColumnHeaderActions",
     "dataGridQuickEntry",
     "dataGridFilterEditorView",
-    "dataGridAutoHideFilterBuilder",
+    "dataGridKeepFilterEditorExpanded",
     "dataGridTextFilterPanelHeight",
     "multiStatementDefaultView",
     "dataGridAutoTransposeSingleRow",
@@ -467,6 +467,13 @@ export function parseSettingsTransferFile(text: string): { ok: true; value: Pars
   if (!isPlainObject(settings)) return { ok: false, error: { code: "invalid-structure" } };
   const editor = settings.editor;
   if (!isPlainObject(editor)) return { ok: false, error: { code: "empty-settings" } };
+
+  // Old exports used the inverse `dataGridAutoHideFilterBuilder` flag. Keep
+  // accepting it, but normalize it into the single current preference before
+  // applying the strict whitelist below.
+  if (!("dataGridKeepFilterEditorExpanded" in editor) && typeof editor.dataGridAutoHideFilterBuilder === "boolean") {
+    editor.dataGridKeepFilterEditorExpanded = !editor.dataGridAutoHideFilterBuilder;
+  }
 
   const presentKeys = EDITOR_SETTINGS_DRAFT_KEYS.filter((key) => key in editor);
   if (presentKeys.length === 0) return { ok: false, error: { code: "empty-settings" } };

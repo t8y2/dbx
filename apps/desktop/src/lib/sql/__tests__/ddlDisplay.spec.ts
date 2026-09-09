@@ -20,4 +20,24 @@ describe("omitDdlIdentifierQuotes", () => {
     const ddl = "CREATE TABLE [demo_table] ([order] int, [key] int, [user] nvarchar(50), [id] int)";
     expect(omitDdlIdentifierQuotes(ddl, "sqlserver")).toBe("CREATE TABLE demo_table ([order] int, [key] int, [user] nvarchar(50), id int)");
   });
+
+  it("removes quotes from ordinary uppercase Oracle identifiers", () => {
+    const ddl = 'CREATE TABLE "DBX_TEST"."PRODUCTS" ("ID" NUMBER(10), "SKU" VARCHAR2(32)) TABLESPACE "USERS";';
+    expect(omitDdlIdentifierQuotes(ddl, "oracle")).toBe("CREATE TABLE DBX_TEST.PRODUCTS (ID NUMBER(10), SKU VARCHAR2(32)) TABLESPACE USERS;");
+  });
+
+  it("keeps quotes required by Oracle case and naming rules", () => {
+    const ddl = 'CREATE TABLE "CamelCase" ("lowercase" NUMBER, "WITH SPACE" NUMBER, "ORDER" NUMBER)';
+    expect(omitDdlIdentifierQuotes(ddl, "oracle")).toBe(ddl);
+  });
+
+  it("removes quotes from ordinary uppercase Dameng identifiers", () => {
+    const ddl = 'CREATE TABLE "DBX_TEST"."PRODUCTS" ("ID" INT, "NAME" VARCHAR(128)) STORAGE (ON "MAIN", CLUSTERBTR)';
+    expect(omitDdlIdentifierQuotes(ddl, "dameng")).toBe("CREATE TABLE DBX_TEST.PRODUCTS (ID INT, NAME VARCHAR(128)) STORAGE (ON MAIN, CLUSTERBTR)");
+  });
+
+  it("keeps quotes required by Dameng case, naming, and reserved-word rules", () => {
+    const ddl = 'CREATE TABLE "CamelCase" ("lowercase" INT, "WITH SPACE" INT, "ORDER" INT, "A$B" INT)';
+    expect(omitDdlIdentifierQuotes(ddl, "dameng")).toBe(ddl);
+  });
 });

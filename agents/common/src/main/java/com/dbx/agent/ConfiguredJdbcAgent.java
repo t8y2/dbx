@@ -47,7 +47,7 @@ public abstract class ConfiguredJdbcAgent extends AbstractJdbcAgent {
 
     @Override
     public List<String> listSchemas() {
-        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile);
+        return StandardJdbcMetadata.INSTANCE.listSchemas(requireConnection(), profile, configuredDatabase);
     }
 
     @Override

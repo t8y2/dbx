@@ -38,7 +38,7 @@ vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({}),
 }));
 
-function createEditor(
+function createEditorWithResult(
   sourceColumns?: Array<string | undefined>,
   confirmDangerousRowDeletion = true,
   cacheKey?: string,
@@ -125,7 +125,33 @@ function createEditor(
   });
 
   editor.newRows.value = [[null, null, null]];
-  return editor;
+  return { editor, result };
+}
+
+function createEditor(...args: Parameters<typeof createEditorWithResult>) {
+  return createEditorWithResult(...args).editor;
+}
+
+function beforeTabSwitchEvent(fromTabId: string, tabId = "next-tab") {
+  return new CustomEvent("dbx:before-tab-switch", { detail: { tabId, fromTabId } });
+}
+
+function setupTabSwitchScrollFixture() {
+  class TestScroller {
+    scrollTop = 0;
+    scrollLeft = 0;
+    scrollTo({ top, left }: ScrollToOptions) {
+      if (typeof top === "number") this.scrollTop = top;
+      if (typeof left === "number") this.scrollLeft = left;
+    }
+  }
+  vi.stubGlobal("HTMLElement", TestScroller);
+  const rows: CellValue[][] = [
+    ["a", null, 1],
+    ["b", null, 2],
+    ["c", null, 3],
+  ];
+  return { TestScroller, rows };
 }
 
 describe("useDataGridEditor result snapshots", () => {
@@ -198,6 +224,112 @@ describe("useDataGridEditor result snapshots", () => {
     remounted.restorePendingSnapshotFocus();
     expect(remountedScroller.scrollTop).toBe(0);
     expect(remountedScroller.scrollLeft).toBe(0);
+  });
+
+  it("adopts a scroll-only snapshot when the previous instance was torn down by a tab switch (#8524)", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-8524";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    // Unmount path runs right after the switch and must not clobber the provenance.
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(6_400);
+    expect(remountedScroller.scrollLeft).toBe(24);
+  });
+
+  it("ignores a tab switch that names a different tab", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-other-group";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    // Split groups keep several grids mounted; this one did not change tabs.
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent("some-other-tab"));
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+    expect(remountedScroller.scrollLeft).toBe(0);
+  });
+
+  it("ignores a tab switch event without a fromTabId", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-no-origin";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(new CustomEvent("dbx:before-tab-switch", { detail: { tabId: "next-tab" } }));
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+  });
+
+  it("drops the tab-switch scroll once the result identity changes", async () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-reloaded";
+    const { editor: previous, result } = createEditorWithResult(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    previous.savePendingSnapshot(true, true);
+
+    // A reload lands a new row array: the grid must start at the first row (#7341).
+    result.value = { columns: ["first", "hidden", "last"], rows: rows.map((row) => [...row]) };
+    await nextTick();
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
+  });
+
+  it("clears the tab-switch provenance when the grid is explicitly scrolled to the top", () => {
+    const { TestScroller, rows } = setupTabSwitchScrollFixture();
+    const key = "table-tab-reset-scroll";
+    const previous = createEditor(undefined, true, key, undefined, rows);
+    previous.newRows.value = [];
+    const previousScroller = new TestScroller();
+    previousScroller.scrollTop = 6_400;
+    previousScroller.scrollLeft = 24;
+    previous.scrollerRef.value = previousScroller as unknown as NonNullable<typeof previous.scrollerRef.value>;
+    previous.onBeforeTabSwitch(beforeTabSwitchEvent(key));
+    // Sort/filter/paginate/refresh all route through here and mean "new viewport".
+    previous.resetGridVerticalScroll(true);
+    previous.savePendingSnapshot(true, true);
+
+    const remounted = createEditor(undefined, true, key, undefined, rows);
+    const remountedScroller = new TestScroller();
+    remounted.scrollerRef.value = remountedScroller as unknown as NonNullable<typeof remounted.scrollerRef.value>;
+    remounted.restorePendingSnapshotFocus();
+    expect(remountedScroller.scrollTop).toBe(0);
   });
 
   it("still adopts the cached scroll when the snapshot carries pending edits", () => {

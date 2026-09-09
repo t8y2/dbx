@@ -306,6 +306,7 @@ import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
 import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEdit";
@@ -992,6 +993,10 @@ const dataGridSearch = useDataGridSearch({
   rows: () => displayItems.value,
   getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
   onNavigate: () => nextTick(scrollToCurrentMatch),
+  // Same key as useDataGridEditor below: table data tabs use the tab id, query
+  // results use resultGridInstanceKey so a re-execute starts with a clean search.
+  persistenceKey: () => props.pendingStateKey ?? props.cacheKey,
+  persistenceScopeKey: () => createDataGridSearchScopeKey(props.result.columns),
 });
 const {
   searchText,
@@ -1005,6 +1010,12 @@ const {
   matchSet: searchMatchSet,
   currentMatch: currentSearchMatch,
 } = dataGridSearch;
+
+// Registered ahead of useDataGridEditor's own onMounted so a restored query
+// resolves the row set — "filter" search mode shrinks sortedRows — before
+// applyScrollPosition measures the content height. Deliberately does not focus the
+// search input: the user is returning to the grid, not to the search box.
+onMounted(() => dataGridSearch.restorePersistedState());
 
 const orderByInput = ref(props.initialOrderByInput ?? "");
 const whereFilterInput = ref(props.initialWhereInput ?? "");
@@ -1188,6 +1199,15 @@ const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
+const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
+const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
+const effectiveFilterBuilderOpen = computed({
+  get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,
+  set: (open: boolean) => {
+    if (isFilterEditorPinnedOpen.value) return;
+    filterBuilderOpen.value = open;
+  },
+});
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
@@ -1542,7 +1562,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
   appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-  if (settingsStore.editorSettings.dataGridAutoHideFilterBuilder) filterBuilderOpen.value = false;
+  if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 
@@ -6992,6 +7012,7 @@ const {
   sourceColumns: visibleSourceColumns,
   columnComments: visibleColumnComments,
   allColumnComments,
+  displayValue: formatCellCached,
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   spatialColumns: computed(() => props.result.spatial_columns),
   spatialValues: computed(() => props.result.spatial_values),
@@ -11116,7 +11137,7 @@ function openGridSnapshot() {
                 <DataGridQueryControls
                   v-model:where-input="whereFilterInput"
                   v-model:order-by-input="orderByInput"
-                  v-model:filter-builder-open="filterBuilderOpen"
+                  v-model:filter-builder-open="effectiveFilterBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :condition-columns="conditionColumns"
@@ -11267,7 +11288,7 @@ function openGridSnapshot() {
           </DataGridToolbar>
         </div>
         <DataGridFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && filterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'conditions' && effectiveFilterBuilderOpen"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -11287,7 +11308,7 @@ function openGridSnapshot() {
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'text' && effectiveFilterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"

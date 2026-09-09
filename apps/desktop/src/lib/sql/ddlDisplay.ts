@@ -1,4 +1,4 @@
-import { requiresMysqlIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
+import { requiresMysqlIdentifierQuote, requiresOracleIdentifierQuote, requiresPostgresIdentifierQuote } from "@/lib/sql/sqlIdentifier";
 import { tokenizeSqlSemantic, unquoteSqlSemanticIdentifier } from "@/lib/sql/semantic/tokens";
 import type { SqlFormatDialect } from "@/lib/sql/sqlFormatter";
 
@@ -11,11 +11,12 @@ function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boole
       return !requiresMysqlIdentifierQuote(identifier);
     case "postgres":
     case "sqlite":
-    case "oracle":
     case "duckdb":
     case "dameng":
     case "generic":
       return !requiresPostgresIdentifierQuote(identifier);
+    case "oracle":
+      return !requiresOracleIdentifierQuote(identifier);
     case "sqlserver":
       return SIMPLE_SQLSERVER_IDENTIFIER.test(identifier) && !requiresMysqlIdentifierQuote(identifier.toLowerCase());
     default:

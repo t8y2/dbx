@@ -20,4 +20,14 @@ describe("omitDdlIdentifierQuotes", () => {
     const ddl = "CREATE TABLE [demo_table] ([order] int, [key] int, [user] nvarchar(50), [id] int)";
     expect(omitDdlIdentifierQuotes(ddl, "sqlserver")).toBe("CREATE TABLE demo_table ([order] int, [key] int, [user] nvarchar(50), id int)");
   });
+
+  it("removes quotes from ordinary uppercase Oracle identifiers", () => {
+    const ddl = 'CREATE TABLE "DBX_TEST"."PRODUCTS" ("ID" NUMBER(10), "SKU" VARCHAR2(32)) TABLESPACE "USERS";';
+    expect(omitDdlIdentifierQuotes(ddl, "oracle")).toBe("CREATE TABLE DBX_TEST.PRODUCTS (ID NUMBER(10), SKU VARCHAR2(32)) TABLESPACE USERS;");
+  });
+
+  it("keeps quotes required by Oracle case and naming rules", () => {
+    const ddl = 'CREATE TABLE "CamelCase" ("lowercase" NUMBER, "WITH SPACE" NUMBER, "ORDER" NUMBER)';
+    expect(omitDdlIdentifierQuotes(ddl, "oracle")).toBe(ddl);
+  });
 });

@@ -1,5 +1,6 @@
 const SIMPLE_LOWER_IDENTIFIER = /^[a-z_][a-z0-9_$]*$/;
 const SIMPLE_MYSQL_IDENTIFIER = /^[A-Za-z_$\u0080-\uFFFF][A-Za-z0-9_$\u0080-\uFFFF]*$/u;
+const SIMPLE_ORACLE_IDENTIFIER = /^[A-Z][A-Z0-9_$#]*$/;
 
 // PostgreSQL pg_get_keywords() categories R and T. GaussDB's PostgreSQL-
 // compatible modes use the same identifier constraints for bare names.
@@ -181,6 +182,120 @@ const MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS = new Set([
   "zerofill",
 ]);
 
+// Oracle 11g SQL reserved words. Ordinary unquoted Oracle identifiers are
+// uppercase-folded, so only uppercase names outside this set are safe to unwrap.
+const ORACLE_RESERVED_IDENTIFIER_KEYWORDS = new Set([
+  "ACCESS",
+  "ADD",
+  "ALL",
+  "ALTER",
+  "AND",
+  "ANY",
+  "AS",
+  "ASC",
+  "AUDIT",
+  "BETWEEN",
+  "BY",
+  "CHAR",
+  "CHECK",
+  "CLUSTER",
+  "COLUMN",
+  "COMMENT",
+  "COMPRESS",
+  "CONNECT",
+  "CREATE",
+  "CURRENT",
+  "DATE",
+  "DECIMAL",
+  "DEFAULT",
+  "DELETE",
+  "DESC",
+  "DISTINCT",
+  "DROP",
+  "ELSE",
+  "EXCLUSIVE",
+  "EXISTS",
+  "FILE",
+  "FLOAT",
+  "FOR",
+  "FROM",
+  "GRANT",
+  "GROUP",
+  "HAVING",
+  "IDENTIFIED",
+  "IMMEDIATE",
+  "IN",
+  "INCREMENT",
+  "INDEX",
+  "INITIAL",
+  "INSERT",
+  "INTEGER",
+  "INTERSECT",
+  "INTO",
+  "IS",
+  "LEVEL",
+  "LIKE",
+  "LOCK",
+  "LONG",
+  "MAXEXTENTS",
+  "MINUS",
+  "MLSLABEL",
+  "MODE",
+  "MODIFY",
+  "NOAUDIT",
+  "NOCOMPRESS",
+  "NOT",
+  "NOWAIT",
+  "NULL",
+  "NUMBER",
+  "OF",
+  "OFFLINE",
+  "ON",
+  "ONLINE",
+  "OPTION",
+  "OR",
+  "ORDER",
+  "PCTFREE",
+  "PRIOR",
+  "PRIVILEGES",
+  "PUBLIC",
+  "RAW",
+  "RENAME",
+  "RESOURCE",
+  "REVOKE",
+  "ROW",
+  "ROWID",
+  "ROWNUM",
+  "ROWS",
+  "SELECT",
+  "SESSION",
+  "SET",
+  "SHARE",
+  "SIZE",
+  "SMALLINT",
+  "START",
+  "SUCCESSFUL",
+  "SYNONYM",
+  "SYSDATE",
+  "TABLE",
+  "THEN",
+  "TO",
+  "TRIGGER",
+  "UID",
+  "UNION",
+  "UNIQUE",
+  "UPDATE",
+  "USER",
+  "VALIDATE",
+  "VALUES",
+  "VARCHAR",
+  "VARCHAR2",
+  "VIEW",
+  "WHENEVER",
+  "WHERE",
+  "WITH",
+]);
+
 export function isExplicitlyQuotedSqlIdentifier(value: string): boolean {
   if (value.length < 2) return false;
   return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("`") && value.endsWith("`")) || (value.startsWith("[") && value.endsWith("]"));
@@ -195,6 +310,10 @@ export function requiresMysqlIdentifierQuote(identifier: string, additionalKeywo
   if (!SIMPLE_MYSQL_IDENTIFIER.test(identifier)) return true;
   const normalized = identifier.toLowerCase();
   return POSTGRES_RESERVED_IDENTIFIER_KEYWORDS.has(normalized) || additionalKeywords?.has(normalized) === true || MYSQL_ONLY_RESERVED_IDENTIFIER_KEYWORDS.has(normalized);
+}
+
+export function requiresOracleIdentifierQuote(identifier: string): boolean {
+  return !SIMPLE_ORACLE_IDENTIFIER.test(identifier) || ORACLE_RESERVED_IDENTIFIER_KEYWORDS.has(identifier);
 }
 
 export function quoteGaussDbJdbcIdentifier(identifier: string, identifierQuote: string): string {

@@ -6487,8 +6487,38 @@ fn postgres_transfer_routines_sql(schema: &str, has_prokind: bool) -> String {
          FROM pg_catalog.pg_proc p \
          JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
          WHERE n.nspname = {schema} AND {routine_filter} \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM pg_catalog.pg_depend d \
+             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+             WHERE d.classid = 'pg_catalog.pg_proc'::regclass \
+               AND d.objid = p.oid \
+               AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
+               AND d.deptype = 'e' \
+               AND e.extnamespace = n.oid \
+           ) \
          ORDER BY CASE WHEN {routine_kind} = 'PROCEDURE' THEN 0 ELSE 1 END, p.proname, p.oid",
         schema = quote_string_literal(schema),
+    )
+}
+
+fn postgres_transfer_relation_sources_sql(schema: &str, relkind: char) -> String {
+    format!(
+        "SELECT c.relname, pg_get_viewdef(c.oid, true) \
+         FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = {} AND c.relkind = {} \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM pg_catalog.pg_depend d \
+             JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+             WHERE d.classid = 'pg_catalog.pg_class'::regclass \
+               AND d.objid = c.oid \
+               AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
+               AND d.deptype = 'e' \
+               AND e.extnamespace = n.oid \
+           ) \
+         ORDER BY c.relname",
+        quote_string_literal(schema),
+        quote_string_literal(&relkind.to_string()),
     )
 }
 
@@ -6498,14 +6528,7 @@ async fn get_postgres_schema_object_sources_for_transfer(
     schema: &str,
     has_prokind: bool,
 ) -> Result<Vec<db::ObjectSource>, String> {
-    let views_sql = format!(
-        "SELECT c.relname, pg_get_viewdef(c.oid, true) \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = {} AND c.relkind = 'v' \
-         ORDER BY c.relname",
-        quote_string_literal(schema)
-    );
+    let views_sql = postgres_transfer_relation_sources_sql(schema, 'v');
     let routines_sql = postgres_transfer_routines_sql(schema, has_prokind);
 
     let mut sources = Vec::new();
@@ -6552,14 +6575,7 @@ async fn get_postgres_materialized_view_sources_for_transfer(
     pool_key: &str,
     schema: &str,
 ) -> Result<Vec<PostgresMaterializedViewSource>, String> {
-    let sql = format!(
-        "SELECT c.relname, pg_get_viewdef(c.oid, true) \
-         FROM pg_catalog.pg_class c \
-         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = {} AND c.relkind = 'm' \
-         ORDER BY c.relname",
-        quote_string_literal(schema)
-    );
+    let sql = postgres_transfer_relation_sources_sql(schema, 'm');
     let rows = execute_on_pool(state, pool_key, &sql).await?.rows;
     Ok(rows
         .into_iter()
@@ -10930,6 +10946,30 @@ mod tests {
             assert!(legacy.contains("'FUNCTION'"));
             assert!(legacy.contains("NOT p.proisagg"));
             assert!(legacy.contains("NOT p.proiswindow"));
+
+            for sql in [modern, legacy] {
+                assert!(sql.contains("JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid"));
+                assert!(sql.contains("d.classid = 'pg_catalog.pg_proc'::regclass"));
+                assert!(sql.contains("d.objid = p.oid"));
+                assert!(sql.contains("d.refclassid = 'pg_catalog.pg_extension'::regclass"));
+                assert!(sql.contains("d.deptype = 'e'"));
+                assert!(sql.contains("e.extnamespace = n.oid"));
+            }
+        }
+
+        #[test]
+        fn postgres_transfer_relation_sources_exclude_extension_members() {
+            for relkind in ['v', 'm'] {
+                let sql = postgres_transfer_relation_sources_sql("public", relkind);
+
+                assert!(sql.contains(&format!("c.relkind = '{relkind}'")));
+                assert!(sql.contains("JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid"));
+                assert!(sql.contains("d.classid = 'pg_catalog.pg_class'::regclass"));
+                assert!(sql.contains("d.objid = c.oid"));
+                assert!(sql.contains("d.refclassid = 'pg_catalog.pg_extension'::regclass"));
+                assert!(sql.contains("d.deptype = 'e'"));
+                assert!(sql.contains("e.extnamespace = n.oid"));
+            }
         }
 
         #[test]

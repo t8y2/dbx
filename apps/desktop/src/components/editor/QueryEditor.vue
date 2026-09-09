@@ -4940,6 +4940,13 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
 
   const cteDefs = extractCteDefinitions(fullDoc);
   for (const refTable of completionContext.referencedTables) {
+    if (refTable.columns?.length) {
+      columnsByTable.set(
+        refTable.name,
+        refTable.columns.map((name) => ({ name, table: refTable.name, schema: refTable.schema })),
+      );
+      continue;
+    }
     if (isVirtualCompletionTableReference(refTable)) continue;
     const cteDef = cteDefs.find((c) => c.name.toLowerCase() === refTable.name.toLowerCase());
     if (cteDef) {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
+const largeValueSource = readFileSync(new URL("../../../composables/useDataGridLargeValues.ts", import.meta.url), "utf8");
 
 describe("DataGrid delete row confirmation details", () => {
   it("still wires deleteRowDetails into the delete-row DangerConfirmDialog", () => {
@@ -22,7 +23,7 @@ describe("DataGrid delete row confirmation details", () => {
     expect(detailsStart).toBeGreaterThanOrEqual(0);
     expect(detailsEnd).toBeGreaterThan(detailsStart);
     expect(dataGridSource.slice(detailsStart, detailsEnd)).toContain("formatGridItemCellForConfirmation");
-    expect(dataGridSource).toContain("formatCell(item.data[columnIndex], columnIndex, largeValueOriginalBytes(item, columnIndex), false)");
+    expect(largeValueSource).toContain("options.formatCell(item.data[columnIndex], columnIndex, largeValueOriginalBytes(item, columnIndex), false)");
   });
 
   it("keeps close-on-confirm disabled so confirmDeleteRow runs before the dialog auto-closes", () => {

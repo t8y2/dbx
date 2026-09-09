@@ -1711,14 +1711,8 @@ async fn external_driver_oracle_columns_via_sql(
     }
 }
 
-fn should_query_oracle_columns_via_sql_first(
-    db_type: &DatabaseType,
-    schema: &str,
-    client_session_id: Option<&str>,
-) -> bool {
-    *db_type == DatabaseType::Oracle
-        && schema.trim().is_empty()
-        && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
+fn should_query_oracle_columns_via_sql_first(db_type: &DatabaseType, client_session_id: Option<&str>) -> bool {
+    *db_type == DatabaseType::Oracle && client_session_id.is_some_and(|session_id| !session_id.trim().is_empty())
 }
 
 fn oracle_object_statistics_sql(schema: &str) -> String {
@@ -5342,17 +5336,16 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn oracle_session_completion_queries_synonym_aware_columns_sql_first() {
-        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("tab-1")));
-        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "   ", Some("tab-1")));
+    fn oracle_columns_sql_first_handles_current_schema_editor_sessions() {
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
     }
 
     #[test]
-    fn oracle_columns_sql_first_is_limited_to_current_schema_editor_sessions() {
-        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "DBX_TEST", Some("tab-1")));
-        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", None));
-        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, "", Some("  ")));
-        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, "", Some("tab-1")));
+    fn oracle_columns_sql_first_handles_explicit_schema_editor_sessions() {
+        assert!(should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("tab-1")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, None));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Oracle, Some("  ")));
+        assert!(!should_query_oracle_columns_via_sql_first(&DatabaseType::Postgres, Some("tab-1")));
     }
 
     #[test]
@@ -6758,7 +6751,7 @@ async fn get_columns_core_for_session_inner(
                     return external_driver_presto_like_columns(session, config.as_ref(), database, schema, table).await;
                 }
                 let query_oracle_columns_first =
-                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, context_session_id);
+                    should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id);
                 if query_oracle_columns_first {
                     match external_driver_oracle_columns_via_sql(
                         session.clone(),
@@ -6861,7 +6854,7 @@ async fn get_columns_core_for_session_inner(
                 let fallback_config = db_config.clone();
                                 let mut client = client.lock().await;
                 let oracle_sql_config = fallback_config.as_ref().filter(|config| {
-                    should_query_oracle_columns_via_sql_first(&config.db_type, schema, context_session_id)
+                    should_query_oracle_columns_via_sql_first(&config.db_type, context_session_id)
                 });
                 let query_oracle_columns_first = oracle_sql_config.is_some();
                 if let Some(config) = oracle_sql_config {

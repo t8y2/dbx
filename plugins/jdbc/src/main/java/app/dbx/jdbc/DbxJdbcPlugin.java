@@ -4278,6 +4278,15 @@ public final class DbxJdbcPlugin {
             return null;
         }
 
+        if (columnType == Types.CHAR
+            || columnType == Types.VARCHAR
+            || columnType == Types.LONGVARCHAR
+            || columnType == Types.NCHAR
+            || columnType == Types.NVARCHAR
+            || columnType == Types.LONGNVARCHAR) {
+            return rs.getString(index);
+        }
+
         // Phoenix exposes VARBINARY_ENCODED as a private type id (9000). Read it through the
         // binary JDBC accessor before a generic getObject() path can ask the driver for an
         // unsupported Java representation.

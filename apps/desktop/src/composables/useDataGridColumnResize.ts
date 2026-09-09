@@ -86,7 +86,7 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     });
   }
 
-  const neededColumnWidths = computed(() => columns.value.map((_, colIdx) => neededColumnWidth(colIdx)));
+  const neededColumnWidths = computed(() => (columns.value ?? []).map((_, colIdx) => neededColumnWidth(colIdx)));
   const neededColumnWidthSignature = computed(() => neededColumnWidths.value.join("|"));
 
   /** Grow-only: late pages with larger keys must not stay stuck at a short-header / early-page width. */
@@ -123,9 +123,10 @@ export function useDataGridColumnResize(options: UseDataGridColumnResizeOptions)
     const nextColumnIndexes = [...columnIndexes.value];
     const cachedState = !force && previousColumnIndexes.length === 0 ? loadDataGridColumnWidthState(columnWidthStateIdentity(), nextColumnIndexes) : undefined;
     if (cachedState) userSizedColumnIndexes = new Set(cachedState.userSizedColumnIndexes);
-    const currentNeededWidths = neededColumnWidths.value;
-    if (force || columnWidths.value.length !== columns.value.length || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
-      columnWidths.value = columns.value.map((_, colIdx) => {
+    const currentNeededWidths = neededColumnWidths.value ?? [];
+    const columnCount = columns.value?.length ?? 0;
+    if (force || columnWidths.value.length !== columnCount || previousColumnIndexes.join("\0") !== nextColumnIndexes.join("\0")) {
+      columnWidths.value = (columns.value ?? []).map((_, colIdx) => {
         if (!force) {
           const existingWidth = previousWidthsByColumnIndex.get(nextColumnIndexes[colIdx]);
           if (existingWidth !== undefined) return existingWidth;

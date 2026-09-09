@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   cancellingRunIds: new Set<string>(),
   activeRuns: [] as DatabaseBackupRun[],
   ensureConnected: vi.fn(async () => {}),
+  recordConnectionLostError: vi.fn(() => false),
   listDatabases: vi.fn(async (_connectionId: string) => [{ name: "app" }]),
   databaseExportDestinationNeedsConfirmation: vi.fn(async (_directory: string) => false),
   recordDatabaseExportDestination: vi.fn(async (_directory: string) => {}),
@@ -23,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   setScheduleEnabled: vi.fn(),
   deleteSchedule: vi.fn(),
   deleteRun: vi.fn(),
+  deleteRuns: vi.fn(),
   runSchedule: vi.fn(),
   runOneShot: vi.fn(),
   cancelRun: vi.fn(),
@@ -32,6 +34,7 @@ vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     connections: mocks.connections,
     ensureConnected: mocks.ensureConnected,
+    recordConnectionLostError: mocks.recordConnectionLostError,
     getConfig: (connectionId: string) => mocks.connections.find((connection) => connection.id === connectionId),
     sqlFileSource: null,
   }),
@@ -49,6 +52,7 @@ vi.mock("@/composables/useScheduledDatabaseBackups", () => ({
     setScheduleEnabled: mocks.setScheduleEnabled,
     deleteSchedule: mocks.deleteSchedule,
     deleteRun: mocks.deleteRun,
+    deleteRuns: mocks.deleteRuns,
     runSchedule: mocks.runSchedule,
     runOneShot: mocks.runOneShot,
     cancelRun: mocks.cancelRun,
@@ -250,6 +254,8 @@ afterEach(() => {
   mocks.activeRunIds.clear();
   mocks.cancellingRunIds.clear();
   mocks.ensureConnected.mockClear();
+  mocks.recordConnectionLostError.mockReset();
+  mocks.recordConnectionLostError.mockReturnValue(false);
   mocks.listDatabases.mockReset();
   mocks.listDatabases.mockResolvedValue([{ name: "app" }]);
   mocks.databaseExportDestinationNeedsConfirmation.mockReset();
@@ -260,6 +266,8 @@ afterEach(() => {
   mocks.openDirectory.mockResolvedValue("/backups");
   mocks.toast.mockClear();
   mocks.saveSchedule.mockClear();
+  mocks.deleteRun.mockClear();
+  mocks.deleteRuns.mockClear();
   mocks.cancelRun.mockClear();
   mocks.runSchedule.mockReset();
   mocks.runSchedule.mockResolvedValue(null);
@@ -268,6 +276,83 @@ afterEach(() => {
 });
 
 describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
+  it("reconnects once when loading databases finds a closed connection", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("MySQL connection failed: Input/output error: connection closed")).mockResolvedValueOnce([{ name: "app" }]);
+    mocks.recordConnectionLostError.mockReturnValue(true);
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    await showDatabaseOptions();
+    await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(2));
+
+    expect(mocks.recordConnectionLostError).toHaveBeenCalledWith("mysql-1", expect.any(Error));
+    expect(mocks.ensureConnected).toHaveBeenCalledTimes(2);
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("shows connection guidance inline when explicitly loading databases fails", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    mocks.listDatabases.mockRejectedValueOnce(new Error("MySQL connection failed: Input/output error: connection closed"));
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    await showDatabaseOptions();
+    await vi.waitFor(() => expect(currentDialog().querySelector("[data-backup-database-load-error]")?.textContent).toContain("Local MySQL"));
+
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+
+  it("selects filtered backup history and deletes the selected runs together", async () => {
+    mocks.runs.push(
+      {
+        id: "run-batch-one",
+        scheduleName: "First backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "scheduled",
+        source: "scheduled",
+        status: "success",
+        startedAt: "2026-09-08T02:00:00.000Z",
+        files: [{ displayName: "first.sql", filePath: "/backups/first.sql" }],
+      },
+      {
+        id: "run-batch-two",
+        scheduleName: "Second backup",
+        connectionId: "mysql-1",
+        connectionName: "Local MySQL",
+        trigger: "scheduled",
+        source: "scheduled",
+        status: "success",
+        startedAt: "2026-09-08T01:00:00.000Z",
+        files: [{ displayName: "second.sql", filePath: "/backups/second.sql" }],
+      },
+    );
+    await mountSettings();
+
+    const selectAll = document.body.querySelector<HTMLInputElement>("[data-backup-history-select-all]");
+    if (!selectAll) throw new Error("Select-all checkbox not found");
+    selectAll.checked = true;
+    selectAll.dispatchEvent(new Event("change", { bubbles: true }));
+    await flush();
+
+    expect(document.body.querySelectorAll<HTMLInputElement>("[data-backup-history-select]")).toHaveLength(2);
+    const deleteSelected = document.body.querySelector<HTMLButtonElement>("[data-backup-delete-selected]");
+    if (!deleteSelected) throw new Error("Delete selected button not found");
+    deleteSelected.click();
+    await flush();
+
+    expect(currentDialog().textContent).toContain(String(i18n.global.t("databaseBackup.deleteBackupsConfirm", { count: 2, files: 2 })));
+    const confirm = Array.from(currentDialog().querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(i18n.global.t("databaseBackup.delete")));
+    if (!confirm) throw new Error("Delete confirmation button not found");
+    confirm.click();
+    await flush();
+
+    expect(mocks.deleteRuns).toHaveBeenCalledWith(["run-batch-one", "run-batch-two"]);
+  });
+
   it("filters backup history by a searched connection", async () => {
     mocks.runs.push(
       {
@@ -335,7 +420,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(document.body.textContent).not.toContain("Manual success backup");
   });
 
-  it("opens the create schedule dialog for supported SQL connections", async () => {
+  it("opens the create schedule dialog without probing its default connection", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     await mountSettings();
 
@@ -348,8 +433,31 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     const dialog = document.body.querySelector('[data-slot="dialog-content"]');
     expect(dialog?.textContent).toContain(String(i18n.global.t("databaseBackup.addSchedule")));
     expect(dialog?.textContent).toContain(String(i18n.global.t("databaseBackup.scheduleName")));
-    expect(mocks.ensureConnected).toHaveBeenCalledWith("mysql-1");
-    expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-1");
+    expect(mocks.ensureConnected).not.toHaveBeenCalled();
+    expect(mocks.listDatabases).not.toHaveBeenCalled();
+  });
+
+  it("previews the rendered run directory and updates it when the template changes", async () => {
+    mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
+    await mountSettings();
+
+    addScheduleButton().click();
+    await flush();
+    buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
+    await flush();
+
+    const preview = currentDialog().querySelector<HTMLElement>("[data-backup-run-directory-preview]");
+    expect(preview?.textContent).toContain("/backups/dbx-backup__");
+    expect(preview?.textContent).toContain("preview0");
+
+    const input = currentDialog().querySelector<HTMLInputElement>("[data-backup-run-directory-pattern]");
+    if (!input) throw new Error("Run directory template input not found");
+    input.value = "archive/{date}/{timestamp}";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+
+    expect(currentDialog().textContent).toContain("{timestamp}");
+    expect(currentDialog().querySelector<HTMLElement>("[data-backup-run-directory-preview]")?.textContent).toContain("/backups/archive/");
   });
 
   it("opens an independent one-shot dialog without schedule fields", async () => {
@@ -400,6 +508,8 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await mountSettings();
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-a"));
     await selectBackupConnection("MySQL B");
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledWith("mysql-b"));
@@ -423,6 +533,8 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
     await flush();
     await showDatabaseOptions();
+    await flush();
+    await showDatabaseOptions();
 
     const search = currentDialog().querySelector<HTMLInputElement>("[data-backup-database-search]");
     if (!search) throw new Error("Backup database search not found");
@@ -438,27 +550,26 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
   it("does not let a closed one-shot request clear a schedule draft", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     const oneShotLoad = deferred<Array<{ name: string }>>();
-    const scheduleLoad = deferred<Array<{ name: string }>>();
-    mocks.listDatabases.mockImplementationOnce(() => oneShotLoad.promise).mockImplementationOnce(() => scheduleLoad.promise);
+    mocks.listDatabases.mockImplementationOnce(() => oneShotLoad.promise);
     await mountSettings();
 
     buttonWithText(String(i18n.global.t("databaseBackup.oneShotBackup"))).click();
+    await flush();
+    await showDatabaseOptions();
     await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(1));
     const closeOneShot = Array.from(currentDialog().querySelectorAll("button")).find((item) => item.textContent?.trim() === String(i18n.global.t("common.cancel")));
     closeOneShot?.click();
     await flush();
 
     addScheduleButton().click();
-    await vi.waitFor(() => expect(mocks.listDatabases).toHaveBeenCalledTimes(2));
+    await flush();
     await setTablePattern("schedule_*");
 
     oneShotLoad.resolve([{ name: "one_shot_database" }]);
     await flush();
     expect(currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`)?.value).toBe("schedule_*");
 
-    scheduleLoad.resolve([{ name: "schedule_database" }]);
-    await flush();
-    expect(currentDialog().querySelector<HTMLInputElement>(`input[placeholder="${String(i18n.global.t("databaseBackup.tablePatternsPlaceholder"))}"]`)?.value).toBe("schedule_*");
+    expect(mocks.listDatabases).toHaveBeenCalledTimes(1);
   });
 
   it("keeps closing the one-shot dialog separate from cancelling the active run", async () => {

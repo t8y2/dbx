@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import az from "../locales/docs/az";
 import en from "../locales/docs/en";
 import es from "../locales/docs/es";
 import it_ from "../locales/docs/it";
@@ -17,6 +18,7 @@ import zhTW from "../locales/docs/zh-TW";
 // have every key and this test would pass while translations were missing —
 // the fallback would silently defeat the test written to catch it.
 const locales: Array<[string, Record<string, unknown>]> = [
+  ["az", az],
   ["es", es],
   ["it", it_],
   ["ja", ja],

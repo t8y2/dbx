@@ -9,7 +9,7 @@ use redis::{
     TlsMode, Value as RedisRawValue,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, future::Future, time::Duration, time::Instant};
+use std::{collections::HashMap, future::Future, sync::OnceLock, time::Duration, time::Instant};
 use tokio::sync::{Mutex, MutexGuard};
 
 use super::json_value_for_js;
@@ -26,6 +26,9 @@ const CLUSTER_CURSOR_NODE_MASK: u64 = (1 << CLUSTER_CURSOR_NODE_BITS) - 1;
 const CLUSTER_CURSOR_SCAN_MASK: u64 = (1 << (64 - CLUSTER_CURSOR_NODE_BITS)) - 1;
 const CLUSTER_SCAN_SESSION_LIMIT: usize = 128;
 const CLUSTER_SCAN_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+const COLLECTION_OVERFLOW_SESSION_LIMIT: usize = 128;
+const COLLECTION_OVERFLOW_SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+const COLLECTION_OVERFLOW_CURSOR_START: u64 = 1 << 52;
 const INVALID_CLUSTER_SCAN_CURSOR_ERROR: &str = "Redis cluster scan cursor is invalid or expired";
 const MAX_SAFE_INTEGER_CURSOR: u64 = (1 << 53) - 1;
 
@@ -419,6 +422,102 @@ impl RedisClusterScanSessions {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RedisCollectionOverflowKind {
+    Hash,
+    Set,
+}
+
+#[derive(Debug, Clone)]
+enum RedisCollectionOverflowItems {
+    Hash(Vec<RedisHashItem>),
+    Set(Vec<RedisSetItem>),
+}
+
+#[derive(Debug, Clone)]
+struct RedisCollectionOverflowSession {
+    key: Vec<u8>,
+    kind: RedisCollectionOverflowKind,
+    filter: Option<String>,
+    sort_direction: Option<String>,
+    followup_cursor: u64,
+    items: RedisCollectionOverflowItems,
+    last_used: Instant,
+}
+
+#[derive(Debug)]
+struct RedisCollectionOverflowSessions {
+    next_cursor: u64,
+    entries: HashMap<u64, RedisCollectionOverflowSession>,
+}
+
+impl Default for RedisCollectionOverflowSessions {
+    fn default() -> Self {
+        Self { next_cursor: COLLECTION_OVERFLOW_CURSOR_START, entries: HashMap::new() }
+    }
+}
+
+impl RedisCollectionOverflowSessions {
+    fn take_matching(
+        &mut self,
+        cursor: u64,
+        key: &[u8],
+        kind: RedisCollectionOverflowKind,
+        filter: Option<&str>,
+        sort_direction: Option<&str>,
+    ) -> Option<RedisCollectionOverflowSession> {
+        self.remove_expired();
+        let matches = self.entries.get(&cursor).is_some_and(|session| {
+            session.key == key
+                && session.kind == kind
+                && session.filter.as_deref() == filter
+                && session.sort_direction.as_deref() == sort_direction
+        });
+        matches.then(|| self.entries.remove(&cursor)).flatten()
+    }
+
+    fn insert(&mut self, mut session: RedisCollectionOverflowSession) -> u64 {
+        self.remove_expired();
+        while self.entries.len() >= COLLECTION_OVERFLOW_SESSION_LIMIT {
+            let Some(oldest) = self.entries.iter().min_by_key(|(_, entry)| entry.last_used).map(|(id, _)| *id) else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+
+        let cursor = self.next_available_cursor();
+        session.last_used = Instant::now();
+        self.entries.insert(cursor, session);
+        cursor
+    }
+
+    fn reinsert(&mut self, cursor: u64, mut session: RedisCollectionOverflowSession) {
+        self.remove_expired();
+        session.last_used = Instant::now();
+        self.entries.insert(cursor, session);
+    }
+
+    fn remove_expired(&mut self) {
+        self.entries.retain(|_, entry| entry.last_used.elapsed() < COLLECTION_OVERFLOW_SESSION_TTL);
+    }
+
+    fn next_available_cursor(&mut self) -> u64 {
+        loop {
+            let cursor = self.next_cursor;
+            self.next_cursor =
+                if cursor >= MAX_SAFE_INTEGER_CURSOR { COLLECTION_OVERFLOW_CURSOR_START } else { cursor + 1 };
+            if cursor != 0 && !self.entries.contains_key(&cursor) {
+                return cursor;
+            }
+        }
+    }
+}
+
+fn collection_overflow_sessions() -> &'static Mutex<RedisCollectionOverflowSessions> {
+    static SESSIONS: OnceLock<Mutex<RedisCollectionOverflowSessions>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(RedisCollectionOverflowSessions::default()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2484,7 +2583,7 @@ where
         }
         "set" => {
             let len: u64 = redis::cmd("SCARD").arg(key).query_async(con).await.unwrap_or(0);
-            let (cursor, items) = sscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE).await?;
+            let (cursor, items) = sscan_bounded_page(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
             RedisValueData::Set { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
         "zset" => {
@@ -2496,7 +2595,7 @@ where
         }
         "hash" => {
             let len: u64 = redis::cmd("HLEN").arg(key).query_async(con).await.unwrap_or(0);
-            let (cursor, mut items) = hscan_page_raw(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
+            let (cursor, mut items) = hscan_bounded_page(con, key, 0, COLLECTION_PAGE_SIZE, None).await?;
             attach_hash_field_ttls(con, key, &mut items).await?;
             RedisValueData::Hash { items, total: len, scan_cursor: (cursor > 0).then_some(cursor) }
         }
@@ -3556,9 +3655,9 @@ where
         }
         "set" => {
             let (next_cursor, items) = if let Some(query) = filter_query {
-                sscan_filtered_page_raw(con, key, cursor, count, query).await?
+                sscan_bounded_page(con, key, cursor, count, Some(query)).await?
             } else {
-                sscan_page_raw(con, key, cursor, count).await?
+                sscan_bounded_page(con, key, cursor, count, None).await?
             };
             Ok(RedisCollectionPage::Set { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
         }
@@ -3583,9 +3682,9 @@ where
         }
         "hash" => {
             let (next_cursor, mut items) = if let Some(query) = filter_query {
-                hscan_filtered_page_raw(con, key, cursor, count, query).await?
+                hscan_bounded_page(con, key, cursor, count, Some(query)).await?
             } else {
-                hscan_page_raw(con, key, cursor, count, None).await?
+                hscan_bounded_page(con, key, cursor, count, None).await?
             };
             attach_hash_field_ttls(con, key, &mut items).await?;
             Ok(RedisCollectionPage::Hash { items, scan_cursor: (next_cursor > 0).then_some(next_cursor) })
@@ -3752,6 +3851,162 @@ where
     }
 
     Ok((items, cur))
+}
+
+async fn hscan_bounded_page<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    filter_query: Option<&str>,
+) -> Result<(u64, Vec<RedisHashItem>), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let count = count.max(1);
+    if let Some(page) = take_hash_overflow_page(key, cursor, count, filter_query).await {
+        return Ok(page);
+    }
+
+    let (next_cursor, mut items) = if let Some(query) = filter_query {
+        hscan_filtered_page_raw(con, key, cursor, count, query).await?
+    } else {
+        hscan_page_raw(con, key, cursor, count, None).await?
+    };
+    let next_cursor = store_hash_overflow_page(key, &mut items, count, next_cursor, filter_query).await;
+    Ok((next_cursor, items))
+}
+
+async fn sscan_bounded_page<C>(
+    con: &mut C,
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    filter_query: Option<&str>,
+) -> Result<(u64, Vec<RedisSetItem>), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    let count = count.max(1);
+    if let Some(page) = take_set_overflow_page(key, cursor, count, filter_query).await {
+        return Ok(page);
+    }
+
+    let (next_cursor, mut items) = if let Some(query) = filter_query {
+        sscan_filtered_page_raw(con, key, cursor, count, query).await?
+    } else {
+        sscan_page_raw(con, key, cursor, count).await?
+    };
+    let next_cursor = store_set_overflow_page(key, &mut items, count, next_cursor, filter_query).await;
+    Ok((next_cursor, items))
+}
+
+async fn take_hash_overflow_page(
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    filter_query: Option<&str>,
+) -> Option<(u64, Vec<RedisHashItem>)> {
+    if cursor == 0 {
+        return None;
+    }
+
+    let mut sessions = collection_overflow_sessions().lock().await;
+    let mut session = sessions.take_matching(cursor, key, RedisCollectionOverflowKind::Hash, filter_query, None)?;
+    let page = match &mut session.items {
+        RedisCollectionOverflowItems::Hash(items) => take_vec_page(items, count),
+        RedisCollectionOverflowItems::Set(_) => return None,
+    };
+    let has_buffered_items = match &session.items {
+        RedisCollectionOverflowItems::Hash(items) => !items.is_empty(),
+        RedisCollectionOverflowItems::Set(_) => false,
+    };
+    let next_cursor = if has_buffered_items { cursor } else { session.followup_cursor };
+    if has_buffered_items {
+        sessions.reinsert(cursor, session);
+    }
+    Some((next_cursor, page))
+}
+
+async fn take_set_overflow_page(
+    key: &[u8],
+    cursor: u64,
+    count: usize,
+    filter_query: Option<&str>,
+) -> Option<(u64, Vec<RedisSetItem>)> {
+    if cursor == 0 {
+        return None;
+    }
+
+    let mut sessions = collection_overflow_sessions().lock().await;
+    let mut session = sessions.take_matching(cursor, key, RedisCollectionOverflowKind::Set, filter_query, None)?;
+    let page = match &mut session.items {
+        RedisCollectionOverflowItems::Set(items) => take_vec_page(items, count),
+        RedisCollectionOverflowItems::Hash(_) => return None,
+    };
+    let has_buffered_items = match &session.items {
+        RedisCollectionOverflowItems::Set(items) => !items.is_empty(),
+        RedisCollectionOverflowItems::Hash(_) => false,
+    };
+    let next_cursor = if has_buffered_items { cursor } else { session.followup_cursor };
+    if has_buffered_items {
+        sessions.reinsert(cursor, session);
+    }
+    Some((next_cursor, page))
+}
+
+async fn store_hash_overflow_page(
+    key: &[u8],
+    items: &mut Vec<RedisHashItem>,
+    count: usize,
+    followup_cursor: u64,
+    filter_query: Option<&str>,
+) -> u64 {
+    if items.len() <= count {
+        return followup_cursor;
+    }
+
+    let overflow = items.split_off(count);
+    let session = RedisCollectionOverflowSession {
+        key: key.to_vec(),
+        kind: RedisCollectionOverflowKind::Hash,
+        filter: filter_query.map(str::to_string),
+        sort_direction: None,
+        followup_cursor,
+        items: RedisCollectionOverflowItems::Hash(overflow),
+        last_used: Instant::now(),
+    };
+    collection_overflow_sessions().lock().await.insert(session)
+}
+
+async fn store_set_overflow_page(
+    key: &[u8],
+    items: &mut Vec<RedisSetItem>,
+    count: usize,
+    followup_cursor: u64,
+    filter_query: Option<&str>,
+) -> u64 {
+    if items.len() <= count {
+        return followup_cursor;
+    }
+
+    let overflow = items.split_off(count);
+    let session = RedisCollectionOverflowSession {
+        key: key.to_vec(),
+        kind: RedisCollectionOverflowKind::Set,
+        filter: filter_query.map(str::to_string),
+        sort_direction: None,
+        followup_cursor,
+        items: RedisCollectionOverflowItems::Set(overflow),
+        last_used: Instant::now(),
+    };
+    collection_overflow_sessions().lock().await.insert(session)
+}
+
+fn take_vec_page<T>(items: &mut Vec<T>, count: usize) -> Vec<T> {
+    let page_size = items.len().min(count.max(1));
+    let overflow = items.split_off(page_size);
+    std::mem::replace(items, overflow)
 }
 
 async fn attach_hash_field_ttls<C>(con: &mut C, key: &[u8], items: &mut [RedisHashItem]) -> Result<(), String>
@@ -4080,6 +4335,22 @@ mod tests {
     fn hscan_response(cursor: &str, pairs: Vec<(&str, &str)>) -> RedisRawValue {
         let entries = pairs.into_iter().flat_map(|(field, value)| [bulk(field), bulk(value)]).collect();
         RedisRawValue::Array(vec![bulk(cursor), RedisRawValue::Array(entries)])
+    }
+
+    fn hscan_response_owned(cursor: &str, pairs: Vec<(String, String)>) -> RedisRawValue {
+        let entries = pairs.into_iter().flat_map(|(field, value)| [bulk(&field), bulk(&value)]).collect();
+        RedisRawValue::Array(vec![bulk(cursor), RedisRawValue::Array(entries)])
+    }
+
+    fn int_scan_response_owned(cursor: &str, members: Vec<String>) -> RedisRawValue {
+        RedisRawValue::Array(vec![
+            bulk(cursor),
+            RedisRawValue::Array(members.into_iter().map(|member| bulk(&member)).collect()),
+        ])
+    }
+
+    fn httl_response(count: usize, ttl: i64) -> RedisRawValue {
+        RedisRawValue::Array((0..count).map(|_| RedisRawValue::Int(ttl)).collect())
     }
 
     fn zrange_response(pairs: Vec<(&str, &str)>) -> RedisRawValue {
@@ -4455,6 +4726,136 @@ mod tests {
         assert_eq!(con.command_count("GETRANGE"), 1);
         assert_eq!(con.command_count("GET"), 0);
         assert_eq!(con.command_count("STRLEN"), 1);
+    }
+
+    #[tokio::test]
+    async fn hash_value_pages_compact_hscan_before_field_ttls() {
+        let pairs = (0..512).map(|index| (format!("field:{index}"), format!("value:{index}"))).collect();
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("hash"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::Int(512),
+            hscan_response_owned("0", pairs),
+            httl_response(super::COLLECTION_PAGE_SIZE, -1),
+            httl_response(super::COLLECTION_PAGE_SIZE, -1),
+            httl_response(112, -1),
+        ]);
+
+        let value = super::get_value(&mut con, b"large-hash").await.unwrap();
+
+        let RedisValueData::Hash { items, total, scan_cursor } = value.data else {
+            panic!("expected a Hash value");
+        };
+        let cursor = scan_cursor.expect("overflow cursor");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+        assert_eq!(total, 512);
+        assert_eq!(items.len(), super::COLLECTION_PAGE_SIZE);
+        assert_eq!(redis_blob_display_text(&items[0].field), "field:0");
+        assert_eq!(redis_blob_display_text(&items[199].field), "field:199");
+        assert!(items.iter().all(|item| item.field_ttl == Some(-1)));
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 1);
+        let httl_command = con.commands.iter().find(|command| command.contains("\r\nHTTL\r\n")).unwrap();
+        assert!(httl_command.contains("\r\nFIELDS\r\n"));
+        assert!(httl_command.contains("\r\n200\r\n"));
+        assert!(!httl_command.contains("\r\nfield:200\r\n"));
+
+        let second =
+            super::load_more_collection(&mut con, b"large-hash", "hash", cursor, 200, None, None).await.unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = second else {
+            panic!("expected a Hash page");
+        };
+        assert_eq!(scan_cursor, Some(cursor));
+        assert_eq!(items.len(), 200);
+        assert_eq!(redis_blob_display_text(&items[0].field), "field:200");
+        assert_eq!(redis_blob_display_text(&items[199].field), "field:399");
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 2);
+
+        let third =
+            super::load_more_collection(&mut con, b"large-hash", "hash", cursor, 200, None, None).await.unwrap();
+        let RedisCollectionPage::Hash { items, scan_cursor } = third else {
+            panic!("expected a Hash page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items.len(), 112);
+        assert_eq!(redis_blob_display_text(&items[0].field), "field:400");
+        assert_eq!(redis_blob_display_text(&items[111].field), "field:511");
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 3);
+    }
+
+    #[tokio::test]
+    async fn large_hash_value_stays_bounded_when_httl_is_unsupported() {
+        let pairs = (0..512).map(|index| (format!("field:{index}"), format!("value:{index}"))).collect();
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown command 'HTTL'".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![
+            Ok(bulk("hash")),
+            Ok(RedisRawValue::Int(-1)),
+            Ok(RedisRawValue::Int(512)),
+            Ok(hscan_response_owned("0", pairs)),
+            Err(unsupported),
+        ]);
+
+        let value = super::get_value(&mut con, b"large-hash-no-httl").await.unwrap();
+
+        let RedisValueData::Hash { items, total, scan_cursor } = value.data else {
+            panic!("expected a Hash value");
+        };
+        assert_eq!(total, 512);
+        assert_eq!(items.len(), super::COLLECTION_PAGE_SIZE);
+        assert!(scan_cursor.is_some());
+        assert!(items.iter().all(|item| item.field_ttl.is_none()));
+        assert_eq!(con.command_count("HSCAN"), 1);
+        assert_eq!(con.command_count("HTTL"), 1);
+    }
+
+    #[tokio::test]
+    async fn set_value_pages_compact_sscan_response() {
+        let members = (0..512).map(|index| format!("member:{index}")).collect();
+        let mut con = FakeRedisConnection::new(vec![
+            bulk("set"),
+            RedisRawValue::Int(-1),
+            RedisRawValue::Int(512),
+            int_scan_response_owned("0", members),
+        ]);
+
+        let value = super::get_value(&mut con, b"large-intset").await.unwrap();
+
+        let RedisValueData::Set { items, total, scan_cursor } = value.data else {
+            panic!("expected a Set value");
+        };
+        let cursor = scan_cursor.expect("overflow cursor");
+        assert!(cursor >= super::COLLECTION_OVERFLOW_CURSOR_START);
+        assert_eq!(total, 512);
+        assert_eq!(items.len(), super::COLLECTION_PAGE_SIZE);
+        assert_eq!(redis_blob_display_text(&items[0].member), "member:0");
+        assert_eq!(redis_blob_display_text(&items[199].member), "member:199");
+
+        let second =
+            super::load_more_collection(&mut con, b"large-intset", "set", cursor, 200, None, None).await.unwrap();
+        let RedisCollectionPage::Set { items, scan_cursor } = second else {
+            panic!("expected a Set page");
+        };
+        assert_eq!(scan_cursor, Some(cursor));
+        assert_eq!(items.len(), 200);
+        assert_eq!(redis_blob_display_text(&items[0].member), "member:200");
+        assert_eq!(redis_blob_display_text(&items[199].member), "member:399");
+
+        let third =
+            super::load_more_collection(&mut con, b"large-intset", "set", cursor, 200, None, None).await.unwrap();
+        let RedisCollectionPage::Set { items, scan_cursor } = third else {
+            panic!("expected a Set page");
+        };
+        assert_eq!(scan_cursor, None);
+        assert_eq!(items.len(), 112);
+        assert_eq!(redis_blob_display_text(&items[0].member), "member:400");
+        assert_eq!(redis_blob_display_text(&items[111].member), "member:511");
+        assert_eq!(con.command_count("SSCAN"), 1);
     }
 
     #[tokio::test]

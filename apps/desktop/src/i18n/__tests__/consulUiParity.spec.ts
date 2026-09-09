@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
 import it_ from "../locales/it";
@@ -11,6 +12,7 @@ import zhCN from "../locales/zh-CN";
 import zhTW from "../locales/zh-TW";
 
 const locales: Array<[string, Record<string, unknown>]> = [
+  ["az", az],
   ["en", en],
   ["es", es],
   ["it", it_],

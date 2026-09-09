@@ -70,6 +70,44 @@ const config: DatabaseBackupExecutionConfig = {
 };
 
 describe("useScheduledDatabaseBackups one-shot execution", () => {
+  it("deletes multiple completed runs and all of their backup files", async () => {
+    const backup = useScheduledDatabaseBackups();
+    const firstRun = {
+      id: "delete-many-first",
+      scheduleName: "First backup",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "scheduled",
+      source: "scheduled",
+      status: "success",
+      startedAt: "2026-09-08T01:00:00.000Z",
+      files: [{ displayName: "first.sql", filePath: "/backups/first.sql" }],
+    } satisfies DatabaseBackupRun;
+    const secondRun = {
+      id: "delete-many-second",
+      scheduleName: "Second backup",
+      connectionId: "mysql-1",
+      connectionName: "Local MySQL",
+      trigger: "scheduled",
+      source: "scheduled",
+      status: "failed",
+      startedAt: "2026-09-08T02:00:00.000Z",
+      files: [{ displayName: "second.sql", filePath: "/backups/second.sql" }],
+    } satisfies DatabaseBackupRun;
+    backup.runs.value.push(firstRun, secondRun);
+    mocks.deleteFiles.mockClear();
+
+    try {
+      await backup.deleteRuns([firstRun.id, secondRun.id]);
+
+      expect(mocks.deleteFiles).toHaveBeenCalledWith(["/backups/first.sql", "/backups/second.sql"]);
+      expect(backup.runs.value).not.toContainEqual(expect.objectContaining({ id: firstRun.id }));
+      expect(backup.runs.value).not.toContainEqual(expect.objectContaining({ id: secondRun.id }));
+    } finally {
+      backup.runs.value = backup.runs.value.filter((run) => run.id !== firstRun.id && run.id !== secondRun.id);
+    }
+  });
+
   it("executes one-shot backups through the shared exporter without a schedule", async () => {
     mocks.runDatabaseExport.mockImplementationOnce(async (_request: unknown, onProgress: (progress: unknown) => void) => {
       onProgress({ status: "Done", objectIndex: 1, totalObjects: 1, currentObject: "app" });

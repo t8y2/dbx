@@ -1358,6 +1358,31 @@ where
     Err(errors.into_iter().next_back().unwrap_or_else(|| format!("[postgres][{log_context}] no SQL tiers configured")))
 }
 
+async fn query_with_non_empty_compat_fallback<F, Fut>(
+    log_context: &str,
+    tiers: &[&'static str],
+    mut run: F,
+) -> Result<Vec<ColumnInfo>, String>
+where
+    F: FnMut(&'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<ColumnInfo>, tokio_postgres::Error>>,
+{
+    let mut empty_result = None;
+    let mut errors = Vec::new();
+    for sql in tiers {
+        match run(sql).await {
+            Ok(columns) if !columns.is_empty() => return Ok(columns),
+            Ok(columns) => empty_result = Some(columns),
+            Err(error) => errors.push(pg_error_to_string(error)),
+        }
+    }
+    if let Some(columns) = empty_result {
+        return Ok(columns);
+    }
+    log::debug!("[postgres][{log_context}:compat-failed] {}", errors.join("; "));
+    Err(errors.into_iter().next_back().unwrap_or_else(|| format!("[postgres][{log_context}] no SQL tiers configured")))
+}
+
 fn pg_db_error_to_string(err: &tokio_postgres::error::DbError) -> String {
     format!("{err} (SQLSTATE {})", err.code().code())
 }
@@ -6402,7 +6427,8 @@ async fn get_columns_with_sql(
 pub async fn get_columns(pool: &Pool, schema: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let tiers = [POSTGRES_COLUMNS_SQL, POSTGRES_COLUMNS_COMPAT_SQL, POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL];
-    query_with_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table)).await
+    query_with_non_empty_compat_fallback("get_columns", &tiers, |sql| get_columns_with_sql(&client, sql, schema, table))
+        .await
 }
 
 fn pg_quote_literal(value: &str) -> String {

@@ -101,7 +101,9 @@ import DataGridQueryControls from "@/components/grid/DataGridQueryControls.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
 
 const dataGridSource = readFileSync("apps/desktop/src/components/grid/DataGrid.vue", "utf8");
+const dataGridCellDetailEditSource = readFileSync("apps/desktop/src/composables/useDataGridCellDetailEdit.ts", "utf8");
 const cellDetailPanelSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailPanel.vue", "utf8");
+const cellDetailHeaderSource = readFileSync("apps/desktop/src/components/grid/DataGridCellDetailHeader.vue", "utf8");
 const globalsCss = readFileSync("apps/desktop/src/styles/globals.css", "utf8");
 
 function detail(patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
@@ -136,6 +138,16 @@ beforeEach(() => {
   localStorage.removeItem("dbx-filter-builder-value-shortcut-hint-days");
 });
 describe("DataGrid canvas surfaces", () => {
+  it("keeps condition and text filter editors open when persistent expansion is enabled", () => {
+    expect(dataGridSource).toContain('const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");');
+    expect(dataGridSource).toContain("const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);");
+    expect(dataGridSource).toContain("get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,");
+    expect(dataGridSource).toContain("if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;");
+    expect(dataGridSource).toContain('v-model:filter-builder-open="effectiveFilterBuilderOpen"');
+    expect(dataGridSource).toContain("filterEditorView === 'conditions' && effectiveFilterBuilderOpen");
+    expect(dataGridSource).toContain("filterEditorView === 'text' && effectiveFilterBuilderOpen");
+  });
+
   it("asks before an expensive Elasticsearch cursor jump", () => {
     expect(dataGridSource).toContain("requestCount >= ELASTICSEARCH_PAGE_JUMP_WARNING_REQUESTS");
     expect(dataGridSource).toContain('t("grid.esDeepPageJumpConfirmMessage"');
@@ -1367,9 +1379,7 @@ describe("DataGridTextFilterWorkbench", () => {
 
 describe("cell detail surfaces", () => {
   it("keeps detail tabs and editor actions usable when the panel narrows", () => {
-    const tabsStart = dataGridSource.indexOf('<Tabs v-model="activeCellDetailTab"');
-    const panelStart = dataGridSource.indexOf("<DataGridCellDetailPanel", tabsStart);
-    const tabsHeader = dataGridSource.slice(tabsStart, panelStart);
+    const tabsHeader = cellDetailHeaderSource;
     const tabViewport = tabsHeader.match(/<div class="([^"]*overflow-x-auto[^"]*)">\s*<TabsList/);
     const tabList = tabsHeader.match(/<TabsList class="([^"]+)">/);
     const triggerClasses = Array.from(tabsHeader.matchAll(/<TabsTrigger\b[^>]*class="([^"]+)"/g), ([, classes]) => classes.split(/\s+/));
@@ -1637,8 +1647,8 @@ describe("cell detail surfaces", () => {
   });
 
   it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
-    expect(dataGridSource).toContain("detailValueDiffSnapshot.value = snapshot;");
-    expect(dataGridSource).toContain("detailValueDiffOpen.value = true;");
+    expect(dataGridCellDetailEditSource).toContain("detailValueDiffSnapshot.value = snapshot;");
+    expect(dataGridCellDetailEditSource).toContain("detailValueDiffOpen.value = true;");
     expect(dataGridSource).toContain("if (!detailValueDiffOpen.value) commitValueEditorEdit();");
     expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
     expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');

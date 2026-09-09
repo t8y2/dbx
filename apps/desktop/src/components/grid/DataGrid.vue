@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   ExternalLink,
   Download,
+  Upload,
   FileUp,
   Trash2,
   ChevronDown,
@@ -30,15 +31,12 @@ import {
   Pencil,
   Filter,
   SquareDashed,
-  Check,
   CopyPlus,
   Hash,
   KeyRound,
   Link2,
   ListTree,
   Maximize2,
-  PanelBottom,
-  PanelRight,
   RefreshCw,
   RefreshCcw,
   TableProperties,
@@ -64,7 +62,7 @@ import LightTooltip from "@/components/ui/LightTooltip.vue";
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -79,6 +77,9 @@ import DataGridFilterBuilder from "@/components/grid/DataGridFilterBuilder.vue";
 import DataGridFilterWorkbench from "@/components/grid/DataGridFilterWorkbench.vue";
 import DataGridTextFilterWorkbench from "@/components/grid/DataGridTextFilterWorkbench.vue";
 import DataGridTableInfoPanels from "@/components/grid/DataGridTableInfoPanels.vue";
+import DataGridColumnFilterPopover from "@/components/grid/DataGridColumnFilterPopover.vue";
+import DataGridCellDetailHeader from "@/components/grid/DataGridCellDetailHeader.vue";
+import DataGridCellDetailHexViewer from "@/components/grid/DataGridCellDetailHexViewer.vue";
 import TemporalCellEditor from "@/components/grid/TemporalCellEditor.vue";
 import EnumCellEditor from "@/components/grid/EnumCellEditor.vue";
 import DataGridReadonlyTextSelection from "@/components/grid/DataGridReadonlyTextSelection.vue";
@@ -111,7 +112,7 @@ import {
   isTdengineExistingRowReadonlyColumn,
   shouldIncludeSyntheticRowId,
 } from "@/lib/table/tableEditing";
-import { buildDataGridColumnDistinctValuesSql, buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
+import { buildDataGridConditionalUpdateSql, buildDataGridContextFilterCondition, buildDataGridCountSql, buildHiveTablePropertiesSql, type DataGridContextFilterMode } from "@/lib/dataGrid/dataGridSql";
 import {
   buildVisibleTransposeRows,
   averageTransposeRecordWidth,
@@ -159,8 +160,7 @@ import {
   type BinaryCellDownloadMode,
 } from "@/lib/dataGrid/binaryCellDownload";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
-import { canFormatCellDetailJson, cellDetailEditorText, compactJsonText, defaultCellDetailTab, formatJsonText, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, valueEditorActions, visibleCellDetailTabs, type CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
-import { createJsonValueDiffSnapshot, isJsonValueDiffAvailable, type JsonValueDiffContext, type JsonValueDiffSnapshot } from "@/lib/dataGrid/jsonValueDiff";
+import { canFormatCellDetailJson, cellDetailEditorText, defaultCellDetailTab, isGeometryColumnType, linkedCellDetailTarget, looksLikeJsonContainerText, visibleCellDetailTabs, type CellDetailTab } from "@/lib/dataGrid/cellDetailPresentation";
 import {
   buildDataGridCellDetail,
   buildDataGridColumnDetail,
@@ -208,20 +208,7 @@ import {
   type DataGridInexactTotalRowCountMode,
 } from "@/lib/dataGrid/dataGridPagination";
 import { dataGridCountQueryOptions } from "@/lib/dataGrid/dataGridQueryOptions";
-import {
-  createResultScopedPendingRequests,
-  createResultScopedRowCache,
-  isTableDataVisiblePreviewColumn,
-  largeValueCellKey,
-  largeValueCellMap,
-  TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES,
-  TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS,
-  TABLE_DATA_VISIBLE_PREVIEW_SIZE,
-  tableDataLargeValuePreviewOptions,
-  tableDataVisiblePreviewContentBytes,
-  tableDataVisiblePreviewRowRange,
-  type ResultScopedRowCache,
-} from "@/lib/dataGrid/dataGridLargeValues";
+import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
 import {
   dataGridBottomScrollTop,
   dataGridInfiniteScrollAppendCompletion,
@@ -243,7 +230,6 @@ import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import {
-  appendColumnValueFilterCondition,
   buildColumnValueFilterCondition,
   buildColumnValuesFilterCondition,
   combineWhereInputs,
@@ -254,8 +240,6 @@ import {
   filterModeUsesRange,
   parseFilterValue,
   parseFilterValues,
-  removeColumnValueFilterCondition,
-  replaceColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { dataGridPageSizeSettingsPatch, preferredDataGridPageSize, resolveDataGridPageSizePreference, type DataGridPageSizePreference } from "@/lib/dataGrid/dataGridPageSizePreference";
@@ -322,8 +306,10 @@ import { useDataGridAutoRefresh } from "@/composables/useDataGridAutoRefresh";
 import { useDataGridAsyncSurface } from "@/composables/useDataGridAsyncSurface";
 import { createDataGridFilterConditionCache, useDataGridFilterBuilder, type DataGridStructuredFilterRule } from "@/composables/useDataGridFilterBuilder";
 import { cloneDataGridStructuredFilterRules, loadDataGridStructuredFilterState, saveDataGridStructuredFilterState, type DataGridCachedServerColumnFilter, type DataGridStructuredFilterCacheState } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
+import { createDataGridSearchScopeKey } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useCellDetailEditor, type UseCellDetailEditorReturn } from "@/composables/useCellDetailEditor";
+import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEdit";
 import { useTheme } from "@/composables/useTheme";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -352,7 +338,7 @@ import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { buildColumnIndexMap, columnIndexColorClass, columnIndexNameKey, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
-import { buildDataGridLocalFilterOptions, dataGridLocalFilterKey, dataGridLocalFilterLabel, restoreDataGridLocalColumnFilters, rowMatchesDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
+import { restoreDataGridLocalColumnFilters, type DataGridLocalFilterOption } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection, gaussdbCountQueryDopHint } from "@/lib/database/jdbcDialect";
 import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
 import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
@@ -361,10 +347,11 @@ import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote, dataG
 import { isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
-import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useDataGridColumnFormatter } from "@/composables/useDataGridColumnFormatter";
 import { useDataGridTableMetadataLoaders } from "@/composables/useDataGridTableMetadataLoaders";
+import { DATA_GRID_SERVER_COLUMN_FILTER_LIMIT, useDataGridColumnFilters } from "@/composables/useDataGridColumnFilters";
+import { useDataGridLargeValues } from "@/composables/useDataGridLargeValues";
 
 const SqlPreviewPanel = defineAsyncComponent(() => import("@/components/editor/SqlPreviewPanel.vue"));
 const ImagePreviewDialog = defineAsyncComponent(() => import("@/components/grid/ImagePreviewDialog.vue"));
@@ -378,6 +365,15 @@ const DataGridInsertRowsDialog = defineAsyncComponent(() => import("@/components
 const ExportProgressDialog = defineAsyncComponent(() => import("@/components/export/ExportProgressDialog.vue"));
 const FORMATTED_JSON_EDIT_WARNING_COUNT_STORAGE_KEY = "dbx-cell-detail-formatted-json-edit-warning-count";
 const FORMATTED_JSON_EDIT_WARNING_MAX_COUNT = 3;
+let largeValueRuntime: ReturnType<typeof useDataGridLargeValues> | undefined;
+
+function scheduleVisibleLargeValuePreviewHydration(delay = 150) {
+  largeValueRuntime?.scheduleVisibleLargeValuePreviewHydration(delay);
+}
+
+async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
+  return largeValueRuntime?.hydrateLargeValueCell(rowId, columnIndex) ?? false;
+}
 
 const { t } = useI18n();
 const slots = useSlots();
@@ -997,6 +993,10 @@ const dataGridSearch = useDataGridSearch({
   rows: () => displayItems.value,
   getCellSearchText: (row, columnIndex) => (row.data[columnIndex] === null ? "" : rowLowerTextCache.get(row.data, columnIndex)),
   onNavigate: () => nextTick(scrollToCurrentMatch),
+  // Same key as useDataGridEditor below: table data tabs use the tab id, query
+  // results use resultGridInstanceKey so a re-execute starts with a clean search.
+  persistenceKey: () => props.pendingStateKey ?? props.cacheKey,
+  persistenceScopeKey: () => createDataGridSearchScopeKey(props.result.columns),
 });
 const {
   searchText,
@@ -1010,6 +1010,12 @@ const {
   matchSet: searchMatchSet,
   currentMatch: currentSearchMatch,
 } = dataGridSearch;
+
+// Registered ahead of useDataGridEditor's own onMounted so a restored query
+// resolves the row set — "filter" search mode shrinks sortedRows — before
+// applyScrollPosition measures the content height. Deliberately does not focus the
+// search input: the user is returning to the grid, not to the search box.
+onMounted(() => dataGridSearch.restorePersistedState());
 
 const orderByInput = ref(props.initialOrderByInput ?? "");
 const whereFilterInput = ref(props.initialWhereInput ?? "");
@@ -1083,18 +1089,15 @@ let localFilterResizeStartWidth = LOCAL_FILTER_POPOVER_DEFAULT_WIDTH;
 let localFilterResizeStartOffsetX = 0;
 let localFilterResizeStartLeft = 0;
 let localFilterResizeStartRight = 0;
-const SERVER_COLUMN_FILTER_LIMIT = 1000;
-const SERVER_COLUMN_FILTER_DEBOUNCE_MS = 300;
 const serverFilterLoading = ref(false);
 const serverFilterError = ref("");
 const serverFilterOptions = ref<LocalFilterOption[]>([]);
 const serverFilterLimited = ref(false);
 const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 const serverColumnFilters = ref<Record<number, DataGridCachedServerColumnFilter>>({});
-let serverFilterRequestId = 0;
-let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
-
-watch(localColumnFilters, (filters) => emit("local-column-filters-change", serializeDataGridLocalColumnFilters(filters)), { deep: true });
+let getGridNewRows: () => readonly (readonly CellValue[])[] = () => [];
+let getGridRowData: (row: CellValue[], sourceIndex: number) => readonly CellValue[] = (row) => row;
+let resetLocalFilterGridScroll: () => void = () => {};
 const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -1196,6 +1199,15 @@ const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
+const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
+const isFilterEditorPinnedOpen = computed(() => isPersistentFilterView.value && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
+const effectiveFilterBuilderOpen = computed({
+  get: () => isFilterEditorPinnedOpen.value || filterBuilderOpen.value,
+  set: (open: boolean) => {
+    if (isFilterEditorPinnedOpen.value) return;
+    filterBuilderOpen.value = open;
+  },
+});
 const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 interface ForeignKeyDisplayLabelState {
@@ -1211,234 +1223,70 @@ function formatForeignKeyCellDisplay(value: CellValue, columnIndex: number): str
   return formatForeignKeyDisplayValue(value, state?.labels, state?.keyDataType);
 }
 
-function localFilterKey(value: CellValue): string {
-  return dataGridLocalFilterKey(value);
-}
-
-function localFilterLabel(value: CellValue, columnIndex: number): string {
-  return dataGridLocalFilterLabel(value, columnIndex, formatCellCached);
-}
-
-function localFilterActive(colIdx: number): boolean {
-  return !!localColumnFilters.value[colIdx]?.size || !!serverColumnFilters.value[colIdx];
-}
-
-const localFilterCount = computed(() => Object.values(localColumnFilters.value).filter((values) => values.size).length);
-const serverColumnFilterCount = computed(() => Object.keys(serverColumnFilters.value).length);
-const hasLocalColumnFilters = computed(() => localFilterCount.value > 0);
-const hasServerColumnFilters = computed(() => serverColumnFilterCount.value > 0);
-const filterButtonCount = computed(() => structuredFilterCount.value + localFilterCount.value + serverColumnFilterCount.value);
-const filterButtonActive = computed(() => hasStructuredFilters.value || hasLocalColumnFilters.value || hasServerColumnFilters.value);
-const localFilterSummaries = computed(() =>
-  [
-    ...Object.entries(localColumnFilters.value)
-      .filter(([, selected]) => selected.size > 0)
-      .map(([columnIndexText, selected]) => {
-        const columnIndex = Number(columnIndexText);
-        const labelByKey = new Map(buildLocalFilterOptions(columnIndex).map((option) => [option.key, option.label]));
-        return {
-          columnIndex,
-          values: [...selected].map((key) => labelByKey.get(key) ?? key),
-        };
-      }),
-    ...Object.entries(serverColumnFilters.value).map(([columnIndexText, filter]) => ({
-      columnIndex: Number(columnIndexText),
-      values: filter.labels,
-    })),
-  ].map(({ columnIndex, values }) => ({
-    columnIndex,
-    columnName: props.result.columns[columnIndex] ?? `#${columnIndex + 1}`,
-    values: values.slice(0, 3),
-    hiddenValueCount: Math.max(0, values.length - 3),
-  })),
-);
-
-function rowMatchesLocalColumnFilters(data: CellValue[]): boolean {
-  return rowMatchesDataGridLocalColumnFilters(data, localColumnFilters.value);
-}
-
-const localFilteredRows = computed(() => {
-  const rows = props.result.rows;
-  const indices: number[] = [];
-  if (!hasLocalColumnFilters.value) {
-    for (let i = 0; i < rows.length; i++) indices.push(i);
-    return indices;
-  }
-  for (let i = 0; i < rows.length; i++) {
-    if (rowMatchesLocalColumnFilters(rowDataWithChanges(rows[i], i))) {
-      indices.push(i);
-    }
-  }
-  return indices;
+const localColumnFilterRuntime = useDataGridColumnFilters({
+  state: {
+    localColumnFilters,
+    localFilterOpenColumn,
+    localFilterSearch,
+    localFilterDraft,
+    serverFilterLoading,
+    serverFilterError,
+    serverFilterOptions,
+    serverFilterLimited,
+    serverFilterValueByKey,
+    serverColumnFilters,
+  },
+  getResult: () => props.result,
+  getTableMeta: () => props.tableMeta,
+  getConnectionId: () => props.connectionId,
+  getSchema: () => props.schema,
+  getExecutionDatabase: () => props.executionDatabase ?? props.database ?? "",
+  resolvedDatabaseType,
+  canUseWhereSearch,
+  canUseServerColumnFilter,
+  structuredFilterCount,
+  hasStructuredFilters,
+  whereFilterInput,
+  getConnectionConfig: () => (props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined),
+  getIdentifierQuote: () => connectionStore.connectionIdentifierQuote?.(props.connectionId),
+  getNewRows: () => getGridNewRows(),
+  getRowData: (row, sourceIndex) => getGridRowData(row, sourceIndex),
+  formatValue: formatCellCached,
+  waitForTableMeta,
+  applyWhereFilter,
+  resetGridVerticalScroll: () => resetLocalFilterGridScroll(),
+  onOpen: () => {
+    localFilterPopoverOffsetX.value = 0;
+  },
+  onClose: () => {
+    onLocalFilterResizeEnd();
+    localFilterPopoverOffsetX.value = 0;
+  },
+  emitLocalFiltersChange: (filters) => emit("local-column-filters-change", filters),
 });
-
-function buildLocalFilterOptions(columnIndex: number): LocalFilterOption[] {
-  return buildDataGridLocalFilterOptions({
-    rows: props.result.rows,
-    newRows: newRows.value,
-    columnIndex,
-    getRowData: rowDataWithChanges,
-    formatValue: formatCellCached,
-  });
-}
-
-const localFilterAllOptions = computed(() => {
-  if (localFilterDraft.value?.mode === "server") return serverFilterOptions.value;
-  const columnIndex = localFilterDraft.value?.columnIndex;
-  if (columnIndex === undefined) return [];
-  return buildLocalFilterOptions(columnIndex);
-});
-
-const localFilterOptions = computed(() => {
-  if (localFilterDraft.value?.mode === "server") return serverFilterOptions.value;
-  const query = localFilterSearch.value.trim().toLowerCase();
-  return localFilterAllOptions.value.filter((option) => !query || option.label.toLowerCase().includes(query)).slice(0, 500);
-});
-
-const localFilterAllVisibleSelected = computed(() => {
-  const draft = localFilterDraft.value;
-  if (!draft || localFilterOptions.value.length === 0) return false;
-  return localFilterOptions.value.every((option) => draft.values.has(option.key));
-});
-
-const localFilterTypedValue = computed(() => localFilterSearch.value.trim());
-
-const localFilterDraftIsAllSelected = computed(() => {
-  const draft = localFilterDraft.value;
-  if (!draft) return false;
-  const allKeys = localFilterAllOptions.value.map((option) => option.key);
-  return allKeys.length > 0 && allKeys.every((key) => draft.values.has(key));
-});
-
-const canApplyTypedLocalFilterValue = computed(() => {
-  const draft = localFilterDraft.value;
-  const typed = localFilterTypedValue.value;
-  if (!draft || !typed || !canUseWhereSearch.value) return false;
-  const normalized = typed.toLowerCase();
-  return !localFilterAllOptions.value.some((option) => option.label.toLowerCase() === normalized);
-});
-
-function openLocalFilter(colIdx: number, requestedMode: LocalFilterMode = "local") {
-  localFilterSearch.value = "";
-  localFilterPopoverOffsetX.value = 0;
-  const mode: LocalFilterMode = requestedMode === "server" && canUseServerColumnFilter.value ? "server" : "local";
-  const allKeys = mode === "server" ? [] : buildLocalFilterOptions(colIdx).map((option) => option.key);
-  localFilterDraft.value = {
-    columnIndex: colIdx,
-    values: new Set(mode === "server" ? allKeys : (localColumnFilters.value[colIdx] ?? allKeys)),
-    mode,
-    touched: false,
-  };
-  localFilterOpenColumn.value = colIdx;
-  if (mode === "server") {
-    resetServerFilterState();
-    void loadServerFilterValues(colIdx, "");
-  } else {
-    resetServerFilterState();
-  }
-}
-
-function resetServerFilterState() {
-  serverFilterRequestId++;
-  if (serverFilterSearchTimer !== undefined) {
-    window.clearTimeout(serverFilterSearchTimer);
-    serverFilterSearchTimer = undefined;
-  }
-  serverFilterLoading.value = false;
-  serverFilterError.value = "";
-  serverFilterOptions.value = [];
-  serverFilterLimited.value = false;
-  serverFilterValueByKey.value = new Map();
-}
-
-function serverFilterOptionFromRow(row: QueryResult["rows"][number], columnIndex: number): LocalFilterOption {
-  const value = (row[0] ?? null) as CellValue;
-  const countValue = Number(row[1]);
-  const count = Number.isFinite(countValue) ? countValue : null;
-  return {
-    key: localFilterKey(value),
-    label: localFilterLabel(value, columnIndex),
-    count,
-    value,
-  };
-}
-
-function serverFilterOptionsFromResult(result: QueryResult, columnIndex: number): LocalFilterOption[] {
-  const byKey = new Map<string, LocalFilterOption>();
-  for (const row of result.rows) {
-    const option = serverFilterOptionFromRow(row, columnIndex);
-    const current = byKey.get(option.key);
-    if (current) {
-      current.count = (current.count ?? 0) + (option.count ?? 0);
-    } else {
-      byKey.set(option.key, option);
-    }
-  }
-  return [...byKey.values()];
-}
-
-function syncServerFilterDraft(columnIndex: number, options: LocalFilterOption[]) {
-  const draft = localFilterDraft.value;
-  if (!draft || draft.mode !== "server" || draft.columnIndex !== columnIndex) return;
-  if (draft.touched) return;
-  const activeFilter = serverColumnFilters.value[columnIndex];
-  localFilterDraft.value = {
-    ...draft,
-    values: new Set(activeFilter?.keys ?? options.map((option) => option.key)),
-  };
-}
-
-async function loadServerFilterValues(columnIndex: number, searchValue: string) {
-  if (!canUseServerColumnFilter.value || !props.connectionId) return;
-  const columnName = props.result.columns[columnIndex];
-  if (!columnName) return;
-  const requestId = ++serverFilterRequestId;
-  serverFilterLoading.value = true;
-  serverFilterError.value = "";
-  serverFilterLimited.value = false;
-  try {
-    const tableMeta = await waitForTableMeta();
-    if (!tableMeta) return;
-    const columnInfo = tableMeta.columns.find((column) => column.name === columnName);
-    const sql = await buildDataGridColumnDistinctValuesSql({
-      databaseType: resolvedDatabaseType.value,
-      driverProfile: props.connectionId ? connectionStore.getConfig(props.connectionId)?.driver_profile : undefined,
-      identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-      catalog: tableMeta.catalog,
-      database: tableMeta.database,
-      schema: tableMeta.schema,
-      tableName: tableMeta.tableName,
-      columnName,
-      columnInfo,
-      // Database value enumeration must remain independent from the active filter;
-      // otherwise reopening the same column can only return its previously selected values.
-      searchValue: searchValue.trim() || undefined,
-      limit: SERVER_COLUMN_FILTER_LIMIT,
-      includeCounts: true,
-    });
-    const result = await api.executeQuery(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, tableMeta.schema ?? props.schema, undefined, {
-      maxRows: SERVER_COLUMN_FILTER_LIMIT,
-      fetchSize: SERVER_COLUMN_FILTER_LIMIT,
-      pageSize: SERVER_COLUMN_FILTER_LIMIT,
-    });
-    if (requestId !== serverFilterRequestId || localFilterOpenColumn.value !== columnIndex) return;
-    const options = serverFilterOptionsFromResult(result, columnIndex);
-    const nextValueByKey = new Map(serverFilterValueByKey.value);
-    for (const option of options) nextValueByKey.set(option.key, option.value);
-    serverFilterValueByKey.value = nextValueByKey;
-    serverFilterOptions.value = options;
-    serverFilterLimited.value = result.truncated === true || result.rows.length >= SERVER_COLUMN_FILTER_LIMIT;
-    syncServerFilterDraft(columnIndex, options);
-  } catch (e: any) {
-    if (requestId !== serverFilterRequestId) return;
-    serverFilterOptions.value = [];
-    serverFilterError.value = String(e?.message || e);
-  } finally {
-    if (requestId === serverFilterRequestId) {
-      serverFilterLoading.value = false;
-    }
-  }
-}
+const {
+  localFilterActive,
+  localFilterCount,
+  serverColumnFilterCount,
+  hasLocalColumnFilters,
+  hasServerColumnFilters,
+  filterButtonCount,
+  filterButtonActive,
+  localFilterSummaries,
+  localFilteredRows,
+  localFilterAllOptions,
+  localFilterOptions,
+  localFilterTypedValue,
+  canApplyTypedLocalFilterValue,
+  openLocalFilter,
+  closeLocalFilter,
+  toggleLocalFilterValue,
+  toggleAllLocalFilterOptions,
+  applyLocalFilter,
+  applyTypedLocalFilterValue,
+  clearLocalFilter,
+  rowMatchesLocalColumnFilters,
+} = localColumnFilterRuntime;
 
 function guardHeaderPanelDismiss() {
   headerPanelDismissGuardUntil.value = Date.now() + 350;
@@ -1496,15 +1344,6 @@ function handleLocalFilterOpenChange(value: boolean, columnIndex: number) {
   } else if (!shouldIgnoreHeaderPanelClose(columnIndex, localFilterOpenColumn.value)) {
     closeLocalFilter();
   }
-}
-
-function closeLocalFilter() {
-  onLocalFilterResizeEnd();
-  localFilterOpenColumn.value = null;
-  localFilterDraft.value = null;
-  localFilterSearch.value = "";
-  localFilterPopoverOffsetX.value = 0;
-  resetServerFilterState();
 }
 
 function onLocalFilterResizeStart(event: MouseEvent, direction: "left" | "right") {
@@ -1567,177 +1406,6 @@ function openCompactColumnFormatter(columnIndex: number) {
     }, 0);
   });
 }
-
-function toggleLocalFilterValue(key: string) {
-  const draft = localFilterDraft.value;
-  if (!draft) return;
-  const next = new Set(draft.values);
-  if (next.has(key)) next.delete(key);
-  else next.add(key);
-  localFilterDraft.value = { ...draft, values: next, touched: true };
-}
-
-function toggleAllLocalFilterOptions() {
-  const draft = localFilterDraft.value;
-  if (!draft) return;
-  const visibleKeys = localFilterOptions.value.map((option) => option.key);
-  const next = new Set(draft.values);
-  if (localFilterAllVisibleSelected.value) {
-    visibleKeys.forEach((key) => next.delete(key));
-  } else {
-    visibleKeys.forEach((key) => next.add(key));
-  }
-  localFilterDraft.value = { ...draft, values: next, touched: true };
-}
-
-async function applyLocalFilter() {
-  const draft = localFilterDraft.value;
-  if (!draft) return;
-  if (draft.mode === "server") {
-    await applyServerColumnFilter(draft);
-    return;
-  }
-  if (canApplyTypedLocalFilterValue.value && localFilterDraftIsAllSelected.value && localFilterOptions.value.length === 0) {
-    await applyTypedLocalFilterValue();
-    return;
-  }
-  const allKeys = new Set(localFilterAllOptions.value.map((option) => option.key));
-  const next = { ...localColumnFilters.value };
-  let selected = draft.values;
-  if (localFilterSearch.value.trim()) {
-    const visibleKeys = new Set(localFilterOptions.value.map((o) => o.key));
-    selected = new Set([...draft.values].filter((k) => visibleKeys.has(k)));
-  }
-  if (selected.size === 0 || selected.size === allKeys.size) {
-    delete next[draft.columnIndex];
-  } else {
-    next[draft.columnIndex] = new Set(selected);
-  }
-  localColumnFilters.value = next;
-  closeLocalFilter();
-  resetGridVerticalScroll();
-}
-
-async function applyServerColumnFilter(draft: LocalColumnFilterDraft) {
-  if (!draft.touched && !localFilterSearch.value.trim()) {
-    closeLocalFilter();
-    return;
-  }
-  if (canApplyTypedLocalFilterValue.value && serverFilterOptions.value.length === 0) {
-    await applyTypedLocalFilterValue();
-    return;
-  }
-  const columnName = props.result.columns[draft.columnIndex];
-  if (!columnName) return;
-  const values = [...draft.values].flatMap((key) => {
-    if (!serverFilterValueByKey.value.has(key)) return [];
-    return [serverFilterValueByKey.value.get(key)!];
-  });
-  if (values.length === 0) {
-    closeLocalFilter();
-    return;
-  }
-  const condition = await buildColumnValuesFilterCondition({
-    databaseType: resolvedDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-    columnName,
-    columnInfo: props.tableMeta?.columns.find((column) => column.name === columnName),
-    values,
-  });
-  if (!condition) return;
-  const next = { ...localColumnFilters.value };
-  delete next[draft.columnIndex];
-  localColumnFilters.value = next;
-  const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
-  whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
-  serverColumnFilters.value = {
-    ...serverColumnFilters.value,
-    [draft.columnIndex]: {
-      condition,
-      keys: [...draft.values],
-      labels: values.map((value) => localFilterLabel(value, draft.columnIndex)),
-    },
-  };
-  closeLocalFilter();
-  await applyWhereFilter();
-}
-
-async function applyTypedLocalFilterValue() {
-  const draft = localFilterDraft.value;
-  if (!draft) return;
-  const columnName = props.result.columns[draft.columnIndex];
-  if (!columnName) return;
-  const columnInfo = props.tableMeta?.columns.find((column) => column.name === columnName);
-  const condition = await buildColumnValueFilterCondition({
-    databaseType: resolvedDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-    columnName,
-    columnInfo,
-    rawValue: localFilterTypedValue.value,
-  });
-  if (!condition) return;
-  const next = { ...localColumnFilters.value };
-  delete next[draft.columnIndex];
-  localColumnFilters.value = next;
-  if (draft.mode === "server") {
-    const previousCondition = serverColumnFilters.value[draft.columnIndex]?.condition;
-    const rawValue = localFilterTypedValue.value.trim();
-    const value = (/^null$/i.test(rawValue) ? null : parseFilterValue(rawValue, columnInfo, resolvedDatabaseType.value)) as CellValue;
-    whereFilterInput.value = replaceColumnValueFilterCondition(whereFilterInput.value, previousCondition, condition);
-    serverColumnFilters.value = {
-      ...serverColumnFilters.value,
-      [draft.columnIndex]: {
-        condition,
-        keys: [localFilterKey(value)],
-        labels: [localFilterLabel(value, draft.columnIndex)],
-      },
-    };
-  } else {
-    whereFilterInput.value = appendColumnValueFilterCondition(whereFilterInput.value, condition);
-  }
-  closeLocalFilter();
-  await applyWhereFilter();
-}
-
-function clearLocalFilter(colIdx?: number, applyServerWhereFilter = true) {
-  let removedServerFilter = false;
-  if (colIdx === undefined) {
-    localColumnFilters.value = {};
-    let nextWhereInput = whereFilterInput.value;
-    for (const filter of Object.values(serverColumnFilters.value)) {
-      nextWhereInput = removeColumnValueFilterCondition(nextWhereInput, filter.condition);
-    }
-    removedServerFilter = Object.keys(serverColumnFilters.value).length > 0;
-    serverColumnFilters.value = {};
-    whereFilterInput.value = nextWhereInput;
-  } else {
-    const next = { ...localColumnFilters.value };
-    delete next[colIdx];
-    localColumnFilters.value = next;
-    const serverFilter = serverColumnFilters.value[colIdx];
-    if (serverFilter) {
-      removedServerFilter = true;
-      const nextServerFilters = { ...serverColumnFilters.value };
-      delete nextServerFilters[colIdx];
-      serverColumnFilters.value = nextServerFilters;
-      whereFilterInput.value = removeColumnValueFilterCondition(whereFilterInput.value, serverFilter.condition);
-    }
-  }
-  closeLocalFilter();
-  resetGridVerticalScroll();
-  if (removedServerFilter && applyServerWhereFilter && canUseWhereSearch.value) void applyWhereFilter();
-}
-
-watch(localFilterSearch, (value) => {
-  const draft = localFilterDraft.value;
-  if (!draft || draft.mode !== "server" || localFilterOpenColumn.value !== draft.columnIndex) return;
-  if (serverFilterSearchTimer !== undefined) {
-    window.clearTimeout(serverFilterSearchTimer);
-  }
-  serverFilterSearchTimer = window.setTimeout(() => {
-    void loadServerFilterValues(draft.columnIndex, value);
-  }, SERVER_COLUMN_FILTER_DEBOUNCE_MS);
-});
 
 function defaultStructuredFilterRule(): StructuredFilterRule {
   return filterBuilder.defaultRule();
@@ -1894,7 +1562,7 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
 async function applyStructuredFilters() {
   if (!canUseWhereSearch.value) return;
   appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
-  if (settingsStore.editorSettings.dataGridAutoHideFilterBuilder) filterBuilderOpen.value = false;
+  if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;
   await applyWhereFilter();
 }
 
@@ -2446,7 +2114,8 @@ const columnStructureSignature = computed(() => createDataGridColumnStructureSig
 // Bumped once the configured header font is ready, so widths measured against a temporary fallback
 // font get re-measured without reacting to unrelated fonts loaded elsewhere in the application.
 const dataGridFontReadyTick = ref(0);
-const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontReadyTick.value]);
+const columnFormatterReadyTick = ref(0);
+const columnHeaderMeasurementKey = computed(() => [tableFontSize.value, tableFontFamily.value, dataGridFontReadyTick.value, columnFormatterReadyTick.value]);
 let columnHeaderMeasureContext: CanvasRenderingContext2D | null | undefined;
 
 if (typeof document !== "undefined" && document.fonts) {
@@ -2476,8 +2145,10 @@ function measureColumnHeaderText(text: string): number | undefined {
   return Math.ceil(columnHeaderMeasureContext.measureText(text).width);
 }
 
+let columnFormatterForWidth: ((columnIndex: number) => ColumnFormatterConfig | undefined) | undefined;
+
 function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellValue {
-  const formatter = columnFormatter(columnIndex);
+  const formatter = columnFormatterForWidth?.(columnIndex);
   return formatter ? applyColumnFormatter(value, formatter) : value;
 }
 
@@ -3103,8 +2774,6 @@ watch(isScrolling, (scrolling) => {
   }
 });
 
-initColumnWidths();
-watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
 const localFilterScopeKey = computed(() =>
   [
     props.connectionId ?? "",
@@ -3858,7 +3527,7 @@ const editor = useDataGridEditor({
   cacheKey: computed(() => props.pendingStateKey ?? props.cacheKey),
   onResultPayloadMutated: () => queryStore.invalidateResultEstimateForPayload(props.result),
   refreshSavedRows,
-  onCellValueChanged: invalidateVisibleLargeValuePreviewCell,
+  onCellValueChanged: (rowId, columnIndex) => largeValueRuntime?.invalidateVisibleLargeValuePreviewCell(rowId, columnIndex),
   prepareFullReload,
   emit,
 });
@@ -3925,6 +3594,9 @@ const {
   isPreviewLoading,
   previewChanges,
 } = editor;
+getGridNewRows = () => newRows.value;
+getGridRowData = rowDataWithChanges;
+resetLocalFilterGridScroll = resetGridVerticalScroll;
 const pendingQuickEntryDraftCellFocus = ref<{
   rowId: number;
   col: number;
@@ -4729,6 +4401,11 @@ const {
   formatForeignKeyCellDisplay,
   toast,
 });
+columnFormatterForWidth = columnFormatter;
+columnFormatterReadyTick.value++;
+
+initColumnWidths();
+watch([visibleColumnIndexes, () => renderedColumnWidths.value.length], () => scheduleColumnLayoutRefresh());
 
 watch(
   () => displayRowCount.value,
@@ -4875,483 +4552,43 @@ const visibleDisplayItems = computed<RowItem[]>(() =>
   })),
 );
 
-type ResolvedLargeValueCells = Map<number, Map<number, CellValue>>;
-type LargeValueCellRequest = {
-  item: RowItem;
-  sourceIndex: number;
-  columnIndex: number;
-  originalBytes: number;
-};
-
-const LARGE_VALUE_FETCH_MAX_ROWS = 200;
-const LARGE_VALUE_FETCH_TARGET_BYTES = 64 * 1024 * 1024;
-const pendingLargeValueHydrations = createResultScopedPendingRequests<boolean>();
-const largeValueCellsByKey = computed(() => largeValueCellMap(props.result));
-type VisibleLargeValuePreviewRequest = {
-  item: RowItem;
-  sourceIndex: number;
-  initialValues: Map<number, { value: CellValue; revision: number }>;
-};
-const visibleLargeValuePreviewCaches = new WeakMap<QueryResult, ResultScopedRowCache<CellValue>>();
-const visibleLargeValuePreviewCellRevisions = new WeakMap<QueryResult, Map<string, number>>();
-const failedVisibleLargeValuePreviewResults = new WeakSet<QueryResult>();
-const visibleLargeValuePreviewVersion = ref(0);
-let visibleLargeValuePreviewTimer = 0;
-let visibleLargeValuePreviewRequestedGeneration = 0;
-let visibleLargeValuePreviewActive = true;
-const visibleLargeValuePreviewExecutionIds = new Map<number, string>();
-
-function isLargeValuePreview(item: RowItem | undefined, columnIndex: number): boolean {
-  if (!item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return false;
-  return largeValueCellsByKey.value.has(largeValueCellKey(item.sourceIndex, columnIndex));
-}
-
-function largeValueOriginalBytes(item: Pick<RowItem, "sourceIndex" | "isNew" | "isDraft" | "isDirtyCol"> | undefined, columnIndex: number): number | undefined {
-  if (resolvedDatabaseType.value !== "mysql" || !item || item.isNew || item.isDraft || item.sourceIndex === undefined || item.isDirtyCol[columnIndex]) return undefined;
-  return largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex))?.original_bytes;
-}
-
-function formatGridItemCell(item: RowItem, columnIndex: number): string {
-  void visibleLargeValuePreviewVersion.value;
-  return formatCellCached(visibleLargeValuePreviewValue(item, columnIndex, item.data[columnIndex] ?? null), columnIndex, largeValueOriginalBytes(item, columnIndex));
-}
-
-function formatGridItemCellForConfirmation(item: RowItem, columnIndex: number): string {
-  return formatCell(item.data[columnIndex], columnIndex, largeValueOriginalBytes(item, columnIndex), false);
-}
-
-function normalizedLargeValueIdentityPart(value: CellValue): string {
-  if (value === null) return "null";
-  return `${typeof value}:${JSON.stringify(value)}`;
-}
-
-function largeValueIdentityKey(row: readonly CellValue[], indexes: readonly number[]): string {
-  return indexes.map((index) => normalizedLargeValueIdentityPart(row[index] ?? null)).join("\u001f");
-}
-
-function largeValueSourceColumnIndex(columnName: string): number {
-  const normalized = columnName.toLocaleLowerCase();
-  return resultSourceColumns.value.findIndex((column) => column.toLocaleLowerCase() === normalized);
-}
-
-function visibleLargeValuePreviewCache(result: QueryResult): ResultScopedRowCache<CellValue> {
-  let cache = visibleLargeValuePreviewCaches.get(result);
-  if (!cache) {
-    cache = createResultScopedRowCache(TABLE_DATA_VISIBLE_PREVIEW_CACHE_ROWS, {
-      maxBytes: TABLE_DATA_VISIBLE_PREVIEW_CACHE_CONTENT_MAX_BYTES,
-      sizeOf: tableDataVisiblePreviewContentBytes,
-    });
-    visibleLargeValuePreviewCaches.set(result, cache);
-  }
-  return cache;
-}
-
-function visibleLargeValuePreviewCellRevisionKey(sourceIndex: number, columnIndex: number): string {
-  return `${sourceIndex}:${columnIndex}`;
-}
-
-function visibleLargeValuePreviewCellRevision(result: QueryResult, sourceIndex: number, columnIndex: number): number {
-  return visibleLargeValuePreviewCellRevisions.get(result)?.get(visibleLargeValuePreviewCellRevisionKey(sourceIndex, columnIndex)) ?? 0;
-}
-
-function bumpVisibleLargeValuePreviewCellRevision(result: QueryResult, sourceIndex: number, columnIndex: number) {
-  let revisions = visibleLargeValuePreviewCellRevisions.get(result);
-  if (!revisions) {
-    revisions = new Map<string, number>();
-    visibleLargeValuePreviewCellRevisions.set(result, revisions);
-  }
-  const key = visibleLargeValuePreviewCellRevisionKey(sourceIndex, columnIndex);
-  revisions.set(key, (revisions.get(key) ?? 0) + 1);
-}
-
-function invalidateVisibleLargeValuePreviewCell(rowId: number, columnIndex: number) {
-  const item = getRowItem(rowId);
-  const sourceIndex = item?.sourceIndex ?? (rowId >= 0 ? rowId : undefined);
-  if (sourceIndex === undefined) return;
-  bumpVisibleLargeValuePreviewCellRevision(props.result, sourceIndex, columnIndex);
-  const cache = visibleLargeValuePreviewCaches.get(props.result);
-  if (!cache?.has(sourceIndex, columnIndex)) return;
-  cache.forget(sourceIndex, columnIndex);
-  visibleLargeValuePreviewVersion.value += 1;
-  scheduleCanvasDraw();
-}
-
-function visibleLargeValuePreviewValue(item: Pick<RowItem, "sourceIndex"> | undefined, columnIndex: number, fallback: CellValue): CellValue {
-  if (item?.sourceIndex === undefined) return fallback;
-  const preview = visibleLargeValuePreviewCaches.get(props.result)?.get(item.sourceIndex, columnIndex);
-  return preview === undefined ? fallback : preview;
-}
-
-function visibleLargeValuePreviewColumnIndexes(): number[] {
-  const rendered = renderedGridColumns.value.map((column) => column.actualColIdx);
-  return [...new Set(rendered)].filter((columnIndex) => {
-    const dataType = tableColumnForGridColumn(columnIndex)?.data_type ?? allColumnTypes.value[columnIndex] ?? "";
-    return isTableDataVisiblePreviewColumn(resolvedDatabaseType.value, dataType);
-  });
-}
-
-function evictVisibleLargeValuePreviews(cache: ResultScopedRowCache<CellValue>, protectedRows: ReadonlySet<number>): boolean {
-  return cache.evict(protectedRows).length > 0;
-}
-
-async function hydrateVisibleLargeValuePreviews(generation: number) {
-  const sourceResult = props.result;
-  const tableMeta = props.tableMeta;
-  const scroller = gridScrollerElement();
-  if (
-    !visibleLargeValuePreviewActive ||
-    generation !== visibleLargeValuePreviewRequestedGeneration ||
-    failedVisibleLargeValuePreviewResults.has(sourceResult) ||
-    showTranspose.value ||
-    (resolvedDatabaseType.value !== "mysql" && resolvedDatabaseType.value !== "postgres") ||
-    !props.connectionId ||
-    !tableMeta?.tableName ||
-    tableMeta.primaryKeys.length === 0 ||
-    !scroller
-  )
-    return;
-
-  const range = tableDataVisiblePreviewRowRange(scroller.scrollTop, scroller.clientHeight, CANVAS_DATA_GRID_ROW_HEIGHT, displayRowCount.value);
-  if (!range) return;
-  const cache = visibleLargeValuePreviewCache(sourceResult);
-  const activeSourceRows = new Set<number>();
-  const requests = new Map<number, VisibleLargeValuePreviewRequest>();
-  const targetColumnIndexes = visibleLargeValuePreviewColumnIndexes();
-  for (let displayIndex = range.start; displayIndex < range.end; displayIndex++) {
-    const item = displayItemAt(displayIndex);
-    if (!item || item.sourceIndex === undefined || item.isNew || item.isDraft) continue;
-    activeSourceRows.add(item.sourceIndex);
-    cache.touch(item.sourceIndex);
-    const initialValues = new Map<number, { value: CellValue; revision: number }>();
-    for (const columnIndex of targetColumnIndexes) {
-      if (!isLargeValuePreview(item, columnIndex) || cache.has(item.sourceIndex, columnIndex)) continue;
-      initialValues.set(columnIndex, {
-        value: item.data[columnIndex] ?? null,
-        revision: visibleLargeValuePreviewCellRevision(sourceResult, item.sourceIndex, columnIndex),
-      });
-    }
-    if (initialValues.size > 0) requests.set(item.sourceIndex, { item, sourceIndex: item.sourceIndex, initialValues });
-  }
-
-  if (requests.size === 0) {
-    if (evictVisibleLargeValuePreviews(cache, activeSourceRows)) {
-      visibleLargeValuePreviewVersion.value += 1;
-      scheduleCanvasDraw();
-    }
-    return;
-  }
-
-  const primaryKeyIndexes = tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
-  if (primaryKeyIndexes.some((index) => index < 0)) return;
-  const requestedColumnIndexes = [...new Set([...requests.values()].flatMap((request) => [...request.initialValues.keys()]))];
-  const selectedColumns = [...tableMeta.primaryKeys];
-  for (const columnIndex of requestedColumnIndexes) {
-    const sourceColumn = resultSourceColumns.value[columnIndex];
-    if (sourceColumn && !selectedColumns.some((column) => column.toLocaleLowerCase() === sourceColumn.toLocaleLowerCase())) selectedColumns.push(sourceColumn);
-  }
-  const selectedColumnTypes = selectedColumns.map((column) => tableMeta.columns.find((candidate) => candidate.name.toLocaleLowerCase() === column.toLocaleLowerCase())?.data_type ?? "");
-  const predicates = await Promise.all([...requests.values()].map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
-  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
-  const sql = await buildTableSelectSql({
-    databaseType: resolvedDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-    database: tableMeta.database,
-    schema: tableMeta.schema,
-    tableName: tableMeta.tableName,
-    tableType: tableMeta.tableType,
-    catalog: tableMeta.catalog,
-    columns: selectedColumns,
-    columnTypes: selectedColumnTypes,
-    largeValuePreviewSize: TABLE_DATA_VISIBLE_PREVIEW_SIZE,
-    primaryKeys: tableMeta.primaryKeys,
-    whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
-    limit: requests.size,
-    offset: 0,
-    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
-  });
-  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
-  const connection = connectionStore.getConfig(props.connectionId);
-  const executionId = uuid();
-  visibleLargeValuePreviewExecutionIds.set(generation, executionId);
-  let results: QueryResult[];
-  try {
-    results = await api.executeMulti(props.connectionId, props.executionDatabase ?? props.database ?? "", sql, undefined, executionId, {
-      maxRows: requests.size,
-      fetchSize: requests.size,
-      resultKeyColumns: tableMeta.primaryKeys,
-      tableDataPreview: true,
-      timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
-    });
-  } finally {
-    if (visibleLargeValuePreviewExecutionIds.get(generation) === executionId) visibleLargeValuePreviewExecutionIds.delete(generation);
-  }
-  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration || props.result !== sourceResult) return;
-  const result = results[0];
-  if (!result || result.execution_error) {
-    throw new Error(result?.error ? translateBackendError(t, result.error) : String(result?.rows?.[0]?.[0] ?? t("grid.largeValueLoadFailed")));
-  }
-  const resultColumnIndexes = selectedColumns.map((column) => {
-    const normalized = column.toLocaleLowerCase();
-    return result.columns.findIndex((resultColumn) => resultColumn.toLocaleLowerCase() === normalized);
-  });
-  if (resultColumnIndexes.some((index) => index < 0)) throw new Error(t("grid.largeValueColumnUnavailable"));
-  const resultPrimaryKeyIndexes = resultColumnIndexes.slice(0, tableMeta.primaryKeys.length);
-  const valuesByIdentity = new Map(result.rows.map((row) => [largeValueIdentityKey(row, resultPrimaryKeyIndexes), row]));
-  const currentLargeValueCells = largeValueCellMap(sourceResult);
-  let changed = false;
-  for (const request of requests.values()) {
-    const currentRow = sourceResult.rows[request.sourceIndex];
-    if (!currentRow) continue;
-    const identity = largeValueIdentityKey(currentRow, primaryKeyIndexes);
-    const resolvedRow = valuesByIdentity.get(identity);
-    if (!resolvedRow) continue;
-    for (const [columnIndex, initialValue] of request.initialValues) {
-      if (!currentLargeValueCells.has(largeValueCellKey(request.sourceIndex, columnIndex)) || currentRow[columnIndex] !== initialValue.value || visibleLargeValuePreviewCellRevision(sourceResult, request.sourceIndex, columnIndex) !== initialValue.revision) continue;
-      const sourceColumn = resultSourceColumns.value[columnIndex];
-      const selectedIndex = selectedColumns.findIndex((column) => column.toLocaleLowerCase() === sourceColumn?.toLocaleLowerCase());
-      const resultIndex = resultColumnIndexes[selectedIndex];
-      if (resultIndex === undefined || resultIndex < 0) continue;
-      const previewValue = resolvedRow[resultIndex] ?? null;
-      cache.remember(request.sourceIndex, columnIndex, previewValue);
-      changed = true;
-    }
-  }
-  if (evictVisibleLargeValuePreviews(cache, activeSourceRows)) changed = true;
-  if (!changed) return;
-  visibleLargeValuePreviewVersion.value += 1;
-  scheduleCanvasDraw();
-}
-
-async function runVisibleLargeValuePreviewHydration(generation: number) {
-  if (!visibleLargeValuePreviewActive || generation !== visibleLargeValuePreviewRequestedGeneration) return;
-  const sourceResult = props.result;
-  try {
-    await hydrateVisibleLargeValuePreviews(generation);
-  } catch (error) {
-    if (props.result === sourceResult && generation === visibleLargeValuePreviewRequestedGeneration && !failedVisibleLargeValuePreviewResults.has(sourceResult)) {
-      failedVisibleLargeValuePreviewResults.add(sourceResult);
-      appendDebugLog("warn", "[DBX][DataGrid:visible-large-value-preview] disabled for result", error);
-    }
-  }
-}
-
-function cancelVisibleLargeValuePreviewHydrations() {
-  for (const [generation, executionId] of visibleLargeValuePreviewExecutionIds) {
-    visibleLargeValuePreviewExecutionIds.delete(generation);
-    void api.cancelQuery(executionId).catch((error) => appendDebugLog("warn", "[DBX][DataGrid:visible-large-value-preview] cancel failed", error));
-  }
-}
-
-function scheduleVisibleLargeValuePreviewHydration(delay = 150) {
-  if (!visibleLargeValuePreviewActive) return;
-  const generation = ++visibleLargeValuePreviewRequestedGeneration;
-  cancelVisibleLargeValuePreviewHydrations();
-  window.clearTimeout(visibleLargeValuePreviewTimer);
-  visibleLargeValuePreviewTimer = window.setTimeout(() => {
-    visibleLargeValuePreviewTimer = 0;
-    void runVisibleLargeValuePreviewHydration(generation);
-  }, delay);
-}
-
-function pauseVisibleLargeValuePreviewHydration() {
-  visibleLargeValuePreviewActive = false;
-  visibleLargeValuePreviewRequestedGeneration += 1;
-  cancelVisibleLargeValuePreviewHydrations();
-  window.clearTimeout(visibleLargeValuePreviewTimer);
-  visibleLargeValuePreviewTimer = 0;
-}
-
-function resumeVisibleLargeValuePreviewHydration() {
-  visibleLargeValuePreviewActive = true;
-  scheduleVisibleLargeValuePreviewHydration();
-}
-
-watch(
-  () => [props.result, props.result.rows.length, renderedGridColumns.value.map((column) => column.actualColIdx).join(","), showTranspose.value] as const,
-  () => {
-    nextTick(() => scheduleVisibleLargeValuePreviewHydration());
-  },
-  { immediate: true },
-);
-onActivated(resumeVisibleLargeValuePreviewHydration);
-onDeactivated(pauseVisibleLargeValuePreviewHydration);
-dataGridRuntimeScope.addCleanup(pauseVisibleLargeValuePreviewHydration);
-
-function chunkLargeValueRequests(requests: LargeValueCellRequest[]): LargeValueCellRequest[][] {
-  const chunks: LargeValueCellRequest[][] = [];
-  let chunk: LargeValueCellRequest[] = [];
-  let bytes = 0;
-  for (const request of requests) {
-    if (chunk.length > 0 && (chunk.length >= LARGE_VALUE_FETCH_MAX_ROWS || bytes + request.originalBytes > LARGE_VALUE_FETCH_TARGET_BYTES)) {
-      chunks.push(chunk);
-      chunk = [];
-      bytes = 0;
-    }
-    chunk.push(request);
-    bytes += request.originalBytes;
-  }
-  if (chunk.length > 0) chunks.push(chunk);
-  return chunks;
-}
-
-async function largeValueRowPredicate(item: RowItem, primaryKeyIndexes: number[]): Promise<string> {
-  const originalRow = item.sourceIndex === undefined ? undefined : props.result.rows[item.sourceIndex];
-  if (!originalRow) throw new Error(t("grid.largeValueRowUnavailable"));
-  const tableMeta = props.tableMeta!;
-  const conditions = await Promise.all(
-    tableMeta.primaryKeys.map((columnName, index) =>
-      buildDataGridContextFilterCondition({
-        databaseType: resolvedDatabaseType.value,
-        identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-        columnName,
-        columnInfo: tableMeta.columns.find((column) => column.name.toLocaleLowerCase() === columnName.toLocaleLowerCase()),
-        mode: "equals",
-        value: originalRow[primaryKeyIndexes[index]!] ?? null,
-      }),
-    ),
-  );
-  if (conditions.some((condition) => !condition)) throw new Error(t("grid.largeValueRowUnavailable"));
-  return conditions.map((condition) => `(${condition})`).join(" AND ");
-}
-
-async function fetchLargeValueRequestChunk(columnIndex: number, requests: LargeValueCellRequest[], primaryKeyIndexes: number[], resolved: ResolvedLargeValueCells) {
-  const tableMeta = props.tableMeta!;
-  const sourceColumn = resultSourceColumns.value[columnIndex];
-  if (!sourceColumn) throw new Error(t("grid.largeValueColumnUnavailable"));
-  const predicates = await Promise.all(requests.map((request) => largeValueRowPredicate(request.item, primaryKeyIndexes)));
-  const selectedColumns = [...new Set([...tableMeta.primaryKeys, sourceColumn])];
-  const sql = await buildTableSelectSql({
-    databaseType: resolvedDatabaseType.value,
-    identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
-    database: tableMeta.database,
-    schema: tableMeta.schema,
-    tableName: tableMeta.tableName,
-    tableType: tableMeta.tableType,
-    catalog: tableMeta.catalog,
-    columns: selectedColumns,
-    includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-    primaryKeys: tableMeta.primaryKeys,
-    whereInput: predicates.map((predicate) => `(${predicate})`).join(" OR "),
-    limit: requests.length,
-    offset: 0,
-    includeRowId: shouldIncludeSyntheticRowId(resolvedDatabaseType.value, tableMeta.primaryKeys, tableMeta.tableType),
-  });
-  const connection = props.connectionId ? connectionStore.getConfig(props.connectionId) : undefined;
-  const results = await api.executeMulti(props.connectionId!, props.executionDatabase ?? props.database ?? "", sql, undefined, uuid(), {
-    maxRows: requests.length,
-    fetchSize: requests.length,
-    timeoutSecs: queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs),
-  });
-  const result = results[0];
-  if (!result || result.execution_error) {
-    throw new Error(result?.error ? translateBackendError(t, result.error) : String(result?.rows?.[0]?.[0] ?? t("grid.largeValueLoadFailed")));
-  }
-  const resultColumnIndexes = selectedColumns.map((column) => {
-    const normalized = column.toLocaleLowerCase();
-    return result.columns.findIndex((resultColumn) => resultColumn.toLocaleLowerCase() === normalized);
-  });
-  if (resultColumnIndexes.some((index) => index < 0)) throw new Error(t("grid.largeValueColumnUnavailable"));
-  const resultPrimaryKeyIndexes = resultColumnIndexes.slice(0, tableMeta.primaryKeys.length);
-  const resultValueIndex = resultColumnIndexes[selectedColumns.indexOf(sourceColumn)];
-  const valuesByIdentity = new Map(result.rows.map((row) => [largeValueIdentityKey(row, resultPrimaryKeyIndexes), row[resultValueIndex!] ?? null]));
-  for (const request of requests) {
-    const originalRow = props.result.rows[request.sourceIndex];
-    const identity = originalRow ? largeValueIdentityKey(originalRow, primaryKeyIndexes) : "";
-    if (!valuesByIdentity.has(identity)) throw new Error(t("grid.largeValueRowUnavailable"));
-    const rowValues = resolved.get(request.item.id) ?? new Map<number, CellValue>();
-    rowValues.set(columnIndex, valuesByIdentity.get(identity) ?? null);
-    resolved.set(request.item.id, rowValues);
-  }
-}
-
-async function resolveLargeValueCells(rowIds: number[], columnIndexes: number[]): Promise<ResolvedLargeValueCells> {
-  const resolved: ResolvedLargeValueCells = new Map();
-  const requestedColumns = new Set(columnIndexes);
-  const requestsByColumn = new Map<number, LargeValueCellRequest[]>();
-  for (const rowId of new Set(rowIds)) {
-    const item = getRowItem(rowId);
-    if (!item || item.sourceIndex === undefined) continue;
-    for (const columnIndex of requestedColumns) {
-      if (!isLargeValuePreview(item, columnIndex)) continue;
-      const metadata = largeValueCellsByKey.value.get(largeValueCellKey(item.sourceIndex, columnIndex));
-      if (!metadata) continue;
-      const requests = requestsByColumn.get(columnIndex) ?? [];
-      requests.push({ item, sourceIndex: item.sourceIndex, columnIndex, originalBytes: metadata.original_bytes });
-      requestsByColumn.set(columnIndex, requests);
-    }
-  }
-  if (requestsByColumn.size === 0) return resolved;
-  if ((resolvedDatabaseType.value !== "mysql" && resolvedDatabaseType.value !== "postgres" && resolvedDatabaseType.value !== "oracle") || !props.connectionId || !props.tableMeta?.tableName || props.tableMeta.primaryKeys.length === 0) {
-    throw new Error(t("grid.largeValueNeedsStableKey"));
-  }
-  const primaryKeyIndexes = props.tableMeta.primaryKeys.map(largeValueSourceColumnIndex);
-  if (primaryKeyIndexes.some((index) => index < 0)) throw new Error(t("grid.largeValueNeedsStableKey"));
-
-  for (const [columnIndex, requests] of requestsByColumn) {
-    for (const chunk of chunkLargeValueRequests(requests)) {
-      await fetchLargeValueRequestChunk(columnIndex, chunk, primaryKeyIndexes, resolved);
-    }
-  }
-  return resolved;
-}
-
-function reportLargeValueLoadError(error: unknown) {
-  toast(t("grid.largeValueLoadFailedWithMessage", { message: translateBackendError(t, error) }), 5000);
-}
-
-async function cloneRow(rowId: number) {
-  try {
-    const resolved = await resolveLargeValueCells(
-      [rowId],
-      props.result.columns.map((_, index) => index),
-    );
-    cloneEditorRow(rowId, resolved.get(rowId));
-  } catch (error) {
-    reportLargeValueLoadError(error);
-  }
-}
-
-async function cloneRows(rowIds: number[]) {
-  try {
-    const resolved = await resolveLargeValueCells(
-      rowIds,
-      props.result.columns.map((_, index) => index),
-    );
-    cloneEditorRows(rowIds, resolved);
-  } catch (error) {
-    reportLargeValueLoadError(error);
-  }
-}
-
-async function hydrateLargeValueCell(rowId: number, columnIndex: number): Promise<boolean> {
-  const item = getRowItem(rowId);
-  if (!isLargeValuePreview(item, columnIndex) || item?.sourceIndex === undefined) return true;
-  const sourceResult = props.result;
-  const hydrationKey = largeValueCellKey(item.sourceIndex, columnIndex);
-  const operation = dataGridResultLifecycle.beginOperation();
-  return pendingLargeValueHydrations.run(hydrationKey, sourceResult, async () => {
-    try {
-      const resolved = await resolveLargeValueCells([rowId], [columnIndex]);
-      if (!dataGridResultLifecycle.isCurrent(operation) || props.result !== sourceResult) return false;
-      const value = resolved.get(rowId)?.get(columnIndex);
-      if (value === undefined && !resolved.get(rowId)?.has(columnIndex)) return false;
-      const row = [...(sourceResult.rows[item.sourceIndex!] ?? [])];
-      row[columnIndex] = value ?? null;
-      const rows = sourceResult.rows.slice();
-      rows[item.sourceIndex!] = row;
-      sourceResult.rows = rows;
-      visibleLargeValuePreviewCaches.get(sourceResult)?.forget(item.sourceIndex!, columnIndex);
-      sourceResult.large_value_cells = sourceResult.large_value_cells?.filter((cell) => cell.row_index !== item.sourceIndex || cell.column_index !== columnIndex);
-      largeValueResolutionVersion.value += 1;
-      clearCellFormatCache();
-      queryStore.invalidateResultEstimateForPayload(sourceResult);
-      return true;
-    } catch (error) {
-      if (dataGridResultLifecycle.isCurrent(operation) && props.result === sourceResult) reportLargeValueLoadError(error);
-      return false;
-    }
-  });
-}
+const largeValueRuntimeInstance = useDataGridLargeValues({
+  result: computed(() => props.result),
+  tableMeta: computed(() => props.tableMeta),
+  databaseType: resolvedDatabaseType,
+  connectionId: computed(() => props.connectionId),
+  executionDatabase: computed(() => props.executionDatabase ?? props.database ?? ""),
+  resultSourceColumns,
+  allColumnTypes,
+  renderedGridColumns,
+  showTranspose,
+  displayRowCount,
+  gridScrollerElement,
+  displayItemAt,
+  getRowItem,
+  tableColumnForGridColumn,
+  formatCell,
+  formatCellCached,
+  scheduleCanvasDraw,
+  clearCellFormatCache,
+  invalidateResultEstimate: (result) => queryStore.invalidateResultEstimateForPayload(result),
+  connectionIdentifierQuote: (connectionId) => (connectionId ? connectionStore.connectionIdentifierQuote(connectionId) : undefined),
+  getConnectionConfig: (connectionId) => connectionStore.getConfig(connectionId),
+  includeDatabaseName: computed(() => settingsStore.editorSettings.generateSqlIncludeDatabaseName),
+  globalQueryTimeoutSecs: computed(() => settingsStore.editorSettings.globalQueryTimeoutSecs),
+  resultLifecycle: dataGridResultLifecycle,
+  largeValueResolutionVersion,
+  runtimeScope: dataGridRuntimeScope,
+  uuid,
+  translate: (key, params) => (params ? t(key, params) : t(key)),
+  translateBackendError: (error) => translateBackendError(t, error),
+  appendDebugLog,
+  toast,
+  cloneRow: (rowId, resolved) => cloneEditorRow(rowId, resolved),
+  cloneRows: cloneEditorRows,
+});
+largeValueRuntime = largeValueRuntimeInstance;
+const { isLargeValuePreview, largeValueOriginalBytes, formatGridItemCell, formatGridItemCellForConfirmation, visibleLargeValuePreviewValue, resolveLargeValueCells, reportLargeValueLoadError, cloneRow, cloneRows } = largeValueRuntimeInstance;
 
 const exportContextCell = computed(() => {
   if (!contextCell.value) return null;
@@ -6099,42 +5336,6 @@ watch(activeCellDetailTabs, (tabs) => {
   }
 });
 
-watch(activeCellDetailTab, (tab) => {
-  if (tab === "valueEditor") {
-    void startDetailEdit();
-  } else {
-    resetDetailEdit();
-  }
-});
-
-const detailEditValue = ref("");
-const detailEditOriginalValue = ref("");
-const isEditingDetail = ref(false);
-// commitDetailEdit() intentionally re-triggers the activeCellDetail watch below to
-// re-sync the editor with the canonical committed value. Any other change to the
-// same cell's underlying data while still editing (e.g. a result refresh, or a
-// large-value hydration resolving) must not clobber the user's in-progress draft.
-let allowActiveCellDetailResync = false;
-let lastSyncedDetailCellKey: string | null = null;
-const detailValueDiffOpen = ref(false);
-const detailValueDiffSnapshot = ref<Readonly<JsonValueDiffSnapshot> | null>(null);
-const hasPendingDetailEditorDraft = computed(() => isEditingDetail.value && detailEditValue.value !== detailEditOriginalValue.value);
-const detailJsonDiffContext = computed<JsonValueDiffContext | null>(() => {
-  const detail = activeCellDetail.value;
-  if (!detail) return null;
-  return {
-    columnName: detail.column,
-    columnType: detail.type,
-    originalValue: detailEditOriginalValue.value,
-    isEditable: detail.isEditable,
-    isEditing: isEditingDetail.value,
-  };
-});
-const showDetailJsonCompare = computed(() => {
-  const context = detailJsonDiffContext.value;
-  return !!context && isJsonValueDiffAvailable(context);
-});
-const canCompareDetailJson = computed(() => showDetailJsonCompare.value && hasPendingDetailEditorDraft.value);
 const hasPendingInlineEditorDraft = computed(() => {
   const cell = editingCell.value;
   if (!cell) return false;
@@ -6142,26 +5343,6 @@ const hasPendingInlineEditorDraft = computed(() => {
   if (!item || item.isDeleted) return false;
   const originalValue = inlineCellEditorText(item.data[cell.col] ?? null, cell.col);
   return editValue.value !== originalValue;
-});
-const hasPendingDataEditorDraft = computed(() => hasPendingDetailEditorDraft.value || hasPendingInlineEditorDraft.value);
-
-function syncPendingDataEditorDraft(pending: boolean) {
-  if (props.context !== "table-data" || !props.cacheKey) return;
-  const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
-  if (tab?.mode === "data") tab.hasPendingDataEditorDraft = pending || undefined;
-}
-
-watch(hasPendingDataEditorDraft, syncPendingDataEditorDraft, {
-  immediate: true,
-  flush: "sync",
-});
-
-const activeValueEditorActions = computed(() => {
-  const detail = activeCellDetail.value;
-  return valueEditorActions({
-    canSetNull: !!detail?.isEditable && detail.value !== null,
-    canFormatJson: !!detail?.isEditable && canFormatCellDetailJson(detail.value, detail.type),
-  });
 });
 
 const detailSqlConditionCopy = ref<PreparedCopyValue>({
@@ -6239,31 +5420,8 @@ async function prefetchDetailSqlCondition() {
   }
 }
 
-watch(activeCellDetail, (detail) => {
+watch(activeCellDetail, () => {
   void prefetchDetailSqlCondition();
-  if (activeCellDetailTab.value !== "valueEditor") return;
-  if (!detail?.isEditable) {
-    resetDetailEdit();
-    return;
-  }
-  const cellKey = `${detail.rowId}:${detail.colIndex}`;
-  const isSameCellStillEditing = isEditingDetail.value && cellKey === lastSyncedDetailCellKey;
-  lastSyncedDetailCellKey = cellKey;
-  if (isSameCellStillEditing && !allowActiveCellDetailResync) {
-    // The row's underlying data changed (e.g. a result refresh or a large-value
-    // hydration) while the user is still editing this same cell. Keep their draft.
-    return;
-  }
-  allowActiveCellDetailResync = false;
-  const value = dataGridCellEditorText({
-    value: detail.value,
-    databaseType: resolvedDatabaseType.value,
-    columnInfo: tableColumnForGridColumn(detail.colIndex) ?? resultColumnInfoForGridColumn(detail.colIndex),
-  });
-  detailEditValue.value = value;
-  detailEditOriginalValue.value = value;
-  syncEditorFromDetailEdit();
-  isEditingDetail.value = true;
 });
 
 const detailTemporalEditorConfig = computed(() => {
@@ -6328,12 +5486,64 @@ watch(valueEditorContainer, async (el) => {
   }
 });
 
-function resetDetailEdit() {
-  isEditingDetail.value = false;
-  detailEditValue.value = "";
-  detailEditOriginalValue.value = "";
-  lastSyncedDetailCellKey = null;
+const detailEdit = useDataGridCellDetailEdit({
+  activeDetail: activeCellDetail,
+  activeTab: activeCellDetailTab,
+  jsonFormatted: cellDetailJsonFormatted,
+  databaseType: resolvedDatabaseType,
+  resultRows: computed(() => props.result.rows),
+  getColumnInfo: (columnIndex) => tableColumnForGridColumn(columnIndex) ?? resultColumnInfoForGridColumn(columnIndex),
+  getRowItem,
+  hydrateLargeValueCell,
+  applyCellValue,
+  restoreCellValue,
+  syncEditor: (value, columnType) => {
+    const editor = getDetailEditor();
+    if (editor) editor.setValue(value, columnType);
+  },
+  refreshDetail: () => {
+    detailCell.value = detailCell.value ? { ...detailCell.value } : null;
+  },
+  warnFormattedJsonEdit: warnFormattedJsonEditIfNeeded,
+});
+
+const {
+  detailEditValue,
+  detailEditOriginalValue,
+  isEditingDetail,
+  detailValueDiffOpen,
+  detailValueDiffSnapshot,
+  hasPendingDetailEditorDraft,
+  showDetailJsonCompare,
+  canCompareDetailJson,
+  activeValueEditorActions,
+  resetDetailEdit,
+  syncEditorFromDetailEdit,
+  startDetailEdit,
+  commitDetailEdit,
+  cancelDetailEdit,
+  cancelValueEditorEdit,
+  commitValueEditorEdit,
+  restoreDetailOriginalValue,
+  setValueEditorNull,
+  formatValueEditorJson,
+  compactDetailJson,
+  openDetailJsonCompare,
+  setDetailNull,
+} = detailEdit;
+
+const hasPendingDataEditorDraft = computed(() => hasPendingDetailEditorDraft.value || hasPendingInlineEditorDraft.value);
+
+function syncPendingDataEditorDraft(pending: boolean) {
+  if (props.context !== "table-data" || !props.cacheKey) return;
+  const tab = queryStore.tabs.find((item) => item.id === props.cacheKey);
+  if (tab?.mode === "data") tab.hasPendingDataEditorDraft = pending || undefined;
 }
+
+watch(hasPendingDataEditorDraft, syncPendingDataEditorDraft, {
+  immediate: true,
+  flush: "sync",
+});
 
 function closeCellDetails() {
   resetDetailEdit();
@@ -6344,7 +5554,12 @@ function closeCellDetails() {
 function toggleMongoJsonPreview() {
   if (!canShowMongoJsonPreview.value) return;
   showMongoJsonPreview.value = !showMongoJsonPreview.value;
-  if (showMongoJsonPreview.value) closeCellDetails();
+  if (showMongoJsonPreview.value) {
+    closeCellDetails();
+    if (!currentSelectedCellPosition() && displayItems.value.length > 0 && visibleColumnIndexes.value.length > 0) {
+      selectSingleCell(0, 0);
+    }
+  }
 }
 
 function closeMongoJsonPreview() {
@@ -6353,15 +5568,6 @@ function closeMongoJsonPreview() {
 
 function copyMongoJsonPreview() {
   if (mongoJsonPreviewFullText.value) copyText(mongoJsonPreviewFullText.value);
-}
-
-function cellDetailEditText(detail: DataGridCellDetail): string {
-  if (sideDetailJsonView.value && detail.formattedJson) return detail.formattedJson;
-  return dataGridCellEditorText({
-    value: detail.value,
-    databaseType: props.databaseType,
-    columnInfo: tableColumnForGridColumn(detail.colIndex),
-  });
 }
 
 function warnFormattedJsonEditIfNeeded(detail: DataGridCellDetail, force = false) {
@@ -6382,136 +5588,6 @@ function toggleCellDetailMetadataCollapsed() {
   settingsStore.updateEditorSettings({
     cellDetailMetadataCollapsed: !cellDetailMetadataCollapsed.value,
   });
-}
-
-async function startDetailEdit() {
-  const initialDetail = activeCellDetail.value;
-  if (!initialDetail || !initialDetail.isEditable) return;
-  if (!(await hydrateLargeValueCell(initialDetail.rowId, initialDetail.colIndex))) return;
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-  warnFormattedJsonEditIfNeeded(detail);
-  const value = cellDetailEditText(detail);
-  detailEditValue.value = value;
-  detailEditOriginalValue.value = value;
-  isEditingDetail.value = true;
-}
-
-function commitDetailEdit() {
-  const detail = activeCellDetail.value;
-  if (!detail || !isEditingDetail.value) return;
-  isEditingDetail.value = false;
-
-  const item = getRowItem(detail.rowId);
-  if (!item || item.isDeleted) return;
-  applyCellValue(detail.rowId, detail.colIndex, detailEditValue.value);
-  detailEditOriginalValue.value = detailEditValue.value;
-  // Force the activeCellDetail watch to re-run so the editor picks up the
-  // canonical (possibly coerced) committed value.
-  allowActiveCellDetailResync = true;
-  detailCell.value = detailCell.value ? { ...detailCell.value } : null;
-}
-
-function cancelDetailEdit() {
-  resetDetailEdit();
-}
-
-function syncEditorFromDetailEdit() {
-  const editor = getDetailEditor();
-  if (editor) {
-    editor.setValue(detailEditValue.value, activeCellDetail.value?.type);
-  }
-}
-
-function cancelValueEditorEdit() {
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-  const value = dataGridCellEditorText({
-    value: detail.value,
-    databaseType: props.databaseType,
-    columnInfo: tableColumnForGridColumn(detail.colIndex),
-  });
-  detailEditValue.value = value;
-  detailEditOriginalValue.value = value;
-  syncEditorFromDetailEdit();
-  isEditingDetail.value = true;
-}
-
-function commitValueEditorEdit() {
-  commitDetailEdit();
-  if (activeCellDetailTab.value === "valueEditor") {
-    isEditingDetail.value = true;
-  }
-}
-
-function restoreDetailOriginalValue() {
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-
-  const item = getRowItem(detail.rowId);
-  if (!item || item.isDeleted) return;
-
-  let restoredValue: CellValue = null;
-
-  if (!item.isNew && item.sourceIndex !== undefined) {
-    restoredValue = props.result.rows[item.sourceIndex]?.[detail.colIndex] ?? null;
-  }
-  restoreCellValue(detail.rowId, detail.colIndex);
-
-  const value = dataGridCellEditorText({
-    value: restoredValue,
-    databaseType: props.databaseType,
-    columnInfo: tableColumnForGridColumn(detail.colIndex),
-  });
-  detailEditValue.value = value;
-  detailEditOriginalValue.value = value;
-  syncEditorFromDetailEdit();
-  isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
-  detailCell.value = { ...detailCell.value! };
-}
-
-function setValueEditorNull() {
-  setDetailNull();
-  detailEditValue.value = cellDetailEditorText(null);
-  detailEditOriginalValue.value = detailEditValue.value;
-  syncEditorFromDetailEdit();
-  isEditingDetail.value = activeCellDetailTab.value === "valueEditor";
-}
-
-function formatValueEditorJson() {
-  const detail = activeCellDetail.value;
-  if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
-  detailEditValue.value = formatJsonText(detailEditValue.value) ?? detailEditValue.value;
-  syncEditorFromDetailEdit();
-  warnFormattedJsonEditIfNeeded(detail, true);
-}
-
-function compactDetailJson() {
-  const detail = activeCellDetail.value;
-  if (!detail || !canFormatCellDetailJson(detailEditValue.value, detail.type)) return;
-  detailEditValue.value = compactJsonText(detailEditValue.value) ?? detailEditValue.value;
-  syncEditorFromDetailEdit();
-}
-
-function openDetailJsonCompare() {
-  const context = detailJsonDiffContext.value;
-  if (!context) return;
-  const snapshot = createJsonValueDiffSnapshot({ ...context, currentValue: detailEditValue.value });
-  if (!snapshot) return;
-  detailValueDiffSnapshot.value = snapshot;
-  detailValueDiffOpen.value = true;
-}
-
-function setDetailNull() {
-  const detail = activeCellDetail.value;
-  if (!detail || !detail.isEditable) return;
-
-  const item = getRowItem(detail.rowId);
-  if (!item || item.isDeleted) return;
-
-  applyCellValue(detail.rowId, detail.colIndex, null);
-  resetDetailEdit();
-  detailCell.value = { ...detailCell.value! };
 }
 
 function applyColumnSort(column: string, columnIndex: number, direction: "asc" | "desc" | null, mode: DataGridSortMode = "database") {
@@ -7936,6 +7012,7 @@ const {
   sourceColumns: visibleSourceColumns,
   columnComments: visibleColumnComments,
   allColumnComments,
+  displayValue: formatCellCached,
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   spatialColumns: computed(() => props.result.spatial_columns),
   spatialValues: computed(() => props.result.spatial_values),
@@ -11408,9 +10485,6 @@ onUnmounted(() => {
   onMongoJsonPreviewResizeEnd();
   finishCellSelection();
   clearTimeout(highlightedColumnTimer);
-  if (serverFilterSearchTimer !== undefined) {
-    window.clearTimeout(serverFilterSearchTimer);
-  }
   stopLoadingElapsedTimer();
 });
 
@@ -11792,7 +10866,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsTxt"), action: exportSelectedRowsTxt },
     );
   }
-  return { label: t("grid.export"), icon: Download, children: items };
+  return { label: t("grid.export"), icon: Upload, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
@@ -12063,7 +11137,7 @@ function openGridSnapshot() {
                 <DataGridQueryControls
                   v-model:where-input="whereFilterInput"
                   v-model:order-by-input="orderByInput"
-                  v-model:filter-builder-open="filterBuilderOpen"
+                  v-model:filter-builder-open="effectiveFilterBuilderOpen"
                   :filter-editor-view="filterEditorView"
                   :columns="props.tableMeta?.columns.map((column) => column.name) ?? props.result.columns"
                   :condition-columns="conditionColumns"
@@ -12214,7 +11288,7 @@ function openGridSnapshot() {
           </DataGridToolbar>
         </div>
         <DataGridFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'conditions' && filterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'conditions' && effectiveFilterBuilderOpen"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
           :columns="filterBuilderColumnOptions"
@@ -12234,7 +11308,7 @@ function openGridSnapshot() {
           @update-rule="updateStructuredFilterRule"
         />
         <DataGridTextFilterWorkbench
-          v-if="canUseWhereSearch && filterEditorView === 'text' && filterBuilderOpen"
+          v-if="canUseWhereSearch && filterEditorView === 'text' && effectiveFilterBuilderOpen"
           :height="settingsStore.editorSettings.dataGridTextFilterPanelHeight"
           :sql-preview="filterSqlPreview"
           :rules="structuredFilterRules"
@@ -13026,118 +12100,37 @@ function openGridSnapshot() {
                             </div>
                           </PopoverContent>
                         </Popover>
-                        <Popover :open="localFilterOpenColumn === col.actualColIdx" @update:open="(value: boolean) => handleLocalFilterOpenChange(value, col.actualColIdx)">
-                          <PopoverAnchor v-if="compactColumnHeaderActions" as-child>
-                            <span class="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2" />
-                          </PopoverAnchor>
-                          <PopoverTrigger v-else as-child>
-                            <button
-                              type="button"
-                              class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                              :class="localFilterActive(col.actualColIdx) ? 'text-primary opacity-100' : 'opacity-80'"
-                              :title="t('grid.localFilter')"
-                              @click.stop
-                            >
-                              <Filter class="h-3.5 w-3.5" />
-                            </button>
-                          </PopoverTrigger>
-                          <PopoverContent
-                            align="start"
-                            side="bottom"
-                            class="relative max-w-[calc(100vw-2rem)] gap-0 overflow-hidden rounded-md border bg-popover p-0 text-popover-foreground shadow-xl"
-                            :style="{ width: `${localFilterPopoverWidth}px`, marginLeft: `${localFilterPopoverOffsetX}px` }"
-                            @click.stop
-                            @keydown.stop
-                          >
-                            <div role="separator" aria-orientation="vertical" aria-label="Resize filter panel" class="absolute left-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onLocalFilterResizeStart($event, 'left')" />
-                            <div role="separator" aria-orientation="vertical" aria-label="Resize filter panel" class="absolute right-0 top-0 z-10 h-full w-1.5 cursor-col-resize hover:bg-primary/30" @mousedown.stop="onLocalFilterResizeStart($event, 'right')" />
-                            <div class="border-b bg-muted/40 px-2 py-1.5 text-center text-xs font-semibold">
-                              {{ columnFilterPanelTitle(col.name) }}
-                            </div>
-                            <div class="flex items-center gap-1.5 border-b px-2 py-1.5">
-                              <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                              <input v-model="localFilterSearch" autocapitalize="off" autocorrect="off" spellcheck="false" class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground" :placeholder="t('grid.searchValues')" />
-                            </div>
-                            <div class="grid grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] border-b bg-muted/40 px-2 py-1 text-xs font-medium text-muted-foreground">
-                              <button type="button" class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterAllVisibleSelected ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'" @click="toggleAllLocalFilterOptions">
-                                <Check v-if="localFilterAllVisibleSelected" class="h-3 w-3 stroke-[3]" />
-                              </button>
-                              <span>{{ t("grid.value") }}</span>
-                              <span class="text-right">{{ t("grid.count") }}</span>
-                            </div>
-                            <div v-if="localFilterDraft?.mode === 'server' && (serverFilterLoading || serverFilterError || serverFilterLimited)" class="flex items-center gap-1.5 border-b px-2 py-1 text-[11px] text-muted-foreground">
-                              <Loader2 v-if="serverFilterLoading" class="h-3 w-3 animate-spin" />
-                              <span class="min-w-0 truncate">
-                                <template v-if="serverFilterLoading">{{ t("grid.loadingValues") }}</template>
-                                <template v-else-if="serverFilterError">{{ serverFilterError }}</template>
-                                <template v-else>{{
-                                  t("grid.serverValuesLimited", {
-                                    count: SERVER_COLUMN_FILTER_LIMIT,
-                                  })
-                                }}</template>
-                              </span>
-                            </div>
-                            <div class="max-h-72 overflow-auto py-0.5">
-                              <button v-for="option in localFilterOptions" :key="option.key" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)_3.5rem] items-center px-2 py-1 text-left text-xs hover:bg-accent" @click="toggleLocalFilterValue(option.key)">
-                                <span class="flex h-4 w-4 items-center justify-center rounded border" :class="localFilterDraft?.values.has(option.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-border bg-background text-foreground/70'">
-                                  <Check v-if="localFilterDraft?.values.has(option.key)" class="h-3 w-3 stroke-[3]" />
-                                </span>
-                                <span
-                                  class="truncate font-mono"
-                                  :class="{
-                                    'italic text-muted-foreground': option.value === null,
-                                  }"
-                                >
-                                  {{ option.label }}
-                                </span>
-                                <span class="text-right tabular-nums text-muted-foreground text-xs">{{ option.count ?? "" }}</span>
-                              </button>
-                              <div v-if="localFilterDraft?.mode === 'local' && localFilterAllOptions.length > localFilterOptions.length" class="px-2 py-0.5 text-center text-[10px] text-muted-foreground">
-                                {{
-                                  t("grid.moreValues", {
-                                    count: localFilterAllOptions.length - localFilterOptions.length,
-                                  })
-                                }}
-                              </div>
-                              <button v-if="canApplyTypedLocalFilterValue" type="button" class="grid w-full grid-cols-[1.75rem_minmax(0,1fr)] items-center px-2 py-1 text-left text-xs text-primary hover:bg-accent" @click="applyTypedLocalFilterValue">
-                                <Search class="h-3.5 w-3.5" />
-                                <span class="truncate font-mono">
-                                  {{
-                                    t("grid.filterTypedValue", {
-                                      value: localFilterTypedValue,
-                                    })
-                                  }}
-                                </span>
-                              </button>
-                              <div v-if="localFilterOptions.length === 0 && !canApplyTypedLocalFilterValue && !serverFilterLoading" class="px-2 py-6 text-center text-xs text-muted-foreground">
-                                {{ t("grid.noSearchResults") }}
-                              </div>
-                            </div>
-                            <div class="flex items-center justify-between gap-2 border-t bg-muted/40 px-2 py-1.5">
-                              <Button variant="ghost" size="sm" class="h-7 px-2 text-xs" @click="clearLocalFilter(col.actualColIdx)">
-                                {{ t("grid.clearFilter") }}
-                              </Button>
-                              <div class="flex items-center gap-2">
-                                <Button variant="outline" size="sm" class="h-7 px-2 text-xs" @click="closeLocalFilter">
-                                  {{ t("dangerDialog.cancel") }}
-                                </Button>
-                                <Button size="sm" class="h-7 px-2 text-xs" @click="applyLocalFilter">
-                                  {{ t("grid.applyFilter") }}
-                                </Button>
-                              </div>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
-                        <button
-                          v-if="!compactColumnHeaderActions && canUseServerColumnFilter"
-                          type="button"
-                          class="flex h-4 w-4 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-gray-200 dark:hover:bg-gray-800 hover:text-foreground"
-                          :class="localFilterOpenColumn === col.actualColIdx && localFilterDraft?.mode === 'server' ? 'text-primary opacity-100' : 'opacity-80'"
-                          :title="t('grid.databaseValueFilter')"
-                          @click.stop="openLocalFilter(col.actualColIdx, 'server')"
-                        >
-                          <Database class="h-3.5 w-3.5" />
-                        </button>
+                        <DataGridColumnFilterPopover
+                          :open="localFilterOpenColumn === col.actualColIdx"
+                          :compact-header-actions="compactColumnHeaderActions"
+                          :can-use-server-filter="canUseServerColumnFilter"
+                          :active="localFilterActive(col.actualColIdx)"
+                          :server-mode-active="localFilterOpenColumn === col.actualColIdx && localFilterDraft?.mode === 'server'"
+                          :panel-title="columnFilterPanelTitle(col.name)"
+                          :search="localFilterSearch"
+                          :popover-width="localFilterPopoverWidth"
+                          :popover-offset-x="localFilterPopoverOffsetX"
+                          :draft-mode="localFilterDraft?.mode"
+                          :draft-values="localFilterDraft?.values"
+                          :options="localFilterOptions"
+                          :all-options-count="localFilterAllOptions.length"
+                          :can-apply-typed-value="canApplyTypedLocalFilterValue"
+                          :typed-value="localFilterTypedValue"
+                          :server-loading="serverFilterLoading"
+                          :server-error="serverFilterError"
+                          :server-limited="serverFilterLimited"
+                          :server-value-limit="DATA_GRID_SERVER_COLUMN_FILTER_LIMIT"
+                          @update:open="(value) => handleLocalFilterOpenChange(value, col.actualColIdx)"
+                          @update:search="localFilterSearch = $event"
+                          @resize-start="onLocalFilterResizeStart"
+                          @toggle-all="toggleAllLocalFilterOptions"
+                          @toggle-value="toggleLocalFilterValue"
+                          @apply-typed-value="applyTypedLocalFilterValue"
+                          @clear="() => clearLocalFilter(col.actualColIdx)"
+                          @close="closeLocalFilter"
+                          @apply="applyLocalFilter"
+                          @open-server-filter="openLocalFilter(col.actualColIdx, 'server')"
+                        />
                       </span>
                     </template>
                   </DataGridColumnHeader>
@@ -13748,49 +12741,17 @@ function openGridSnapshot() {
             <div v-if="!cellDetailPanelIsBottom" class="absolute left-0 top-0 bottom-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize hover:bg-primary/30" @mousedown.prevent="onDetailResizeStart" />
             <div v-else class="data-grid-detail-resize-handle data-grid-detail-resize-handle--bottom absolute left-0 right-0 top-0 z-20 h-2 -translate-y-1/2 cursor-row-resize" @mousedown.prevent="onDetailResizeStart" />
             <Tabs v-model="activeCellDetailTab" class="min-w-0 flex-1 min-h-0 gap-0">
-              <div class="h-9 flex min-w-0 items-center gap-2 overflow-hidden border-b bg-muted/20 px-3 shrink-0">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="h-5 w-5 shrink-0"
-                  :title="cellDetailMetadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
-                  :aria-label="cellDetailMetadataCollapsed ? t('grid.expandCellDetailMetadata') : t('grid.collapseCellDetailMetadata')"
-                  :aria-expanded="!cellDetailMetadataCollapsed"
-                  @click="toggleCellDetailMetadataCollapsed"
-                >
-                  <ChevronRight v-if="cellDetailMetadataCollapsed" class="w-3 h-3" />
-                  <ChevronDown v-else class="w-3 h-3" />
-                </Button>
-                <div class="min-w-0 flex-1 overflow-x-auto overflow-y-hidden overscroll-x-contain">
-                  <TabsList class="flex h-7 w-max min-w-full justify-start p-0.5">
-                    <TabsTrigger value="details" class="h-6 min-w-max flex-1 shrink-0 text-xs">{{ t("grid.cellDetails") }}</TabsTrigger>
-                    <TabsTrigger v-if="activeCellDetailTabs.includes('hexViewer')" value="hexViewer" class="h-6 min-w-max flex-1 shrink-0 text-xs">
-                      {{ t("grid.hexViewer") }}
-                    </TabsTrigger>
-                    <TabsTrigger v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="h-6 min-w-max flex-1 shrink-0 text-xs">
-                      {{ t("grid.valueEditor") }}
-                    </TabsTrigger>
-                  </TabsList>
-                </div>
-                <div class="ml-auto flex shrink-0 items-center gap-1">
-                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="cellDetailPanelIsBottom ? t('grid.cellDetailLayoutRight') : t('grid.cellDetailLayoutBottom')" @click="toggleCellDetailPanelLayout">
-                    <PanelRight v-if="cellDetailPanelIsBottom" class="w-3 h-3" />
-                    <PanelBottom v-else class="w-3 h-3" />
-                  </Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openCellDetailsDialog')" @click="openActiveCellDetailDialog">
-                    <Maximize2 class="w-3 h-3" />
-                  </Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openRowDetailsDialog')" @click="openActiveRowDetailDialog">
-                    <ListTree class="w-3 h-3" />
-                  </Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.openColumnDetailsDialog')" @click="openActiveColumnDetailDialog">
-                    <TableProperties class="w-3 h-3" />
-                  </Button>
-                  <Button variant="ghost" size="icon" class="h-5 w-5" @click="closeCellDetails">
-                    <X class="w-3 h-3" />
-                  </Button>
-                </div>
-              </div>
+              <DataGridCellDetailHeader
+                :metadata-collapsed="cellDetailMetadataCollapsed"
+                :panel-is-bottom="cellDetailPanelIsBottom"
+                :active-tabs="activeCellDetailTabs"
+                @toggle-metadata="toggleCellDetailMetadataCollapsed"
+                @toggle-layout="toggleCellDetailPanelLayout"
+                @open-cell-details="openActiveCellDetailDialog"
+                @open-row-details="openActiveRowDetailDialog"
+                @open-column-details="openActiveColumnDetailDialog"
+                @close="closeCellDetails"
+              />
 
               <DataGridCellDetailPanel
                 v-if="activeCellDetail"
@@ -13827,35 +12788,7 @@ function openGridSnapshot() {
                 @copy-column-name="copyDetailColumnName"
                 @copy-sql-condition="copyDetailSqlCondition"
               />
-              <TabsContent v-if="activeCellDetailTabs.includes('hexViewer')" value="hexViewer" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
-                <div class="mb-2 min-w-0 shrink-0">
-                  <div class="font-medium">{{ t("grid.hexViewer") }}</div>
-                  <div class="text-[11px] text-muted-foreground">
-                    {{
-                      t("grid.hexViewerByteCount", {
-                        count: activeBinaryHexByteCount,
-                      })
-                    }}
-                  </div>
-                </div>
-                <div class="min-h-0 flex-1 overflow-auto rounded border bg-muted/20 font-mono text-[11px]">
-                  <div class="sticky top-0 grid grid-cols-[5.5rem_minmax(24rem,1fr)_8rem] gap-3 border-b bg-muted px-2 py-1 font-semibold text-muted-foreground">
-                    <div>{{ t("grid.hexViewerOffset") }}</div>
-                    <div>{{ t("grid.hexViewerHex") }}</div>
-                    <div>{{ t("grid.hexViewerAscii") }}</div>
-                  </div>
-                  <div v-for="row in activeBinaryHexRows" :key="row.offset" class="grid grid-cols-[5.5rem_minmax(24rem,1fr)_8rem] gap-3 border-b border-border/50 px-2 py-1 last:border-b-0">
-                    <div class="select-all text-muted-foreground">
-                      {{ row.offset }}
-                    </div>
-                    <div class="select-all whitespace-pre">{{ row.hex }}</div>
-                    <div class="select-all whitespace-pre">{{ row.ascii }}</div>
-                  </div>
-                  <div v-if="activeBinaryHexRows.length === 0" class="px-2 py-6 text-center font-sans text-muted-foreground">
-                    {{ t("grid.hexViewerEmpty") }}
-                  </div>
-                </div>
-              </TabsContent>
+              <DataGridCellDetailHexViewer v-if="activeCellDetailTabs.includes('hexViewer')" :rows="activeBinaryHexRows" :byte-count="activeBinaryHexByteCount" />
 
               <TabsContent v-if="activeCellDetailTabs.includes('valueEditor')" value="valueEditor" class="m-0 min-h-0 min-w-0 flex-1 flex flex-col p-3 text-xs">
                 <div class="min-w-0 flex min-h-0 flex-1 flex-col">

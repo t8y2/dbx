@@ -743,6 +743,7 @@ struct SearchHit {
 }
 
 const ES_PIT_KEEP_ALIVE: &str = "1m";
+const ES_SCROLL_KEEP_ALIVE: &str = "1m";
 const ES_MAX_RESULT_WINDOW: usize = 10_000;
 
 /// 一页检索的分页方式。PIT + `search_after` 是首选；集群不支持时降级为 from/size。
@@ -750,6 +751,7 @@ const ES_MAX_RESULT_WINDOW: usize = 10_000;
 #[serde(tag = "type", rename_all = "snake_case")]
 enum EsPageMode {
     Pit { pit_id: String, keep_alive: String, search_after: Vec<serde_json::Value> },
+    Scroll { scroll_id: String, keep_alive: String },
     Offset { from: u64 },
 }
 
@@ -833,6 +835,20 @@ async fn close_es_pit(client: &EsClient, pit_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+async fn close_es_scroll(client: &EsClient, scroll_id: &str) -> Result<(), String> {
+    let resp = client
+        .delete("/_search/scroll")
+        .json(&serde_json::json!({ "scroll_id": [scroll_id] }))
+        .send()
+        .await
+        .map_err(|e| format!("Elasticsearch request failed: {e}"))?;
+    if !client.response_status(&resp).is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("Elasticsearch error: {body}"));
+    }
+    Ok(())
+}
+
 async fn close_es_sql_cursor(client: &EsClient, cursor: &str) -> Result<(), String> {
     let resp = client
         .post("/_sql/close")
@@ -854,6 +870,10 @@ pub async fn close_cursor(client: &EsClient, cursor: &str) -> Result<(), String>
         return match search_cursor {
             EsSearchCursor::Page(page) => match page.mode {
                 EsPageMode::Pit { pit_id, .. } => close_es_pit(client, &pit_id).await,
+                EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                    close_es_scroll(client, &scroll_id).await
+                }
+                EsPageMode::Scroll { .. } => Ok(()),
                 // from/size 分页在服务端没有留下任何状态，无需释放。
                 EsPageMode::Offset { .. } => Ok(()),
             },
@@ -955,6 +975,9 @@ fn es_build_page_request_body(page: &EsPageCursor) -> serde_json::Value {
                 map.insert("search_after".to_string(), serde_json::Value::Array(search_after.clone()));
             }
         }
+        EsPageMode::Scroll { .. } => {
+            map.remove("from");
+        }
         EsPageMode::Offset { from } => {
             map.insert("from".to_string(), serde_json::json!(from));
             // from/size 各页之间没有快照，排序有并列值时页边界会重复或漏行。
@@ -981,7 +1004,24 @@ async fn es_send_page(
     // PIT 检索必须打全局 `/_search`——PIT 自带索引信息，路径里再带索引名会被拒。
     let path = match &page.mode {
         EsPageMode::Pit { .. } => "/_search".to_string(),
+        EsPageMode::Scroll { scroll_id, keep_alive } if !scroll_id.is_empty() => {
+            let _ = keep_alive;
+            "/_search/scroll".to_string()
+        }
+        EsPageMode::Scroll { keep_alive, .. } => {
+            format!(
+                "/{}/_search?scroll={}",
+                elasticsearch_path_segment(&page.index),
+                elasticsearch_query_value(keep_alive)
+            )
+        }
         EsPageMode::Offset { .. } => elasticsearch_index_path(&page.index, "_search"),
+    };
+    let request_body = match &page.mode {
+        EsPageMode::Scroll { scroll_id, keep_alive } if !scroll_id.is_empty() => {
+            serde_json::json!({ "scroll": keep_alive, "scroll_id": scroll_id })
+        }
+        _ => request_body,
     };
     let opened_pit = match &page.mode {
         EsPageMode::Pit { pit_id, .. } if !is_continuation => Some(pit_id.clone()),
@@ -1029,6 +1069,17 @@ async fn es_send_page(
             };
             (current, next)
         }
+        EsPageMode::Scroll { scroll_id, keep_alive } => {
+            let scroll_id = response
+                .get("_scroll_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| scroll_id.clone());
+            let current = EsPageMode::Scroll { scroll_id: scroll_id.clone(), keep_alive: keep_alive.clone() };
+            let next = (!scroll_id.is_empty() && is_full_page)
+                .then_some(EsPageMode::Scroll { scroll_id, keep_alive: keep_alive.clone() });
+            (current, next)
+        }
         EsPageMode::Offset { from } => {
             let next_from = from.saturating_add(page.size as u64);
             // 下一页整页都要落在 max_result_window 内，否则那次请求必被 ES 拒绝。
@@ -1051,8 +1102,14 @@ async fn es_send_page(
     };
     // 首页就翻到底时没有「上一页」可回，直接关掉 PIT 而不是挂着等它过期。
     if next_cursor.is_none() && !is_continuation {
-        if let EsPageMode::Pit { pit_id, .. } = &current_mode {
-            let _ = close_es_pit(client, pit_id).await;
+        match &current_mode {
+            EsPageMode::Pit { pit_id, .. } => {
+                let _ = close_es_pit(client, pit_id).await;
+            }
+            EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                let _ = close_es_scroll(client, scroll_id).await;
+            }
+            _ => {}
         }
     }
     let active_cursor = if next_cursor.is_some() || is_continuation { Some(encode(current_mode)?) } else { None };
@@ -1076,8 +1133,14 @@ async fn es_execute_paged_search(
             None
         };
         if let Some(error) = mismatch {
-            if let EsPageMode::Pit { pit_id, .. } = &page.mode {
-                let _ = close_es_pit(client, pit_id).await;
+            match &page.mode {
+                EsPageMode::Pit { pit_id, .. } => {
+                    let _ = close_es_pit(client, pit_id).await;
+                }
+                EsPageMode::Scroll { scroll_id, .. } if !scroll_id.is_empty() => {
+                    let _ = close_es_scroll(client, scroll_id).await;
+                }
+                _ => {}
             }
             return Err(error);
         }
@@ -1110,12 +1173,24 @@ async fn es_execute_paged_search(
     }
 
     let page = EsPageCursor {
-        index: request.index,
-        body: request.body,
+        index: request.index.clone(),
+        body: request.body.clone(),
         size: request.size,
-        mode: EsPageMode::Offset { from: 0 },
+        mode: EsPageMode::Scroll { scroll_id: String::new(), keep_alive: ES_SCROLL_KEEP_ALIVE.to_string() },
     };
-    es_send_page(client, &page, false).await.map_err(String::from)
+    match es_send_page(client, &page, false).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) if !error.rejected_by_server => Err(error.message),
+        Err(_) => {
+            let page = EsPageCursor {
+                index: request.index,
+                body: request.body,
+                size: request.size,
+                mode: EsPageMode::Offset { from: 0 },
+            };
+            es_send_page(client, &page, false).await.map_err(String::from)
+        }
+    }
 }
 
 /// 首页解析失败时游标不会交到调用方手上，这里释放它可能持有的 PIT。
@@ -3473,6 +3548,20 @@ mod tests {
     }
 
     #[test]
+    fn scroll_page_body_removes_offset_for_legacy_clusters() {
+        let page = super::EsPageCursor {
+            index: "events".to_string(),
+            body: json!({ "from": 9_500, "query": { "match_all": {} }, "sort": ["created_at"] }),
+            size: 500,
+            mode: super::EsPageMode::Scroll { scroll_id: String::new(), keep_alive: "1m".to_string() },
+        };
+        assert_eq!(
+            super::es_build_page_request_body(&page),
+            json!({ "query": { "match_all": {} }, "size": 500, "sort": ["created_at"] })
+        );
+    }
+
+    #[test]
     fn es_sql_pagination_strips_plan_offset_but_keeps_user_limit() {
         let (base, limit) = super::es_sql_pagination("SELECT field FROM idx LIMIT 500 OFFSET 0");
         assert_eq!(base, "SELECT field FROM idx");
@@ -3521,6 +3610,7 @@ mod tests {
                     assert_eq!(pit_id, "pit-1");
                     assert_eq!(search_after, vec![serde_json::json!("abc")]);
                 }
+                super::EsPageMode::Scroll { .. } => panic!("expected PIT page cursor"),
                 super::EsPageMode::Offset { .. } => panic!("expected PIT page cursor"),
             },
             super::EsSearchCursor::Sql { .. } => panic!("expected PIT search cursor"),
@@ -3583,6 +3673,7 @@ mod tests {
         };
         match page.mode {
             super::EsPageMode::Pit { pit_id, .. } => assert_eq!(pit_id, "pit-2"),
+            super::EsPageMode::Scroll { .. } => panic!("expected PIT mode"),
             super::EsPageMode::Offset { .. } => panic!("expected PIT mode"),
         }
     }
@@ -3622,54 +3713,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_shard_doc_support_falls_back_to_offset_paging() {
+    async fn unsupported_pit_uses_scroll_cursor_before_offset_fallback() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = serve_responses(
             listener,
             vec![
-                (200, r#"{"id":"pit-1"}"#.to_string()),
-                (400, missing_shard_doc_error_body()),
-                (200, "{}".to_string()),
-                (200, one_hit_response()),
-            ],
-        )
-        .await;
-
-        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
-        let result = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
-        let requests = server.await.unwrap();
-
-        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
-        assert!(requests[1].starts_with("POST /_search "), "{}", requests[1]);
-        assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
-        assert!(requests[2].starts_with("DELETE /_pit "), "{}", requests[2]);
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
-        assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
-        assert!(requests[3].contains(r#""from":0"#), "{}", requests[3]);
-        assert_eq!(result.documents.len(), 1);
-        assert_eq!(result.total, 42);
-
-        // 回退后仍要给出游标，否则数据浏览器只能停在第一页。
-        let page = match super::decode_es_search_cursor(result.next_cursor.as_deref().unwrap()).unwrap() {
-            super::EsSearchCursor::Page(page) => page,
-            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
-        };
-        assert_eq!(page.mode, super::EsPageMode::Offset { from: 1 });
-    }
-
-    #[tokio::test]
-    async fn offset_fallback_is_remembered_for_the_connection() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = serve_responses(
-            listener,
-            vec![
-                (200, r#"{"id":"pit-1"}"#.to_string()),
-                (400, missing_shard_doc_error_body()),
-                (200, "{}".to_string()),
-                (200, one_hit_response()),
-                (200, one_hit_response()),
+                (400, r#"{"error":"PIT is not supported"}"#.to_string()),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-1","hits":{"total":{"value":2,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-2","hits":{"total":{"value":2,"relation":"eq"},"hits":[]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
             ],
         )
         .await;
@@ -3682,10 +3740,84 @@ mod tests {
                 .unwrap();
         let requests = server.await.unwrap();
 
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /products/_search?scroll=1m "), "{}", requests[1]);
+        assert!(requests[1].contains(r#""size":1"#), "{}", requests[1]);
+        assert!(requests[2].starts_with("POST /_search/scroll "), "{}", requests[2]);
+        assert!(requests[2].contains(r#""scroll_id":"scroll-1""#), "{}", requests[2]);
+        assert_eq!(first.documents.len(), 1);
+        assert!(first.next_cursor.is_some());
+        assert!(second.documents.is_empty());
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_shard_doc_support_falls_back_to_scroll_paging() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (
+                    200,
+                    r#"{"_scroll_id":"scroll-1","hits":{"total":{"value":42,"relation":"eq"},"hits":[{"_id":"1","_source":{"name":"one"}}]},"_shards":{"total":1,"successful":1,"skipped":0,"failed":0}}"#.to_string(),
+                ),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST /_search "), "{}", requests[1]);
+        assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
+        assert!(requests[2].starts_with("DELETE /_pit "), "{}", requests[2]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
+        assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
+        assert!(!requests[3].contains(r#""from":0"#), "{}", requests[3]);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.total, 42);
+
+        // 回退后仍要给出游标，否则数据浏览器只能停在第一页。
+        let page = match super::decode_es_search_cursor(result.next_cursor.as_deref().unwrap()).unwrap() {
+            super::EsSearchCursor::Page(page) => page,
+            super::EsSearchCursor::Sql { .. } => panic!("expected page cursor"),
+        };
+        assert_eq!(
+            page.mode,
+            super::EsPageMode::Scroll { scroll_id: "scroll-1".to_string(), keep_alive: "1m".to_string() }
+        );
+    }
+
+    #[tokio::test]
+    async fn scroll_fallback_is_remembered_for_the_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_responses(
+            listener,
+            vec![
+                (200, r#"{"id":"pit-1"}"#.to_string()),
+                (400, missing_shard_doc_error_body()),
+                (200, "{}".to_string()),
+                (200, one_hit_response()),
+                (200, one_hit_response()),
+            ],
+        )
+        .await;
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let _first = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let second = super::find_documents_with_cursor(&client, "products", 1, None, None, None).await.unwrap();
+        let requests = server.await.unwrap();
+
         // 探测结果记在连接上：第二次查询不再尝试开 PIT。
         assert_eq!(requests.len(), 5);
-        assert!(requests[4].starts_with("POST /products/_search "), "{}", requests[4]);
-        assert!(requests[4].contains(r#""from":1"#), "{}", requests[4]);
+        assert!(requests[4].starts_with("POST /products/_search?scroll=1m "), "{}", requests[4]);
         assert_eq!(second.documents.len(), 1);
     }
 
@@ -3714,7 +3846,7 @@ mod tests {
         let requests = server.await.unwrap();
 
         // 偶发 5xx 只回退这一次请求，下一次查询仍旧先试 PIT。
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
         assert!(requests[4].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[4]);
     }
 
@@ -3788,7 +3920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offset_fallback_keeps_track_total_hits_off_and_breaks_sort_ties() {
+    async fn scroll_fallback_keeps_track_total_hits_off_and_preserves_requested_sort() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = serve_responses(
@@ -3809,8 +3941,9 @@ mod tests {
         let requests = server.await.unwrap();
 
         let fallback = &requests[3];
-        // 多页 from/size 之间没有快照，需要 `_doc` 打散并列值造成的页边界抖动。
-        assert!(fallback.contains(r#""sort":[{"created_at":{"order":"desc"}},"_doc"]"#), "{fallback}");
+        // Scroll 持有搜索快照，保留用户的排序即可，无需追加 `_doc`。
+        assert!(fallback.starts_with("POST /products/_search?scroll=1m "), "{fallback}");
+        assert!(fallback.contains(r#""sort":[{"created_at":{"order":"desc"}}]"#), "{fallback}");
         // 回退路径不加 track_total_hits：那会让每页都对整个索引做一次精确计数，
         // 而这条路径针对的正是老的大集群。
         assert!(!fallback.contains("track_total_hits"), "{fallback}");
@@ -3871,7 +4004,7 @@ mod tests {
 
         assert!(requests[0].starts_with("POST /products/_pit?keep_alive=1m "), "{}", requests[0]);
         assert!(requests[1].contains("_shard_doc"), "{}", requests[1]);
-        assert!(requests[3].starts_with("POST /products/_search "), "{}", requests[3]);
+        assert!(requests[3].starts_with("POST /products/_search?scroll=1m "), "{}", requests[3]);
         assert!(!requests[3].contains("_shard_doc"), "fallback must not sort on _shard_doc: {}", requests[3]);
         assert_eq!(result.rows.len(), 1);
         // 分页计划要拿索引真实总数来算总页数。

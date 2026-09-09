@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import type { ComposerTranslation } from "vue-i18n";
 import { translateBackendError } from "../../apps/desktop/src/i18n/backend-errors";
+import az from "../../apps/desktop/src/i18n/locales/az";
 import en from "../../apps/desktop/src/i18n/locales/en";
 import es from "../../apps/desktop/src/i18n/locales/es";
 import it from "../../apps/desktop/src/i18n/locales/it";
@@ -78,7 +79,7 @@ test("Claude Code CLI errors are localized while retaining their stable code and
 });
 
 test("every current locale defines all AI CLI diagnostic messages", () => {
-  const locales = { en, es, it, ja, ko, ptBR, tr, zhCN, zhTW } as const;
+  const locales = { az, en, es, it, ja, ko, ptBR, tr, zhCN, zhTW } as const;
 
   for (const [localeName, locale] of Object.entries(locales)) {
     assert.equal(typeof locale.ai.requestFailed, "string", `${localeName}.ai.requestFailed`);

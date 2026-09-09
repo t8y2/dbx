@@ -5757,8 +5757,9 @@ fn generate_schema_sync_sql_inner(
                                 }
                             } else if profile.alter_uses_modify_column {
                                 if column.changes.iter().any(|change| !change.starts_with("order:")) {
+                                    let modify_keyword = profile.alter_modify_keyword();
                                     parts.push(format!(
-                                        "  MODIFY COLUMN {}",
+                                        "  {modify_keyword} {}",
                                         column_def(&mapped, db_type, source_dialect)
                                     ));
                                 }
@@ -8143,6 +8144,14 @@ mod tests {
             assert!(sql.contains('`'), "{label} backticks: {sql}");
             assert!(sql.contains("MODIFY COLUMN"), "{label} MODIFY: {sql}");
         }
+    }
+
+    #[test]
+    fn dameng_modify_column_uses_modify_without_column_keyword() {
+        let diffs = make_col_diffs(&[("name", "varchar(64)")], &[("name", "varchar(32)")], false);
+        let sql = gen_sql(wrap_table_diff("tbxx", diffs), DatabaseType::Dameng, None);
+        assert!(sql.contains("MODIFY NAME varchar(64)"), "Dameng modify: {sql}");
+        assert!(!sql.contains("MODIFY COLUMN"), "Dameng must omit COLUMN: {sql}");
     }
 
     // -- 25. Rename with nullable change --

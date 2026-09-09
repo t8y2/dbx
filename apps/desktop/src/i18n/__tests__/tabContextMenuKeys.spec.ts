@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import az from "../locales/az";
 import en from "../locales/en";
 import es from "../locales/es";
 import it_ from "../locales/it";
@@ -23,6 +24,7 @@ const tabMenuKeys = ["changeOrientation", "closeAllTabs", "closeLeftTabs", "clos
 // real text for every UI language, while the en test above is the one that
 // actually catches a missing-from-everywhere key.
 const locales: Array<[string, Record<string, unknown>]> = [
+  ["az", az as Record<string, unknown>],
   ["en", en as Record<string, unknown>],
   ["es", es],
   ["it", it_],

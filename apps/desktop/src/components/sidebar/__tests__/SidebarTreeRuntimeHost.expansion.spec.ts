@@ -30,7 +30,11 @@ const connectionStore = {
 };
 
 const queryStore = {
+  tabs: [] as Array<{ id: string; mode: string; connectionId: string; database: string; title?: string; tableMeta?: { tableName: string } }>,
   createTab: vi.fn(),
+  switchTab: vi.fn(),
+  updateSql: vi.fn(),
+  setTableMeta: vi.fn(),
   openNacosAdmin: vi.fn(),
 };
 
@@ -61,6 +65,7 @@ afterEach(() => {
   connectionStore.sidebarSearchQuery = "";
   connectionStore.activeConnectionId = null;
   connectionStore.connectedIds.clear();
+  queryStore.tabs = [];
   vi.clearAllMocks();
   connectionStore.canUseLoadedTreeNodeToggle.mockReturnValue(true);
   connectionStore.getConfig.mockReturnValue({ db_type: "mysql", name: "connection" });
@@ -68,6 +73,36 @@ afterEach(() => {
 });
 
 describe("SidebarTreeRuntimeHost expansion", () => {
+  it("reuses a Mongo collection tab by identity without replacing its state", async () => {
+    const collection: TreeNode = {
+      id: "mongo:app:orders",
+      label: "orders",
+      type: "mongo-collection",
+      connectionId: "mongo",
+      database: "app",
+    };
+    connectionStore.getConfig.mockReturnValue({ db_type: "mongodb", name: "connection" });
+    queryStore.tabs = [
+      { id: "other-database", mode: "mongo", connectionId: "mongo", database: "other", tableMeta: { tableName: "orders" } },
+      { id: "orders-tab", mode: "mongo", connectionId: "mongo", database: "app", title: "My renamed collection", tableMeta: { tableName: "orders" } },
+    ];
+    const host = ref<InstanceType<typeof SidebarTreeRuntimeHost> | null>(null);
+    const app = createApp(defineComponent({ setup: () => () => h(SidebarTreeRuntimeHost, { ref: host, node: collection, depth: 0 }) }));
+    mountedApps.push(app);
+    const container = document.createElement("div");
+    document.body.append(container);
+    app.use(i18n);
+    app.mount(container);
+
+    host.value?.handleRowClick(collection, 1);
+    await nextTick();
+
+    expect(queryStore.switchTab).toHaveBeenCalledWith("orders-tab");
+    expect(queryStore.createTab).not.toHaveBeenCalled();
+    expect(queryStore.updateSql).not.toHaveBeenCalled();
+    expect(queryStore.setTableMeta).not.toHaveBeenCalled();
+  });
+
   it("activates the owning connection when a cached node toggles locally", async () => {
     const group: TreeNode = {
       id: "mysql:basic:__tables",

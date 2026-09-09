@@ -3,6 +3,7 @@ import { describe, expect, it as test } from "vitest";
 import { createI18n } from "vue-i18n";
 import { translateBackendError, type BackendErrorTranslate } from "@/i18n/backend-errors";
 import { BackendErrorException, formatError, normalizeBackendError, sanitizeBackendErrorMessage } from "@/lib/backend/errorUtils";
+import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
@@ -15,6 +16,7 @@ import zhTW from "@/i18n/locales/zh-TW";
 import { PHOENIX_DRIVER_NOT_INSTALLED_ERROR, PHOENIX_JDBC_PLUGIN_NOT_INSTALLED_ERROR } from "@/lib/database/phoenixConnection";
 
 const LOCALES = {
+  az,
   en,
   es,
   it,

@@ -120,7 +120,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const target = {
       tabId: tab.id,
       connectionId: tab.connectionId,
-      database: tab.database,
+      database: tableMeta.database ?? tab.database,
       catalog: tableMeta.catalog,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
@@ -161,13 +161,15 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     }
     const current = queryStore.tabs.find((item) => item.id === target.tabId);
     const currentMeta = current ? tableMetaForDataTab(current) : undefined;
-    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || current.database !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "") || (currentMeta.catalog ?? "") !== (target.catalog ?? "")) {
+    const currentSourceDatabase = currentMeta?.database ?? current?.database;
+    if (!current || current.mode !== "data" || current.connectionId !== target.connectionId || currentSourceDatabase !== target.database || currentMeta?.tableName !== target.tableName || (currentMeta.schema ?? "") !== (target.schema ?? "") || (currentMeta.catalog ?? "") !== (target.catalog ?? "")) {
       console.info("[DBX][reloadData:metadata:stale-tab]", { traceId: trace?.traceId, elapsed: trace?.elapsed(), table: target.tableName });
       return false;
     }
     const primaryKeys = metadata.primaryKeys;
     queryStore.setTableMeta(target.tabId, {
       catalog: target.catalog,
+      database: target.database,
       schema: target.schema,
       tableName: target.tableName,
       tableType: target.tableType,
@@ -395,7 +397,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
       // request per skipped page (page 1 -> 101 sends 100 requests);
       // retainDisplayedResult only hides those intermediate pages from the UI.
       const currentResultSessionId = tab.resultSessionId ?? tab.result?.session_id;
-      if (usesElasticsearchCursor && !appendResult && typeof expectedNextOffset === "number" && limit === tab.resultPageLimit && currentResultSessionId) {
+      if (usesElasticsearchCursor && tab.result?.has_more === true && !appendResult && typeof expectedNextOffset === "number" && limit === tab.resultPageLimit && currentResultSessionId) {
         let nextOffset = expectedNextOffset;
         let nextSessionId: string | undefined = currentResultSessionId;
         const currentPage = Math.floor(nextOffset / limit);

@@ -1,10 +1,12 @@
 import { computed, ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
+import type { DatabaseType } from "@/types/database";
 import { buildDataGridCopyUpdateStatements } from "@/lib/dataGrid/dataGridSql";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
+import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { extractDataGridSelection } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
@@ -115,6 +117,8 @@ function createExportState(
   isSyntheticContext = false,
   contextRowId?: number | null,
   contextColumn?: number,
+  databaseType: DatabaseType = "mysql",
+  displayValue?: (value: CellValue, columnIndex: number) => string,
 ) {
   const rows = (rowDataList ?? [rowData ?? columns.map((column, index) => (column === "id" ? 1 : `value-${index}`))]).map((data, index) => ({ ...row(data), id: index + 1 }));
   const resolvedContextRowId = contextRowId === undefined ? (rows[0]?.id ?? null) : contextRowId;
@@ -124,7 +128,8 @@ function createExportState(
     displayItems: computed(() => rows),
     sql: computed(() => undefined),
     tableMeta: computed(() => tableMeta),
-    databaseType: computed(() => "mysql"),
+    databaseType: computed(() => databaseType),
+    displayValue,
     connectionId: computed(() => "connection-1"),
     database: computed(() => "dbx"),
     context: computed(() => "table-data"),
@@ -736,6 +741,19 @@ describe("useDataGridExport prepared row statements", () => {
     await state.copyCell();
 
     expect(copyToClipboard).toHaveBeenCalledWith("");
+  });
+
+  it("copies Oracle temporal cells using the displayed value", async () => {
+    const table: DataGridTableMeta = {
+      tableName: "events",
+      columns: [{ name: "created_at", data_type: "timestamp", is_nullable: true }],
+      primaryKeys: [],
+    };
+    const state = createExportState(table, ["created_at"], undefined, ["2020-12-02T15:18:29"], undefined, undefined, [], DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS, false, undefined, false, 1, 0, "oracle", () => "2020-12-02 15:18:29");
+
+    await state.copyCell();
+
+    expect(copyToClipboard).toHaveBeenCalledWith("2020-12-02 15:18:29");
   });
 
   it("copies all rows with empty fields for NULL cells", async () => {

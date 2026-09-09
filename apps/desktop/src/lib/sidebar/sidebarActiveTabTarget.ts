@@ -1,4 +1,5 @@
 import { SIDEBAR_TREE_ROW_HEIGHT, type FlatTreeNode } from "@/composables/useFlatTree";
+import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import type { QueryTab, TreeNode } from "@/types/database";
 
 export type ActiveTabSidebarTarget =
@@ -114,13 +115,14 @@ export function activeTabSidebarTarget(tab: QueryTab | undefined | null): Active
   }
 
   if (tab.mode === "data") {
-    const tableName = tab.tableMeta?.tableName || tab.title;
+    const tableMeta = tableMetaForDataTab(tab);
+    const tableName = tableMeta?.tableName || tab.title;
     if (!tableName) return null;
     return {
       type: "table",
       connectionId: tab.connectionId,
-      database: tab.database,
-      schema: tab.tableMeta?.schema ?? tab.schema,
+      database: tableMeta?.database ?? tab.database,
+      schema: tableMeta?.schema ?? tab.schema,
       tableName,
     };
   }

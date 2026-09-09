@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it as test } from "vitest";
+import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import it from "@/i18n/locales/it";
@@ -18,6 +19,7 @@ function cachedResultMessages(messages: Record<string, unknown>): Record<string,
 
 describe("cached result messages", () => {
   test.each([
+    ["Azerbaijani", az],
     ["English", en],
     ["Spanish", es],
     ["Italian", it],

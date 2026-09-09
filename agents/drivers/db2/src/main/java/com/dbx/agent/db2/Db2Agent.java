@@ -19,6 +19,7 @@ import com.dbx.agent.TableInfo;
 import com.dbx.agent.TriggerInfo;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -389,6 +390,10 @@ public final class Db2Agent extends AbstractJdbcAgent {
     @Override
     protected Object resultValue(ResultSet rs, int index, int sqlType) {
         return unchecked(() -> {
+            if (sqlType == Types.CLOB || sqlType == Types.NCLOB) {
+                String value = rs.getString(index);
+                return rs.wasNull() ? null : value;
+            }
             Object value = rs.getObject(index);
             return rs.wasNull() ? null : value == null ? null : value.toString();
         });

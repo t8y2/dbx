@@ -22,4 +22,10 @@ describe("QueryEditor semantic highlighting while scrolling", () => {
     expect(queryEditorSource).toContain("MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS = 32");
     expect(queryEditorSource).toContain("this.cachedWindows.splice(0, this.cachedWindows.length - MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS)");
   });
+
+  it("defers semantic highlighting while the document is changing", () => {
+    expect(queryEditorSource).toContain("SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100");
+    expect(queryEditorSource).toContain("this.decorations = this.decorations.map(update.changes)");
+    expect(queryEditorSource).toContain("refreshSqlSemanticHighlightEffect.of(null)");
+  });
 });

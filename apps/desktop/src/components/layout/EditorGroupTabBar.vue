@@ -1305,10 +1305,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
     :data-placement="settingsStore.editorSettings.tabPlacement"
   >
     <!-- Compact vertical toolbar: search, grouping preference, collapse. -->
-    <div v-if="isVerticalLayout" class="flex shrink-0 items-center gap-0.5 border-b p-1.5" :class="isTabBarCollapsed ? 'justify-center' : ''">
+    <div v-if="isVerticalLayout" class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1" :class="isTabBarCollapsed ? 'justify-center' : ''">
       <div v-if="!isTabBarCollapsed" class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />
+        <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-7 w-full pl-7 text-sm" />
       </div>
       <div v-if="!isTabBarCollapsed" class="flex shrink-0 items-center gap-0">
         <LightDropdown

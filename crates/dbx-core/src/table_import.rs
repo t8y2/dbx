@@ -7407,7 +7407,7 @@ mod tests {
 
     fn assert_xlsx_absolute_row_selection(path_kind: &str) {
         for origin in [1, 3, 7] {
-            for first_column in [b'A', b'C'] {
+            for first_column in *b"AC" {
                 let last_column = char::from(first_column + 3);
                 let first_column_label = char::from(first_column);
                 let mut rows_xml = format!(

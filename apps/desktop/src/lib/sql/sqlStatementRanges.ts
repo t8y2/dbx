@@ -196,6 +196,10 @@ function splitElasticsearchRestRequestRanges(sql: string): RawStatement[] | unde
 
 type QuoteState = "none" | "single" | "double" | "backtick" | "bracket" | "dollar";
 
+function usesBracketIdentifierQuotes(databaseType?: DatabaseType): boolean {
+  return databaseType !== "doris" && databaseType !== "starrocks";
+}
+
 const COMMON_SOFT_STATEMENT_START_KEYWORDS = [
   "SELECT",
   "WITH",
@@ -564,7 +568,7 @@ export function splitSqlStatementRanges(sql: string, databaseType?: DatabaseType
       i += 1;
       continue;
     }
-    if (ch === "[") {
+    if (ch === "[" && usesBracketIdentifierQuotes(databaseType)) {
       markContent(i);
       state = "bracket";
       i += 1;
@@ -984,7 +988,7 @@ function topLevelSoftStatementLineStarts(sql: string, statement: RawStatement, d
       i += 1;
       continue;
     }
-    if (ch === "[") {
+    if (ch === "[" && usesBracketIdentifierQuotes(databaseType)) {
       state = "bracket";
       i += 1;
       continue;
@@ -1187,7 +1191,7 @@ function topLevelWordsBefore(sql: string, from: number, to: number, limit: numbe
       i += 1;
       continue;
     }
-    if (ch === "[") {
+    if (ch === "[" && usesBracketIdentifierQuotes(databaseType)) {
       state = "bracket";
       i += 1;
       continue;
@@ -1541,7 +1545,7 @@ function trimRangeEndBeforeNextBoundary(sql: string, from: number, nextBoundaryF
       i += 1;
       continue;
     }
-    if (ch === "[") {
+    if (ch === "[" && usesBracketIdentifierQuotes(databaseType)) {
       state = "bracket";
       lastContentEnd = i + 1;
       i += 1;

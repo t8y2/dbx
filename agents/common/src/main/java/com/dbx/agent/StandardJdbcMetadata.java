@@ -42,11 +42,23 @@ public final class StandardJdbcMetadata {
     }
 
     public List<String> listSchemas(Connection conn, JdbcAgentProfile profile) {
+        return listSchemas(conn, profile, null);
+    }
+
+    public List<String> listSchemas(Connection conn, JdbcAgentProfile profile, String configuredCatalog) {
         return unchecked(() -> {
             Set<String> names = new LinkedHashSet<>();
             DatabaseMetaData meta = conn.getMetaData();
+            String catalog = blankToNull(configuredCatalog);
             try {
-                appendSchemas(names, meta.getSchemas(null, null));
+                String currentCatalog = conn.getCatalog();
+                if (currentCatalog != null && !currentCatalog.trim().isEmpty()) {
+                    catalog = currentCatalog.trim();
+                }
+            } catch (Exception | AbstractMethodError ignored) {
+            }
+            try {
+                appendSchemas(names, meta.getSchemas(catalog, null));
             } catch (Exception | AbstractMethodError first) {
                 try {
                     appendSchemas(names, meta.getSchemas());

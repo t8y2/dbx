@@ -110,6 +110,7 @@ describe("EDITOR_SETTINGS_DRAFT_KEYS", () => {
 
   it("includes the data grid filter view", () => {
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridFilterEditorView");
+    expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridKeepFilterEditorExpanded");
     expect(EDITOR_SETTINGS_DRAFT_KEYS).toContain("dataGridTextFilterPanelHeight");
   });
 
@@ -196,9 +197,10 @@ describe("editorSettingsDraftFromSettings", () => {
     expect(editorSettingsDraftFromSettings(makeSettings({ colorizeDataGridCellTypes: false })).colorizeDataGridCellTypes).toBe(false);
   });
 
-  it("maps the data grid filter view from settings", () => {
-    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridFilterEditorView: "text", dataGridTextFilterPanelHeight: 224 }));
+  it("maps the data grid filter view and persistent expansion from settings", () => {
+    const draft = editorSettingsDraftFromSettings(makeSettings({ dataGridFilterEditorView: "text", dataGridKeepFilterEditorExpanded: true, dataGridTextFilterPanelHeight: 224 }));
     expect(draft.dataGridFilterEditorView).toBe("text");
+    expect(draft.dataGridKeepFilterEditorExpanded).toBe(true);
     expect(draft.dataGridTextFilterPanelHeight).toBe(224);
   });
 

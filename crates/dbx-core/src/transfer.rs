@@ -2325,6 +2325,7 @@ struct PostgresTransferSequence {
     cycle: bool,
     cache_value: String,
     last_value: Option<String>,
+    is_called: Option<bool>,
 }
 
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
@@ -2358,8 +2359,9 @@ fn generate_postgres_transfer_sequence_setval_sql(sequence: &PostgresTransferSeq
     if last_value.is_empty() {
         return None;
     }
+    let is_called = sequence.is_called.unwrap_or(true);
     Some(format!(
-        "SELECT setval({}, {last_value}, true)",
+        "SELECT setval({}, {last_value}, {is_called})",
         quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name))
     ))
 }
@@ -4113,6 +4115,36 @@ fn rewrite_transfer_source_table_ddl(
     }
 }
 
+fn rewrite_postgres_serial_columns_for_transfer(
+    sql: &str,
+    sequences: &[PostgresOwnedSequence],
+    target_schema: &str,
+) -> String {
+    let mut rewritten = sql.to_string();
+    for sequence in sequences {
+        let quoted_column = quote_identifier(&sequence.owner_column, &DatabaseType::Postgres);
+        let qualified_sequence = postgres_sequence_qualified_name(target_schema, &sequence.name);
+        let default_clause =
+            format!("DEFAULT nextval({}::regclass)", quote_postgres_string_literal(&qualified_sequence));
+        for (serial_type, concrete_type) in
+            [("smallserial", "smallint"), ("serial", "integer"), ("bigserial", "bigint")]
+        {
+            let needle = format!("{quoted_column} {serial_type}");
+            let replacement = format!("{quoted_column} {concrete_type} {default_clause}");
+            if rewritten.contains(&needle) {
+                rewritten = rewritten.replacen(&needle, &replacement, 1);
+                break;
+            }
+            let uppercase_needle = format!("{quoted_column} {}", serial_type.to_ascii_uppercase());
+            if rewritten.contains(&uppercase_needle) {
+                rewritten = rewritten.replacen(&uppercase_needle, &replacement, 1);
+                break;
+            }
+        }
+    }
+    rewritten
+}
+
 fn mysql_spatial_transfer_select_sql(
     sql: String,
     columns: &[String],
@@ -5605,6 +5637,25 @@ async fn get_postgres_owned_sequences_for_transfer(
         .collect())
 }
 
+async fn get_postgres_sequence_names_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+) -> Result<Vec<String>, String> {
+    let sql = format!(
+        "SELECT c.relname FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relkind = 'S' AND n.nspname = {} ORDER BY c.relname",
+        quote_string_literal(schema)
+    );
+    Ok(execute_on_pool(state, pool_key, &sql)
+        .await?
+        .rows
+        .into_iter()
+        .filter_map(|row| json_string_cell(&row, 0))
+        .collect())
+}
+
 const POSTGRES_OWNED_SEQUENCES_SQL: &str = "SELECT c.relname, \
               t.relname, \
               a.attname \
@@ -5692,7 +5743,7 @@ async fn get_postgres_selected_sequences_for_transfer(
     let Some(sql) = postgres_selected_sequences_sql(schema, names) else {
         return Ok(Vec::new());
     };
-    Ok(execute_on_pool(state, pool_key, &sql)
+    let mut sequences = execute_on_pool(state, pool_key, &sql)
         .await?
         .rows
         .into_iter()
@@ -5707,9 +5758,26 @@ async fn get_postgres_selected_sequences_for_transfer(
                 cycle: json_string_cell(&row, 6).as_deref() == Some("true"),
                 cache_value: json_string_cell(&row, 7)?,
                 last_value: json_string_cell(&row, 8),
+                is_called: None,
             })
         })
-        .collect())
+        .collect::<Vec<_>>();
+    for sequence in &mut sequences {
+        let sql = format!(
+            "SELECT last_value::text, is_called::text FROM {}",
+            postgres_sequence_qualified_name(schema, &sequence.name)
+        );
+        let row = execute_on_pool(state, pool_key, &sql).await?.rows.into_iter().next();
+        if let Some(row) = row {
+            sequence.last_value = json_string_cell(&row, 0).or(sequence.last_value.take());
+            sequence.is_called = json_string_cell(&row, 1).and_then(|value| match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+        }
+    }
+    Ok(sequences)
 }
 
 async fn get_existing_postgres_sequence_names_for_transfer(
@@ -5761,6 +5829,14 @@ async fn prepare_postgres_owned_sequences_for_transfer(
         return Ok(Vec::new());
     }
 
+    let sequence_names = owned_sequences.iter().map(|sequence| sequence.name.clone()).collect::<Vec<_>>();
+    let definitions =
+        get_postgres_selected_sequences_for_transfer(state, source_pool_key, &request.source_schema, &sequence_names)
+            .await?
+            .into_iter()
+            .map(|sequence| (sequence.name.clone(), sequence))
+            .collect::<HashMap<_, _>>();
+
     let existing_sequences =
         get_postgres_sequence_snapshots_for_transfer(state, target_pool_key, &request.target_schema)
             .await?
@@ -5775,8 +5851,10 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             &request.target_schema,
         )?;
         if should_create {
-            let create_sql =
-                format!("CREATE SEQUENCE {}", postgres_sequence_qualified_name(&request.target_schema, &sequence.name));
+            let definition = definitions
+                .get(&sequence.name)
+                .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
+            let create_sql = generate_postgres_transfer_sequence_create_ddl(definition, &request.target_schema);
             execute_on_pool(state, target_pool_key, &create_sql)
                 .await
                 .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
@@ -8017,6 +8095,11 @@ async fn create_transfer_target_table(
     .await?;
     let reused_source_ddl = prepared.reused_source_ddl;
     let ddl = prepared.ddl;
+    let ddl = if pg_compat_transfer && !owned_sequences.is_empty() {
+        rewrite_postgres_serial_columns_for_transfer(&ddl, &owned_sequences, &request.target_schema)
+    } else {
+        ddl
+    };
     let deferred_fk_alters = prepared.deferred_fk_alters;
     log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
     let target_table_created = transfer_create_table_created(
@@ -8984,7 +9067,11 @@ where
         get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
     let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
     let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let selected_sequence_names = selected_postgres_sequence_names(request);
+    let selected_sequence_names = if request.objects.is_empty() {
+        get_postgres_sequence_names_for_transfer(state, source_pool_key, &request.source_schema).await?
+    } else {
+        selected_postgres_sequence_names(request)
+    };
     let selected_sequences = get_postgres_selected_sequences_for_transfer(
         state,
         source_pool_key,
@@ -10931,6 +11018,7 @@ mod tests {
                 cycle: true,
                 cache_value: "7".into(),
                 last_value: Some("41".into()),
+                is_called: Some(true),
             };
 
             assert_eq!(
@@ -10940,6 +11028,12 @@ mod tests {
             assert_eq!(
                 generate_postgres_transfer_sequence_setval_sql(&sequence, "archive"),
                 Some("SELECT setval('\"archive\".\"biz_banner_id_seq\"', 41, true)".into())
+            );
+
+            let not_called = PostgresTransferSequence { is_called: Some(false), ..sequence.clone() };
+            assert_eq!(
+                generate_postgres_transfer_sequence_setval_sql(&not_called, "archive"),
+                Some("SELECT setval('\"archive\".\"biz_banner_id_seq\"', 41, false)".into())
             );
 
             let never_called = PostgresTransferSequence { last_value: None, ..sequence };
@@ -13048,6 +13142,21 @@ mod tests {
             owner_sql,
             "ALTER SEQUENCE \"public\".\"it_quick_entry_id_seq\" OWNED BY \"public\".\"it_quick_entry\".\"id\""
                 .to_string()
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_rewrites_serial_columns_to_existing_sequences() {
+        let sequence = PostgresOwnedSequence {
+            name: "ticket_id_seq".into(),
+            owner_table: "ticket".into(),
+            owner_column: "id".into(),
+        };
+        let ddl = "CREATE TABLE \"src\".\"ticket\" (\n  \"id\" serial NOT NULL\n)";
+
+        assert_eq!(
+            rewrite_postgres_serial_columns_for_transfer(ddl, &[sequence], "dst"),
+            "CREATE TABLE \"src\".\"ticket\" (\n  \"id\" integer DEFAULT nextval('\"dst\".\"ticket_id_seq\"'::regclass) NOT NULL\n)"
         );
     }
 

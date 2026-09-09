@@ -57,6 +57,17 @@ describe("connection database browser", () => {
     expect(supportsConnectionDatabaseBrowser("redis")).toBe(false);
     expect(supportsConnectionDatabaseBrowser("mongodb")).toBe(false);
   });
+
+  it("hides the browse-databases entry for message brokers", () => {
+    // Kafka/Pulsar/RocketMQ/RabbitMQ/NATS all share db_type "mq" and differ only by
+    // driver_profile, so one exclusion covers every broker. They keep the
+    // objectBrowser capability for the tenant/topic tree, but have no database
+    // namespace, so the connection-level browser tab rendered an empty
+    // "no databases found" state (issue #8515). MQTT never had the entry.
+    expect(supportsObjectBrowser("mq")).toBe(true);
+    expect(supportsConnectionDatabaseBrowser("mq")).toBe(false);
+    expect(supportsConnectionDatabaseBrowser("mqtt")).toBe(false);
+  });
 });
 
 describe("object browser tree nodes", () => {

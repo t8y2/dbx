@@ -27,6 +27,7 @@ const props = withDefaults(
     triggerClass?: HTMLAttributes["class"];
     triggerIconClass?: HTMLAttributes["class"];
     contentClass?: HTMLAttributes["class"];
+    contentStyle?: HTMLAttributes["style"];
     listClass?: HTMLAttributes["class"];
     itemClass?: HTMLAttributes["class"];
     displayName?: (option: string) => string;
@@ -248,7 +249,7 @@ function handleKeydown(event: KeyboardEvent) {
         <ChevronDown v-else :class="cn('shrink-0 opacity-60', triggerIconClass)" />
       </Button>
     </PopoverTrigger>
-    <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)">
+    <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)" :style="contentStyle">
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
         <div ref="listCard" :class="cn('shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">
           <div class="relative rounded-md border bg-background">

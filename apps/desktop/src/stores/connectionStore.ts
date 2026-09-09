@@ -1685,7 +1685,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   function setLoadedTableMetadataChildren(parent: TreeNode, children: TreeNode[]) {
     setChildren(parent, children);
-    parent.objectCount = children.length;
+    parent.objectCount = parent.children!.length;
   }
 
   function removePinnedTreeNodes(nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): boolean {

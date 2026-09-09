@@ -196,6 +196,21 @@ describe("connectionStore Xugu table child metadata", () => {
     ]);
   });
 
+  it("counts the normalized foreign key nodes for a composite foreign key", async () => {
+    const listForeignKeys = vi.fn().mockResolvedValue([
+      { name: "FK_ORDER_CUSTOMER", column: "CUSTOMER_TENANT_ID", ref_table: "CUSTOMERS", ref_column: "TENANT_ID" },
+      { name: "FK_ORDER_CUSTOMER", column: "CUSTOMER_ID", ref_table: "CUSTOMERS", ref_column: "ID" },
+    ]);
+    const { config, store, tableId } = await setup("mysql", { listForeignKeys });
+    const foreignKeys = findNode(store.treeNodes, `${tableId}:__fkeys`)!;
+
+    await store.loadTreeNodeChildren(foreignKeys);
+
+    expect(listForeignKeys).toHaveBeenCalledWith(config.id, "SHOP_DEMO", "SYSDBA", "SHOP_ORDERS", undefined);
+    expect(foreignKeys.children).toHaveLength(1);
+    expect(foreignKeys.objectCount).toBe(1);
+  });
+
   it("keeps a rejected Xugu metadata group collapsed and clears its loading state", async () => {
     const listPartitions = vi.fn().mockRejectedValue(new Error("metadata denied"));
     const { store, tableId } = await setup("xugu", { listPartitions });

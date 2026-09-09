@@ -402,7 +402,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const normalized = normalizeCompleteLocalResult(completeLocalResult.value);
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
-        ...applyGlobalDateTimeExportFormat({ columns: normalized.columns, columnTypes: normalized.columnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : normalized.rows }, formatDateTime && !preserveMongoExtendedJson),
+        ...applyGlobalDateTimeExportFormat(
+          { columns: normalized.columns, columnTypes: normalized.columnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : normalized.rows },
+          formatDateTime && !preserveMongoExtendedJson,
+        ),
         columnComments,
         spatialColumns: completeLocalResult.value.spatial_columns,
         spatialValues: completeLocalResult.value.spatial_values,

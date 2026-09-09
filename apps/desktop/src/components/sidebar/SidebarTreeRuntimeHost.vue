@@ -1533,9 +1533,7 @@ function openMongoTreeData(node: TreeNode) {
     return;
   }
   if (node.type !== "mongo-collection") return;
-  const existing = queryStore.tabs.find(
-    (tab) => tab.mode === "mongo" && tab.connectionId === node.connectionId && tab.database === node.database && tab.tableMeta?.tableName === node.label,
-  );
+  const existing = queryStore.tabs.find((tab) => tab.mode === "mongo" && tab.connectionId === node.connectionId && tab.database === node.database && tab.tableMeta?.tableName === node.label);
   if (existing) {
     queryStore.switchTab(existing.id);
     return;

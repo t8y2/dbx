@@ -149,6 +149,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
     expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header,[\s\S]*?\.tab-group-header-content\s*\{[^}]*height:\s*2rem !important;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header:not\(\.tab-group-header--collapsed\)::after\s*\{[^}]*right:\s*-1px;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\) \.tab-group-header::after\s*\{[^}]*bottom:\s*0;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");

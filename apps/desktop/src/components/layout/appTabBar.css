@@ -524,6 +524,12 @@
   min-height: 2rem;
 }
 
+/* Classic wrapped headers only need to bridge the subpixel border seam to the
+ * first member tab. The shared 0.2rem extension visibly overshoots here. */
+.app-tab-scroll.wrap-mode.classic-wrap .tab-group-header:not(.tab-group-header--collapsed)::after {
+  right: -1px;
+}
+
 /* Settings and Driver Manager are rendered directly in the section instead
  * of inside a tab-group-entry wrapper. Their classic h-full class must size
  * to one wrapped row, not to the full multi-row section. */

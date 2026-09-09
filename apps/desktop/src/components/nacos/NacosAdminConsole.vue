@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, useId, watch } from "vue";
-import { Compartment, StateEffect, StateField, type Extension } from "@codemirror/state";
-import { StreamLanguage, ensureSyntaxTree } from "@codemirror/language";
+import { Compartment, StateEffect, StateField } from "@codemirror/state";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { Decoration, EditorView } from "@codemirror/view";
 import { Archive, ArrowLeftRight, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Clipboard, Columns3, Download, ExternalLink, FileClock, FileInput, FileText, Loader2, Maximize2, Minimize2, Network, Plus, RefreshCw, Save, Search, Send, Server, Trash2, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,7 @@ import { executeWithProductionContextGuard } from "@/lib/database/productionExec
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { validateNacosConfigContent, type NacosConfigDiagnostic } from "@/lib/nacos/nacosConfigValidation";
+import { loadNacosConfigLanguage, resolveNacosConfigFormat } from "@/lib/nacos/nacosConfigLanguage";
 import type { NacosConfigEditorViewport } from "@/types/database";
 import type {
   NacosBatchPreview,
@@ -158,10 +159,12 @@ const historyPageSize = ref(20);
 const historyTotal = ref(0);
 const historyViewingItem = ref<NacosConfigHistoryItem | null>(null);
 const historyViewingContent = ref("");
+const historyViewingFormat = ref("text");
 const historyViewingLoading = ref(false);
 const historyCompareOpen = ref(false);
 const historyCompareCurrent = ref("");
 const historyCompareContent = ref("");
+const historyCompareFormat = ref("text");
 const historyCompareLoading = ref(false);
 const historyCompareItem = ref<NacosConfigHistoryItem | null>(null);
 const pendingHistoryRollback = ref<NacosConfigHistoryItem | null>(null);
@@ -501,37 +504,6 @@ function currentCustomThemeColors() {
   return activeTheme?.colors ?? settings.customThemeColors;
 }
 
-async function configLanguageExtension(format: string): Promise<Extension[]> {
-  switch (format) {
-    case "json": {
-      const { json } = await import("@codemirror/lang-json");
-      return [json()];
-    }
-    case "yaml": {
-      const { yaml } = await import("@codemirror/lang-yaml");
-      return [yaml()];
-    }
-    case "xml": {
-      const { xml } = await import("@codemirror/lang-xml");
-      return [xml()];
-    }
-    case "html": {
-      const { html } = await import("@codemirror/lang-html");
-      return [html({ matchClosingTags: false })];
-    }
-    case "properties": {
-      const { properties } = await import("@codemirror/legacy-modes/mode/properties");
-      return [StreamLanguage.define(properties)];
-    }
-    case "toml": {
-      const { toml } = await import("@codemirror/legacy-modes/mode/toml");
-      return [StreamLanguage.define(toml)];
-    }
-    default:
-      return [];
-  }
-}
-
 function configValidationHighlightExtension() {
   const decorationsFor = (state: import("@codemirror/state").EditorState, diagnostics: NacosConfigDiagnostic[]) => {
     const ranges = diagnostics
@@ -577,7 +549,7 @@ async function mountConfigEditor() {
     import("codemirror"),
     import("@codemirror/commands"),
     import("@codemirror/search"),
-    configLanguageExtension(format),
+    loadNacosConfigLanguage(format),
   ]);
   const editorSettings = settingsStore.editorSettings;
   configEditorFontSize.value = clampEditorFontSize(editorSettings.fontSize);
@@ -1680,9 +1652,11 @@ async function viewConfigHistory(item: NacosConfigHistoryItem) {
   await nextTick();
   historyViewingItem.value = item;
   historyViewingContent.value = "";
+  historyViewingFormat.value = resolveNacosConfigFormat(item.configType, item.dataId);
   historyViewingLoading.value = true;
   const detail = await loadHistoryDetail(item);
   historyViewingContent.value = detail?.content || "";
+  historyViewingFormat.value = resolveNacosConfigFormat(detail?.configType || item.configType, detail?.dataId || item.dataId);
   historyViewingLoading.value = false;
 }
 
@@ -1690,6 +1664,7 @@ function closeHistoryDetail() {
   historyViewingItem.value = null;
   historyViewingContent.value = "";
   historyViewingLoading.value = false;
+  historyViewingFormat.value = "text";
 }
 
 async function compareConfigHistory(item: NacosConfigHistoryItem) {
@@ -1699,10 +1674,12 @@ async function compareConfigHistory(item: NacosConfigHistoryItem) {
   historyCompareItem.value = item;
   historyCompareCurrent.value = "";
   historyCompareContent.value = "";
+  historyCompareFormat.value = resolveNacosConfigFormat(item.configType, item.dataId);
   try {
     const [current, history] = await Promise.all([api.nacosGetConfig(props.connectionId, selectedConfigOriginalKey.value), api.nacosGetConfigHistory(props.connectionId, historyKeyFor(item))]);
     historyCompareCurrent.value = current.content || "";
     historyCompareContent.value = history.content || "";
+    historyCompareFormat.value = resolveNacosConfigFormat(history.configType || item.configType || current.configType, history.dataId || item.dataId);
   } catch (error) {
     await handleRNacosConsoleError(error, () => compareConfigHistory(item), "history");
     historyCompareOpen.value = false;
@@ -3341,7 +3318,7 @@ function openNacosConsole() {
       </DialogContent>
     </Dialog>
 
-    <NacosConfigDiffDialog v-model:open="pendingConfigSave" :before="originalConfigContent" :after="configContent" :loading="savingConfig" @confirm="saveConfig" />
+    <NacosConfigDiffDialog v-model:open="pendingConfigSave" :before="originalConfigContent" :after="configContent" :format="resolveNacosConfigFormat(configType, configDataId)" :loading="savingConfig" @confirm="saveConfig" />
 
     <NacosContentSearchDialog
       v-model:open="searchOpen"
@@ -3394,6 +3371,7 @@ function openNacosConsole() {
       :read-only="readOnly"
       :viewing-item="historyViewingItem"
       :viewing-content="historyViewingContent"
+      :viewing-format="historyViewingFormat"
       :viewing-loading="historyViewingLoading"
       @load="loadConfigHistory"
       @view="viewConfigHistory"
@@ -3433,6 +3411,7 @@ function openNacosConsole() {
       :after-label="t('nacos.historyVersionContent')"
       :before="historyCompareCurrent"
       :after="historyCompareContent"
+      :format="historyCompareFormat"
       :loading="historyCompareLoading"
       :show-confirm="!readOnly"
       :confirm-label="t('nacos.rollback')"

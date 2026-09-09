@@ -1,5 +1,6 @@
 import type { ConnectionConfig, DatabaseType, SshTunnelConfig } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 type PartialConnection = Omit<ConnectionConfig, "id">;
 
@@ -336,7 +337,7 @@ async function parseConnection(node: ParsedNode): Promise<ConnectionConfig | nul
     color: "",
     transport_layers: sshTunnel ? [sshTunnel] : [],
     connect_timeout_secs: 10,
-    query_timeout_secs: 30,
+    query_timeout_secs: DEFAULT_QUERY_TIMEOUT_SECS,
     keepalive_interval_secs: keepaliveInterval,
     ssl: false,
     oracle_connection_type: oracleConnectionType,

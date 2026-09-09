@@ -211,6 +211,14 @@ import TableStructureEditor from "@/components/structure/TableStructureEditor.vu
 const DDL = "CREATE TABLE users (id bigint);";
 let app: App | undefined;
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 function buttonWithText(root: HTMLElement, text: string): HTMLButtonElement {
   const button = Array.from(root.querySelectorAll("button")).find((item) => item.textContent?.trim() === text);
   if (!button) throw new Error(`Missing ${text} button`);
@@ -275,5 +283,73 @@ describe("TableStructureEditor DDL tab lifecycle", () => {
 
     await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 1000 });
     expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart the new tab's metadata load when a stale DDL request resolves", async () => {
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      initialTab: "triggers",
+    });
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.some((call) => call[1] === "triggers")).toBe(true));
+
+    const ddlResult = deferred<{ ddl: string; cacheStatus: "remote" }>();
+    const columnsResult = deferred<Array<{ name: string; data_type: string; is_nullable: boolean; column_default: null; is_primary_key: boolean }>>();
+    mocks.loadObjectDdl.mockImplementationOnce(() => ddlResult.promise);
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
+      value: facet === "columns" ? await columnsResult.promise : facet === "comment" ? "Application users" : facet === "owner" ? "app_user" : [],
+      cacheStatus: "remote",
+    }));
+
+    selectTab(buttonWithText(root, "DDL"));
+    await vi.waitFor(() => expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1));
+    selectTab(buttonWithText(root, "structureEditor.columns"));
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "columns")).toHaveLength(1));
+
+    ddlResult.resolve({ ddl: DDL, cacheStatus: "remote" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const columnLoadsAfterDdl = mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "columns").length;
+    columnsResult.resolve([{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true }]);
+
+    expect(columnLoadsAfterDdl).toBe(1);
+  });
+
+  it("force-refreshes both DDL and the visible table comment", async () => {
+    let tableComment = "Old comment";
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({
+      value: facet === "columns" ? [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: true }] : facet === "comment" ? tableComment : facet === "owner" ? "app_user" : [],
+      cacheStatus: "remote",
+    }));
+
+    const root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      initialTab: "ddl",
+    });
+    app.mount(root);
+
+    const commentInput = () => root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.tableCommentPlaceholder"]');
+    await vi.waitFor(() => expect(commentInput()?.value).toBe("Old comment"));
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain(DDL), { timeout: 5000 });
+
+    tableComment = "Updated comment";
+    mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint, name text);", cacheStatus: "remote" });
+    buttonWithText(root, "structureEditor.refresh").click();
+
+    await vi.waitFor(() => expect(commentInput()?.value).toBe("Updated comment"));
+    await vi.waitFor(() => expect(root.querySelector(".cm-content")?.textContent).toContain("name text"), { timeout: 5000 });
+    const commentCalls = mocks.loadObjectMetadataFacet.mock.calls.filter((call) => call[1] === "comment");
+    expect(commentCalls).toHaveLength(2);
+    expect(commentCalls.at(-1)?.[3]).toEqual({ force: true });
   });
 });

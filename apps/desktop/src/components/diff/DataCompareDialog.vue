@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -13,59 +13,26 @@ import { useToast } from "@/composables/useToast";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
 import { isSchemaAware } from "@/lib/database/databaseCapabilities";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import type { DataCompareCellValue, DataCompareModifiedRow, DataCompareResult, DataCompareRow, DataCompareSyncPlan, DataCompareSyncPlanTableOptions } from "@/lib/dataGrid/dataCompare";
-import { inferCompareKeyColumns, intersectCompareColumns, matchColumnNameIgnoreCase } from "@/lib/dataGrid/dataCompare";
-import type { ColumnInfo, DatabaseType } from "@/types/database";
+import type { DataCompareCellValue, DataCompareSyncPlan } from "@/lib/dataGrid/dataCompare";
+import { inferCompareKeyColumns } from "@/lib/dataGrid/dataCompare";
+import {
+  buildDataCompareSyncPlanTables,
+  emptyDataCompareSyncPlan,
+  getDataCompareSession,
+  startDataCompareSession,
+  type CompareColumn,
+  type DataCompareSession,
+  type DataCompareTableResult,
+  type DataCompareTableStatus,
+  type DataCompareTableTask,
+  type DiffKind,
+  type SelectableDataCompareModifiedRow,
+  type SelectableDataCompareRow,
+} from "@/composables/useDataCompareSession";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import TableMultiSelect from "@/components/diff/TableMultiSelect.vue";
 import { ArrowLeftRight, CheckSquare, ChevronDown, ChevronRight, Copy, GitCompareArrows, Loader2, Play, Square } from "@lucide/vue";
-
-type CompareColumn = ColumnInfo;
-
-interface DataCompareTableTask {
-  sourceTable: string;
-  targetTable: string;
-}
-
-type DataCompareTableStatus = "different" | "same" | "error";
-type DiffKind = "added" | "removed" | "modified";
-
-interface SelectableDataCompareRow extends DataCompareRow {
-  selected: boolean;
-}
-
-interface SelectableDataCompareModifiedRow extends DataCompareModifiedRow {
-  selected: boolean;
-}
-
-interface SelectableDataCompareResult {
-  added: SelectableDataCompareRow[];
-  removed: SelectableDataCompareRow[];
-  modified: SelectableDataCompareModifiedRow[];
-}
-
-interface DataCompareTableResult {
-  sourceTable: string;
-  targetTable: string;
-  keyColumns: string[];
-  columns: string[];
-  columnInfo: CompareColumn[];
-  status: DataCompareTableStatus;
-  added: number;
-  removed: number;
-  modified: number;
-  sourceRowCount: number;
-  targetRowCount: number;
-  sourceTruncated: boolean;
-  targetTruncated: boolean;
-  databaseType?: DatabaseType;
-  preSyncStatements?: string[];
-  diff: SelectableDataCompareResult;
-  expanded: boolean;
-  showAll: Record<DiffKind, boolean>;
-  error?: string;
-}
 
 const PREVIEW_LIMIT_OPTIONS = [50, 100, 200, 500];
 const SYNC_EXECUTE_BATCH_SIZE = 500;
@@ -80,6 +47,7 @@ const props = defineProps<{
   prefillDatabase?: string;
   prefillSchema?: string;
   prefillTable?: string;
+  sessionId?: string | null;
 }>();
 
 const sourceConnectionId = ref("");
@@ -102,7 +70,7 @@ const targetTables = ref<string[]>([]);
 const keyColumnsText = ref("");
 const detailPreviewLimit = ref(String(PREVIEW_LIMIT_OPTIONS[1]));
 const batchResults = ref<DataCompareTableResult[]>([]);
-const syncPlan = ref<DataCompareSyncPlan>(emptySyncPlan());
+const syncPlan = ref<DataCompareSyncPlan>(emptyDataCompareSyncPlan());
 const comparing = ref(false);
 const planningSync = ref(false);
 const compareProgressCurrent = ref(0);
@@ -116,8 +84,12 @@ const showAdded = ref(true);
 const showRemoved = ref(true);
 const showModified = ref(true);
 
+const activeSessionId = ref<string | null>(props.sessionId ?? null);
 let syncPlanRequestId = 0;
 let initializingPrefill = false;
+let initializingPrefillGeneration = 0;
+let componentUnmounted = false;
+let shownSessionError = "";
 
 const sqlConnections = computed(() => store.connections.filter((connection) => !["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "etcd", "zookeeper", "consul", "mq", "nacos"].includes(connection.db_type)));
 const selectedSourceTableNames = computed(() => sourceTables.value.filter((table) => selectedSourceTables.value.has(table)));
@@ -196,21 +168,6 @@ const compareProgressLabel = computed(() => {
   });
 });
 
-function emptySyncPlan(): DataCompareSyncPlan {
-  return {
-    insertCount: 0,
-    updateCount: 0,
-    deleteCount: 0,
-    statementCount: 0,
-    syncStatements: [],
-    syncSql: "",
-  };
-}
-
-function targetDatabaseType(): DatabaseType | undefined {
-  return store.getConfig(targetConnectionId.value)?.db_type;
-}
-
 function resetSelectedSourceTables(nextTables: Iterable<string>) {
   selectedSourceTables.value = new Set(nextTables);
 }
@@ -229,14 +186,75 @@ function buildCompareTasks(): DataCompareTableTask[] {
 
 function clearResult() {
   batchResults.value = [];
-  syncPlan.value = emptySyncPlan();
+  syncPlan.value = emptyDataCompareSyncPlan();
   syncErrors.value = [];
   compareProgressCurrent.value = 0;
   compareProgressTotal.value = 0;
   compareProgressTable.value = "";
   executedCount.value = 0;
   executeTotal.value = 0;
+  planningSync.value = false;
   syncPlanRequestId++;
+}
+
+function comparisonEndpointLabel(connectionId: string, database: string, schema: string): string {
+  const connection = store.getConfig(connectionId);
+  return [connection?.name || connectionId, database, schema].filter(Boolean).join(" / ");
+}
+
+async function restoreDataCompareSession(session: DataCompareSession): Promise<void> {
+  const config = session.config;
+  const generation = ++initializingPrefillGeneration;
+  initializingPrefill = true;
+  try {
+    sourceConnectionId.value = config.sourceConnectionId;
+    sourceDatabase.value = config.sourceDatabase;
+    sourceSchema.value = config.sourceSchema;
+    sourceDatabases.value = [...config.sourceDatabases];
+    sourceSchemas.value = [...config.sourceSchemas];
+    sourceTables.value = [...config.sourceTables];
+    resetSelectedSourceTables(config.selectedSourceTables);
+    sourceTable.value = config.selectedSourceTables.length === 1 ? (config.selectedSourceTables[0] ?? "") : "";
+    targetConnectionId.value = config.targetConnectionId;
+    targetDatabase.value = config.targetDatabase;
+    targetSchema.value = config.targetSchema;
+    targetDatabases.value = [...config.targetDatabases];
+    targetSchemas.value = [...config.targetSchemas];
+    targetTables.value = [...config.targetTables];
+    targetTable.value = config.targetTable;
+    keyColumnsText.value = config.keyColumns.join(", ");
+    batchResults.value = session.batchResults;
+    syncPlan.value = session.syncPlan;
+    syncErrors.value = [];
+    compareProgressCurrent.value = session.progress?.current ?? 0;
+    compareProgressTotal.value = session.progress?.total ?? 0;
+    compareProgressTable.value = session.progress?.table ?? "";
+    comparing.value = session.status === "running";
+  } finally {
+    await nextTick();
+    if (generation === initializingPrefillGeneration) initializingPrefill = false;
+  }
+}
+
+function applyDataCompareSession(session: DataCompareSession | undefined): void {
+  if (!session) return;
+  batchResults.value = session.batchResults;
+  syncPlan.value = session.syncPlan;
+  if (session.status === "running") {
+    comparing.value = true;
+    compareProgressCurrent.value = session.progress?.current ?? 0;
+    compareProgressTotal.value = session.progress?.total ?? 0;
+    compareProgressTable.value = session.progress?.table ?? "";
+    return;
+  }
+  comparing.value = false;
+  compareProgressCurrent.value = 0;
+  compareProgressTotal.value = 0;
+  compareProgressTable.value = "";
+  if (session.status === "failed" && session.error && shownSessionError !== session.error) {
+    shownSessionError = session.error;
+    toast(session.error, 5000);
+  }
 }
 
 function swapSourceTarget() {
@@ -393,32 +411,6 @@ function resultStatusClass(status: DataCompareTableStatus): string {
   return "bg-destructive/15 text-destructive";
 }
 
-function toSelectableDiff(diff: DataCompareResult): SelectableDataCompareResult {
-  return {
-    added: diff.added.map((row) => ({ ...row, selected: true })),
-    removed: diff.removed.map((row) => ({ ...row, selected: true })),
-    modified: diff.modified.map((row) => ({ ...row, selected: true })),
-  };
-}
-
-function buildSelectedDiff(table: DataCompareTableResult): DataCompareResult {
-  return {
-    added: table.diff.added.filter((row) => row.selected).map(stripSelectedRow),
-    removed: table.diff.removed.filter((row) => row.selected).map(stripSelectedRow),
-    modified: table.diff.modified.filter((row) => row.selected).map(stripSelectedModifiedRow),
-  };
-}
-
-function stripSelectedRow(row: SelectableDataCompareRow): DataCompareRow {
-  const { selected: _selected, ...rest } = row;
-  return rest;
-}
-
-function stripSelectedModifiedRow(row: SelectableDataCompareModifiedRow): DataCompareModifiedRow {
-  const { selected: _selected, ...rest } = row;
-  return rest;
-}
-
 function hasDiffRows(table: DataCompareTableResult, kind: DiffKind): boolean {
   return table.diff[kind].length > 0;
 }
@@ -480,27 +472,26 @@ function selectedDiffCount(kind: DiffKind) {
   return batchResults.value.reduce((sum, table) => sum + selectedRows(table, kind), 0);
 }
 
-function buildSyncPlanTables(): DataCompareSyncPlanTableOptions[] {
-  return batchResults.value
-    .filter((table) => table.status === "different")
-    .map((table) => ({
-      tableName: table.targetTable,
-      schema: targetSchema.value,
-      columns: table.columns,
-      keyColumns: table.keyColumns,
-      columnInfo: table.columnInfo,
-      diff: buildSelectedDiff(table),
-      databaseType: table.databaseType,
-      preSyncStatements: table.preSyncStatements ?? [],
-    }))
-    .filter((table) => table.preSyncStatements.length > 0 || table.diff.added.length > 0 || table.diff.removed.length > 0 || table.diff.modified.length > 0);
+function buildSyncPlanTables() {
+  return buildDataCompareSyncPlanTables(batchResults.value, targetSchema.value);
+}
+
+function updateSyncPlan(nextPlan: DataCompareSyncPlan, sessionId = activeSessionId.value): void {
+  if (!componentUnmounted) syncPlan.value = nextPlan;
+  const session = getDataCompareSession(sessionId);
+  if (session?.status === "completed") {
+    session.syncPlan = nextPlan;
+    session.batchResults = batchResults.value;
+  }
 }
 
 async function rebuildSyncPlan() {
+  if (componentUnmounted) return;
   const requestId = ++syncPlanRequestId;
+  const sessionId = activeSessionId.value;
   const tables = buildSyncPlanTables();
   if (tables.length === 0) {
-    syncPlan.value = emptySyncPlan();
+    updateSyncPlan(emptyDataCompareSyncPlan(), sessionId);
     planningSync.value = false;
     return;
   }
@@ -508,17 +499,17 @@ async function rebuildSyncPlan() {
   try {
     const plan = await api.buildDataCompareSyncPlan({ tables });
     if (requestId !== syncPlanRequestId) return;
-    syncPlan.value = plan;
+    updateSyncPlan(plan, sessionId);
   } catch (e: any) {
     if (requestId !== syncPlanRequestId) return;
-    syncPlan.value = emptySyncPlan();
-    toast(e?.message || String(e), 5000);
+    updateSyncPlan(emptyDataCompareSyncPlan(), sessionId);
+    if (!componentUnmounted) toast(e?.message || String(e), 5000);
   } finally {
-    if (requestId === syncPlanRequestId) planningSync.value = false;
+    if (!componentUnmounted && requestId === syncPlanRequestId) planningSync.value = false;
   }
 }
 
-async function startCompare() {
+function startCompare(): void {
   if (!canCompare.value || comparing.value) return;
   const tasks = buildCompareTasks();
   if (tasks.length === 0) {
@@ -526,174 +517,39 @@ async function startCompare() {
     return;
   }
 
-  comparing.value = true;
   clearResult();
-  compareProgressTotal.value = tasks.length;
-
-  const sourceColumnCache = new Map<string, CompareColumn[]>();
-  const targetColumnCache = new Map<string, CompareColumn[]>();
-  const results: DataCompareTableResult[] = [];
-  const currentTargetDatabaseType = targetDatabaseType();
-
-  try {
-    await Promise.all([store.ensureConnected(sourceConnectionId.value), store.ensureConnected(targetConnectionId.value)]);
-
-    for (const [index, task] of tasks.entries()) {
-      compareProgressCurrent.value = index + 1;
-      compareProgressTable.value = task.sourceTable;
-
-      try {
-        if (!targetTables.value.includes(task.targetTable)) {
-          const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
-          const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : [];
-          const sourceColumnNames = sourceColumns.map((column) => column.name);
-          const sourceKeyColumns = resolvedKeys.map((key) => matchColumnNameIgnoreCase(key, sourceColumnNames) ?? key);
-          const preparation = await api.prepareDataCompareMissingTarget({
-            sourceConnectionId: sourceConnectionId.value,
-            sourceDatabase: sourceDatabase.value,
-            sourceSchema: sourceSchema.value,
-            sourceTable: task.sourceTable,
-            targetConnectionId: targetConnectionId.value,
-            targetDatabase: targetDatabase.value,
-            targetSchema: targetSchema.value,
-            targetTable: task.targetTable,
-            keyColumns: sourceKeyColumns,
-          });
-          results.push({
-            sourceTable: task.sourceTable,
-            targetTable: task.targetTable,
-            keyColumns: sourceKeyColumns,
-            columns: sourceColumns.map((column) => column.name),
-            columnInfo: sourceColumns,
-            status: "different",
-            added: preparation.result.added.length,
-            removed: 0,
-            modified: 0,
-            sourceRowCount: preparation.sourceRowCount,
-            targetRowCount: 0,
-            sourceTruncated: preparation.sourceTruncated,
-            targetTruncated: false,
-            databaseType: currentTargetDatabaseType,
-            preSyncStatements: preparation.preSyncStatements,
-            diff: toSelectableDiff(preparation.result),
-            expanded: preparation.result.added.length > 0,
-            showAll: {
-              added: false,
-              removed: false,
-              modified: false,
-            },
-          });
-          continue;
-        }
-
-        const resolvedKeys = keyColumns.value.length > 0 ? keyColumns.value : await inferKeyColumnsForTable(task.sourceTable, sourceColumnCache);
-        if (resolvedKeys.length === 0) {
-          throw new Error(t("dataCompare.noKeyColumns"));
-        }
-
-        const sourceColumns = await loadColumnsWithCache(sourceColumnCache, sourceConnectionId.value, sourceDatabase.value, sourceSchema.value, task.sourceTable);
-        const targetColumns = await loadColumnsWithCache(targetColumnCache, targetConnectionId.value, targetDatabase.value, targetSchema.value, task.targetTable);
-        const matched = intersectCompareColumns(sourceColumns, targetColumns);
-        const columns = matched.columns;
-        const columnInfo = columns.map((column) => targetColumns.find((target) => target.name === column)).filter((column): column is CompareColumn => !!column);
-        const canonicalKeyColumns: string[] = [];
-        const missingKeys: string[] = [];
-        for (const key of resolvedKeys) {
-          const canonical = matchColumnNameIgnoreCase(key, columns);
-          if (!canonical) {
-            missingKeys.push(key);
-          } else if (!canonicalKeyColumns.includes(canonical)) {
-            canonicalKeyColumns.push(canonical);
-          }
-        }
-        if (missingKeys.length > 0) {
-          throw new Error(t("dataCompare.missingKeyColumns", { columns: missingKeys.join(", ") }));
-        }
-        if (columns.length === 0) {
-          throw new Error(t("dataCompare.noCommonColumns"));
-        }
-
-        const preparation = await api.prepareDataCompareFromTables({
-          sourceConnectionId: sourceConnectionId.value,
-          sourceDatabase: sourceDatabase.value,
-          sourceSchema: sourceSchema.value,
-          sourceTable: task.sourceTable,
-          targetConnectionId: targetConnectionId.value,
-          targetDatabase: targetDatabase.value,
-          targetSchema: targetSchema.value,
-          targetTable: task.targetTable,
-          columns,
-          keyColumns: canonicalKeyColumns,
-          sourceColumns: matched.sourceColumns,
-        });
-
-        const added = preparation.result.added.length;
-        const removed = preparation.result.removed.length;
-        const modified = preparation.result.modified.length;
-        const status: DataCompareTableStatus = added || removed || modified ? "different" : "same";
-
-        results.push({
-          sourceTable: task.sourceTable,
-          targetTable: task.targetTable,
-          keyColumns: canonicalKeyColumns,
-          columns,
-          columnInfo,
-          status,
-          added,
-          removed,
-          modified,
-          sourceRowCount: preparation.sourceRowCount,
-          targetRowCount: preparation.targetRowCount,
-          sourceTruncated: preparation.sourceTruncated,
-          targetTruncated: preparation.targetTruncated,
-          databaseType: currentTargetDatabaseType,
-          diff: toSelectableDiff(preparation.result),
-          expanded: status === "different",
-          showAll: {
-            added: false,
-            removed: false,
-            modified: false,
-          },
-        });
-      } catch (e: any) {
-        results.push({
-          sourceTable: task.sourceTable,
-          targetTable: task.targetTable,
-          keyColumns: keyColumns.value,
-          columns: [],
-          columnInfo: [],
-          status: "error",
-          added: 0,
-          removed: 0,
-          modified: 0,
-          sourceRowCount: 0,
-          targetRowCount: 0,
-          sourceTruncated: false,
-          targetTruncated: false,
-          databaseType: currentTargetDatabaseType,
-          preSyncStatements: [],
-          diff: { added: [], removed: [], modified: [] },
-          expanded: false,
-          showAll: {
-            added: false,
-            removed: false,
-            modified: false,
-          },
-          error: e?.message || String(e),
-        });
-      }
-    }
-
-    batchResults.value = results;
-    await rebuildSyncPlan();
-  } catch (e: any) {
-    toast(e?.message || String(e), 5000);
-  } finally {
-    comparing.value = false;
-    compareProgressCurrent.value = 0;
-    compareProgressTotal.value = 0;
-    compareProgressTable.value = "";
-  }
+  shownSessionError = "";
+  const session = startDataCompareSession(
+    {
+      sourceConnectionId: sourceConnectionId.value,
+      sourceDatabase: sourceDatabase.value,
+      sourceSchema: sourceSchema.value,
+      sourceDatabases: [...sourceDatabases.value],
+      sourceSchemas: [...sourceSchemas.value],
+      sourceTables: [...sourceTables.value],
+      selectedSourceTables: [...selectedSourceTables.value],
+      targetConnectionId: targetConnectionId.value,
+      targetDatabase: targetDatabase.value,
+      targetSchema: targetSchema.value,
+      targetDatabases: [...targetDatabases.value],
+      targetSchemas: [...targetSchemas.value],
+      targetTables: [...targetTables.value],
+      targetTable: targetTable.value,
+      keyColumns: [...keyColumns.value],
+      label: `${comparisonEndpointLabel(sourceConnectionId.value, sourceDatabase.value, sourceSchema.value)} → ${comparisonEndpointLabel(targetConnectionId.value, targetDatabase.value, targetSchema.value)}`,
+    },
+    tasks,
+    {
+      ensureConnected: (connectionId) => store.ensureConnected(connectionId),
+      getConfig: (connectionId) => store.getConfig(connectionId),
+      formatError: (kind, columns) => {
+        if (kind === "missingKeyColumns") return t("dataCompare.missingKeyColumns", { columns: columns ?? "" });
+        return kind === "noCommonColumns" ? t("dataCompare.noCommonColumns") : t("dataCompare.noKeyColumns");
+      },
+    },
+  );
+  activeSessionId.value = session.id;
+  applyDataCompareSession(session);
 }
 
 async function copySql() {
@@ -798,6 +654,7 @@ watch(sourceConnectionId, (id) => {
   loadDatabases(id, "source").catch((e) => toast(String(e), 5000));
 });
 watch(targetConnectionId, (id) => {
+  if (initializingPrefill) return;
   clearResult();
   targetDatabase.value = "";
   targetSchema.value = "";
@@ -817,6 +674,7 @@ watch(sourceDatabase, () => {
   loadSchemas("source", props.prefillSchema).catch((e) => toast(String(e), 5000));
 });
 watch(targetDatabase, () => {
+  if (initializingPrefill) return;
   clearResult();
   targetSchema.value = "";
   targetSchemas.value = [];
@@ -833,12 +691,14 @@ watch(sourceSchema, () => {
   if (sourceSchema.value) loadTables("source").catch((e) => toast(String(e), 5000));
 });
 watch(targetSchema, () => {
+  if (initializingPrefill) return;
   clearResult();
   targetTables.value = [];
   targetTable.value = "";
   if (targetSchema.value) loadTables("target").catch((e) => toast(String(e), 5000));
 });
 watch(selectedSourceTableNames, (tables, previous) => {
+  if (initializingPrefill) return;
   clearResult();
   sourceTable.value = tables.length === 1 ? tables[0] : "";
   if (tables.length !== 1) {
@@ -856,13 +716,27 @@ watch(selectedSourceTableNames, (tables, previous) => {
   }
   inferKeyColumns().catch(() => {});
 });
-watch(targetTable, () => clearResult());
+watch(targetTable, () => {
+  if (initializingPrefill) return;
+  clearResult();
+});
 watch(
-  open,
-  async (value) => {
+  [() => open.value, () => props.sessionId],
+  async ([value, sessionId]) => {
     if (!value) return;
     clearResult();
+    shownSessionError = "";
+    const session = getDataCompareSession(sessionId);
+    if (session) {
+      activeSessionId.value = session.id;
+      await restoreDataCompareSession(session);
+      applyDataCompareSession(session);
+      return;
+    }
+
+    activeSessionId.value = null;
     if (props.prefillConnectionId) {
+      const generation = ++initializingPrefillGeneration;
       initializingPrefill = true;
       try {
         sourceConnectionId.value = props.prefillConnectionId;
@@ -877,12 +751,26 @@ watch(
           }
         }
       } finally {
-        initializingPrefill = false;
+        await nextTick();
+        if (generation === initializingPrefillGeneration) initializingPrefill = false;
       }
     }
   },
   { immediate: true },
 );
+watch(
+  () => {
+    const session = getDataCompareSession(activeSessionId.value);
+    return session ? { id: session.id, version: session.version } : null;
+  },
+  () => {
+    if (!componentUnmounted) applyDataCompareSession(getDataCompareSession(activeSessionId.value));
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  componentUnmounted = true;
+});
 </script>
 
 <template>
@@ -901,6 +789,7 @@ watch(
             <Label class="text-xs font-medium">{{ t("diff.source") }}</Label>
             <ConnectionTreeSelect
               v-model="sourceConnectionId"
+              :disabled="comparing"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -915,7 +804,7 @@ watch(
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="!sourceDatabases.length"
+              :disabled="comparing || !sourceDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -924,6 +813,7 @@ watch(
               v-if="sourceSchemas.length"
               v-model="sourceSchema"
               :options="sourceSchemas"
+              :disabled="comparing"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -938,11 +828,12 @@ watch(
               :tables="sourceTables"
               :title="t('dataCompare.sourceTables')"
               :empty-text="!sourceConnectionId || !sourceDatabase ? t('dataCompare.selectSourceTables') : t('dataCompare.noTables')"
+              :disabled="comparing"
             />
           </div>
 
           <div class="flex items-center pt-6">
-            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" @click="swapSourceTarget">
+            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('diff.swap')" :disabled="comparing" @click="swapSourceTarget">
               <ArrowLeftRight class="w-3.5 h-3.5" />
             </Button>
           </div>
@@ -951,6 +842,7 @@ watch(
             <Label class="text-xs font-medium">{{ t("diff.target") }}</Label>
             <ConnectionTreeSelect
               v-model="targetConnectionId"
+              :disabled="comparing"
               :connections="sqlConnections"
               :layout="store.sidebarLayout"
               :placeholder="t('diff.selectConnection')"
@@ -965,7 +857,7 @@ watch(
               :placeholder="t('diff.selectDatabase')"
               :search-placeholder="t('diff.searchDatabase')"
               :empty-text="t('common.noResults')"
-              :disabled="!targetDatabases.length"
+              :disabled="comparing || !targetDatabases.length"
               trigger-variant="outline"
               trigger-class="h-8 w-full justify-between text-xs"
               content-class="w-[var(--reka-popover-trigger-width)]"
@@ -974,6 +866,7 @@ watch(
               v-if="targetSchemas.length"
               v-model="targetSchema"
               :options="targetSchemas"
+              :disabled="comparing"
               :placeholder="t('diff.selectSchema')"
               :search-placeholder="t('diff.searchSchema')"
               :empty-text="t('common.noResults')"
@@ -990,6 +883,7 @@ watch(
                 :placeholder="t('dataCompare.selectTable')"
                 :search-placeholder="t('dataCompare.searchTable')"
                 :empty-text="t('common.noResults')"
+                :disabled="comparing"
                 trigger-variant="outline"
                 trigger-class="h-8 w-full justify-between text-xs"
                 content-class="w-[var(--reka-popover-trigger-width)]"
@@ -1018,10 +912,15 @@ watch(
 
         <div class="space-y-1">
           <Label class="text-xs font-medium">{{ t("dataCompare.keyColumns") }}</Label>
-          <Input v-model="keyColumnsText" class="h-8 text-xs" :placeholder="t('dataCompare.keyColumnsPlaceholder')" />
+          <Input v-model="keyColumnsText" class="h-8 text-xs" :placeholder="t('dataCompare.keyColumnsPlaceholder')" :disabled="comparing" />
           <div class="text-[11px] text-muted-foreground">
             {{ t("dataCompare.keyColumnsAutoHint") }}
           </div>
+        </div>
+
+        <div v-if="comparing" class="flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+          <Loader2 class="h-3.5 w-3.5 animate-spin text-primary" />
+          <span>{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
         </div>
 
         <div v-if="hasResults" class="space-y-3">
@@ -1211,7 +1110,8 @@ watch(
 
       <DialogFooter v-else class="flex items-center gap-2">
         <Button variant="outline" @click="open = false">{{ t("common.close") }}</Button>
-        <span v-if="executing" class="text-xs text-muted-foreground mr-auto">
+        <span v-if="comparing" class="text-xs text-muted-foreground mr-auto">{{ compareProgressLabel || t("diff.progress.comparing") }}</span>
+        <span v-else-if="executing" class="text-xs text-muted-foreground mr-auto">
           {{ t("diff.syncProgress", { current: executedCount, total: executeTotal }) }}
         </span>
         <span v-else-if="planningSync" class="text-xs text-muted-foreground mr-auto">

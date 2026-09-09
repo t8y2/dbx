@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   cancelConditionalUpdate: vi.fn(),
   executeInTransaction: vi.fn(),
   executeInManualTransaction: vi.fn(),
+  executeQuery: vi.fn(),
   addHistory: vi.fn(),
 }));
 
@@ -22,6 +23,7 @@ vi.mock("@/lib/backend/api", () => ({
   cancelConditionalUpdate: mocks.cancelConditionalUpdate,
   executeInTransaction: mocks.executeInTransaction,
   executeInManualTransaction: mocks.executeInManualTransaction,
+  executeQuery: mocks.executeQuery,
   unlockConnectionWrites: vi.fn(),
   lockConnectionWrites: vi.fn(),
   connectionWriteUnlockState: vi.fn().mockResolvedValue(0),
@@ -621,6 +623,7 @@ describe("useDataGridEditor saveChanges reload", () => {
     mocks.cancelConditionalUpdate.mockReset();
     mocks.executeInTransaction.mockReset();
     mocks.executeInManualTransaction.mockReset();
+    mocks.executeQuery.mockReset();
     mocks.addHistory.mockReset();
     mocks.getConfig.mockReset();
   });
@@ -635,6 +638,9 @@ describe("useDataGridEditor saveChanges reload", () => {
       manualTransactionSessionId?: string;
       refreshSavedRows?: ReturnType<typeof vi.fn>;
       onManualTransactionMutation?: ReturnType<typeof vi.fn>;
+      connectionId?: string;
+      primaryKeys?: string[];
+      onExecuteSql?: (sql: string) => Promise<void>;
     } = {},
   ) {
     const emit = vi.fn();
@@ -651,7 +657,7 @@ describe("useDataGridEditor saveChanges reload", () => {
       result: computed(() => result.value),
       editable: computed(() => true),
       databaseType: computed(() => "mysql"),
-      connectionId: computed(() => "connection-1"),
+      connectionId: computed(() => ("connectionId" in options ? options.connectionId : "connection-1")),
       database: computed(() => "app"),
       tableMeta: computed(() => ({
         tableName: "orders_test",
@@ -659,11 +665,11 @@ describe("useDataGridEditor saveChanges reload", () => {
           { name: "id", data_type: "int" },
           { name: "status", data_type: "varchar" },
         ],
-        primaryKeys: ["id"],
+        primaryKeys: options.primaryKeys ?? ["id"],
       })),
       sourceColumns: computed(() => undefined),
       joinedWriteTargets: computed(() => options.joinedWriteTargets),
-      onExecuteSql: computed(() => undefined),
+      onExecuteSql: computed(() => options.onExecuteSql),
       customSaveHandler: computed(() => options.customSaveHandler),
       manualTransactionSessionId: computed(() => options.manualTransactionSessionId),
       onManualTransactionMutation: options.onManualTransactionMutation,
@@ -684,6 +690,69 @@ describe("useDataGridEditor saveChanges reload", () => {
     });
     return { editor, emit, currentPage };
   }
+
+  // https://github.com/t8y2/dbx/issues/8321: without a primary key the row is
+  // addressed by matching every column value, and the loaded page cannot show
+  // whether another physical row matches the same condition.
+  const keylessGuard = {
+    sql: "SELECT COUNT(*) AS dbx_keyless_row_matches FROM orders_test WHERE (status = 'pending')",
+    maxMatchedRows: 1,
+    message: "Cannot safely update or delete this row: more than one row matches.",
+  };
+
+  it("refuses a keyless save when the server counts more than one row matching the predicate the save sends", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[2]] });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [] });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeQuery).toHaveBeenCalledWith("connection-1", "app", keylessGuard.sql, undefined);
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toBe(keylessGuard.message);
+  });
+
+  it("runs a keyless save once the server confirms the predicate matches a single row", async () => {
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+    mocks.executeQuery.mockResolvedValue({ columns: ["dbx_keyless_row_matches"], rows: [[1]] });
+    mocks.executeBatch.mockResolvedValue({ affected_rows: 1 });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [] });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(mocks.executeBatch).toHaveBeenCalledTimes(1);
+    expect(editor.saveError.value).toBeFalsy();
+  });
+
+  it("refuses a keyless save when the guard cannot be counted on the server at all", async () => {
+    const onExecuteSql = vi.fn().mockResolvedValue(undefined);
+    mocks.prepareDataGridSave.mockResolvedValue({
+      statements: ["UPDATE orders_test SET status='shipped' WHERE status = 'pending'"],
+      rollbackStatements: [],
+      keylessGuards: [keylessGuard],
+    });
+
+    const { editor } = createSaveTestEditor({ primaryKeys: [], connectionId: undefined, onExecuteSql });
+    editor.dirtyRows.value.set(0, new Map([[1, "shipped"]]));
+
+    await editor.saveChanges();
+
+    expect(onExecuteSql).not.toHaveBeenCalled();
+    expect(mocks.executeQuery).not.toHaveBeenCalled();
+    expect(editor.saveError.value).toContain("could not check on the server");
+  });
 
   it("reloads after a pure row update, so database-computed columns (e.g. ON UPDATE CURRENT_TIMESTAMP) refresh without a manual page reload", async () => {
     mocks.prepareDataGridSave.mockResolvedValue({ statements: ["UPDATE orders_test SET status='shipped' WHERE id=1"], rollbackStatements: [] });

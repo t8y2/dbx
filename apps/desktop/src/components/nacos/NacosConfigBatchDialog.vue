@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { AlertTriangle, Archive, CheckCircle2, FileUp, Loader2 } from "@lucide/vue";
+import { AlertTriangle, Archive, CheckCircle2, FileUp, GitCompareArrows, Loader2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { NacosBatchPreview, NacosBatchReport, NacosConfigDataIdMapping, NacosConfigKey, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
+import type { NacosBatchPreview, NacosBatchPreviewDiff, NacosBatchReport, NacosConfigDataIdMapping, NacosConfigKey, NacosConfigSelectionScope, NacosConflictPolicy, NacosNamespaceInfo } from "@/types/nacos";
 import { nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
 
 export type NacosBatchDialogMode = "export" | "import" | "copy";
@@ -58,6 +59,8 @@ const policy = ref<NacosConflictPolicy>("ABORT");
 const targetNamespace = ref("");
 const targetGroup = ref("");
 const targetDataIdDrafts = ref<NacosConfigDataIdMapping[]>([]);
+const previewDiffOpen = ref(false);
+const selectedPreviewDiff = ref<NacosBatchPreviewDiff | null>(null);
 
 const titleKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Title`);
 const descriptionKey = computed(() => `nacos.batch${props.mode[0].toUpperCase()}${props.mode.slice(1)}Description`);
@@ -117,6 +120,11 @@ function batchStatusClass(status: string) {
   return "text-muted-foreground";
 }
 
+function showPreviewDiff(diff: NacosBatchPreviewDiff) {
+  selectedPreviewDiff.value = diff;
+  previewDiffOpen.value = true;
+}
+
 function resetTargetNamespace() {
   if (targetNamespaces.value.some((item) => JSON.stringify(item.namespace) === targetNamespace.value)) return;
   targetNamespace.value = targetNamespaces.value[0] ? JSON.stringify(targetNamespaces.value[0].namespace) : "";
@@ -171,6 +179,14 @@ watch(
 watch(targetNamespaces, () => {
   if (props.open) resetTargetNamespace();
 });
+
+watch(
+  () => props.preview,
+  () => {
+    previewDiffOpen.value = false;
+    selectedPreviewDiff.value = null;
+  },
+);
 </script>
 
 <template>
@@ -302,7 +318,12 @@ watch(targetNamespaces, () => {
                 <div class="truncate text-muted-foreground">{{ item.group }} · {{ item.namespace || "public" }}</div>
                 <div v-if="item.message" class="break-all text-destructive">{{ item.message }}</div>
               </div>
-              <Badge variant="outline" :class="batchStatusClass(item.status)">{{ batchStatusLabel(item.status) }}</Badge>
+              <div class="flex shrink-0 items-center gap-1">
+                <Button v-if="item.diff" size="icon" variant="ghost" class="h-7 w-7" :title="t('nacos.configDiffTitle')" :aria-label="t('nacos.configDiffTitle')" @click="showPreviewDiff(item.diff)">
+                  <GitCompareArrows class="h-4 w-4" />
+                </Button>
+                <Badge variant="outline" :class="batchStatusClass(item.status)">{{ batchStatusLabel(item.status) }}</Badge>
+              </div>
             </div>
           </div>
         </div>
@@ -358,4 +379,6 @@ watch(targetNamespaces, () => {
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <NacosConfigDiffDialog v-model:open="previewDiffOpen" :before="selectedPreviewDiff?.beforeContent ?? ''" :after="selectedPreviewDiff?.afterContent ?? ''" :format="selectedPreviewDiff?.format" :show-confirm="false" />
 </template>

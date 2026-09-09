@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -77,7 +78,37 @@ class IrisAgentTest {
     }
 
     @Test
+    void readsOutOfRangeIntegerThroughBigDecimal() {
+        BigDecimal valueOutsideIntegerRange = new BigDecimal("2147483648");
+        List<String> calls = new ArrayList<>();
+        ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
+            if ("getBigDecimal".equals(method.getName())) {
+                calls.add("getBigDecimal");
+                return valueOutsideIntegerRange;
+            }
+            if (method.getName().startsWith("get")) {
+                calls.add(method.getName());
+                throw new SQLException("Numeric value out of range");
+            }
+            if ("wasNull".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        });
+
+        Object value = new IrisAgent().resultValue(resultSet, 1, Types.INTEGER);
+
+        assertEquals(valueOutsideIntegerRange, value);
+        assertEquals(Collections.singletonList("getBigDecimal"), calls);
+    }
+
+    @Test
     void preservesStringPathForStandardValues() {
+        assertStringPath(Types.VARCHAR);
+        assertStringPath(Types.LONGVARCHAR);
+    }
+
+    private static void assertStringPath(int sqlType) {
         List<String> calls = new ArrayList<>();
         ResultSet resultSet = proxy(ResultSet.class, (method, args) -> {
             if ("getString".equals(method.getName())) {
@@ -90,7 +121,7 @@ class IrisAgentTest {
             return defaultValue(method.getReturnType());
         });
 
-        Object value = new IrisAgent().resultValue(resultSet, 1, Types.VARCHAR);
+        Object value = new IrisAgent().resultValue(resultSet, 1, sqlType);
 
         assertEquals("ordinary", value);
         assertEquals(Collections.singletonList("getString"), calls);

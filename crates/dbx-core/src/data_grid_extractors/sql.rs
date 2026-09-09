@@ -257,7 +257,13 @@ fn sql_selected_data(context: &ExtractContext<'_>, for_update: bool) -> Result<S
                 && info.is_some_and(is_auto_generated_column)
                 && !is_primary_key)
             || (for_update && is_primary_key)
-            || (!for_update && context.request.options.sql.exclude_primary_keys_from_insert && is_primary_key);
+            // Exclude only auto-generated primary keys; manually-assigned key
+            // columns must survive "without primary keys" INSERT copies
+            // (composite keys would otherwise lose NOT NULL data).
+            || (!for_update
+                && context.request.options.sql.exclude_primary_keys_from_insert
+                && is_primary_key
+                && info.is_some_and(is_auto_generated_column));
         if omit {
             omitted.push(source_name.to_string());
         } else {

@@ -11,6 +11,7 @@ import {
   DatabaseBackupConnectionQueue,
   databaseBackupAggregateExportStatus,
   databaseBackupFilePath,
+  databaseBackupRunDirectory,
   databaseBackupProgressPercent,
   databaseBackupRunsToPrune,
   databaseBackupScheduleIsDue,
@@ -127,12 +128,20 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     return true;
   }
 
-  async function deleteRun(runId: string): Promise<void> {
-    const run = runs.value.find((item) => item.id === runId);
-    if (!run || activeRunIds.has(runId)) return;
-    if (run.files.length > 0) await api.deleteDatabaseBackupFiles(run.files.map((file) => file.filePath));
-    runs.value = runs.value.filter((item) => item.id !== runId);
+  async function deleteRuns(runIds: readonly string[]): Promise<void> {
+    const ids = new Set(runIds);
+    const selectedRuns = runs.value.filter((run) => ids.has(run.id) && !activeRunIds.has(run.id));
+    if (selectedRuns.length === 0) return;
+
+    const paths = selectedRuns.flatMap((run) => run.files.map((file) => file.filePath));
+    if (paths.length > 0) await api.deleteDatabaseBackupFiles(paths);
+    const deletedIds = new Set(selectedRuns.map((run) => run.id));
+    runs.value = runs.value.filter((run) => !deletedIds.has(run.id));
     persistRuns();
+  }
+
+  async function deleteRun(runId: string): Promise<void> {
+    await deleteRuns([runId]);
   }
 
   function renameRun(runId: string, displayName: string): boolean {
@@ -176,12 +185,13 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     return true;
   }
 
-  async function runBackup(config: DatabaseBackupExecutionConfig, request: { source: DatabaseBackupRunSource; trigger: DatabaseBackupRunTrigger; scheduleId?: string; displayName: string }): Promise<FinishedDatabaseBackupRun | null> {
+  async function runBackup(config: DatabaseBackupExecutionConfig, request: { source: DatabaseBackupRunSource; trigger: DatabaseBackupRunTrigger; scheduleId?: string; displayName: string; runDirectoryPattern?: string }): Promise<FinishedDatabaseBackupRun | null> {
     const backupName = request.displayName;
     const connection = connectionStore.getConfig(config.connectionId);
 
     const startedAt = new Date();
     const runId = generateDatabaseExportId();
+    const outputDirectory = request.runDirectoryPattern ? databaseBackupRunDirectory(config.destinationDirectory, request.runDirectoryPattern, backupName, startedAt, runId) : config.destinationDirectory;
     const run: DatabaseBackupRun = {
       id: runId,
       scheduleId: request.scheduleId,
@@ -198,7 +208,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     replaceRun(run);
     activeRunIds.add(runId);
     cancellationRequested.delete(runId);
-    addDatabaseExportTask(runId, backupName, config.destinationDirectory, request.source === "scheduled" ? "scheduled" : "manual");
+    addDatabaseExportTask(runId, backupName, outputDirectory, request.source === "scheduled" ? "scheduled" : "manual");
     registerTaskCancelHandler(runId, async () => {
       await cancelRun(runId);
     });
@@ -289,7 +299,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
               exportIndex += 1;
               const childExportId = `${runId}-${exportIndex}`;
               activeExportIds.set(runId, childExportId);
-              const filePath = databaseBackupFilePath(config.destinationDirectory, backupName, item.fileStem, startedAt, runId, config.outputCompression);
+              const filePath = databaseBackupFilePath(outputDirectory, backupName, item.fileStem, startedAt, runId, config.outputCompression);
               generatedPaths.push(filePath);
               const terminal = await runDatabaseExportUntilTerminal(
                 {
@@ -447,7 +457,13 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     if (!schedule || activeScheduleIds.has(scheduleId)) return null;
     activeScheduleIds.add(scheduleId);
     try {
-      const run = await runBackup(toDatabaseBackupExecutionConfig(schedule), { source: "scheduled", trigger, scheduleId, displayName: schedule.name });
+      const run = await runBackup(toDatabaseBackupExecutionConfig(schedule), {
+        source: "scheduled",
+        trigger,
+        scheduleId,
+        displayName: schedule.name,
+        runDirectoryPattern: schedule.runDirectoryPattern,
+      });
       if (run) await finalizeScheduledRun(scheduleId, trigger, run);
       return run;
     } finally {
@@ -521,6 +537,7 @@ export function useScheduledDatabaseBackups(options: { scheduler?: boolean } = {
     setScheduleEnabled,
     deleteSchedule,
     deleteRun,
+    deleteRuns,
     renameRun,
     runSchedule,
     runOneShot,

@@ -1104,6 +1104,8 @@ export interface TableStructureEditorDraft {
   triggersLoaded?: boolean;
   loadedMetadataFacets?: import("@/lib/metadata/objectMetadataCache").ObjectMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
+  /** Request id of the structureInitialTab the editor already applied; remounts must not replay a consumed initial tab over the restored draft. */
+  appliedInitialTabRequestId?: number;
   initialized: boolean;
 }
 
@@ -1304,6 +1306,7 @@ export interface QueryTab {
     objectType: ObjectSourceKind;
     signature?: string;
   };
+  tableComment?: string | null;
   tableMeta?: {
     schema?: string;
     tableName: string;
@@ -1466,6 +1469,10 @@ export interface TransferTaskConfig {
   targetTableNameCase: TransferTableNameCase;
   quoteTargetColumnNames: boolean;
   batchSize: number;
+  /** Legacy-compatible rebuild flag; true takes precedence over the saved DML mode. */
+  dropTargetBeforeCreate?: boolean;
+  /** Legacy field only. Saved confirmation is always ignored and reset to false. */
+  dropTargetConfirmed?: boolean;
 }
 
 export interface TransferTask {

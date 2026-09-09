@@ -80,6 +80,18 @@ pub fn uses_oracle_row_id(database_type: Option<DatabaseType>) -> bool {
     matches!(database_type, Some(DatabaseType::Oracle | DatabaseType::OceanbaseOracle))
 }
 
+/// Xugu exposes an unqualified ROWID pseudo-column for base, partitioned and
+/// temporary tables. It is intentionally separate from Oracle's ROWIDTOCHAR
+/// representation because qualified ROWID and ROWIDTOCHAR are not supported
+/// by Xugu.
+pub fn uses_xugu_row_id(database_type: Option<DatabaseType>) -> bool {
+    database_type == Some(DatabaseType::Xugu)
+}
+
+pub fn uses_synthetic_row_id(database_type: Option<DatabaseType>) -> bool {
+    uses_oracle_row_id(database_type) || uses_xugu_row_id(database_type)
+}
+
 /// Oracle 系方言不支持 `INSERT ... VALUES (...), (...)` 多行语法，
 /// 复制为 INSERT 与导出 INSERT 都需按行生成单条语句。
 pub fn uses_single_row_insert_statements(database_type: DatabaseType) -> bool {

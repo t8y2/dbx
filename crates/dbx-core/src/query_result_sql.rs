@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::models::connection::DatabaseType;
 use crate::sql::{find_statement_at_cursor, find_statement_at_cursor_for_database};
 use crate::sql_dialect::{
-    firebird_rows_clause, pagination_strategy, quote_table_identifier, PaginationContext, TablePaginationStrategy,
+    firebird_rows_clause, pagination_strategy, quote_iris_identifier, quote_table_identifier, PaginationContext,
+    TablePaginationStrategy,
 };
 use sqlparser::ast::{
     visit_expressions, Expr, GroupByExpr, LimitClause, ObjectNamePart, OrderByKind, Select, SelectItem,
@@ -391,6 +392,8 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     }
 
     let aliases = build_derived_column_aliases(&options.result_columns);
+    // Caché/IRIS rejects derived-table column alias lists (`t(col, col)`)
+    // outright (SQLCODE -25), regardless of delimited-identifier support.
     let use_derived_column_aliases = options.database_type != Some(DatabaseType::Mysql)
         && options.database_type != Some(DatabaseType::ClickHouse)
         // Doris accepts the derived-table alias but not its column-name list.
@@ -400,7 +403,8 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
         && options.database_type != Some(DatabaseType::Dameng)
         && options.database_type != Some(DatabaseType::Oracle)
         && options.database_type != Some(DatabaseType::OceanbaseOracle)
-        && options.database_type != Some(DatabaseType::SapHana);
+        && options.database_type != Some(DatabaseType::SapHana)
+        && options.database_type != Some(DatabaseType::Iris);
     let sort_alias = if use_derived_column_aliases {
         aliases
             .get(options.column_index)
@@ -422,13 +426,24 @@ pub fn build_sorted_query_sql(options: SortedQuerySqlOptions) -> QuerySqlBuildRe
     let use_sort_ordinal = !use_derived_column_aliases
         && matches!(
             options.database_type,
-            Some(DatabaseType::Dameng | DatabaseType::Oracle | DatabaseType::OceanbaseOracle | DatabaseType::SapHana)
+            Some(
+                DatabaseType::Dameng
+                    | DatabaseType::Oracle
+                    | DatabaseType::OceanbaseOracle
+                    | DatabaseType::SapHana
+                    | DatabaseType::Iris
+            )
         )
         && options.result_columns.get(options.column_index).is_some_and(|column| {
             options.result_columns.iter().filter(|candidate| candidate.eq_ignore_ascii_case(column)).count() > 1
         });
     let sort_reference = if use_sort_ordinal {
         (options.column_index + 1).to_string()
+    } else if options.database_type == Some(DatabaseType::Iris) {
+        // With delimited identifiers disabled, a quoted ORDER BY name becomes
+        // a string literal on Caché and the sort silently degrades to a
+        // constant. Ordinary names must be sent unquoted.
+        quote_iris_identifier(&sort_alias, None)
     } else {
         quote_table_identifier(options.database_type, &sort_alias)
     };
@@ -628,13 +643,18 @@ fn add_sql_server_offset_fetch(statement: &str, limit: usize, offset: usize) -> 
         return Some(inject_sql_server_top(statement, limit));
     }
 
-    let statement_without_order = order_by_index.map(|index| statement[..index].trim_end()).unwrap_or(statement);
+    // The inner query may end with a line comment after removing ORDER BY.
+    // Keep the derived-table closing parenthesis on a new line so it is not
+    // swallowed by `--` / `#` comments.
+    let statement_without_order = order_by_index
+        .map(|index| statement_for_sql_suffix(statement[..index].trim_end()))
+        .unwrap_or_else(|| statement_for_sql_suffix(statement));
     if !sql_server_row_number_pagination_safe(statement) {
         return Some(add_sql_server_rowcount_pagination(statement, limit, offset));
     }
 
     let row_number_order = order_by_index
-        .map(|index| statement[index..].trim().to_string())
+        .map(|index| statement_for_sql_suffix(statement[index..].trim()))
         .unwrap_or_else(|| "ORDER BY (SELECT NULL)".to_string());
     let end = offset + limit;
     Some(format!(
@@ -718,12 +738,14 @@ fn add_sql_server_existing_top_pagination(statement: &str, limit: usize, offset:
     let row_number_order = sql_server_derived_pagination_order(statement)
         .unwrap_or_else(|| format!("ORDER BY {}", sql_server_default_pagination_order(statement)));
     if offset == 0 {
-        return format!("SELECT TOP ({limit}) * FROM ({statement}) [dbx_page] {row_number_order};");
+        let derived_statement = statement_for_sql_suffix(statement);
+        return format!("SELECT TOP ({limit}) * FROM ({derived_statement}) [dbx_page] {row_number_order};");
     }
 
     let end = offset + limit;
+    let derived_statement = statement_for_sql_suffix(statement);
     format!(
-        "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({statement}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
+        "SELECT * FROM (SELECT dbx_page_source.*, ROW_NUMBER() OVER ({row_number_order}) AS [__dbx_row_num] FROM ({derived_statement}) dbx_page_source) dbx_page WHERE [__dbx_row_num] > {offset} AND [__dbx_row_num] <= {end} ORDER BY [__dbx_row_num];"
     )
 }
 
@@ -3011,6 +3033,36 @@ mod tests {
     }
 
     #[test]
+    fn sqlserver_later_page_keeps_derived_table_closing_after_comment_before_order_by() {
+        let sql = "SELECT\n*\nFROM\ncode\n-- WHERE\n-- ccode = '1002'\nORDER BY\nccode;";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        let generated = result.sql.expect("build SQL Server page SQL");
+        assert!(generated.contains("FROM (SELECT\n*\nFROM\ncode\n-- WHERE\n-- ccode = '1002'\n) dbx_page_source"));
+        assert!(!generated.contains("-- ccode = '1002') dbx_page_source"));
+    }
+
+    #[test]
+    fn sqlserver_later_page_keeps_row_number_window_after_comment_after_order_by() {
+        let sql = "SELECT\n*\nFROM\ncode\nORDER BY\nccode -- sort";
+        let result = build_paginated_query_sql(PaginatedQuerySqlOptions {
+            original_sql: sql.to_string(),
+            database_type: Some(DatabaseType::SqlServer),
+            limit: 100,
+            offset: 100,
+        });
+
+        let generated = result.sql.expect("build SQL Server page SQL");
+        assert!(generated.contains("ROW_NUMBER() OVER (ORDER BY\nccode -- sort\n) AS [__dbx_row_num]"));
+        assert!(!generated.contains("-- sort) AS [__dbx_row_num]"));
+    }
+
+    #[test]
     fn sqlserver_cte_pagination_plan_executes_original_sql() {
         let sql = ";WITH ranked AS (SELECT id FROM dbo.users) SELECT * FROM ranked".to_string();
         let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
@@ -4814,6 +4866,42 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT * FROM (SELECT ID, NAME, AMOUNT FROM DBX_ISSUE_7274_SORT) t ORDER BY \"NAME\" ASC;"
+        );
+    }
+
+    #[test]
+    fn builds_iris_sorted_query_without_derived_column_alias_list() {
+        // Caché/IRIS rejects `t(col, col)` derived alias lists (SQLCODE -25) and
+        // a quoted ORDER BY name becomes a string literal when delimited
+        // identifiers are disabled, so the wrap must stay alias-free and
+        // unquoted (#8340).
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT ID, Name FROM SQLUser.CT_Country".to_string(),
+            database_type: Some(DatabaseType::Iris),
+            result_columns: vec!["ID".to_string(), "Name".to_string()],
+            column_index: 1,
+            column: "Name".to_string(),
+            direction: QuerySortDirection::Asc,
+        });
+        let sql = result.sql.unwrap();
+        assert!(!sql.contains(") t("), "derived column alias list must not be emitted: {sql}");
+        assert_eq!(sql, "SELECT * FROM (SELECT ID, Name FROM SQLUser.CT_Country) t ORDER BY Name ASC;");
+    }
+
+    #[test]
+    fn builds_iris_sorted_query_by_ordinal_for_duplicate_columns() {
+        let result = build_sorted_query_sql(SortedQuerySqlOptions {
+            original_sql: "SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id".to_string(),
+            database_type: Some(DatabaseType::Iris),
+            result_columns: vec!["ID".to_string(), "id".to_string()],
+            column_index: 1,
+            column: "id".to_string(),
+            direction: QuerySortDirection::Desc,
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "SELECT * FROM (SELECT a.id, b.id FROM a JOIN b ON b.a_id = a.id) t ORDER BY 2 DESC;"
         );
     }
 

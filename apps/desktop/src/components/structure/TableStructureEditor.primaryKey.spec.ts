@@ -216,7 +216,7 @@ vi.mock("@/stores/settingsStore", () => ({
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
-vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false } }) }));
+vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: "default" } }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
 vi.mock("@/lib/sql/sqlHighlighter", () => ({ createShikiSqlHighlighter: vi.fn(async () => (sql: string) => sql) }));
 vi.mock("@/lib/metadata/objectDdlCache", () => ({
@@ -301,7 +301,7 @@ async function mountEditor(databaseType: "sqlserver" | "postgres" | "sqlite" | "
   return root;
 }
 
-async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl", owner = "app_user") {
+async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKeys" | "triggers" | "ddl", owner = "app_user", tableComment = "") {
   mocks.connection.db_type = "postgres";
   mocks.connection.name = "postgres";
   mocks.connection.driver_label = "postgres";
@@ -309,7 +309,7 @@ async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKe
   mocks.listDataTypes.mockResolvedValue([]);
   mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
-  mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? "" : facet === "owner" ? owner : [], cacheStatus: "remote" }));
+  mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? tableComment : facet === "owner" ? owner : [], cacheStatus: "remote" }));
 
   const root = document.createElement("div");
   document.body.append(root);
@@ -802,12 +802,81 @@ describe("TableStructureEditor horizontal scrolling", () => {
 });
 
 describe("TableStructureEditor metadata loading", () => {
-  it("opens the initial DDL tab while loading only the table owner", async () => {
-    await mountLoadingEditor("ddl");
+  it("opens the initial DDL tab with its always-visible table comment", async () => {
+    const root = await mountLoadingEditor("ddl", "app_user", "Application users");
 
     await vi.waitFor(() => expect(mocks.loadObjectDdl).toHaveBeenCalledTimes(1));
-    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(1));
-    expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["owner"]);
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(2));
+    expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1]).sort()).toEqual(["comment", "owner"]);
+    expect(root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.tableCommentPlaceholder"]')?.value).toBe("Application users");
+  });
+
+  it.each([
+    ["backfills a clean draft", "", "", "Application users"],
+    ["preserves a dirty draft", "Local edit", "Old comment", "Local edit"],
+  ])("%s when restored DDL metadata loads the table comment", async (_case, tableComment, originalTableComment, expectedComment) => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => ({ value: facet === "comment" ? "Application users" : facet === "owner" ? "app_user" : [], cacheStatus: "remote" }));
+
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      draft: {
+        ...draft(),
+        activeTab: "ddl",
+        tableComment,
+        originalTableComment,
+        loadedMetadataFacets: [],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+
+    const commentInput = () => root.querySelector<HTMLInputElement>('input[placeholder="structureEditor.tableCommentPlaceholder"]');
+    await vi.waitFor(() => expect(commentInput()?.value).toBe(expectedComment));
+  });
+
+  it("refreshes the SQL preview when a delayed table comment updates the restored draft baseline", async () => {
+    const commentSql = "COMMENT ON TABLE users IS 'Local edit';";
+    let resolveComment!: (result: { value: string; cacheStatus: "remote" }) => void;
+    const commentResult = new Promise<{ value: string; cacheStatus: "remote" }>((resolve) => {
+      resolveComment = resolve;
+    });
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request, facet: string) => {
+      if (facet === "comment") return commentResult;
+      return { value: facet === "owner" ? "app_user" : [], cacheStatus: "remote" };
+    });
+    mocks.buildTableStructureChangeSql.mockImplementation(async (options) => ({
+      statements: options.tableComment === options.originalTableComment ? [] : [commentSql],
+      warnings: [],
+    }));
+
+    const root = document.createElement("div");
+    document.body.append(root);
+    const app = createApp(TableStructureEditor, {
+      connectionId: mocks.connection.id,
+      database: "test",
+      schema: "public",
+      tableName: "users",
+      draft: {
+        ...draft(),
+        activeTab: "ddl",
+        tableComment: "Local edit",
+        originalTableComment: "Old comment",
+        loadedMetadataFacets: [],
+      },
+    });
+    mountedApps.push(app);
+    app.mount(root);
+
+    await vi.waitFor(() => expect(mocks.buildTableStructureChangeSql).toHaveBeenLastCalledWith(expect.objectContaining({ tableComment: "Local edit", originalTableComment: "Old comment" })));
+    await vi.waitFor(() => expect(root.textContent).toContain(commentSql));
+    resolveComment({ value: "Local edit", cacheStatus: "remote" });
+    await vi.waitFor(() => expect(root.textContent).not.toContain(commentSql));
+    expect(root.textContent).toContain("structureEditor.noChanges");
   });
 
   it.each([

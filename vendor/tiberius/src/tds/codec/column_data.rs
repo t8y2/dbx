@@ -301,19 +301,13 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
                     || vlc.r#type() == VarLenType::BigVarChar =>
             {
                 if let Some(str) = opt {
-                    let mut encoder = vlc.collation().as_ref().unwrap().encoding()?.new_encoder();
-                    let len = encoder
-                        .max_buffer_length_from_utf8_without_replacement(str.len())
-                        .unwrap();
-                    let mut bytes = Vec::with_capacity(len);
-                    let (res, _) = encoder.encode_from_utf8_to_vec_without_replacement(
-                        str.as_ref(),
-                        &mut bytes,
-                        true,
-                    );
-                    if let encoding_rs::EncoderResult::Unmappable(_) = res {
-                        return Err(crate::Error::Encoding("unrepresentable character".into()));
-                    }
+                    let bytes = vlc
+                        .collation()
+                        .as_ref()
+                        .unwrap()
+                        .codec()?
+                        .encode_from_utf8(str.as_ref())
+                        .ok_or_else(|| crate::Error::Encoding("unrepresentable character".into()))?;
 
                     if bytes.len() > vlc.len() {
                         return Err(crate::Error::BulkInput(
@@ -762,6 +756,36 @@ mod tests {
 
             assert_eq!(decoded_string(value).as_deref(), Some("\u{fffd}"));
         }
+    }
+
+    #[tokio::test]
+    async fn varchar_cp850_collation_decodes_french_text() {
+        // SQL_1xCompat_CP850_CI_AS: LCID 0x409, sort ID 49. The DOS codepages
+        // behind legacy SQL collations are not implemented by encoding_rs.
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            10,
+            Some(Collation::new(0x409, 49)),
+            &short_string_wire(b"Caf\x82 \x87\x85"),
+        )
+        .await
+        .expect("CP850 varchar row values must decode");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("Café çà"));
+    }
+
+    #[tokio::test]
+    async fn text_cp850_collation_decodes_french_text() {
+        let value = decode_wire(
+            VarLenType::Text,
+            0,
+            Some(Collation::new(0x409, 49)),
+            &ntext_wire(b"Caf\x82 \x87\x85"),
+        )
+        .await
+        .expect("CP850 text row values must decode");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("Café çà"));
     }
 
     #[tokio::test]

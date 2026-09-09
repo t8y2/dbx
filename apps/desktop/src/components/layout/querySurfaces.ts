@@ -75,6 +75,7 @@ export interface ContentAreaSurfaceEmits {
   editorCursorChange: [tabId: string, pos: number];
   editorViewportChange: [tabId: string, viewport: { scrollTop: number; scrollLeft: number }];
   editorSelectionStateChange: [tabId: string, selection: { anchor: number; head: number }];
+  editorStateFlushed: [tabId: string];
   formatError: [tabId: string];
   reload: [tabId: string, sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number, intent?: DataGridReloadIntent];
   paginate: [tabId: string, offset: number, limit: number, whereInput?: string, orderBy?: string];
@@ -85,7 +86,7 @@ export interface ContentAreaSurfaceEmits {
   viewTableDdl: [tabId: string, target: SqlObjectNavigationTarget];
   editTableStructure: [tabId: string, target: SqlObjectNavigationTarget];
   openObjectSource: [tabId: string, target: SqlObjectNavigationTarget, initialEditing: boolean];
-  openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string }];
+  openObjectTable: [tabId: string, target: { tableName: string; schema?: string; tableType?: string; catalog?: string; comment?: string | null }];
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
@@ -97,7 +97,21 @@ const terminalError = ref("");
 const activeExecutionTask = ref<ExportTask | null>(null);
 const failureDetailsExpanded = ref(false);
 const refreshedTarget = ref(false);
-const MAX_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
+const DEFAULT_WEB_SQL_FILE_BYTES = 200 * 1024 * 1024;
+const webSqlFileUploadMaxBytes = ref(DEFAULT_WEB_SQL_FILE_BYTES);
+
+// The web server caps SQL file uploads via DBX_SQL_FILE_UPLOAD_MAX_MB; fetch the
+// effective limit once so the client-side pre-check matches the server rule.
+onMounted(async () => {
+  if (isDesktopRuntime) return;
+  try {
+    const { loadSqlFileUploadMaxBytes } = await import("@/lib/backend/http");
+    const value = await loadSqlFileUploadMaxBytes();
+    if (Number.isFinite(value) && value > 0) webSqlFileUploadMaxBytes.value = value;
+  } catch {
+    // Fall back to the built-in default; the server still rejects oversized uploads.
+  }
+});
 
 // Per-file results accumulated from backend file-boundary events during
 // multi-file execution.  Populated only when previews.length > 1.
@@ -285,8 +299,9 @@ async function previewSelectedSqlFile(fileOrPath: string | File) {
     return previewSqlFile(fileOrPath as string);
   }
   const file = fileOrPath as File;
-  if (file.size > MAX_WEB_SQL_FILE_BYTES) {
-    throw new Error(`File too large: ${file.size} bytes (max ${MAX_WEB_SQL_FILE_BYTES} bytes)`);
+  const uploadLimit = webSqlFileUploadMaxBytes.value;
+  if (file.size > uploadLimit) {
+    throw new Error(`File too large: ${file.size} bytes (max ${uploadLimit} bytes)`);
   }
   const { previewSqlFile: previewWebSqlFile } = await import("@/lib/backend/http");
   return previewWebSqlFile(file);

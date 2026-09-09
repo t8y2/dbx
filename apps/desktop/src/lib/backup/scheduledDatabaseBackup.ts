@@ -6,6 +6,7 @@ export const DATABASE_BACKUP_SCHEDULES_STORAGE_KEY = "dbx-database-backup-schedu
 export const DATABASE_BACKUP_RUNS_STORAGE_KEY = "dbx-database-backup-runs";
 export const DATABASE_BACKUP_CONFIG_CHANGED_EVENT = "dbx:database-backup-config-changed";
 export const MAX_DATABASE_BACKUP_HISTORY = 200;
+export const DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN = "dbx-backup__{schedule}__{timestamp}__{runId}";
 
 export type DatabaseBackupFrequency = "hourly" | "daily" | "weekly";
 export type DatabaseBackupExportStatus = "Running" | "Done" | "Error" | "Cancelled";
@@ -130,6 +131,8 @@ export interface DatabaseBackupSchedule extends DatabaseBackupExecutionConfig {
   timeOfDay: string;
   weekday: number;
   retentionCount: number;
+  /** Relative directory template used to group the files created by one scheduled run. */
+  runDirectoryPattern?: string;
   createdAt: string;
   updatedAt: string;
   nextRunAt: string;
@@ -249,6 +252,7 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
     dropTableIfExists: booleanValue(input.dropTableIfExists, false),
     outputCompression: input.outputCompression === "gzip" ? "gzip" : "none",
     retentionCount: normalizeDatabaseBackupRetention(input.retentionCount),
+    runDirectoryPattern: normalizeDatabaseBackupRunDirectoryPattern(input.runDirectoryPattern),
     createdAt: validIsoDate(input.createdAt, nowIso),
     updatedAt: validIsoDate(input.updatedAt, nowIso),
     nextRunAt: validIsoDate(input.nextRunAt, ""),
@@ -385,6 +389,44 @@ export function sanitizeDatabaseBackupFileSegment(value: string): string {
     .replace(/[. ]+$/g, "")
     .trim();
   return sanitized || "database";
+}
+
+/**
+ * A run directory is always relative to the directory selected in the native
+ * file picker. Empty and legacy schedules keep the stable default template.
+ */
+export function normalizeDatabaseBackupRunDirectoryPattern(value: unknown): string {
+  return stringValue(value).trim() || DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN;
+}
+
+function renderDatabaseBackupRunDirectoryPattern(pattern: string, scheduleName: string, startedAt: Date | string, runId: string): string {
+  const timestamp = databaseBackupTimestamp(startedAt);
+  const compactTimestamp = timestamp.replace("-", "");
+  return normalizeDatabaseBackupRunDirectoryPattern(pattern).replaceAll("{schedule}", sanitizeDatabaseBackupFileSegment(scheduleName)).replaceAll("{date}", timestamp.slice(0, 8)).replaceAll("{timestamp}", compactTimestamp).replaceAll("{runId}", sanitizeDatabaseBackupFileSegment(runId).slice(0, 8));
+}
+
+export function databaseBackupRunDirectory(directory: string, pattern: string, scheduleName: string, startedAt: Date | string, runId: string): string {
+  const normalizedPattern = normalizeDatabaseBackupRunDirectoryPattern(pattern);
+  const rendered = renderDatabaseBackupRunDirectoryPattern(normalizedPattern, scheduleName, startedAt, runId);
+  if (!rendered || /^[\\/]|^[a-zA-Z]:/.test(rendered) || /[\\/]$/.test(rendered)) {
+    throw new Error("Backup run directory template must be a relative path.");
+  }
+
+  const segments = rendered.split(/[\\/]+/);
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("Backup run directory template cannot contain . or .. path segments.");
+  }
+
+  return segments.reduce((path, segment) => joinDatabaseBackupPath(path, sanitizeDatabaseBackupFileSegment(segment)), directory);
+}
+
+export function databaseBackupRunDirectoryPatternIsValid(pattern: string): boolean {
+  try {
+    databaseBackupRunDirectory("/backups", pattern, "database-backup", new Date(2026, 0, 2, 3, 4, 5), "12345678");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function databaseBackupTimestamp(value: Date | string): string {

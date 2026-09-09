@@ -36,5 +36,6 @@ tasks.named('test') {
     dependsOn tasks.named('shadowJar')
     doFirst {
         systemProperty 'dbx.h2.agent.jar', tasks.named('shadowJar').get().archiveFile.get().asFile.absolutePath
+        systemProperty 'dbx.h2.v1.driver.jar', configurations.h2V1.asPath
     }
 }

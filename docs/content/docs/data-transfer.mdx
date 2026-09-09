@@ -61,6 +61,7 @@ After copying one or more tables in the object tree, paste them at a target loca
 | Option | Details |
 | --- | --- |
 | Create target tables | Generates target structure from source metadata when the table does not exist and the path supports it |
+| Rebuild structure and data | Renames existing target tables to backup (`__dbx_bak_` prefix), rebuilds from source structure, inserts data, then drops backup on success. Any failure preserves the backup table for manual recovery. Requires confirmation on production databases. Available for MySQL, PostgreSQL, SQL Server, KingBase, GaussDB, OpenGauss, KWDB, GoldenDB, SQLite, DuckDB, and Cloudflare D1. |
 | Append | Keeps existing target rows and inserts source rows |
 | Overwrite | Clears each target table before writing its source rows |
 | Upsert | Updates or inserts by key when the target path supports it and a usable key is available |
@@ -68,6 +69,8 @@ After copying one or more tables in the object tree, paste them at a target loca
 | Batch size | Controls paged reads and batched writes; the UI default is 1000 |
 
 If table creation is disabled, compatible target tables must already exist. Even with table creation enabled, cross-engine DDL may require manual changes when the target does not support a source type, default, constraint, or object.
+
+<Callout type="warn">**Rebuild structure and data** replaces existing target tables and their indexes, triggers, constraints, comments, and object permissions with source structure. The original table is renamed to a backup first, then dropped after a successful transfer. If any step fails, the backup table is retained and can be manually restored.</Callout>
 
 ## PostgreSQL Structure and Ownership
 

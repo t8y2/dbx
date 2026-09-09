@@ -405,3 +405,45 @@ test("blocks concurrent data transfers that write the same target table", () => 
     terminal: true,
   });
 });
+
+test("tracks compare tasks without exposing cancellation and removes completed sessions", async () => {
+  const tracker = useExportTracker();
+  const onOpen = vi.fn();
+  const onRemove = vi.fn();
+  const task = tracker.addDataCompareTask("data-compare-1", "app → warehouse", onOpen, onRemove);
+
+  assert.equal(task.kind, "data-compare");
+  assert.equal(task.canCancel, false);
+  await tracker.cancelTask(task.exportId);
+  assert.equal(
+    apiMock.cancelTableExport.mock.calls.some(([id]) => id === task.exportId),
+    false,
+  );
+
+  tracker.updateCompareTask(task.exportId, {
+    status: "Running",
+    compareCurrent: 1,
+    compareTotal: 2,
+    compareCurrentObject: "users",
+    compareResultCount: 1,
+    compareDifferentCount: 1,
+  });
+  assert.equal(task.status, "Running");
+  assert.equal(task.compareCurrentObject, "users");
+
+  tracker.updateCompareTask(task.exportId, {
+    status: "Done",
+    compareCurrent: 2,
+    compareTotal: 2,
+    compareResultCount: 2,
+  });
+  assert.equal(task.status, "Done");
+  task.onOpen?.();
+  assert.equal(onOpen.mock.calls.length, 1);
+  tracker.removeTask(task.exportId);
+  assert.equal(onRemove.mock.calls.length, 1);
+  assert.equal(
+    tracker.tasks.value.some((item) => item.exportId === task.exportId),
+    false,
+  );
+});

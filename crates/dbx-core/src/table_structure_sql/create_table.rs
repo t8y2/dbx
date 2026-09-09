@@ -1,6 +1,7 @@
 use super::column_format::{
     column_data_type, column_extra_clause, has_dameng_identity, is_dameng_identity_compatible_type,
-    is_mysql_character_data_type, is_mysql_timestamp_type, strip_inherited_mysql_column_charsets,
+    is_mysql_character_data_type, is_mysql_timestamp_type, mysql_on_update_current_timestamp_clause,
+    strip_inherited_mysql_column_charsets,
 };
 use super::comments::{build_sqlserver_column_comment_sql, build_sqlserver_table_comment_sql};
 use super::dialect::{capabilities_for, database_label, StructureDialect};
@@ -94,7 +95,7 @@ pub fn build_create_table_sql(mut options: TableStructureSqlOptions) -> TableStr
         }
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
             if on_update && dialect == StructureDialect::Mysql {
-                parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+                parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
             }
         }
         if dialect == StructureDialect::Mysql && capabilities.comment && !clean(&column.comment).is_empty() {

@@ -70,6 +70,7 @@ tmp/
 .dlp-quarantine/
 outputs/
 target-ai-write-confirmation/
+.serena/
 
 # Code review tool artifacts
 review_diff.json

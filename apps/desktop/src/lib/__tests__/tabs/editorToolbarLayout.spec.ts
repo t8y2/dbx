@@ -22,6 +22,40 @@ describe("editor toolbar measured condensation", () => {
     expect(resolveNextEditorToolbarTier({ tier: 2, availableWidth: grown, contentWidth: grown - EDITOR_TOOLBAR_STEP_DOWN_SLACK_PX - 10, condensedAtWidth: 400 })).toBe(1);
   });
 
+  it("restores the fullest measured tier that fits after the pane expands", () => {
+    expect(
+      resolveNextEditorToolbarTier({
+        tier: 3,
+        availableWidth: 920,
+        contentWidth: 920,
+        condensedAtWidth: 420,
+        expandedTierRequiredWidths: { 0: 840, 1: 700, 2: 560 },
+      }),
+    ).toBe(0);
+
+    expect(
+      resolveNextEditorToolbarTier({
+        tier: 3,
+        availableWidth: 760,
+        contentWidth: 760,
+        condensedAtWidth: 420,
+        expandedTierRequiredWidths: { 0: 840, 1: 700, 2: 560 },
+      }),
+    ).toBe(1);
+  });
+
+  it("does not use the condensed flex row width to restore a tier that cannot fit", () => {
+    expect(
+      resolveNextEditorToolbarTier({
+        tier: 2,
+        availableWidth: 720,
+        contentWidth: 720,
+        condensedAtWidth: 420,
+        expandedTierRequiredWidths: { 0: 840, 1: 700 },
+      }),
+    ).toBe(2);
+  });
+
   it("never oscillates: slack alone without pane growth keeps the condensed tier", () => {
     // The row fits with plenty of slack, but the pane barely grew since the
     // toolbar condensed at this width — stepping down would overflow again.

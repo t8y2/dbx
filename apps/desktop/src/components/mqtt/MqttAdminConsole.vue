@@ -209,6 +209,11 @@ function handleTopicClick(topic: string) {
   void refreshData();
 }
 
+function handleMessageClick(topic: string) {
+  if (messagesPaused.value) return;
+  handleTopicClick(topic);
+}
+
 function handleMessagePublished() {
   void refreshData();
 }
@@ -386,7 +391,7 @@ onUnmounted(stopPolling);
                   ? 'ml-auto max-w-[85%] rounded-l-md border-r-2 border-emerald-400 bg-emerald-50/70 hover:bg-emerald-100/70 dark:border-emerald-500 dark:bg-emerald-950/30 dark:hover:bg-emerald-950/50'
                   : 'mr-auto max-w-[85%] rounded-r-md border-l-2 border-blue-400 bg-blue-50/70 hover:bg-blue-100/70 dark:border-blue-500 dark:bg-blue-950/30 dark:hover:bg-blue-950/50'
               "
-              @click="handleTopicClick(msg.topic)"
+              @click="handleMessageClick(msg.topic)"
             >
               <div class="mb-0.5 flex items-center gap-2">
                 <span v-if="msg.direction === 'sent'" class="shrink-0 text-[10px] font-bold text-emerald-600 dark:text-emerald-400">{{ t("connection.mqttSent") }}</span>

@@ -9,6 +9,7 @@ import {
   normalizeShortcutSettings,
   selectionOccurrenceDefaultShortcut,
   shortcutToCodeMirrorKey,
+  toggleAiPanelDefaultShortcut,
   type ShortcutActionId,
 } from "@/lib/editor/shortcutRegistry";
 
@@ -167,6 +168,17 @@ describe("shortcutRegistry editor actions", () => {
     expect(definition).toMatchObject({ labelKey: "settings.shortcutToggleZenMode", scope: "global", defaultShortcut: "Shift+Mod+F12" });
     expect(DEFAULT_SHORTCUT_SETTINGS.toggleZenMode).toBe("Shift+Mod+F12");
     expect(findShortcutConflict("toggleZenMode", DEFAULT_SHORTCUT_SETTINGS.toggleZenMode, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
+  it("uses a platform-specific shortcut for toggling the AI panel", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "toggleAiPanel");
+
+    expect(definition).toMatchObject({ id: "toggleAiPanel", labelKey: "settings.shortcutToggleAiPanel", scope: "global" });
+    expect(toggleAiPanelDefaultShortcut("MacIntel")).toBe("Ctrl+Mod+I");
+    expect(toggleAiPanelDefaultShortcut("Win32")).toBe("Ctrl+Alt+I");
+    expect(normalizeShortcutSettings({ toggleAiPanel: "Ctrl+Alt+I" }, "MacIntel").toggleAiPanel).toBe("Ctrl+Mod+I");
+    expect(normalizeShortcutSettings({ toggleAiPanel: "Ctrl+Mod+I" }, "Win32").toggleAiPanel).toBe("Ctrl+Alt+I");
+    expect(findShortcutConflict("toggleAiPanel", normalizeShortcutSettings().toggleAiPanel, normalizeShortcutSettings())).toBeNull();
   });
 
   it("uses Shift+Enter for inserting a complete line below", () => {

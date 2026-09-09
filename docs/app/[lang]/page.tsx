@@ -544,7 +544,7 @@ export default async function LandingPage({ params }: { params: Promise<{ lang: 
     },
     {
       name: "HuaLongAI",
-      href: "https://api.hualong.online/",
+      href: "https://api.hualong.online/register?promo=DBX%26HUALONG",
       logo: "/sponsors/hualong-card.png",
       logoClass: "w-full max-w-[120px] object-contain",
       description: t.hualongSponsorDesc,

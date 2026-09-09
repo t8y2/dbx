@@ -36,7 +36,7 @@ import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
-import { MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
+import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import { buildOracleTnsConnectionString, normalizeOracleTnsAdminPath, parseOracleTnsConnectionString } from "@/lib/connection/oracleTnsConnection";
 import { connectionDeepLinkServiceHydrationValue, parseConnectionDeepLink, parseServiceConnectionUrl, type ConnectionDeepLinkDraft } from "@/lib/connection/connectionDeepLink";
 import { connectionUrlPlaceholder as getUrlPlaceholder } from "@/lib/connection/connectionPresentation";
@@ -107,6 +107,7 @@ import {
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleObjectFiltersNeedReset } from "@/lib/connection/connectionVisibleDatabases";
 import { canSaveVisibleDatabaseSelection, connectionUsesVisibleSchemaFilter, filterDatabaseNamesForVisiblePicker, filterSchemaNamesForVisiblePicker, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId, normalizeVisibleSchemaSelection } from "@/lib/database/visibleDatabases";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
+import { normalizeConnectionScope, normalizeConnectionTimeouts } from "@/lib/connection/connectionSubmitNormalization";
 import { databaseConnectionFormKind } from "@/lib/database/databaseDriverManifest";
 import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 import CloudflareD1ConnectionFields from "@/components/connection/CloudflareD1ConnectionFields.vue";
@@ -2517,7 +2518,7 @@ watch(
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
         connect_timeout_inherit: config.connect_timeout_inherit === true,
-        query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+        query_timeout_secs: config.query_timeout_inherit === true ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
         query_timeout_inherit: config.query_timeout_inherit === true,
         idle_timeout_secs: config.idle_timeout_secs ?? 60,
         keepalive_interval_secs: config.keepalive_interval_secs ?? 30,
@@ -3854,13 +3855,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     // service, SID, and descriptor JDBC strings exactly as before.
     config.connection_string = undefined;
   }
-  config.connect_timeout_secs = config.connect_timeout_inherit === true ? normalizeGlobalConnectTimeoutSecs(editGlobalConnectTimeoutSecs.value) : normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs);
-  const queryTimeout = Number(config.query_timeout_secs);
-  config.query_timeout_secs = config.query_timeout_inherit === true ? normalizeGlobalQueryTimeoutSecs(editGlobalQueryTimeoutSecs.value) : normalizeGlobalQueryTimeoutSecs(queryTimeout);
-  const idleTimeout = Number(config.idle_timeout_secs);
-  config.idle_timeout_secs = Number.isFinite(idleTimeout) && idleTimeout >= 0 ? idleTimeout : 60;
-  const keepaliveInterval = Number(config.keepalive_interval_secs);
-  config.keepalive_interval_secs = Number.isFinite(keepaliveInterval) && keepaliveInterval >= 0 ? keepaliveInterval : 30;
+  normalizeConnectionTimeouts(config, editGlobalConnectTimeoutSecs.value, editGlobalQueryTimeoutSecs.value);
   if (config.db_type === "manticoresearch") {
     config.url_params = "";
   }
@@ -3903,19 +3898,7 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
       .replace(/^[;]|[;]$/g, "")
       .trim();
   }
-  if (!config.one_time) config.one_time = undefined;
-  if (!config.read_only) config.read_only = undefined;
-  // Save-password is a positive default: only an explicit unchecked state (false)
-  // is persisted; anything else keeps the current behavior.
-  config.save_password = config.save_password !== false;
-  if ((isSingleDatabase(config.db_type) || config.db_type === "mq" || config.db_type === "mqtt") && config.production_databases?.length) {
-    // Single-database / MQ drivers expose no independently selectable database list for PROD scope.
-    config.is_production = true;
-    config.production_databases = [];
-  }
-  if (!config.is_production) config.is_production = undefined;
-  config.production_databases = [...new Set((config.production_databases || []).map((database) => database.trim()).filter(Boolean))];
-  if (!config.production_databases.length) config.production_databases = undefined;
+  normalizeConnectionScope(config);
   if (form.value.db_type === "mq") {
     const mqConfig = buildMqAdminConfig();
     config.external_config = mqConfig;

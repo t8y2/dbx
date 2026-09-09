@@ -11,6 +11,7 @@ import {
   isGoToNextPageShortcut,
   isGoToPreviousPageShortcut,
   isToggleZenModeShortcut,
+  isToggleAiPanelShortcut,
   matchesModifierOnlyShortcut,
   matchesShortcut,
   tabSwitcherDirectionFromShortcut,
@@ -120,6 +121,13 @@ describe("keyboard shortcut matching", () => {
     expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "Shift+Mod+F12" })).toBe(true);
     expect(isToggleZenModeShortcut({ ...platformModEvent, shiftKey: false }, { toggleZenMode: "Shift+Mod+F12" })).toBe(false);
     expect(isToggleZenModeShortcut(platformModEvent, { toggleZenMode: "" })).toBe(false);
+  });
+
+  it("matches the platform-specific AI panel shortcut", () => {
+    expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, metaKey: true }, undefined, "MacIntel")).toBe(true);
+    expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, altKey: true }, undefined, "Win32")).toBe(true);
+    expect(isToggleAiPanelShortcut({ key: "a", ctrlKey: true, shiftKey: true }, { toggleAiPanel: "Mod+Shift+A" }, "Win32")).toBe(true);
+    expect(isToggleAiPanelShortcut({ key: "i", ctrlKey: true, metaKey: true }, { toggleAiPanel: "" }, "MacIntel")).toBe(false);
   });
 
   it("matches legacy plus-key shortcuts saved with plus as a separator", () => {

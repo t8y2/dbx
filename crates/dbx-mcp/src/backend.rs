@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use dbx_core::{
     agent_events::{ToolCall, ToolResult},
     agent_tools::{self, format_query_result_as_text, AgentSqlPermissions, QueryCellWindow},
-    connection::AppState,
+    connection::{connection_configs_pool_equivalent, AppState},
     db::{mongo_driver::MongoIndexSpec, redis_driver::RedisCommandResult, ColumnInfo, TableInfo},
     mcp_policy::{connection_group_paths, McpConnectionGroupPath},
     models::connection::{ConnectionConfig, DatabaseType},
@@ -598,19 +598,34 @@ impl LocalBackend {
     /// needs this — WebBackend talks HTTP and holds no local AppState, and the desktop mcp_bridge
     /// shares the DBX process so it is unaffected by this cache desync.
     async fn sync_runtime_configs(&self, configs: &[ConnectionConfig]) {
-        let mut runtime = self.state.configs.write().await;
-        for config in configs {
-            match runtime.get(&config.id) {
-                Some(existing) if existing == config => {}
-                _ => {
-                    runtime.insert(config.id.clone(), config.clone());
+        let pool_ids_to_drop = {
+            let mut runtime = self.state.configs.write().await;
+            let mut pool_ids_to_drop = Vec::new();
+            for config in configs {
+                match runtime.get(&config.id) {
+                    Some(existing) if existing == config => {}
+                    Some(existing) => {
+                        if !connection_configs_pool_equivalent(existing, config) {
+                            pool_ids_to_drop.push(config.id.clone());
+                        }
+                        runtime.insert(config.id.clone(), config.clone());
+                    }
+                    None => {
+                        runtime.insert(config.id.clone(), config.clone());
+                    }
                 }
             }
-        }
-        let stale_ids: Vec<String> =
-            runtime.keys().filter(|id| !configs.iter().any(|config| &config.id == *id)).cloned().collect();
-        for id in stale_ids {
-            runtime.remove(&id);
+            let stale_ids: Vec<String> =
+                runtime.keys().filter(|id| !configs.iter().any(|config| &config.id == *id)).cloned().collect();
+            for id in &stale_ids {
+                runtime.remove(id);
+            }
+            pool_ids_to_drop.extend(stale_ids);
+            pool_ids_to_drop
+        };
+
+        for id in pool_ids_to_drop {
+            self.state.remove_connection_pools_detached(&id).await;
         }
     }
 }
@@ -817,6 +832,7 @@ impl DbxBackend for LocalBackend {
         let removed = self.state.storage.remove_connection_for_mcp(connection_id).await?;
         if removed {
             self.state.configs.write().await.remove(connection_id);
+            self.state.remove_connection_pools_detached(connection_id).await;
         }
         Ok(removed)
     }

@@ -1,15 +1,16 @@
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type { ConnectionConfig, DatabaseType } from "@/types/database";
 
-export const DEFAULT_QUERY_TIMEOUT_SECS = 30;
+export { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 
 /**
  * Query timeout (seconds) the table structure editor applies when the change
  * script contains a PostgreSQL `CREATE INDEX CONCURRENTLY`.
  *
  * Concurrent builds scan the whole table while only taking `ShareUpdateExclusiveLock`,
- * so they routinely run far beyond the default 30s query timeout — the default
+ * so they routinely run far beyond the default 60s query timeout — the default
  * budget would cancel a legitimate build and leave an INVALID index behind.
  * PostgreSQL itself does not impose a build deadline
  * (https://www.postgresql.org/docs/current/sql-createindex.html). This is the

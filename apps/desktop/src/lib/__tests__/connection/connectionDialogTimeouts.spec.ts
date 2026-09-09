@@ -21,7 +21,7 @@ describe("ConnectionDialog timeout controls", () => {
 
   it("restores the default when the connection timeout input is cleared", () => {
     expect(normalizeConnectTimeoutSecs("")).toBe(DEFAULT_CONNECT_TIMEOUT_SECS);
-    expect(dialogSource).toContain("normalizeGlobalConnectTimeoutSecs(config.connect_timeout_secs)");
+    expect(dialogSource).toContain("normalizeConnectionTimeouts(config");
     expect(dialogSource).not.toContain("Number(config.connect_timeout_secs)");
   });
 

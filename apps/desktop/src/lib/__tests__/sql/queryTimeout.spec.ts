@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CONCURRENT_INDEX_QUERY_TIMEOUT_SECS, frontendQueryTimeoutDelayMs, frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConcurrentIndex, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 
 describe("queryTimeout", () => {
-  it("gives CREATE INDEX CONCURRENTLY a dedicated long budget instead of the 30s default", () => {
+  it("gives CREATE INDEX CONCURRENTLY a dedicated long budget instead of the 60s default", () => {
     expect(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS).toBe(1800);
     expect(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS).toBeGreaterThan(30);
     expect(frontendQueryTimeoutDelayMs(CONCURRENT_INDEX_QUERY_TIMEOUT_SECS)).toBe(1_800_000);
@@ -33,7 +33,7 @@ describe("queryTimeout", () => {
 
   it("keeps the existing frontend guard for other database types", () => {
     expect(frontendQueryTimeoutSecsForSql("SELECT * FROM sample_records LIMIT 2000", "mysql", 30)).toBe(60);
-    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(30);
+    expect(queryTimeoutSecsForConnection({ query_timeout_secs: undefined })).toBe(60);
   });
 
   it("does not schedule frontend timeouts beyond the browser timer limit", () => {
@@ -49,6 +49,6 @@ describe("queryTimeout", () => {
   });
 
   it("falls back safely when an inherited global timeout is invalid", () => {
-    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(30);
+    expect(queryTimeoutSecsForConnection({ query_timeout_inherit: true }, Number.NaN)).toBe(60);
   });
 });

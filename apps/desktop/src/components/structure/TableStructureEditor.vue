@@ -1146,6 +1146,8 @@ function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
 
 let sqlPreviewRequestId = 0;
 let structureLoadRequestId = 0;
+let tableCommentLoadRequestId = 0;
+let tableCommentLoadPromise: Promise<void> | null = null;
 let tableOwnerLoadRequestId = 0;
 let tableOwnerRolesLoadRequestId = 0;
 let mysqlAutoIncrementLoadRequestId = 0;
@@ -1158,6 +1160,7 @@ let skipNextRefreshVersion = false;
 let restoringDraft = false;
 let syncingDraft = false;
 let draftHydrated = false;
+let lastAppliedInitialTabRequestId: number | undefined;
 let hydratingRestoredDraft = false;
 let structureScrollFrame = 0;
 let structureHorizontalScrollbarThumbLeftPercent = 0;
@@ -1359,6 +1362,7 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     triggersLoaded: triggersLoaded.value,
     loadedMetadataFacets: [...loadedMetadataFacets],
     scrollPositions: cloneDraftValue(structureScrollPositions.value),
+    appliedInitialTabRequestId: lastAppliedInitialTabRequestId,
     initialized,
   };
 }
@@ -1374,6 +1378,7 @@ function syncDraftToParent() {
 function restoreDraft(draft: TableStructureEditorDraft) {
   restoringDraft = true;
   draftHydrated = false;
+  lastAppliedInitialTabRequestId = draft.appliedInitialTabRequestId;
   activeTab.value = draft.activeTab || "columns";
   // Restore the DDL baseline alongside the edit, otherwise the restored script
   // would read as dirty (or clean) against the wrong reference text.
@@ -1834,7 +1839,8 @@ async function reloadStructureFromDatabase() {
   ddlDraft.value = null;
   if (refreshDdl) {
     ddlFetched.value = false;
-    await Promise.all([fetchDdl(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    await Promise.all([fetchDdl(true), loadVisibleTableComment(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    markDraftHydratedAndSync();
   } else {
     await Promise.all([loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true }), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
   }
@@ -1869,6 +1875,40 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
 
 function loadCachedTableComment(request: ReturnType<typeof ddlRequest>, force = false): Promise<{ value: string | undefined; cacheStatus: "memory" | "disk" | "remote" }> {
   return loadObjectMetadataFacet(request, "comment", () => fetchTableCommentValue(request.connectionId, request.database, request.schema, request.tableName, request.catalog), { force });
+}
+
+async function loadVisibleTableComment(force = false, preserveDraft = false) {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  const catalog = props.catalog;
+  if (!structureCapabilities.value.comment || !connectionId || !database || !tableName) return;
+  if (!force && loadedMetadataFacets.has("comment")) return;
+  if (!force && tableCommentLoadPromise) return tableCommentLoadPromise;
+
+  const requestId = ++tableCommentLoadRequestId;
+  const loadPromise = (async () => {
+    try {
+      await store.ensureConnected(connectionId);
+      const { value } = await loadCachedTableComment({ connectionId, database, schema, tableName, catalog }, force);
+      if (requestId !== tableCommentLoadRequestId) return;
+      if (connectionId !== props.connectionId || database !== props.database || schema !== metadataSchema.value || tableName !== props.tableName || (catalog || "") !== (props.catalog || "")) return;
+      if (value === undefined) return;
+      const hasCommentDraft = tableComment.value !== originalTableComment.value;
+      originalTableComment.value = value;
+      if (!preserveDraft || !hasCommentDraft) tableComment.value = value;
+      loadedMetadataFacets.add("comment");
+    } catch (error) {
+      if (requestId === tableCommentLoadRequestId) console.warn("[DBX][structure-editor:comment-metadata-failed]", error);
+    }
+  })();
+  tableCommentLoadPromise = loadPromise;
+  try {
+    await loadPromise;
+  } finally {
+    if (tableCommentLoadPromise === loadPromise) tableCommentLoadPromise = null;
+  }
 }
 
 async function loadMysqlAutoIncrementCounter(preserveDraft = false) {
@@ -3713,14 +3753,17 @@ function unregisterStructureEditorShortcuts() {
 
 onMounted(() => {
   resetState();
-  applyInitialStructureTab();
+  // With an initialized draft the restore below owns the tab (plus any
+  // unconsumed initial tab); applying the stale initial tab first would only
+  // flash the wrong facet and kick its metadata load (#8419).
+  if (!props.draft?.initialized) applyInitialStructureTab();
   applyInitialStructureTarget();
   registerStructureEditorShortcuts();
   void loadDynamicDataTypeOptions();
   if (props.draft?.initialized) {
     restoreDraft(props.draft);
     // A restored draft owns its saved tab unless navigation explicitly requested another one.
-    applyInitialStructureTab(false);
+    applyPendingInitialStructureTab();
     applyInitialStructureTarget();
   }
   structureEditorReady = true;
@@ -3737,7 +3780,7 @@ onMounted(() => {
   } else if (isCreateMode.value) {
     markDraftHydratedAndSync();
   } else if (activeTab.value === "ddl") {
-    void fetchDdl();
+    void Promise.all([fetchDdl(), loadVisibleTableComment()]).then(markDraftHydratedAndSync);
   } else {
     void loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true }).then(() => applyInitialStructureTarget());
   }
@@ -3803,9 +3846,21 @@ function resolveStructureMetadataTab(tab: TableInfoTab | undefined, capabilities
 function applyInitialStructureTab(useDefault = true) {
   if (props.initialTab) {
     activeTab.value = resolveStructureMetadataTab(props.initialTab);
+    lastAppliedInitialTabRequestId = props.initialTabRequestId;
   } else if (useDefault) {
     activeTab.value = resolveStructureMetadataTab(undefined);
   }
+}
+
+// The tab's structureInitialTab stays populated after it was consumed once
+// (e.g. the side panel opened the editor on its foreign-keys facet). Replaying
+// it on every remount would override the draft-restored tab the user last
+// selected, so an initial tab only applies again when navigation bumped the
+// request id (#8419).
+function applyPendingInitialStructureTab() {
+  if (!props.initialTab) return;
+  if (props.initialTabRequestId !== undefined && props.initialTabRequestId === lastAppliedInitialTabRequestId) return;
+  applyInitialStructureTab(false);
 }
 
 function initialTargetKey(target: TableStructureEditorTarget): string {
@@ -3879,6 +3934,7 @@ watch(
     () => props.tableName,
     newTableName,
     tableComment,
+    originalTableComment,
     mysqlAutoIncrementValue,
     originalMysqlAutoIncrementValue,
     mysqlAutoIncrementLoading,
@@ -3963,7 +4019,7 @@ watch(refreshVersion, (version, previous) => {
 async function loadActiveTableStructureMetadataIfNeeded() {
   if (!structureEditorReady || isCreateMode.value) return;
   if (activeTab.value === "ddl") {
-    await fetchDdl();
+    await Promise.all([ddlLoading.value ? Promise.resolve() : fetchDdl(), loadVisibleTableComment(false, true)]);
     return;
   }
   if (loading.value || secondaryMetadataLoading.value) return;

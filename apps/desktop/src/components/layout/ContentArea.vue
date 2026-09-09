@@ -939,7 +939,7 @@ function refreshQueryEditorCompletionCache(): boolean {
 
 function reloadUnavailableDataTab() {
   const { whereInput, orderBy } = restoredDataTabReloadFilters(props.activeTab);
-  emit("reload", props.activeTab.id, undefined, whereInput, orderBy);
+  emit("reload", props.activeTab.id, undefined, undefined, whereInput, orderBy);
 }
 
 function refreshData(): boolean {
@@ -1275,6 +1275,7 @@ defineExpose({
               class="relative z-0 flex-1"
               :auto-focus="autoFocus !== false"
               :model-value="activeTab.sql"
+              :tab-id="activeTab.id"
               :connection-id="activeTab.connectionId"
               :catalog="activeTab.catalog"
               :database="activeTab.database"
@@ -1304,6 +1305,7 @@ defineExpose({
               @preview-changes-available="emit('previewChangesAvailable', activeTab.id, $event)"
               @viewport-change="emit('editorViewportChange', activeTab.id, $event)"
               @selection-state-change="emit('editorSelectionStateChange', activeTab.id, $event)"
+              @editor-state-flushed="emit('editorStateFlushed', activeTab.id)"
               @format-error="emit('formatError', activeTab.id)"
               @execute="emit('execute', activeTab.id, $event)"
               @execute-in-new-result-tab="emit('executeInNewResultTab', activeTab.id, $event)"

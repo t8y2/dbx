@@ -20,6 +20,7 @@ import {
   gaussdbTargetServerType,
   inferJdbcDialect,
   metadataSchemaForConnection,
+  objectListSchemaForConnection,
   setGaussdbConnectionMode,
   setGaussdbCountQueryDop,
   setGaussdbIdentifierQuoteStyle,
@@ -54,6 +55,20 @@ describe("jdbc dialect inference", () => {
       inferJdbcDialect({
         db_type: "jdbc",
         jdbc_driver_paths: ["/drivers/intersystems-jdbc-3.10.5.jar"],
+      }),
+    ).toBe("iris");
+    // Legacy Caché connections pick the CacheDB.jar from the driver store; the
+    // jar file name and driver label are the only Intersystems markers there.
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        jdbc_driver_paths: ["/drivers/CacheDB.jar"],
+      }),
+    ).toBe("iris");
+    expect(
+      inferJdbcDialect({
+        db_type: "jdbc",
+        driver_label: "CacheDB",
       }),
     ).toBe("iris");
   });
@@ -284,6 +299,7 @@ describe("jdbc dialect inference", () => {
     expect(inferJdbcDialect({ db_type: "jdbc", driver_label: "Kyuubi JDBC", connection_string: "jdbc:hive2://kyuubi.example.com/default" })).toBe("mysql");
     expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:hive2://hiveserver.example.com/default" })).toBe("mysql");
     expect(inferJdbcDialect({ db_type: "jdbc", connection_string: "jdbc:mysql://mysql.example.com/app" })).toBe("mysql");
+    expect(inferJdbcDialect({ db_type: "jdbc", jdbc_driver_paths: ["/drivers/mysql-connector-j-8.0.33.jar"] })).toBe("mysql");
   });
 
   it("prefers explicit Kyuubi identity over Apache Hive product metadata", () => {
@@ -471,5 +487,30 @@ describe("object tree node schema", () => {
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db")).toBe("");
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "")).toBe("");
     expect(connectionDatabaseMetadataSchema({ db_type: "spanner" }, "projects/p/instances/i/databases/db", "public")).toBe("public");
+  });
+});
+
+describe("object list schema", () => {
+  it("falls back to the uppercased Dameng connection username when no schema is selected", () => {
+    // Dameng's object SQL filters on a fixed WHERE o.OWNER = ?, so a blank schema
+    // matches nothing and the object tab renders empty (#8301).
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "sales_app" })).toBe("SALES_APP");
+  });
+
+  it("applies the Dameng fallback to generic jdbc:dm connections", () => {
+    expect(objectListSchemaForConnection({ db_type: "jdbc", connection_string: "jdbc:dm://localhost:5236", username: "sysdba" })).toBe("SYSDBA");
+  });
+
+  it("keeps an explicitly selected schema for Dameng", () => {
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "sales_app" }, "OTHER_SCHEMA")).toBe("OTHER_SCHEMA");
+  });
+
+  it("returns a blank schema for Dameng when the connection has no usable username", () => {
+    expect(objectListSchemaForConnection({ db_type: "dameng" })).toBe("");
+    expect(objectListSchemaForConnection({ db_type: "dameng", username: "   " })).toBe("");
+  });
+
+  it.each(["oracle", "oceanbase-oracle", "postgres", "mysql"] as const)("does not fall back to the username for %s", (dbType) => {
+    expect(objectListSchemaForConnection({ db_type: dbType, username: "app_user" })).toBe("");
   });
 });

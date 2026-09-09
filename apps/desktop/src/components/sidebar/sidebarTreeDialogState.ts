@@ -39,6 +39,9 @@ export const showEmptyTableConfirm = ref(false);
 export const showTruncateTableConfirm = ref(false);
 export const showVacuumTableConfirm = ref(false);
 export const showMysqlAutoIncrementConfirm = ref(false);
+export const showBatchMysqlAutoIncrementConfirm = ref(false);
+export const batchMysqlAutoIncrementTargets = ref<TreeNode[]>([]);
+export const batchMysqlAutoIncrementPreviewSql = ref("");
 export const showRenameObjectDialog = ref(false);
 export const renameObjectName = ref("");
 export const renameObjectError = ref("");
@@ -201,6 +204,7 @@ const openFlags = [
   showTruncateTableConfirm,
   showVacuumTableConfirm,
   showMysqlAutoIncrementConfirm,
+  showBatchMysqlAutoIncrementConfirm,
   showDropObjectConfirm,
   showRenameObjectDialog,
   showDuplicateDialog,

@@ -313,6 +313,9 @@ pub struct AiChatSelectionState {
     pub effort_preferences: Vec<AiModelEffortPreference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_mode: Option<AiAssistantMode>,
+    /// Whether opening the AI panel should restore the most recently updated conversation.
+    #[serde(default)]
+    pub restore_last_conversation: bool,
     /// Prompt template ids auto-applied when the AI panel opens, keyed by
     /// connection db_type. BTreeMap keeps serialized key order stable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -330,6 +333,7 @@ impl Default for AiChatSelectionState {
             active: None,
             effort_preferences: Vec::new(),
             default_mode: None,
+            restore_last_conversation: false,
             default_templates_by_db_type: BTreeMap::new(),
             last_used_templates_by_db_type: BTreeMap::new(),
         }
@@ -569,6 +573,10 @@ pub struct AiChatMessage {
     pub reasoning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Set on the assistant message whose generation failed; persisted so the
+    /// export failure marker survives reloads and locale switches (#6467 PR3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covered_messages: Option<usize>,
 }

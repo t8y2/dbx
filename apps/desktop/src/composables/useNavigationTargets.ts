@@ -5,7 +5,7 @@ import { canApplyDataTabMetadata, canReuseActiveMongoTab, type DataTabReuseMode 
 import { isNoSnapshotErrorResult, isQueryExecutionErrorResult } from "@/lib/query/queryResultError";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { tableDataLargeValuePreviewOptions } from "@/lib/dataGrid/dataGridLargeValues";
-import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, shouldIncludeSyntheticRowId } from "@/lib/table/tableEditing";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { beginDataTabNavigation, endDataTabNavigation, isCurrentDataTabNavigation } from "@/lib/tabs/dataTabNavigationGeneration";
@@ -22,6 +22,7 @@ export type NavigationTarget = {
   schema?: string;
   tableName: string;
   tableType?: string;
+  comment?: string | null;
   columnName?: string;
   whereInput?: string;
 };
@@ -72,7 +73,10 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
   }
   const tabId = queryStore.createTab(target.connectionId, target.database, tabTitle, "data", tableSchema, undefined, undefined, { forceNew: true });
   const targetTab = queryStore.tabs.find((tab) => tab.id === tabId);
-  if (targetTab) targetTab.tableInfoTab = options.tableInfoTab;
+  if (targetTab) {
+    targetTab.tableInfoTab = options.tableInfoTab;
+    targetTab.tableComment = target.comment;
+  }
   // Stamp the new table identity synchronously so SQL rebuilds (refresh,
   // filters, row count) never read a stale tableMeta from a reused tab or
   // fall back to parsing the schema-qualified tab title (issue #3613).
@@ -268,7 +272,7 @@ async function openTableTarget(target: NavigationTarget, options: { tableInfoTab
       // 异步窗口内 tab 可能已被复用为其他目标：旧请求的元数据不得落地、
       // 不得解除新目标的 pending
       if (!isCurrentTarget() || !isCurrentGeneration()) return;
-      const useRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, targetTableType);
+      const useRowId = shouldIncludeSyntheticRowId(effectiveDbType, primaryKeys, targetTableType);
       queryStore.setTableMeta(tabId, {
         schema: tableSchema,
         catalog: target.catalog,
@@ -339,6 +343,7 @@ export function useNavigationTargets(dialogs: { showFieldLineageDialog: { value:
         schema: target.schema,
         catalog: target.catalog,
         tableType: target.tableType,
+        comment: target.comment,
       },
       undefined,
       "default",

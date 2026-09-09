@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dialogSource = readFileSync(new URL("../SchemaDiffDialog.vue", import.meta.url), "utf8");
+const sessionSource = readFileSync(new URL("../../../composables/useSchemaDiffSession.ts", import.meta.url), "utf8");
 const configStepSource = readFileSync(new URL("../SchemaDiffConfigStep.vue", import.meta.url), "utf8");
 
 describe("SchemaDiffDialog fullscreen layout", () => {
@@ -43,20 +44,20 @@ describe("SchemaDiffDialog fullscreen layout", () => {
 
   it("clears stale result and progress state whenever a new dialog session opens", () => {
     expect(dialogSource).toContain("function resetComparisonResultState() {");
-    expect(dialogSource).toMatch(/if \(isOpen\) \{\s+resetComparisonResultState\(\);/);
+    expect(dialogSource).toMatch(/if \(!isOpen\) return;[\s\S]*?resetComparisonResultState\(\);/);
     expect(dialogSource).toContain("diffObjects.value = [];");
     expect(dialogSource).toContain("lastDiffResult.value = null;");
     expect(dialogSource).toContain("schemaDiffProgress.value = null;");
   });
 
   it("shows real metadata progress and indeterminate comparison phases without fabricated percentages", () => {
-    expect(dialogSource).toContain('phase: "loading-table-lists"');
-    expect(dialogSource).toContain('phase: "loading-source-details"');
-    expect(dialogSource).toContain('phase: "loading-target-details"');
-    expect(dialogSource).toContain('phase: "loading-extra-objects"');
-    expect(dialogSource).toContain('phase: "comparing"');
-    expect(dialogSource).toContain('phase: "generating"');
-    expect(dialogSource).toContain("onProgress: (progress) =>");
+    expect(sessionSource).toContain('phase: "loading-table-lists"');
+    expect(sessionSource).toContain('phase: "loading-source-details"');
+    expect(sessionSource).toContain('phase: "loading-target-details"');
+    expect(sessionSource).toContain('phase: "loading-extra-objects"');
+    expect(sessionSource).toContain('phase: "comparing"');
+    expect(sessionSource).toContain('phase: "generating"');
+    expect(sessionSource).toContain("onProgress: (progress) =>");
     expect(dialogSource).toContain("schemaDiffProgressCount");
     expect(dialogSource).toContain('role="progressbar"');
     expect(dialogSource).toContain("schema-diff-progress-indeterminate");
@@ -72,15 +73,17 @@ describe("SchemaDiffDialog fullscreen layout", () => {
   });
 
   it("clears progress before preserving the existing comparison error flow", () => {
-    expect(dialogSource).toMatch(/\} catch \(e: any\) \{\s+if \(!isCurrentRequest\(\)\) return;\s+schemaDiffProgress\.value = null;/);
-    expect(dialogSource).toContain("toast(e?.message || String(e), 5000);");
+    expect(sessionSource).toContain("session.error = message;");
+    expect(sessionSource).toContain('session.status = "failed";');
+    expect(dialogSource).toContain("toast(session.error, 5000);");
     expect(dialogSource).toContain('step.value = "config";');
   });
 
-  it("invalidates an active comparison when the dialog closes", () => {
-    expect(dialogSource).toContain("const requestId = ++comparisonRequestId;");
-    expect(dialogSource).toContain("if (!isCurrentRequest()) return;");
-    expect(dialogSource).toMatch(/\} else \{\s+comparisonRequestId\+\+;\s+loading\.value = false;\s+schemaDiffProgress\.value = null;/);
+  it("keeps an active comparison running after the dialog unmounts", () => {
+    expect(dialogSource).toContain("const session = startSchemaDiffSession(");
+    expect(dialogSource).toContain("onBeforeUnmount(() => {");
+    expect(dialogSource).toContain("componentUnmounted = true;");
+    expect(dialogSource).not.toContain("comparisonRequestId");
   });
 
   it("does not restore persisted table matches before source and target identities are ready", () => {
@@ -111,9 +114,9 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(configStepSource).toContain('@update:model-value="(value: string) => handleTableMappingUpdate(match.sourceTable, value)"');
     expect(configStepSource).toContain("tableMatchStatus.${match.kind}");
     expect(dialogSource).toContain('@update:table-mappings="handleTableMappingsUpdate"');
-    expect(dialogSource).toContain("tableMappings: opts.selectedTables === undefined ? undefined : opts.tableMappings");
-    expect(dialogSource).toContain("ignoreTableNameCase: opts.ignoreTableNameCase");
-    expect(dialogSource).toContain("ignoreColumnNameCase: opts.ignoreColumnNameCase");
+    expect(sessionSource).toContain("tableMappings: options.selectedTables === undefined ? undefined : options.tableMappings");
+    expect(sessionSource).toContain("ignoreTableNameCase: options.ignoreTableNameCase");
+    expect(sessionSource).toContain("ignoreColumnNameCase: options.ignoreColumnNameCase");
     expect(dialogSource).toContain("const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);");
   });
 

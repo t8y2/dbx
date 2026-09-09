@@ -21,12 +21,10 @@ where
         // Codepages other than UTF
         (Some(buf), BigChar) | (Some(buf), BigVarChar) => {
             let collation = collation.as_ref().unwrap();
-            let encoder = collation.encoding()?;
-
-            let s = encoder
-                .decode_without_bom_handling_and_without_replacement(buf.as_ref())
-                .ok_or_else(|| Error::Encoding("invalid sequence".into()))?
-                .to_string();
+            let s = collation
+                .codec()?
+                .decode(buf.as_ref())
+                .ok_or_else(|| Error::Encoding("invalid sequence".into()))?;
 
             Ok(Some(s.into()))
         }

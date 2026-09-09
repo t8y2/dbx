@@ -204,4 +204,43 @@ describe("AI SQL dialect prompt", () => {
     expect(prompt).toContain("db.collection.findOne({})");
     expect(prompt).not.toContain("get_sample_data");
   });
+
+  it("injects the rich-content chart protocol into the normal database system prompt", () => {
+    const prompt = buildSystemPrompt("generate", context(), "ask");
+    expect(prompt).toContain("chart-json");
+    expect(prompt).toContain("at most one chart per reply");
+    expect(prompt).toContain('"version":1,"type":"line"');
+    expect(prompt).toContain('"version":1,"type":"pie"');
+    expect(prompt).toContain('"xAxis":{"values":["Jan","Feb","Mar"]}');
+    expect(prompt).toContain("grounded in actual available data");
+    expect(prompt).toContain("Do not emit ```html code blocks unless the user explicitly asks for them.");
+  });
+
+  it("injects the rich-content chart protocol into the vector database system prompt", () => {
+    const prompt = buildSystemPrompt("general", context({ databaseType: "qdrant", connectionName: "Qdrant", database: "vec" }), "ask");
+    expect(prompt).toContain("chart-json");
+    expect(prompt).toContain("at most one chart per reply");
+    expect(prompt).toContain('"version":1,"type":"pie"');
+    expect(prompt).toContain("Do not emit ```html code blocks unless the user explicitly asks for them.");
+  });
+
+  it("injects the zh rich-content protocol into both normal and vector prompts", async () => {
+    await setLocale("zh-CN");
+    try {
+      const normal = buildSystemPrompt("generate", context(), "ask");
+      expect(normal).toContain("chart-json");
+      expect(normal).toContain("一条回复最多一个");
+      expect(normal).toContain('"version":1,"type":"line"');
+      expect(normal).toContain("不得编造");
+      expect(normal).toContain("不要输出 ```html 代码块，除非用户明确要求");
+
+      const vector = buildSystemPrompt("general", context({ databaseType: "milvus", connectionName: "Milvus", database: "vec" }), "ask");
+      expect(vector).toContain("chart-json");
+      expect(vector).toContain("一条回复最多一个");
+      expect(vector).toContain('"version":1,"type":"pie"');
+      expect(vector).toContain("不要输出 ```html 代码块，除非用户明确要求");
+    } finally {
+      await setLocale("en");
+    }
+  });
 });

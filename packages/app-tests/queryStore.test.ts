@@ -7510,7 +7510,7 @@ test("query execution is scoped to the tab client session", async () => {
     await store.executeTabSql(tabId, "select 1");
 
     assert.equal(executeBody.clientSessionId, tabId);
-    assert.equal(executeBody.timeoutSecs, 30);
+    assert.equal(executeBody.timeoutSecs, 60);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();
@@ -7729,7 +7729,7 @@ test("data tab execution uses a tab-scoped client session", async () => {
     await store.executeTabSql(tabId, "select * from users");
 
     assert.equal(executeBody.clientSessionId, tabId);
-    assert.equal(executeBody.timeoutSecs, 30);
+    assert.equal(executeBody.timeoutSecs, 60);
   } finally {
     globalThis.fetch = originalFetch;
     restoreStorage();

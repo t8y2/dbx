@@ -96,6 +96,8 @@ export interface AiChatSelectionState {
   active?: AiActiveModelSelection;
   effortPreferences: AiModelEffortPreference[];
   defaultMode?: AiAssistantMode;
+  /** Whether opening the AI panel restores the most recently updated conversation. */
+  restoreLastConversation?: boolean;
   /** Prompt template ids auto-applied when the AI panel opens, keyed by connection db_type. */
   defaultTemplatesByDbType?: Record<string, string[]>;
   /** Prompt template ids from the most recent send, keyed by connection db_type. */

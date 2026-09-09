@@ -1,7 +1,7 @@
 use crate::models::connection::DatabaseType;
 
 use super::capabilities::{
-    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, TablePaginationStrategy,
+    firebird_rows_clause, table_pagination_strategy, uses_oracle_row_id, uses_xugu_row_id, TablePaginationStrategy,
 };
 use super::identifiers::{
     normalize_where_input, qualified_table_name, qualified_table_name_with_catalog, quote_gaussdb_jdbc_identifier,
@@ -272,6 +272,8 @@ pub fn build_table_data_select_sql_with_database(
     let include_oracle_row_id = options.include_row_id
         && uses_oracle_row_id(database_type)
         && !is_view_table_type(options.table_type.as_deref());
+    let include_xugu_row_id =
+        options.include_row_id && uses_xugu_row_id(database_type) && !is_view_table_type(options.table_type.as_deref());
     let offset = options.offset.unwrap_or(0);
     let oracle_view_first_page =
         database_type == Some(DatabaseType::Oracle) && is_view_table_type(options.table_type.as_deref()) && offset == 0;
@@ -280,6 +282,15 @@ pub fn build_table_data_select_sql_with_database(
         format!("ROWIDTOCHAR(t.ROWID) AS \"{DBX_ROWID_COLUMN}\", t.*")
     } else if let Some(preview_columns) = build_large_value_preview_columns(&options) {
         preview_columns
+    } else if include_xugu_row_id {
+        if options.columns.is_empty() {
+            format!("ROWID AS \"{DBX_ROWID_COLUMN}\", *")
+        } else {
+            format!(
+                "ROWID AS \"{DBX_ROWID_COLUMN}\", {}",
+                quoted_table_columns_or_star(database_type, &options.columns)
+            )
+        }
     } else {
         build_select_columns(
             database_type,
@@ -544,7 +555,17 @@ pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {
             options
                 .order_columns
                 .iter()
-                .map(|column| format!("{} ASC", quote_table_identifier(database_type, column)))
+                .map(|column| {
+                    let quoted = if database_type == Some(DatabaseType::Iris) {
+                        // Caché/IRIS may run with delimited identifiers disabled,
+                        // where a quoted ORDER BY name becomes a string literal and
+                        // silently degrades to a constant sort.
+                        quote_iris_identifier(column, None)
+                    } else {
+                        quote_table_identifier(database_type, column)
+                    };
+                    format!("{quoted} ASC")
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -594,7 +615,20 @@ fn quoted_table_columns_or_star(database_type: Option<DatabaseType>, columns: &[
     if columns.is_empty() {
         return "*".to_string();
     }
-    columns.iter().map(|column| quote_table_identifier(database_type, column)).collect::<Vec<_>>().join(", ")
+    columns
+        .iter()
+        .map(|column| {
+            if database_type == Some(DatabaseType::Iris) {
+                // With delimited identifiers disabled, the Caché/IRIS JDBC
+                // preparser turns a quoted column name into a `:%qpar` host
+                // variable, so ordinary names must stay unquoted.
+                quote_iris_identifier(column, None)
+            } else {
+                quote_table_identifier(database_type, column)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn build_rownum_table_select_sql(

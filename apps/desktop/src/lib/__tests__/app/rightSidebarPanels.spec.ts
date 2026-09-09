@@ -21,6 +21,11 @@ describe("right sidebar panel entry points", () => {
     expect(appSource).toContain("@close=\"closeRightSidebarPanel('sqlFile')\"");
   });
 
+  it("toggles the AI panel through the configured global shortcut", () => {
+    expect(appSource).toContain("isToggleAiPanelShortcut(e, shortcuts)");
+    expect(appSource).toContain('toggleRightSidebarPanel("ai");');
+  });
+
   it("routes welcome, history analysis, selection, and error-fix opens through the same controller", () => {
     expect(appSource).toContain("@show-history=\"openRightSidebarPanel('history')\"");
     expect(functionSource("fixWithAi", "sendSelectionToAi")).toContain('openRightSidebarPanel("ai")');

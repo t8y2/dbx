@@ -3,6 +3,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import * as api from "@/lib/backend/api";
 import type { TransferTask, TransferTaskConfig, TransferTaskFolder, TransferTaskLibrary } from "@/types/database";
+import { resolveTransferStrategy, transferStrategyOptions } from "@/components/transfer/transferStrategy";
 
 export class TransferTaskNameConflictError extends Error {
   readonly code = "TRANSFER_TASK_NAME_CONFLICT";
@@ -87,10 +88,11 @@ function normalizeTask(raw: unknown): TransferTask | null {
       targetSchema: config.targetSchema || undefined,
       objects,
       content: config.content ?? "structureAndData",
-      mode: config.mode ?? "append",
+      ...transferStrategyOptions(resolveTransferStrategy(config)),
       targetTableNameCase: config.targetTableNameCase ?? "preserve",
       quoteTargetColumnNames: config.quoteTargetColumnNames ?? true,
       batchSize: typeof config.batchSize === "number" && config.batchSize > 0 ? config.batchSize : 1000,
+      dropTargetConfirmed: false,
     },
     createdAt: candidate.createdAt || nowIso(),
     updatedAt: candidate.updatedAt || nowIso(),
@@ -281,14 +283,15 @@ export const useTransferTaskStore = defineStore("transferTasks", () => {
     const folderId = Object.prototype.hasOwnProperty.call(input, "folderId") ? input.folderId || undefined : existing?.folderId;
     ensureTaskNameAvailable(trimmed, folderId, input.id);
     const timestamp = nowIso();
+    const config: TransferTaskConfig = { ...input.config, ...transferStrategyOptions(resolveTransferStrategy(input.config)), dropTargetConfirmed: false };
     const task: TransferTask = existing
-      ? { ...existing, folderId, name: trimmed, config: input.config, updatedAt: timestamp }
+      ? { ...existing, folderId, name: trimmed, config, updatedAt: timestamp }
       : {
           id: uuid(),
           folderId,
           name: trimmed,
           orderIndex: maxOrderIndex(tasks.value.filter((item) => (item.folderId || "") === (folderId || ""))) + 1,
-          config: input.config,
+          config,
           createdAt: timestamp,
           updatedAt: timestamp,
         };

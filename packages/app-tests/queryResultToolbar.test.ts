@@ -6,7 +6,9 @@ import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 const contentAreaPath = "apps/desktop/src/components/layout/ContentArea.vue";
 const appPath = "apps/desktop/src/App.vue";
 const dataGridPath = "apps/desktop/src/components/grid/DataGrid.vue";
+const dataGridExportMenuPath = "apps/desktop/src/components/grid/DataGridExportMenu.vue";
 const dataGridToolbarPath = "apps/desktop/src/components/grid/DataGridToolbar.vue";
+const editorToolbarPath = "apps/desktop/src/components/layout/EditorToolbar.vue";
 const viewSwitcherPath = "apps/desktop/src/components/layout/QueryResultViewSwitcher.vue";
 const toolbarActionsPath = "apps/desktop/src/components/layout/QueryResultToolbarActions.vue";
 
@@ -26,7 +28,7 @@ function assertSfcCompiles(path: string): void {
 }
 
 test("query result toolbar SFCs compile", () => {
-  for (const path of [contentAreaPath, dataGridPath, dataGridToolbarPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
+  for (const path of [contentAreaPath, dataGridPath, dataGridExportMenuPath, dataGridToolbarPath, editorToolbarPath, viewSwitcherPath, toolbarActionsPath]) assertSfcCompiles(path);
 });
 
 test("ContentArea keeps query-result insert and delete capabilities separate", () => {
@@ -38,6 +40,10 @@ test("ContentArea keeps query-result insert and delete capabilities separate", (
 
 test("query result toolbar reuses the production icon contract", () => {
   const contentArea = source(contentAreaPath);
+  const dataGrid = source(dataGridPath);
+  const dataGridExportMenu = source(dataGridExportMenuPath);
+  const dataGridToolbar = source(dataGridToolbarPath);
+  const editorToolbar = source(editorToolbarPath);
   const viewSwitcher = source(viewSwitcherPath);
   const toolbarActions = source(toolbarActionsPath);
 
@@ -46,6 +52,11 @@ test("query result toolbar reuses the production icon contract", () => {
   assert.match(contentArea, /<ChevronDown class="h-3\.5 w-3\.5"/);
   assert.match(viewSwitcher, /import \{ BarChart3, ListChecks, MessageSquareText \} from "@lucide\/vue"/);
   assert.match(toolbarActions, /import \{ GitBranch, Gauge, Loader2, Upload \} from "@lucide\/vue"/);
+  assert.match(editorToolbar, /@click="emit\('importResultArchive'\)"[\s\S]{0,100}<Download/);
+  assert.match(toolbarActions, /@click="emit\('exportArchive'\)"[\s\S]{0,200}<Upload v-else/);
+  assert.match(dataGrid, /return \{ label: t\("grid\.export"\), icon: Upload, children: items \};/);
+  assert.match(dataGridExportMenu, /:trigger-icon="Upload"/);
+  assert.match(dataGridToolbar, /<Upload class="data-grid-topbar-action-icon h-3 w-3"/);
   assert.match(viewSwitcher, /inline-flex h-4 items-center leading-none/);
   assert.match(toolbarActions, /block h-3\.5 w-3\.5 self-center/);
   assert.doesNotMatch(viewSwitcher + toolbarActions, /<svg\b|<symbol\b|<use\b/);

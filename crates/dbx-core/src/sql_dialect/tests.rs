@@ -339,6 +339,33 @@ fn builds_select_sql_with_limit_syntax_for_database_type() {
         }),
         "SELECT TOP 100 * FROM Ens.AlarmResponse"
     );
+    // Caché 2016 often runs with delimited identifiers disabled: the JDBC
+    // preparser turns a quoted column into a `:%qpar` host variable and a
+    // quoted ORDER BY name into a string literal (constant sort), so ordinary
+    // column names must stay unquoted (#8340).
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Iris),
+            schema: Some("SQLUser"),
+            table_name: "CT_Country",
+            columns: &columns,
+            order_columns: &keys,
+            limit: 200,
+        }),
+        "SELECT TOP 200 id, name FROM SQLUser.CT_Country ORDER BY id ASC"
+    );
+    // Non-Iris dialects keep their own quoting for the same input.
+    assert_eq!(
+        build_table_select_sql(TableSelectSqlOptions {
+            database_type: Some(DatabaseType::Mysql),
+            schema: None,
+            table_name: "users",
+            columns: &columns,
+            order_columns: &keys,
+            limit: 100,
+        }),
+        "SELECT `id`, `name` FROM `users` ORDER BY `id` ASC LIMIT 100;"
+    );
     assert_eq!(
         build_table_select_sql(TableSelectSqlOptions {
             database_type: Some(DatabaseType::Iotdb),
@@ -1325,6 +1352,60 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             ..Default::default()
         }),
         "SELECT \"__DBX_ROWID\", \"ID\", \"SMC_RESPONSE\" FROM (SELECT ROWIDTOCHAR(t.ROWID) AS \"__DBX_ROWID\", t.* FROM \"APP\".\"DATA_REPORT_SUB_TASK\" t) WHERE ROWNUM <= 100"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Xugu),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_LOAD_TABLE_006".to_string(),
+            table_type: Some("PARTITIONED TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: Vec::new(),
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT ROWID AS \"__DBX_ROWID\", * FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" LIMIT 100;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Xugu),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_LOAD_TABLE_006".to_string(),
+            table_type: Some("TEMPORARY TABLE".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(25),
+            offset: Some(10),
+            where_input: None,
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT ROWID AS \"__DBX_ROWID\", \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_LOAD_TABLE_006\" LIMIT 25 OFFSET 10;"
+    );
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Xugu),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_JOIN_VIEW".to_string(),
+            table_type: Some("VIEW".to_string()),
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            fallback_order_columns: Vec::new(),
+            order_by: None,
+            limit: Some(100),
+            offset: None,
+            where_input: None,
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT * FROM \"DBXTEST\".\"DBX_JOIN_VIEW\" LIMIT 100;"
     );
     assert_eq!(
         build_table_data_select_sql(TableDataSelectSqlOptions {

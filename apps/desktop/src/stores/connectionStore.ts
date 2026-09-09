@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { uuid } from "@/lib/common/utils";
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { ref, computed, watch, markRaw } from "vue";
+import { DEFAULT_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
 import type {
   ColumnInfo,
   CompletionAssistantCandidate,
@@ -1237,6 +1238,22 @@ export const useConnectionStore = defineStore("connection", () => {
     recordConnectionError(connectionId, error);
   }
 
+  async function runConnectionTreeMetadataLoad<T>(connectionId: string, node: TreeNode | null | undefined, work: (load: TreeNodeLoadHandle) => Promise<T>): Promise<T | undefined> {
+    if (!node) return;
+
+    let load = beginTreeNodeLoad(node);
+    try {
+      await ensureConnected(connectionId);
+      load = reclaimTreeNodeLoad(load, node);
+      return await work(load);
+    } catch (error) {
+      recordMetadataLoadError(connectionId, error, load);
+      throw error;
+    } finally {
+      finishTreeNodeLoad(load);
+    }
+  }
+
   async function withConnectionAttemptTimeout<T>(promise: Promise<T>, config: ConnectionConfig): Promise<T> {
     const timeoutMs = connectionAttemptTimeoutMs(config, tunnelProfileStore.profileById);
     const timeoutMessage = connectionAttemptTimeoutMessage(timeoutMs);
@@ -1377,7 +1394,7 @@ export const useConnectionStore = defineStore("connection", () => {
       show_system_schemas: config.show_system_schemas === true,
       connect_timeout_secs: connectTimeoutInherit ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
       connect_timeout_inherit: connectTimeoutInherit,
-      query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? 30),
+      query_timeout_secs: queryTimeoutInherit ? settingsStore.editorSettings.globalQueryTimeoutSecs : (config.query_timeout_secs ?? DEFAULT_QUERY_TIMEOUT_SECS),
       query_timeout_inherit: queryTimeoutInherit,
       idle_timeout_secs: config.idle_timeout_secs ?? 60,
       keepalive_interval_secs: config.keepalive_interval_secs ?? DEFAULT_KEEPALIVE_INTERVAL_SECS,
@@ -1813,7 +1830,7 @@ export const useConnectionStore = defineStore("connection", () => {
       savedSqlFilesByDatabase = indexSavedSqlFilesByDatabase(savedSqlStore.allFiles);
       refreshDatabaseSavedSqlTrees();
     },
-    { flush: "sync" },
+    { flush: "post" },
   );
 
   function schemaCacheKey(...parts: string[]): string {
@@ -4556,12 +4573,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadRedisDatabases(connectionId: string) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.redisListDatabases(connectionId), "Redis databases");
       const config = getConfig(connectionId);
       const visibleNames = filterVisibleDatabaseNames(
@@ -4596,22 +4608,12 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
       );
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadEtcdRoot(connectionId: string) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       const etcdAccess = await ensureEtcdAccessCapabilities(connectionId, { force: true, verifyHealth: false });
@@ -4650,22 +4652,12 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       setChildren(targetNode, withSavedSqlRoot(connectionId, children, targetNode));
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadZooKeeperRoot(connectionId: string) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(
@@ -4687,22 +4679,12 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
       );
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadConsulRoot(connectionId: string) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(
@@ -4733,12 +4715,7 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
       );
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadMqttTopics(connectionId: string) {
@@ -4770,13 +4747,8 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadMqTenants(connectionId: string, options?: LoadTreeOptions) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
-      if (useCachedChildren(node, options, load)) return;
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
+      if (useCachedChildren(node!, options, load)) return;
 
       const config = getConfig(connectionId);
       if (isFlatMqConnection(config)) {
@@ -4814,23 +4786,13 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       const liveNode = treeNodeLoadTarget(load);
       if (liveNode) liveNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadNacosNamespaces(connectionId: string, options?: LoadTreeOptions) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
-      if (useCachedChildren(node, options, load)) return;
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
+      if (useCachedChildren(node!, options, load)) return;
 
       const sidebarSnapshot = await api.nacosSidebarSnapshot(connectionId);
       const namespaces = normalizeNacosNamespacesForDisplay(sidebarSnapshot.namespaces);
@@ -4875,12 +4837,7 @@ export const useConnectionStore = defineStore("connection", () => {
       }
       setChildren(targetNode, children);
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   function updateRedisDbKeyStats(connectionId: string, db: number, stats: { loaded?: number; total?: number; totalDelta?: number }) {
@@ -5082,12 +5039,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function loadMilvusDatabases(connectionId: string) {
     const node = findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const dbs = await withMetadataLoadTimeout(connectionId, api.documentListDatabases(connectionId), "Milvus databases");
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
@@ -5108,12 +5060,7 @@ export const useConnectionStore = defineStore("connection", () => {
         ),
       );
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadVectorCollections(connectionId: string, database?: string) {
@@ -5122,12 +5069,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const effectiveDb = database || config?.database || (config?.db_type === "chromadb" ? "default_database" : "default");
     // Milvus groups collections under a per-database node; other vector stores stay flat under the connection.
     const node = isMilvus && database ? findNode(treeNodes.value, `${connectionId}:${database}`) : findConnectionNode(connectionId);
-    if (!node) return;
-
-    let load = beginTreeNodeLoad(node);
-    try {
-      await ensureConnected(connectionId);
-      load = reclaimTreeNodeLoad(load, node);
+    return runConnectionTreeMetadataLoad(connectionId, node, async (load) => {
       const collections = await withMetadataLoadTimeout(connectionId, api.vectorListCollections(connectionId, effectiveDb), "vector collections");
       const sorted = [...collections].sort((a, b) => a.name.localeCompare(b.name));
       const collectionChildren = sorted.map((info) => ({
@@ -5144,12 +5086,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!targetNode) return;
       setChildren(targetNode, isMilvus && database ? collectionChildren : withSavedSqlRoot(connectionId, collectionChildren, targetNode));
       targetNode.isExpanded = true;
-    } catch (e) {
-      recordMetadataLoadError(connectionId, e, load);
-      throw e;
-    } finally {
-      finishTreeNodeLoad(load);
-    }
+    });
   }
 
   async function loadMongoCollections(connectionId: string, database: string) {

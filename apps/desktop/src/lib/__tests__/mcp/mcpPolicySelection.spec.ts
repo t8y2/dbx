@@ -1,10 +1,23 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { groupMcpScopeConnections, isMcpPolicyMutationBlocked, matchesMcpSearchQuery, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COLUMNS, mcpExecutionModeFromPolicy, mcpPolicyFieldsForExecutionMode, toggleMcpAllowedConnectionId, updateMcpAllowedConnectionIds } from "@/lib/mcp/mcpPolicySelection";
+import {
+  groupMcpScopeConnections,
+  isMcpPolicyMutationBlocked,
+  matchesMcpSearchQuery,
+  MCP_CAPABILITY_ROWS,
+  MCP_EXECUTION_MODE_COLUMNS,
+  MCP_TOOL_OPTIONS,
+  mcpExecutionModeFromPolicy,
+  mcpPolicyFieldsForExecutionMode,
+  toggleMcpAllowedConnectionId,
+  toggleMcpAllowedToolName,
+  updateMcpAllowedConnectionIds,
+} from "@/lib/mcp/mcpPolicySelection";
 
 const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const scopePickerSource = readFileSync(new URL("../../../components/settings/McpConnectionScopePicker.vue", import.meta.url), "utf8");
+const mcpServerSource = readFileSync(new URL("../../../../../../crates/dbx-mcp/src/server.rs", import.meta.url), "utf8");
 
 describe("MCP execution permission selection", () => {
   it("maps the persisted policy to the three UI modes", () => {
@@ -67,6 +80,29 @@ describe("MCP policy connection selection", () => {
   it("applies batch additions and removals while preserving unavailable IDs", () => {
     expect(updateMcpAllowedConnectionIds(["one", "missing"], ["one", "two", "three"], ["two", "three"], true)).toEqual(["one", "missing", "two", "three"]);
     expect(updateMcpAllowedConnectionIds(null, ["one", "two", "three"], ["one", "three"], false)).toEqual(["two"]);
+  });
+});
+
+describe("MCP tool permission selection", () => {
+  it("lists every tool registered by the MCP server", () => {
+    const registeredToolNames = [...mcpServerSource.matchAll(/name\s*=\s*"(dbx_[^"]+)"/g)].map((match) => match[1]).sort();
+
+    expect(MCP_TOOL_OPTIONS.map((tool) => tool.name).sort()).toEqual(registeredToolNames);
+  });
+
+  it("keeps batch execution allowed when allow-all becomes an explicit allowlist", () => {
+    const next = toggleMcpAllowedToolName(null, "dbx_send_message", false);
+
+    expect(next).toContain("dbx_execute_batch");
+    expect(next).not.toContain("dbx_send_message");
+  });
+
+  it("lets batch execution be enabled and disabled independently", () => {
+    expect(toggleMcpAllowedToolName(["dbx_execute_query"], "dbx_execute_batch", true)).toEqual(["dbx_execute_query", "dbx_execute_batch"]);
+    expect(toggleMcpAllowedToolName(["dbx_execute_query", "dbx_execute_batch"], "dbx_execute_batch", false)).toEqual(["dbx_execute_query"]);
+    expect(MCP_TOOL_OPTIONS.find((tool) => tool.name === "dbx_execute_batch")?.labelKey).toBe("settings.mcpToolExecuteBatch");
+    expect(settingsDialogSource).toContain("const mcpToolOptions = MCP_TOOL_OPTIONS;");
+    expect(settingsDialogSource).toContain("toggleMcpAllowedToolName(mcpAllowedToolNames.value, name, allowed)");
   });
 });
 

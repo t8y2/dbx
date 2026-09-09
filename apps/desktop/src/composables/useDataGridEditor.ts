@@ -1,6 +1,7 @@
 import { joinedSaveOptions } from "@/lib/dataGrid/joinedRowChanges";
 import { ref, shallowRef, triggerRef, computed, nextTick, watch, getCurrentInstance, onActivated, onBeforeUnmount, onDeactivated, onMounted, toRaw, type ComputedRef, type Ref } from "vue";
 import * as api from "@/lib/backend/api";
+import type { DataGridSaveGuard } from "@/lib/backend/tauri";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { coerceDataGridCellValue, dataGridCellEditorText } from "@/lib/dataGrid/dataGridCellCoercion";
 import { focusDataGridEditorWithoutScrolling, preserveDataGridScrollPosition } from "@/lib/dataGrid/dataGridEditorFocus";
@@ -19,6 +20,8 @@ import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { normalizeBackendError } from "@/lib/backend/errorUtils";
 import { uuid } from "@/lib/common/utils";
 import i18n from "@/i18n";
+
+const KEYLESS_GUARD_UNVERIFIED_ERROR = "Cannot safely update or delete this row: the table has no primary key, and DBX could not check on the server whether the row can be targeted uniquely. Add a primary key or unique index before editing.";
 
 interface RowItem {
   id: number;
@@ -1507,16 +1510,42 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       dirtyRows: new Map(stmtOptions.dirtyRows.map(([index, changes]) => [index, new Map(changes)])),
       deletedRows: new Set(stmtOptions.deletedRows),
     });
-    const prepared: Awaited<ReturnType<typeof api.prepareDataGridSave>> = { statements: [], rollbackStatements: [] };
+    const prepared: Awaited<ReturnType<typeof api.prepareDataGridSave>> = { statements: [], rollbackStatements: [], keylessGuards: [] };
     for (const group of groups) {
       const part = await api.prepareDataGridSave(group, saveDriverProfile());
       if (part.validationError) return part;
       prepared.statements.push(...part.statements);
       prepared.rollbackStatements.unshift(...part.rollbackStatements);
+      prepared.keylessGuards!.push(...(part.keylessGuards ?? []));
       if (prepared.executionSchema && part.executionSchema && prepared.executionSchema !== part.executionSchema) throw new Error("Joined source tables require incompatible execution schemas.");
       prepared.executionSchema ??= part.executionSchema;
     }
     return prepared;
+  }
+
+  // A keyless save can only be trusted once the server confirms that each
+  // predicate it sends addresses a single physical row; the loaded page cannot
+  // see rows outside it. Returns the error to fail with, or undefined to allow.
+  async function verifyKeylessGuards(guards: DataGridSaveGuard[], executionSchema?: string) {
+    if (!guards.length) return undefined;
+    const txnSessionId = manualTransactionSessionId.value;
+    // Without a connection to count against there is no way to verify the
+    // predicate, and an unverified keyless write is exactly what must not run.
+    if (!hasBackendSaveTarget.value) return KEYLESS_GUARD_UNVERIFIED_ERROR;
+    for (const guard of guards) {
+      let matched: unknown;
+      if (txnSessionId) {
+        const results = await api.executeInManualTransaction(txnSessionId, guard.sql, database.value ?? "", executionSchema, 1);
+        matched = (results.find((result) => result.columns.length > 0) ?? results[results.length - 1])?.rows?.[0]?.[0];
+      } else {
+        const result = await api.executeQuery(connectionId.value!, database.value ?? "", guard.sql, executionSchema);
+        matched = result?.rows?.[0]?.[0];
+      }
+      const count = Number(matched);
+      if (!Number.isFinite(count)) return KEYLESS_GUARD_UNVERIFIED_ERROR;
+      if (count > guard.maxMatchedRows) return guard.message;
+    }
+    return undefined;
   }
 
   function saveDriverProfile() {
@@ -1844,6 +1873,18 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
       return;
     }
     const rollbackStmts = preparedSave?.rollbackStatements ?? [];
+    try {
+      const guardError = await verifyKeylessGuards(preparedSave?.keylessGuards ?? [], preparedSave?.executionSchema);
+      if (guardError) {
+        saveError.value = guardError;
+        await finishInterruptedSaveChanges(snapshot);
+        return;
+      }
+    } catch (e: any) {
+      saveError.value = normalizeDataGridSaveError(databaseType.value, e);
+      await finishInterruptedSaveChanges(snapshot);
+      return;
+    }
     const productionAssessment = assessProductionSql(stmts.join(";\n"), connection, database.value);
     if (productionAssessment.active && productionAssessment.isMutation) {
       // Autosave must never write production data without an operator reviewing the generated statements.

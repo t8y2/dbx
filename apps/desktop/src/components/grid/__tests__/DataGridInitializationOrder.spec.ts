@@ -12,6 +12,15 @@ describe("DataGrid setup initialization order", () => {
     expect(columnResizeInitialization).toBeGreaterThan(tableColumnMetadataDeclaration);
   });
 
+  it("initializes column formatters before measuring formatted column widths", () => {
+    const columnFormatterDeclaration = dataGridSource.indexOf("} = useDataGridColumnFormatter({");
+    const columnWidthInitialization = dataGridSource.lastIndexOf("initColumnWidths();");
+
+    expect(columnFormatterDeclaration).toBeGreaterThanOrEqual(0);
+    expect(columnWidthInitialization).toBeGreaterThan(columnFormatterDeclaration);
+    expect(dataGridSource).toContain("columnFormatterForWidth?.(columnIndex)");
+  });
+
   it("initializes where-search capability before the immediate filter preview watcher", () => {
     const canUseWhereSearchDeclaration = dataGridSource.indexOf("const canUseWhereSearch = computed");
     const filterPreviewDeclaration = dataGridSource.indexOf("const filterPreviewVisible = computed");
@@ -20,5 +29,11 @@ describe("DataGrid setup initialization order", () => {
     expect(canUseWhereSearchDeclaration).toBeGreaterThanOrEqual(0);
     expect(filterPreviewDeclaration).toBeGreaterThan(canUseWhereSearchDeclaration);
     expect(filterPreviewWatcher).toBeGreaterThan(filterPreviewDeclaration);
+  });
+
+  it("does not expose an uninitialized large-value runtime to startup callbacks", () => {
+    expect(dataGridSource).toContain("let largeValueRuntime: ReturnType<typeof useDataGridLargeValues> | undefined;");
+    expect(dataGridSource).toContain("largeValueRuntime?.scheduleVisibleLargeValuePreviewHydration(delay)");
+    expect(dataGridSource).toContain("largeValueRuntime?.hydrateLargeValueCell(rowId, columnIndex) ?? false");
   });
 });

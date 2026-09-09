@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.6"
+version = "0.6.8"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -78,6 +78,7 @@ axum = { version = "0.8", features = ["ws"] }
 font-kit = "0.14.3"
 tauri-plugin-clipboard-manager = "2.3.2"
 sys-locale = "0.3"
+sysinfo = { version = "0.32", features = ["system"] }
 
 [dev-dependencies]
 tauri = { version = "2.10.3", features = ["test"] }

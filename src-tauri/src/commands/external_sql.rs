@@ -8,9 +8,18 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
 const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MIN_EXTERNAL_SQL_EDITOR_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES_LIMIT: u64 = 4096 * 1024 * 1024;
 
-fn exceeds_external_sql_editor_limit(size_bytes: u64) -> bool {
-    size_bytes > MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES
+fn clamp_external_sql_editor_limit(max_size_bytes: Option<u64>) -> u64 {
+    match max_size_bytes {
+        Some(value) => value.clamp(MIN_EXTERNAL_SQL_EDITOR_FILE_BYTES, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES_LIMIT),
+        None => MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+    }
+}
+
+fn exceeds_external_sql_editor_limit(size_bytes: u64, max_size_bytes: u64) -> bool {
+    size_bytes > max_size_bytes
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -60,8 +69,11 @@ pub fn pending_open_sql_files(state: tauri::State<'_, ExternalSqlOpenState>) -> 
 }
 
 #[tauri::command]
-pub async fn read_external_sql_file(path: String) -> Result<ExternalSqlFileReadResult, String> {
-    read_external_sql_file_content_async(PathBuf::from(path)).await
+pub async fn read_external_sql_file(
+    path: String,
+    max_size_bytes: Option<u64>,
+) -> Result<ExternalSqlFileReadResult, String> {
+    read_external_sql_file_content_async(PathBuf::from(path), clamp_external_sql_editor_limit(max_size_bytes)).await
 }
 
 #[tauri::command]
@@ -181,43 +193,42 @@ fn external_sql_file_version(metadata: &std::fs::Metadata, bytes: &[u8]) -> Exte
 
 #[cfg(test)]
 fn read_external_sql_file_content(path: &Path) -> Result<ExternalSqlFileReadResult, String> {
+    read_external_sql_file_content_with_limit(path, MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES)
+}
+
+#[cfg(test)]
+fn read_external_sql_file_content_with_limit(
+    path: &Path,
+    max_size_bytes: u64,
+) -> Result<ExternalSqlFileReadResult, String> {
     let metadata = std::fs::metadata(path).map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
     if !metadata.is_file() {
         return Err("Only files can be opened this way".to_string());
     }
-    if exceeds_external_sql_editor_limit(metadata.len()) {
-        return Ok(ExternalSqlFileReadResult::TooLarge {
-            size_bytes: metadata.len(),
-            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
-        });
+    if exceeds_external_sql_editor_limit(metadata.len(), max_size_bytes) {
+        return Ok(ExternalSqlFileReadResult::TooLarge { size_bytes: metadata.len(), max_size_bytes });
     }
     let bytes = std::fs::read(path).map_err(|e| format!("Failed to read SQL file: {e}"))?;
     let version = external_sql_file_version(&metadata, &bytes);
     decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content, version })
 }
 
-async fn read_external_sql_file_content_async(path: PathBuf) -> Result<ExternalSqlFileReadResult, String> {
+async fn read_external_sql_file_content_async(
+    path: PathBuf,
+    max_size_bytes: u64,
+) -> Result<ExternalSqlFileReadResult, String> {
     let file = tokio::fs::File::open(&path).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
     let metadata = file.metadata().await.map_err(|e| format!("Failed to inspect SQL file: {e}"))?;
     if !metadata.is_file() {
         return Err("Only files can be opened this way".to_string());
     }
-    if exceeds_external_sql_editor_limit(metadata.len()) {
-        return Ok(ExternalSqlFileReadResult::TooLarge {
-            size_bytes: metadata.len(),
-            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
-        });
+    if exceeds_external_sql_editor_limit(metadata.len(), max_size_bytes) {
+        return Ok(ExternalSqlFileReadResult::TooLarge { size_bytes: metadata.len(), max_size_bytes });
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| format!("Failed to read SQL file: {e}"))?;
-    if exceeds_external_sql_editor_limit(bytes.len() as u64) {
-        return Ok(ExternalSqlFileReadResult::TooLarge {
-            size_bytes: bytes.len() as u64,
-            max_size_bytes: MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
-        });
+    file.take(max_size_bytes + 1).read_to_end(&mut bytes).await.map_err(|e| format!("Failed to read SQL file: {e}"))?;
+    if exceeds_external_sql_editor_limit(bytes.len() as u64, max_size_bytes) {
+        return Ok(ExternalSqlFileReadResult::TooLarge { size_bytes: bytes.len() as u64, max_size_bytes });
     }
     let version = external_sql_file_version(&metadata, &bytes);
     decode_sql_file_bytes(&bytes).map(|content| ExternalSqlFileReadResult::Content { content, version })
@@ -413,8 +424,22 @@ mod tests {
 
     #[test]
     fn external_sql_editor_limit_is_inclusive() {
-        assert!(!exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES));
-        assert!(exceeds_external_sql_editor_limit(MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1));
+        assert!(!exceeds_external_sql_editor_limit(
+            MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES,
+            MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES
+        ));
+        assert!(exceeds_external_sql_editor_limit(
+            MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1,
+            MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES
+        ));
+    }
+
+    #[test]
+    fn clamps_external_sql_editor_limit_from_frontend() {
+        assert_eq!(clamp_external_sql_editor_limit(None), MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES);
+        assert_eq!(clamp_external_sql_editor_limit(Some(0)), MIN_EXTERNAL_SQL_EDITOR_FILE_BYTES);
+        assert_eq!(clamp_external_sql_editor_limit(Some(16 * 1024 * 1024)), 16 * 1024 * 1024);
+        assert_eq!(clamp_external_sql_editor_limit(Some(u64::MAX)), MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES_LIMIT);
     }
 
     #[test]
@@ -436,6 +461,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_oversized_external_sql_with_custom_limit() {
+        let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "select 1;").unwrap();
+
+        let result = read_external_sql_file_content_with_limit(&path, 4);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(result.unwrap(), ExternalSqlFileReadResult::TooLarge { size_bytes: 9, max_size_bytes: 4 });
+    }
+
     #[tokio::test]
     async fn rejects_oversized_external_sql_in_async_command_path() {
         let path = std::env::temp_dir().join(format!("dbx-test-{}.sql", uuid::Uuid::new_v4()));
@@ -443,7 +479,7 @@ mod tests {
         let file_size = MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES + 1;
         file.set_len(file_size).unwrap();
 
-        let result = read_external_sql_file_content_async(path.clone()).await;
+        let result = read_external_sql_file_content_async(path.clone(), MAX_EXTERNAL_SQL_EDITOR_FILE_BYTES).await;
 
         let _ = std::fs::remove_file(&path);
         assert_eq!(

@@ -8,7 +8,7 @@ describe("table structure metadata loading", () => {
     ["foreignKeys", { columns: true, indexes: false, foreignKeys: true, constraints: false, triggers: false, tableComment: true }],
     ["constraints", { columns: false, indexes: false, foreignKeys: false, constraints: true, triggers: false, tableComment: true }],
     ["triggers", { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: true, tableComment: true }],
-    ["ddl", { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: false, tableComment: false }],
+    ["ddl", { columns: false, indexes: false, foreignKeys: false, constraints: false, triggers: false, tableComment: true }],
   ] as const)("requests only the metadata required by the %s tab", (tab, expected) => {
     expect(visibleTableStructureRefreshScope(tab)).toEqual(expected);
   });

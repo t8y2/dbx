@@ -79,7 +79,7 @@ pub(super) fn column_definition(dialect: StructureDialect, column: &EditableStru
     if mysql_generated_clause.is_none() {
         if let Some(on_update) = column.extra.as_ref().and_then(|e| e.on_update_current_timestamp).filter(|v| *v) {
             if on_update && dialect == StructureDialect::Mysql {
-                parts.push("ON UPDATE CURRENT_TIMESTAMP".to_string());
+                parts.push(mysql_on_update_current_timestamp_clause(&column.data_type));
             }
         }
     }
@@ -418,6 +418,39 @@ pub(super) fn is_valid_temporal_precision(params: &str, dialect: StructureDialec
         6
     };
     value <= max && params == value.to_string()
+}
+
+/// Fractional-seconds precision of a MySQL temporal column type, e.g. `3` for
+/// `datetime(3)`. MySQL requires every `CURRENT_TIMESTAMP` in a column
+/// definition to carry the same precision the column type declares: a
+/// `datetime(3) ... DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`
+/// definition is rejected with `ERROR 1067 (42000): Invalid default value`
+/// while the `(3)`-suffixed clauses succeed. The editor model keeps only an
+/// on-update flag, so the precision has to be recovered from the data type.
+/// Non-temporal types and invalid precisions fall back to `None` (no suffix).
+pub(super) fn mysql_temporal_precision(data_type: &str) -> Option<String> {
+    let trimmed = data_type.trim();
+    let open_index = trimmed.find('(')?;
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+    let base_type = trimmed[..open_index].trim();
+    let params = trimmed[open_index + 1..trimmed.len() - 1].trim();
+    if !is_temporal_precision_type(StructureDialect::Mysql, base_type)
+        || !is_valid_temporal_precision(params, StructureDialect::Mysql)
+    {
+        return None;
+    }
+    Some(params.to_string())
+}
+
+/// `ON UPDATE CURRENT_TIMESTAMP` clause for a MySQL column, carrying the
+/// column's temporal precision (if any) so the clause matches the type.
+pub(super) fn mysql_on_update_current_timestamp_clause(data_type: &str) -> String {
+    match mysql_temporal_precision(data_type) {
+        Some(fsp) => format!("ON UPDATE CURRENT_TIMESTAMP({fsp})"),
+        None => "ON UPDATE CURRENT_TIMESTAMP".to_string(),
+    }
 }
 
 pub(super) fn clickhouse_column_type(column: &EditableStructureColumn) -> String {

@@ -11096,6 +11096,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn oracle_jdbc_import_maps_xls_rows_to_insert_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "oracle-jdbc-import";
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "Oracle over JDBC",
+            "db_type": "jdbc",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "connection_string": "jdbc:oracle:thin:@localhost:1521:ORCL",
+            "jdbc_driver_class": "oracle.jdbc.driver.OracleDriver"
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+
+        let db_type = crate::transfer::get_db_type(&state, connection_id).await.unwrap();
+        assert_eq!(db_type, DatabaseType::Oracle);
+
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "id".to_string(),
+                target_column: "id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let data = ParsedImportFile {
+            columns: vec!["id".to_string(), "name".to_string()],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+            ],
+            total_rows: 2,
+            effective_encoding: None,
+        };
+
+        let batches = build_import_insert_batches(
+            &data,
+            &mappings,
+            &[("id".to_string(), "NUMBER".to_string()), ("name".to_string(), "VARCHAR2(64)".to_string())],
+            "events",
+            "APP",
+            &db_type,
+            500,
+        )
+        .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].row_count, 2);
+        assert!(batches[0].sql.starts_with("INSERT ALL\nINTO "));
+        assert!(batches[0].sql.ends_with("SELECT 1 FROM dual"));
+        assert!(!batches[0].sql.contains("),\n("));
+    }
+
     fn kingbase_date_import_sql(oracle_mode: bool) -> String {
         let mappings = vec![TableImportColumnMapping {
             source_column: "created_at".to_string(),

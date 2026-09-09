@@ -1,3 +1,5 @@
+import { AI_RICH_BLOCK_HANDLERS, type AiMessageChartSegment, type AiMessageHtmlSegment, type AiRichBlockHandler } from "@/lib/ai/richContent/aiRichContent";
+
 export interface AiMessageTextSegment {
   type: "text";
   content: string;
@@ -14,7 +16,7 @@ export interface AiMessageCodeSegment {
   pending: boolean;
 }
 
-export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment;
+export type AiMessageRenderSegment = AiMessageTextSegment | AiMessageCodeSegment | AiMessageChartSegment | AiMessageHtmlSegment;
 
 interface MessageSegment {
   type: "text" | "code";
@@ -36,6 +38,8 @@ export interface AiMessageRendererOptions {
   maxCacheChars?: number;
   markdown: (text: string) => string;
   highlightCode?: (content: string, lang: string) => string;
+  /** Resolves a fenced raw lang to a rich handler (chart-json, ...). */
+  richHandlers?: Record<string, AiRichBlockHandler>;
 }
 
 const DEFAULT_MAX_ENTRIES = 100;
@@ -77,6 +81,8 @@ interface SegmentRenderFlags {
   pending: boolean;
   /** The segment is the growing tail of a streaming message. */
   live: boolean;
+  /** True once the closing fence has arrived (rich handlers require it). */
+  closed?: boolean;
 }
 
 export function createAiMessageRenderer(options: AiMessageRendererOptions) {
@@ -90,10 +96,22 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
   // Bounded by the one answer being streamed, and dropped as soon as another answer starts.
   const streamBlocks = new Map<string, AiMessageRenderSegment>();
   let streamContent = "";
+  // Rich blocks are dispatched by their raw fenced language tag (lowercased,
+  // trimmed) BEFORE normalizeAiCodeLanguage's SQL/SHELL label map, so the
+  // shared code path for SQL/SHELL buckets is untouched.
+  const richHandlers = options.richHandlers ?? AI_RICH_BLOCK_HANDLERS;
 
   function renderSegment(segment: MessageSegment, flags: SegmentRenderFlags): AiMessageRenderSegment {
     if (segment.type === "text") {
       return { type: "text", content: segment.content, html: options.markdown(segment.content) };
+    }
+    const rawLang = (segment.lang || "").trim().toLowerCase();
+    const handler = richHandlers[rawLang];
+    if (handler) {
+      // The `closed` flag gates the handler call: an unfinished fence
+      // (streaming) always routes back to the plain code segment.
+      const rich = flags.closed ? handler.parse(segment.content, { closed: true }) : null;
+      if (rich) return rich;
     }
     const lang = normalizeAiCodeLanguage(segment.lang);
     // Highlighting a block that is still streaming is wasted work: it is re-highlighted once the fence closes.
@@ -121,12 +139,16 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     if (segment.content.length > maxCacheableChars) return renderSegment(segment, flags);
 
     // Length-prefixed so no field separator can be forged by segment content.
-    const key = `${segment.type}|${segment.lang ?? ""}|${flags.pending ? 1 : 0}|${segment.content.length}|${segment.content}`;
+    // `closed` also participates in the key so an open chart-json fence caches
+    // as plain code and the closed fence caches as its rich chart segment.
+    const key = `${segment.type}|${segment.lang ?? ""}|${flags.pending ? 1 : 0}|${flags.closed ? 1 : 0}|${segment.content.length}|${segment.content}`;
     const cached = segmentCache.get(key);
     if (cached) return cached;
 
     const rendered = renderSegment(segment, flags);
-    segmentCache.set(key, rendered, segment.content.length + rendered.html.length);
+    // Rich chart segments carry their parsed spec instead of an html string.
+    const size = segment.content.length + ("html" in rendered ? rendered.html.length : 0);
+    segmentCache.set(key, rendered, size);
     return rendered;
   }
 
@@ -152,7 +174,7 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
       const live = blocks[blocks.length - 1];
       return [...blocks.slice(0, -1).map(renderStreamingBlock), renderSegment({ type: "text", content: live }, { pending: false, live: true })];
     }
-    return [renderSegment(segment, { pending, live: true })];
+    return [renderSegment(segment, { pending, live: true, closed: segment.closed === true })];
   }
 
   function render(content: string, renderOptions: AiMessageRenderOptions = {}): AiMessageRenderSegment[] {
@@ -171,11 +193,12 @@ export function createAiMessageRenderer(options: AiMessageRendererOptions) {
     const rendered = segments.flatMap((segment, index): AiMessageRenderSegment[] => {
       if (streaming && index === lastIndex) return renderTail(segment);
       const pending = segment.type === "code" && segment.closed !== true;
-      return [renderCachedSegment(segment, { pending, live: false })];
+      return [renderCachedSegment(segment, { pending, live: false, closed: segment.closed === true })];
     });
 
     // Charge for the HTML the entry pins, not just for the source text.
-    if (cacheable) cache.set(content, rendered, content.length + rendered.reduce((sum, segment) => sum + segment.html.length, 0));
+    // Chart segments carry a parsed spec, not html — fall back to content length.
+    if (cacheable) cache.set(content, rendered, content.length + rendered.reduce((sum, segment) => sum + ("html" in segment ? segment.html.length : 0), 0));
     return rendered;
   }
 

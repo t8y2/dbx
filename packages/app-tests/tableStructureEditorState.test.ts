@@ -666,7 +666,7 @@ test("preserves a restored structure draft tab without an explicit initial tab",
   const restoredDraftBlock = source.match(/if \(props\.draft\?\.initialized\) \{[\s\S]*?\n  \} else if/);
 
   assert.ok(restoredDraftBlock);
-  assert.match(restoredDraftBlock[0], /restoreDraft\(props\.draft\);[\s\S]*applyInitialStructureTab\(false\);/);
+  assert.match(restoredDraftBlock[0], /restoreDraft\(props\.draft\);[\s\S]*applyPendingInitialStructureTab\(\);[\s\S]*applyInitialStructureTarget\(\);/);
 });
 
 test("renders editable structure tables with flat cell controls", () => {

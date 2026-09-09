@@ -60,6 +60,18 @@ test("suggests Elasticsearch indices by prefix", () => {
   );
 });
 
+test("suggests Elasticsearch indices by case-insensitive ordered cross-segment match", () => {
+  const text = "GET /MiM";
+  const items = buildElasticsearchCompletionItems(text, text.length, {
+    indices: ["my_index_misc_20260907", "my_index_logs_20260907"],
+  });
+
+  assert.deepEqual(
+    items.filter((item) => item.detail === "index").map((item) => item.label),
+    ["my_index_misc_20260907"],
+  );
+});
+
 test("index completion preserves endpoint suffix after cursor", () => {
   const text = "GET /ord/_search";
   const cursor = "GET /ord".length;

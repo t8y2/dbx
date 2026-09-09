@@ -19,8 +19,9 @@ const props = withDefaults(
     databaseOptions: string[];
     tablePatternsInput: string;
     loadingDatabases: boolean;
+    databaseLoadError?: string;
   }>(),
-  { connections: () => [], selectedDatabases: () => [], databaseOptions: () => [] },
+  { connections: () => [], selectedDatabases: () => [], databaseOptions: () => [], databaseLoadError: "" },
 );
 
 const emit = defineEmits<{
@@ -139,6 +140,7 @@ watch(
           </template>
           <div v-else class="px-2 py-2 text-sm text-muted-foreground">{{ t("databaseBackup.noMatchingDatabases") }}</div>
         </div>
+        <p v-if="databaseLoadError" data-backup-database-load-error class="text-xs text-destructive">{{ databaseLoadError }}</p>
       </div>
     </div>
 

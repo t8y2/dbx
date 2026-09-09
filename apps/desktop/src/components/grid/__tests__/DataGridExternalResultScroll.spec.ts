@@ -11,6 +11,14 @@ function resultWatchSource(): string {
   return dataGridSource.slice(start, end);
 }
 
+function captureViewportAnchorForRefreshSource(): string {
+  const start = dataGridSource.indexOf("function captureViewportAnchorForRefresh()");
+  const end = dataGridSource.indexOf("function restoreViewportAnchorAfterRefresh(");
+  expect(start).toBeGreaterThanOrEqual(0);
+  expect(end).toBeGreaterThan(start);
+  return dataGridSource.slice(start, end);
+}
+
 describe("DataGrid result-replacement vertical scroll", () => {
   it("resets to the first row when the result is replaced without an internal grid action", () => {
     const watchSource = resultWatchSource();
@@ -52,5 +60,20 @@ describe("DataGrid result-replacement vertical scroll", () => {
     expect(appendReturn).toBeGreaterThanOrEqual(0);
     expect(appendEarlyReturn).toBeGreaterThan(appendReturn);
     expect(resetBranch).toBeGreaterThan(appendEarlyReturn);
+  });
+
+  it("does not anchor a toolbar refresh to the current top row when already scrolled to the top (#8339)", () => {
+    // Anchoring the row that happens to be at scrollTop 0 would re-pin it to the
+    // same on-screen offset after refresh, which pushes newly inserted rows
+    // (e.g. rows prepended by an external insert under a DESC sort) above the
+    // visible viewport instead of showing them. Skipping the anchor when already
+    // at the top lets the toolbar-refresh path land on the freshest first row.
+    const anchorSource = captureViewportAnchorForRefreshSource();
+
+    expect(anchorSource).toContain("#8339");
+    const guard = anchorSource.indexOf("if (scroller.scrollTop <= 0) return null;");
+    const rowHeightUse = anchorSource.indexOf("const rowHeight =");
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(rowHeightUse).toBeGreaterThan(guard);
   });
 });

@@ -2762,3 +2762,13 @@ html.theme-vscode .app-tab-scroll.wrap-mode .app-tab-pill[data-active-tab="false
     background-color: color-mix(in oklab, var(--destructive) 30%, transparent);
   }
 }
+
+/* Wallpaper mode (html.dbx-bg-active is toggled by useBackgroundImage):
+   CodeMirror themes paint opaque editor backgrounds via EditorView.theme, so
+   clear them app-wide to let the background image show through. Active line,
+   selection, and search-highlight layers keep their own translucent colors
+   and stay readable on top. */
+html.dbx-bg-active .cm-editor,
+html.dbx-bg-active .cm-gutters {
+  background-color: transparent !important;
+}

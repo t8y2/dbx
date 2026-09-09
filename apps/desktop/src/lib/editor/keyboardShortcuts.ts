@@ -145,6 +145,10 @@ export function isSendSelectionToAiShortcut(event: ShortcutLikeEvent, shortcuts?
   return matchesShortcut(event, actionShortcut("sendSelectionToAi", shortcuts));
 }
 
+export function isToggleAiPanelShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
+  return matchesShortcut(event, actionShortcut("toggleAiPanel", shortcuts, platform), platform);
+}
+
 export function isConvertNamingStyleShortcut(event: ShortcutLikeEvent, shortcuts?: Partial<ShortcutSettings>, platform = globalThis.navigator?.platform || ""): boolean {
   return matchesShortcut(event, actionShortcut("convertNamingStyle", shortcuts, platform), platform);
 }

@@ -1848,6 +1848,19 @@ export async function loadMaxAgentTurns(): Promise<number> {
   return get("/api/app-settings/max-agent-turns");
 }
 
+export async function loadSqlFileUploadMaxBytes(): Promise<number> {
+  return get("/api/app-settings/sql-file-upload-max-bytes");
+}
+
+export async function saveSqlFileUploadMaxMb(sqlFileUploadMaxMb: number): Promise<void> {
+  const res = await fetch(apiUrl("/api/app-settings/sql-file-upload-max-bytes"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sqlFileUploadMaxMb }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+}
+
 export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   const res = await fetch(apiUrl("/api/app-settings/max-agent-turns"), {
     method: "PUT",
@@ -1879,6 +1892,28 @@ export async function loadEditorSettings(): Promise<unknown | null> {
 
 export async function saveEditorSettings(settings: unknown): Promise<void> {
   await saveBrowserAppState("editor_settings", settings);
+}
+
+// Background images are desktop-only: the web backend has no local data dir.
+export interface BackgroundImageInfo {
+  storedPath: string;
+  fileName: string;
+}
+
+export async function saveBackgroundImage(_sourcePath: string): Promise<BackgroundImageInfo> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function clearBackgroundImage(_storedPath: string): Promise<void> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function readBackgroundImage(_storedPath: string): Promise<string> {
+  throw new Error("Background images are only supported in the desktop app");
+}
+
+export async function checkBackgroundImage(_storedPath: string): Promise<boolean> {
+  throw new Error("Background images are only supported in the desktop app");
 }
 
 export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> {
@@ -2248,11 +2283,11 @@ export async function pendingOpenAiConfigLinks(): Promise<string[]> {
   return [];
 }
 
-export async function readExternalSqlFile(_path: string): Promise<string> {
+export async function readExternalSqlFile(_path: string, _maxSizeBytes?: number): Promise<string> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
-export async function readExternalSqlFileSnapshot(_path: string): Promise<import("@/lib/backend/tauri").ExternalSqlFileSnapshot> {
+export async function readExternalSqlFileSnapshot(_path: string, _maxSizeBytes?: number): Promise<import("@/lib/backend/tauri").ExternalSqlFileSnapshot> {
   throw new Error("Opening external SQL file paths is only available in the desktop app");
 }
 
@@ -2478,6 +2513,10 @@ export async function cancelDatabaseExport(exportId: string): Promise<void> {
 
 export async function clearDatabaseExportCancellation(_exportId: string): Promise<void> {
   // The web exporter owns and clears its cancellation marker on completion.
+}
+
+export async function databaseExportDestinationNeedsConfirmation(_directory: string): Promise<boolean> {
+  throw new Error("Scheduled database backups are only available in the desktop app.");
 }
 
 export async function recordDatabaseExportDestination(_directory: string): Promise<void> {

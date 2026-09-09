@@ -8,6 +8,9 @@
 /* 多行平铺模式：覆盖滚动相关样式，让标签换行展示 */
 .app-tab-scroll.wrap-mode {
   height: auto !important;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   overflow: visible !important;
   overflow-x: visible !important;
   overflow-y: visible !important;
@@ -16,19 +19,229 @@
 
 /* 父级 strip 容器在包含 wrap-mode 时也需要解除高度约束和裁剪 */
 .app-tab-strip:has(.wrap-mode) {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: auto !important;
   overflow: visible !important;
 }
 
 /* 标签栏行容器（直接子 div）在包含 wrap-mode 时解除固定高度和裁剪 */
 .app-tab-bar > div:has(.wrap-mode) {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   height: auto !important;
   overflow: visible !important;
 }
 
 /* 标签栏本身也解除裁剪，让换行内容自然撑高 */
 .app-tab-bar:has(.wrap-mode) {
+  max-width: 100%;
   overflow: visible !important;
+}
+
+/* Use an explicit root marker as well as the inner scroll marker. This keeps
+ * the auto-height rules reliable when a fixed-row strip contains wrapped
+ * sections and prevents the outer tab bar from reverting to two-row height. */
+.app-tab-bar.tab-wrap-mode {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.app-tab-bar.tab-wrap-mode > div {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+}
+
+/* Horizontal tab bars keep pinned tabs in their own row. Vertical bars use
+ * the same strip for both sections so pinned tabs remain at the top. */
+.app-tab-bar.horizontal-fixed-tabs {
+  height: 4.5rem !important;
+  min-height: 4.5rem;
+}
+
+/* Wrapped rows must grow the tab bar. The fixed two-row height otherwise lets
+ * additional rows paint over the editor while the workspace starts at 4.5rem. */
+.app-tab-bar.horizontal-fixed-tabs:has(.wrap-mode) {
+  height: auto !important;
+  min-height: 0;
+}
+
+.app-tab-bar.horizontal-fixed-tabs:not(:has(.wrap-mode)) > div:has(.horizontal-fixed-tabs-scroll) {
+  height: 100% !important;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.horizontal-fixed-tabs-scroll:not(.wrap-mode) {
+  height: 100% !important;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 0 !important;
+  overscroll-behavior-x: none;
+  overflow-x: hidden !important;
+  overflow-y: hidden !important;
+}
+
+.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode) {
+  padding-block: 0;
+}
+
+/* A wrapped fixed-tab strip must size itself from its rows. The regular
+ * fixed-row rules above are intentionally excluded because 100% height on an
+ * auto-height flex container creates a cyclic height calculation. */
+.app-tab-bar.horizontal-fixed-tabs:has(.wrap-mode) > div:has(.horizontal-fixed-tabs-scroll) {
+  height: auto !important;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.horizontal-fixed-tabs-scroll.wrap-mode {
+  height: auto !important;
+  min-height: 0;
+  flex-direction: column !important;
+  align-items: stretch !important;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  column-gap: 0 !important;
+  row-gap: 0.375rem !important;
+  overflow: visible !important;
+}
+
+.tab-section-frame--vertical,
+.tab-section--vertical {
+  display: contents;
+}
+
+.tab-section-frame--horizontal {
+  display: contents;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal {
+  position: relative;
+  display: block;
+  width: 100%;
+  min-width: 100%;
+  height: 2.25rem;
+  min-height: 2.25rem;
+  max-height: 2.25rem;
+  flex: 0 0 2.25rem;
+  overflow: hidden;
+}
+
+.tab-section--horizontal {
+  display: flex;
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  align-items: center;
+  gap: 0;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section--horizontal {
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: none;
+  touch-action: pan-x;
+  scrollbar-width: none;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section--horizontal::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-section--horizontal > * {
+  flex-shrink: 0;
+}
+
+/* Keep grouped tabs flush so their accent forms one continuous rule. With
+ * grouping disabled, flex gap also behaves correctly at wrapped line starts. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout)[data-group-mode="none"] .tab-section--horizontal {
+  column-gap: 4px;
+}
+
+/* The fixed two-row layout does not need the trailing flex spacer. Keeping it
+ * in the max-content row would manufacture horizontal overflow even when all
+ * tabs already fit. */
+.horizontal-fixed-tabs-scroll .tab-section--horizontal > [data-tauri-drag-region] {
+  width: 0;
+  min-width: 0;
+  flex: 0 0 0;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section--horizontal > .tab-tail-overflow-spacer[data-tauri-drag-region] {
+  width: 1px;
+  min-width: 1px;
+  flex-basis: 1px;
+}
+
+/* Keep the overflow affordance out of the measurement box. Otherwise its own
+ * width reduces the scroll viewport and can create a false overflow state. */
+.tab-overflow-control {
+  padding: 0;
+  background: transparent;
+}
+
+.has-tab-overflow-control .app-tab-strip {
+  padding-inline-end: 2.5rem;
+}
+
+.has-tab-overflow-control .app-tab-scrollbar {
+  inset-inline-end: 2.5rem;
+}
+
+/* In the two-row layout, only the first row shares its right edge with the
+ * overflow button. The fixed row must retain the full width of its own strip. */
+.horizontal-fixed-tabs .has-tab-overflow-control .app-tab-strip {
+  padding-inline-end: 0;
+}
+
+.horizontal-fixed-tabs > .has-tab-overflow-control {
+  padding-inline-end: 0;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control {
+  padding-inline-end: 35px;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--with-overflow-control .app-tab-scrollbar {
+  inset-inline-end: 35px;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:not(:first-child) .app-tab-scrollbar {
+  inset-inline-end: 0;
+}
+
+.horizontal-fixed-tabs .tab-overflow-control {
+  box-sizing: border-box;
+  width: 35px;
+  padding-inline: 0 1px;
+  height: 2.25rem !important;
+  align-items: center;
+}
+
+.tab-overflow-control > * {
+  max-width: 100%;
+}
+
+.tab-overflow-control button {
+  width: 34px;
+  height: 34px;
+  min-width: 0;
+  border-color: color-mix(in oklch, var(--foreground) 18%, var(--border));
+  background-color: color-mix(in oklch, var(--muted) 72%, var(--background));
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+
+[data-settings-page-tab],
+[data-driver-store-tab] {
+  scroll-margin-inline-end: 1px;
 }
 
 /* 经典布局 + 多行模式：优化多行标签显示 */
@@ -40,8 +253,40 @@
 }
 
 /* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
-.app-tab-scroll.classic-wrap > div {
+.app-tab-scroll.classic-wrap .tab-group-entry {
   height: 2rem;
+}
+
+/* Wrap mode must keep the old multi-line behavior inside each semantic
+ * section, including when pinned and regular sections are rendered. */
+.app-tab-scroll.wrap-mode .tab-section-frame--horizontal,
+.app-tab-scroll.wrap-mode .tab-section--horizontal {
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none;
+  flex: 0 0 auto !important;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.app-tab-scroll.wrap-mode .tab-section--horizontal {
+  flex: 0 0 auto !important;
+  align-items: flex-start;
+}
+
+/* Modern separated tabs originally kept 0.375rem between wrapped rows. Keep
+ * horizontal tabs flush while preserving that vertical breathing room. */
+.app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal {
+  column-gap: 0;
+  row-gap: 0.375rem;
+}
+
+.app-tab-scroll.wrap-mode .tab-section-frame--horizontal {
+  align-self: flex-start;
 }
 
 .app-tab-pill {
@@ -50,6 +295,18 @@
 
 .app-tab-pill[data-active-tab="false"]:hover {
   background-color: var(--app-tab-hover-background, color-mix(in oklch, var(--foreground) 8%, transparent));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill {
+  border: 0.5px solid color-mix(in oklch, var(--foreground) 14%, var(--border));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill[data-active-tab="true"] {
+  border-color: color-mix(in oklch, var(--foreground) 42%, var(--border));
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .app-tab-pill[data-active-tab="false"]:hover {
+  border-color: color-mix(in oklch, var(--foreground) 28%, var(--border));
 }
 
 .dirty-tab-marker {
@@ -87,6 +344,20 @@
 .app-tab-strip:hover .app-tab-scrollbar,
 .app-tab-strip:focus-within .app-tab-scrollbar,
 .app-tab-scrollbar--dragging {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* With two horizontal rows, reveal only the scrollbar belonging to the row
+ * under the pointer. The dragging state keeps it visible after the pointer
+ * leaves the row. */
+.horizontal-fixed-tabs-scroll .app-tab-scrollbar {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.horizontal-fixed-tabs-scroll .tab-section-frame--horizontal:hover .app-tab-scrollbar,
+.horizontal-fixed-tabs-scroll .app-tab-scrollbar--dragging {
   opacity: 1;
   pointer-events: auto;
 }
@@ -166,7 +437,9 @@
   transition:
     color 150ms ease,
     background-color 150ms ease,
-    box-shadow 150ms ease;
+    box-shadow 150ms ease,
+    opacity 120ms ease,
+    transform 120ms ease;
 }
 
 .tab-group-marker {
@@ -225,9 +498,42 @@
   line-height: 1;
 }
 
+/* Wrapped rows must use their own content height. In particular, avoid
+ * height: 100% here: when a group expands into another row it makes the
+ * auto-sized flex container feed its height back into the row measurement. */
+.app-tab-scroll.wrap-mode .tab-group-header {
+  height: auto !important;
+  min-height: 0;
+  align-self: flex-start;
+}
+
+.app-tab-scroll.wrap-mode.classic-wrap .tab-group-tab {
+  height: 2rem !important;
+  min-height: 2rem !important;
+}
+
+/* Settings and Driver Manager are rendered directly in the section instead
+ * of inside a tab-group-entry wrapper. Their classic h-full class must size
+ * to one wrapped row, not to the full multi-row section. */
+.app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill {
+  height: 2rem !important;
+  min-height: 2rem !important;
+  align-self: flex-start;
+}
+
+.app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-group-tab {
+  min-height: 1.75rem;
+}
+
+.app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill {
+  height: 1.75rem !important;
+  min-height: 1.75rem !important;
+  align-self: flex-start;
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header-content {
-  height: 1.625rem;
-  border-radius: 9999px;
+  height: 1.75rem;
+  border-radius: var(--dbx-radius-md);
   padding-inline: 0.4rem 0.5rem;
   background: var(--tab-group-soft);
 }
@@ -245,9 +551,9 @@
   content: "";
   position: absolute;
   z-index: 1;
-  right: -0.45rem;
+  right: -0.2rem;
   bottom: 0;
-  left: 0.3rem;
+  left: 0;
   height: 2px;
   border-radius: 9999px;
   background: var(--tab-group-color);
@@ -256,7 +562,7 @@
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after {
-  right: 0.3rem;
+  right: 0;
 }
 
 .app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-header::after {
@@ -268,8 +574,66 @@
   position: relative;
 }
 
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab) {
+  position: relative;
+  height: 100%;
+  max-height: none;
+  align-self: stretch;
+}
+
+/* Separated tabs are 1.75rem tall inside a row with vertical padding. Group
+ * entries stretch to the row for the continuous accent, so center the pill
+ * within that wrapper instead of leaving it attached to the row's top edge. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab) {
+  display: flex;
+  align-items: center;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
   content: "";
+  position: absolute;
+  z-index: 1;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+/* Wrapped group members need the same continuous group rule as the single
+ * row layout. Keep the stripe on the entry so it spans each full tab and
+ * meets the group header stripe without relying on the pill's own height. */
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab) {
+  position: relative;
+  height: auto !important;
+  min-height: 0;
+  align-self: flex-start;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab)::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after {
+  display: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab::after {
+  content: "";
+  display: block;
   position: absolute;
   z-index: 1;
   right: -0.2rem;
@@ -283,16 +647,115 @@
 }
 
 .app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after {
+  display: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-tab::after {
+  top: 0;
+  right: -0.2rem;
+  bottom: auto;
+  left: -0.2rem;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
   top: 0;
   bottom: auto;
 }
 
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode)[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
+  top: 0;
+  bottom: auto;
+}
+
+/* The separated pill is 1.75rem high and centered in a 2.5rem row. Align the
+ * group rail with the pill edge, not with the outer row edge. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after,
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
+  bottom: 0.375rem;
+}
+
+.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after,
+.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
+  bottom: 0.25rem;
+}
+
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-header::after,
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
+  top: 0.375rem;
+  bottom: auto;
+}
+
+.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-header::after,
+.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
+  top: 0.25rem;
+  bottom: auto;
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--first::after {
-  left: 0;
+  left: -0.2rem;
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after {
-  right: 0.3rem;
+  right: 0;
+}
+
+/* Keep collapsed group members in the DOM so the cluster can contract and
+ * expand smoothly instead of appearing and disappearing in one frame. */
+.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry {
+  max-width: 100%;
+  max-height: 2rem;
+  overflow: hidden;
+  transition:
+    max-width 140ms ease,
+    max-height 140ms ease,
+    margin 140ms ease,
+    opacity 100ms ease;
+}
+
+.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsed {
+  max-width: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    max-width 140ms ease,
+    max-height 140ms ease,
+    margin 140ms ease,
+    opacity 100ms ease;
+}
+
+.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsed .tab-group-tab--collapsed {
+  max-width: 0 !important;
+  max-height: 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding-inline: 0 !important;
+  border-width: 0 !important;
+  overflow: hidden;
+  transition:
+    max-width 140ms ease,
+    max-height 140ms ease,
+    padding 140ms ease,
+    border-width 140ms ease;
+}
+
+/* Wrapped tabs must retain their intrinsic row height. Collapsed groups use
+ * the original immediate-hide behavior here rather than the single-row
+ * width animation, which would otherwise disturb row measurement. */
+.app-tab-bar:has(.wrap-mode) .tab-group-entry--collapsed {
+  display: none;
+}
+
+/* Do not animate dimensions in wrapped mode. The browser must reflow the
+ * complete set of rows immediately when a group is expanded or collapsed. */
+.app-tab-scroll.wrap-mode .tab-group-entry,
+.app-tab-scroll.wrap-mode .tab-group-entry--collapsed,
+.app-tab-scroll.wrap-mode .tab-group-tab,
+.app-tab-scroll.wrap-mode .tab-group-header,
+.app-tab-scroll.wrap-mode .tab-group-header-content {
+  transition: none !important;
 }
 
 .tab-group-color-option,
@@ -393,6 +856,21 @@
     0 3px 9px color-mix(in srgb, var(--tab-group-color, var(--foreground)) 8%, transparent);
 }
 
+/* Without semantic grouping there is no group color to distinguish the
+ * active item, so give the selected vertical tab a stronger neutral state. */
+.vertical-tab-layout .app-tab-pill:not(.tab-group-tab)[data-active-tab="true"] {
+  background-color: color-mix(in srgb, var(--foreground) 16%, var(--background));
+  border-color: color-mix(in srgb, var(--foreground) 32%, var(--border));
+  box-shadow:
+    inset 3px 0 0 var(--ring),
+    inset 0 0 0 1px color-mix(in srgb, var(--foreground) 18%, transparent),
+    0 1px 2px rgb(0 0 0 / 0.08);
+}
+
+.vertical-tab-layout .tab-group-tab[data-active-tab="true"] {
+  background-color: var(--tab-group-soft);
+}
+
 .vertical-tab-layout .app-tab-scroll > * {
   width: 100%;
   flex: none;
@@ -468,7 +946,7 @@
 .vertical-tab-layout .tab-group-header-content {
   width: 100%;
   height: 100%;
-  border-radius: 0.5rem;
+  border-radius: var(--dbx-radius-md);
   padding-inline: 0.55rem;
 }
 

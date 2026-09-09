@@ -6,7 +6,7 @@ import { DEFAULT_QUERY_TIMEOUT_SECS, frontendQueryTimeoutSecsForSql, queryTimeou
 const contentAreaSource = readFileSync("apps/desktop/src/components/layout/ContentArea.vue", "utf8");
 
 test("queryTimeoutSecsForConnection falls back to the default timeout", () => {
-  assert.equal(DEFAULT_QUERY_TIMEOUT_SECS, 30);
+  assert.equal(DEFAULT_QUERY_TIMEOUT_SECS, 60);
   assert.equal(queryTimeoutSecsForConnection(undefined), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: -1 }), DEFAULT_QUERY_TIMEOUT_SECS);
   assert.equal(queryTimeoutSecsForConnection({ query_timeout_secs: 0 }), 0);

@@ -381,6 +381,19 @@ export function redisMemberCopyText(value: unknown): string {
   return redisClipboardSafeText(text);
 }
 
+/** Copy targets for one hash row: its field, its value, or both. */
+export type RedisHashRowCopyTarget = "field" | "value" | "fieldValue";
+
+/**
+ * Copy text for one hash row. `fieldValue` joins the two with a tab so the
+ * result pastes into a spreadsheet as two columns, matching the grid's TSV copy.
+ */
+export function redisHashRowCopyText(field: unknown, value: unknown, target: RedisHashRowCopyTarget): string {
+  if (target === "value") return redisMemberCopyText(value);
+  const fieldText = redisMemberCopyText(field);
+  return target === "field" ? fieldText : `${fieldText}\t${redisMemberCopyText(value)}`;
+}
+
 export function redisClipboardSafeText(value: string): string {
   let output = "";
   for (const ch of value) {

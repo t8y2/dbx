@@ -1,3 +1,4 @@
+use super::column_format::mysql_temporal_precision;
 use super::dialect::StructureDialect;
 use super::types::EditableStructureColumn;
 use crate::models::connection::DatabaseType;
@@ -372,7 +373,7 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
     let base_type = data_type.split('(').next().unwrap_or(data_type).trim();
     if is_temporal_type_for_default(dialect, base_type) {
         if is_temporal_expression(default_value) {
-            return default_value.to_string();
+            return mysql_temporal_default_with_column_precision(dialect, data_type, default_value);
         }
         return quote_string(default_value);
     }
@@ -400,6 +401,27 @@ pub(super) fn format_default_for_sql(dialect: StructureDialect, data_type: &str,
         return quote_string(default_value);
     }
     default_value.to_string()
+}
+
+/// MySQL requires a `CURRENT_TIMESTAMP` default on a fractional-precision
+/// temporal column to spell out the column's precision (`datetime(3)` needs
+/// `DEFAULT CURRENT_TIMESTAMP(3)`), otherwise the statement fails with
+/// `ERROR 1067 (42000): Invalid default value`. Complete a bare
+/// `CURRENT_TIMESTAMP` with the precision parsed from the data type; a value
+/// that already carries parentheses is passed through unchanged.
+fn mysql_temporal_default_with_column_precision(
+    dialect: StructureDialect,
+    data_type: &str,
+    default_value: &str,
+) -> String {
+    let trimmed = default_value.trim();
+    if dialect != StructureDialect::Mysql || !trimmed.eq_ignore_ascii_case("current_timestamp") {
+        return default_value.to_string();
+    }
+    match mysql_temporal_precision(data_type) {
+        Some(fsp) => format!("{trimmed}({fsp})"),
+        None => default_value.to_string(),
+    }
 }
 
 pub(super) fn normalize_default(value: Option<&String>) -> String {

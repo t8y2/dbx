@@ -768,6 +768,15 @@ pub enum NacosConflictPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct NacosBatchPreviewDiff {
+    pub before_content: String,
+    pub after_content: String,
+    #[serde(default)]
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NacosBatchPreviewItem {
     pub namespace: String,
     pub group: String,
@@ -775,6 +784,8 @@ pub struct NacosBatchPreviewItem {
     pub status: String,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub diff: Option<NacosBatchPreviewDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

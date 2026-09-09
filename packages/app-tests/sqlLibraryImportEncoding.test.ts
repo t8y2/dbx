@@ -9,7 +9,7 @@ test("SQL library imports use the charset-aware external SQL reader", () => {
   const end = source.indexOf("async function chooseSyncDirectory", start);
   const handler = start >= 0 && end > start ? source.slice(start, end) : "";
 
-  assert.match(handler, /await api\.readExternalSqlFile\(path\)/);
+  assert.match(handler, /await api\.readExternalSqlFile\(path, externalSqlEditorMaxBytes\(settingsStore\.editorSettings\.externalSqlEditorMaxMb\)\)/);
   assert.doesNotMatch(handler, /readTextFile/);
 });
 

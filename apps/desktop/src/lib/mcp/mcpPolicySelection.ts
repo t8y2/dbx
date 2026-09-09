@@ -21,6 +21,27 @@ export const MCP_CAPABILITY_ROWS: readonly McpCapabilityRow[] = [
   { labelKey: "settings.mcpCapabilityConnectionManagement", read_only: false, safe_write: true, high_risk_write: true },
 ];
 
+export const MCP_TOOL_OPTIONS = [
+  { name: "dbx_list_connections", labelKey: "settings.mcpToolListConnections" },
+  { name: "dbx_list_databases", labelKey: "settings.mcpToolListDatabases" },
+  { name: "dbx_list_tables", labelKey: "settings.mcpToolListTables" },
+  { name: "dbx_describe_table", labelKey: "settings.mcpToolDescribeTable" },
+  { name: "dbx_list_routines", labelKey: "settings.mcpToolListRoutines" },
+  { name: "dbx_get_routine_source", labelKey: "settings.mcpToolGetRoutineSource" },
+  { name: "dbx_get_schema_context", labelKey: "settings.mcpToolGetSchemaContext" },
+  { name: "dbx_execute_query", labelKey: "settings.mcpToolExecuteQuery" },
+  { name: "dbx_execute_batch", labelKey: "settings.mcpToolExecuteBatch" },
+  { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },
+  { name: "dbx_close_session", labelKey: "settings.mcpToolCloseSession" },
+  { name: "dbx_execute_redis_command", labelKey: "settings.mcpToolExecuteRedisCommand" },
+  { name: "dbx_send_message", labelKey: "settings.mcpToolSendMessage" },
+  { name: "dbx_add_connection", labelKey: "settings.mcpToolAddConnection" },
+  { name: "dbx_duplicate_connection", labelKey: "settings.mcpToolDuplicateConnection" },
+  { name: "dbx_remove_connection", labelKey: "settings.mcpToolRemoveConnection" },
+  { name: "dbx_open_table", labelKey: "settings.mcpToolOpenTable" },
+  { name: "dbx_execute_and_show", labelKey: "settings.mcpToolExecuteAndShow" },
+] as const;
+
 export interface McpExecutionPolicyFields {
   readOnly: boolean;
   allowDangerousSql: boolean;
@@ -88,6 +109,13 @@ export function mcpPolicyFieldsForExecutionMode(mode: McpExecutionMode): McpExec
 
 export function toggleMcpAllowedConnectionId(current: readonly string[] | null, availableConnectionIds: readonly string[], connectionId: string, allowed: boolean): string[] {
   return updateMcpAllowedConnectionIds(current, availableConnectionIds, [connectionId], allowed);
+}
+
+export function toggleMcpAllowedToolName(current: readonly string[] | null, toolName: string, allowed: boolean): string[] {
+  const selected = new Set(current === null ? MCP_TOOL_OPTIONS.map((tool) => tool.name) : current);
+  if (allowed) selected.add(toolName);
+  else selected.delete(toolName);
+  return [...selected];
 }
 
 export function updateMcpAllowedConnectionIds(current: readonly string[] | null, availableConnectionIds: readonly string[], connectionIds: readonly string[], allowed: boolean): string[] {

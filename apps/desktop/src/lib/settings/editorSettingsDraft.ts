@@ -1,6 +1,8 @@
 import type { EditorSettings } from "@/stores/settingsStore";
+import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
+import { normalizeExternalSqlEditorMaxMb } from "@/lib/sql/sqlFileOpen";
 import { normalizeCompletionTriggerMode } from "@/lib/sql/sqlCompletionTriggerPolicy";
 import { normalizeRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
 
@@ -11,6 +13,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "uiFontFamily",
   "uiScale",
   "theme",
+  "backgroundImage",
   "customThemes",
   "activeCustomThemeId",
   "executeMode",
@@ -47,6 +50,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "compactColumnHeaderActions",
   "dataGridQuickEntry",
   "dataGridFilterEditorView",
+  "dataGridAutoHideFilterBuilder",
   "dataGridTextFilterPanelHeight",
   "multiStatementDefaultView",
   "dataGridAutoTransposeSingleRow",
@@ -56,6 +60,7 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "tableOpenPageSize",
   "queryResultMaxRowsEnabled",
   "queryResultMaxRows",
+  "externalSqlEditorMaxMb",
   "infiniteScroll",
   "regexMaxMatchCount",
   "autoCalculateTotalRows",
@@ -128,8 +133,10 @@ export function normalizeQueryResultMaxRowsDraft(value: unknown): number {
 function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unknown {
   if (key === "pageSize" || key === "tableOpenPageSize") return normalizeTableOpenPageSizeDraft(value);
   if (key === "queryResultMaxRows") return normalizeQueryResultMaxRowsDraft(value);
+  if (key === "externalSqlEditorMaxMb") return normalizeExternalSqlEditorMaxMb(value);
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
+  if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }
 
@@ -143,6 +150,20 @@ export function editorSettingsDraftFromSettings(settings: EditorSettings): Edito
     draft[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
   }
   return draft;
+}
+
+/**
+ * Draft-shaped, per-key-normalized values for exactly the keys present in
+ * `settings`. Used for partial updates (e.g. settings import) where keys the
+ * input does not contain must leave the target state untouched.
+ */
+export function editorSettingsDraftPatchFromSettings(settings: Partial<EditorSettings>): Partial<EditorSettingsDraft> {
+  const patch: Partial<EditorSettingsDraft> = {};
+  for (const key of EDITOR_SETTINGS_DRAFT_KEYS) {
+    if (!(key in settings)) continue;
+    (patch as Record<string, unknown>)[key] = cloneDraftValue(normalizedDraftValue(key, settings[key])) as never;
+  }
+  return patch;
 }
 
 export function editorSettingsPatchFromDraft(draft: EditorSettingsDraft, base: EditorSettingsDraft): Partial<EditorSettings> {

@@ -7,6 +7,7 @@
 //! [2] https://github.com/lifthrasiir/rust-encoding/blob/496823171f15d9b9446b2ec3fb7765f22346256b/src/label.rs#L282
 
 use encoding_rs::Encoding;
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::error::Error;
@@ -38,17 +39,17 @@ impl Collation {
     }
 
     /// return an encoding for a given collation
-    pub fn encoding(&self) -> crate::Result<&'static Encoding> {
+    pub fn codec(&self) -> crate::Result<CollationCodec> {
         let res = if self.sort_id == 0 {
-            lcid_to_encoding(self.lcid())
+            lcid_to_encoding(self.lcid()).map(CollationCodec::BuiltIn)
         } else {
-            sortid_to_encoding(self.sort_id)
+            sortid_to_codec(self.sort_id)
         };
 
         res.ok_or_else(|| {
             Error::Encoding(
                 format!(
-                    "encoding: unspported encoding (LCID: {:#02x}, sort ID: {})",
+                    "encoding: unsupported encoding (LCID: {:#02x}, sort ID: {})",
                     self.lcid(),
                     self.sort_id(),
                 )
@@ -60,12 +61,121 @@ impl Collation {
 
 impl fmt::Display for Collation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.encoding() {
-            Ok(encoding) => write!(f, "{}", encoding.name()),
+        match self.codec() {
+            Ok(codec) => write!(f, "{}", codec.name()),
             _ => write!(f, "None"),
         }
     }
 }
+
+/// A codec for decoding and encoding legacy single-byte column data.
+///
+/// Windows collations map to encodings implemented by `encoding_rs`, but the
+/// legacy SQL collations with sort IDs 30-61 use the DOS codepages CP437 and
+/// CP850, which `encoding_rs` (an implementation of the WHATWG Encoding
+/// Standard) does not provide. Those are covered by hand-written tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollationCodec {
+    BuiltIn(&'static Encoding),
+    Cp437,
+    Cp850,
+}
+
+impl CollationCodec {
+    pub fn name(&self) -> &'static str {
+        match self {
+            CollationCodec::BuiltIn(encoding) => encoding.name(),
+            CollationCodec::Cp437 => "CP437",
+            CollationCodec::Cp850 => "CP850",
+        }
+    }
+
+    /// Decode legacy varchar/text data. Returns `None` on byte sequences that
+    /// are invalid in the target encoding (only possible for the multi-byte
+    /// built-in codecs; single-byte codecs accept every byte).
+    pub fn decode(&self, bytes: &[u8]) -> Option<String> {
+        match self {
+            CollationCodec::BuiltIn(encoding) => encoding
+                .decode_without_bom_handling_and_without_replacement(bytes)
+                .map(Cow::into_owned),
+            CollationCodec::Cp437 => Some(decode_single_byte(bytes, &CP437_HIGH)),
+            CollationCodec::Cp850 => Some(decode_single_byte(bytes, &CP850_HIGH)),
+        }
+    }
+
+    /// Encode a string for a legacy varchar parameter. Returns `None` when the
+    /// input contains a character that the target encoding cannot represent.
+    pub fn encode_from_utf8(&self, text: &str) -> Option<Vec<u8>> {
+        match self {
+            CollationCodec::BuiltIn(encoding) => {
+                let mut encoder = encoding.new_encoder();
+                let len = encoder
+                    .max_buffer_length_from_utf8_without_replacement(text.len())
+                    .unwrap();
+                let mut bytes = Vec::with_capacity(len);
+                let (res, _) =
+                    encoder.encode_from_utf8_to_vec_without_replacement(text, &mut bytes, true);
+                match res {
+                    encoding_rs::EncoderResult::InputEmpty => Some(bytes),
+                    _ => None,
+                }
+            }
+            CollationCodec::Cp437 => encode_single_byte(text, &CP437_HIGH),
+            CollationCodec::Cp850 => encode_single_byte(text, &CP850_HIGH),
+        }
+    }
+}
+
+fn decode_single_byte(bytes: &[u8], high: &[char; 128]) -> String {
+    bytes
+        .iter()
+        .map(|&b| {
+            if b < 0x80 {
+                b as char
+            } else {
+                high[(b - 0x80) as usize]
+            }
+        })
+        .collect()
+}
+
+fn encode_single_byte(text: &str, high: &[char; 128]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len());
+    for c in text.chars() {
+        let b = match c {
+            '\0'..='\u{7f}' => c as u8,
+            _ => high.iter().position(|&mapped| mapped == c)? as u8 + 0x80,
+        };
+        out.push(b);
+    }
+    Some(out)
+}
+
+/// CP437 high half (bytes 0x80-0xFF), generated from the Unicode consortium
+/// mapping table (the same source Python's `cp437` codec uses).
+const CP437_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', '¢', '£', '¥', '₧', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '⌐', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', '╡', '╢', '╖', '╕', '╣', '║', '╗', '╝', '╜', '╛', '┐',
+    '└', '┴', '┬', '├', '─', '┼', '╞', '╟', '╚', '╔', '╩', '╦', '╠', '═', '╬', '╧',
+    '╨', '╤', '╥', '╙', '╘', '╒', '╓', '╫', '╪', '┘', '┌', '█', '▄', '▌', '▐', '▀',
+    'α', 'ß', 'Γ', 'π', 'Σ', 'σ', 'µ', 'τ', 'Φ', 'Θ', 'Ω', 'δ', '∞', 'φ', 'ε', '∩',
+    '≡', '±', '≥', '≤', '⌠', '⌡', '÷', '≈', '°', '∙', '·', '√', 'ⁿ', '²', '■', ' ',
+];
+
+/// CP850 high half (bytes 0x80-0xFF), generated from the Unicode consortium
+/// mapping table (the same source Python's `cp850` codec uses).
+const CP850_HIGH: [char; 128] = [
+    'Ç', 'ü', 'é', 'â', 'ä', 'à', 'å', 'ç', 'ê', 'ë', 'è', 'ï', 'î', 'ì', 'Ä', 'Å',
+    'É', 'æ', 'Æ', 'ô', 'ö', 'ò', 'û', 'ù', 'ÿ', 'Ö', 'Ü', 'ø', '£', 'Ø', '×', 'ƒ',
+    'á', 'í', 'ó', 'ú', 'ñ', 'Ñ', 'ª', 'º', '¿', '®', '¬', '½', '¼', '¡', '«', '»',
+    '░', '▒', '▓', '│', '┤', 'Á', 'Â', 'À', '©', '╣', '║', '╗', '╝', '¢', '¥', '┐',
+    '└', '┴', '┬', '├', '─', '┼', 'ã', 'Ã', '╚', '╔', '╩', '╦', '╠', '═', '╬', '¤',
+    'ð', 'Ð', 'Ê', 'Ë', 'È', 'ı', 'Í', 'Î', 'Ï', '┘', '┌', '█', '▄', '¦', 'Ì', '▀',
+    'Ó', 'ß', 'Ô', 'Ò', 'õ', 'Õ', 'µ', 'þ', 'Þ', 'Ú', 'Û', 'Ù', 'ý', 'Ý', '¯', '´',
+    '­', '±', '‗', '¾', '¶', '§', '÷', '¸', '°', '¨', '·', '¹', '³', '²', '■', ' ',
+];
 
 /// https://github.com/Microsoft/mssql-jdbc/blob/eb14f63077c47ef1fc1c690deb8cfab602baeb85/src/main/java/com/microsoft/sqlserver/jdbc/SQLCollation.java#L102-L310
 /// maps an LCID (it's locale part which is only 2 bytes) to a codepage
@@ -297,6 +407,18 @@ pub fn lcid_to_encoding(locale: u16) -> Option<&'static Encoding> {
 /// generate the code below from source code:
 /// 1. (regex)replace .*\((.*?),.*?,(.*?)\) with $1 => $2
 /// 2. see above/as above
+/// Legacy SQL collations on DOS codepages. encoding_rs has no CP437/CP850, so
+/// these are served by the hand-written tables above; every other sort ID
+/// falls back to the encoding_rs mapping below (per mssql-jdbc
+/// SQLCollation.java, sort IDs 30-35 are CP437 and 40-45, 49, 55-61 are CP850).
+pub fn sortid_to_codec(sort_id: u8) -> Option<CollationCodec> {
+    match sort_id {
+        30..=35 => Some(CollationCodec::Cp437),
+        40..=45 | 49 | 55..=61 => Some(CollationCodec::Cp850),
+        _ => sortid_to_encoding(sort_id).map(CollationCodec::BuiltIn),
+    }
+}
+
 pub fn sortid_to_encoding(sort_id: u8) -> Option<&'static Encoding> {
     match sort_id {
         // 30 | 31 | 32 | 33 | 34 | 35 => Some(encoding_rs::WINDOWS_437),
@@ -389,30 +511,65 @@ pub fn sortid_to_encoding(sort_id: u8) -> Option<&'static Encoding> {
     }
 }
 
-/* TODO
 #[cfg(test)]
 mod tests {
-    use futures_state_stream::StateStream;
-    use tokio::executor::current_thread;
-    use crate::tests::new_connection;
+    use super::*;
 
     #[test]
-    fn select_nvarchar_collation_test() {
-        let c1 = new_connection();
-        let query = c1.simple_query(
-            "select cast(cast(N'cześć' as nvarchar(5)) collate Polish_CI_AI as varchar(5))",
-        );
-        let mut i = 0;
-        {
-            let future = query.for_each(|x| {
-                let val: &str = x.get(0);
-                assert_eq!(val, "cześć");
-                i += 1;
-                Ok(())
-            });
-            current_thread::block_on_all(future).unwrap();
+    fn cp850_collation_decodes_french_text() {
+        // SQL_1xCompat_CP850_CI_AS: LCID 0x409, sort ID 49.
+        let collation = Collation::new(0x409, 49);
+        let codec = collation.codec().unwrap();
+        assert_eq!(codec, CollationCodec::Cp850);
+
+        // "Café démarré çà" encoded in CP850 by hand from the table above.
+        let bytes = b"Caf\x82 d\x82marr\x82 \x87\x85";
+        assert_eq!(codec.decode(bytes).unwrap(), "Café démarré çà");
+    }
+
+    #[test]
+    fn cp850_round_trip() {
+        let text = "Héçàüõ Êîÿ Ø £ × ³ ´ § ±";
+        let codec = CollationCodec::Cp850;
+        let encoded = codec.encode_from_utf8(text).unwrap();
+        assert_eq!(codec.decode(&encoded).unwrap(), text);
+    }
+
+    #[test]
+    fn cp437_round_trip_and_spot_checks() {
+        let codec = CollationCodec::Cp437;
+        let text = "éàç ü Ä Å ñ α Γ ∞ ± ²";
+        let encoded = codec.encode_from_utf8(text).unwrap();
+        assert_eq!(codec.decode(&encoded).unwrap(), text);
+
+        assert_eq!(codec.decode(&[0x82, 0xe0, 0xf1]).unwrap(), "éα±");
+    }
+
+    #[test]
+    fn legacy_dos_sortids_resolve() {
+        for sort_id in (30..=35).chain(40..=45).chain([49]).chain(55..=61) {
+            let codec = Collation::new(0x409, sort_id).codec();
+            assert!(codec.is_ok(), "sort ID {sort_id} should resolve");
         }
-        assert_eq!(i, 1);
+    }
+
+    #[test]
+    fn windows_sortid_still_uses_encoding_rs() {
+        // SQL_Latin1_General_CP1_CI_AS: sort ID 52.
+        let codec = Collation::new(0x409, 52).codec().unwrap();
+        assert_eq!(
+            codec,
+            CollationCodec::BuiltIn(encoding_rs::WINDOWS_1252)
+        );
+        assert_eq!(codec.decode(b"caf\xe9").unwrap(), "café");
+    }
+
+    #[test]
+    fn unmappable_character_rejected() {
+        // Neither CP850 nor CP437 contains the euro sign.
+        assert_eq!(CollationCodec::Cp850.encode_from_utf8("€"), None);
+        assert_eq!(CollationCodec::Cp437.encode_from_utf8("€"), None);
+        // And a truly unknown sort ID still errors out.
+        assert!(Collation::new(0x409, 62).codec().is_err());
     }
 }
-*/

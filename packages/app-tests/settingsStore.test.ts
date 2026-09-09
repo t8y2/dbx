@@ -6,7 +6,18 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS } from "../../apps/desktop/src/lib/sql/s
 import { DEFAULT_TABLE_COLUMN_TEMPLATE_FIELDS } from "../../apps/desktop/src/lib/table/tableColumnTemplates.ts";
 import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, SYSTEM_UI_FONT_FAMILY } from "../../apps/desktop/src/lib/app/appFonts.ts";
 import { tableOpenPageLimit } from "../../apps/desktop/src/lib/table/tableOpenPageLimit.ts";
-import { AI_PROVIDER_PARTNER_PRESETS, AI_PROVIDER_PRESETS, DEFAULT_EDITOR_SETTINGS, EXECUTE_MODE_CURRENT_DEFAULT_VERSION, getAiProviderPreset, getAiProviderPresetId, normalizeAiConfig, normalizeEditorSettings, useSettingsStore } from "../../apps/desktop/src/stores/settingsStore.ts";
+import {
+  AI_PROVIDER_PARTNER_PRESETS,
+  AI_PROVIDER_PRESETS,
+  DEFAULT_EDITOR_SETTINGS,
+  EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+  SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+  getAiProviderPreset,
+  getAiProviderPresetId,
+  normalizeAiConfig,
+  normalizeEditorSettings,
+  useSettingsStore,
+} from "../../apps/desktop/src/stores/settingsStore.ts";
 import { DEFAULT_SHORTCUT_SETTINGS, tabNavigationHistoryDefaultShortcut, type ShortcutSettings } from "../../apps/desktop/src/lib/editor/shortcutRegistry.ts";
 
 const saveEditorSettingsMock = vi.hoisted(() => vi.fn());
@@ -506,13 +517,45 @@ test("defaults sidebar activation to single click", () => {
   assert.equal(normalizeEditorSettings({}).sidebarActivation, "single");
 });
 
-test("defaults database activation browsing to off and migrates the previous single-click setting", () => {
+test("preserves object browsing for legacy sidebar settings", () => {
   assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivation, false);
+  assert.equal(DEFAULT_EDITOR_SETTINGS.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion, SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION);
   assert.equal(normalizeEditorSettings({}).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: true }).sidebarBrowseObjectsOnDatabaseActivation, true);
+  assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false }).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: "yes" as any }).sidebarBrowseObjectsOnDatabaseActivation, false);
   assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: true } as any).sidebarBrowseObjectsOnDatabaseActivation, true);
-  assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: false } as any).sidebarBrowseObjectsOnDatabaseActivation, false);
+  assert.equal(normalizeEditorSettings({ sidebarOpenDatabaseOnSingleClick: false } as any).sidebarBrowseObjectsOnDatabaseActivation, true);
+  assert.equal(normalizeEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false, sidebarOpenDatabaseOnSingleClick: true } as any).sidebarBrowseObjectsOnDatabaseActivation, false);
+});
+
+test("migrates existing settings once and preserves a later explicit opt-out", async () => {
+  await withMockLocalStorage(
+    {
+      "dbx-app-state:editor_settings": JSON.stringify({ sidebarBrowseObjectsOnDatabaseActivation: false }),
+    },
+    async () => {
+      setActivePinia(createPinia());
+      const migratedStore = useSettingsStore();
+      await migratedStore.initEditorSettings();
+
+      assert.equal(migratedStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, true);
+      assert.equal(migratedStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion, SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION);
+      await vi.waitFor(() => {
+        const saved = JSON.parse(localStorage.getItem("dbx-app-state:editor_settings") || "{}") as Record<string, unknown>;
+        assert.equal(saved.sidebarBrowseObjectsOnDatabaseActivation, true);
+        assert.equal(saved.sidebarBrowseObjectsOnDatabaseActivationMigrationVersion, SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION);
+      });
+
+      migratedStore.updateEditorSettings({ sidebarBrowseObjectsOnDatabaseActivation: false });
+      await vi.waitFor(() => assert.equal(migratedStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, false));
+
+      setActivePinia(createPinia());
+      const reloadedStore = useSettingsStore();
+      await reloadedStore.initEditorSettings();
+      assert.equal(reloadedStore.editorSettings.sidebarBrowseObjectsOnDatabaseActivation, false);
+    },
+  );
 });
 
 test("defaults active tab sidebar selection to off", () => {

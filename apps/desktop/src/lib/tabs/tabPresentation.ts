@@ -11,6 +11,14 @@ import type { BatchSqlExecution, ConnectionConfig, DatabaseType, QueryResult, Qu
 
 type Translate = (key: string, params?: Record<string, unknown>) => string;
 export type OutputView = "result" | "summary" | "explain" | "chart";
+const TABLE_COMMENT_TOOLTIP_MAX_LENGTH = 50;
+
+function tableCommentTooltipValue(comment: string | null | undefined): string | undefined {
+  const normalized = comment?.trim().replace(/\s+/g, " ");
+  if (!normalized) return undefined;
+  const characters = Array.from(normalized);
+  return characters.length <= TABLE_COMMENT_TOOLTIP_MAX_LENGTH ? normalized : `${characters.slice(0, TABLE_COMMENT_TOOLTIP_MAX_LENGTH - 1).join("")}…`;
+}
 
 export function connectionDisplayName(connectionId: string): string {
   const connectionStore = useConnectionStore();
@@ -146,8 +154,9 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "objects") {
     const schema = tab.objectBrowser?.schema;
-    if (compact) return schema || tab.title;
-    return schema ? `${schema}@${database}` : `${tab.title}@${database}`;
+    const objectScope = tab.catalog ? `${tab.catalog}.${database}` : database;
+    if (compact) return schema || objectScope;
+    return schema ? `${schema}@${objectScope}` : objectScope;
   }
   if (tab.mode === "users") {
     if (compact) return t("tabs.users");
@@ -170,6 +179,10 @@ export function tabTooltipLines(tab: QueryTab, t: Translate): { label: string; v
   }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     lines.push({ label: t("tabs.tooltipTable"), value: tab.tableMeta.tableName });
+    const comment = tableCommentTooltipValue(tab.tableComment);
+    if (comment) {
+      lines.push({ label: t("tabs.tooltipTableComment"), value: comment });
+    }
   }
   if (tab.mode === "mongo" && tab.sql) {
     lines.push({ label: t("tabs.tooltipCollection"), value: tab.sql });
@@ -485,28 +498,39 @@ export function tabDatabaseIconType(tab: QueryTab): string {
 export function tabIconClass(tab: QueryTab): string {
   if (tab.externalSqlFileMissing) return "text-amber-600 dark:text-amber-400";
   if (tab.mode === "mq") return "";
+  if (tab.objectSource?.objectType === "VIEW") return "text-purple-500";
+  if (tab.objectSource?.objectType === "MATERIALIZED_VIEW") return "text-indigo-500";
+  if (tab.objectSource?.objectType === "PROCEDURE") return "text-blue-500";
+  if (tab.objectSource?.objectType === "FUNCTION") return "text-amber-500";
+  if (tab.objectSource?.objectType === "TRIGGER") return "text-orange-300";
+  if (tab.objectSource?.objectType === "EVENT" || tab.objectSource?.objectType === "JOB") return "text-orange-400";
+  if (tab.objectSource?.objectType === "SEQUENCE") return "text-emerald-500";
+  if (tab.mode === "redis") return "text-red-400";
+  if (tab.mode === "data" && tab.tableMeta?.tableType?.toUpperCase() === "VIEW") return "text-purple-500";
+  if (tab.mode === "data" && tab.tableMeta?.tableType?.toUpperCase() === "MATERIALIZED_VIEW") return "text-indigo-500";
   if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "redis" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
   return "text-blue-600 dark:text-blue-400";
 }
 
 export function tabColorStyle(tab: QueryTab, active: boolean, isClassic: boolean): CSSProperties | undefined {
+  const activeIndicator = "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)";
   const color = connectionColor(tab.connectionId);
   if (!color) {
     if (isClassic) {
-      return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;
+      return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", boxShadow: activeIndicator } : undefined;
     }
-    return active ? { borderColor: "var(--ring)" } : undefined;
+    return active ? { "--app-tab-background": "color-mix(in srgb, var(--foreground) 18%, var(--background))", borderColor: "var(--ring)" } : undefined;
   }
   if (isClassic) {
     return {
-      "--app-tab-background": hexToRgba(color, active ? 0.16 : 0.07),
+      "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.07),
       "--app-tab-hover-background": hexToRgba(color, 0.14),
-      boxShadow: active ? `inset 0 -2px 0 ${color}` : undefined,
+      boxShadow: active ? activeIndicator : undefined,
     };
   }
   return {
-    "--app-tab-background": hexToRgba(color, active ? 0.16 : 0.09),
+    "--app-tab-background": hexToRgba(color, active ? 0.24 : 0.09),
     "--app-tab-hover-background": hexToRgba(color, 0.16),
     borderColor: active ? hexToRgba(color, 0.72) : hexToRgba(color, 0.18),
   };

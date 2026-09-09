@@ -98,6 +98,21 @@ describe("connection query actions", () => {
     expect(supportsConnectionQueryActions("hbase")).toBe(false);
     expect(supportsConnectionQueryActions("zookeeper")).toBe(false);
   });
+
+  it("hides the sidebar new-query entry for message brokers", () => {
+    // Kafka/Pulsar/RocketMQ/RabbitMQ all share db_type "mq" and have no SQL
+    // engine: the sidebar entry opened a plain SQL editor against a broker
+    // (issue #8415). MQTT has the same console-only surface.
+    expect(supportsConnectionQueryActions("mq")).toBe(false);
+    expect(supportsConnectionQueryActions("mqtt")).toBe(false);
+  });
+});
+
+describe("message queue query capabilities", () => {
+  it("does not advertise query execution for broker surfaces", () => {
+    expect(supportsQueryExecution("mq")).toBe(false);
+    expect(supportsQueryExecution("mqtt")).toBe(false);
+  });
 });
 
 describe("zookeeper query capabilities", () => {

@@ -134,8 +134,9 @@ function createTextProbe(input: HTMLTextAreaElement, wrap: boolean, options: { w
 
 function shouldExpand(input: HTMLTextAreaElement) {
   if (!input.value) return false;
+  const hasMultipleLines = /\r?\n/.test(input.value);
   const probe = createTextProbe(input, false);
-  const should = probe.getBoundingClientRect().width > input.clientWidth + 1;
+  const should = hasMultipleLines || probe.getBoundingClientRect().width > input.clientWidth + 1;
   probe.remove();
   return should;
 }

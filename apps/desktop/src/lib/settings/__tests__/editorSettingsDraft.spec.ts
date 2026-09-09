@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { EDITOR_SETTINGS_DRAFT_KEYS, editorSettingsDraftFromSettings, editorSettingsDraftChanged, editorSettingsPatchFromDraft, normalizeQueryResultMaxRowsDraft, normalizeTableOpenPageSizeDraft, shouldConfirmEditorSettingsDialogClose } from "../editorSettingsDraft";
+import {
+  EDITOR_SETTINGS_DRAFT_KEYS,
+  editorSettingsDraftFromSettings,
+  editorSettingsDraftChanged,
+  editorSettingsDraftPatchFromSettings,
+  editorSettingsPatchFromDraft,
+  normalizeQueryResultMaxRowsDraft,
+  normalizeTableOpenPageSizeDraft,
+  shouldConfirmEditorSettingsDialogClose,
+} from "../editorSettingsDraft";
 import type { EditorSettings } from "@/stores/settingsStore";
 
 const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
@@ -466,5 +475,28 @@ describe("editorSettingsPatchFromDraft - tabLayout", () => {
     const base = editorSettingsDraftFromSettings(settings);
     const patch = editorSettingsPatchFromDraft(draft, base);
     expect(patch.tabLayout).toBeUndefined();
+  });
+});
+
+describe("editorSettingsDraftPatchFromSettings", () => {
+  it("contains exactly the keys present in the input", () => {
+    const patch = editorSettingsDraftPatchFromSettings({ wordWrap: true, pageSize: 200 } as Partial<EditorSettings>);
+    expect(Object.keys(patch).sort()).toEqual(["pageSize", "wordWrap"]);
+    expect(patch.wordWrap).toBe(true);
+    expect(patch.pageSize).toBe(200);
+  });
+
+  it("normalizes imported values per key", () => {
+    const patch = editorSettingsDraftPatchFromSettings({ pageSize: 999999 } as Partial<EditorSettings>);
+    expect(patch.pageSize).toBe(normalizeTableOpenPageSizeDraft(999999));
+  });
+
+  it("is the base for the settings import path in the dialog", () => {
+    // The import must patch only imported keys into the edit refs; rebuilding
+    // the whole draft would drop unsaved state the file does not cover (e.g. a
+    // half-filled table-column template row, which serialization drops).
+    expect(settingsDialogSource).toContain("const patch = editorSettingsDraftPatchFromSettings(imported);");
+    expect(settingsDialogSource).toContain("applyEditorSettingsKeysToRefs(patch as EditorSettingsDraft, Object.keys(patch) as EditorSettingsDraftKey[]);");
+    expect(settingsDialogSource).not.toContain("const merged = editorSettingsDraftFromSettings({");
   });
 });

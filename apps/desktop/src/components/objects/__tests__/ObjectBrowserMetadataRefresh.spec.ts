@@ -20,7 +20,7 @@ describe("ObjectBrowser table metadata refresh", () => {
   it("refreshes the object list and the open table-info tab from the toolbar", () => {
     const refresh = functionBody("refresh");
 
-    expect(refresh).toContain("void reload();");
+    expect(refresh).toContain("void reload({ preserveExistingRows: true });");
     expect(refresh).toContain("void refreshActiveTableInfo();");
     expect(source).toContain('@click="refresh"');
   });

@@ -717,6 +717,14 @@ export async function loadMaxAgentTurns(): Promise<number> {
   return invoke("load_max_agent_turns");
 }
 
+export async function loadSqlFileUploadMaxBytes(): Promise<number> {
+  return 200 * 1024 * 1024;
+}
+
+export async function saveSqlFileUploadMaxMb(_sqlFileUploadMaxMb: number): Promise<void> {
+  // No-op on desktop: SQL files are streamed directly from disk, no server upload cap applies.
+}
+
 export async function saveMaxAgentTurns(maxAgentTurns: number): Promise<void> {
   return invoke("save_max_agent_turns", { maxAgentTurns });
 }
@@ -738,6 +746,27 @@ export async function loadEditorSettings(): Promise<unknown | null> {
 
 export async function saveEditorSettings(settings: unknown): Promise<void> {
   return invoke("save_editor_settings", { settings });
+}
+
+export interface BackgroundImageInfo {
+  storedPath: string;
+  fileName: string;
+}
+
+export async function saveBackgroundImage(sourcePath: string): Promise<BackgroundImageInfo> {
+  return invoke("save_background_image", { sourcePath });
+}
+
+export async function clearBackgroundImage(storedPath: string): Promise<void> {
+  return invoke("clear_background_image", { storedPath });
+}
+
+export async function readBackgroundImage(storedPath: string): Promise<string> {
+  return invoke("read_background_image", { storedPath });
+}
+
+export async function checkBackgroundImage(storedPath: string): Promise<boolean> {
+  return invoke("check_background_image", { storedPath });
 }
 
 export async function loadOpenTabsState(): Promise<OpenTabsStatePayload | null> {
@@ -949,16 +978,16 @@ export type ExternalSqlFileStatus = { kind: "present"; sizeBytes: number; modifi
 
 export type ExternalSqlFileWriteResult = { kind: "written"; version: ExternalSqlFileVersion } | { kind: "conflict"; currentVersion: ExternalSqlFileVersion } | { kind: "missing" };
 
-export async function readExternalSqlFileSnapshot(path: string): Promise<ExternalSqlFileSnapshot> {
-  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path });
+export async function readExternalSqlFileSnapshot(path: string, maxSizeBytes?: number): Promise<ExternalSqlFileSnapshot> {
+  const result = await invoke<{ kind: "content"; content: string; version: ExternalSqlFileVersion } | { kind: "tooLarge"; sizeBytes: number; maxSizeBytes: number }>("read_external_sql_file", { path, maxSizeBytes });
   if (result.kind === "tooLarge") {
     throw new ExternalSqlFileTooLargeError(result.sizeBytes, result.maxSizeBytes);
   }
   return { content: result.content, version: result.version };
 }
 
-export async function readExternalSqlFile(path: string): Promise<string> {
-  return (await readExternalSqlFileSnapshot(path)).content;
+export async function readExternalSqlFile(path: string, maxSizeBytes?: number): Promise<string> {
+  return (await readExternalSqlFileSnapshot(path, maxSizeBytes)).content;
 }
 
 export async function inspectExternalSqlFile(path: string): Promise<ExternalSqlFileStatus> {
@@ -1009,6 +1038,8 @@ export interface AiChatMessage {
   mentions?: unknown[];
   reasoning?: string;
   kind?: "contextSummary" | "writeSqlConfirmation" | "productionWriteBlocked";
+  /** Set on the assistant message whose generation failed; persisted (mirrors dbx-core `AiChatMessage.failed`). */
+  failed?: boolean;
 }
 
 export interface AiConversation {
@@ -1840,11 +1871,23 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
   return invoke("analyze_editable_query_editability", { sql });
 }
 
+/// A server-side check that must pass before `statements` may run. Without a
+/// primary key a row is addressed by matching every column value, so the same
+/// predicate can match rows outside the loaded page; `sql` counts the matches
+/// of a predicate the save actually sends, and the save must be refused with
+/// `message` unless the returned count is at most `maxMatchedRows`.
+export interface DataGridSaveGuard {
+  sql: string;
+  maxMatchedRows: number;
+  message: string;
+}
+
 export interface DataGridSavePreparation {
   validationError?: string;
   statements: string[];
   rollbackStatements: string[];
   executionSchema?: string;
+  keylessGuards?: DataGridSaveGuard[];
 }
 
 export async function prepareDataGridSave(options: DataGridSaveStatementOptions, driverProfile?: string): Promise<DataGridSavePreparation> {
@@ -4591,11 +4634,18 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
+  dropTargetBeforeCreate: boolean;
+  dropTargetConfirmed: boolean;
 }
 
 export interface TransferOwnershipPreview {
   missingOwners: string[];
   targetOwner: string;
+  rebuild?: {
+    sql: string;
+    tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
+    warnings: string[];
+  };
 }
 
 export interface TransferProgress {
@@ -5041,6 +5091,10 @@ export async function cancelDatabaseExport(exportId: string): Promise<void> {
 
 export async function clearDatabaseExportCancellation(exportId: string): Promise<void> {
   await invoke("clear_database_export_cancellation", { exportId });
+}
+
+export async function databaseExportDestinationNeedsConfirmation(directory: string): Promise<boolean> {
+  return invoke("database_export_destination_needs_confirmation", { directory });
 }
 
 export async function recordDatabaseExportDestination(directory: string): Promise<void> {

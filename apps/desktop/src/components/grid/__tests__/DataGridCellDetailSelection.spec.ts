@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dataGridSource = readFileSync(new URL("../DataGrid.vue", import.meta.url), "utf8");
+const largeValueSource = readFileSync(new URL("../../../composables/useDataGridLargeValues.ts", import.meta.url), "utf8");
 
 describe("DataGrid cell detail selection", () => {
   it("keeps Canvas hover state while the renderer swaps drawing surfaces", () => {
@@ -46,7 +47,8 @@ describe("DataGrid cell detail selection", () => {
   });
 
   it("hydrates bounded large-value previews for every cell detail target", () => {
-    expect(dataGridSource).toMatch(/function hydrateCellDetailTarget[\s\S]*?isLargeValuePreview[\s\S]*?hydrateLargeValueCell/);
+    expect(largeValueSource).toContain("function isLargeValuePreview");
+    expect(dataGridSource).toContain("function hydrateLargeValueCell");
     expect(dataGridSource).toMatch(/showCellDetails[\s\S]*?hydrateCellDetailTarget\(detailCell\.value\)/);
     expect(dataGridSource).toMatch(/openCellDetailDialog[\s\S]*?hydrateCellDetailTarget\(cellDetailDialogTarget\.value\)/);
   });

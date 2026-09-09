@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -198,6 +199,7 @@ fn resolve_requested_export_column_types(
     requested_column_types: &[Option<String>],
     table_columns: &[crate::db::ColumnInfo],
 ) -> Vec<Option<String>> {
+    let table_columns_by_name = table_columns_by_name(table_columns);
     requested_columns
         .iter()
         .enumerate()
@@ -208,26 +210,29 @@ fn resolve_requested_export_column_types(
                 .flatten()
                 .filter(|column_type| !column_type.trim().is_empty())
                 .or_else(|| {
-                    table_columns
-                        .iter()
-                        .find(|column| column.name.eq_ignore_ascii_case(requested))
-                        .map(|column| column.data_type.clone())
+                    table_columns_by_name.get(&requested.to_ascii_lowercase()).map(|column| column.data_type.clone())
                 })
         })
         .collect()
+}
+
+fn table_columns_by_name(table_columns: &[crate::db::ColumnInfo]) -> HashMap<String, &crate::db::ColumnInfo> {
+    let mut by_name = HashMap::with_capacity(table_columns.len());
+    for column in table_columns {
+        by_name.entry(column.name.to_ascii_lowercase()).or_insert(column);
+    }
+    by_name
 }
 
 fn resolve_requested_export_column_extras(
     requested_columns: &[String],
     table_columns: &[crate::db::ColumnInfo],
 ) -> Vec<Option<String>> {
+    let table_columns_by_name = table_columns_by_name(table_columns);
     requested_columns
         .iter()
         .map(|requested| {
-            table_columns
-                .iter()
-                .find(|column| column.name.eq_ignore_ascii_case(requested))
-                .and_then(|column| column.extra.clone())
+            table_columns_by_name.get(&requested.to_ascii_lowercase()).and_then(|column| column.extra.clone())
         })
         .collect()
 }

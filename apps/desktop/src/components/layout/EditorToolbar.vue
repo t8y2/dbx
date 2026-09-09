@@ -87,6 +87,7 @@ const toolbarTier = ref<EditorToolbarTier>(0);
 // Available width when the current tier was condensed into; anchors the
 // step-down hysteresis so a static narrow layout cannot oscillate.
 const condensedAtWidth = ref(0);
+const expandedTierRequiredWidths: Partial<Record<EditorToolbarTier, number>> = {};
 let toolbarResizeObserver: ResizeObserver | undefined;
 
 function measureToolbarTier() {
@@ -99,9 +100,12 @@ function measureToolbarTier() {
     availableWidth: element.clientWidth,
     contentWidth: element.scrollWidth,
     condensedAtWidth: condensedAtWidth.value,
+    expandedTierRequiredWidths,
   });
   if (next !== toolbarTier.value) {
     if (next > toolbarTier.value) {
+      const currentTier = toolbarTier.value;
+      expandedTierRequiredWidths[currentTier] = Math.max(expandedTierRequiredWidths[currentTier] ?? 0, element.scrollWidth);
       condensedAtWidth.value = element.clientWidth;
     }
     toolbarTier.value = next;

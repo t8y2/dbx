@@ -1379,6 +1379,8 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         target_catalog: None,
         tables: vec![source_table.clone()],
         create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
         content: dbx_core::transfer::TransferContent::default(),
         objects: Vec::new(),
         mode: dbx_core::transfer::TransferMode::Append,
@@ -1398,6 +1400,7 @@ async fn live_sqlserver_transfer_table_skips_rowversion_insert_column() {
         &target_pool_key,
         &std::collections::HashMap::new(),
         &mut Vec::new(),
+        None,
         |_| {},
     )
     .await;

@@ -130,6 +130,29 @@ pub async fn load_max_retries(State(state): State<Arc<WebState>>) -> Result<Json
     state.app.storage.load_max_retries().await.map(Json).map_err(AppError::from)
 }
 
+fn sql_file_upload_max_bytes_from_mb(max_mb: u32) -> u64 {
+    u64::from(max_mb).saturating_mul(1024 * 1024)
+}
+
+pub async fn load_sql_file_upload_max_bytes(State(state): State<Arc<WebState>>) -> Result<Json<u64>, AppError> {
+    let max_mb = state.app.storage.load_sql_file_upload_max_mb().await.map_err(AppError::from)?;
+    Ok(Json(sql_file_upload_max_bytes_from_mb(max_mb)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSqlFileUploadMaxMbRequest {
+    pub sql_file_upload_max_mb: u32,
+}
+
+pub async fn save_sql_file_upload_max_mb(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<SaveSqlFileUploadMaxMbRequest>,
+) -> Result<Json<()>, AppError> {
+    state.app.storage.save_sql_file_upload_max_mb(body.sql_file_upload_max_mb).await.map_err(AppError::from)?;
+    Ok(Json(()))
+}
+
 pub async fn save_max_retries(
     State(state): State<Arc<WebState>>,
     Json(body): Json<SaveMaxRetriesRequest>,
@@ -163,7 +186,12 @@ fn decrypt_config_payload(payload: &EncryptedConfigPayload, passphrase: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{decrypt_config_payload, EncryptedConfigPayload};
+    use super::{decrypt_config_payload, sql_file_upload_max_bytes_from_mb, EncryptedConfigPayload};
+
+    #[test]
+    fn preserves_four_gib_sql_file_upload_limit() {
+        assert_eq!(sql_file_upload_max_bytes_from_mb(4096), 4096_u64 * 1024 * 1024);
+    }
 
     fn exported_browser_payload() -> EncryptedConfigPayload {
         EncryptedConfigPayload {

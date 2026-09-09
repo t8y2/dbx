@@ -65,8 +65,11 @@ test("AI request failures use localized backend diagnostics", () => {
   // request was still in flight, writing the failure text doesn't throw and silently
   // swallow the real error. See issue #5941. (`runMessages` is the send pipeline's
   // array — `messages.value` for a visible conversation, the run's own array for a
-  // detached/background run.)
-  assert.match(source, /const msg = runMessages\[assistantIdx\];\s*\n\s*if \(msg\) msg\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`;/);
+  // detached/background run.) The failure flag rides along with the prefix text
+  // (#6467 PR3): the export derives its failure marker from this state.
+  assert.match(source, /const msg = runMessages\[assistantIdx\];\s*\n\s*if \(msg\) \{/);
+  assert.match(source, /msg\.content = `\$\{t\("ai\.requestFailed"\)\}\\n\\n\$\{translateBackendError\(t, message\)\}`;/);
+  assert.match(source, /msg\.failed = true;/);
 });
 
 test("AI analysis export keeps the connection that produced each assistant response", () => {

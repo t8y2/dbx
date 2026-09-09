@@ -22,6 +22,7 @@ import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
 import { insertValueHintColumnNames } from "@/lib/sql/insertValueHintColumns";
 import { canFormatSqlForDatabaseType, formatSqlForDisplay, formatSqlForEditing, compressSqlText, sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sql/sqlFormatter";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { detectAndFormatStructured } from "@/lib/sql/autoFormat";
 import { enabledSqlParameterSyntaxes, resolveSqlVariableSyntaxToggles } from "@/lib/sql/sqlVariableSyntax";
 import { blankLineDeletionChanges, replaceSelectedEditorText } from "@/lib/editor/queryEditorTextEdits";
@@ -95,7 +96,7 @@ import {
 import { buildHoverTableSql, ddlForHoverPreview, hoverTableMatchesScope, normalizeAlignedSqlWhitespace, quoteIdentifier, quoteQualifiedName, reformatHoverDdl, scopeHoverTables, type HoverTableScope } from "@/lib/editor/hoverTableSql";
 import { constrainSqlHoverLayout } from "@/lib/editor/sqlHoverLayout";
 import { createHoverSearch, type HoverSearchController } from "@/lib/editor/sqlHoverSearch";
-import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange } from "@/lib/sql/sqlDiagnostics";
+import { lineColumnToOffset, sqlErrorDecorationRange as resolveSqlErrorDecorationRange, sqlErrorSqlMatchesEditor } from "@/lib/sql/sqlDiagnostics";
 import { analyzeMysqlRoutineSyntax, supportsMysqlRoutineSyntaxDiagnostics } from "@/lib/sql/mysqlRoutineSyntaxDiagnostics";
 import { buildOracleSyntaxDiagnostics } from "@/lib/sql/oracleSyntaxDiagnostics";
 import {
@@ -178,6 +179,8 @@ import type { CompletionAssistantObjectKind, ColumnInfo, DatabaseType, IndexInfo
 
 const props = defineProps<{
   modelValue: string;
+  /** Identity of the tab owning the document. Changing it swaps in that tab's cached editor state (fresh undo history on first visit). */
+  tabId?: string;
   connectionId?: string;
   catalog?: string;
   database?: string;
@@ -241,6 +244,7 @@ const emit = defineEmits<{
   closeColumnPanel: [];
   viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
   selectionStateChange: [selection: { anchor: number; head: number }];
+  editorStateFlushed: [];
   sendSelectionToAi: [sql: string];
 }>();
 
@@ -557,6 +561,8 @@ let codeMirrorCloseBracketsKeymap: readonly import("@codemirror/view").KeyBindin
 let readOnlyComp: import("@codemirror/state").Compartment | null = null;
 let runGutterComp: import("@codemirror/state").Compartment | null = null;
 let runKeymapComp: import("@codemirror/state").Compartment | null = null;
+let historyResetComp: import("@codemirror/state").Compartment | null = null;
+let codeMirrorHistory: typeof import("@codemirror/commands").history | null = null;
 let defaultKeymapComp: import("@codemirror/state").Compartment | null = null;
 let completionComp: import("@codemirror/state").Compartment | null = null;
 let diagnosticComp: import("@codemirror/state").Compartment | null = null;
@@ -2991,7 +2997,9 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
           // (the same one the sidebar/object-source viewers use). Tables keep
           // the aligned column layout from reformatHoverDdl.
           const isViewObject = objectMetadataRequest.objectType === "VIEW" || objectMetadataRequest.objectType === "MATERIALIZED_VIEW";
-          sqlContent = isViewObject ? await formatSqlForDisplay(rawDdl, props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType), settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+          const formatDialect = props.formatDialect ?? sqlFormatDialectForDbType(props.databaseType);
+          const formatted = isViewObject ? await formatSqlForDisplay(rawDdl, formatDialect, settingsStore.editorSettings.sqlFormatter) : reformatHoverDdl(rawDdl, quoteQualifiedName(hoverQualifiedName));
+          sqlContent = settingsStore.editorSettings.generateSqlQuoteIdentifiers ? formatted : omitDdlIdentifierQuotes(formatted, formatDialect);
         }
       } catch (error) {
         console.warn(`[DBX] Failed to load table DDL for ${hoverDatabase}.${hoverSchema}.${table.name}:`, error);
@@ -3070,7 +3078,7 @@ async function resolveSqlHoverTooltip(currentView: EditorViewType, pos: number) 
 
 function sqlErrorDecorationRange(currentState: import("@codemirror/state").EditorState) {
   if (!props.executionError) return [];
-  if (!props.executionErrorSql || props.executionErrorSql !== currentState.doc.toString()) return [];
+  if (!props.executionErrorSql || !sqlErrorSqlMatchesEditor(currentState.doc.toString(), props.executionErrorSql)) return [];
   const range = resolveSqlErrorDecorationRange(currentState.doc.toString(), props.executionError);
   if (!range) return [];
   return [
@@ -5632,6 +5640,7 @@ onMounted(async () => {
   readOnlyComp = new Compartment();
   runGutterComp = new Compartment();
   runKeymapComp = new Compartment();
+  historyResetComp = new Compartment();
   defaultKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
@@ -5659,6 +5668,7 @@ onMounted(async () => {
   codeMirrorMoveLineDown = moveLineDown;
   codeMirrorUndo = undo;
   codeMirrorRedo = redo;
+  codeMirrorHistory = history;
   codeMirrorSelectAll = selectAll;
   codeMirrorInsertNewlineKeepIndent = insertNewlineKeepIndent;
   codeMirrorToggleLineComment = toggleLineComment;
@@ -6122,7 +6132,7 @@ onMounted(async () => {
       currentStatementFrameExtension,
       highlightActiveLineGutter(),
       highlightSpecialChars(),
-      history(),
+      historyResetComp.of(history()),
       foldGutter({
         markerDOM(open: boolean) {
           const span = document.createElement("span");
@@ -6657,18 +6667,92 @@ watch(
   },
 );
 
-watch(
-  () => props.modelValue,
-  (val) => {
-    if (view.value && val !== view.value.state.doc.toString()) {
-      if (isEditorComposing(view.value)) return;
-      view.value.dispatch({
-        changes: { from: 0, to: view.value.state.doc.length, insert: val },
-      });
-      scheduleSemanticDiagnostics();
+// A single editor instance serves every tab, so the document swap on tab
+// switches must not push "previous tab's content → new content" onto a shared
+// undo history (one undo in the new tab restored the old tab's text). Each
+// tab's editor state — including its undo history — is cached per tabId and
+// reinstalled with setState; first-seen tabs get the document swapped in with a
+// transaction excluded from history, and the history extension is dropped and
+// re-added in two separate transactions (a compartment reconfigure alone keeps
+// the old field value) so the previous tab's edits cannot leak in.
+const tabStateCache = new Map<string, import("@codemirror/state").EditorState>();
+const MAX_CACHED_TAB_STATES = 16;
+
+function swapEditorDocument(doc: string) {
+  const currentView = view.value;
+  if (!currentView || !historyResetComp || !codeMirrorHistory) return;
+  if (doc !== currentView.state.doc.toString()) {
+    currentView.dispatch({
+      changes: { from: 0, to: currentView.state.doc.length, insert: doc },
+      annotations: Transaction.addToHistory.of(false),
+    });
+  }
+  currentView.dispatch({ effects: historyResetComp.reconfigure([]) });
+  currentView.dispatch({ effects: historyResetComp.reconfigure(codeMirrorHistory()) });
+  scheduleSemanticDiagnostics();
+}
+
+function activateTabDocument(prevTabId: string | undefined, tabId: string | undefined, doc: string) {
+  const currentView = view.value;
+  if (!currentView) return;
+  if (prevTabId !== undefined) {
+    tabStateCache.set(prevTabId, currentView.state);
+    if (tabStateCache.size > MAX_CACHED_TAB_STATES) {
+      const oldest = tabStateCache.keys().next();
+      if (!oldest.done) tabStateCache.delete(oldest.value);
     }
-  },
-);
+  }
+  const cached = tabId === undefined ? undefined : tabStateCache.get(tabId);
+  if (!cached) {
+    swapEditorDocument(doc);
+    // First activation in this editor instance (or a cache-evicted tab, e.g.
+    // beyond MAX_CACHED_TAB_STATES): restore the tab's saved cursor and scroll
+    // position exactly like the cached-state branch, otherwise the swapped-in
+    // document keeps whatever scroll offset the dispatch left behind (#8374).
+    // A brand-new tab has no saved state, so reset it instead of falling back
+    // to the previous tab's latest position (#8378).
+    restoreEditorSelection(props.initialSelection ?? { anchor: 0, head: 0 });
+    restoreEditorViewport(props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 });
+    return;
+  }
+  // setState swaps doc, selection, undo history and all fields at once, but it
+  // is not a transaction, so update-listener side effects are re-run manually.
+  currentView.setState(cached);
+  // Compartments in the restored state may lag behind settings that changed
+  // while another tab was active; re-sync them from current values.
+  void applyEditorAppearance();
+  applyEditorShortcutKeymaps();
+  applyEditorIndentExtension();
+  applyEditorCompletionExtension();
+  if (doc !== currentView.state.doc.toString()) {
+    // Content changed while the tab was inactive (external file change, AI
+    // edit, another split group): apply it as a regular undoable edit.
+    currentView.dispatch({
+      changes: { from: 0, to: currentView.state.doc.length, insert: doc },
+    });
+  }
+  searchPanelRef.value?.scheduleDocumentSearchUpdate();
+  invalidateSemanticDiagnosticsForDocumentChange();
+  restoreEditorSelection();
+  restoreEditorViewport();
+  scheduleSemanticDiagnostics();
+}
+
+watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) => {
+  if (!view.value) return;
+  if (tabId !== prevTabId) {
+    activateTabDocument(prevTabId, tabId, val);
+    if (props.autoFocus) restoreEditorFocus();
+    return;
+  }
+  if (val !== view.value.state.doc.toString()) {
+    if (isEditorComposing(view.value)) return;
+    view.value.dispatch({
+      changes: { from: 0, to: view.value.state.doc.length, insert: val },
+    });
+    scheduleSemanticDiagnostics();
+  }
+});
 
 watch(
   () => props.formatRequestId,
@@ -6782,75 +6866,97 @@ function getCurrentCustomThemeColors() {
   return activeTheme?.colors ?? settings.customThemeColors;
 }
 
-// Reactively apply editor settings changes
+// Reactively apply editor settings changes. Also called after restoring a
+// cached per-tab state, whose compartments predate any settings changed while
+// another tab was active.
+async function applyEditorAppearance() {
+  const ss = queryEditorAppearanceSettings.value;
+  if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    return;
+  }
+  if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
+    liveFontSize.value = ss.fontSize;
+  }
+  syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
+  syncEditorDiagnosticCssVars();
+  const themeColors = getCurrentCustomThemeColors();
+  const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
+  if (!view.value || !codeMirrorTheme || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
+    return;
+  }
+  view.value.dispatch({
+    effects: [
+      codeMirrorTheme.reconfigure(themeExt),
+      wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
+      lineNumbersComp.reconfigure(lineNumbersExtension(ss.showLineNumbers)),
+      vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
+      closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
+      runGutterComp.reconfigure(runStatementGutterExtension()),
+      runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
+    ],
+  });
+}
+
 watch(
   [queryEditorAppearanceSettings, () => isDark.value, () => themePalette.value, editorThemeAppearance],
-  async ([ss]) => {
-    if (!view.value || !codeMirrorTheme || !fontThemeComp || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
-      return;
-    }
-    if (!isGestureZooming.value && !zoomCommitScheduler.hasPendingCommit() && liveFontSize.value !== ss.fontSize) {
-      liveFontSize.value = ss.fontSize;
-    }
-    syncEditorFontCssVars(liveFontSize.value, ss.fontFamily);
-    syncEditorDiagnosticCssVars();
-    const themeColors = getCurrentCustomThemeColors();
-    const [themeExt] = await Promise.all([loadEditorTheme(ss.theme, editorThemeAppearance(), themeColors, themePalette.value), ss.vimModeEnabled ? ensureCodeMirrorVim() : Promise.resolve(false)]);
-    if (!view.value || !codeMirrorTheme || !wordWrapComp || !lineNumbersComp || !vimModeComp || !closeBracketsComp || !runGutterComp || !runKeymapComp || !editorViewModule) {
-      return;
-    }
-    view.value.dispatch({
-      effects: [
-        codeMirrorTheme.reconfigure(themeExt),
-        wordWrapComp.reconfigure(props.forceWordWrap || ss.wordWrap ? editorViewModule.EditorView.lineWrapping : []),
-        lineNumbersComp.reconfigure(lineNumbersExtension(ss.showLineNumbers)),
-        vimModeComp.reconfigure(vimModeExtension(settingsStore.editorSettings.vimModeEnabled)),
-        closeBracketsComp.reconfigure(closeBracketsExtension(settingsStore.editorSettings.autoCloseBrackets)),
-        runGutterComp.reconfigure(runStatementGutterExtension()),
-        runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)),
-      ],
-    });
+  () => {
+    void applyEditorAppearance();
   },
   { deep: true },
 );
+
+// Re-sync shortcut-driven keymap compartments; shared with per-tab state restore.
+function applyEditorShortcutKeymaps() {
+  if (!view.value || !editorViewModule) return;
+  const effects = [];
+  if (defaultKeymapComp) {
+    effects.push(defaultKeymapComp.reconfigure(defaultKeymapExtension()));
+  }
+  if (runKeymapComp) {
+    effects.push(runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)));
+  }
+  if (effects.length > 0) {
+    view.value.dispatch({ effects });
+  }
+}
 
 watch(
   () => [settingsStore.editorSettings.shortcuts, settingsStore.editorSettings.sqlShortcuts],
   () => {
-    if (!view.value || !editorViewModule) return;
-    const effects = [];
-    if (defaultKeymapComp) {
-      effects.push(defaultKeymapComp.reconfigure(defaultKeymapExtension()));
-    }
-    if (runKeymapComp) {
-      effects.push(runKeymapComp.reconfigure(runKeymapExtension(editorViewModule.keymap)));
-    }
-    if (effects.length > 0) {
-      view.value.dispatch({ effects });
-    }
+    applyEditorShortcutKeymaps();
   },
   { deep: true },
 );
 
+// Re-sync the indent compartment; shared with per-tab state restore.
+function applyEditorIndentExtension() {
+  if (!view.value || !indentComp) return;
+  view.value.dispatch({ effects: indentComp.reconfigure(indentExtension()) });
+}
+
 watch(
   () => [settingsStore.editorSettings.sqlFormatter.tabWidth, settingsStore.editorSettings.sqlFormatter.useTabs],
   () => {
-    if (!view.value || !indentComp) return;
-    view.value.dispatch({ effects: indentComp.reconfigure(indentExtension()) });
+    applyEditorIndentExtension();
   },
 );
+
+// Re-sync the completion compartment; shared with per-tab state restore.
+function applyEditorCompletionExtension() {
+  completionEpoch++;
+  if (!view.value || !completionComp || !buildSqlCompletionExtension) return;
+  view.value.dispatch({
+    effects: completionComp.reconfigure(buildSqlCompletionExtension()),
+  });
+  if (codeMirrorCompletionStatus?.(view.value.state) === "active") {
+    codeMirrorStartCompletion?.(view.value);
+  }
+}
 
 watch(
   () => [settingsStore.editorSettings.snippets, settingsStore.editorSettings.sortCompletionColumnsAlphabetically, settingsStore.editorSettings.selectFirstCompletionOnOpen],
   () => {
-    completionEpoch++;
-    if (!view.value || !completionComp || !buildSqlCompletionExtension) return;
-    view.value.dispatch({
-      effects: completionComp.reconfigure(buildSqlCompletionExtension()),
-    });
-    if (codeMirrorCompletionStatus?.(view.value.state) === "active") {
-      codeMirrorStartCompletion?.(view.value);
-    }
+    applyEditorCompletionExtension();
   },
   { deep: true },
 );
@@ -6880,6 +6986,7 @@ function pauseQueryEditorBackgroundWork() {
   cancelBatchColumnSelectionRefresh();
   flushEditorViewport();
   flushEditorSelection();
+  emit("editorStateFlushed");
   clearTableNavigationHover();
   clearPendingCompletionEnter();
   clearPendingCompletionTab();
@@ -6961,10 +7068,10 @@ function flushEditorSelection() {
   if (latestSelection) emitEditorSelection(latestSelection);
 }
 
-function restoreEditorSelection() {
-  const selection = normalizedEditorSelection(props.initialSelection ?? latestSelection, props.modelValue.length);
-  if (!view.value || !selection) return;
-  view.value.dispatch({ selection });
+function restoreEditorSelection(selection = props.initialSelection ?? latestSelection) {
+  const normalizedSelection = normalizedEditorSelection(selection, props.modelValue.length);
+  if (!view.value || !normalizedSelection) return;
+  view.value.dispatch({ selection: normalizedSelection });
 }
 
 function restoreEditorFocus() {
@@ -7003,8 +7110,7 @@ function flushEditorViewport() {
   if (latestViewport) emitEditorViewport(latestViewport);
 }
 
-function restoreEditorViewport() {
-  const viewport = props.initialViewport ?? latestViewport;
+function restoreEditorViewport(viewport = props.initialViewport ?? latestViewport) {
   if (!view.value || !viewport) return;
   const restoreScroll = () => {
     if (!view.value) return;

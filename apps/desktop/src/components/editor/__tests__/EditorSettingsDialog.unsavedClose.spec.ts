@@ -13,7 +13,8 @@ const dialogSource = readFileSync(new URL("../EditorSettingsDialog.vue", import.
 // the update itself had reset their settings.
 describe("EditorSettingsDialog unsaved-changes close guard", () => {
   it("imports the shared unsaved-changes decision helper", () => {
-    expect(dialogSource).toContain('shouldConfirmEditorSettingsDialogClose, type EditorSettingsDraft } from "@/lib/settings/editorSettingsDraft"');
+    // Keep in sync with the (oxfmt-formatted) multi-line import block in EditorSettingsDialog.vue.
+    expect(dialogSource).toContain('shouldConfirmEditorSettingsDialogClose,\n  type EditorSettingsDraft,\n  type EditorSettingsDraftKey,\n} from "@/lib/settings/editorSettingsDraft"');
   });
 
   it("routes every close path through the same guard instead of emitting update:open directly", () => {

@@ -34,7 +34,6 @@ import {
   resolveNacosConsoleUrl,
   sanitizeNacosConfigFileNameSegment,
   splitNacosContentLiteralMatches,
-  summarizeNacosConfigDiff,
 } from "@/lib/nacos/nacosAdmin";
 
 describe("nacosAdmin helpers", () => {
@@ -185,21 +184,6 @@ describe("nacosAdmin helpers", () => {
       contextPath: "/nacos",
     });
     expect(resolveRNacosOpenApiFallback("http://rnacos.example:8848", "/nacos")).toBeNull();
-  });
-
-  it("summarizes config diffs", () => {
-    const diff = summarizeNacosConfigDiff("a\nb", "a\nc\nd");
-    expect(diff.changed).toBe(true);
-    expect(diff.removedLines).toBe(1);
-    expect(diff.addedLines).toBe(2);
-    expect(diff.preview).toContain("- b");
-    expect(diff.preview).toContain("+ c");
-  });
-
-  it("uses the same terminal newline semantics for diff summaries", () => {
-    expect(summarizeNacosConfigDiff("aa", "aa\nbb")).toMatchObject({ changed: true, addedLines: 1, removedLines: 0 });
-    expect(summarizeNacosConfigDiff("aa", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
-    expect(summarizeNacosConfigDiff("aa\r\n", "aa\n")).toEqual({ changed: false, addedLines: 0, removedLines: 0, preview: "No content changes." });
   });
 
   it("builds side-by-side config diff rows with inline segments", () => {

@@ -35,7 +35,7 @@ export function tableMetaForDataTab(tab: QueryTab | undefined): DataTabTableMeta
   // Keep filters usable when the table identity loaded but its column metadata did not.
   return {
     ...tab.tableMeta,
-    schema: tab.schema,
+    schema: tab.tableMeta?.schema ?? tab.schema,
     tableName,
     columns: (tab.result?.columns ?? []).map(fallbackColumnInfo),
     primaryKeys: tab.tableMeta?.primaryKeys ?? [],

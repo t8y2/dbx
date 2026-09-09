@@ -98,7 +98,7 @@ async fn query_index_rows(pool: &deadpool_postgres::Pool, schema: &str) -> Vec<(
     postgres::execute_query(
         pool,
         &format!(
-            "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = '{}' AND tablename = 'index_transfer' ORDER BY indexname",
+            "SELECT c.relname, pg_get_indexdef(i.indexrelid) FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class t ON t.oid = i.indrelid JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace WHERE n.nspname = '{}' AND t.relname = 'index_transfer' ORDER BY c.relname",
             schema
         ),
     )
@@ -370,6 +370,10 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
                 source_schema
             ),
             format!(
+                "CREATE INDEX \"index_transfer_order_idx\" ON \"{}\".\"index_transfer\" (\"created_at\" DESC NULLS LAST, \"email\", \"status\" NULLS FIRST, lower(\"email\") DESC) INCLUDE (\"id\")",
+                source_schema
+            ),
+            format!(
                 "COMMENT ON INDEX \"{}\".\"index_transfer_status_idx\" IS 'status lookup'",
                 source_schema
             ),
@@ -381,6 +385,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
     )
     .await
     .unwrap();
+    let source_index_rows = query_index_rows(&source_pool, &source_schema).await;
 
     let dir = std::env::temp_dir().join(format!("dbx-live-structure-only-transfer-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -455,6 +460,12 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
     let structure_and_data_index_comment = query_index_comment(&target_pool, &target_schema).await;
 
     let _ = postgres::execute_batch(&target_pool, &[cleanup_sql[1].clone()]).await;
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
     request.content = dbx_core::transfer::TransferContent::StructureOnly;
     transfer_postgres_schema_dependencies(&state, &request, &source_pool_key, &target_pool_key, |_| {}).await.unwrap();
     let structure_only_result = transfer_table(
@@ -494,6 +505,7 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
             "index_transfer_email_lower_idx",
             "index_transfer_created_at_partial_idx",
             "index_transfer_status_include_idx",
+            "index_transfer_order_idx",
         ] {
             assert!(names.contains(&expected), "missing {expected}; target indexes: {names:?}");
         }
@@ -512,9 +524,33 @@ async fn live_postgres_structure_only_preserves_table_indexes() {
             rows.iter().any(|(name, definition)| name == "index_transfer_status_include_idx" && definition.contains("INCLUDE")),
             "target indexes: {rows:?}"
         );
+        assert!(
+            rows.iter().any(|(name, definition)| name == "index_transfer_order_idx"
+                && definition.contains("created_at DESC NULLS LAST")
+                && definition.contains("status NULLS FIRST")
+                && definition.contains("lower(email) DESC")
+                && definition.contains("INCLUDE (id)")),
+            "target indexes: {rows:?}"
+        );
     };
     assert_indexes(&structure_and_data_index_rows);
     assert_indexes(&structure_only_index_rows);
+    let source_order_definition = source_index_rows
+        .iter()
+        .find(|(name, _)| name == "index_transfer_order_idx")
+        .map(|(_, definition)| definition.as_str())
+        .expect("source whole-index definition");
+    for rows in [&structure_and_data_index_rows, &structure_only_index_rows] {
+        let target_order_definition = rows
+            .iter()
+            .find(|(name, _)| name == "index_transfer_order_idx")
+            .map(|(_, definition)| definition.as_str())
+            .expect("target whole-index definition");
+        assert_eq!(
+            source_order_definition.replace(&source_schema, "normalized_schema"),
+            target_order_definition.replace(&target_schema, "normalized_schema")
+        );
+    }
     assert_eq!(structure_and_data_index_comment, Some(json!("status lookup")));
     assert_eq!(structure_only_index_comment, Some(json!("status lookup")));
 }

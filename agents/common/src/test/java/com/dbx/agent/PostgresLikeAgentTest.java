@@ -157,6 +157,34 @@ class PostgresLikeAgentTest {
         assertTrue(index.getIs_unique());
         assertFalse(index.getIs_primary());
         assertEquals("btree", index.getIndex_type());
+        assertTrue(index.getKey_options().isEmpty());
+    }
+
+    @Test
+    void listIndexesPreservesPerKeyOrderingAndSeparatesIncludedColumns() {
+        TestPostgresLikeAgent agent = new TestPostgresLikeAgent(preparedConnection(resultSet(
+            new String[]{
+                "index_name", "index_type", "is_unique", "is_primary", "column_text",
+                "is_expression", "nkeyatts", "key_position", "key_option"
+            },
+            new Object[][]{
+                {"event_order_idx", "btree", false, false, "created_at", false, 4, 1, 1},
+                {"event_order_idx", "btree", false, false, "tenant_id", false, 4, 2, 0},
+                {"event_order_idx", "btree", false, false, "score", false, 4, 3, 2},
+                {"event_order_idx", "btree", false, false, "lower(payload)", true, 4, 4, 3},
+                {"event_order_idx", "btree", false, false, "payload", false, 4, 5, null}
+            }
+        )));
+        agent.connect(new ConnectParams());
+
+        IndexInfo index = agent.listIndexes("public", "event_log").get(0);
+
+        assertEquals(java.util.Arrays.asList("created_at", "tenant_id", "score", "lower(payload)"), index.getColumns());
+        assertEquals(java.util.Arrays.asList(false, false, false, true), index.getKey_is_expression());
+        assertEquals(java.util.Arrays.asList(1, 0, 2, 3), index.getKey_options());
+        assertEquals(java.util.Collections.singletonList("payload"), index.getIncluded_columns());
+        com.google.gson.Gson gson = new com.google.gson.Gson();
+        assertEquals(index, gson.fromJson(gson.toJson(index), IndexInfo.class));
     }
 
     @Test
@@ -174,6 +202,8 @@ class PostgresLikeAgentTest {
         assertTrue(sql.contains("LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0"), sql);
         assertTrue(sql.contains("pg_catalog.pg_get_indexdef(ix.indexrelid, k.n, true)"), sql);
         assertTrue(sql.contains("ix.indisunique AND ix.indisvalid"), sql);
+        assertTrue(sql.contains("ix.indoption[(k.n - 1)::int]"), sql);
+        assertTrue(sql.contains("array_length(ix.indoption, 1) AS nkeyatts"), sql);
     }
 
     @Test

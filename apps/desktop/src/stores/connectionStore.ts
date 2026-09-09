@@ -7793,7 +7793,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return api.listTables(connectionId, database, schema, filter, limit);
   }
 
-  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean } = {}): Promise<SqlCompletionTable[]> {
+  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean; verifySchemaMetadata?: boolean } = {}): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
     // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
@@ -7801,7 +7801,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // second lookup returns the first's stale results. Local lookups below stay
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
-    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}`;
+    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}`;
     const cachedTables = completionTablesCache.value[cacheKey];
     if (cachedTables) {
       const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
@@ -7821,14 +7821,25 @@ export const useConnectionStore = defineStore("connection", () => {
         if (isSchemaAwareDatabase(connectionId)) {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
+            let assistantCompleted = false;
             try {
               results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision);
+              assistantCompleted = true;
             } catch {
               if (schema) {
                 const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
                 results = tableInfosToCompletionTables(tables, schema, catalog);
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
+              }
+            }
+            if (assistantCompleted && schema && options.verifySchemaMetadata) {
+              try {
+                const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
+                results = dedupeCompletionTables([...tableInfosToCompletionTables(tables, schema, catalog), ...results]);
+              } catch {
+                // The completion index still provides a best-effort result when
+                // authoritative metadata is temporarily unavailable.
               }
             }
             if (results.length === 0 && relaxedFilter) {

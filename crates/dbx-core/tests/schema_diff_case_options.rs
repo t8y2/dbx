@@ -29,6 +29,7 @@ fn index(name: &str, columns: &[&str]) -> IndexInfo {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: Vec::new(),
+        key_options: Vec::new(),
         constraint_backed: false,
     }
 }

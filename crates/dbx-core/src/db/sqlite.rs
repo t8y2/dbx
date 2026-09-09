@@ -2494,6 +2494,7 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                key_options: Vec::new(),
                 constraint_backed: false,
             });
         }
@@ -2549,6 +2550,7 @@ pub async fn list_indexes(pool: &SqliteHandle, schema: &str, table: &str) -> Res
                     comment: None,
                     key_is_expression: Vec::new(),
                     column_opclasses: vec![],
+                    key_options: Vec::new(),
                     constraint_backed: false,
                 });
             }

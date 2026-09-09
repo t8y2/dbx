@@ -16,7 +16,7 @@ import (
 )
 
 const sendMessageRequestCode = 10
-const queryMessageNotFoundCode = 208
+const queryMessageNotFoundCode = 22
 
 type messageQueueTarget struct {
 	BrokerName string
@@ -208,9 +208,6 @@ func (a *rocketMQAgent) queryMessageByKey(params map[string]any) (any, error) {
 	messages, err := queryMessagesByKey(ctx, client, config.ConnectTimeout, topic, key, maxNum,
 		int64Value(params, 0, "begin"), int64Value(params, time.Now().UnixMilli(), "end"))
 	if err != nil {
-		if isEmptyMessageQueryError(err) {
-			return emptyMessageQuery(), nil
-		}
 		return nil, err
 	}
 	return messageQueryResult(topic, messages), nil
@@ -296,11 +293,14 @@ func (a *rocketMQAgent) queryMessageByTopic(params map[string]any) (any, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), config.RequestTimeout)
 	defer cancel()
 	maxNum := min(max(1, intValue(params, 32, "maxNum")), 200)
+	beginTimestamp := int64Value(params, 0, "begin")
+	endTimestamp := int64Value(params, time.Now().UnixMilli(), "end")
 	messages, err := client.QueryMessageByTime(ctx, topic,
-		int64Value(params, 0, "begin"), int64Value(params, time.Now().UnixMilli(), "end"), maxNum)
+		beginTimestamp, endTimestamp, maxNum)
 	if err != nil {
 		return nil, err
 	}
+	messages = filterMessagesByStoreTimestamp(messages, beginTimestamp, endTimestamp)
 	return messageQueryResult(topic, messages), nil
 }
 
@@ -491,10 +491,6 @@ func messageQueryResult(topic string, messages []*admin.MessageExt) map[string]a
 	return map[string]any{"messages": rows, "indexLastUpdateTimestamp": int64(0)}
 }
 
-func emptyMessageQuery() map[string]any {
-	return map[string]any{"messages": []map[string]any{}, "indexLastUpdateTimestamp": int64(0)}
-}
-
 func sortMessageRows(messages []map[string]any) {
 	sort.Slice(messages, func(i, j int) bool {
 		leftTime := anyInt64(messages[i]["timestamp"])
@@ -556,9 +552,18 @@ func anyInt64(value any) int64 {
 	}
 }
 
-func isEmptyMessageQueryError(err error) bool {
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "208") || strings.Contains(message, "no message") || strings.Contains(message, "未找到消息")
+func filterMessagesByStoreTimestamp(messages []*admin.MessageExt, beginTimestamp, endTimestamp int64) []*admin.MessageExt {
+	filtered := make([]*admin.MessageExt, 0, len(messages))
+	for _, message := range messages {
+		if beginTimestamp > 0 && message.StoreTimestamp < beginTimestamp {
+			continue
+		}
+		if endTimestamp > 0 && message.StoreTimestamp > endTimestamp {
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+	return filtered
 }
 
 func isReservedMessageProperty(key string) bool {

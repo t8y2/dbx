@@ -116,6 +116,17 @@ describe("EditorGroupTabBar semantic tab groups", () => {
 
   it("remeasures overflow after a single-row group expansion finishes", () => {
     expect(source).toContain('@transitionend.self="handleTabGroupTransitionEnd"');
+    expect(source).toContain(':data-tab-group-id="entry.grouping ? tabGroupId(entry.tab) : undefined"');
+    expect(source).toContain("captureExpandedTabGroupWidths(new Set(pending))");
+    expect(source).toContain("'tab-group-entry--collapsing'");
+    expect(source).toContain("window.setTimeout(() =>");
+    expect(sharedStyles).toContain("@keyframes tab-group-collapse");
+    expect(sharedStyles).toMatch(/\.tab-group-entry--collapsing\s*\{[^}]*animation:\s*tab-group-collapse 140ms ease forwards;/s);
+    expect(source).toContain('entry.style.removeProperty("--tab-group-entry-expanded-width")');
+    expect(sharedStyles).toContain("max-width: var(--tab-group-entry-expanded-width, 100%)");
+    expect(sharedStyles).toMatch(/\.tab-group-entry\[data-tab-group-id\] > \.tab-group-tab\s*\{[^}]*width:\s*var\(--tab-group-entry-expanded-width, auto\);[^}]*min-width:\s*var\(--tab-group-entry-expanded-width, max-content\) !important;[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
+    expect(sharedStyles).not.toContain(".tab-group-entry--collapsed .tab-group-tab--collapsed");
     const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
     expect(handler).toContain('event.propertyName !== "max-width"');
     expect(handler).toContain("refreshHorizontalTabOverflow();");

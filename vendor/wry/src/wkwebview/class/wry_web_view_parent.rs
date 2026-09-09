@@ -6,10 +6,10 @@
 use objc2::DefinedClass;
 use objc2::{define_class, msg_send, rc::Retained, MainThreadOnly};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplication, NSEvent, NSView, NSWindow, NSWindowButton};
+use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSView, NSWindow, NSWindowButton};
 use objc2_foundation::MainThreadMarker;
 #[cfg(target_os = "macos")]
-use objc2_foundation::NSRect;
+use objc2_foundation::{NSArray, NSRect};
 #[cfg(target_os = "ios")]
 use objc2_ui_kit::UIView as NSView;
 
@@ -28,11 +28,39 @@ define_class!(
     #[cfg(target_os = "macos")]
     #[unsafe(method(keyDown:))]
     fn key_down(&self, event: &NSEvent) {
-      let mtm = MainThreadMarker::new().unwrap();
-      let app = NSApplication::sharedApplication(mtm);
-      if let Some(menu) = app.mainMenu() {
-        menu.performKeyEquivalent(event);
+      let flags = event.modifierFlags();
+
+      // Only attempt menu key equivalents when Command or Control modifiers
+      // are held. Without this guard, ALL keyDown events (including bare
+      // number keys, symbols, and arrow keys) are sent to
+      // `performKeyEquivalent` which silently swallows them when no menu
+      // item matches, preventing the events from ever reaching the
+      // WKWebView content - especially problematic for iframe-based apps.
+      //
+      // Note: Option (Alt) is intentionally excluded - Option+key
+      // combinations are used for special character input (e.g.,
+      // Option+e for accent marks) and routing them to
+      // performKeyEquivalent would break dead-key / compose input.
+      //
+      // Refs: https://github.com/tauri-apps/wry/issues/1175
+      //       https://github.com/tauri-apps/wry/issues/1177
+      if flags.intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control) {
+        let mtm = MainThreadMarker::new().unwrap();
+        let app = NSApplication::sharedApplication(mtm);
+        if let Some(menu) = app.mainMenu() {
+          if menu.performKeyEquivalent(event) {
+            return;
+          }
+        }
       }
+
+      // Events reaching here were not handled by the WKWebView (first
+      // responder) or matched a menu shortcut. We call interpretKeyEvents
+      // on self (the parent NSView) purely to suppress the NSBeep that
+      // super.keyDown would produce (see PR #742). The parent has no
+      // NSTextInputClient, so this is effectively a no-op sink for
+      // unhandled keys.
+      self.interpretKeyEvents(&NSArray::from_slice(&[event]));
     }
 
     #[cfg(target_os = "macos")]

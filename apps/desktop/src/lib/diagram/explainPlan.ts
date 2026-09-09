@@ -16,16 +16,18 @@ export interface ExplainPlanNode {
   children: ExplainPlanNode[];
 }
 
+export type ExplainPlanDatabaseType = "mysql" | "postgres" | "dameng" | "questdb" | "doris" | "oracle" | "sqlserver";
+
 export interface ParsedExplainPlan {
-  databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver";
+  databaseType: ExplainPlanDatabaseType;
   raw: unknown;
   nodes: ExplainPlanNode[];
 }
 
 export type BuildExplainSqlResult = { ok: true; sql: string } | { ok: false; reason: "unsupported" | "empty" | "unsafe" };
 
-const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "oracle", "sqlserver"]);
-export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is "mysql" | "postgres" | "dameng" | "questdb" | "oracle" | "sqlserver" {
+const SUPPORTED_EXPLAIN_TYPES = new Set<DatabaseType>(["mysql", "postgres", "dameng", "questdb", "doris", "oracle", "sqlserver"]);
+export function supportsExplainPlan(databaseType?: DatabaseType): databaseType is ExplainPlanDatabaseType {
   return !!databaseType && supportsDatabaseFeature(databaseType, "sqlExplain") && SUPPORTED_EXPLAIN_TYPES.has(databaseType);
 }
 
@@ -34,11 +36,13 @@ export function buildExplainSql(databaseType: DatabaseType | undefined, sql: str
   return api.buildExplainSql({ databaseType, sql, format, analyze }) as Promise<BuildExplainSqlResult>;
 }
 
-export function parseExplainResult(databaseType: "mysql" | "postgres" | "dameng" | "questdb" | "sqlserver", result: QueryResult): ParsedExplainPlan {
+export function parseExplainResult(databaseType: ExplainPlanDatabaseType, result: QueryResult): ParsedExplainPlan {
   if (databaseType === "dameng") {
     return parseDamengExplain(result);
   } else if (databaseType === "questdb") {
     return parseQuestdbExplain(result);
+  } else if (databaseType === "doris") {
+    return parseDorisExplain(result);
   } else if (databaseType === "sqlserver") {
     return parseSqlServerExplain(result);
   }
@@ -871,6 +875,29 @@ function parseQuestdbExplain(result: QueryResult): ParsedExplainPlan {
     return node;
   });
   return { databaseType: "questdb", raw: result, nodes };
+}
+
+// ── Doris explain parser ────────────────────────────────────────────
+function parseDorisExplain(result: QueryResult): ParsedExplainPlan {
+  const lines = result.rows.flatMap((row) => String(row[0] ?? "").split(/\r?\n/));
+  const raw = lines.join("\n");
+  const nodes = lines
+    .filter((line) => line.trim().length > 0)
+    .map((line, index): ExplainPlanNode => {
+      const text = line.trim();
+      return {
+        id: `plan_${index}`,
+        title: text,
+        nodeType: "Plan",
+        relation: "",
+        index: String(index),
+        cost: undefined,
+        rows: undefined,
+        details: [text],
+        children: [],
+      };
+    });
+  return { databaseType: "doris", raw, nodes };
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────

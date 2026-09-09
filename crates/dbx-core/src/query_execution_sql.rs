@@ -81,6 +81,7 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         Some(DatabaseType::Dameng | DatabaseType::Questdb) => {
             format!("EXPLAIN {source}")
         }
+        Some(DatabaseType::Doris) => format!("EXPLAIN {source}"),
         Some(DatabaseType::Oracle) => format!("EXPLAIN PLAN FOR {source}"),
         // STATISTICS XML returns the same ShowPlanXML document plus per-operator
         // runtime counters, at the price of actually running the statement.
@@ -123,6 +124,7 @@ pub fn supports_explain_plan(database_type: Option<DatabaseType>) -> bool {
         database_type,
         Some(
             DatabaseType::Mysql
+                | DatabaseType::Doris
                 | DatabaseType::Postgres
                 | DatabaseType::Questdb
                 | DatabaseType::Dameng
@@ -1172,6 +1174,34 @@ mod tests {
                 reason: None,
             }
         );
+    }
+
+    #[test]
+    fn builds_doris_explain_sql_without_mysql_json_format() {
+        assert!(supports_explain_plan(Some(DatabaseType::Doris)));
+
+        assert_eq!(
+            build_explain_sql(ExplainSqlOptions {
+                database_type: Some(DatabaseType::Doris),
+                format: None,
+                analyze: None,
+                sql: "SELECT * FROM users;".to_string(),
+            }),
+            ExplainSqlBuildResult { ok: true, sql: Some("EXPLAIN SELECT * FROM users".to_string()), reason: None }
+        );
+
+        for sql in ["DELETE FROM users", "SELECT * FROM users; DROP TABLE users"] {
+            assert_eq!(
+                build_explain_sql(ExplainSqlOptions {
+                    database_type: Some(DatabaseType::Doris),
+                    format: None,
+                    analyze: None,
+                    sql: sql.to_string(),
+                }),
+                ExplainSqlBuildResult { ok: false, sql: None, reason: Some("unsafe".to_string()) },
+                "{sql}"
+            );
+        }
     }
 
     #[test]

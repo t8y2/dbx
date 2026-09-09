@@ -155,6 +155,50 @@ dbx-plugin-demo/
 
 ## 5. 打包未签名开发包
 
+### 打包前：使用独立浏览器开发环境
+
+Agent 可通过只读接口获取调试日志，无需浏览器会话：
+
+```bash
+curl -sS 'http://127.0.0.1:5190/api/diagnostics?after=0&limit=100'
+```
+
+端口使用实际启动值。增量查询传入上次返回的 `nextAfter`（作为 `after`）与 `instanceId`，可增加 `level=error` 筛选错误。`hasMore` 表示还有下一页，`reset` 表示实例或游标重置，`truncated` 表示旧日志已被覆盖。日志沿用界面脱敏规则，仅保留内存中最近 500 条。详见 [Agent 调试接口](sdk/dev-host/README.md#agent-diagnostics-api)。
+
+语言按钮支持中文与英文，同时切换调试外壳、日志面板和插件语言；插件名称与字段标签使用 Manifest 本地化。已有插件页面在确认后自动重载，取消则保持原语言。用户保存的连接名称与业务数据不翻译。
+
+顶部“自动重载”默认关闭。启用后，UI 输出更新会自动刷新所有插件页面；Rust/Go 后端源码修改会自动构建并重启。编译型前端仍需配置 `ui_watch`。已保存连接配置不会丢失，但后端重启后需重新连接；页面草稿与进行中的操作可能丢失。构建失败不会启动旧产物，重启调试服务后此开关恢复关闭。
+
+配置 `ui_watch` 后，监听命令必须在每次构建成功且产物全部写入后，向标准输出打印独立一行 `DBX_UI_BUILD_SUCCESS`，调试服务才会通知页面重载。请接入构建工具的成功回调，不要在失败或无条件退出回调中发送；仅修改输出文件不会触发重载。未配置 `ui_watch` 的静态页面仍按文件变化重载。
+
+浏览器刷新或关闭后，旧页面的工作台会保留 30 秒，允许事件流短暂断开后重连；超时后回收工作台，并断开没有其他页面使用的连接。已保存的连接配置不受影响。
+
+使用包含 `dev` 子命令的 CLI，可不启动 DBX 进行前后端联调：
+
+```bash
+dbx-plugin dev --path /path/to/my-plugin --port 5190
+```
+
+`--path` 默认为当前目录，端口占用时自动选择空闲端口。仅此子命令要求 Node.js 22+。纯前端插件直接打开工作台；Rust/Go 插件根据 `[backend]` 配置构建并启动后端，兼容 JSONL 和 framed v1。
+
+可在 `dbx-plugin.toml` 配置前端构建命令：
+
+```toml
+[dev]
+ui_build = ["npm", "run", "build"]
+ui_watch = ["npm", "run", "build:watch"]
+```
+
+命令按参数数组执行，不经过 shell；未配置时使用已有 UI。先自行安装插件依赖，工具不会猜测框架或自动安装。前端重新构建后手动重载页面，后端改动后点击重建并重新连接。
+
+点击“重载页面”右侧的“调试”，底部显示最近 500 条构建、后端状态、RPC 和请求校验日志，包含端口、项目与请求路径、耗时，以及可展开的 JSON 入参和出参。支持级别筛选、清空视图和自动滚动，终端同步输出 `[dbx-dev]` 日志。密码、令牌及 Manifest 声明的敏感字段脱敏，二进制内容省略，长内容截断；普通业务内容仍可见，仅用于本地开发。重启服务后历史清空。
+
+开发环境提供声明式连接表单、工作台 Tab、RPC、事件、资源读取和主题切换。普通配置与凭据以本地明文形式保存在 `.dbx-dev/`，默认忽略提交，可通过 `--data-dir` 更换。它不读取 DBX 用户数据，也不替代真实宿主的安装、Secret Store 或生命周期验收。
+
+源码构建和支持范围见[开发运行时说明](sdk/dev-host/README.md)。
+
+### 构建安装包
+
 进入插件目录并打包：
 
 ```bash
@@ -316,6 +360,7 @@ cargo run --release \
 # 查看帮助
 dbx-plugin --help
 dbx-plugin create --help
+dbx-plugin dev --help
 dbx-plugin package --help
 dbx-plugin keygen --help
 
@@ -340,6 +385,25 @@ dbx-plugin keygen company.plugins.release
 # 关闭彩色输出
 NO_COLOR=1 dbx-plugin --help
 ```
+
+### 独立调试插件
+
+无需启动 DBX，使用 Node.js 22+ 在浏览器中调试真实插件前后端：
+
+```bash
+# 在插件目录启动，默认端口 5190
+dbx-plugin dev
+
+# 指定插件目录和端口
+dbx-plugin dev --path /path/to/my-plugin --port 5190
+
+# 指定开发配置存储目录
+dbx-plugin dev --path /path/to/my-plugin --data-dir /path/to/dev-data
+```
+
+启动后打开终端输出的本地地址，按 `Ctrl+C` 停止。端口占用时自动选择空闲端口。纯前端插件无需后端；Rust/Go 插件会根据项目配置构建并启动 Sidecar，需先安装对应工具链及插件依赖。
+
+连接配置与凭据默认以明文保存在插件目录的 `.dbx-dev/` 中。前端构建监听通过 `[dev].ui_watch` 配置，自动重载默认关闭，可在页面中开启。完整配置与调试方式见[独立浏览器开发环境](#打包前使用独立浏览器开发环境)。
 
 ## 11. 常见问题
 

@@ -67,6 +67,11 @@ try {
   const binary = resolveBinary();
   const env = { ...process.env };
   delete env.DBX_PLUGIN_CLI_BINARY;
+  if (process.argv[2] === "dev") {
+    if (Number(process.versions.node.split(".")[0]) < 22) throw new Error("dbx-plugin dev requires Node.js 22+.");
+    env.DBX_PLUGIN_NODE = env.DBX_PLUGIN_NODE || process.execPath;
+    env.DBX_PLUGIN_DEV_RUNTIME = env.DBX_PLUGIN_DEV_RUNTIME || join(packageRoot, "dev-runtime", "runtime.mjs");
+  }
   if (!env.DBX_PLUGIN_SDK_ROOT) {
     const sdkRoot = bundledSdkRoot();
     if (sdkRoot) env.DBX_PLUGIN_SDK_ROOT = sdkRoot;

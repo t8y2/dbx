@@ -902,6 +902,20 @@ async fn list_transfer_tables_isolated(
     task.await.map_err(|error| format!("Transfer table metadata task failed: {error}"))?
 }
 
+async fn get_transfer_table_comment_isolated(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    let task = tokio::spawn(async move {
+        crate::schema::get_table_comment_core(&state, &connection_id, &database, &schema, &table).await
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Transfer table comment task failed: {error}"))?
+}
+
 async fn resolve_transfer_target_table_name(
     state: &Arc<AppState>,
     request: &TransferRequest,
@@ -3525,7 +3539,7 @@ fn generate_comment_ddl_with_column_quoting(
         if let Some(comment) = table_comment {
             let trimmed = comment.trim();
             if !trimmed.is_empty() {
-                let escaped = trimmed.replace('\'', "''");
+                let escaped = comment.replace('\'', "''");
                 statements.push(format!("COMMENT ON TABLE {full_table} IS '{escaped}'"));
             }
         }
@@ -3537,7 +3551,7 @@ fn generate_comment_ddl_with_column_quoting(
             if trimmed.is_empty() {
                 continue;
             }
-            let escaped = trimmed.replace('\'', "''");
+            let escaped = comment.replace('\'', "''");
             let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
 
             match target_db {
@@ -8203,23 +8217,37 @@ where
             ),
         };
 
-    // Fetch source table comment. Keep this list-tables metadata chain on its
-    // own task stack, just like the target-table lookup above.
-    let table_comment = list_transfer_tables_isolated(
-        state.clone(),
-        request.source_connection_id.clone(),
-        request.source_database.clone(),
-        request.source_schema.clone(),
-        request.source_catalog.clone(),
-        *source_db_type,
-        table.to_string(),
-        1,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .next()
-    .and_then(|table| table.comment);
+    // PostgreSQL's table list filter is fuzzy, so it cannot identify the
+    // requested table's comment when similarly named tables exist.
+    let table_comment = if *source_db_type == DatabaseType::Postgres {
+        get_transfer_table_comment_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            table.to_string(),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        // Keep the list-tables metadata chain on its own task stack, just like
+        // the target-table lookup above.
+        list_transfer_tables_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            request.source_catalog.clone(),
+            *source_db_type,
+            table.to_string(),
+            1,
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .and_then(|table| table.comment)
+    };
 
     // Get source columns (deduplicate by name).
     //
@@ -11690,16 +11718,20 @@ mod tests {
     #[test]
     fn postgres_comment_ddl_generates_column_and_table_comments() {
         let cols = vec![
-            db::ColumnInfo { comment: Some("主键".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some(" 主键's ".to_string()), ..test_column("id", "int") },
             db::ColumnInfo { comment: Some("名称".to_string()), ..test_column("name", "varchar(100)") },
         ];
 
-        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some("项目表"));
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some(" 项目表 "));
 
-        assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
-        assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
-        assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+        assert_eq!(
+            stmts,
+            vec![
+                "COMMENT ON TABLE \"public\".\"items\" IS ' 项目表 '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"id\" IS ' 主键''s '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'".to_string(),
+            ]
+        );
     }
 
     #[test]

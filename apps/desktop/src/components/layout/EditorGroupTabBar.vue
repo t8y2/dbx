@@ -515,7 +515,7 @@ function cancelTabGroupCollapse(groupId: string) {
 }
 
 function beginTabGroupCollapse(groupIds: Set<string>) {
-  if (isWrapLayout.value || isVerticalLayout.value) {
+  if (isWrapLayout.value) {
     collapsedTabGroups.value = new Set([...collapsedTabGroups.value, ...groupIds]);
     nextTick(refreshHorizontalTabOverflow);
     return;

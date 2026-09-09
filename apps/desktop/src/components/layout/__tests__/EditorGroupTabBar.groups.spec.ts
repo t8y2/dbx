@@ -201,11 +201,20 @@ describe("EditorGroupTabBar vertical placement", () => {
   });
 
   it("keeps vertical rows fixed and aligns the sidebar toolbar with content headers", () => {
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout\s*\{[^}]*--tab-group-root-rail-x:\s*1\.16rem;[^}]*--tab-group-tab-inset:\s*1\.8rem;[^}]*--tab-group-branch-width:\s*0\.5rem;/s);
+    expect(sharedStyles).toContain("width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
+    expect(sharedStyles).toContain("padding-inline: 0.2rem 0.25rem !important;");
     expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*flex:\s*none;/s);
     expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-scroll\s*\{[^}]*overflow-x:\s*hidden;/s);
-    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry--collapsed\s*\{[^}]*display:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-pill\s*\{[^}]*border-radius:\s*var\(--dbx-radius-md\);/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*max-height:\s*2rem;/s);
+    expect(sharedStyles).toContain("max-height 140ms ease,");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*opacity:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry\s*\{[^}]*max-height:\s*2\.5rem;[^}]*overflow:\s*visible;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*overflow:\s*hidden;/s);
     expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) return;");
-    expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) {");
+    expect(source).toContain("if (isWrapLayout.value) {");
     expect(source).toContain('inline: isVerticalLayout.value ? "nearest" : "center"');
     expect(source).toContain('class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1"');
     expect(source).toContain('class="h-7 w-full pl-7 text-sm"');
@@ -242,10 +251,11 @@ describe("EditorGroupTabBar vertical placement", () => {
 
   it("uses the sidebar rail and soft active shadow for vertical pills", () => {
     expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-tab::before");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-tab::before\s*\{[^}]*top:\s*-0\.25rem;[^}]*bottom:\s*-0\.25rem;/s);
     expect(sharedStyles).toContain('.vertical-tab-layout .app-tab-pill[data-active-tab="true"]');
     expect(sharedStyles).toContain("inset 0 0 0 1px color-mix");
     expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after");
-    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.5rem;");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
   });
 });
 

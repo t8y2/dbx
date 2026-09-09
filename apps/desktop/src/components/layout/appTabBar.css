@@ -815,8 +815,8 @@
   flex: 0 0 15rem;
   --tab-group-header-inset: 0.5rem;
   --tab-group-root-rail-x: 1.16rem;
-  --tab-group-tab-inset: 2.5rem;
-  --tab-group-branch-width: 0.65rem;
+  --tab-group-tab-inset: 1.8rem;
+  --tab-group-branch-width: 0.5rem;
   --tab-group-row-half: 1rem;
   --tab-group-header-gap: 0.08rem;
 }
@@ -834,16 +834,13 @@
   overflow-x: hidden;
 }
 
-.vertical-tab-layout .tab-group-entry--collapsed {
-  display: none;
-}
-
 .vertical-tab-layout .app-tab-pill {
   width: 100%;
   min-width: 0 !important;
   min-height: 2rem;
   height: 2rem !important;
   border-right: 0;
+  border-radius: var(--dbx-radius-md);
   background-color: var(--app-tab-background, transparent);
   transition:
     background-color 150ms ease,
@@ -885,7 +882,30 @@
  * intended row height and let the strip scroll instead of compressing rows. */
 .vertical-tab-layout .tab-group-entry {
   width: 100%;
+  min-height: 0;
+  max-height: 2rem;
   flex: none;
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    max-height 140ms ease,
+    opacity 100ms ease;
+}
+
+.vertical-tab-layout .tab-group-entry--collapsed {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vertical-tab-layout--collapsed .tab-group-entry {
+  max-height: 2.5rem;
+  overflow: visible;
+}
+
+.vertical-tab-layout--collapsed .tab-group-entry--collapsed {
+  max-height: 0;
+  overflow: hidden;
 }
 
 .vertical-tab-layout--collapsed .app-tab-scroll {
@@ -900,7 +920,7 @@
   justify-content: center;
   margin: 0.125rem auto;
   padding: 0 !important;
-  border-radius: 0.625rem;
+  border-radius: var(--dbx-radius-md);
 }
 
 .vertical-tab-layout--collapsed .compact-dirty-tab-marker {
@@ -998,17 +1018,17 @@
 
 .vertical-tab-layout .tab-group-tab {
   position: relative;
-  width: calc(100% - 3rem);
-  margin-inline: var(--tab-group-tab-inset) 0.5rem;
-  padding-inline-start: 0.65rem !important;
+  width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);
+  margin-inline: var(--tab-group-tab-inset) 0.25rem;
+  padding-inline: 0.2rem 0.25rem !important;
   border-color: transparent;
 }
 
 .vertical-tab-layout .tab-group-tab::before {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: -0.25rem;
+  bottom: -0.25rem;
   left: calc(0rem - var(--tab-group-branch-width));
   width: 1px;
   border-radius: 9999px;

@@ -213,7 +213,7 @@
   z-index: -1;
   inset-block: 0;
   inset-inline: -0.25rem 0;
-  background: color-mix(in srgb, var(--background) 48%, transparent);
+  background: transparent;
   pointer-events: none;
 }
 
@@ -585,6 +585,12 @@
 .app-tab-bar.classic-tab-layout:not(.vertical-tab-layout) .tab-group-header-content {
   height: 100%;
   border-radius: 0;
+}
+
+/* A one-pixel CSS border becomes visually heavy on scaled displays. Keep the
+ * classic ungrouped single-row separators as the thinnest available rule. */
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-group-mode="none"] .app-tab-pill {
+  border-right-width: 0.5px;
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,

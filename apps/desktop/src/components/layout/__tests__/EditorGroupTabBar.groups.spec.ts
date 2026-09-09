@@ -158,10 +158,11 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-group-mode="none"\] \.app-tab-pill\s*\{[^}]*border-right-width:\s*0\.5px;/s);
     expect(sharedStyles).toMatch(/\.tab-overflow-control\s*\{[^}]*width:\s*34px;[^}]*flex:\s*0 0 34px;/s);
     expect(sharedStyles).toContain("padding-inline-end: 2.125rem;");
     expect(sharedStyles).toContain("inset-inline-end: 2.125rem;");
-    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\)\[data-placement="top"\] \.tab-overflow-control::before\s*\{[^}]*inset-inline:\s*-0\.25rem 0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\)\[data-placement="top"\] \.tab-overflow-control::before\s*\{[^}]*inset-inline:\s*-0\.25rem 0;[^}]*background:\s*transparent;/s);
     expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header,[\s\S]*?\.tab-group-header-content\s*\{[^}]*height:\s*2rem !important;/s);
     expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header:not\(\.tab-group-header--collapsed\)::after\s*\{[^}]*right:\s*-1px;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");

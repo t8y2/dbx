@@ -92,7 +92,10 @@ const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
 const toolbar = inject(EDITOR_TOOLBAR_ACTIONS, createNoopEditorToolbarActions());
 const tabBarPortal = inject(GROUP_TAB_BAR_PORTAL, null);
-const tabBarTarget = computed(() => tabBarPortal?.targets.get(props.groupId));
+const tabBarTarget = computed(() => {
+  if (!tabBarPortal?.active.value) return undefined;
+  return tabBarPortal.targets.get(props.groupId);
+});
 const groupTabs = computed(() => {
   const byId = new Map(queryStore.tabs.map((tab) => [tab.id, tab]));
   return props.tabIds.map((id) => byId.get(id)).filter((tab): tab is QueryTab => !!tab);

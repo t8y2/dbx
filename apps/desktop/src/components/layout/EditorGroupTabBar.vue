@@ -494,7 +494,7 @@ function restoreTabScrollPosition(position: { fixed: number; regular: number }) 
 }
 
 function captureExpandedTabGroupWidths(groupIds: Set<string>) {
-  if (isWrapLayout.value) return;
+  if (isWrapLayout.value || isVerticalLayout.value) return;
   tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]").forEach((entry) => {
     const groupId = entry.dataset.tabGroupId;
     if (!groupId || !groupIds.has(groupId) || entry.classList.contains("tab-group-entry--collapsed")) return;
@@ -515,7 +515,7 @@ function cancelTabGroupCollapse(groupId: string) {
 }
 
 function beginTabGroupCollapse(groupIds: Set<string>) {
-  if (isWrapLayout.value) {
+  if (isWrapLayout.value || isVerticalLayout.value) {
     collapsedTabGroups.value = new Set([...collapsedTabGroups.value, ...groupIds]);
     nextTick(refreshHorizontalTabOverflow);
     return;
@@ -1295,7 +1295,7 @@ watch(
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
           if (activeEl) {
-            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "center" });
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: isVerticalLayout.value ? "nearest" : "center" });
           }
         }
       }

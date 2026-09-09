@@ -687,7 +687,7 @@
 
 /* Keep collapsed group members in the DOM so the cluster can contract and
  * expand smoothly instead of appearing and disappearing in one frame. */
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry {
   min-width: 0;
   max-width: var(--tab-group-entry-expanded-width, 100%);
   max-height: 2rem;
@@ -699,7 +699,7 @@
     opacity 100ms ease;
 }
 
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry[data-tab-group-id] > .tab-group-tab {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry[data-tab-group-id] > .tab-group-tab {
   width: var(--tab-group-entry-expanded-width, auto);
   min-width: var(--tab-group-entry-expanded-width, max-content) !important;
   flex: none;
@@ -726,12 +726,12 @@
   }
 }
 
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsing {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry--collapsing {
   pointer-events: none;
   animation: tab-group-collapse 140ms ease forwards;
 }
 
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsed:not(.tab-group-entry--collapsing) {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry--collapsed:not(.tab-group-entry--collapsing) {
   max-width: 0 !important;
   max-height: 0 !important;
   margin: 0 !important;
@@ -831,6 +831,11 @@
 
 .vertical-tab-layout .app-tab-scroll {
   min-height: 0;
+  overflow-x: hidden;
+}
+
+.vertical-tab-layout .tab-group-entry--collapsed {
+  display: none;
 }
 
 .vertical-tab-layout .app-tab-pill {

@@ -125,7 +125,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain('entry.style.removeProperty("--tab-group-entry-expanded-width")');
     expect(sharedStyles).toContain("max-width: var(--tab-group-entry-expanded-width, 100%)");
     expect(sharedStyles).toMatch(/\.tab-group-entry\[data-tab-group-id\] > \.tab-group-tab\s*\{[^}]*width:\s*var\(--tab-group-entry-expanded-width, auto\);[^}]*min-width:\s*var\(--tab-group-entry-expanded-width, max-content\) !important;[^}]*flex:\s*none;/s);
-    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
     const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
     expect(handler).toContain('event.propertyName !== "max-width"');
     expect(handler).toContain("refreshHorizontalTabOverflow();");
@@ -202,6 +202,11 @@ describe("EditorGroupTabBar vertical placement", () => {
 
   it("keeps vertical rows fixed and aligns the sidebar toolbar with content headers", () => {
     expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-scroll\s*\{[^}]*overflow-x:\s*hidden;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry--collapsed\s*\{[^}]*display:\s*none;/s);
+    expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) return;");
+    expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) {");
+    expect(source).toContain('inline: isVerticalLayout.value ? "nearest" : "center"');
     expect(source).toContain('class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1"');
     expect(source).toContain('class="h-7 w-full pl-7 text-sm"');
   });

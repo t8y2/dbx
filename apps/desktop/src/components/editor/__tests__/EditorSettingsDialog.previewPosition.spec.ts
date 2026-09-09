@@ -71,10 +71,10 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(completionTriggerMode).toBeGreaterThan(completionSection);
     expect(selectFirstCompletion).toBeGreaterThan(completionTriggerMode);
     expect(editorSection).not.toContain('t("settings.sqlCompletionSection")');
-    expect(editorSection).toContain('class="flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode');
+    expect(editorSection).toContain('class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode');
     expect(editorSection).toContain('<SelectTrigger class="h-8 w-44 shrink-0">');
     expect(editorSection).toContain('class="grid gap-4 md:grid-cols-2" data-editor-execution-settings');
-    expect(editorSection).toContain('class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode');
+    expect(editorSection).toContain('class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode');
     expect(editorSection.match(/:model-value="editCompletionTriggerMode"/g)).toHaveLength(1);
     expect(editorSection.match(/id="editor-select-first-completion-on-open"/g)).toHaveLength(1);
   });

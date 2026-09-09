@@ -445,6 +445,34 @@ describe("DataGridConditionEditor quote completion", () => {
     vi.unstubAllGlobals();
   });
 
+  it("does not carry the collapsed horizontal scroll into the expanded highlight layer", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const textWidth = (this.textContent?.length ?? 0) * 8;
+      const width = this.classList.contains("data-grid-topbar-condition-pane--expanded") ? 160 : textWidth;
+      return { x: 0, y: 0, left: 0, top: 0, right: width, bottom: 24, width, height: 24, toJSON: () => ({}) } as DOMRect;
+    });
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    });
+    const { input } = mountEditor("where", "test_item_id=12 and test_item_name=''");
+    mockTextareaMetrics(input, { clientWidth: 80, scrollWidth: 320 });
+    input.scrollLeft = 128;
+    input.dispatchEvent(new Event("scroll", { bubbles: true }));
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.dispatchEvent(new Event("focus", { bubbles: true }));
+
+    await nextTick();
+    await nextTick();
+
+    const expandedHighlight = document.body.querySelector(".data-grid-condition-highlight--expanded") as HTMLElement | null;
+    expect(expandedHighlight).toBeTruthy();
+    expect(expandedHighlight?.style.transform).toBe("translate(0px, 0px)");
+    vi.unstubAllGlobals();
+  });
+
   it("positions suggestions below the measured expanded editor height", () => {
     const source = readFileSync(resolve(process.cwd(), "apps/desktop/src/components/grid/DataGridConditionEditor.vue"), "utf8");
     const expandedPaneCss = source.match(/\.data-grid-topbar-condition-pane--expanded\s*\{(?<body>[\s\S]*?)\n\}/)?.groups?.body;

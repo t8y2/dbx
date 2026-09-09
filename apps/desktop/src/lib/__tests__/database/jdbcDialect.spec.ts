@@ -364,8 +364,8 @@ describe("query execution schema", () => {
     expect(connectionQueryExecutionSchema({ db_type: dbType }, "ai_test", undefined, false)).toBe("ai_test");
   });
 
-  it("prefers an explicit schema for PostgreSQL", () => {
-    expect(connectionQueryExecutionSchema({ db_type: "postgres" }, "app", "reporting", false)).toBe("reporting");
+  it.each(["postgres", "gaussdb", "opengauss"] as const)("prefers an explicit schema for %s", (dbType) => {
+    expect(connectionQueryExecutionSchema({ db_type: dbType }, "app", "reporting", false)).toBe("reporting");
   });
 
   it("prefers an explicit schema for Kingbase query execution", () => {

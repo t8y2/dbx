@@ -16,9 +16,27 @@
  * result can never adopt a stale viewport (#7341).
  */
 
-import type { PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
-
 export type DataGridRendererMode = "dom" | "canvas";
+
+/** Cell position in display-row / visible-column coordinates. */
+export interface DataGridViewCellPosition {
+  rowIndex: number;
+  colIndex: number;
+}
+
+/**
+ * Selection captured in grid display coordinates. A generation match already
+ * guarantees the same dataset, so plain indexes are used instead of the
+ * identity-token machinery from `dataGridSelectionPersistence.ts` — that path
+ * builds a token for every row, which is O(row count) and would violate the
+ * capture budget on large results.
+ */
+export type DataGridViewSelectionSnapshot =
+  | { kind: "all"; anchorRowIndex?: number | null }
+  | { kind: "rows"; rowIndexes: number[]; contiguous?: boolean; anchorRowIndex?: number | null }
+  | { kind: "columns"; columnIndexes: number[] }
+  | { kind: "cells"; cellKeys: string[]; anchor?: DataGridViewCellPosition; focus?: DataGridViewCellPosition; selectingAll?: boolean }
+  | { kind: "range"; anchor: DataGridViewCellPosition; focus: DataGridViewCellPosition; selectingAll?: boolean; lastClickedRowIndex?: number | null };
 
 export interface DataGridViewSnapshot {
   /** Grid cache key: `resultGridCacheKey(tab)` for results, tab id for data tabs. */
@@ -31,8 +49,10 @@ export interface DataGridViewSnapshot {
   rowCount: number;
   columnCount: number;
   viewport: { top: number; left: number };
-  /** Identity-based selection captured by `captureDataGridSelection`. */
-  selection?: PersistedDataGridSelection;
+  /** Index-based selection captured in O(selection size). */
+  selection?: DataGridViewSelectionSnapshot;
+  /** Set when a sparse selection had to be dropped; surfaces the restore-time notice. */
+  selectionDropped?: boolean;
 }
 
 export interface DataGridViewProbeInput {
@@ -96,39 +116,54 @@ function isClosingOwner(ownerKey: string): boolean {
   return false;
 }
 
+const byteEncoder = new TextEncoder();
+
 /**
- * Approximate serialized size in bytes. Snapshots contain only numbers, short
- * strings, and punctuation, so UTF-16 code-unit count is a close proxy; the
- * budgets above are deliberately generous relative to the data stored.
+ * Serialized size in bytes (UTF-8), so the budgets hold for non-ASCII column
+ * and cell content too. Only ever called on the small snapshot object, never
+ * on result data.
  */
 function snapshotBytes(snapshot: DataGridViewSnapshot): number {
   try {
-    return JSON.stringify(snapshot).length;
+    return byteEncoder.encode(JSON.stringify(snapshot)).byteLength;
   } catch {
     return Number.MAX_SAFE_INTEGER;
   }
 }
 
 /** True when the selection exceeds the sparse-cell budget. */
-export function selectionExceedsBudget(selection: PersistedDataGridSelection | undefined): boolean {
-  return selection?.state.kind === "cells" && selection.state.cells.length > MAX_SPARSE_CELL_ENTRIES;
+export function selectionExceedsBudget(selection: DataGridViewSelectionSnapshot | undefined): boolean {
+  return !!selection && (selection.kind === "cells" ? selection.cellKeys.length > MAX_SPARSE_CELL_ENTRIES : selection.kind === "rows" && !selection.contiguous && selection.rowIndexes.length > MAX_SPARSE_CELL_ENTRIES);
+}
+
+/** Trim an over-budget sparse selection, reporting what was dropped. */
+export function clampDataGridViewSelection(selection: DataGridViewSelectionSnapshot): { selection: DataGridViewSelectionSnapshot; droppedSelection: boolean } {
+  if (selection.kind === "cells") {
+    if (selection.cellKeys.length <= MAX_SPARSE_CELL_ENTRIES) return { selection, droppedSelection: false };
+    return { selection: { kind: "cells", cellKeys: [], anchor: selection.anchor, focus: selection.focus }, droppedSelection: true };
+  }
+  if (selection.kind === "rows" && !selection.contiguous) {
+    if (selection.rowIndexes.length <= MAX_SPARSE_CELL_ENTRIES) return { selection, droppedSelection: false };
+    return { selection: { kind: "rows", rowIndexes: [], anchorRowIndex: selection.anchorRowIndex }, droppedSelection: true };
+  }
+  return { selection, droppedSelection: false };
 }
 
 /**
- * Shrink a snapshot until it fits the per-snapshot budget: the sparse cell
- * selection first, then the whole selection. The viewport is always retained.
+ * Shrink a snapshot until it fits the per-snapshot budget: a sparse selection
+ * first, then the whole selection. The viewport is always retained.
  */
 function degradeToBudget(snapshot: DataGridViewSnapshot): { snapshot: DataGridViewSnapshot; droppedSelection: boolean } {
   if (snapshotBytes(snapshot) <= MAX_SNAPSHOT_BYTES) {
     return { snapshot, droppedSelection: false };
   }
-  if (snapshot.selection?.state.kind === "cells") {
-    const withoutCells: DataGridViewSnapshot = { ...snapshot, selection: undefined };
+  if (snapshot.selection?.kind === "cells" && snapshot.selection.cellKeys.length) {
+    const withoutCells: DataGridViewSnapshot = { ...snapshot, selection: { ...snapshot.selection, cellKeys: [] }, selectionDropped: true };
     if (snapshotBytes(withoutCells) <= MAX_SNAPSHOT_BYTES) {
       return { snapshot: withoutCells, droppedSelection: true };
     }
   }
-  return { snapshot: { ...snapshot, selection: undefined }, droppedSelection: !!snapshot.selection };
+  return { snapshot: { ...snapshot, selection: undefined, selectionDropped: true }, droppedSelection: !!snapshot.selection };
 }
 
 function totalCacheBytes(): number {

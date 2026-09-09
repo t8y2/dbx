@@ -60,7 +60,7 @@ import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUs
 import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
-import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot } from "@/lib/dataGrid/dataGridViewStateCache";
+import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
 import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -1476,9 +1476,12 @@ export const useQueryStore = defineStore("query", () => {
     if (!options.evicted) {
       if (tab.resultCacheKey && !options.preserveCacheSnapshot) void deleteTabResultSnapshot(tab.resultCacheKey);
       tab.resultCacheKey = undefined;
-      // A cleared result has no view to come back to; an evicted one keeps its
-      // snapshot so returning to the tab can replay it.
-      beginClosingDataGridViewSnapshotsForTab(tab.id);
+      // Drop the stale view snapshot but do NOT tombstone: ordinary execution
+      // clears the payload before running, and the replacement result must stay
+      // free to capture a fresh snapshot when the user switches away. Tab
+      // closure (closeTab/closeTabsWhere/releaseTabsWhere) uses the tombstone.
+      // An evicted result keeps its snapshot so returning to the tab can replay it.
+      clearDataGridViewSnapshotsForTab(tab.id);
     }
   }
 
@@ -2564,6 +2567,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.executionId = undefined;
     tab.executingResultRunId = undefined;
     tab.queryExecutionStartedAt = undefined;
+    // An externally-supplied result is a brand-new dataset, not the previous
+    // one: publish a fresh generation so the tab can capture a view snapshot.
+    publishResultGeneration(tab, "execute");
     if (tab.result) touchResult(tab);
     return id;
   }
@@ -5700,6 +5706,8 @@ export const useQueryStore = defineStore("query", () => {
             current.activeResultIndex = undefined;
             current.result = allResults[0];
           }
+          // Redis command batches always replace the visible result.
+          publishResultGeneration(current, "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6085,6 +6093,7 @@ export const useQueryStore = defineStore("query", () => {
             current.activeResultIndex = undefined;
             current.result = allResults[0];
           }
+          publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6153,6 +6162,8 @@ export const useQueryStore = defineStore("query", () => {
           current.results = allResults.length > 1 ? allResults : undefined;
           current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;
           current.result = allResults[resultIndex];
+          // Elasticsearch batch requests replace the visible result.
+          publishResultGeneration(current, "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6673,6 +6684,8 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCountLoading = false;
         touchResult(current);
         producedResult = true;
+        // An error result replaces the dataset the view snapshot was taken on.
+        publishResultGeneration(current, "execute");
         // When a pinned result requires a new run, errors must use that same
         // run instead of being replaced by the retained pinned result below.
         syncDisplayedResultRun(current, queryBaseSql, captureResultRun);

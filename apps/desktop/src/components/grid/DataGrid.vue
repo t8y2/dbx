@@ -250,7 +250,7 @@ import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrde
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { createPendingSelectionSummary, formatSelectionAggregate, formatSelectionAverage, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
-import { DATA_GRID_VIEW_SNAPSHOT_RESTORE, buildDataGridViewProbe, consumeDataGridViewSnapshot, peekDataGridViewSnapshot, saveDataGridViewSnapshot, selectionExceedsBudget, shouldNotifyOverBudgetSelection } from "@/lib/dataGrid/dataGridViewStateCache";
+import { buildDataGridViewProbe, clampDataGridViewSelection, DATA_GRID_VIEW_SNAPSHOT_RESTORE, consumeDataGridViewSnapshot, peekDataGridViewSnapshot, saveDataGridViewSnapshot, shouldNotifyOverBudgetSelection, type DataGridViewSelectionSnapshot } from "@/lib/dataGrid/dataGridViewStateCache";
 import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
@@ -4904,7 +4904,7 @@ function restoreDetailsAfterRefresh(details: NonNullable<typeof preservedDetails
   }
 }
 
-function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection, options: { scroll?: boolean } = {}) {
+function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
   const restored = restoreDataGridSelection({
     snapshot,
     columns: props.result.columns,
@@ -4927,7 +4927,6 @@ function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection, opti
   }
 
   if (restored.kind === "columns") return;
-  if (options.scroll === false) return;
   nextTick(() => {
     if (restored.kind === "range") scrollCellIntoView(restored.scrollRowIndex, restored.focus.colIndex);
     else scrollGridRowIntoView(restored.scrollRowIndex);
@@ -4966,6 +4965,104 @@ function currentViewProbe(): string {
 }
 
 /**
+ * Copy the current selection into display coordinates. O(selection size): a
+ * generation match already guarantees the same dataset on return, so the
+ * identity-token machinery of the refresh path (which scans every row) is not
+ * needed here.
+ *
+ * Large row sets are represented compactly: a contiguous range (or "all" when
+ * every row is selected) costs a single range pair instead of one id per row.
+ */
+function captureViewSelection(): { selection?: DataGridViewSelectionSnapshot; droppedSelection: boolean } {
+  const selectedRowCount = selectedRowIds.value.size;
+  const hasRows = selectedRowCount > 0;
+  const hasCells = selectedCellKeys.value.size > 0;
+  const hasColumns = selectedColumnIndexes.value.size > 0;
+  const hasRange = !!selectionAnchor.value && !!selectionFocus.value;
+  if (!hasRows && !hasCells && !hasColumns && !hasRange) return { selection: undefined, droppedSelection: false };
+
+  if (hasRows) {
+    const displayCount = displayItems.value.length;
+    const contiguous = selectedRowCount === displayCount || selectedRowsContiguous(selectedRowIds.value);
+    if (contiguous) {
+      const anchorRowIndex = selection.lastClickedRowIndex.value;
+      if (selectedRowCount === displayCount) {
+        return { selection: { kind: "all", anchorRowIndex }, droppedSelection: false };
+      }
+      return { selection: { kind: "rows", rowIndexes: minimalRowRange(selectedRowIds.value), contiguous: true, anchorRowIndex }, droppedSelection: false };
+    }
+    const { selection: capturedRows, droppedSelection } = clampDataGridViewSelection({ kind: "rows", rowIndexes: selectedRowIdsAsDisplayIndexes(selectedRowIds.value), anchorRowIndex: selection.lastClickedRowIndex.value });
+    return { selection: capturedRows.kind === "rows" && capturedRows.rowIndexes.length ? capturedRows : undefined, droppedSelection };
+  }
+
+  if (hasColumns) {
+    return { selection: { kind: "columns", columnIndexes: [...selectedColumnIndexes.value] }, droppedSelection: false };
+  }
+
+  if (hasRange) {
+    return {
+      selection: { kind: "range", anchor: { ...selectionAnchor.value! }, focus: { ...selectionFocus.value! }, selectingAll: isSelectingAll.value || undefined, lastClickedRowIndex: selection.lastClickedRowIndex.value },
+      droppedSelection: false,
+    };
+  }
+
+  const { selection: capturedCells, droppedSelection } = clampDataGridViewSelection({ kind: "cells", cellKeys: [...selectedCellKeys.value], anchor: selectionAnchor.value ? { ...selectionAnchor.value } : undefined, focus: selectionFocus.value ? { ...selectionFocus.value } : undefined });
+  return { selection: capturedCells.kind === "cells" && capturedCells.cellKeys.length ? capturedCells : undefined, droppedSelection };
+}
+
+/** Display indexes of the selected row ids, bounded to the displayed rows. */
+function selectedRowIdsAsDisplayIndexes(selectedIds: ReadonlySet<number>): number[] {
+  const indexes: number[] = [];
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index >= 0) indexes.push(index);
+  }
+  return indexes;
+}
+
+/**
+ * True when the selected rows form a contiguous block in display order.
+ * Iterates only the selected ids via the O(1) index lookup, so a single-row
+ * selection on a 100k-row result stays O(1) instead of scanning every row.
+ */
+function selectedRowsContiguous(selectedIds: ReadonlySet<number>): boolean {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  let count = 0;
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index < 0) continue;
+    if (index < min) min = index;
+    if (index > max) max = index;
+    count += 1;
+  }
+  return count > 0 && max - min + 1 === count;
+}
+
+/** The [first, last] display indexes of the selected rows, when contiguous. */
+function minimalRowRange(selectedIds: ReadonlySet<number>): number[] {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index < 0) continue;
+    if (index < min) min = index;
+    if (index > max) max = index;
+  }
+  return Number.isFinite(min) ? [min, max] : [];
+}
+
+/** Expand a [first, last] row range into every display index in between. */
+function expandRowRange(range: readonly number[], displayCount: number): number[] {
+  const [first, last] = range;
+  if (!Number.isInteger(first) || !Number.isInteger(last) || first < 0 || last < first) return [];
+  const indexes: number[] = [];
+  const end = Math.min(last, displayCount - 1);
+  for (let index = first; index <= end; index += 1) indexes.push(index);
+  return indexes;
+}
+
+/**
  * Capture scroll/selection before this instance is unmounted by a tab switch.
  * Skips transpose (explicitly out of scope) and grids without an owner key or
  * generation, so a snapshot can never be replayed without an identity check.
@@ -4976,9 +5073,8 @@ function captureTabSwitchViewSnapshot() {
   if (showTranspose.value) return;
   const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
   if (!scroller) return;
-  const selection = captureCurrentSelectionForRefresh() ?? undefined;
-  const overBudget = selectionExceedsBudget(selection);
-  const { droppedSelection } = saveDataGridViewSnapshot({
+  const { selection, droppedSelection } = captureViewSelection();
+  saveDataGridViewSnapshot({
     ownerKey: props.cacheKey,
     viewGeneration: props.viewGeneration,
     probe: currentViewProbe(),
@@ -4986,11 +5082,9 @@ function captureTabSwitchViewSnapshot() {
     rowCount: props.result.rows.length,
     columnCount: props.result.columns.length,
     viewport: { top: Math.max(0, scroller.scrollTop), left: Math.max(0, scroller.scrollLeft) },
-    selection: overBudget ? undefined : selection,
+    selection,
+    selectionDropped: droppedSelection || undefined,
   });
-  if ((droppedSelection || overBudget) && shouldNotifyOverBudgetSelection(props.cacheKey, props.viewGeneration)) {
-    toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
-  }
 }
 
 /**
@@ -5008,6 +5102,27 @@ function restoreTabSwitchViewSnapshot() {
   if (snapshot.viewGeneration !== props.viewGeneration) return;
   if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
   if (snapshot.probe !== currentViewProbe()) return;
+
+  // The selection rides along for free: indexes stay valid under a generation
+  // match, and out-of-range entries simply never match any display row.
+  const capturedSelection = snapshot.selection;
+  if (capturedSelection) {
+    if (capturedSelection.kind === "cells") {
+      if (capturedSelection.cellKeys.length) restoreCellSelectionState({ cellKeys: new Set(capturedSelection.cellKeys) });
+    } else if (capturedSelection.kind === "range") {
+      restoreCellSelectionState({ anchor: capturedSelection.anchor, focus: capturedSelection.focus, selectingAll: capturedSelection.selectingAll === true });
+      if (capturedSelection.lastClickedRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.lastClickedRowIndex;
+    } else if (capturedSelection.kind === "columns") {
+      selectedColumnIndexes.value = new Set(capturedSelection.columnIndexes);
+    } else if (capturedSelection.kind === "rows") {
+      const indexes = capturedSelection.contiguous ? expandRowRange(capturedSelection.rowIndexes, displayItems.value.length) : capturedSelection.rowIndexes;
+      selectedRowIds.value = new Set(indexes.map((index) => displayItems.value[index]?.id).filter((id): id is number => typeof id === "number"));
+      if (capturedSelection.anchorRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.anchorRowIndex;
+    } else if (capturedSelection.kind === "all") {
+      selectedRowIds.value = new Set(displayItems.value.map((item) => item.id));
+      if (capturedSelection.anchorRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.anchorRowIndex;
+    }
+  }
 
   // DOM virtualization and canvas layout can report an incomplete scroll height
   // for more than a frame, which would clamp the saved position to the top.
@@ -5040,9 +5155,13 @@ function restoreTabSwitchViewSnapshot() {
     settled = true;
     cancelViewSnapshotRestoreFrame();
     consumeDataGridViewSnapshot(ownerKey);
+    // Report a dropped selection only once the restore it belongs to actually
+    // happened — never while merely leaving the tab.
+    if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
+      toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
+    }
     return true;
   };
-  if (snapshot.selection) restoreSelectionAfterRefresh(snapshot.selection, { scroll: false });
   if (attempt()) return;
   nextTick(() => {
     if (attempt()) return;

@@ -12,15 +12,33 @@ function functionSource(name: string, endMarker: string): string {
 }
 
 describe("DataGrid tab-switch view snapshots", () => {
-  const captureSource = functionSource("captureTabSwitchViewSnapshot", "function restoreTabSwitchViewSnapshot(");
+  const captureSource = functionSource("captureViewSelection", "function captureTabSwitchViewSnapshot(");
+  const captureFnSource = functionSource("captureTabSwitchViewSnapshot", "function restoreTabSwitchViewSnapshot(");
   const restoreSource = functionSource("restoreTabSwitchViewSnapshot", "const multiRowCount = computed(");
 
   it("captures only with an owner key and a generation, and skips transpose", () => {
-    expect(captureSource).toContain("if (!props.cacheKey || !props.viewGeneration) return;");
-    expect(captureSource).toContain("if (showTranspose.value) return;");
-    expect(captureSource).toContain("ownerKey: props.cacheKey");
-    expect(captureSource).toContain("viewGeneration: props.viewGeneration");
-    expect(captureSource).toContain("probe: currentViewProbe()");
+    expect(captureFnSource).toContain("if (!props.cacheKey || !props.viewGeneration) return;");
+    expect(captureFnSource).toContain("if (showTranspose.value) return;");
+    expect(captureFnSource).toContain("ownerKey: props.cacheKey");
+    expect(captureFnSource).toContain("viewGeneration: props.viewGeneration");
+    expect(captureFnSource).toContain("probe: currentViewProbe()");
+  });
+
+  it("captures the selection in O(selection size), never through the refresh identity scan", () => {
+    // Copies refs directly instead of captureCurrentSelectionForRefresh, which
+    // builds an identity token for every row (O(row count) on a large result).
+    expect(captureFnSource).not.toContain("captureCurrentSelectionForRefresh");
+    // Contiguous/all row selections serialize as a compact range instead of one
+    // id per row, and the range helpers iterate only the selected ids via the
+    // O(1) display index lookup — never the full displayItems.
+    expect(captureSource).toContain("selectedRowCount === displayCount");
+    expect(captureSource).toContain("selectedRowsContiguous(selectedRowIds.value)");
+    expect(captureSource).toContain('kind: "all"');
+    expect(captureSource).toContain("clampDataGridViewSelection(");
+    const contiguousHelper = dataGridSource.slice(dataGridSource.indexOf("function selectedRowsContiguous("), dataGridSource.indexOf("function minimalRowRange("));
+    expect(contiguousHelper).toContain("displayRowIndexById(rowId)");
+    expect(contiguousHelper).toContain("max - min + 1 === count");
+    expect(contiguousHelper).not.toContain("displayItems");
   });
 
   it("gates every restore on identity, renderer, and probe", () => {
@@ -30,10 +48,18 @@ describe("DataGrid tab-switch view snapshots", () => {
     expect(restoreSource).toContain("if (showTranspose.value) return;");
   });
 
-  it("clamps the restored viewport and applies the selection without scrolling it into view", () => {
+  it("applies the index-based selection directly without scrolling it into view", () => {
+    expect(restoreSource).toContain("restoreCellSelectionState({ cellKeys: new Set(capturedSelection.cellKeys) })");
+    expect(restoreSource).toContain('selectedRowIds.value = new Set(indexes.map((index) => displayItems.value[index]?.id).filter((id): id is number => typeof id === "number"));');
+    expect(restoreSource).toContain("selectedColumnIndexes.value = new Set(capturedSelection.columnIndexes);");
+    expect(restoreSource).toContain("selectedRowIds.value = new Set(displayItems.value.map((item) => item.id));");
+    expect(restoreSource).toContain("selection.lastClickedRowIndex.value = capturedSelection.anchorRowIndex;");
+    expect(restoreSource).not.toContain("restoreSelectionAfterRefresh(snapshot");
+  });
+
+  it("clamps the restored viewport and consumes the snapshot after success", () => {
     expect(restoreSource).toContain("Math.min(Math.max(0, snapshot.viewport.top), maxTop)");
     expect(restoreSource).toContain("Math.min(Math.max(0, snapshot.viewport.left), maxLeft)");
-    expect(restoreSource).toContain("restoreSelectionAfterRefresh(snapshot.selection, { scroll: false })");
     // A replayed snapshot is consumed so a later remount cannot re-apply it.
     expect(restoreSource).toContain("consumeDataGridViewSnapshot(ownerKey);");
   });
@@ -54,7 +80,7 @@ describe("DataGrid tab-switch view snapshots", () => {
   });
 
   it("honours the rollback switch in both directions", () => {
-    expect(captureSource).toContain("if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;");
+    expect(captureFnSource).toContain("if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;");
     expect(restoreSource).toContain("if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;");
     expect(dataGridSource).toContain("cancelViewSnapshotRestoreFrame();");
   });
@@ -66,8 +92,12 @@ describe("DataGrid tab-switch view snapshots", () => {
     expect(dataGridSource).toContain("captureTabSwitchViewSnapshot();");
   });
 
-  it("notifies once per owner and generation when a selection was dropped", () => {
-    expect(captureSource).toContain("shouldNotifyOverBudgetSelection(props.cacheKey, props.viewGeneration)");
-    expect(captureSource).toContain('toast(t("grid.viewSnapshotSelectionNotRestored")');
+  it("reports a dropped selection only after a successful restore", () => {
+    // The capture must not toast while the user is leaving the tab.
+    expect(captureFnSource).not.toContain("toast(");
+    expect(restoreSource).toContain("snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey");
+    expect(restoreSource).toContain('toast(t("grid.viewSnapshotSelectionNotRestored")');
+    // The notice stays one-shot per owner+generation.
+    expect(dataGridSource).toContain("shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)");
   });
 });

@@ -3,8 +3,10 @@ import {
   DATA_GRID_VIEW_SNAPSHOT_RESTORE,
   MAX_CACHE_BYTES,
   MAX_SNAPSHOT_BYTES,
+  MAX_SPARSE_CELL_ENTRIES,
   beginClosingDataGridViewSnapshotsForTab,
   buildDataGridViewProbe,
+  clampDataGridViewSelection,
   clearDataGridViewSnapshot,
   clearDataGridViewSnapshotsForTab,
   dataGridViewSnapshotCacheBytes,
@@ -12,11 +14,10 @@ import {
   peekDataGridViewSnapshot,
   resetDataGridViewSnapshots,
   saveDataGridViewSnapshot,
-  selectionExceedsBudget,
   shouldNotifyOverBudgetSelection,
+  type DataGridViewSelectionSnapshot,
   type DataGridViewSnapshot,
 } from "@/lib/dataGrid/dataGridViewStateCache";
-import type { PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
 
 function snapshot(ownerKey: string, patch: Partial<DataGridViewSnapshot> = {}): DataGridViewSnapshot {
   return {
@@ -31,11 +32,8 @@ function snapshot(ownerKey: string, patch: Partial<DataGridViewSnapshot> = {}): 
   };
 }
 
-function sparseCellSelection(count: number): PersistedDataGridSelection {
-  return {
-    identity: { mode: "row", columnSignature: "sig" },
-    state: { kind: "cells", cells: Array.from({ length: count }, (_, index) => ({ row: { key: `r${index}`, occurrence: 0 }, column: { resultName: `c${index}`, occurrence: 0 } })) },
-  };
+function sparseCellSelection(count: number): DataGridViewSelectionSnapshot {
+  return { kind: "cells", cellKeys: Array.from({ length: count }, (_, index) => `${index}:${index}`) };
 }
 
 describe("dataGridViewStateCache", () => {
@@ -61,25 +59,48 @@ describe("dataGridViewStateCache", () => {
     expect(peekDataGridViewSnapshot("tab-32")).toBeDefined();
   });
 
-  it("drops the selection when it exceeds the per-snapshot byte budget", () => {
-    const result = saveDataGridViewSnapshot(snapshot("tab-1", { selection: sparseCellSelection(4096) }));
+  it("measures size in bytes, not UTF-16 code units", () => {
+    // A selection of multi-byte characters: byte length exceeds code-unit count.
+    const selection: DataGridViewSelectionSnapshot = { kind: "cells", cellKeys: Array.from({ length: 300 }, () => "格:式") };
+    const stored = snapshot("tab-1", { selection });
+
+    saveDataGridViewSnapshot(stored);
+
+    // ~300 CJK keys cost well above 600 UTF-16 units but above 1800 bytes; a
+    // code-unit measure would keep this under a tiny budget while bytes exceed it.
+    const kept = peekDataGridViewSnapshot("tab-1");
+    expect(JSON.stringify(kept ?? {}).length).toBeGreaterThan(600);
+  });
+
+  it("drops the cell keys when they exceed the per-snapshot byte budget and marks the snapshot", () => {
+    // Long keys push the serialized selection past the 64 KB budget.
+    const selection: DataGridViewSelectionSnapshot = { kind: "cells", cellKeys: Array.from({ length: 1200 }, (_, index) => `${index}:${"cell".repeat(20)}`) };
+    const result = saveDataGridViewSnapshot(snapshot("tab-1", { selection }));
 
     expect(result.droppedSelection).toBe(true);
-    expect(peekDataGridViewSnapshot("tab-1")?.selection).toBeUndefined();
-    expect(peekDataGridViewSnapshot("tab-1")?.viewport.top).toBe(100);
+    const kept = peekDataGridViewSnapshot("tab-1");
+    expect(kept?.selection?.kind === "cells" && kept.selection.cellKeys).toEqual([]);
+    expect(kept?.selectionDropped).toBe(true);
+    expect(kept?.viewport.top).toBe(100);
     expect(dataGridViewSnapshotCacheBytes()).toBeLessThan(MAX_SNAPSHOT_BYTES);
   });
 
-  it("keeps a selection that fits the budget", () => {
+  it("keeps a selection that fits the budget without a dropped flag", () => {
     const result = saveDataGridViewSnapshot(snapshot("tab-1", { selection: sparseCellSelection(3) }));
 
     expect(result.droppedSelection).toBe(false);
-    expect(peekDataGridViewSnapshot("tab-1")?.selection?.state.kind).toBe("cells");
+    const kept = peekDataGridViewSnapshot("tab-1");
+    expect(kept?.selection?.kind === "cells" && kept.selection.cellKeys).toHaveLength(3);
+    expect(kept?.selectionDropped).toBeUndefined();
   });
 
-  it("flags sparse cell selections beyond the hard cardinality cap", () => {
-    expect(selectionExceedsBudget(sparseCellSelection(4096))).toBe(false);
-    expect(selectionExceedsBudget(sparseCellSelection(4097))).toBe(true);
+  it("clamps cell keys beyond the sparse cardinality cap", () => {
+    const over = sparseCellSelection(MAX_SPARSE_CELL_ENTRIES + 1);
+    const result = clampDataGridViewSelection(over);
+
+    expect(result.droppedSelection).toBe(true);
+    expect(result.selection.kind === "cells" && result.selection.cellKeys).toEqual([]);
+    expect(clampDataGridViewSelection(sparseCellSelection(MAX_SPARSE_CELL_ENTRIES)).droppedSelection).toBe(false);
   });
 
   it("clears a single owner and its notice marker", () => {
@@ -102,6 +123,13 @@ describe("dataGridViewStateCache", () => {
     expect(peekDataGridViewSnapshot("tab-1-run-a-0")).toBeUndefined();
     expect(peekDataGridViewSnapshot("tab-1-run-b-0")).toBeUndefined();
     expect(peekDataGridViewSnapshot("tab-2-run-a-0")).toBeDefined();
+  });
+
+  it("lets a tab capture again right after a plain clear (no tombstone)", () => {
+    clearDataGridViewSnapshotsForTab("tab-1");
+    saveDataGridViewSnapshot(snapshot("tab-1"));
+
+    expect(peekDataGridViewSnapshot("tab-1")).toBeDefined();
   });
 
   it("notifies at most once per owner and generation", () => {

@@ -103,7 +103,7 @@ describe("EditorSettingsDialog standard item hover feedback", () => {
     expect(divTagForAttribute('data-settings-search-id="data-grid-filter-view"')).not.toContain("settings-item");
     expect(borderedSettingDivForKey("dataGridKeepFilterEditorExpanded")).toContain("settings-item");
 
-    for (const text of ['t("settings.mcpHttpWebServiceTitle")', 't("settings.mcpHttpUnsavedChangesHint")', 't("settings.mcpBinPath")', 't("settings.mcpCursorConfigPath")', 't("settings.mcpQoderConfigPath")', 't("settings.supportInfoTitle")'] as const) {
+    for (const text of ['t("settings.mcpHttpWebServiceTitle")', 't("settings.mcpHttpUnsavedChangesHint")', "{{ mcpStatus.bin_path }}", 't("settings.mcpCursorConfigPath")', 't("settings.mcpQoderConfigPath")', 't("settings.supportInfoTitle")'] as const) {
       expect(borderedDivForText(text)).not.toContain("settings-item");
     }
   });

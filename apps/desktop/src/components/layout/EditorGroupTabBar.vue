@@ -421,6 +421,9 @@ const sortedPinnedTabs = computed(() => sortDisplayedTabs(props.tabs.filter((tab
 const sortedRegularTabs = computed(() => sortDisplayedTabs(props.tabs.filter((tab) => !tab.pinned)));
 
 const collapsedTabGroups = ref<Set<string>>(new Set());
+const collapsingTabGroups = ref<Set<string>>(new Set());
+const tabGroupCollapseTimers = new Map<string, number>();
+const TAB_GROUP_COLLAPSE_MS = 140;
 const pendingTabScrollRestore = ref<{ fixed: number; regular: number } | null>(null);
 const tabGroupPalette = ["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"];
 const tabGroupEditorOpen = ref(false);
@@ -490,6 +493,53 @@ function restoreTabScrollPosition(position: { fixed: number; regular: number }) 
   if (regularTabsRowRef.value) regularTabsRowRef.value.scrollLeft = position.regular;
 }
 
+function captureExpandedTabGroupWidths(groupIds: Set<string>) {
+  if (isWrapLayout.value || isVerticalLayout.value) return;
+  tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]").forEach((entry) => {
+    const groupId = entry.dataset.tabGroupId;
+    if (!groupId || !groupIds.has(groupId) || entry.classList.contains("tab-group-entry--collapsed")) return;
+    const width = entry.getBoundingClientRect().width;
+    if (width <= 0) return;
+    entry.style.setProperty("--tab-group-entry-expanded-width", String(width) + "px");
+  });
+}
+
+function cancelTabGroupCollapse(groupId: string) {
+  const timer = tabGroupCollapseTimers.get(groupId);
+  if (timer !== undefined) window.clearTimeout(timer);
+  tabGroupCollapseTimers.delete(groupId);
+  if (!collapsingTabGroups.value.has(groupId)) return;
+  const next = new Set(collapsingTabGroups.value);
+  next.delete(groupId);
+  collapsingTabGroups.value = next;
+}
+
+function beginTabGroupCollapse(groupIds: Set<string>) {
+  if (isWrapLayout.value) {
+    collapsedTabGroups.value = new Set([...collapsedTabGroups.value, ...groupIds]);
+    nextTick(refreshHorizontalTabOverflow);
+    return;
+  }
+
+  const pending = [...groupIds].filter((groupId) => !collapsedTabGroups.value.has(groupId) && !collapsingTabGroups.value.has(groupId));
+  if (!pending.length) return;
+  captureExpandedTabGroupWidths(new Set(pending));
+  collapsingTabGroups.value = new Set([...collapsingTabGroups.value, ...pending]);
+  collapsedTabGroups.value = new Set([...collapsedTabGroups.value, ...pending]);
+  pending.forEach((groupId) => {
+    tabGroupCollapseTimers.set(
+      groupId,
+      window.setTimeout(() => {
+        tabGroupCollapseTimers.delete(groupId);
+        const collapsing = new Set(collapsingTabGroups.value);
+        collapsing.delete(groupId);
+        collapsingTabGroups.value = collapsing;
+        nextTick(refreshHorizontalTabOverflow);
+      }, TAB_GROUP_COLLAPSE_MS),
+    );
+  });
+}
+
 function refreshHorizontalTabOverflow() {
   updateScrollButtons();
   fixedTabsScroll.updateScrollButtons();
@@ -499,17 +549,27 @@ function refreshHorizontalTabOverflow() {
 
 function handleTabGroupTransitionEnd(event: TransitionEvent) {
   if (event.propertyName !== "max-width") return;
+  const entry = event.currentTarget as HTMLElement;
+  if (!entry.classList.contains("tab-group-entry--collapsed")) {
+    entry.style.removeProperty("--tab-group-entry-expanded-width");
+  }
   refreshHorizontalTabOverflow();
 }
 
 function toggleTabGroup(tab: QueryTab) {
   preserveTabScrollPosition();
   const groupId = tabGroupId(tab);
+  if (collapsingTabGroups.value.has(groupId)) {
+    cancelTabGroupCollapse(groupId);
+  }
   const next = new Set(collapsedTabGroups.value);
-  if (next.has(groupId)) next.delete(groupId);
-  else next.add(groupId);
-  collapsedTabGroups.value = next;
-  nextTick(refreshHorizontalTabOverflow);
+  if (next.has(groupId)) {
+    next.delete(groupId);
+    collapsedTabGroups.value = next;
+    nextTick(refreshHorizontalTabOverflow);
+    return;
+  }
+  beginTabGroupCollapse(new Set([groupId]));
 }
 
 function tabGroupIdsInPane() {
@@ -519,12 +579,12 @@ function tabGroupIdsInPane() {
 
 function collapseAllTabGroups() {
   preserveTabScrollPosition();
-  collapsedTabGroups.value = new Set(tabGroupIdsInPane());
-  nextTick(refreshHorizontalTabOverflow);
+  beginTabGroupCollapse(new Set(tabGroupIdsInPane()));
 }
 
 function expandAllTabGroups() {
   preserveTabScrollPosition();
+  [...tabGroupCollapseTimers.keys()].forEach(cancelTabGroupCollapse);
   collapsedTabGroups.value = new Set();
   nextTick(refreshHorizontalTabOverflow);
 }
@@ -534,6 +594,7 @@ function expandTabGroupForTab(tabId: string | null) {
   const tab = queryStore.tabs.find((item) => item.id === tabId);
   if (!tab) return;
   const groupId = tabGroupId(tab);
+  cancelTabGroupCollapse(groupId);
   if (!collapsedTabGroups.value.has(groupId)) return;
   const next = new Set(collapsedTabGroups.value);
   next.delete(groupId);
@@ -1215,7 +1276,11 @@ function handleTabPointerUp(event: PointerEvent) {
   queryStore.moveTabToGroup(payload.tabId, targetGroupId, index);
 }
 
-onUnmounted(cleanupTabDrag);
+onUnmounted(() => {
+  cleanupTabDrag();
+  tabGroupCollapseTimers.forEach((timer) => window.clearTimeout(timer));
+  tabGroupCollapseTimers.clear();
+});
 
 const tabScrollBehavior = ref<ScrollBehavior>("smooth");
 
@@ -1230,7 +1295,7 @@ watch(
         if (container) {
           const activeEl = container.querySelector('[data-active-tab="true"]');
           if (activeEl) {
-            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: "center" });
+            activeEl.scrollIntoView({ behavior: tabScrollBehavior.value, block: "nearest", inline: isVerticalLayout.value ? "nearest" : "center" });
           }
         }
       }
@@ -1305,10 +1370,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
     :data-placement="settingsStore.editorSettings.tabPlacement"
   >
     <!-- Compact vertical toolbar: search, grouping preference, collapse. -->
-    <div v-if="isVerticalLayout" class="flex shrink-0 items-center gap-0.5 border-b p-1.5" :class="isTabBarCollapsed ? 'justify-center' : ''">
+    <div v-if="isVerticalLayout" class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1" :class="isTabBarCollapsed ? 'justify-center' : ''">
       <div v-if="!isTabBarCollapsed" class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-8 w-full pl-7 text-sm" />
+        <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-7 w-full pl-7 text-sm" />
       </div>
       <div v-if="!isTabBarCollapsed" class="flex shrink-0 items-center gap-0">
         <LightDropdown
@@ -1394,7 +1459,15 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   </CustomContextMenu>
                   <CustomContextMenu v-else-if="entry.kind === 'tab'" :items="getTabMenuItems(entry.tab)" v-slot="{ onContextMenu }">
                     <div
-                      :class="['tab-group-entry', isClassicLayout && !isVerticalLayout ? 'h-full' : '', { 'tab-group-entry--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab) }]"
+                      :class="[
+                        'tab-group-entry',
+                        isClassicLayout && !isVerticalLayout ? 'h-full' : '',
+                        {
+                          'tab-group-entry--collapsing': entry.grouping && !tabSearchQuery.trim() && collapsingTabGroups.has(tabGroupId(entry.tab)),
+                          'tab-group-entry--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab),
+                        },
+                      ]"
+                      :data-tab-group-id="entry.grouping ? tabGroupId(entry.tab) : undefined"
                       :aria-hidden="entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)"
                       :inert="entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab)"
                       @contextmenu="onContextMenu"
@@ -1410,7 +1483,6 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                                 : ['h-7 rounded-md border', isTabActive(entry.tab) ? 'text-foreground font-medium' : 'border-border/60 text-foreground/70 hover:border-border hover:text-foreground/90'],
                               {
                                 'tab-group-tab': entry.grouping,
-                                'tab-group-tab--collapsed': entry.grouping && !tabSearchQuery.trim() && isTabGroupCollapsed(entry.tab),
                                 'tab-group-tab--first': entry.grouping && entry.groupFirst,
                                 'tab-group-tab--last': entry.grouping && entry.groupLast,
                               },

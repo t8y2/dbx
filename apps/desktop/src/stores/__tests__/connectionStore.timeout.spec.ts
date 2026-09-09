@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionConfig, TreeNode } from "@/types/database";
+import { runSidebarSearchTasks } from "@/components/sidebar/sidebarSearchTaskRunner";
 
 function installLocalStorage() {
   const data = new Map<string, string>();
@@ -91,6 +92,99 @@ describe("connectionStore timeout recovery", () => {
     expect(checkConnectionHealth).not.toHaveBeenCalled();
     expect(connectDb).not.toHaveBeenCalled();
     expect(store.connectedIds.has(connection.id)).toBe(true);
+  });
+
+  it.each(["failure", "success", "timeout"] as const)("ignores an older health check %s after disconnect", async (outcome) => {
+    let resolveHealth!: () => void;
+    let rejectHealth!: (error: Error) => void;
+    const checkConnectionHealth = vi.fn(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          resolveHealth = resolve;
+          rejectHealth = reject;
+        }),
+    );
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      connectDb,
+      disconnectDb: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore, CONNECTION_ATTEMPT_CANCELLED_MESSAGE } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    const ensure = store.ensureConnected(connection.id).catch((error) => error);
+    await store.disconnect(connection.id);
+    if (outcome === "failure") rejectHealth(new Error("pool closed"));
+    else if (outcome === "success") resolveHealth();
+    else await vi.advanceTimersByTimeAsync(5001);
+    expect(await ensure).toEqual(new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE));
+    expect(connectDb).not.toHaveBeenCalled();
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    // An explicit reconnect still works after the stale probe has been discarded.
+    await store.ensureConnected(connection.id);
+    expect(connectDb).toHaveBeenCalledTimes(1);
+    expect(store.connectedIds.has(connection.id)).toBe(true);
+  });
+
+  it("does not reconnect for queued sidebar object loads after disconnect", async () => {
+    let finishTables!: (tables: []) => void;
+    const listTables = vi.fn(
+      () =>
+        new Promise<[]>((resolve) => {
+          finishTables = resolve;
+        }),
+    );
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb,
+      disconnectDb: vi.fn().mockResolvedValue(undefined),
+      listTables,
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const connection = postgresConnection();
+    const groups: TreeNode[] = ["TABLE", "VIEW"].map((kind) => ({
+      id: `${connection.id}:app:public:__${kind.toLowerCase()}s`,
+      label: kind,
+      type: kind === "TABLE" ? "group-tables" : "group-views",
+      connectionId: connection.id,
+      database: "app",
+      schema: "public",
+      children: [],
+    }));
+    store.connections = [connection];
+    store.connectedIds.add(connection.id);
+    store.treeNodes = [{ id: connection.id, label: connection.name, type: "connection", connectionId: connection.id, children: groups }];
+    const queued = runSidebarSearchTasks(
+      groups.map((node) => () => store.loadObjectGroupChildren(node, { force: true })),
+      1,
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(listTables).toHaveBeenCalledTimes(1);
+    await store.disconnect(connection.id);
+    finishTables([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connectDb).not.toHaveBeenCalled();
+    await queued;
+    expect(listTables).toHaveBeenCalledTimes(1);
+    expect(store.connectedIds.has(connection.id)).toBe(false);
+    expect(store.treeNodes[0].children).toEqual([]);
   });
 
   it("normalizes missing keepalive interval to 30 seconds", async () => {

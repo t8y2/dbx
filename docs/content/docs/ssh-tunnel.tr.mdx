@@ -75,7 +75,7 @@ DBX, bir kimlik bilgisi göndermeden önce SSH sunucu anahtarını doğrular. G�
 
 - Bilinmeyen bir sunucu, parmak izini incelemenizi ve açıkça kabul etmenizi ister.
 - Yalnızca geçerli bağlantı için güvenebilir ya da DBX'in `known_hosts` dosyasında hatırlayabilirsiniz.
-- DBX, daha önce bilinen bir sunucu için değişmiş bir anahtarı reddeder.
+- DBX `known_hosts` dosyasında kayıtlı bir sunucunun anahtarı değiştiğinde parmak izlerini karşılaştırmanız istenir. Kapatabilir, yalnızca bu oturum için devam edebilir veya kayıtlı anahtarı güncelleyip devam edebilirsiniz. DBX `~/.ssh/known_hosts` dosyasını düzenlemez; oradaki bir uyumsuzluk hâlâ bağlantıyı reddeder.
 - Onay arayüzü kullanılamıyorsa, zaman aşımına uğrarsa ya da anahtar reddedilirse bağlantı parola veya özel anahtar gönderilmeden başarısız olur.
 
 ### Tüneli Yerel Ağa Açma

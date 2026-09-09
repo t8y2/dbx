@@ -1304,7 +1304,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             database_type: Some(DatabaseType::Oracle),
             schema: Some("DBXTEST".to_string()),
             table_name: "DBX_LOAD_TABLE_006".to_string(),
-            table_type: None,
+            table_type: Some("TABLE".to_string()),
             primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
             columns: Vec::new(),
             fallback_order_columns: Vec::new(),
@@ -1322,7 +1322,7 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             database_type: Some(DatabaseType::Oracle),
             schema: Some("DBXTEST".to_string()),
             table_name: "DBX_LOAD_TABLE_006".to_string(),
-            table_type: None,
+            table_type: Some("TABLE".to_string()),
             primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
             columns: vec!["ID".to_string(), "NAME".to_string()],
             fallback_order_columns: Vec::new(),
@@ -1443,6 +1443,25 @@ fn builds_oracle_and_neo4j_table_data_queries() {
             }),
             "MATCH (n:`Employee`) RETURN elementId(n) AS `__DBX_ELEMENT_ID`, n.`id` AS `id`, n.`first name` AS `first name`, n.`role` AS `role` LIMIT 100;"
         );
+}
+
+#[test]
+fn oracle_unknown_table_type_does_not_assume_rowid_support() {
+    assert_eq!(
+        build_table_data_select_sql(TableDataSelectSqlOptions {
+            database_type: Some(DatabaseType::Oracle),
+            schema: Some("DBXTEST".to_string()),
+            table_name: "DBX_DISTINCT_VIEW".to_string(),
+            table_type: None,
+            primary_keys: vec![DBX_ROWID_COLUMN.to_string()],
+            columns: vec!["ID".to_string(), "NAME".to_string()],
+            limit: Some(100),
+            offset: Some(100),
+            include_row_id: true,
+            ..Default::default()
+        }),
+        "SELECT \"ID\", \"NAME\" FROM (SELECT dbx_inner.*, ROWNUM AS \"__dbx_row_num\" FROM (SELECT \"ID\", \"NAME\" FROM \"DBXTEST\".\"DBX_DISTINCT_VIEW\") dbx_inner WHERE ROWNUM <= 200) WHERE \"__dbx_row_num\" > 100"
+    );
 }
 
 #[test]

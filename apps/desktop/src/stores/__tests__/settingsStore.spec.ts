@@ -7,6 +7,7 @@ import {
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
   enforceRightSidebarPanelExclusivity,
+  getAiProviderPresetDefaultEndpoint,
   normalizeAiConfig,
   normalizeDesktopSettings,
   normalizeEditorSettings,
@@ -769,6 +770,18 @@ describe("settingsStore AI API key normalization", () => {
       requiresApiKey: true,
     });
     expect(normalizeAiConfig({ endpoint: "https://api.moonshot.cn/v1", model: "kimi-k2.5" }).provider).toBe("kimi");
+  });
+
+  it("uses the mainland MiniMax endpoint only for new zh-CN presets", () => {
+    expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.minimax, "zh-CN")).toBe("https://api.minimaxi.com/v1");
+    expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.minimax, "zh-TW")).toBe("https://api.minimax.io/v1");
+    expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.minimax, "en")).toBe("https://api.minimax.io/v1");
+    expect(getAiProviderPresetDefaultEndpoint(AI_PROVIDER_PRESETS.openai, "zh-CN")).toBe(AI_PROVIDER_PRESETS.openai.endpoint);
+  });
+
+  it("preserves saved MiniMax endpoints during normalization", () => {
+    expect(normalizeAiConfig({ provider: "minimax", endpoint: "https://api.minimaxi.com/v1" }).endpoint).toBe("https://api.minimaxi.com/v1");
+    expect(normalizeAiConfig({ provider: "minimax", endpoint: "https://minimax.example.com/v1" }).endpoint).toBe("https://minimax.example.com/v1");
   });
 
   it("normalizes OpenCode CLI path and environment settings", () => {

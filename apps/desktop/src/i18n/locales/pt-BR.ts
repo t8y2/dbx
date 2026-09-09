@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
 import { meilisearchManagementPtBR } from "./meilisearchManagement";
+import { redisGroupingPtBR as redisGrouping } from "./redisGrouping";
 import docs from "./docs/pt-BR";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -7,6 +8,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 
 const consul = {
   ...consulUiMessages,
+  redisGrouping,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
   newKey: "New Key",
   loadingKeys: "Loading keys...",
@@ -1082,6 +1084,14 @@ export default withEnglishFallback({
     sshHostKeyVerifyRemember: "Confiar neste host (lembrar desta chave para conexões futuras)",
     sshHostKeyVerifyAccept: "Aceitar e conectar",
     sshHostKeyVerifyReject: "Cancelar",
+    sshHostKeyChangedTitle: "A impressão digital do host mudou",
+    sshHostKeyChangedMessage: "A impressão digital salva de {host} não corresponde ao servidor atual.",
+    sshHostKeyChangedCurrent: "A impressão digital {keyType} é SHA256:",
+    sshHostKeyChangedSaved: "Impressão digital salva",
+    sshHostKeyChangedWarning: "Continue apenas se tiver certeza de que este host realmente mudou.",
+    sshHostKeyChangedClose: "Fechar",
+    sshHostKeyChangedContinue: "Continuar",
+    sshHostKeyChangedUpdate: "Atualizar e continuar",
     sshInteractiveTitle: "Verificação SSH necessária",
     sshInteractiveMessage: "O servidor SSH {host}:{port} exige verificação adicional.",
     sshInteractiveDefaultPrompt: "Digite a resposta de verificação solicitada.",
@@ -1880,7 +1890,8 @@ export default withEnglishFallback({
     generateNull: "NULL",
     generateCurrentDatetime: "Data e hora atuais",
     generateCurrentDate: "Data atual",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "ID incremental",
     generateSnowflakeId: "ID Snowflake",
     generateSequenceDescription: "Gere valores consecutivos para {count} célula(s) selecionada(s). Informe o valor inicial.",
@@ -2040,6 +2051,7 @@ export default withEnglishFallback({
     queryError: "Erro na Consulta",
     saveErrorTitle: "Falha ao salvar alterações",
     dataUnavailable: "Os dados da tabela precisam ser recarregados.",
+    viewSnapshotSelectionNotRestored: "A visualização anterior foi restaurada, mas a seleção era grande demais para ser mantida.",
     dataUnavailableHintPrefix: "Pressione ",
     dataUnavailableHintSuffix: " ou clique em Atualizar abaixo para recarregar.",
     refresh: "Atualizar",
@@ -5255,6 +5267,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "A reconstrução não está disponível para transferências apenas de dados. Selecione estrutura e dados ou apenas estrutura.",
     rebuildUnsupportedDisabled: "O mecanismo de destino selecionado não oferece suporte à reconstrução das tabelas de destino.",
     rebuildPreviewUnavailable: "O backend não retornou um plano de reconstrução. A transferência não foi iniciada; atualize a prévia com um backend compatível.",
+    rebuildMissingTargets: "Algumas tabelas de destino ainda não existem e serão criadas sem backup.",
     previewFailed: "Não foi possível preparar a transferência: {message}",
     start: "Iniciar transferência",
     startConfirmTitle: "Confirmar transferência",

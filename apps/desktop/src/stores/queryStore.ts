@@ -60,6 +60,7 @@ import { replaceSqlServerLeadingUseQuery, sqlServerLeadingUseScript, sqlServerUs
 import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
+import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
 import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -1475,6 +1476,12 @@ export const useQueryStore = defineStore("query", () => {
     if (!options.evicted) {
       if (tab.resultCacheKey && !options.preserveCacheSnapshot) void deleteTabResultSnapshot(tab.resultCacheKey);
       tab.resultCacheKey = undefined;
+      // Drop the stale view snapshot but do NOT tombstone: ordinary execution
+      // clears the payload before running, and the replacement result must stay
+      // free to capture a fresh snapshot when the user switches away. Tab
+      // closure (closeTab/closeTabsWhere/releaseTabsWhere) uses the tombstone.
+      // An evicted result keeps its snapshot so returning to the tab can replay it.
+      clearDataGridViewSnapshotsForTab(tab.id);
     }
   }
 
@@ -1554,6 +1561,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.results = run.results;
     tab.activeResultIndex = run.activeResultIndex;
     tab.resultGridRevision = run.resultGridRevision;
+    // A legacy run without the token must not inherit a stale tab value: fail
+    // safe by starting a fresh logical result.
+    tab.resultViewGeneration = run.resultViewGeneration ?? uuid();
     tab.batchSqlExecution = cloneBatchSqlExecution(run.batchSqlExecution);
     tab.resultBaseSql = run.resultBaseSql;
     tab.resultEditorFingerprint = run.resultEditorFingerprint;
@@ -1877,6 +1887,7 @@ export const useQueryStore = defineStore("query", () => {
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
       resultGridRevision: tab.resultGridRevision,
+      resultViewGeneration: tab.resultViewGeneration,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -1978,6 +1989,7 @@ export const useQueryStore = defineStore("query", () => {
       results: tab.results,
       activeResultIndex: tab.activeResultIndex,
       resultGridRevision: tab.resultGridRevision,
+      resultViewGeneration: tab.resultViewGeneration,
       batchSqlExecution: cloneBatchSqlExecution(tab.batchSqlExecution),
       resultBaseSql: tab.resultBaseSql,
       resultEditorFingerprint: tab.resultEditorFingerprint,
@@ -2038,6 +2050,27 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  type ResultPublicationOrigin = "execute" | "refresh" | "page" | "sort" | "local-sort" | "append" | "disk-restore";
+
+  /**
+   * Single writer of `resultViewGeneration`, the logical-result identity used by
+   * the tab-switch view snapshot cache (`dataGridViewStateCache.ts`).
+   *
+   * New value by default, so a path that forgets to classify itself still fails
+   * safe (the old view snapshot stops matching) instead of replaying a stale
+   * viewport. `append` extends the current dataset; `disk-restore` inherits, so
+   * an evicted-then-restored payload keeps its captured view. No other code path
+   * may assign the token directly.
+   */
+  function publishResultGeneration(tab: QueryTab, origin: ResultPublicationOrigin) {
+    if (origin === "disk-restore") return;
+    if (origin === "append") {
+      tab.resultViewGeneration ??= uuid();
+      return;
+    }
+    tab.resultViewGeneration = uuid();
+  }
+
   function sortTabResultLocally(id: string, column: string, columnIndex: number, direction: DataGridSortDirection | null) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result) return;
@@ -2059,6 +2092,8 @@ export const useQueryStore = defineStore("query", () => {
     const mongo_copy_documents = originalMongoCopyDocuments ? rowIndexes.map((index) => originalMongoCopyDocuments[index]) : undefined;
     const large_value_cells = remapLargeValueCells(tab.resultLocalSortOriginalLargeValueCells, rowIndexes);
     assignDisplayedResult(tab, { ...tab.result, rows, large_value_cells, mongo_documents, mongo_copy_documents });
+    // Reordering rows invalidates source-index view snapshots.
+    publishResultGeneration(tab, "local-sort");
 
     tab.resultSortColumn = direction ? column : undefined;
     tab.resultSortColumnIndex = direction ? columnIndex : undefined;
@@ -2532,6 +2567,9 @@ export const useQueryStore = defineStore("query", () => {
     tab.executionId = undefined;
     tab.executingResultRunId = undefined;
     tab.queryExecutionStartedAt = undefined;
+    // An externally-supplied result is a brand-new dataset, not the previous
+    // one: publish a fresh generation so the tab can capture a view snapshot.
+    publishResultGeneration(tab, "execute");
     if (tab.result) touchResult(tab);
     return id;
   }
@@ -3385,6 +3423,7 @@ export const useQueryStore = defineStore("query", () => {
     persistSavedSqlEditorPosition(tabs.value[idx]);
     if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
     clearDataGridPendingSnapshotsForTab(id);
+    beginClosingDataGridViewSnapshotsForTab(id);
     clearDataGridStructuredFilterStatesForTab(id);
     clearDataGridSearchStatesForTab(id);
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
@@ -3746,6 +3785,7 @@ export const useQueryStore = defineStore("query", () => {
       .forEach((tab) => {
         if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
         clearDataGridPendingSnapshotsForTab(tab.id);
+        beginClosingDataGridViewSnapshotsForTab(tab.id);
         clearDataGridStructuredFilterStatesForTab(tab.id);
         clearDataGridSearchStatesForTab(tab.id);
         if (tab.txnSessionId) void rollbackTransaction(tab.id);
@@ -3930,6 +3970,7 @@ export const useQueryStore = defineStore("query", () => {
       await executeTabSql(tab.id, sql, {
         pagination: { limit, offset },
         preserveResultDuringExecution: true,
+        publicationOrigin: "refresh",
       });
       return true;
     } catch (error) {
@@ -3963,6 +4004,7 @@ export const useQueryStore = defineStore("query", () => {
       .forEach((tab) => {
         rollbackTabTransaction(tab, { resetAutoCommit: true });
         clearDataGridPendingSnapshotsForTab(tab.id);
+        beginClosingDataGridViewSnapshotsForTab(tab.id);
         clearDataGridStructuredFilterStatesForTab(tab.id);
         clearDataGridSearchStatesForTab(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);
@@ -4521,6 +4563,8 @@ export const useQueryStore = defineStore("query", () => {
     tab.result = toErrorResult(e);
     tab.results = undefined;
     tab.activeResultIndex = undefined;
+    // An error result is a replacement, not the previous dataset.
+    publishResultGeneration(tab, "execute");
     tab.resultSessionId = undefined;
     tab.resultClientSessionId = undefined;
     tab.isExecuting = false;
@@ -4550,6 +4594,7 @@ export const useQueryStore = defineStore("query", () => {
         current.activeResultIndex = undefined;
         current.resultSessionId = undefined;
         current.resultClientSessionId = undefined;
+        publishResultGeneration(current, "execute");
         touchResult(current);
       }
       clearLiveBatchSqlExecution(current, executionId);
@@ -4584,7 +4629,10 @@ export const useQueryStore = defineStore("query", () => {
         current.resultGridRevision = uuid();
         if (current.activeResultRunId) syncActiveResultRunFromDisplayed(current);
         await nextTick();
-        if (previousGridKey && options?.openInNewResultTab !== true) clearDataGridPendingSnapshot(previousGridKey);
+        if (previousGridKey && options?.openInNewResultTab !== true) {
+          clearDataGridPendingSnapshot(previousGridKey);
+          clearDataGridViewSnapshot(previousGridKey);
+        }
       }
     }
     return producedResult;
@@ -4676,6 +4724,30 @@ export const useQueryStore = defineStore("query", () => {
     oracleLobPreview: boolean;
   }
 
+  function oracleCompletionTableType(tab: QueryTab, metadataDbType: string, database: string, schema: string, tableName: string, catalog?: string): string | undefined {
+    if (metadataDbType !== "oracle" && metadataDbType !== "oceanbase-oracle") return undefined;
+    const resolvedSchema = schema.trim();
+    if (!resolvedSchema) return undefined;
+    const normalizeIdentifier = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
+    const targetName = normalizeIdentifier(tableName);
+    const targetSchema = normalizeIdentifier(resolvedSchema);
+    const targetCatalog = catalog?.trim() ? normalizeIdentifier(catalog) : undefined;
+    const matches = useConnectionStore()
+      .lookupLocalCompletionTables(tab.connectionId!, database, tableName, 20, resolvedSchema, catalog)
+      .filter((table) => normalizeIdentifier(table.name) === targetName && normalizeIdentifier(table.schema) === targetSchema && (!targetCatalog || normalizeIdentifier(table.catalog) === targetCatalog));
+    if (matches.length !== 1) return undefined;
+    const match = matches[0]!;
+    return match.tableType?.trim() || match.type?.toUpperCase();
+  }
+
+  function canUseQueryKeylessRowPredicate(databaseType: DatabaseType, loaded: LoadedEditableSource): boolean {
+    if (!canUseKeylessRowPredicate(databaseType, loaded.tableMeta.primaryKeys)) return false;
+    // An unknown Oracle object may be a view whose query shape rejects ROWID
+    // and whose rows cannot be mapped safely for writes. Keep the result
+    // read-only until the object tree or tab metadata confirms its type.
+    return databaseType !== "oracle" || !!loaded.tableMeta.tableType?.trim();
+  }
+
   function applyQueryMetadataPatch(tab: QueryTab, patch: QueryMetadataPatch) {
     tab.queryAnalysis = patch.queryAnalysis;
     tab.querySourceColumns = patch.querySourceColumns;
@@ -4730,7 +4802,8 @@ export const useQueryStore = defineStore("query", () => {
     // Keep SQL Server writes unqualified unless the SELECT source explicitly
     // named a schema, so SELECT and UPDATE resolve the same object.
     const writeSchema = dbType === "sqlserver" && !source.schema ? undefined : metadataSchema || undefined;
-    const knownTableType = tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined;
+    const localTableType = oracleCompletionTableType(tab, metadataDbType, metadataDatabase, metadataSchema || conn?.default_schema || "", metadataTableName, metadataCatalog);
+    const knownTableType = localTableType ?? (tab.tableMeta?.tableName.toLowerCase() === metadataTableName.toLowerCase() && normalizeOptionalSchema(tab.tableMeta.schema) === normalizeOptionalSchema(metadataSchema) ? tab.tableMeta.tableType : undefined);
     return {
       source: metadataSource,
       analysis: normalizeUppercaseFoldedQueryAnalysis(metadataDbType, cloneAnalysisForSource(analysis, metadataSource), metadataSchema || undefined, metadataTableName),
@@ -5129,7 +5202,7 @@ export const useQueryStore = defineStore("query", () => {
           const primaryKeys = loaded.tableMeta.primaryKeys;
           const sourceColumns = sourceColumnsForResult(metadataAnalysis, tab.result!.columns, loaded.source.key, dbType as DatabaseType, primaryKeys);
           const primaryKeysPresent = primaryKeysPresentForSource(dbType, primaryKeys, tab.result!.columns, metadataAnalysis, loaded.source.key, loaded.tableMeta.columns);
-          const keylessAllowed = sources.length === 1 && canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys);
+          const keylessAllowed = sources.length === 1 && canUseQueryKeylessRowPredicate(dbType as DatabaseType, loaded);
           const primaryKeySet = new Set(primaryKeys);
           const editableSourceColumnCount = (sourceColumns ?? []).filter((column) => column && !primaryKeySet.has(column)).length;
           return {
@@ -5154,7 +5227,7 @@ export const useQueryStore = defineStore("query", () => {
           const resultIndex = tab.result.columns.findIndex((column) => column.toLowerCase() === syntheticRowIdProjection.alias.toLowerCase());
           if (resultIndex >= 0) sourceColumns[resultIndex] = DBX_ROWID_COLUMN;
         }
-        if (primaryKeys.length === 0 && !canUseKeylessRowPredicate(dbType as DatabaseType, primaryKeys)) {
+        if (primaryKeys.length === 0 && !canUseQueryKeylessRowPredicate(dbType as DatabaseType, loaded)) {
           return {
             queryAnalysis: undefined,
             querySourceColumns: undefined,
@@ -5433,6 +5506,8 @@ export const useQueryStore = defineStore("query", () => {
       };
       pagination?: { limit: number; offset: number; sessionId?: string; clientSessionId?: string };
       appendResult?: { maxRows: number };
+      /** Logical-result publication origin for the view-snapshot cache. */
+      publicationOrigin?: ResultPublicationOrigin;
       mongoSafety?: MongoAggregateSafetyOptions;
       preserveResultDuringExecution?: boolean;
       preserveTotalRowCountDuringExecution?: boolean;
@@ -5656,6 +5731,8 @@ export const useQueryStore = defineStore("query", () => {
             current.activeResultIndex = undefined;
             current.result = allResults[0];
           }
+          // Redis command batches always replace the visible result.
+          publishResultGeneration(current, "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6041,6 +6118,7 @@ export const useQueryStore = defineStore("query", () => {
             current.activeResultIndex = undefined;
             current.result = allResults[0];
           }
+          publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6109,6 +6187,8 @@ export const useQueryStore = defineStore("query", () => {
           current.results = allResults.length > 1 ? allResults : undefined;
           current.activeResultIndex = allResults.length > 1 ? resultIndex : undefined;
           current.result = allResults[resultIndex];
+          // Elasticsearch batch requests replace the visible result.
+          publishResultGeneration(current, "execute");
           producedResult = current.result !== undefined;
           touchResult(current);
           current.queryAnalysis = undefined;
@@ -6436,6 +6516,9 @@ export const useQueryStore = defineStore("query", () => {
           current.activeResultIndex = undefined;
           current.result = results[0];
         }
+        // Logical-result identity for the view-snapshot cache. An append extends
+        // the same dataset; every other branch above replaces it.
+        publishResultGeneration(current, shouldAppendResult ? "append" : (options?.publicationOrigin ?? "execute"));
         producedResult = current.result !== undefined;
         current.resultBaseSql = batchResume ? batchResume.batch.submittedSql : shouldReplaceActiveResultInGroup ? (current.resultBaseSql ?? queryBaseSql) : queryBaseSql;
         current.resultEditorFingerprint = batchResume ? batchResume.batch.editorFingerprint : shouldReplaceActiveResultInGroup ? (current.resultEditorFingerprint ?? executionEditorFingerprint) : executionEditorFingerprint;
@@ -6626,6 +6709,8 @@ export const useQueryStore = defineStore("query", () => {
         current.resultTotalRowCountLoading = false;
         touchResult(current);
         producedResult = true;
+        // An error result replaces the dataset the view snapshot was taken on.
+        publishResultGeneration(current, "execute");
         // When a pinned result requires a new run, errors must use that same
         // run instead of being replaced by the retained pinned result below.
         syncDisplayedResultRun(current, queryBaseSql, captureResultRun);
@@ -7249,6 +7334,8 @@ export const useQueryStore = defineStore("query", () => {
     // 置空让 projectResultRun 按需重算
     tab.resultRuns = snapshot.resultRuns ? markQueryResultRunsRowsRaw(snapshot.resultRuns).map((run) => ({ ...run, resultEstimatedBytes: undefined })) : tab.resultRuns;
     tab.activeResultRunId = snapshot.activeResultRunId ?? tab.activeResultRunId;
+    // Disk restore is the same logical result: keep the captured view identity.
+    tab.resultViewGeneration = snapshot.resultViewGeneration ?? tab.resultViewGeneration;
     if (!tab.result && !tab.results && !tab.resultRuns) return false;
 
     tab.queryAnalysis = snapshot.queryAnalysis;

@@ -1,6 +1,6 @@
 import { uuid } from "@/lib/common/utils";
 
-export type CellValueGenerationKind = "empty" | "null" | "datetime" | "date" | "uuid" | "increment" | "snowflake";
+export type CellValueGenerationKind = "empty" | "null" | "datetime" | "date" | "uuid" | "uuid-v7" | "increment" | "snowflake";
 
 export interface SnowflakeIdGenerator {
   next(nowMs?: number): string;
@@ -59,6 +59,12 @@ export function generateCellValues(
     if (kind === "datetime") return localDateTimeText(now);
     if (kind === "date") return localDateText(now);
     if (kind === "uuid") return uuidFactory();
+    if (kind === "uuid-v7") {
+      // RFC 9562: 48-bit Unix milliseconds, version 7, then 74 random bits and the UUID variant.
+      // A v4 UUID already supplies the random bits and variant in the same positions.
+      const timestamp = now.getTime().toString(16).padStart(12, "0");
+      return `${timestamp.slice(0, 8)}-${timestamp.slice(8)}-7${uuidFactory().slice(15)}`;
+    }
     if (kind === "increment") return String((options.startValue ?? 1n) + BigInt(index));
     return snowflakeGenerator.next(now.getTime());
   });

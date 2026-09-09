@@ -75,7 +75,7 @@ DBX verifies the SSH host key before it sends a credential. Trusted keys come fr
 
 - An unknown host prompts you to review and explicitly accept its fingerprint.
 - You can trust it for the current connection only or remember it in DBX's `known_hosts`.
-- DBX rejects a changed key for a previously known host.
+- A changed key for a host already saved in DBX's `known_hosts` prompts you to compare fingerprints. You can close, continue for this session only, or update the saved key and continue. DBX never edits `~/.ssh/known_hosts`; a mismatch there still fails closed.
 - If the confirmation UI is unavailable, times out, or rejects the key, the connection fails without sending a password or private key.
 
 ### Expose Tunnel to LAN

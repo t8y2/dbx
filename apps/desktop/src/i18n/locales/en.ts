@@ -1,3 +1,4 @@
+import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
@@ -79,6 +80,7 @@ const consul = {
 };
 
 export default {
+  redisGrouping,
   customType: {
     kinds: {
       base: "Base",
@@ -1100,6 +1102,14 @@ export default {
     sshHostKeyVerifyRemember: "Trust this host (remember this key for future connections)",
     sshHostKeyVerifyAccept: "Accept & Connect",
     sshHostKeyVerifyReject: "Cancel",
+    sshHostKeyChangedTitle: "Host fingerprint has changed",
+    sshHostKeyChangedMessage: "The saved fingerprint for {host} does not match the current server.",
+    sshHostKeyChangedCurrent: "{keyType} fingerprint is SHA256:",
+    sshHostKeyChangedSaved: "Saved fingerprint",
+    sshHostKeyChangedWarning: "Continue only if you are sure this host has actually changed.",
+    sshHostKeyChangedClose: "Close",
+    sshHostKeyChangedContinue: "Continue",
+    sshHostKeyChangedUpdate: "Update and Continue",
     sshInteractiveTitle: "SSH Verification Required",
     sshInteractiveMessage: "The SSH server at {host}:{port} requires additional verification.",
     sshInteractiveDefaultPrompt: "Enter the requested verification response.",
@@ -2026,7 +2036,8 @@ export default {
     generateNull: "NULL",
     generateCurrentDatetime: "Current Datetime",
     generateCurrentDate: "Current Date",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "Increment ID",
     generateSnowflakeId: "Snowflake ID",
     generateSequenceDescription: "Generate consecutive values for {count} selected cell(s). Enter the start value.",
@@ -2191,6 +2202,7 @@ export default {
     queryError: "Query Error",
     saveErrorTitle: "Failed to Save Changes",
     dataUnavailable: "Table data needs to be reloaded.",
+    viewSnapshotSelectionNotRestored: "The previous view was restored, but its selection was too large to keep.",
     cachedResultUnavailable: "The cached result is missing or incompatible.",
     reexecuteQuery: "Run query again",
     dataUnavailableHintPrefix: "Press ",
@@ -5615,6 +5627,7 @@ export default {
     rebuildDataOnlyDisabled: "Rebuild is unavailable for data-only transfers. Select structure and data or structure only.",
     rebuildUnsupportedDisabled: "The selected target engine does not support rebuilding target tables.",
     rebuildPreviewUnavailable: "The backend did not provide a rebuild plan. The transfer has not started; refresh the preview with a backend that supports rebuild.",
+    rebuildMissingTargets: "Some target tables do not exist yet and will be created without a backup.",
     previewFailed: "Could not prepare the transfer: {message}",
     start: "Start Transfer",
     startConfirmTitle: "Confirm transfer",

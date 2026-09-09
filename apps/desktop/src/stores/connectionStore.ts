@@ -3433,6 +3433,18 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  async function updateRedisKeyGrouping(connectionId: string, grouping: import("@/lib/redis/redisKeyGrouping").RedisKeyGrouping) {
+    const { validateRedisKeyGrouping } = await import("@/lib/redis/redisKeyGrouping");
+    const validated = validateRedisKeyGrouping(grouping);
+    const index = connections.value.findIndex((connection) => connection.id === connectionId);
+    if (index < 0) throw new Error("Connection not found");
+    const next = [...connections.value];
+    next[index] = { ...next[index]!, redis_key_grouping: validated };
+    await persistConnections(next);
+    // Presentation-only preferences must not invalidate a live connection.
+    connections.value = next;
+  }
+
   async function renameConnection(connectionId: string, name: string): Promise<boolean> {
     const trimmed = name.trim();
     if (!trimmed) return false;
@@ -4081,12 +4093,16 @@ export const useConnectionStore = defineStore("connection", () => {
       // a health probe makes an otherwise local tab switch take up to 5s.
       if (options.verifyHealth === false) return;
       if (hasRecentConnectionHealthCheck(connectionId)) return;
+      const stateRevision = connectionStateRevision(connectionId);
       // Optimistic: verify backend pool is actually healthy
       try {
         await withConnectionHealthTimeout(connectionId, api.checkConnectionHealth(connectionId));
+        if (!isCurrentConnectionStateRevision(connectionId, stateRevision)) throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
         markConnectionHealthChecked(connectionId);
         return;
       } catch {
+        // A late probe must not undo an explicit disconnect or a newer reconnect.
+        if (!isCurrentConnectionStateRevision(connectionId, stateRevision)) throw new Error(CONNECTION_ATTEMPT_CANCELLED_MESSAGE);
         // Backend pool is dead — remove from connectedIds and reconnect.
         // 死池重连同样跨越了连接生命周期：shared 表元数据缓存与数据标签页的
         // 元数据 freshness 都必须作废，否则自动重连后仍可能复用断链前的旧
@@ -5682,6 +5698,8 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   async function loadObjectGroupChildren(node: TreeNode, options?: LoadTreeOptions) {
+    // Queued search/refresh tasks can outlive disconnect, which removes their nodes.
+    if (!treeNodeInSidebarTree(node)) return;
     const packageOwnerId = packageMemberGroupOwnerId(node);
     const packageConfig = node.connectionId ? getConfig(node.connectionId) : undefined;
     if (packageOwnerId && effectiveDatabaseTypeForConnection(packageConfig) === "xugu") {
@@ -7781,7 +7799,7 @@ export const useConnectionStore = defineStore("connection", () => {
     return api.listTables(connectionId, database, schema, filter, limit);
   }
 
-  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean } = {}): Promise<SqlCompletionTable[]> {
+  async function listCompletionTables(connectionId: string, database: string, filter = "", limit?: number, schema?: string, globalSearch = false, currentSchema?: string, catalog?: string, options: { activateConnection?: boolean; verifySchemaMetadata?: boolean } = {}): Promise<SqlCompletionTable[]> {
     const trimmedFilter = filter.trim();
     const normalizedFilter = trimmedFilter.toLowerCase();
     // Remote queries (Dameng/Oracle) are case-sensitive, so the cache key must
@@ -7789,7 +7807,7 @@ export const useConnectionStore = defineStore("connection", () => {
     // second lookup returns the first's stale results. Local lookups below stay
     // case-insensitive because tableMatchScore normalizes internally.
     const relaxedFilter = relaxedCompletionTableFilter(trimmedFilter);
-    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}`;
+    const cacheKey = `${connectionId}:${database}:${catalog ?? ""}:${trimmedFilter}:${limit ?? ""}:${schema ?? ""}:${globalSearch ? "global" : "scoped"}:${currentSchema ?? ""}:${options.verifySchemaMetadata ? "verified" : "indexed"}`;
     const cachedTables = completionTablesCache.value[cacheKey];
     if (cachedTables) {
       const localTables = lookupLocalCompletionTables(connectionId, database, trimmedFilter, limit, schema, catalog);
@@ -7809,14 +7827,25 @@ export const useConnectionStore = defineStore("connection", () => {
         if (isSchemaAwareDatabase(connectionId)) {
           if (normalizedFilter || limit) {
             let results: SqlCompletionTable[] = [];
+            let assistantCompleted = false;
             try {
               results = await listCompletionAssistantTables(connectionId, database, trimmedFilter, limit, schema, globalSearch, currentSchema, requestRevision);
+              assistantCompleted = true;
             } catch {
               if (schema) {
                 const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
                 results = tableInfosToCompletionTables(tables, schema, catalog);
               } else {
                 results = lookupLocalCompletionTables(connectionId, database, normalizedFilter, limit, undefined, catalog);
+              }
+            }
+            if (assistantCompleted && schema && options.verifySchemaMetadata) {
+              try {
+                const tables = await listCompletionTableMetadata(connectionId, database, schema, trimmedFilter, limit, catalog);
+                results = dedupeCompletionTables([...tableInfosToCompletionTables(tables, schema, catalog), ...results]);
+              } catch {
+                // The completion index still provides a best-effort result when
+                // authoritative metadata is temporarily unavailable.
               }
             }
             if (results.length === 0 && relaxedFilter) {
@@ -8970,6 +8999,7 @@ export const useConnectionStore = defineStore("connection", () => {
     pasteConnectionClipboard,
     addEphemeralConnection,
     updateConnection,
+    updateRedisKeyGrouping,
     renameConnection,
     applyGlobalTimeouts,
     updateConnectionDatabaseInfo,

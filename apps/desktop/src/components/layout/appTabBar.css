@@ -184,16 +184,42 @@
 /* Keep the overflow affordance out of the measurement box. Otherwise its own
  * width reduces the scroll viewport and can create a false overflow state. */
 .tab-overflow-control {
+  box-sizing: border-box;
+  width: 34px;
+  flex: 0 0 34px;
   padding: 0;
   background: transparent;
+  justify-content: flex-end;
 }
 
 .has-tab-overflow-control .app-tab-strip {
-  padding-inline-end: 2.5rem;
+  padding-inline-end: 2.125rem;
 }
 
 .has-tab-overflow-control .app-tab-scrollbar {
-  inset-inline-end: 2.5rem;
+  inset-inline-end: 2.125rem;
+}
+
+/* The top-row overflow control overlays a small reserved area. Blend that
+ * area into the tab strip so the gap before the button does not read as an
+ * opaque empty block while keeping the button itself fully visible. */
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control {
+  isolation: isolate;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset-block: 0;
+  inset-inline: -0.25rem 0;
+  background: color-mix(in srgb, var(--background) 48%, transparent);
+  pointer-events: none;
+}
+
+.app-tab-bar:not(.vertical-tab-layout)[data-placement="top"] .tab-overflow-control button {
+  position: relative;
+  z-index: 1;
 }
 
 /* In the two-row layout, only the first row shares its right edge with the
@@ -247,9 +273,15 @@
 /* 经典布局 + 多行模式：优化多行标签显示 */
 .app-tab-scroll.classic-wrap {
   row-gap: 0.25rem;
-  padding-top: 0.25rem;
-  padding-bottom: 0.25rem;
+  padding-top: 0;
+  padding-bottom: 0;
   align-items: flex-start;
+}
+
+/* Match the space between regular and pinned sections to the classic wrap
+ * strip's 4px outer padding. The shared fixed-row gap is 6px for modern tabs. */
+.horizontal-fixed-tabs-scroll.wrap-mode.classic-wrap {
+  row-gap: 0.25rem !important;
 }
 
 /* 经典布局下 h-full 在 height:auto 容器中失效，改为固定高度 */
@@ -512,6 +544,18 @@
   min-height: 2rem !important;
 }
 
+.app-tab-scroll.wrap-mode.classic-wrap .tab-group-header,
+.app-tab-scroll.wrap-mode.classic-wrap .tab-group-header-content {
+  height: 2rem !important;
+  min-height: 2rem;
+}
+
+/* Classic wrapped headers only need to bridge the subpixel border seam to the
+ * first member tab. The shared 0.2rem extension visibly overshoots here. */
+.app-tab-scroll.wrap-mode.classic-wrap .tab-group-header:not(.tab-group-header--collapsed)::after {
+  right: -1px;
+}
+
 /* Settings and Driver Manager are rendered directly in the section instead
  * of inside a tab-group-entry wrapper. Their classic h-full class must size
  * to one wrapped row, not to the full multi-row section. */
@@ -536,6 +580,11 @@
   border-radius: var(--dbx-radius-md);
   padding-inline: 0.4rem 0.5rem;
   background: var(--tab-group-soft);
+}
+
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout) .tab-group-header-content {
+  height: 100%;
+  border-radius: 0;
 }
 
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
@@ -581,26 +630,11 @@
   align-self: stretch;
 }
 
-/* Separated tabs are 1.75rem tall inside a row with vertical padding. Group
- * entries stretch to the row for the continuous accent, so center the pill
- * within that wrapper instead of leaving it attached to the row's top edge. */
+/* Keep the separated pill centered inside its group entry. The entry also owns
+ * the group accent, so its underline shares the header's exact bottom edge. */
 .app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab) {
   display: flex;
   align-items: center;
-}
-
-.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
-  content: "";
-  position: absolute;
-  z-index: 1;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  border-radius: 9999px;
-  background: var(--tab-group-color);
-  pointer-events: none;
-  opacity: 0.82;
 }
 
 /* Wrapped group members need the same continuous group rule as the single
@@ -627,17 +661,16 @@
   opacity: 0.82;
 }
 
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after {
-  display: none;
-}
-
+/* Single-row entries clip their contents while animating group expansion.
+ * Draw the accent on the pill so it remains visible, compensating for the
+ * pill's 0.5px border to align it with the header accent. */
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab::after {
   content: "";
   display: block;
   position: absolute;
   z-index: 1;
   right: -0.2rem;
-  bottom: 0;
+  bottom: -0.5px;
   left: -0.2rem;
   height: 2px;
   border-radius: 9999px;
@@ -646,15 +679,26 @@
   opacity: 0.82;
 }
 
-.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after {
-  display: none;
+/* The group rail sits above the classic active inset shadow. Reuse the same
+ * rail segment as the active indicator so a colored group cannot hide it. */
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab[data-active-tab="true"]::after,
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-entry:has(.tab-group-tab[data-active-tab="true"])::after {
+  z-index: 2;
+  background: color-mix(in srgb, var(--foreground) 72%, transparent);
+  opacity: 1;
 }
 
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-tab::after {
-  top: 0;
-  right: -0.2rem;
+  top: -0.5px;
   bottom: auto;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--first::after {
   left: -0.2rem;
+}
+
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after {
+  right: 0;
 }
 
 .app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
@@ -667,42 +711,11 @@
   bottom: auto;
 }
 
-/* The separated pill is 1.75rem high and centered in a 2.5rem row. Align the
- * group rail with the pill edge, not with the outer row edge. */
-.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after,
-.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
-  bottom: 0.375rem;
-}
-
-.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after,
-.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)::after {
-  bottom: 0.25rem;
-}
-
-.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-header::after,
-.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
-  top: 0.375rem;
-  bottom: auto;
-}
-
-.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-header::after,
-.app-tab-bar.separated-tab-layout.horizontal-fixed-tabs:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-entry:has(.tab-group-tab)::after {
-  top: 0.25rem;
-  bottom: auto;
-}
-
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--first::after {
-  left: -0.2rem;
-}
-
-.app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after {
-  right: 0;
-}
-
 /* Keep collapsed group members in the DOM so the cluster can contract and
  * expand smoothly instead of appearing and disappearing in one frame. */
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry {
-  max-width: 100%;
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry {
+  min-width: 0;
+  max-width: var(--tab-group-entry-expanded-width, 100%);
   max-height: 2rem;
   overflow: hidden;
   transition:
@@ -712,33 +725,45 @@
     opacity 100ms ease;
 }
 
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsed {
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry[data-tab-group-id] > .tab-group-tab {
+  width: var(--tab-group-entry-expanded-width, auto);
+  min-width: var(--tab-group-entry-expanded-width, max-content) !important;
+  flex: none;
+}
+
+/* The classic single-row strip is 2.25rem tall. Keep ordinary tab wrappers
+ * at the full row height so direct tabs such as Settings do not look taller. */
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry {
+  height: 100%;
+  max-height: none;
+}
+
+@keyframes tab-group-collapse {
+  from {
+    max-width: var(--tab-group-entry-expanded-width);
+    opacity: 1;
+  }
+
+  to {
+    max-width: 0;
+    max-height: 0;
+    margin-inline: 0;
+    opacity: 0;
+  }
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry--collapsing {
+  pointer-events: none;
+  animation: tab-group-collapse 140ms ease forwards;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry--collapsed:not(.tab-group-entry--collapsing) {
   max-width: 0 !important;
   max-height: 0 !important;
   margin: 0 !important;
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
-  transition:
-    max-width 140ms ease,
-    max-height 140ms ease,
-    margin 140ms ease,
-    opacity 100ms ease;
-}
-
-.app-tab-bar:not(:has(.wrap-mode)) .tab-group-entry--collapsed .tab-group-tab--collapsed {
-  max-width: 0 !important;
-  max-height: 0 !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
-  padding-inline: 0 !important;
-  border-width: 0 !important;
-  overflow: hidden;
-  transition:
-    max-width 140ms ease,
-    max-height 140ms ease,
-    padding 140ms ease,
-    border-width 140ms ease;
 }
 
 /* Wrapped tabs must retain their intrinsic row height. Collapsed groups use
@@ -816,8 +841,8 @@
   flex: 0 0 15rem;
   --tab-group-header-inset: 0.5rem;
   --tab-group-root-rail-x: 1.16rem;
-  --tab-group-tab-inset: 2.5rem;
-  --tab-group-branch-width: 0.65rem;
+  --tab-group-tab-inset: 1.8rem;
+  --tab-group-branch-width: 0.5rem;
   --tab-group-row-half: 1rem;
   --tab-group-header-gap: 0.08rem;
 }
@@ -832,6 +857,7 @@
 
 .vertical-tab-layout .app-tab-scroll {
   min-height: 0;
+  overflow-x: hidden;
 }
 
 .vertical-tab-layout .app-tab-pill {
@@ -840,6 +866,7 @@
   min-height: 2rem;
   height: 2rem !important;
   border-right: 0;
+  border-radius: var(--dbx-radius-md);
   background-color: var(--app-tab-background, transparent);
   transition:
     background-color 150ms ease,
@@ -876,6 +903,37 @@
   flex: none;
 }
 
+/* The section wrappers use display: contents in vertical mode, so their
+ * children become the effective flex items. Keep each tab wrapper at its
+ * intended row height and let the strip scroll instead of compressing rows. */
+.vertical-tab-layout .tab-group-entry {
+  width: 100%;
+  min-height: 0;
+  max-height: 2rem;
+  flex: none;
+  overflow: hidden;
+  opacity: 1;
+  transition:
+    max-height 140ms ease,
+    opacity 100ms ease;
+}
+
+.vertical-tab-layout .tab-group-entry--collapsed {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.vertical-tab-layout--collapsed .tab-group-entry {
+  max-height: 2.5rem;
+  overflow: visible;
+}
+
+.vertical-tab-layout--collapsed .tab-group-entry--collapsed {
+  max-height: 0;
+  overflow: hidden;
+}
+
 .vertical-tab-layout--collapsed .app-tab-scroll {
   align-items: center;
 }
@@ -888,7 +946,7 @@
   justify-content: center;
   margin: 0.125rem auto;
   padding: 0 !important;
-  border-radius: 0.625rem;
+  border-radius: var(--dbx-radius-md);
 }
 
 .vertical-tab-layout--collapsed .compact-dirty-tab-marker {
@@ -986,17 +1044,17 @@
 
 .vertical-tab-layout .tab-group-tab {
   position: relative;
-  width: calc(100% - 3rem);
-  margin-inline: var(--tab-group-tab-inset) 0.5rem;
-  padding-inline-start: 0.65rem !important;
+  width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);
+  margin-inline: var(--tab-group-tab-inset) 0.25rem;
+  padding-inline: 0.2rem 0.25rem !important;
   border-color: transparent;
 }
 
 .vertical-tab-layout .tab-group-tab::before {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
+  top: -0.25rem;
+  bottom: -0.25rem;
   left: calc(0rem - var(--tab-group-branch-width));
   width: 1px;
   border-radius: 9999px;

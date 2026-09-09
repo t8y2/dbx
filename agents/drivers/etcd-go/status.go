@@ -72,7 +72,7 @@ func (s *etcdSession) status(params map[string]json.RawMessage) (any, error) {
 		statusRequests[index] = channel
 		go func(endpoint string, channel chan *statusResult) {
 			started := time.Now()
-			ctx, cancel := context.WithTimeout(context.Background(), rpcTimeoutSeconds*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), statusProbeSeconds*time.Second)
 			response, err := client.Maintenance.Status(ctx, endpoint)
 			cancel()
 			channel <- &statusResult{response: response, err: err, started: started}

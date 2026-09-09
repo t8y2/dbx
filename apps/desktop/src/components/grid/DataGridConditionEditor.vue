@@ -81,10 +81,11 @@ const hasValue = computed(() => modelValue.value.trim().length > 0);
 // textarea, so keywords / fields / values are colored without losing caret
 // and selection behavior.
 const highlightTokens = computed(() => tokenizeDataGridCondition(modelValue.value));
-const highlightScrollLeft = ref(0);
-const highlightScrollTop = ref(0);
-const collapsedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translateX(${-highlightScrollLeft.value}px)` }));
-const expandedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translate(${-highlightScrollLeft.value}px, ${-highlightScrollTop.value}px)` }));
+const collapsedHighlightScrollLeft = ref(0);
+const expandedHighlightScrollLeft = ref(0);
+const expandedHighlightScrollTop = ref(0);
+const collapsedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translateX(${-collapsedHighlightScrollLeft.value}px)` }));
+const expandedHighlightStyle = computed<CSSProperties>(() => ({ transform: `translate(${-expandedHighlightScrollLeft.value}px, ${-expandedHighlightScrollTop.value}px)` }));
 
 function highlightTokenClass(type: DataGridConditionTokenType): string | undefined {
   if (type === "plain") return undefined;
@@ -93,8 +94,12 @@ function highlightTokenClass(type: DataGridConditionTokenType): string | undefin
 
 function onEditorScroll(event: Event) {
   const target = event.currentTarget as HTMLTextAreaElement;
-  highlightScrollLeft.value = target.scrollLeft;
-  highlightScrollTop.value = target.scrollTop;
+  if (target === overlayRef.value) {
+    expandedHighlightScrollLeft.value = target.scrollLeft;
+    expandedHighlightScrollTop.value = target.scrollTop;
+  } else {
+    collapsedHighlightScrollLeft.value = target.scrollLeft;
+  }
 }
 const emptyHistoryText = computed(() => (modelValue.value.trim() ? props.historyNoMatchesText : props.historyEmptyText));
 const activeSuggestionId = computed(() => (editor.highlightedIndex.value >= 0 ? `${suggestionListId}-${editor.highlightedIndex.value}` : undefined));
@@ -221,10 +226,15 @@ function resizeEditor(forceExpand = false) {
       expandAfterComposition = true;
       return;
     }
+    const wasExpanded = expanded.value;
     const overlayFocused = document.activeElement === overlayRef.value;
     const focused = document.activeElement === input || overlayFocused;
     const nextExpanded = focused && shouldExpand(input) && (forceExpand || expanded.value);
     if (nextExpanded) {
+      if (!wasExpanded) {
+        expandedHighlightScrollLeft.value = 0;
+        expandedHighlightScrollTop.value = 0;
+      }
       const nextRect = measureExpandedRect(input);
       expandedRect.value = nextRect;
       expandedHeight.value = measureExpandedHeight(input, nextRect);

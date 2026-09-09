@@ -773,7 +773,7 @@ describe("queryStore hidden primary key editing", () => {
     expect(executeMulti).toHaveBeenCalledWith("oracle-1", "ORCL", "SELECT * FROM CUSTOMER_VIEW", undefined, expect.any(String), expect.objectContaining({ timeoutSecs: 30 }));
     const tab = store.tabs.find((item) => item.id === tabId)!;
     expect(tab.result?.hidden_column_indexes).toBeUndefined();
-    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("primary-key-not-returned"));
+    await vi.waitFor(() => expect(tab.queryEditabilityReason).toBe("no-primary-key"));
     expect(tab.queryAnalysis).toBeUndefined();
   });
 

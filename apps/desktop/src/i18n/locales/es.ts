@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
 import { meilisearchManagementEs } from "./meilisearchManagement";
+import { redisGroupingEs as redisGrouping } from "./redisGrouping";
 import docs from "./docs/es";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -7,6 +8,7 @@ import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessag
 
 const consul = {
   ...consulUiMessages,
+  redisGrouping,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
   newKey: "New Key",
   loadingKeys: "Loading keys...",
@@ -1083,6 +1085,14 @@ export default withEnglishFallback({
     sshHostKeyVerifyRemember: "Confiar en este host (recordar esta clave para futuras conexiones)",
     sshHostKeyVerifyAccept: "Aceptar y conectar",
     sshHostKeyVerifyReject: "Cancelar",
+    sshHostKeyChangedTitle: "La huella del host ha cambiado",
+    sshHostKeyChangedMessage: "La huella guardada de {host} no coincide con el servidor actual.",
+    sshHostKeyChangedCurrent: "La huella {keyType} es SHA256:",
+    sshHostKeyChangedSaved: "Huella guardada",
+    sshHostKeyChangedWarning: "Continúa solo si estás seguro de que este host realmente ha cambiado.",
+    sshHostKeyChangedClose: "Cerrar",
+    sshHostKeyChangedContinue: "Continuar",
+    sshHostKeyChangedUpdate: "Actualizar y continuar",
     sshInteractiveTitle: "Se requiere verificación SSH",
     sshInteractiveMessage: "El servidor SSH {host}:{port} requiere verificación adicional.",
     sshInteractiveDefaultPrompt: "Introduzca la respuesta de verificación solicitada.",
@@ -1880,7 +1890,8 @@ export default withEnglishFallback({
     generateNull: "NULL",
     generateCurrentDatetime: "Fecha y hora actuales",
     generateCurrentDate: "Fecha actual",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "ID incremental",
     generateSnowflakeId: "ID Snowflake",
     generateSequenceDescription: "Generar valores consecutivos para {count} celda(s) seleccionada(s). Introduzca el valor inicial.",
@@ -2040,6 +2051,7 @@ export default withEnglishFallback({
     queryError: "Error de consulta",
     saveErrorTitle: "Error al guardar los cambios",
     dataUnavailable: "Los datos de la tabla deben volver a cargarse.",
+    viewSnapshotSelectionNotRestored: "Se restauró la vista anterior, pero la selección era demasiado grande para conservarla.",
     dataUnavailableHintPrefix: "Presiona ",
     dataUnavailableHintSuffix: " o haz clic en Actualizar abajo para recargar.",
     refresh: "Actualizar",
@@ -5252,6 +5264,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "La reconstrucción no está disponible para transferencias de solo datos. Seleccione estructura y datos o solo estructura.",
     rebuildUnsupportedDisabled: "El motor de destino seleccionado no permite reconstruir las tablas de destino.",
     rebuildPreviewUnavailable: "El backend no devolvió un plan de reconstrucción. La transferencia no se ha iniciado; vuelva a obtener la vista previa con un backend compatible.",
+    rebuildMissingTargets: "Algunas tablas de destino aún no existen y se crearán sin copia de seguridad.",
     previewFailed: "No se pudo preparar la transferencia: {message}",
     start: "Iniciar transferencia",
     startConfirmTitle: "Confirmar transferencia",

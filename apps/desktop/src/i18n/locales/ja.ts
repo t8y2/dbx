@@ -4,9 +4,11 @@ import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementJa } from "./meilisearchManagement";
+import { redisGroupingJa as redisGrouping } from "./redisGrouping";
 
 const consul = {
   ...consulUiMessages,
+  redisGrouping,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
   newKey: "New Key",
   loadingKeys: "Loading keys...",
@@ -1081,6 +1083,14 @@ export default withEnglishFallback({
     sshHostKeyVerifyRemember: "このホストを信頼する（今後の接続のためにキーを記憶する）",
     sshHostKeyVerifyAccept: "承諾して接続",
     sshHostKeyVerifyReject: "キャンセル",
+    sshHostKeyChangedTitle: "ホストフィンガープリントが変わりました",
+    sshHostKeyChangedMessage: "{host} の保存済みフィンガープリントが現在のサーバーと一致しません。",
+    sshHostKeyChangedCurrent: "{keyType} のフィンガープリント(SHA256):",
+    sshHostKeyChangedSaved: "保存済みフィンガープリント",
+    sshHostKeyChangedWarning: "このホストが実際に変更されたことが確実な場合のみ続行してください。",
+    sshHostKeyChangedClose: "閉じる",
+    sshHostKeyChangedContinue: "続行",
+    sshHostKeyChangedUpdate: "更新して続行",
     sshInteractiveTitle: "SSH検証が必要です",
     sshInteractiveMessage: "SSHサーバー {host}:{port} で追加の検証が必要です。",
     sshInteractiveDefaultPrompt: "サーバーから要求された検証情報を入力してください。",
@@ -1890,7 +1900,8 @@ export default withEnglishFallback({
     generateNull: "NULL",
     generateCurrentDatetime: "現在の日時",
     generateCurrentDate: "現在の日付",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "連番ID",
     generateSnowflakeId: "Snowflake ID",
     generateSequenceDescription: "選択した{count}セルに連続値を生成します。開始値を入力してください。",
@@ -2050,6 +2061,7 @@ export default withEnglishFallback({
     queryError: "クエリエラー",
     saveErrorTitle: "変更の保存に失敗しました",
     dataUnavailable: "テーブルデータを再読み込みする必要があります。",
+    viewSnapshotSelectionNotRestored: "前回の表示位置は復元しましたが、選択範囲が大きすぎるため復元できませんでした。",
     dataUnavailableHintPrefix: "",
     dataUnavailableHintSuffix: " を押すか、下の更新ボタンをクリックして再読み込みしてください。",
     refresh: "更新",
@@ -5282,6 +5294,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "データのみの転送では再構築できません。「構造とデータ」または「構造のみ」を選択してください。",
     rebuildUnsupportedDisabled: "選択したターゲットエンジンはテーブルの再構築をサポートしていません。",
     rebuildPreviewUnavailable: "バックエンドから再構築計画が返されなかったため、転送は開始されていません。再構築プレビューに対応したバックエンドで再試行してください。",
+    rebuildMissingTargets: "存在しないターゲットテーブルがあります。バックアップなしで直接作成されます。",
     previewFailed: "転送を準備できませんでした：{message}",
     start: "転送開始",
     startConfirmTitle: "転送の開始確認",

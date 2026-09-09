@@ -27,7 +27,7 @@ function resolveClickHouseIdentifierSafeDialect(sqlFormatter: SqlFormatterModule
 }
 
 export function canFormatSqlForDatabaseType(dbType: string | null | undefined): boolean {
-  return dbType !== "victoriametrics";
+  return dbType !== "redis" && dbType !== "victoriametrics";
 }
 
 /**

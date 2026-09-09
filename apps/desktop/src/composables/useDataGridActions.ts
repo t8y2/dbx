@@ -77,6 +77,26 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     return tab.resultPageLimit ?? tableOpenPageLimit(settingsStore.editorSettings.tableOpenPageSize);
   }
 
+  function reconcileOracleTableType(tab: QueryTab): void {
+    const config = connectionStore.getConfig(tab.connectionId);
+    const databaseType = effectiveDatabaseTypeForConnection(config);
+    if (databaseType !== "oracle" && databaseType !== "oceanbase-oracle") return;
+    const tableMeta = tab.tableMeta;
+    if (!tableMeta?.tableName) return;
+
+    const normalize = (value: string | undefined) => value?.trim().toLowerCase() ?? "";
+    const resolvedSchema = tableMeta.schema?.trim() || config?.default_schema?.trim();
+    const matches = connectionStore
+      .lookupLocalCompletionTables(tab.connectionId, tableMeta.database ?? tab.database, tableMeta.tableName, 20, resolvedSchema, tableMeta.catalog)
+      .filter((candidate) => normalize(candidate.name) === normalize(tableMeta.tableName) && normalize(candidate.schema) === normalize(resolvedSchema) && normalize(candidate.catalog) === normalize(tableMeta.catalog));
+    if (matches.length !== 1) return;
+
+    const objectType = matches[0]?.type;
+    const resolvedTableType = objectType === "view" ? "VIEW" : objectType === "materialized_view" ? "MATERIALIZED_VIEW" : objectType === "table" ? "TABLE" : undefined;
+    if (!resolvedTableType || tableMeta.tableType?.trim().toUpperCase() === resolvedTableType) return;
+    queryStore.setTableMeta(tab.id, { ...tableMeta, tableType: resolvedTableType });
+  }
+
   function resultSortPagination(tab: QueryTab): { limit: number; offset: number } | undefined {
     const limit = tab.resultPageLimit;
     return typeof limit === "number" && limit > 0 ? { limit, offset: 0 } : undefined;
@@ -193,6 +213,7 @@ export function useDataGridActions(activeTab: ComputedRef<QueryTab | undefined>)
     const startedAt = performance.now();
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     if (tab.mode === "data" && tableMetaForDataTab(tab)) {
+      reconcileOracleTableType(tab);
       tab.whereInput = whereInput ?? "";
       queryStore.clearInvalidDataTabSort(tab.id);
       const realColumnNames = tab.tableMeta?.columns.map((column) => column.name) ?? [];

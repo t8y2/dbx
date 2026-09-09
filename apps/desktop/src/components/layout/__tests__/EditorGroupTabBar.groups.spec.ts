@@ -99,12 +99,14 @@ describe("EditorGroupTabBar semantic tab groups", () => {
   });
 
   it("applies the group rail classes to clustered pills", () => {
-    // The horizontal underline and vertical indent rails only render when the
-    // pill carries tab-group-tab with its --first/--last markers.
+    // Grouped pills carry tab-group-tab for the entry underline and the
+    // vertical rail, with first/last markers available for side layouts.
     expect(source).toContain("'tab-group-tab': entry.grouping,");
     expect(source).toContain("'tab-group-tab--first': entry.grouping && entry.groupFirst,");
     expect(source).toContain("'tab-group-tab--last': entry.grouping && entry.groupLast,");
-    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-tab::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-tab::after\s*\{[^}]*bottom:\s*-0\.5px;/s);
+    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after");
+    expect(sharedStyles).toMatch(/\.tab-group-tab\[data-active-tab="true"\]::after,[\s\S]*?\.tab-group-entry:has\(\.tab-group-tab\[data-active-tab="true"\]\)::after\s*\{[^}]*z-index:\s*2;[^}]*var\(--foreground\) 72%/s);
   });
 
   it("hides collapsed cluster pills but reveals them while searching", () => {
@@ -114,6 +116,16 @@ describe("EditorGroupTabBar semantic tab groups", () => {
 
   it("remeasures overflow after a single-row group expansion finishes", () => {
     expect(source).toContain('@transitionend.self="handleTabGroupTransitionEnd"');
+    expect(source).toContain(':data-tab-group-id="entry.grouping ? tabGroupId(entry.tab) : undefined"');
+    expect(source).toContain("captureExpandedTabGroupWidths(new Set(pending))");
+    expect(source).toContain("'tab-group-entry--collapsing'");
+    expect(source).toContain("window.setTimeout(() =>");
+    expect(sharedStyles).toContain("@keyframes tab-group-collapse");
+    expect(sharedStyles).toMatch(/\.tab-group-entry--collapsing\s*\{[^}]*animation:\s*tab-group-collapse 140ms ease forwards;/s);
+    expect(source).toContain('entry.style.removeProperty("--tab-group-entry-expanded-width")');
+    expect(sharedStyles).toContain("max-width: var(--tab-group-entry-expanded-width, 100%)");
+    expect(sharedStyles).toMatch(/\.tab-group-entry\[data-tab-group-id\] > \.tab-group-tab\s*\{[^}]*width:\s*var\(--tab-group-entry-expanded-width, auto\);[^}]*min-width:\s*var\(--tab-group-entry-expanded-width, max-content\) !important;[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*min-width:\s*0;/s);
     const handler = sourceBetween("function handleTabGroupTransitionEnd", "function toggleTabGroup");
     expect(handler).toContain('event.propertyName !== "max-width"');
     expect(handler).toContain("refreshHorizontalTabOverflow();");
@@ -145,10 +157,17 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
     expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.tab-overflow-control\s*\{[^}]*width:\s*34px;[^}]*flex:\s*0 0 34px;/s);
+    expect(sharedStyles).toContain("padding-inline-end: 2.125rem;");
+    expect(sharedStyles).toContain("inset-inline-end: 2.125rem;");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\)\[data-placement="top"\] \.tab-overflow-control::before\s*\{[^}]*inset-inline:\s*-0\.25rem 0;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header,[\s\S]*?\.tab-group-header-content\s*\{[^}]*height:\s*2rem !important;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-scroll\.wrap-mode\.classic-wrap \.tab-group-header:not\(\.tab-group-header--collapsed\)::after\s*\{[^}]*right:\s*-1px;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\) \.tab-group-header::after\s*\{[^}]*bottom:\s*0;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
-    expect(sharedStyles).toContain('.app-tab-bar:not(.vertical-tab-layout)[data-placement="bottom"] .tab-group-tab::after');
-    expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-tab--last::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain("row-gap: 0.375rem;");
@@ -158,8 +177,9 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout.horizontal-fixed-tabs .app-tab-scroll:not(.wrap-mode)");
     expect(sharedStyles).toContain(".horizontal-fixed-tabs-scroll.wrap-mode");
     expect(sharedStyles).toContain("row-gap: 0.375rem !important;");
-    expect(sharedStyles).toContain("bottom: 0.375rem;");
-    expect(sharedStyles).toContain("bottom: 0.25rem;");
+    expect(sharedStyles).toMatch(/\.horizontal-fixed-tabs-scroll\.wrap-mode\.classic-wrap\s*\{[^}]*row-gap:\s*0\.25rem !important;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\) \.tab-group-entry\s*\{[^}]*height:\s*100%;[^}]*max-height:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\) \.tab-group-entry:has\(\.tab-group-tab\)::after\s*\{[^}]*bottom:\s*0;/s);
     expect(sharedStyles).toContain("scroll-margin-inline-end: 1px;");
   });
 
@@ -182,6 +202,26 @@ describe("EditorGroupTabBar vertical placement", () => {
     expect(source).toContain('isVerticalLayout.value && props.tabBarCollapsed ? "vertical-tab-layout--collapsed" : ""');
     // The strip flips to a column with vertical scrolling; no horizontal strip remains.
     expect(source).toContain("isVerticalLayout ? 'flex-col items-stretch overflow-y-auto overflow-x-hidden py-1'");
+  });
+
+  it("keeps vertical rows fixed and aligns the sidebar toolbar with content headers", () => {
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout\s*\{[^}]*--tab-group-root-rail-x:\s*1\.16rem;[^}]*--tab-group-tab-inset:\s*1\.8rem;[^}]*--tab-group-branch-width:\s*0\.5rem;/s);
+    expect(sharedStyles).toContain("width: calc(100% - var(--tab-group-tab-inset) - 0.25rem);");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
+    expect(sharedStyles).toContain("padding-inline: 0.2rem 0.25rem !important;");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*flex:\s*none;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-scroll\s*\{[^}]*overflow-x:\s*hidden;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.app-tab-pill\s*\{[^}]*border-radius:\s*var\(--dbx-radius-md\);/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry\s*\{[^}]*max-height:\s*2rem;/s);
+    expect(sharedStyles).toContain("max-height 140ms ease,");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*opacity:\s*0;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry\s*\{[^}]*max-height:\s*2\.5rem;[^}]*overflow:\s*visible;/s);
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout--collapsed \.tab-group-entry--collapsed\s*\{[^}]*max-height:\s*0;[^}]*overflow:\s*hidden;/s);
+    expect(source).toContain("if (isWrapLayout.value || isVerticalLayout.value) return;");
+    expect(source).toContain("if (isWrapLayout.value) {");
+    expect(source).toContain('inline: isVerticalLayout.value ? "nearest" : "center"');
+    expect(source).toContain('class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1"');
+    expect(source).toContain('class="h-7 w-full pl-7 text-sm"');
   });
 
   it("positions each pane's bar by the global placement without mixing directions", () => {
@@ -215,10 +255,11 @@ describe("EditorGroupTabBar vertical placement", () => {
 
   it("uses the sidebar rail and soft active shadow for vertical pills", () => {
     expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-tab::before");
+    expect(sharedStyles).toMatch(/\.vertical-tab-layout \.tab-group-tab::before\s*\{[^}]*top:\s*-0\.25rem;[^}]*bottom:\s*-0\.25rem;/s);
     expect(sharedStyles).toContain('.vertical-tab-layout .app-tab-pill[data-active-tab="true"]');
     expect(sharedStyles).toContain("inset 0 0 0 1px color-mix");
     expect(sharedStyles).toContain(".vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after");
-    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.5rem;");
+    expect(sharedStyles).toContain("margin-inline: var(--tab-group-tab-inset) 0.25rem;");
   });
 });
 

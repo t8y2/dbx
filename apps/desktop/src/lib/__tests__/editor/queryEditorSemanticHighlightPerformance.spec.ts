@@ -28,4 +28,10 @@ describe("QueryEditor semantic highlighting while scrolling", () => {
     expect(queryEditorSource).toContain("this.decorations = this.decorations.map(update.changes)");
     expect(queryEditorSource).toContain("refreshSqlSemanticHighlightEffect.of(null)");
   });
+
+  it("keeps preview and diagnostics on the shared statement-range cache", () => {
+    expect(queryEditorSource).toContain("executableStatementRangeCache = executableStatementRangeCacheForDoc");
+    expect(queryEditorSource).toContain('props.databaseType === "sqlserver" ? undefined : executableStatementRangeCache?.ranges');
+    expect(queryEditorSource).toContain("const cursorRange = executableStatementRangeAtCursor(executableStatementRangeCache, cursorPos)");
+  });
 });

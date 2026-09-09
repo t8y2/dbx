@@ -9,6 +9,40 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 const source = readFileSync(path.resolve(process.cwd(), "apps/desktop/src/components/editor/QueryEditor.vue"), "utf8");
 
 describe("QueryEditor context menu lifecycle", () => {
+  it("keeps heavyweight context derivation out of the per-update path", () => {
+    const updateStart = source.indexOf("EditorView.updateListener.of((update) => {");
+    const updateEnd = source.indexOf("\n      fontThemeComp.of(", updateStart);
+    const updateSource = source.slice(updateStart, updateEnd);
+
+    expect(updateStart).toBeGreaterThanOrEqual(0);
+    expect(updateEnd).toBeGreaterThan(updateStart);
+    expect(updateSource).toContain("syncEditorSelectionState(update.view);");
+    expect(updateSource).toContain("schedulePreviewContextRefresh(update.view);");
+    expect(updateSource).not.toContain("syncContextMenuState(update.view);");
+  });
+
+  it("does not suppress legitimate external model updates", () => {
+    expect(source).not.toContain("lastEmittedModelValue");
+    expect(source).toContain("if (val !== currentEditorDocText(view.value)) {");
+  });
+
+  it("resynchronizes context state after restoring a tab document", () => {
+    const activateStart = source.indexOf("function activateTabDocument");
+    const activateEnd = source.indexOf("\nwatch([() => props.tabId", activateStart);
+    const activateSource = source.slice(activateStart, activateEnd);
+
+    expect(activateStart).toBeGreaterThanOrEqual(0);
+    expect(activateEnd).toBeGreaterThan(activateStart);
+    expect(activateSource).toContain("syncContextMenuState(currentView);");
+    expect(activateSource).toContain('emit("previewChangesAvailable", !!previewContextSql.value);');
+  });
+
+  it("guards deferred preview refresh against stale selection ranges", () => {
+    expect(source).toContain("const expectedSelection = currentView.state.selection.main;");
+    expect(source).toContain("currentSelection.from !== expectedSelection.from");
+    expect(source).toContain("currentSelection.to !== expectedSelection.to");
+  });
+
   it("resolves menu items after synchronizing the right-click target", () => {
     const syncStart = source.indexOf("function syncContextMenuStateAtEvent");
     const syncEnd = source.indexOf("\n}", syncStart);

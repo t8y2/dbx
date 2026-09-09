@@ -3,9 +3,11 @@ import docs from "./docs/tr";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementTr } from "./meilisearchManagement";
+import { redisGroupingTr as redisGrouping } from "./redisGrouping";
 
 const consul = {
   ...consulUiMessages,
+  redisGrouping,
   prefixPlaceholder: "Anahtar öneki, örn. app/ veya services/",
   newKey: "Yeni Anahtar",
   loadingKeys: "Anahtarlar yükleniyor...",
@@ -1101,6 +1103,14 @@ export default withEnglishFallback({
     sshHostKeyVerifyRemember: "Bu sunucuya güven (bu anahtarı sonraki bağlantılar için hatırla)",
     sshHostKeyVerifyAccept: "Kabul Et ve Bağlan",
     sshHostKeyVerifyReject: "İptal",
+    sshHostKeyChangedTitle: "Sunucu parmak izi değişti",
+    sshHostKeyChangedMessage: "{host} için kayıtlı parmak izi geçerli sunucuyla eşleşmiyor.",
+    sshHostKeyChangedCurrent: "{keyType} parmak izi SHA256:",
+    sshHostKeyChangedSaved: "Kayıtlı parmak izi",
+    sshHostKeyChangedWarning: "Yalnızca bu sunucunun gerçekten değiştiğinden eminseniz devam edin.",
+    sshHostKeyChangedClose: "Kapat",
+    sshHostKeyChangedContinue: "Devam et",
+    sshHostKeyChangedUpdate: "Güncelle ve devam et",
     sshInteractiveTitle: "SSH Doğrulaması Gerekli",
     sshInteractiveMessage: "{host}:{port} adresindeki SSH sunucusu ek doğrulama istiyor.",
     sshInteractiveDefaultPrompt: "İstenen doğrulama yanıtını girin.",
@@ -2020,7 +2030,8 @@ export default withEnglishFallback({
     generateNull: "NULL",
     generateCurrentDatetime: "Geçerli Tarih-Saat",
     generateCurrentDate: "Geçerli Tarih",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "Artan Kimlik",
     generateSnowflakeId: "Snowflake Kimliği",
     generateSequenceDescription: "Seçili {count} hücre için ardışık değerler üretin. Başlangıç değerini girin.",
@@ -2185,6 +2196,7 @@ export default withEnglishFallback({
     queryError: "Sorgu Hatası",
     saveErrorTitle: "Değişiklikler Kaydedilemedi",
     dataUnavailable: "Tablo verisinin yeniden yüklenmesi gerekiyor.",
+    viewSnapshotSelectionNotRestored: "Önceki görünüm geri yüklendi, ancak seçim korunamayacak kadar büyüktü.",
     cachedResultUnavailable: "Önbelleğe alınmış sonuç eksik veya uyumsuz.",
     reexecuteQuery: "Sorguyu yeniden çalıştır",
     dataUnavailableHintPrefix: "Yeniden yüklemek için ",

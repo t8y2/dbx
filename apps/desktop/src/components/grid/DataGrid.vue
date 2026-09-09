@@ -250,6 +250,7 @@ import { uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrde
 import { dataGridColumnLayoutScopeKey, TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
 import { createPendingSelectionSummary, formatSelectionAggregate, formatSelectionAverage, summarizeSelection } from "@/lib/dataGrid/gridSelection";
 import { captureDataGridSelection, restoreDataGridSelection, type CaptureDataGridSelectionOptions, type PersistedDataGridSelection } from "@/lib/dataGrid/dataGridSelectionPersistence";
+import { buildDataGridViewProbe, clampDataGridViewSelection, DATA_GRID_VIEW_SNAPSHOT_RESTORE, consumeDataGridViewSnapshot, peekDataGridViewSnapshot, saveDataGridViewSnapshot, shouldNotifyOverBudgetSelection, type DataGridViewSelectionSnapshot } from "@/lib/dataGrid/dataGridViewStateCache";
 import { dataGridFrameCoversRow, dataGridSelectionEdgeMask, dataGridSelectionFrameKindAtCell, dataGridSelectionUsesOuterFrame, resolveDataGridSelectionFrames } from "@/lib/dataGrid/dataGridSelectionFrames";
 import {
   createDataGridCellContextMenuItems,
@@ -485,6 +486,13 @@ interface DataGridProps {
   cacheKey?: string;
   columnWidthCacheKey?: string;
   pendingStateKey?: string;
+  /**
+   * Logical-result identity (`QueryTab.resultViewGeneration`) the grid is
+   * currently rendering. The tab-switch view snapshot is captured with this
+   * value and replayed only when it still matches, so a replaced dataset never
+   * adopts a stale viewport or selection (#7341).
+   */
+  viewGeneration?: string;
   exportSql?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
@@ -1197,6 +1205,11 @@ const filterBuilderOpen = filterBuilder.open;
 const filterBuilderColumnSearch = filterBuilder.columnSearch;
 const filteredFilterBuilderColumnOptions = filterBuilder.filteredColumns;
 const appliedStructuredWhereInput = filterBuilder.appliedWhereInput;
+// Structured filter rules are restored asynchronously. A tab-switch snapshot's
+// probe includes the applied condition, so restoring before this hydration
+// settles would reject an otherwise valid snapshot and never retry it.
+const structuredFilterHydrationReady = ref(true);
+let structuredFilterHydrationRequestId = 0;
 const draftStructuredWhereInput = ref("");
 const filterEditorView = computed(() => settingsStore.editorSettings.dataGridFilterEditorView);
 const isPersistentFilterView = computed(() => filterEditorView.value === "conditions" || filterEditorView.value === "text");
@@ -1464,6 +1477,8 @@ function persistStructuredFilterState() {
 }
 
 function loadStructuredFilterStateForScope() {
+  const requestId = ++structuredFilterHydrationRequestId;
+  structuredFilterHydrationReady.value = false;
   const cached = cachedStructuredFilterState();
   if (cached) {
     const cacheKey = structuredFilterCacheKey.value;
@@ -1472,14 +1487,23 @@ function loadStructuredFilterStateForScope() {
     whereFilterInput.value = cached.manualWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
     appliedStructuredWhereInput.value = "";
-    void buildStructuredWhereFromRules(structuredFilterRules.value).then((whereInput) => {
-      if (structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
-      appliedStructuredWhereInput.value = whereInput;
-      nextTick(() => {
-        emit("update:whereInput", currentWhereInput() ?? "");
-        markConditionInputsApplied();
+    void buildStructuredWhereFromRules(structuredFilterRules.value)
+      .then((whereInput) => {
+        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
+        appliedStructuredWhereInput.value = whereInput;
+        nextTick(() => {
+          emit("update:whereInput", currentWhereInput() ?? "");
+          markConditionInputsApplied();
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
+        structuredFilterHydrationReady.value = true;
+        // The initial mounted restore may have run while the applied condition
+        // was empty; retry exactly after the async condition is settled.
+        nextTick(restoreTabSwitchViewSnapshot);
       });
-    });
     return;
   }
   appliedStructuredWhereInput.value = "";
@@ -1487,6 +1511,7 @@ function loadStructuredFilterStateForScope() {
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
   persistStructuredFilterState();
   markConditionInputsApplied();
+  structuredFilterHydrationReady.value = true;
 }
 
 function ensureStructuredFilterRule() {
@@ -4925,6 +4950,251 @@ function restoreSelectionAfterRefresh(snapshot: PersistedDataGridSelection) {
   });
 }
 
+/** Bounded settling envelope for a replayed tab-switch viewport. */
+const MAX_VIEW_SNAPSHOT_RESTORE_FRAMES = 8;
+let viewSnapshotRestoreFrame = 0;
+
+function cancelViewSnapshotRestoreFrame() {
+  if (viewSnapshotRestoreFrame) cancelAnimationFrame(viewSnapshotRestoreFrame);
+  viewSnapshotRestoreFrame = 0;
+}
+
+/** Bounded integrity probe of the result the grid is currently rendering. */
+function currentViewProbe(): string {
+  const rows = props.result.rows;
+  return buildDataGridViewProbe({
+    columns: props.result.columns,
+    columnTypes: props.result.column_types,
+    rowCount: rows.length,
+    firstRow: rows[0],
+    lastRow: rows[rows.length - 1],
+    largeValueCells: props.result.large_value_cells,
+    navigation: {
+      whereInput: currentWhereInput(),
+      orderByInput: orderByInput.value,
+      pageOffset: props.pageOffset,
+      pageLimit: pageSize.value,
+      sortColumn: props.sortColumn,
+      sortDirection: props.sortDirection,
+      sortMode: props.sortMode,
+    },
+  });
+}
+
+/**
+ * Copy the current selection into display coordinates. O(selection size): a
+ * generation match already guarantees the same dataset on return, so the
+ * identity-token machinery of the refresh path (which scans every row) is not
+ * needed here.
+ *
+ * Large row sets are represented compactly: a contiguous range (or "all" when
+ * every row is selected) costs a single range pair instead of one id per row.
+ */
+function captureViewSelection(): { selection?: DataGridViewSelectionSnapshot; droppedSelection: boolean } {
+  const selectedRowCount = selectedRowIds.value.size;
+  const hasRows = selectedRowCount > 0;
+  const hasCells = selectedCellKeys.value.size > 0;
+  const hasColumns = selectedColumnIndexes.value.size > 0;
+  const hasRange = !!selectionAnchor.value && !!selectionFocus.value;
+  if (!hasRows && !hasCells && !hasColumns && !hasRange) return { selection: undefined, droppedSelection: false };
+
+  if (hasRows) {
+    const displayCount = displayItems.value.length;
+    const contiguous = selectedRowCount === displayCount || selectedRowsContiguous(selectedRowIds.value);
+    if (contiguous) {
+      const anchorRowIndex = selection.lastClickedRowIndex.value;
+      if (selectedRowCount === displayCount) {
+        return { selection: { kind: "all", anchorRowIndex }, droppedSelection: false };
+      }
+      return { selection: { kind: "rows", rowIndexes: minimalRowRange(selectedRowIds.value), contiguous: true, anchorRowIndex }, droppedSelection: false };
+    }
+    const { selection: capturedRows, droppedSelection } = clampDataGridViewSelection({ kind: "rows", rowIndexes: selectedRowIdsAsDisplayIndexes(selectedRowIds.value), anchorRowIndex: selection.lastClickedRowIndex.value });
+    return { selection: capturedRows.kind === "rows" && capturedRows.rowIndexes.length ? capturedRows : undefined, droppedSelection };
+  }
+
+  if (hasColumns) {
+    return { selection: { kind: "columns", columnIndexes: [...selectedColumnIndexes.value] }, droppedSelection: false };
+  }
+
+  if (hasRange) {
+    return {
+      selection: { kind: "range", anchor: { ...selectionAnchor.value! }, focus: { ...selectionFocus.value! }, selectingAll: isSelectingAll.value || undefined, lastClickedRowIndex: selection.lastClickedRowIndex.value },
+      droppedSelection: false,
+    };
+  }
+
+  const { selection: capturedCells, droppedSelection } = clampDataGridViewSelection({ kind: "cells", cellKeys: [...selectedCellKeys.value], anchor: selectionAnchor.value ? { ...selectionAnchor.value } : undefined, focus: selectionFocus.value ? { ...selectionFocus.value } : undefined });
+  return { selection: capturedCells.kind === "cells" && capturedCells.cellKeys.length ? capturedCells : undefined, droppedSelection };
+}
+
+/** Display indexes of the selected row ids, bounded to the displayed rows. */
+function selectedRowIdsAsDisplayIndexes(selectedIds: ReadonlySet<number>): number[] {
+  const indexes: number[] = [];
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index >= 0) indexes.push(index);
+  }
+  return indexes;
+}
+
+/**
+ * True when the selected rows form a contiguous block in display order.
+ * Iterates only the selected ids via the O(1) index lookup, so a single-row
+ * selection on a 100k-row result stays O(1) instead of scanning every row.
+ */
+function selectedRowsContiguous(selectedIds: ReadonlySet<number>): boolean {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  let count = 0;
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index < 0) continue;
+    if (index < min) min = index;
+    if (index > max) max = index;
+    count += 1;
+  }
+  return count > 0 && max - min + 1 === count;
+}
+
+/** The [first, last] display indexes of the selected rows, when contiguous. */
+function minimalRowRange(selectedIds: ReadonlySet<number>): number[] {
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const rowId of selectedIds) {
+    const index = displayRowIndexById(rowId);
+    if (index < 0) continue;
+    if (index < min) min = index;
+    if (index > max) max = index;
+  }
+  return Number.isFinite(min) ? [min, max] : [];
+}
+
+/** Expand a [first, last] row range into every display index in between. */
+function expandRowRange(range: readonly number[], displayCount: number): number[] {
+  const [first, last] = range;
+  if (!Number.isInteger(first) || !Number.isInteger(last) || first < 0 || last < first) return [];
+  const indexes: number[] = [];
+  const end = Math.min(last, displayCount - 1);
+  for (let index = first; index <= end; index += 1) indexes.push(index);
+  return indexes;
+}
+
+/**
+ * Capture scroll/selection before this instance is unmounted by a tab switch.
+ * Skips transpose (explicitly out of scope) and grids without an owner key or
+ * generation, so a snapshot can never be replayed without an identity check.
+ */
+function captureTabSwitchViewSnapshot() {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
+  if (!props.cacheKey || !props.viewGeneration) return;
+  if (showTranspose.value) return;
+  const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
+  if (!scroller) return;
+  const { selection, droppedSelection } = captureViewSelection();
+  saveDataGridViewSnapshot({
+    ownerKey: props.cacheKey,
+    viewGeneration: props.viewGeneration,
+    probe: currentViewProbe(),
+    renderer: useCanvasGridRows.value ? "canvas" : "dom",
+    rowCount: props.result.rows.length,
+    columnCount: props.result.columns.length,
+    viewport: { top: Math.max(0, scroller.scrollTop), left: Math.max(0, scroller.scrollLeft) },
+    selection,
+    selectionDropped: droppedSelection || undefined,
+  });
+}
+
+/**
+ * Replay a tab-switch snapshot captured from a previous instance of the same
+ * logical result. Every gate must pass; any mismatch degrades to a clean start
+ * rather than a partial restore.
+ */
+function restoreTabSwitchViewSnapshot() {
+  if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
+  if (!structuredFilterHydrationReady.value) return;
+  const ownerKey = props.cacheKey;
+  if (!ownerKey || !props.viewGeneration) return;
+  if (showTranspose.value) return;
+  const snapshot = peekDataGridViewSnapshot(ownerKey);
+  if (!snapshot) return;
+  if (snapshot.viewGeneration !== props.viewGeneration) return;
+  if (snapshot.renderer !== (useCanvasGridRows.value ? "canvas" : "dom")) return;
+  if (snapshot.probe !== currentViewProbe()) return;
+
+  // The selection rides along for free: indexes stay valid under a generation
+  // match, and out-of-range entries simply never match any display row.
+  const capturedSelection = snapshot.selection;
+  if (capturedSelection) {
+    if (capturedSelection.kind === "cells") {
+      if (capturedSelection.cellKeys.length) restoreCellSelectionState({ cellKeys: new Set(capturedSelection.cellKeys) });
+    } else if (capturedSelection.kind === "range") {
+      restoreCellSelectionState({ anchor: capturedSelection.anchor, focus: capturedSelection.focus, selectingAll: capturedSelection.selectingAll === true });
+      if (capturedSelection.lastClickedRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.lastClickedRowIndex;
+    } else if (capturedSelection.kind === "columns") {
+      selectedColumnIndexes.value = new Set(capturedSelection.columnIndexes);
+    } else if (capturedSelection.kind === "rows") {
+      const indexes = capturedSelection.contiguous ? expandRowRange(capturedSelection.rowIndexes, displayItems.value.length) : capturedSelection.rowIndexes;
+      selectedRowIds.value = new Set(indexes.map((index) => displayItems.value[index]?.id).filter((id): id is number => typeof id === "number"));
+      if (capturedSelection.anchorRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.anchorRowIndex;
+    } else if (capturedSelection.kind === "all") {
+      selectedRowIds.value = new Set(displayItems.value.map((item) => item.id));
+      if (capturedSelection.anchorRowIndex != null) selection.lastClickedRowIndex.value = capturedSelection.anchorRowIndex;
+    }
+  }
+
+  // DOM virtualization and canvas layout can report an incomplete scroll height
+  // for more than a frame, which would clamp the saved position to the top.
+  // Mirror `restoreScrollAcrossFrames`: immediate, then nextTick, then a
+  // bounded rAF settling loop that stops once the position sticks.
+  let settled = false;
+  let previousMaxTop = -1;
+  const applyView = (): boolean => {
+    const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
+    if (!scroller) return false;
+    const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const maxLeft = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+    const targetTop = Math.min(Math.max(0, snapshot.viewport.top), maxTop);
+    const targetLeft = Math.min(Math.max(0, snapshot.viewport.left), maxLeft);
+    scroller.scrollTop = targetTop;
+    scroller.scrollLeft = targetLeft;
+    if (useCanvasGridRows.value) syncCanvasViewport();
+    const accepted = Math.abs(scroller.scrollTop - targetTop) < 0.5 && Math.abs(scroller.scrollLeft - targetLeft) < 0.5;
+    // A saved offset of 0 is settled as soon as it is accepted. Otherwise the
+    // scroller must be tall enough to hold the saved position AND its measured
+    // geometry must hold still — an unmeasured virtual scroller clamps the
+    // target to 0 and would otherwise be mistaken for a finished restore.
+    const roomForSavedTop = maxTop >= snapshot.viewport.top;
+    const stable = maxTop === previousMaxTop;
+    previousMaxTop = maxTop;
+    return accepted && (snapshot.viewport.top === 0 || (roomForSavedTop && stable));
+  };
+  const attempt = (): boolean => {
+    if (settled || !applyView()) return settled;
+    settled = true;
+    cancelViewSnapshotRestoreFrame();
+    consumeDataGridViewSnapshot(ownerKey);
+    // Report a dropped selection only once the restore it belongs to actually
+    // happened — never while merely leaving the tab.
+    if (snapshot.selectionDropped && shouldNotifyOverBudgetSelection(ownerKey, props.viewGeneration!)) {
+      toast(t("grid.viewSnapshotSelectionNotRestored"), 4000);
+    }
+    return true;
+  };
+  if (attempt()) return;
+  nextTick(() => {
+    if (attempt()) return;
+    if (typeof requestAnimationFrame !== "function") return;
+    let frames = 0;
+    const onFrame = () => {
+      if (attempt()) return;
+      frames += 1;
+      if (frames >= MAX_VIEW_SNAPSHOT_RESTORE_FRAMES) return;
+      viewSnapshotRestoreFrame = requestAnimationFrame(onFrame);
+    };
+    viewSnapshotRestoreFrame = requestAnimationFrame(onFrame);
+  });
+}
+
 const multiRowCount = computed(() => {
   if (hasRowSelection.value) return selectedRowCount.value;
   const range = selectedRange.value;
@@ -6848,11 +7118,20 @@ onMounted(() => {
   window.visualViewport?.addEventListener("resize", refreshDataGridViewportMetrics);
   window.addEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.addEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
+  window.addEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.addEventListener("blur", clearInternalClipboardCopy);
   document.addEventListener("visibilitychange", clearInternalClipboardCopy);
+  nextTick(restoreTabSwitchViewSnapshot);
 });
 onDeactivated(pauseCanvasGridWork);
 onUnmounted(() => {
+  // Capture before teardown: a tab switch unmounts this instance, and the
+  // snapshot is the only carrier of its viewport/selection. This runs after the
+  // `dbx:before-tab-switch` capture and wins, because it observes the final
+  // rendered viewport. Closing a tab blocks both writes via the cache's
+  // closing-tab tombstone.
+  captureTabSwitchViewSnapshot();
+  cancelViewSnapshotRestoreFrame();
   onLocalFilterResizeEnd();
   dataGridRuntimeScope.dispose();
   foreignKeyDisplayRequests.dispose();
@@ -6874,6 +7153,7 @@ onUnmounted(() => {
   window.visualViewport?.removeEventListener("resize", refreshDataGridViewportMetrics);
   window.removeEventListener("dbx:ui-scale-applied", refreshDataGridViewportMetrics);
   window.removeEventListener(TABLE_DATA_GRID_COLUMN_ORDER_CHANGED_EVENT, onSynchronizedTableDataGridColumnOrderChanged);
+  window.removeEventListener("dbx:before-tab-switch", captureTabSwitchViewSnapshot);
   window.removeEventListener("blur", clearInternalClipboardCopy);
   document.removeEventListener("visibilitychange", clearInternalClipboardCopy);
 });
@@ -7932,8 +8212,13 @@ function generateSelectionMenuItems(disabled: boolean): ContextMenuItem[] {
       disabled,
     },
     {
-      label: t("grid.generateUuid"),
+      label: t("grid.generateUuidV4"),
       action: () => applyGeneratedSelectionValue("uuid"),
+      disabled,
+    },
+    {
+      label: t("grid.generateUuidV7"),
+      action: () => applyGeneratedSelectionValue("uuid-v7"),
       disabled,
     },
     {
@@ -12817,7 +13102,8 @@ function openGridSnapshot() {
                       <DropdownMenuItem @click="applyGeneratedDetailValue('null')">{{ t("grid.generateNull") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('datetime')">{{ t("grid.generateCurrentDatetime") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('date')">{{ t("grid.generateCurrentDate") }}</DropdownMenuItem>
-                      <DropdownMenuItem @click="applyGeneratedDetailValue('uuid')">{{ t("grid.generateUuid") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('uuid')">{{ t("grid.generateUuidV4") }}</DropdownMenuItem>
+                      <DropdownMenuItem @click="applyGeneratedDetailValue('uuid-v7')">{{ t("grid.generateUuidV7") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="applyGeneratedDetailValue('snowflake')">{{ t("grid.generateSnowflakeId") }}</DropdownMenuItem>
                       <DropdownMenuItem @click="openGenerateIncrementDialog('detail')">{{ t("grid.generateIncrementId") }}</DropdownMenuItem>
                     </DropdownMenuContent>

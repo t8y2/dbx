@@ -1,11 +1,13 @@
 import { withEnglishFallback } from "./fallback";
 import { meilisearchManagementIt } from "./meilisearchManagement";
+import { redisGroupingIt as redisGrouping } from "./redisGrouping";
 import docs from "./docs/it";
 import { consulUiMessages } from "./consulUi";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 const consul = {
   ...consulUiMessages,
+  redisGrouping,
   prefixPlaceholder: "Key prefix, e.g. app/ or services/",
   newKey: "New Key",
   loadingKeys: "Loading keys...",
@@ -1081,6 +1083,14 @@ export default withEnglishFallback({
     sshHostKeyVerifyRemember: "Fidati di questo host (ricorda la chiave per connessioni future)",
     sshHostKeyVerifyAccept: "Accetta e connetti",
     sshHostKeyVerifyReject: "Annulla",
+    sshHostKeyChangedTitle: "L'impronta dell'host è cambiata",
+    sshHostKeyChangedMessage: "L'impronta salvata per {host} non corrisponde al server attuale.",
+    sshHostKeyChangedCurrent: "L'impronta {keyType} è SHA256:",
+    sshHostKeyChangedSaved: "Impronta salvata",
+    sshHostKeyChangedWarning: "Continua solo se sei sicuro che questo host sia realmente cambiato.",
+    sshHostKeyChangedClose: "Chiudi",
+    sshHostKeyChangedContinue: "Continua",
+    sshHostKeyChangedUpdate: "Aggiorna e continua",
     sshInteractiveTitle: "Verifica SSH richiesta",
     sshInteractiveMessage: "Il server SSH {host}:{port} richiede una verifica aggiuntiva.",
     sshInteractiveDefaultPrompt: "Inserisci la risposta di verifica richiesta.",
@@ -1878,7 +1888,8 @@ export default withEnglishFallback({
     generateNull: "NULL",
     generateCurrentDatetime: "Data e ora correnti",
     generateCurrentDate: "Data corrente",
-    generateUuid: "UUID",
+    generateUuidV4: "UUID v4",
+    generateUuidV7: "UUID v7",
     generateIncrementId: "ID incrementale",
     generateSnowflakeId: "ID Snowflake",
     generateSequenceDescription: "Genera valori consecutivi per le {count} celle selezionate. Inserisci il valore iniziale.",
@@ -2038,6 +2049,7 @@ export default withEnglishFallback({
     queryError: "Errore Query",
     saveErrorTitle: "Impossibile salvare le modifiche",
     dataUnavailable: "I dati della tabella devono essere ricaricati.",
+    viewSnapshotSelectionNotRestored: "La vista precedente è stata ripristinata, ma la selezione era troppo grande per essere mantenuta.",
     dataUnavailableHintPrefix: "Premi ",
     dataUnavailableHintSuffix: " o fai clic su Aggiorna qui sotto per ricaricare.",
     refresh: "Aggiorna",
@@ -5253,6 +5265,7 @@ export default withEnglishFallback({
     rebuildDataOnlyDisabled: "La ricostruzione non è disponibile per i trasferimenti di soli dati. Selezionare struttura e dati oppure solo struttura.",
     rebuildUnsupportedDisabled: "Il motore di destinazione selezionato non supporta la ricostruzione delle tabelle di destinazione.",
     rebuildPreviewUnavailable: "Il backend non ha restituito un piano di ricostruzione. Il trasferimento non è iniziato; aggiornare l’anteprima con un backend compatibile.",
+    rebuildMissingTargets: "Alcune tabelle di destinazione non esistono ancora e verranno create senza backup.",
     previewFailed: "Impossibile preparare il trasferimento: {message}",
     start: "Avvia Trasferimento",
     startConfirmTitle: "Conferma trasferimento",

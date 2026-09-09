@@ -4064,6 +4064,8 @@ async fn list_indexes_for_relations_with_sql(
         let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(11).unwrap_or_default();
         let key_is_expression =
             if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
+        let all_key_options: Vec<i16> = row.try_get::<_, Vec<i16>>(12).unwrap_or_default();
+        let key_options = if all_key_options.len() == split_at { all_key_options } else { Vec::new() };
         result.entry(relid).or_default().push(IndexInfo {
             name: pg_row_try_string(row, 1),
             columns: key_cols,
@@ -4075,6 +4077,7 @@ async fn list_indexes_for_relations_with_sql(
             comment: row.try_get::<_, Option<String>>(10).ok().flatten(),
             key_is_expression,
             column_opclasses: key_opclasses,
+            key_options,
             constraint_backed: false,
         });
     }
@@ -4101,7 +4104,8 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              ix.indnkeyatts AS nkeyatts, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
-             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression \
+             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4145,7 +4149,7 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
              am.amname AS index_type, \
-             NULL::smallint AS nkeyatts, \
+             array_length(string_to_array(ix.indoption::text, ' '), 1)::smallint AS nkeyatts, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              ARRAY( \
@@ -4156,7 +4160,8 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                 AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
                 AND a.attnum > 0 \
                ORDER BY pos.n \
-             ) AS key_is_expression \
+             ) AS key_is_expression, \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7634,7 +7639,8 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              ix.indnkeyatts AS nkeyatts, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
-             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression \
+             array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7677,7 +7683,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
              ix.indisprimary AS is_primary, \
              pg_get_expr(ix.indpred, ix.indrelid) AS filter_expr, \
              am.amname AS index_type, \
-             NULL::smallint AS nkeyatts, \
+             array_length(string_to_array(ix.indoption::text, ' '), 1)::smallint AS nkeyatts, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              ARRAY( \
@@ -7688,7 +7694,8 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                 AND a.attnum = (string_to_array(ix.indkey::text, ' '))[pos.n]::int2 \
                 AND a.attnum > 0 \
                ORDER BY pos.n \
-             ) AS key_is_expression \
+             ) AS key_is_expression, \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7808,6 +7815,8 @@ async fn list_indexes_with_sql(
             let all_is_expr: Vec<bool> = row.try_get::<_, Vec<bool>>(10).unwrap_or_default();
             let key_is_expression =
                 if all_is_expr.len() == all_cols.len() { all_is_expr[..split_at].to_vec() } else { Vec::new() };
+            let all_key_options: Vec<i16> = row.try_get::<_, Vec<i16>>(11).unwrap_or_default();
+            let key_options = if all_key_options.len() == split_at { all_key_options } else { Vec::new() };
             IndexInfo {
                 name: pg_row_try_string(row, 0),
                 columns: key_cols,
@@ -7819,6 +7828,7 @@ async fn list_indexes_with_sql(
                 comment: row.try_get::<_, Option<String>>(9).ok().flatten(),
                 key_is_expression,
                 column_opclasses: key_opclasses,
+                key_options,
                 constraint_backed: false,
             }
         })
@@ -12899,7 +12909,8 @@ mod tests {
     fn postgres_index_metadata_has_legacy_catalog_fallback() {
         assert!(POSTGRES_INDEXES_SQL.contains("ix.indnkeyatts"));
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("ix.indnkeyatts"));
-        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("NULL::smallint AS nkeyatts"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("AS nkeyatts"));
+        assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("ix.indoption::text"));
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("LATERAL"));
         assert!(!POSTGRES_INDEXES_COMPAT_SQL.contains("WITH ORDINALITY"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("generate_series"));
@@ -12921,6 +12932,17 @@ mod tests {
         assert!(POSTGRES_INDEXES_SQL.contains("array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("SELECT a.attname IS NULL"));
         assert!(POSTGRES_INDEXES_COMPAT_SQL.contains("AS key_is_expression"));
+    }
+
+    #[test]
+    fn postgres_index_metadata_tracks_per_key_ordering_without_include_columns() {
+        for sql in [POSTGRES_INDEXES_SQL, postgres_indexes_for_relations_sql()] {
+            assert!(sql.contains("ix.indoption[(k.n - 1)::int]"));
+            assert!(sql.contains("FILTER (WHERE k.n <= ix.indnkeyatts)"));
+        }
+        for sql in [POSTGRES_INDEXES_COMPAT_SQL, postgres_indexes_for_relations_compat_sql()] {
+            assert!(sql.contains("string_to_array(ix.indoption::text, ' ')") && sql.contains("AS key_options"));
+        }
     }
 
     #[test]

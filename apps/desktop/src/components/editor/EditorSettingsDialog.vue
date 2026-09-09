@@ -6187,7 +6187,7 @@ onUnmounted(() => {
                     <p>{{ t("settings.toolbarHiddenHint") }}</p>
                   </HelpTooltip>
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
                   <div class="space-y-1">
                     <Label for="exclusive-right-sidebar-panels" class="text-sm cursor-pointer">{{ t("settings.exclusiveRightSidebarPanels") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -6625,7 +6625,7 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
-              <div data-settings-search-id="data-grid-filter-view" :class="['settings-item overflow-hidden rounded-md border bg-muted/20', settingsSearchTargetClass('data-grid-filter-view')]">
+              <div data-settings-search-id="data-grid-filter-view" :class="['overflow-hidden rounded-md border bg-muted/20', settingsSearchTargetClass('data-grid-filter-view')]">
                 <div class="space-y-3 p-3">
                   <div class="flex items-start justify-between gap-4">
                     <div class="min-w-0 space-y-1">
@@ -6683,7 +6683,7 @@ onUnmounted(() => {
                       <span class="truncate">{{ t("grid.filterTextView") }}</span>
                     </Button>
                   </div>
-                  <div v-if="editDataGridFilterEditorView !== 'quick'" class="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                  <div v-if="editDataGridFilterEditorView !== 'quick'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
                     <div class="space-y-1">
                       <Label for="data-grid-keep-filter-editor-expanded">{{ t("settings.dataGridKeepFilterEditorExpanded") }}</Label>
                       <p class="text-xs text-muted-foreground">{{ t("settings.dataGridKeepFilterEditorExpandedDescription") }}</p>
@@ -7207,7 +7207,7 @@ onUnmounted(() => {
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.sqlFileSection") }}
                 </div>
-                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'settings-item-disabled': !webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbLoading }">
                   <div class="space-y-1">
                     <Label for="web-sql-file-upload-max-mb">
                       {{ t("settings.webSqlFileUploadMaxMb") }}
@@ -8497,7 +8497,7 @@ LIMIT 100;</pre
                       </TabsList>
                       <TabsContent value="http" class="m-0 space-y-4">
                         <div v-if="isWeb" class="space-y-4">
-                          <div class="settings-item rounded-md border bg-muted/20 p-4 space-y-2">
+                          <div class="rounded-md border bg-muted/20 p-4 space-y-2">
                             <div class="flex items-center justify-between gap-3">
                               <Label class="text-base">{{ t("settings.mcpHttpWebServiceTitle") }}</Label>
                               <Badge :variant="webMcpHttpStatus?.enabled ? 'default' : 'outline'">{{ webMcpHttpStatus?.enabled ? t("settings.mcpHttpStatusLabelEnabled") : t("settings.mcpHttpStatusLabelDisabled") }}</Badge>
@@ -8520,7 +8520,7 @@ LIMIT 100;</pre
                         </div>
 
                         <div v-if="!isWeb" class="space-y-4">
-                          <div class="settings-item rounded-md border bg-muted/20 p-4">
+                          <div class="settings-item rounded-md border bg-muted/20 p-4" :class="{ 'settings-item-disabled': mcpHttpLoading || mcpHttpSaving }">
                             <div class="flex items-start justify-between gap-4">
                               <div class="space-y-1">
                                 <div class="flex items-center gap-2">
@@ -8587,7 +8587,7 @@ LIMIT 100;</pre
                               {{ mcpHttpError }}
                             </div>
 
-                            <div class="settings-item flex flex-col gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div class="flex flex-col gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
                               <p class="text-xs text-muted-foreground">
                                 {{ mcpHttpHasUnsavedChanges ? t("settings.mcpHttpUnsavedChangesHint") : t("settings.mcpHttpSaveHint") }}
                               </p>
@@ -8705,7 +8705,7 @@ LIMIT 100;</pre
 
                         <div v-if="mcpStatus?.bin_path" class="space-y-2">
                           <Label>{{ t("settings.mcpBinPath") }}</Label>
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 font-mono text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 font-mono text-xs text-muted-foreground">
                             {{ mcpStatus.bin_path }}
                           </div>
                         </div>
@@ -8955,7 +8955,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="cursor" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpCursorConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -8970,7 +8970,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="codebuddy" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpCodeBuddyConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -8985,7 +8985,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="zcode" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpZCodeConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9000,7 +9000,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="trae" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpTraeConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9015,7 +9015,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="vscode" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpVsCodeConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9030,7 +9030,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="windsurf" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpWindsurfConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9045,7 +9045,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="codex" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpCodexConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9060,7 +9060,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="deepseek-harness" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpDeepSeekHarnessConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9075,7 +9075,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="opencode" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpOpenCodeConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9090,7 +9090,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="pi" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpPiConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9105,7 +9105,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="cherry-studio" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpCherryStudioConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9120,7 +9120,7 @@ LIMIT 100;</pre
 
                       <TabsContent value="qoder" class="m-0">
                         <div class="space-y-2">
-                          <div class="settings-item rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                          <div class="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                             {{ t("settings.mcpQoderConfigPath") }}
                           </div>
                           <div class="relative rounded-md border bg-background p-3">
@@ -9216,7 +9216,7 @@ LIMIT 100;</pre
 
               <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
 
-              <div class="rounded-lg border p-4">
+              <div class="settings-item rounded-lg border p-4">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.updateDownloadSource") }}</Label>
@@ -9627,15 +9627,22 @@ LIMIT 100;</pre
   margin-top: 0.625rem;
 }
 
-.settings-item:not(.opacity-50) {
+.settings-item:not(.settings-item-disabled):not(.opacity-50) {
   transition:
     background-color 150ms ease-out,
     border-color 150ms ease-out;
 }
 
-.settings-item:not(.opacity-50):hover {
-  border-color: color-mix(in oklab, var(--border) 80%, var(--muted-foreground));
-  background-color: color-mix(in oklab, var(--muted) 40%, var(--background));
+.settings-item:not(.settings-item-disabled):not(.opacity-50):hover {
+  border-color: var(--muted-foreground);
+  background-color: var(--muted);
+}
+
+@supports (background: color-mix(in oklab, black, white)) {
+  .settings-item:not(.settings-item-disabled):not(.opacity-50):hover {
+    border-color: color-mix(in oklab, var(--border) 80%, var(--muted-foreground));
+    background-color: color-mix(in oklab, var(--muted) 40%, var(--background));
+  }
 }
 
 .settings-editor-live-preview {

@@ -21,6 +21,9 @@ import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import RedisValueViewer from "./RedisValueViewer.vue";
 import RedisPubSubPanel from "./RedisPubSubPanel.vue";
 import RedisSlowlogPanel from "./RedisSlowlogPanel.vue";
+import RedisGroupedKeyList from "./RedisGroupedKeyList.vue";
+import RedisKeyGroupingDialog from "./RedisKeyGroupingDialog.vue";
+import { defaultRedisKeyGrouping, type RedisKeyGrouping } from "@/lib/redis/redisKeyGrouping";
 import * as api from "@/lib/backend/api";
 import type { RedisKeyInfo, RedisScanResult, RedisValue, HistoryEntry } from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
@@ -65,10 +68,34 @@ import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } fro
 import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
+import { createRedisKeyViewYield } from "@/lib/redis/redisKeyViewScheduler";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const customGrouping = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_grouping ?? defaultRedisKeyGrouping());
+const groupingDialogOpen = ref(false);
+const groupingSaving = ref(false);
+const groupingError = ref("");
+const groupingStructureRevision = ref(0);
+const legacyGroupingPreparing = ref(false);
+let legacyGroupingPublishing = false;
+const showCustomGrouping = computed(() => customGrouping.value.enabled || legacyGroupingPreparing.value);
+let legacyGroupingGeneration = 0;
+let legacyExpandedBeforeGrouping: ReadonlySet<string> = new Set();
+async function saveGrouping(config: RedisKeyGrouping) {
+  if (groupingSaving.value) return;
+  groupingSaving.value = true;
+  groupingError.value = "";
+  try {
+    await connectionStore.updateRedisKeyGrouping(props.connectionId, config);
+    groupingDialogOpen.value = false;
+  } catch (error) {
+    groupingError.value = errorMessage(error);
+  } finally {
+    groupingSaving.value = false;
+  }
+}
 const settingsStore = useSettingsStore();
 const editorFontFamilyStyle = useEditorFontFamilyStyle();
 
@@ -113,6 +140,7 @@ const fetchAllLoadedCount = ref(0);
 const rootRef = ref<HTMLElement>();
 const keyPaneRef = ref<HTMLElement>();
 const redisKeyScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
+const groupedKeyListRef = ref<InstanceType<typeof RedisGroupedKeyList> | null>(null);
 let redisKeyScrollRevision = 0;
 let latestRedisKeyScrollAnchor: RedisKeyViewportAnchor | null = null;
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
@@ -252,12 +280,12 @@ const isSearchMode = computed(() => (searchMode.value === "key" ? effectivePatte
 // opts into the namespace hierarchy that users need for group selection.
 const isFuzzyKeySearch = computed(() => searchMode.value === "key" && isSearchMode.value && fuzzyKeySearch.value);
 const fuzzyTreeLimitReached = computed(() => isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(flatKeys.value.length));
-const useFlatKeySearchRows = computed(() => (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
+const useFlatKeySearchRows = computed(() => showCustomGrouping.value || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
 const isFuzzyHierarchyView = computed(() => isFuzzyKeySearch.value && !fuzzyTreeLimitReached.value);
 const selectionBusy = computed(() => deletingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
-const allKeysSelected = computed(() => allLoadedKeysSelected.value && !hasMore.value);
+const allKeysSelected = computed(() => (customGrouping.value.enabled ? filteredFlatKeys.value.length > 0 && checkedKeys.value.size === filteredFlatKeys.value.length : allLoadedKeysSelected.value && !hasMore.value));
 const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
@@ -415,6 +443,9 @@ watch(activeCreateKeyTypeHelp, () => {
   void updateCreateKeyTypeHelpOffset();
 });
 const regularVisibleRows = computed(() => {
+  // Prepared snapshots already own their rows. Even a watcher whose callback
+  // ignores them would otherwise synchronously re-map/flatten the keyspace.
+  if (showCustomGrouping.value || fetchAllVisibleRowsActive.value) return [];
   return useFlatKeySearchRows.value ? filteredFlatKeys.value.map((key) => redisKeyToFlatTreeRow(key, props.db)) : flattenVisibleRedisKeyTree(filteredTreeKeys.value, expandedGroupIds.value);
 });
 let fetchAllVisibleRowsSource: readonly RedisKeyTreeRow[] = [];
@@ -545,6 +576,7 @@ function appendFlatKeyRecords(keys: readonly RedisKeyInfo[]) {
 }
 
 function replaceFlatKeyRecords(keys: RedisKeyInfo[]) {
+  groupingStructureRevision.value++;
   flatKeyByRaw.clear();
   for (const key of keys) flatKeyByRaw.set(key.key_raw, key);
   flatKeys.value = keys;
@@ -662,7 +694,7 @@ function toggleNodeCheck(node: RedisKeyTreeNode, event: MouseEvent) {
   if (selectionBusy.value) return;
   focusKeyPane();
 
-  if (event.shiftKey) {
+  if (event.shiftKey && !customGrouping.value.enabled) {
     const rows = visibleRows.value;
     const to = rows.findIndex((row) => row.node.id === node.id);
     if (to < 0) return;
@@ -682,11 +714,15 @@ function toggleNodeCheck(node: RedisKeyTreeNode, event: MouseEvent) {
 function selectAllLoadedKeys() {
   if (selectionBusy.value || loadedKeyRaws.size === 0) return;
   focusKeyPane();
-  setKeysChecked(loadedKeyRaws, true);
+  setKeysChecked(customGrouping.value.enabled ? filteredFlatKeys.value.map((key) => key.key_raw) : loadedKeyRaws, true);
   selectionAnchorRowId.value = visibleRows.value[0]?.id ?? null;
 }
 
 async function selectAllKeys() {
+  if (customGrouping.value.enabled) {
+    selectAllLoadedKeys();
+    return;
+  }
   if (selectionBusy.value || (loadedKeyRaws.size === 0 && !hasMore.value)) return;
   const requestId = searchRequestId;
   if (hasMore.value) {
@@ -1037,7 +1073,7 @@ async function maybeAutoLoadMoreRedisKeys() {
   // operation is spent, independent of how many (if any) new keys prior calls
   // yielded.
   if (autoLoadBudget.remaining <= 0) return;
-  const scroller = redisKeyScrollerRef.value?.$el as HTMLElement | undefined;
+  const scroller = showCustomGrouping.value ? groupedKeyListRef.value?.getScrollElement() : (redisKeyScrollerRef.value?.$el as HTMLElement | undefined);
   if (!scroller) return;
   const shouldLoad = shouldLoadMoreRedisKeys({
     enabled: redisInfiniteScrollEnabled.value,
@@ -1253,7 +1289,7 @@ async function fetchAll(): Promise<boolean> {
       let published = !changed && !fetchAllStopRequested.value;
       try {
         if (changed) {
-          snapshotConfig.flatRows = (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || (isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(initialFlatKeys.length + bufferedKeys.length));
+          snapshotConfig.flatRows = customGrouping.value.enabled || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || (isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(initialFlatKeys.length + bufferedKeys.length));
           snapshotConfig.expandAll = isSearchMode.value;
           snapshotConfig.expandedGroupIds = expandedGroupIds.value;
           snapshotConfig.noExpiryOnly = noExpiryOnly.value;
@@ -2668,6 +2704,7 @@ onMounted(async () => {
 
 onActivated(async () => {
   resumeRedisBrowserBackgroundWork();
+  if (legacyGroupingPreparing.value || legacyGroupingPublishing) void prepareLegacyGroupingView();
   void autofocusSearchOnce();
   // Ensure the connection is still alive after reactivation (e.g. tab switch).
   // Retry an empty failed/interrupted load, but retain successful sparse pages.
@@ -2729,11 +2766,114 @@ async function executeAiCommand(command: string): Promise<boolean> {
   return true;
 }
 
+watch(
+  () => JSON.stringify(customGrouping.value.rules),
+  () => resetCheckedKeys(),
+);
+watch(noExpiryOnly, () => resetCheckedKeys());
+async function prepareLegacyGroupingView() {
+  const generation = ++legacyGroupingGeneration;
+  legacyGroupingPublishing = false;
+  const keys = flatKeys.value;
+  const connectionId = props.connectionId;
+  const db = props.db;
+  const current = () => generation === legacyGroupingGeneration && !customGrouping.value.enabled && redisBrowserIsActive && props.connectionId === connectionId && props.db === db && flatKeys.value === keys;
+  const yieldView = createRedisKeyViewYield();
+  legacyGroupingPreparing.value = true;
+  const snapshot = await buildRedisKeySnapshotCooperatively(
+    [keys],
+    {
+      db,
+      separator: redisKeySeparator.value,
+      flatRows: (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value,
+      expandAll: false,
+      expandedGroupIds: legacyExpandedBeforeGrouping,
+      noExpiryOnly: noExpiryOnly.value,
+    },
+    { workChunkSize: 512, shouldContinue: current, yieldControl: yieldView },
+  );
+  if (!snapshot || !current()) return;
+  let anchor = groupedKeyListRef.value?.getViewportAnchor();
+  let rowIndex = Math.min(anchor?.rowIndex ?? 0, Math.max(0, snapshot.visibleRows.length - 1));
+  if (anchor?.keyRaw) {
+    for (let offset = 0; offset < snapshot.visibleRows.length; ) {
+      if (!current()) return;
+      const end = Math.min(offset + 512, snapshot.visibleRows.length);
+      let found = false;
+      for (; offset < end; offset++) {
+        const row = snapshot.visibleRows[offset]!;
+        if (row.node.kind === "leaf" && row.node.keyRaw === anchor.keyRaw) {
+          rowIndex = offset;
+          found = true;
+          break;
+        }
+      }
+      if (found) break;
+      if (offset < snapshot.visibleRows.length) await yieldView();
+      const latest = groupedKeyListRef.value?.getViewportAnchor();
+      if (latest?.keyRaw !== anchor.keyRaw) {
+        anchor = latest;
+        rowIndex = Math.min(latest?.rowIndex ?? 0, Math.max(0, snapshot.visibleRows.length - 1));
+        if (!anchor?.keyRaw) break;
+        offset = 0;
+      }
+    }
+  }
+  if (!current()) return;
+  // Keep the complete custom view mounted until all expensive work is done.
+  // Activate prepared rows before changing structural refs, so the regular
+  // projection watcher cannot accidentally rebuild this snapshot synchronously.
+  fetchAllVisibleRowsActive.value = true;
+  treeIndex = snapshot.treeIndex;
+  treeKeys.value = snapshot.treeIndex?.root ?? [];
+  expandedGroupIds.value = snapshot.expandedGroupIds;
+  // RecycleScroller snapshots every initial item during setup. Mount with an
+  // empty backing source, then switch the same facade before the next paint.
+  fetchAllVisibleRowsSource = [];
+  fetchAllFilteredKeyCount.value = snapshot.filteredKeyCount;
+  refreshSelectedGroupLeafCounts();
+  legacyGroupingPublishing = true;
+  legacyGroupingPreparing.value = false;
+  await nextTick();
+  if (current()) {
+    fetchAllVisibleRowsSource = snapshot.visibleRows;
+    redisKeyScroller()?.scrollToItem(rowIndex, { align: "start" });
+    refreshRedisKeyScroller();
+    await nextTick();
+    if (!current()) return;
+    redisKeyScroller()?.scrollToItem(rowIndex, { align: "start" });
+    refreshRedisKeyScroller();
+    legacyGroupingPublishing = false;
+  }
+}
+watch(
+  () => customGrouping.value.enabled,
+  (enabled, previous) => {
+    if (enabled) {
+      legacyGroupingGeneration++;
+      legacyGroupingPublishing = false;
+      if (!legacyGroupingPreparing.value) legacyExpandedBeforeGrouping = expandedGroupIds.value;
+      legacyGroupingPreparing.value = false;
+      rebuildTree(false);
+    } else if (previous) {
+      void prepareLegacyGroupingView();
+    }
+  },
+  { flush: "sync" },
+);
+watch(
+  [flatKeys, groupingStructureRevision, redisKeySeparator, noExpiryOnly, noExpiryProjectionEpoch, effectivePattern, () => props.connectionId, () => props.db],
+  () => {
+    if ((legacyGroupingPreparing.value || legacyGroupingPublishing) && !customGrouping.value.enabled) void prepareLegacyGroupingView();
+  },
+  { flush: "sync" },
+);
 defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 </script>
 
 <template>
   <div ref="rootRef" class="h-full" :style="editorFontFamilyStyle">
+    <RedisKeyGroupingDialog v-model:open="groupingDialogOpen" :config="customGrouping" :saving="groupingSaving" :error="groupingError" @save="saveGrouping" />
     <Splitpanes class="redis-workspace-splitpanes h-full">
       <!-- Key tree (left) -->
       <Pane :size="36" :min-size="24">
@@ -2754,7 +2894,17 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
               </div>
               <span class="redis-key-count truncate text-xs text-muted-foreground" :title="keyCountText">{{ keyCountText }}</span>
               <div class="redis-key-toolbar-actions flex items-center justify-end gap-1">
-                <Button v-if="(flatKeys.length > 0 || hasMore) && !allKeysSelected" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.selectAllLoadedTitle')" data-redis-select-all @click="selectAllKeys">{{ t("redis.selectAllLoaded") }}</Button>
+                <Button
+                  v-if="(flatKeys.length > 0 || hasMore) && !allKeysSelected"
+                  variant="ghost"
+                  size="sm"
+                  class="h-6 shrink-0 px-1.5 text-xs"
+                  :disabled="selectionBusy"
+                  :title="customGrouping.enabled ? t('redisGrouping.selectLoaded') : t('redis.selectAllLoadedTitle')"
+                  data-redis-select-all
+                  @click="selectAllKeys"
+                  >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
+                >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
                 <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
@@ -2833,7 +2983,48 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </div>
           </div>
 
-          <div v-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
+          <div class="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              class="h-6 text-xs"
+              :class="customGrouping.enabled ? 'bg-accent text-accent-foreground' : 'border border-dashed border-border/70 text-muted-foreground hover:text-foreground'"
+              :aria-pressed="customGrouping.enabled"
+              :disabled="groupingSaving || isFetchingAll"
+              data-redis-grouping-toggle
+              @click="saveGrouping({ ...customGrouping, enabled: !customGrouping.enabled })"
+              >{{ t("redisGrouping.toggle") }}</Button
+            >
+            <Button v-if="customGrouping.enabled" variant="ghost" size="sm" class="h-6 text-xs" :disabled="groupingSaving" @click="saveGrouping({ ...customGrouping, inner_view: customGrouping.inner_view === 'list' ? 'tree' : 'list' })">{{
+              t(customGrouping.inner_view === "list" ? "redisGrouping.list" : "redisGrouping.tree")
+            }}</Button>
+            <Button variant="ghost" size="sm" class="h-6 text-xs" @click="groupingDialogOpen = true">{{ t("redisGrouping.settings") }}</Button>
+            <span v-if="groupingError" role="alert" class="text-xs text-destructive">{{ groupingError }}</span>
+          </div>
+          <p v-if="legacyGroupingPreparing" role="status" class="shrink-0 px-2 py-1 text-xs text-muted-foreground">{{ t("redisGrouping.preparingLegacy") }}</p>
+          <RedisGroupedKeyList
+            v-if="showCustomGrouping"
+            ref="groupedKeyListRef"
+            :key="`${connectionId}:${db}`"
+            :keys="filteredFlatKeys"
+            :config="customGrouping"
+            :separator="redisKeySeparator"
+            :scope="`${connectionId}:${db}`"
+            :structure-revision="groupingStructureRevision"
+            :selected="selectedKeyRaw"
+            :checked="checkedKeys"
+            :busy="selectionBusy"
+            :metadata-epoch="keyMetadataEpoch"
+            :tree-allowed="!fuzzyTreeLimitReached"
+            @request-list="saveGrouping({ ...customGrouping, inner_view: 'list' })"
+            @scroll="onRedisKeyScroll"
+            @resize="maybeAutoLoadMoreRedisKeys"
+            @select="(key) => onRowClick(redisKeyToFlatTreeRow(key, db).node)"
+            @check="(key, event) => toggleNodeCheck(redisKeyToFlatTreeRow(key, db).node, event)"
+            @copy="(key) => copyRedisKeyName(key.key_display)"
+            @delete="(key, event) => requestKeyDelete(redisKeyToFlatTreeRow(key, db).node, event)"
+          />
+          <div v-else-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
             <template v-if="hasMore">
               <span class="mb-3">{{ t("redis.noKeysInScanHint") }}</span>
               <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || deletingKeys" @click="loadMore()">
@@ -2931,7 +3122,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
               </CustomContextMenu>
             </template>
           </RecycleScroller>
-          <div v-if="fuzzyTreeLimitReached" class="shrink-0 border-t px-3 py-2 text-center text-xs text-muted-foreground">
+          <div v-if="fuzzyTreeLimitReached && !showCustomGrouping" class="shrink-0 border-t px-3 py-2 text-center text-xs text-muted-foreground">
             {{ t("redis.fuzzyTreeLimit", { count: flatKeys.length }) }}
           </div>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">

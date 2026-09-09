@@ -1,3 +1,4 @@
+import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
@@ -81,6 +82,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  redisGrouping,
   customType: {
     kinds: {
       base: "基礎型別",

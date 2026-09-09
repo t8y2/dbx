@@ -1,3 +1,4 @@
+import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
@@ -79,6 +80,7 @@ const consul = {
 };
 
 export default {
+  redisGrouping,
   customType: {
     kinds: {
       base: "Base",

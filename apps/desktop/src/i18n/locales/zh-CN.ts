@@ -1,9 +1,11 @@
+import { redisGroupingZhCN as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 
 export default withEnglishFallback({
+  redisGrouping,
   customType: {
     kinds: {
       base: "基础类型",

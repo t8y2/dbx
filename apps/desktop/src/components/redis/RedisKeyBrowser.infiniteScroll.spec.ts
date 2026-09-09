@@ -4,8 +4,14 @@ import { createApp, defineComponent, h, KeepAlive, nextTick, ref } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RedisKeyInfo } from "@/lib/backend/api";
+import { defaultRedisKeyGrouping, type RedisKeyGrouping } from "@/lib/redis/redisKeyGrouping";
+
+const grouping = ref<RedisKeyGrouping>();
+vi.mock("@/lib/redis/redisKeyViewScheduler", () => ({ createRedisKeyViewYield: () => () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())) }));
 
 const mocks = vi.hoisted(() => ({
+  scrollerInitialSnapshot: vi.fn(),
+  scrollerRefresh: vi.fn(),
   ensureConnected: vi.fn(),
   redisScanKeysBatch: vi.fn(),
   redisScanValues: vi.fn(),
@@ -57,7 +63,10 @@ vi.mock("@/lib/backend/api", () => ({
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
-    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize }),
+    getConfig: () => ({ name: "Redis", redis_key_separator: ":", redis_scan_page_size: mocks.redisScanPageSize, redis_key_grouping: grouping.value }),
+    updateRedisKeyGrouping: async (_id: string, config: RedisKeyGrouping) => {
+      grouping.value = config;
+    },
     updateRedisDbKeyStats: mocks.updateRedisDbKeyStats,
     listRedisCompletionCommandDocs: mocks.listRedisCompletionCommandDocs,
     listRedisCompletionKeys: mocks.listRedisCompletionKeys,
@@ -238,17 +247,32 @@ vi.mock("vue-virtual-scroller", async () => {
     RecycleScroller: defineComponent({
       inheritAttrs: false,
       props: { items: { type: Array, default: () => [] } },
-      setup(props, { attrs, slots }) {
+      setup(props, { attrs, slots, expose }) {
+        // The installed library copies/keys all initial items in setup, even
+        // though its rendered pool only contains the visible viewport.
+        mocks.scrollerInitialSnapshot(props.items.slice().length);
+        const epoch = ref(0);
+        expose({
+          findItemIndex: () => 0,
+          getScroll: () => ({ start: 0 }),
+          scrollToItem: () => {},
+          updateVisibleItems: () => {
+            mocks.scrollerRefresh(props.items.length);
+            epoch.value++;
+          },
+        });
         // Real RecycleScroller only mounts as many rows as fit the viewport;
         // rendering everything here would defeat the point of this test, so
         // cap it the same way the expiry spec's mock does.
         const visibleItemCount = 50;
-        return () =>
-          h(
+        return () => {
+          void epoch.value;
+          return h(
             "div",
             attrs,
             props.items.slice(0, visibleItemCount).map((item) => slots.default?.({ item })),
           );
+        };
       },
     }),
   };
@@ -378,6 +402,7 @@ function restoreViewportStub() {
 }
 
 beforeEach(() => {
+  grouping.value = undefined;
   resetApiMocks();
 });
 
@@ -390,6 +415,124 @@ afterEach(() => {
 });
 
 describe("RedisKeyBrowser infinite scroll auto-continue (issue #6022)", () => {
+  it.each(["mount", "refresh"])("cancels legacy publication when grouping is re-enabled during %s", async (phase) => {
+    grouping.value = { ...defaultRedisKeyGrouping(), enabled: true };
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys: [{ key_display: "a", key_raw: btoa("a"), key_type: "string", ttl: -1 }], total_keys: 1 });
+    const host = mountBrowser();
+    await settleThoroughly();
+    const reenable = () => {
+      grouping.value = { ...grouping.value!, enabled: true };
+    };
+    if (phase === "mount") mocks.scrollerInitialSnapshot.mockImplementationOnce(reenable);
+    else mocks.scrollerRefresh.mockImplementationOnce(reenable);
+    grouping.value = { ...grouping.value!, enabled: false };
+    await settleThoroughly();
+    expect(grouping.value.enabled).toBe(true);
+    expect(host.querySelector('[role="button"]')).not.toBeNull();
+    expect(host.textContent).not.toContain("redisGrouping.preparingLegacy");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not publish a prepared old scope after the database changes or keys are cleared", async () => {
+    grouping.value = { ...defaultRedisKeyGrouping(), enabled: true };
+    const keys = Array.from({ length: 1100 }, (_, i) => ({ key_display: `old:${i}`, key_raw: btoa(`old:${i}`), key_type: "string", ttl: -1 }));
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys, total_keys: keys.length });
+    const db = ref(0);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const app = createApp(defineComponent({ setup: () => () => h(RedisKeyBrowser, { connectionId: "connection", db: db.value, blockDangerousRedisCommands: false }) }));
+    app.use(createI18n({ legacy: false, locale: "en", messages: { en: {} }, missingWarn: false, fallbackWarn: false }));
+    app.mount(host);
+    mountedApps.push({ unmount: () => app.unmount(), host });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settleThoroughly();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    try {
+      grouping.value = { ...grouping.value!, enabled: false };
+      await settle();
+      expect(frames.length).toBeGreaterThan(0);
+      mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys: [{ key_display: "new", key_raw: btoa("new"), key_type: "string", ttl: -1 }], total_keys: 1 });
+      db.value = 1;
+      await settleThoroughly();
+      for (let i = 0; i < 30; i++) {
+        for (const callback of frames.splice(0)) callback(i);
+        await settle();
+      }
+      expect(host.querySelector(`[data-redis-leaf='${btoa("new")}']`)).not.toBeNull();
+      expect(host.textContent).not.toContain("old");
+      window.dispatchEvent(new CustomEvent("dbx-redis-db-flushed", { detail: { connectionId: "connection", db: 1 } }));
+      await settleThoroughly();
+      expect(host.querySelector(`[data-redis-leaf='${btoa("new")}']`)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps custom rows during cooperative legacy preparation, cancels and retries", async () => {
+    grouping.value = { ...defaultRedisKeyGrouping(), enabled: true };
+    const keys = Array.from({ length: 1100 }, (_, i) => ({ key_display: `namespace:${i}`, key_raw: btoa(`namespace:${i}`), key_type: "string", ttl: -1 }));
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys, total_keys: keys.length });
+    const host = mountBrowser();
+    await settleThoroughly();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settleThoroughly();
+    expect(host.querySelector('[role="button"]')).not.toBeNull();
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    try {
+      grouping.value = { ...grouping.value!, enabled: false };
+      await settle();
+      expect(frames.length).toBeGreaterThan(0);
+      expect(host.textContent).toContain("redisGrouping.preparingLegacy");
+      expect(host.querySelector('[role="button"]')).not.toBeNull();
+      grouping.value = { ...grouping.value!, enabled: true };
+      for (const callback of frames.splice(0)) callback(0);
+      await settle();
+      expect(host.textContent).not.toContain("redisGrouping.preparingLegacy");
+      expect(host.querySelector('[role="button"]')).not.toBeNull();
+      mocks.scrollerInitialSnapshot.mockClear();
+      grouping.value = { ...grouping.value!, enabled: false };
+      for (let i = 0; i < 30; i++) {
+        for (const callback of frames.splice(0)) callback(i);
+        await settle();
+      }
+      expect(host.textContent).not.toContain("redisGrouping.preparingLegacy");
+      expect(host.querySelector("[data-redis-group]")).not.toBeNull();
+      expect(mocks.scrollerInitialSnapshot).toHaveBeenCalledWith(0);
+      expect(mocks.scrollerInitialSnapshot.mock.calls.every(([length]) => length === 0)).toBe(true);
+      expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("continues sparse custom groups and preserves explicit checks across layout toggles", async () => {
+    grouping.value = { ...defaultRedisKeyGrouping(), enabled: true };
+    stubNonOverflowingViewport();
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 7, keys: [{ key_display: "a", key_raw: btoa("a"), key_type: "string", ttl: -1 }], total_keys: 2 });
+    mocks.redisScanKeysBatch.mockResolvedValueOnce({ cursor: 0, keys: [{ key_display: "b", key_raw: btoa("b"), key_type: "string", ttl: -1 }], total_keys: 2 });
+    const host = mountBrowser();
+    await settleThoroughly();
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
+    host.querySelector<HTMLButtonElement>("[data-redis-select-all]")!.click();
+    await settleThoroughly();
+    expect(host.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2");
+    grouping.value = { ...grouping.value!, enabled: false };
+    await settleThoroughly();
+    expect(host.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2");
+    grouping.value = { ...grouping.value!, enabled: true, inner_view: "tree" };
+    await settleThoroughly();
+    expect(host.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2");
+    expect(mocks.redisScanKeysBatch).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps fetching pages on its own when the loaded rows don't overflow the viewport, without any scroll event", async () => {
     stubNonOverflowingViewport();
 

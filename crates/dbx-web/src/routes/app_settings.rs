@@ -67,7 +67,7 @@ pub async fn save_mcp_global_policy(
 
 pub async fn preview_mcp_result_protection(
     Json(request): Json<dbx_core::mcp_result_protection::ResultProtectionPreview>,
-) -> Result<Json<Vec<dbx_core::mcp_result_protection::ResultProtectionHit>>, AppError> {
+) -> Result<Json<dbx_core::mcp_result_protection::ResultProtectionPreviewResult>, AppError> {
     dbx_core::mcp_result_protection::preview_result_protection(request).map(Json).map_err(AppError::from)
 }
 

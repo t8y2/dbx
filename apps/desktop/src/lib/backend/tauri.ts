@@ -663,7 +663,7 @@ export async function loadMcpGlobalPolicy(): Promise<McpGlobalPolicy> {
   return invoke("load_mcp_global_policy");
 }
 
-export async function previewMcpResultProtection(request: import("@/lib/mcp/mcpResultProtection").ResultProtectionPreview): Promise<import("@/lib/mcp/mcpResultProtection").ResultProtectionHit[]> {
+export async function previewMcpResultProtection(request: import("@/lib/mcp/mcpResultProtection").ResultProtectionPreview): Promise<import("@/lib/mcp/mcpResultProtection").ResultProtectionPreviewResult> {
   return invoke("preview_mcp_result_protection", { request });
 }
 

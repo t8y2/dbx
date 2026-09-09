@@ -103,6 +103,22 @@ pub struct ResultProtectionOverride {
     pub settings: ResultProtectionSettings,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResultProtectionGroupOverride {
+    pub group_id: String,
+    pub settings: ResultProtectionSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ResultProtectionSource {
+    Global,
+    Group { group_id: String },
+    Connection { connection_id: String },
+    Database { connection_id: String, database: String },
+}
+
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct McpResultProtectionPolicy {
@@ -110,6 +126,8 @@ pub struct McpResultProtectionPolicy {
     pub default: ResultProtectionSettings,
     #[serde(default)]
     pub overrides: Vec<ResultProtectionOverride>,
+    #[serde(default)]
+    pub group_overrides: Vec<ResultProtectionGroupOverride>,
     #[serde(default)]
     pub hash_key: Option<String>,
 }
@@ -119,6 +137,7 @@ impl std::fmt::Debug for McpResultProtectionPolicy {
         f.debug_struct("McpResultProtectionPolicy")
             .field("default", &self.default)
             .field("overrides", &self.overrides)
+            .field("group_overrides", &self.group_overrides)
             .field("has_hash_key", &self.hash_key.is_some())
             .finish()
     }
@@ -126,7 +145,9 @@ impl std::fmt::Debug for McpResultProtectionPolicy {
 
 impl McpResultProtectionPolicy {
     pub fn any_enabled(&self) -> bool {
-        self.default.enabled || self.overrides.iter().any(|rule| rule.settings.enabled)
+        self.default.enabled
+            || self.overrides.iter().any(|rule| rule.settings.enabled)
+            || self.group_overrides.iter().any(|rule| rule.settings.enabled)
     }
 
     pub fn has_database_overrides(&self, connection: &str) -> bool {
@@ -138,20 +159,63 @@ impl McpResultProtectionPolicy {
     }
 
     pub fn effective(&self, connection: &str, database: &str) -> &ResultProtectionSettings {
-        self.overrides
+        self.resolve(&[], connection, database).0
+    }
+
+    pub fn resolve(
+        &self,
+        group_ids: &[String],
+        connection: &str,
+        database: &str,
+    ) -> (&ResultProtectionSettings, ResultProtectionSource) {
+        if let Some(rule) = self
+            .overrides
             .iter()
             .filter(|rule| rule.connection_id == connection)
             .find(|rule| rule.database.as_deref() == Some(database))
             .or_else(|| self.overrides.iter().find(|rule| rule.connection_id == connection && rule.database.is_none()))
-            .map(|rule| &rule.settings)
-            .unwrap_or(&self.default)
+        {
+            let source = match &rule.database {
+                Some(database) => ResultProtectionSource::Database {
+                    connection_id: rule.connection_id.clone(),
+                    database: database.clone(),
+                },
+                None => ResultProtectionSource::Connection { connection_id: rule.connection_id.clone() },
+            };
+            return (&rule.settings, source);
+        }
+        if let Some(rule) = self.nearest_group(group_ids) {
+            return (&rule.settings, ResultProtectionSource::Group { group_id: rule.group_id.clone() });
+        }
+        (&self.default, ResultProtectionSource::Global)
+    }
+
+    fn nearest_group(&self, group_ids: &[String]) -> Option<&ResultProtectionGroupOverride> {
+        group_ids.iter().rev().find_map(|id| self.group_overrides.iter().find(|rule| rule.group_id == *id))
+    }
+
+    /// Bind only the request-local policy copy to server-resolved membership.
+    /// Never persist this copy: its default belongs to this connection's group.
+    pub fn for_groups(&self, group_ids: &[String]) -> Self {
+        let mut policy = self.clone();
+        if let Some(rule) = self.nearest_group(group_ids) {
+            policy.default = rule.settings.clone();
+        }
+        policy
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.overrides.len() > MAX_RULES {
+        if self.overrides.len() + self.group_overrides.len() > MAX_RULES {
             return Err(POLICY_INVALID.to_string());
         }
         compile_rules(&self.default, self.hash_key.as_deref())?;
+        let mut groups = HashSet::new();
+        for rule in &self.group_overrides {
+            if rule.group_id.trim().is_empty() || !groups.insert(&rule.group_id) {
+                return Err(POLICY_INVALID.to_string());
+            }
+            compile_rules(&rule.settings, self.hash_key.as_deref())?;
+        }
         let mut scopes = HashSet::new();
         for rule in &self.overrides {
             if rule.connection_id.trim().is_empty()
@@ -313,6 +377,9 @@ pub struct ResultProtectionHit {
 #[serde(rename_all = "camelCase")]
 pub struct ResultProtectionPreview {
     pub policy: McpResultProtectionPolicy,
+    // Synthetic draft context only. Real MCP requests load membership on the server.
+    #[serde(default)]
+    pub group_ids: Vec<String>,
     pub connection_id: String,
     pub database: String,
     #[serde(default)]
@@ -324,9 +391,38 @@ pub struct ResultProtectionPreview {
     pub value: Value,
 }
 
-pub fn preview_result_protection(request: ResultProtectionPreview) -> Result<Vec<ResultProtectionHit>, String> {
-    let Some(protector) = request.policy.compile(&request.connection_id, &request.database)? else {
-        return Ok(Vec::new());
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResultProtectionPreviewStatus {
+    Disabled,
+    Unchanged,
+    Protected,
+    Removed,
+    Denied,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResultProtectionPreviewResult {
+    pub status: ResultProtectionPreviewStatus,
+    pub source: ResultProtectionSource,
+    pub hits: Vec<ResultProtectionHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+pub fn preview_result_protection(request: ResultProtectionPreview) -> Result<ResultProtectionPreviewResult, String> {
+    request.policy.validate()?;
+    let (_, source) = request.policy.resolve(&request.group_ids, &request.connection_id, &request.database);
+    let policy = request.policy.for_groups(&request.group_ids);
+    let mut preview = ResultProtectionPreviewResult {
+        status: ResultProtectionPreviewStatus::Disabled,
+        source,
+        hits: Vec::new(),
+        value: None,
+    };
+    let Some(protector) = policy.compile(&request.connection_id, &request.database)? else {
+        return Ok(preview);
     };
     let mut result: QueryResult = serde_json::from_value(serde_json::json!({
         "columns": [request.column], "column_types": [request.data_type], "rows": [[request.value]],
@@ -339,12 +435,25 @@ pub fn preview_result_protection(request: ResultProtectionPreview) -> Result<Vec
         expected_output_columns: None,
         qualified_sql: None,
     };
-    // Only match metadata leaves this endpoint. Samples never enter audit logs.
-    let mut hits = Vec::new();
-    match protector.protect_with_hits(&mut result, &projection, &mut hits) {
-        Ok(()) => Ok(hits),
-        Err(error) if error == RESULT_DENIED && hits.iter().any(|hit| hit.action == ResultProtectionAction::Deny) => {
-            Ok(hits)
+    // Sample output is exclusive to this admin preview; audit hits remain data-free.
+    let original_value = result.rows[0][0].clone();
+    match protector.protect_with_hits(&mut result, &projection, &mut preview.hits) {
+        Ok(()) => {
+            preview.status = if result.columns.is_empty() {
+                ResultProtectionPreviewStatus::Removed
+            } else if result.rows[0][0] == original_value {
+                ResultProtectionPreviewStatus::Unchanged
+            } else {
+                preview.value = Some(result.rows[0][0].take());
+                ResultProtectionPreviewStatus::Protected
+            };
+            Ok(preview)
+        }
+        Err(error)
+            if error == RESULT_DENIED && preview.hits.iter().any(|hit| hit.action == ResultProtectionAction::Deny) =>
+        {
+            preview.status = ResultProtectionPreviewStatus::Denied;
+            Ok(preview)
         }
         Err(error) => Err(error),
     }
@@ -441,7 +550,7 @@ impl ResultProtector {
                     if let Some((rule, _)) = matches.iter().find(|(_, rows)| rows.contains(&row_index)) {
                         row[index] = self.transform(&row[index], &rule.rule)?;
                     } else {
-                        self.protect_json(&mut row[index], projection.source.as_ref(), hits, 0)?;
+                        self.protect_json(&mut row[index], projection.source.as_ref(), hits, column, 0)?;
                     }
                 }
                 retained.push(index);
@@ -504,6 +613,7 @@ impl ResultProtector {
         value: &mut Value,
         source: Option<&ResultSource>,
         hits: &mut Vec<ResultProtectionHit>,
+        column: &str,
         depth: usize,
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
@@ -513,7 +623,7 @@ impl ResultProtector {
             if text.trim_start().starts_with(['{', '[']) {
                 match serde_json::from_str::<Value>(text) {
                     Ok(mut json) if json.is_object() || json.is_array() => {
-                        self.protect_json(&mut json, source, hits, depth + 1)?;
+                        self.protect_json(&mut json, source, hits, column, depth + 1)?;
                         *text = serde_json::to_string(&json).map_err(|_| RESULT_DENIED.to_string())?;
                     }
                     Err(_) if self.is_strict() => return Err(RESULT_DENIED.to_string()),
@@ -541,7 +651,7 @@ impl ResultProtector {
                     } else if let Some(rule) = matching.first() {
                         *value = self.transform(value, &rule.rule)?;
                     } else {
-                        self.protect_json(value, source, hits, depth + 1)?;
+                        self.protect_json(value, source, hits, column, depth + 1)?;
                     }
                 }
                 for key in removed {
@@ -557,6 +667,7 @@ impl ResultProtector {
                             && rule.matches_column("", "", Some(json_type(value)), source)?
                             && rule.matches_value(value)
                         {
+                            push_hit(hits, &rule.rule, column);
                             matching.push(rule);
                         }
                     }
@@ -568,7 +679,7 @@ impl ResultProtector {
                     } else if let Some(rule) = matching.first() {
                         *value = self.transform(value, &rule.rule)?;
                     } else {
-                        self.protect_json(value, source, hits, depth + 1)?;
+                        self.protect_json(value, source, hits, column, depth + 1)?;
                     }
                 }
             }

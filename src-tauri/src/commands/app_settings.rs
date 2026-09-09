@@ -169,7 +169,7 @@ pub async fn save_mcp_global_policy(state: State<'_, Arc<AppState>>, policy: Mcp
 #[tauri::command]
 pub fn preview_mcp_result_protection(
     request: dbx_core::mcp_result_protection::ResultProtectionPreview,
-) -> Result<Vec<dbx_core::mcp_result_protection::ResultProtectionHit>, String> {
+) -> Result<dbx_core::mcp_result_protection::ResultProtectionPreviewResult, String> {
     dbx_core::mcp_result_protection::preview_result_protection(request)
 }
 

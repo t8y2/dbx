@@ -8819,7 +8819,16 @@ LIMIT 100;</pre
                   </McpAuthorizationStepper>
                 </TabsContent>
                 <TabsContent value="result-protection" class="m-0">
-                  <McpResultProtectionEditor :policy="settingsStore.mcpGlobalPolicy.resultProtection" :connections="mcpSelectableConnections" :disabled="mcpPolicyControlsDisabled" :save-policy="saveMcpResultProtection" />
+                  <McpResultProtectionEditor
+                    :policy="settingsStore.mcpGlobalPolicy.resultProtection"
+                    :connections="mcpSelectableConnections"
+                    :layout="connectionStore.sidebarLayout"
+                    :allowed-connection-ids="mcpAllowedConnectionIds"
+                    :allowed-group-ids="mcpAllowedGroupIds"
+                    :connection-policies="settingsStore.mcpGlobalPolicy.connectionPolicies"
+                    :disabled="mcpPolicyControlsDisabled"
+                    :save-policy="saveMcpResultProtection"
+                  />
                 </TabsContent>
                 <div v-if="mcpManagementTab === 'access'" class="space-y-5 border-t border-border/60 pt-5 sm:ml-1">
                   <div class="space-y-3">

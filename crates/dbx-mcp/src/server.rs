@@ -2170,12 +2170,13 @@ fn database_scope_for_connection(
 }
 
 fn resolved_connection(
-    policy: McpGlobalPolicy,
+    mut policy: McpGlobalPolicy,
     connection: dbx_core::models::connection::ConnectionConfig,
     group_path: Option<&dbx_core::mcp_policy::McpConnectionGroupPath>,
 ) -> ResolvedConnection {
     let database_scope = database_scope_for_connection(&policy, &connection);
     let group_ids = group_path.map(|path| path.ids.clone()).unwrap_or_default();
+    policy.result_protection = policy.result_protection.for_groups(&group_ids);
     ResolvedConnection { connection, policy, database_scope, group_ids }
 }
 

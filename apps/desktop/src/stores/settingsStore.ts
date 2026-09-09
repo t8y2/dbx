@@ -128,7 +128,7 @@ export const DEFAULT_MCP_GLOBAL_POLICY: McpGlobalPolicy = {
   groupPolicies: [],
   configured: false,
   queryTimeoutSecs: null,
-  resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
+  resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
 };
 
 export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null | undefined): McpGlobalPolicy {
@@ -197,7 +197,7 @@ export function normalizeMcpGlobalPolicy(policy: Partial<McpGlobalPolicy> | null
     groupPolicies,
     configured: policy?.configured === true,
     queryTimeoutSecs,
-    resultProtection: policy?.resultProtection ?? { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
+    resultProtection: policy?.resultProtection ? { ...policy.resultProtection, groupOverrides: policy.resultProtection.groupOverrides ?? [] } : { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
   };
 }
 

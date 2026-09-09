@@ -499,7 +499,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: false,
       queryTimeoutSecs: null,
-      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
+      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
     });
   });
 
@@ -521,7 +521,7 @@ describe("normalizeMcpGlobalPolicy", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
-      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
+      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
     });
   });
 
@@ -840,7 +840,7 @@ describe("settingsStore MCP policy persistence", () => {
       groupPolicies: [],
       configured: true,
       queryTimeoutSecs: null,
-      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, overrides: [], hashKey: null },
+      resultProtection: { default: { enabled: false, mode: "strict", rules: [] }, groupOverrides: [], overrides: [], hashKey: null },
     });
 
     rejectSave(new Error("save failed"));

@@ -208,26 +208,152 @@ fn disabled_default_is_compatible_and_enabled_empty_policy_is_invalid() {
 fn preview_reports_deny_rule_hits_without_returning_sample_values() {
     let mut policy = policy();
     policy.default.rules[0].action = ResultProtectionAction::Deny;
-    let hits = preview_result_protection(ResultProtectionPreview {
-        policy,
-        connection_id: "conn".to_string(),
-        database: "db".to_string(),
-        schema: "main".to_string(),
-        table: "users".to_string(),
-        column: "phone".to_string(),
-        data_type: "varchar".to_string(),
-        value: json!("13812345678"),
-    })
-    .unwrap();
+    let preview = preview_wire(serde_json::to_value(policy).unwrap(), &[], "phone", json!("13812345678"));
     assert_eq!(
-        hits,
-        [ResultProtectionHit {
-            rule_id: "phone".to_string(),
-            column: "phone".to_string(),
-            action: ResultProtectionAction::Deny
-        }]
+        preview,
+        json!({ "status": "denied", "source": { "kind": "global" },
+            "hits": [{ "ruleId": "phone", "column": "phone", "action": "deny" }] })
     );
-    assert!(!serde_json::to_string(&hits).unwrap().contains("13812345678"));
+    assert!(!preview.to_string().contains("13812345678"));
+}
+
+fn preview_wire(policy: Value, groups: &[&str], column: &str, value: Value) -> Value {
+    let request = serde_json::from_value(json!({
+        "policy": policy, "groupIds": groups, "connectionId": "conn", "database": "db",
+        "schema": "main", "table": "users", "column": column, "dataType": "varchar", "value": value,
+    }))
+    .unwrap();
+    serde_json::to_value(preview_result_protection(request).unwrap()).unwrap()
+}
+
+#[test]
+fn preview_returns_transformed_samples_but_never_removed_or_unchanged_inputs() {
+    let policy = serde_json::to_value(policy()).unwrap();
+    let masked = preview_wire(policy.clone(), &[], "phone", json!("013812345678"));
+    assert_eq!(masked["status"], "protected");
+    assert_eq!(masked["value"], "013***5678");
+    assert!(!masked.to_string().contains("013812345678"));
+    let removed = preview_wire(policy.clone(), &[], "password", json!("sample-secret"));
+    assert_eq!(removed["status"], "removed");
+    assert!(removed.get("value").is_none());
+    let unchanged = preview_wire(policy.clone(), &[], "name", json!("sample-name"));
+    assert_eq!(unchanged["status"], "unchanged");
+    assert!(unchanged.get("value").is_none());
+    let null = preview_wire(policy, &[], "phone", Value::Null);
+    assert_eq!(null["status"], "unchanged");
+    assert!(null.get("value").is_none());
+}
+
+#[test]
+fn preview_nested_json_uses_the_query_filter_and_keeps_audit_hits_data_free() {
+    let preview = preview_wire(
+        serde_json::to_value(policy()).unwrap(),
+        &[],
+        "profile",
+        json!({ "phone": "13812345678", "nested": [{ "password": "sample-secret", "name": "Alice" }] }),
+    );
+    assert_eq!(preview["status"], "protected");
+    assert_eq!(preview["value"], json!({ "phone": "138***5678", "nested": [{ "name": "Alice" }] }));
+    assert!(!preview.to_string().contains("sample-secret"));
+    assert!(!preview["hits"].to_string().contains("138***5678"));
+}
+
+#[test]
+fn group_protection_inherits_nearest_group_then_connection_then_database() {
+    let mut policy = serde_json::to_value(policy()).unwrap();
+    policy["groupOverrides"] = json!([
+        { "groupId": "production", "settings": policy["default"] },
+        { "groupId": "testing", "settings": { "enabled": false } },
+    ]);
+    let disabled = preview_wire(policy.clone(), &["production", "testing"], "phone", json!("13812345678"));
+    assert_eq!(
+        disabled,
+        json!({ "status": "disabled", "hits": [], "source": { "kind": "group", "groupId": "testing" } })
+    );
+    let inherited = preview_wire(policy.clone(), &["production", "unconfigured"], "phone", json!("13812345678"));
+    assert_eq!(inherited["value"], "138***5678");
+    assert_eq!(inherited["source"], json!({ "kind": "group", "groupId": "production" }));
+    policy["overrides"] = json!([{ "connectionId": "conn", "settings": policy["default"] }]);
+    let connection = preview_wire(policy.clone(), &["production", "testing"], "phone", json!("13812345678"));
+    assert_eq!(connection["status"], "protected");
+    assert_eq!(connection["source"], json!({ "kind": "connection", "connectionId": "conn" }));
+    policy["overrides"].as_array_mut().unwrap().push(json!({
+        "connectionId": "conn", "database": "db", "settings": { "enabled": false },
+    }));
+    let database = preview_wire(policy, &["production", "testing"], "phone", json!("13812345678"));
+    assert_eq!(database["status"], "disabled");
+    assert_eq!(database["source"], json!({ "kind": "database", "connectionId": "conn", "database": "db" }));
+}
+
+#[test]
+fn group_only_protection_is_validated_and_counts_as_enabled() {
+    let raw = json!({ "groupOverrides": [{ "groupId": "production", "settings": policy().default }] });
+    let policy: McpResultProtectionPolicy = serde_json::from_value(raw.clone()).unwrap();
+    assert!(policy.any_enabled());
+    assert!(policy.validate().is_ok());
+    let mut duplicate = raw.clone();
+    duplicate["groupOverrides"].as_array_mut().unwrap().push(raw["groupOverrides"][0].clone());
+    assert!(serde_json::from_value::<McpResultProtectionPolicy>(duplicate).unwrap().validate().is_err());
+    let mut invalid = raw;
+    invalid["groupOverrides"][0]["groupId"] = json!(" ");
+    assert!(serde_json::from_value::<McpResultProtectionPolicy>(invalid).unwrap().validate().is_err());
+}
+
+#[test]
+fn binding_group_defaults_does_not_mutate_the_persisted_policy() {
+    let original: McpResultProtectionPolicy = serde_json::from_value(json!({
+        "groupOverrides": [{ "groupId": "production", "settings": policy().default }],
+    }))
+    .unwrap();
+    let bound = original.for_groups(&["production".to_string()]);
+    assert!(bound.compile("conn", "db").unwrap().is_some());
+    assert!(original.compile("conn", "db").unwrap().is_none());
+    assert!(original.for_groups(&[]).compile("conn", "db").unwrap().is_none());
+    assert_eq!(bound.group_overrides, original.group_overrides);
+}
+
+#[test]
+fn preview_validates_the_original_policy_before_binding_groups() {
+    let request = serde_json::from_value(json!({
+        "policy": {
+            "default": { "enabled": true, "rules": [] },
+            "groupOverrides": [{ "groupId": "testing", "settings": { "enabled": false } }],
+        },
+        "groupIds": ["testing"], "connectionId": "conn", "database": "db",
+        "column": "phone", "dataType": "varchar", "value": "13812345678",
+    }))
+    .unwrap();
+    assert!(matches!(preview_result_protection(request), Err(error) if error == POLICY_INVALID));
+}
+
+#[test]
+fn preview_hashes_are_stable_and_match_the_real_query_result() {
+    let mut policy = policy();
+    policy.default.rules[0].action = ResultProtectionAction::Hash;
+    policy.hash_key = Some("01234567890123456789012345678901".to_string());
+    let mut actual = result(&["phone"], json!([["13812345678"]]));
+    protect(&policy, "SELECT phone FROM users", &mut actual).unwrap();
+    let preview = preview_wire(serde_json::to_value(&policy).unwrap(), &[], "phone", json!("13812345678"));
+    assert_eq!(preview["value"], actual.rows[0][0]);
+    assert_eq!(preview, preview_wire(serde_json::to_value(policy).unwrap(), &[], "phone", json!("13812345678")));
+}
+
+#[test]
+fn preview_reports_value_only_rules_inside_arrays() {
+    let mut policy = policy();
+    policy.default.rules = vec![serde_json::from_value(json!({
+        "id": "array-secret", "valuePattern": "^secret$", "action": "mask",
+    }))
+    .unwrap()];
+    let preview = preview_wire(serde_json::to_value(&policy).unwrap(), &[], "labels", json!(["secret", "safe"]));
+    assert_eq!(preview["status"], "protected");
+    assert_eq!(preview["value"], json!(["[REDACTED]", "safe"]));
+    assert_eq!(preview["hits"][0]["column"], "labels");
+
+    policy.default.rules[0].action = ResultProtectionAction::Deny;
+    let denied = preview_wire(serde_json::to_value(policy).unwrap(), &[], "labels", json!(["secret"]));
+    assert_eq!(denied["status"], "denied");
+    assert!(denied.get("value").is_none());
 }
 
 #[test]

@@ -266,6 +266,111 @@ async fn duplicated_connections_preserve_result_protection_overrides() {
 }
 
 #[tokio::test]
+async fn group_protection_tracks_membership_and_specific_disabled_overrides() {
+    let fixture = Fixture::new().await;
+    let mut policy: McpResultProtectionPolicy = serde_json::from_value(json!({
+        "groupOverrides": [
+            { "groupId": "project", "settings": protection("strict").default },
+            { "groupId": "testing", "settings": { "enabled": false } },
+        ],
+    }))
+    .unwrap();
+    fixture.set_policy(policy.clone()).await;
+    let layout = json!({
+        "groups": [{ "id": "project", "name": "Project" }, { "id": "testing", "name": "Testing" }],
+        "order": [{ "type": "group", "id": "project", "children": [
+            { "type": "group", "id": "testing", "children": [
+                { "type": "connection", "id": fixture.connection.id },
+            ] },
+        ] }],
+    });
+    fixture.storage.save_sidebar_layout(&layout).await.unwrap();
+    let plain = fixture.call("dbx_execute_query", json!({ "sql": "SELECT phone FROM users" })).await;
+    assert_ne!(plain.is_error, Some(true), "{plain:?}");
+    assert!(serde_json::to_string(&plain).unwrap().contains(PHONE), "{plain:?}");
+
+    let mut moved = layout;
+    moved["order"][0]["children"] = json!([{ "type": "connection", "id": fixture.connection.id }]);
+    fixture.storage.save_sidebar_layout(&moved).await.unwrap();
+    for tool in ["dbx_execute_query", "dbx_execute_batch"] {
+        let protected = fixture.call(tool, json!({ "sql": "SELECT phone, password FROM users" })).await;
+        assert_ne!(protected.is_error, Some(true), "{protected:?}");
+        assert_no_secrets(&protected);
+    }
+    let metadata = fixture.call("dbx_describe_table", json!({ "table": "users", "schema": "main" })).await;
+    assert_ne!(metadata.is_error, Some(true), "{metadata:?}");
+    assert_no_secrets(&metadata);
+
+    policy.overrides.push(
+        serde_json::from_value(json!({
+            "connectionId": fixture.connection.id, "settings": { "enabled": false },
+        }))
+        .unwrap(),
+    );
+    fixture.set_policy(policy.clone()).await;
+    let plain = fixture.call("dbx_execute_query", json!({ "sql": "SELECT phone FROM users" })).await;
+    assert_ne!(plain.is_error, Some(true), "{plain:?}");
+    assert!(serde_json::to_string(&plain).unwrap().contains(PHONE), "{plain:?}");
+    policy.overrides.push(
+        serde_json::from_value(json!({
+            "connectionId": fixture.connection.id, "database": "main", "settings": protection("strict").default,
+        }))
+        .unwrap(),
+    );
+    fixture.set_policy(policy).await;
+    let protected = fixture.call("dbx_execute_query", json!({ "sql": "SELECT phone FROM users" })).await;
+    assert_ne!(protected.is_error, Some(true), "{protected:?}");
+    assert_no_secrets(&protected);
+}
+
+#[tokio::test]
+async fn group_only_protection_fails_closed_if_membership_cannot_be_loaded() {
+    let fixture = Fixture::new().await;
+    fixture
+        .set_policy(
+            serde_json::from_value(json!({
+                "groupOverrides": [{ "groupId": "production", "settings": protection("strict").default }],
+            }))
+            .unwrap(),
+        )
+        .await;
+    fixture.storage.save_sidebar_layout(&json!({ "groups": "invalid", "order": [] })).await.unwrap();
+    let result = fixture.call("dbx_execute_query", json!({ "sql": "SELECT phone FROM users" })).await;
+    assert_eq!(result.is_error, Some(true));
+    assert_no_secrets(&result);
+    assert!(result.structured_content.is_none());
+}
+
+#[tokio::test]
+async fn configuring_group_protection_does_not_authorize_connections() {
+    let fixture = Fixture::new().await;
+    fixture
+        .storage
+        .save_sidebar_layout(&json!({
+            "groups": [{ "id": "production", "name": "Production" }],
+            "order": [{ "type": "group", "id": "production", "connectionIds": [fixture.connection.id] }],
+        }))
+        .await
+        .unwrap();
+    fixture
+        .storage
+        .save_mcp_global_policy(&McpGlobalPolicy {
+            allowed_connection_ids: Some(Vec::new()),
+            result_protection: serde_json::from_value(json!({
+                "groupOverrides": [{ "groupId": "production", "settings": protection("strict").default }],
+            }))
+            .unwrap(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let result = fixture.call("dbx_execute_query", json!({ "sql": "SELECT phone FROM users" })).await;
+    assert_eq!(result.is_error, Some(true));
+    assert_no_secrets(&result);
+    assert!(result.structured_content.is_none());
+}
+
+#[tokio::test]
 async fn database_overrides_cannot_be_bypassed_with_sqlite_database_arguments() {
     let fixture = Fixture::new().await;
     let policy = serde_json::from_value(json!({

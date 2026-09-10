@@ -5,7 +5,7 @@ import { Play, CirclePlay, Loader2, Square, Database, Check, Table2, AlignLeft, 
 import { supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -573,17 +573,20 @@ async function changeCatalog(selectedCatalog: string) {
             <MoreHorizontal class="h-3.5 w-3.5" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" class="w-56">
+        <DropdownMenuContent align="start" class="w-max min-w-56 max-w-[calc(100vw-1rem)]">
           <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('compressSql')">
             <Minimize2 class="h-3.5 w-3.5" />
             {{ t("toolbar.compressSql") }}
           </DropdownMenuItem>
           <DropdownMenuItem @select="emit('toggleSqlKeywordCase')">
+            <span class="inline-flex h-4 w-4 shrink-0 items-center justify-center font-mono text-xs font-semibold" aria-hidden="true">
+              {{ keywordCaseIsLower ? "A" : "a" }}
+            </span>
             {{ keywordCaseToggleTooltip }}
           </DropdownMenuItem>
-          <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent @update:model-value="toggleSqlSemanticDiagnostics()">
+          <DropdownMenuCheckboxItem v-if="supportsSqlSemanticDiagnosticsToggle" :model-value="sqlSemanticDiagnosticsEnabled" @select.prevent="toggleSqlSemanticDiagnostics">
             <SpellCheck2 class="h-3.5 w-3.5" />
-            {{ sqlSemanticDiagnosticsToggleTooltip }}
+            {{ t("settings.sqlSemanticDiagnosticsEnabled") }}
           </DropdownMenuCheckboxItem>
           <DropdownMenuItem @select="emit('openSql')">
             <FolderOpen class="h-3.5 w-3.5" />
@@ -605,9 +608,9 @@ async function changeCatalog(selectedCatalog: string) {
             <Eye class="h-3.5 w-3.5" />
             {{ t("editor.previewChanges") }}
           </DropdownMenuItem>
-          <DropdownMenuCheckboxItem v-if="supportsInsertValueHintsToggle" :model-value="insertValueHintsEnabled" @select.prevent @update:model-value="toggleInsertValueHints">
+          <DropdownMenuCheckboxItem v-if="supportsInsertValueHintsToggle" :model-value="insertValueHintsEnabled" @select.prevent="toggleInsertValueHints">
             <BetweenVerticalStart class="h-3.5 w-3.5" />
-            {{ insertValueHintsToggleTooltip }}
+            {{ t("settings.showInsertValueHints") }}
           </DropdownMenuCheckboxItem>
           <template v-if="toolbarTier >= 2">
             <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('formatSql')">
@@ -623,7 +626,7 @@ async function changeCatalog(selectedCatalog: string) {
               {{ isActiveDatabaseDefault ? t("editor.defaultDatabase") : t("editor.setDefaultDatabase") }}
             </DropdownMenuItem>
           </template>
-          <DropdownMenuCheckboxItem v-if="toolbarTier >= 3 && supportsExplainAnalyze" :model-value="props.explainMode === 'autotrace'" @select.prevent @update:model-value="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')">
+          <DropdownMenuCheckboxItem v-if="toolbarTier >= 3 && supportsExplainAnalyze" :model-value="props.explainMode === 'autotrace'" @select.prevent="emit('update:explainMode', props.explainMode === 'autotrace' ? 'explain' : 'autotrace')">
             <span class="font-bold" style="font-size: 9px">A</span>
             {{ explainAnalyzeTooltip }}
           </DropdownMenuCheckboxItem>

@@ -48,11 +48,32 @@ describe("objectBrowserTablesToAiTreeNodes", () => {
     expect(nodes[0].id).toBe("conn-1:db-1:app:users");
   });
 
-  it("falls back to the database name as a last resort", () => {
+  it("keeps the schema undefined instead of falling back to the database name", () => {
+    const nodes = objectBrowserTablesToAiTreeNodes(tab(), [{ name: "users" }, { name: "orders", schema: undefined }]);
+
+    expect(nodes.map((node) => node.schema)).toEqual([undefined, undefined]);
+    expect(nodes[0].id).toBe("conn-1:db-1::users");
+  });
+
+  it("keeps the schema undefined for schema-less engines so addToAi reuses the current tab", () => {
+    // MySQL/MariaDB-style connection: object-browser rows and the tab both
+    // carry schema: undefined (rows via connectionObjectTreeNodeSchema, which
+    // returns undefined for schema-less engines). The synthesized node must
+    // keep schema undefined so App.vue's addToAi() tab matching
+    // ((tab.schema || "") === (target.schema || "")) reuses the current tab
+    // instead of spawning a stray query tab and clearing accumulated AI
+    // context via clearContextReferences().
     const nodes = objectBrowserTablesToAiTreeNodes(tab(), [{ name: "users" }]);
 
-    expect(nodes[0].schema).toBe("db-1");
-    expect(nodes[0].id).toBe("conn-1:db-1:db-1:users");
+    expect(nodes[0]).toEqual({
+      id: "conn-1:db-1::users",
+      label: "users",
+      type: "table",
+      connectionId: "conn-1",
+      database: "db-1",
+      catalog: undefined,
+      schema: undefined,
+    });
   });
 
   it("carries the tab catalog through for external-catalog contexts (Doris/StarRocks)", () => {

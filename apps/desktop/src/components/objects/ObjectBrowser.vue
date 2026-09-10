@@ -3114,9 +3114,10 @@ function addToAiMenuItem(item: ObjectBrowserRow): ContextMenuItem {
   const useBatch = isSelectedBatchTableContext(item);
   const count = selectedTableCount.value;
   // Schema stays per-row: the consumer (App.vue addToAi) resolves the final
-  // schema with its own fallback chain (table.schema || tab.schema || tab.database).
-  // ObjectBrowser is a single-schema view, but keeping row-level schemas makes
-  // the payload honest and future-proof if multi-schema selection ever appears.
+  // schema with its own fallback chain (table.schema || tab.schema — no
+  // database fallback, mirroring the sidebar tree path). ObjectBrowser is a
+  // single-schema view, but keeping row-level schemas makes the payload honest
+  // and future-proof if multi-schema selection ever appears.
   const targets = useBatch ? selectedTableRows.value.map((row) => ({ name: row.name, schema: row.schema })) : [{ name: item.name, schema: item.schema }];
   return {
     label: useBatch ? t("contextMenu.addToAiMultiple", { count }) : t("contextMenu.addToAi"),

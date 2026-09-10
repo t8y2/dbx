@@ -2854,14 +2854,13 @@ async function loadObjects(options?: { allowCached?: boolean; preserveExistingRo
 
   const cached = options?.allowCached ? getCachedObjectBrowserRowsForScaffold(request.scope) : undefined;
   if (cached) {
-    // Scaffold the last-known rows so returning to this tab shows them instantly
-    // instead of flashing an empty list. A fresh entry (< TTL) is authoritative on
-    // its own; a stale one is presented and then revalidated in the background.
+    // Restore the last-known rows when remounting this tab. The cached list is
+    // authoritative for navigation restores, including entries older than the
+    // freshness TTL; re-querying here makes every tab switch look like a refresh.
+    // Explicit refresh and metadata invalidation still bypass this branch.
     applyObjectBrowserRows(cached.rows);
     finishOnce();
-    if (!cached.stale) return;
-    scaffoldRefresh = true;
-    refreshingObjects.value = true;
+    return;
   } else {
     // No scaffold: first load in this scope, cache invalidated by a DDL mutation,
     // or the caller wants a true reload. If the caller explicitly asked to keep the

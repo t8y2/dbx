@@ -7574,6 +7574,7 @@ export default withEnglishFallback({
     mcpToolOpenSession: "Sorğu sessiyasını aç",
     mcpToolCloseSession: "Sorğu sessiyasını bağla",
     mcpToolExecuteRedisCommand: "Redis əmrini icra et",
+    mcpToolPeekMessages: "Kafka mesajlarını oxu",
     mcpToolSendMessage: "Mesaj növbəsinə mesaj göndər",
     mcpToolAddConnection: "Əlaqə əlavə et",
     mcpToolDuplicateConnection: "Əlaqənin surətini yarat",

@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 use serde::Deserialize;
 use serde_json::Value;
 
+mod dev;
+
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SDK_VERSION: &str = "0.1.0";
 const ANSI_RESET: &str = "\x1b[0m";
@@ -193,6 +195,8 @@ struct ProjectConfig {
     #[serde(default)]
     backend: Option<BackendConfig>,
     package: PackageConfig,
+    #[serde(default)]
+    dev: dev::DevConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,6 +299,7 @@ where
     match arguments.next().as_deref() {
         Some("create") => run_create(arguments.collect()),
         Some("package") => run_package(arguments.collect()),
+        Some("dev") => dev::run(arguments.collect()),
         Some("keygen") => run_keygen(arguments.collect()),
         Some("--version" | "-V" | "version") => {
             println!("{} {}", styled_stdout("dbx-plugin", ANSI_ACCENT), styled_stdout(CLI_VERSION, ANSI_MUTED));
@@ -839,6 +844,9 @@ pub fn package_project(options: &PackageOptions) -> Result<(PathBuf, PathBuf), S
     }
     for include in &config.package.include {
         validate_relative_path(include, "package include")?;
+        if include.components().any(|part| part.as_os_str() == ".dbx-dev") {
+            return Err("Package input cannot contain .dbx-dev development data".to_owned());
+        }
     }
     let manifest_path = project.join("manifest.json");
     let manifest_raw = fs::read(&manifest_path).map_err(|error| format!("Failed to read manifest.json: {error}"))?;
@@ -1084,6 +1092,9 @@ fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
 }
 
 fn copy_path(source: &Path, destination: &Path) -> Result<(), String> {
+    if source.file_name().is_some_and(|name| name == ".dbx-dev") {
+        return Err("Package input cannot contain .dbx-dev development data".to_owned());
+    }
     let metadata = fs::symlink_metadata(source).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink() {
         return Err(format!("Package input cannot contain symbolic link {}", source.display()));
@@ -1383,6 +1394,10 @@ fn print_usage() {
     println!("\n{}", styled_stdout("Commands:", ANSI_PROMPT));
     println!("  {}     Create a frontend-only, Rust, or Go plugin project", styled_stdout("create", ANSI_SUCCESS));
     println!("  {}    Build a .dbxp package and artifact metadata", styled_stdout("package", ANSI_SUCCESS));
+    println!(
+        "  {}        Run a plugin in the local browser development host (Node.js 22+)",
+        styled_stdout("dev", ANSI_SUCCESS)
+    );
     println!("  {}     Generate an Ed25519 repository signing key", styled_stdout("keygen", ANSI_SUCCESS));
     println!("  {}    Print the CLI version", styled_stdout("version", ANSI_SUCCESS));
     println!("\n{}", styled_stdout("Examples:", ANSI_PROMPT));
@@ -1473,6 +1488,17 @@ mod tests {
         resolve_create_options, run_cli, styled, title_from_slug, validate_semver, BackendConfig, CreateInputs,
         CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
+
+    #[test]
+    fn rejects_development_data_in_package_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("ui");
+        std::fs::create_dir_all(input.join(".dbx-dev")).unwrap();
+        std::fs::write(input.join(".dbx-dev/connections.json"), "private").unwrap();
+        let output = root.path().join("stage");
+        assert!(super::copy_path(&input, &output).unwrap_err().contains(".dbx-dev"));
+        assert!(!output.join(".dbx-dev/connections.json").exists());
+    }
 
     #[test]
     fn enables_colors_only_for_supported_terminal_modes() {

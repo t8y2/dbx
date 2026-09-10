@@ -9,6 +9,7 @@ npm install --global @dbx-app/plugin-cli
 
 dbx-plugin create
 cd my-plugin
+dbx-plugin dev --port 5190
 dbx-plugin package .
 ```
 
@@ -19,6 +20,12 @@ npx @dbx-app/plugin-cli create my-plugin
 ```
 
 The npm launcher selects the matching macOS, Linux, or Windows binary and bundles the matching Rust and Go plugin SDK sources. Building the CLI from a DBX checkout is only necessary while developing the CLI itself.
+
+## Browser development
+
+`dbx-plugin dev --path /path/to/plugin --port 5190` runs a local browser development host without starting DBX. The npm package includes the prebuilt runtime; only `dev` requires Node.js 22+. Frontend-only plugins need no sidecar; Rust/Go projects are built from `[backend]` configuration. JSONL and framed v1 are supported.
+
+Optional `[dev]` `ui_build` and `ui_watch` argument arrays configure UI builds. Without them, existing UI assets are loaded and watched. The command does not install project dependencies. Development data, including plaintext credentials, defaults to `.dbx-dev/`; use `--data-dir` to override it. See [runtime documentation](../dev-host/README.md) for supported APIs, source builds and limitations.
 
 ## Project templates
 

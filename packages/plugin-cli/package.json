@@ -22,14 +22,15 @@
   "files": [
     "bin",
     "README.md",
-    "sdk-root"
+    "sdk-root",
+    "dev-runtime"
   ],
   "type": "module",
   "scripts": {
     "build": "node --check bin/dbx-plugin.js && node --check scripts/stage-sdk.mjs",
     "test": "node --test tests/*.test.mjs",
-    "prepack": "node scripts/stage-sdk.mjs",
-    "postpack": "node scripts/stage-sdk.mjs --clean",
+    "prepack": "node scripts/stage-sdk.mjs && node scripts/stage-dev.mjs",
+    "postpack": "node scripts/stage-sdk.mjs --clean && node scripts/stage-dev.mjs --clean",
     "prepublishOnly": "npm run build && npm test"
   },
   "optionalDependencies": {

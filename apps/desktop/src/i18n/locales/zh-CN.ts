@@ -7553,6 +7553,7 @@ export default withEnglishFallback({
     mcpToolOpenSession: "打开查询会话",
     mcpToolCloseSession: "关闭查询会话",
     mcpToolExecuteRedisCommand: "执行 Redis 命令",
+    mcpToolPeekMessages: "读取 Kafka 消息",
     mcpToolSendMessage: "发送消息队列消息",
     mcpToolAddConnection: "新增连接",
     mcpToolDuplicateConnection: "复制连接",

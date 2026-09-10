@@ -7086,6 +7086,7 @@ export default withEnglishFallback({
     mcpToolOpenSession: "Apri sessione di query",
     mcpToolCloseSession: "Chiudi sessione di query",
     mcpToolExecuteRedisCommand: "Esegui comando Redis",
+    mcpToolPeekMessages: "Leggi messaggi Kafka",
     mcpToolSendMessage: "Invia messaggio in coda",
     mcpToolAddConnection: "Aggiungi connessione",
     mcpToolDuplicateConnection: "Duplica connessione",

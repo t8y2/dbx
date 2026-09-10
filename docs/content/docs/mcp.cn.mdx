@@ -87,7 +87,7 @@ DeepSeek Harness 通过 Cordis 插件条目加载 MCP Server，不读取 `mcpSer
 
 ## 工具列表
 
-DBX MCP 当前提供 18 个工具：
+DBX MCP 当前提供以下工具（具体可用工具取决于构建功能及权限设置）：
 
 | 工具 | 说明 |
 | --- | --- |
@@ -106,11 +106,34 @@ DBX MCP 当前提供 18 个工具：
 | `dbx_open_session` | 为 SQL 连接打开固定后端连接的有状态查询会话 |
 | `dbx_close_session` | 关闭会话并释放固定连接资源 |
 | `dbx_execute_redis_command` | 执行 Redis 命令 |
+| `dbx_peek_messages` | 读取 Kafka 消息，不提交消费位点 |
 | `dbx_send_message` | 向支持的消息队列 Topic 或队列发送消息 |
 | `dbx_open_table` | 在运行中的 DBX 桌面端打开表 |
 | `dbx_execute_and_show` | 执行查询并在 DBX 中展示结果 |
 
 启用连接作用域后，修改连接和桌面 UI 工具会被隐藏。
+
+## 读取 Kafka 消息
+
+包含 `mq-admin` 的构建在本地和 Web 模式下均提供 `dbx_peek_messages`。通过 `connection_id` 或 `connection_name` 选择已保存的 Kafka 连接，并指定 `topic`。工具遵守 MCP 连接范围及工具白名单，允许读取只读连接和生产连接，不提交消费位点。
+
+```json
+{
+  "connection_name": "Kafka",
+  "topic": "events",
+  "count": 20,
+  "start_position": "offset",
+  "partition": 0,
+  "offset": 120
+}
+```
+
+- `count`：1–100，默认 20。
+- `start_position`：`latest`（默认）、`earliest` 或 `offset`。仅 `offset` 模式必须且允许传入非负 `offset`。
+- `partition`：可选的非负分区号。不传时跨分区读取；offset 模式下从各分区的该位点开始读取。
+- JSON 结果包含 `messages`，保留 base64 消息体、可无损解码时的 UTF-8 预览、消息 ID 和元数据。`incomplete` 表示读取达到超时或扫描上限；`outputTruncated` 表示为满足 256 KiB 消息输出预算而省略了整条消息。如果首条消息过大，可能返回空列表并标记 `outputTruncated: true`，不会静默截断消息体。
+
+该工具读取有限条消息快照，不提供持续订阅或全 Topic 文本搜索。其他消息队列类型会被拒绝。
 
 ## 批量 SQL 执行
 

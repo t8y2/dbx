@@ -34,6 +34,7 @@ export const MCP_TOOL_OPTIONS = [
   { name: "dbx_open_session", labelKey: "settings.mcpToolOpenSession" },
   { name: "dbx_close_session", labelKey: "settings.mcpToolCloseSession" },
   { name: "dbx_execute_redis_command", labelKey: "settings.mcpToolExecuteRedisCommand" },
+  { name: "dbx_peek_messages", labelKey: "settings.mcpToolPeekMessages" },
   { name: "dbx_send_message", labelKey: "settings.mcpToolSendMessage" },
   { name: "dbx_add_connection", labelKey: "settings.mcpToolAddConnection" },
   { name: "dbx_duplicate_connection", labelKey: "settings.mcpToolDuplicateConnection" },

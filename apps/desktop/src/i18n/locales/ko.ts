@@ -6847,6 +6847,7 @@ export default withEnglishFallback({
     mcpToolOpenSession: "쿼리 세션 열기",
     mcpToolCloseSession: "쿼리 세션 닫기",
     mcpToolExecuteRedisCommand: "Redis 명령 실행",
+    mcpToolPeekMessages: "Kafka 메시지 읽기",
     mcpToolSendMessage: "메시지 큐 메시지 전송",
     mcpToolAddConnection: "연결 추가",
     mcpToolDuplicateConnection: "연결 복제",

@@ -215,6 +215,17 @@ pub trait DbxBackend: Send + Sync {
         let _ = (connection, request);
         Err("Message queue sending is not supported by this backend.".to_string())
     }
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        let _ = (connection, topic, count, options);
+        Err("Message queue reading is not supported by this backend.".to_string())
+    }
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -766,6 +777,25 @@ impl DbxBackend for LocalBackend {
         dbx_core::mq::service::mq_send_message_core(&self.state, &connection.id, request).await
     }
 
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        dbx_core::mq::service::mq_peek_messages_core(
+            &self.state,
+            &connection.id,
+            topic,
+            "__dbx_kafka_viewer__".into(),
+            count,
+            Some(options),
+        )
+        .await
+    }
+
     async fn execute_query(
         &self,
         connection: &ConnectionConfig,
@@ -1172,6 +1202,21 @@ impl DbxBackend for WebBackend {
         .json()
         .await
         .map_err(|error| format!("Invalid message send response: {error}"))
+    }
+
+    #[cfg(feature = "mq-admin")]
+    async fn peek_messages(
+        &self,
+        connection: &ConnectionConfig,
+        topic: dbx_core::mq::TopicRef,
+        count: u32,
+        options: dbx_core::mq::PeekMessagesOptions,
+    ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+        self.request(
+            reqwest::Method::POST,
+            "/api/mq/subscriptions/peek-messages",
+            Some(json!({ "connectionId": connection.id, "topic": topic, "sub": "__dbx_kafka_viewer__", "count": count, "options": options })),
+        ).await?.json().await.map_err(|error| format!("Invalid message peek response: {error}"))
     }
 
     async fn execute_query(
@@ -2536,6 +2581,81 @@ mod tests {
         let (_request_line, second_body) = request_receiver.recv().unwrap();
         let second_request: Value = serde_json::from_str(&second_body).unwrap();
         assert_eq!(second_request["timeoutSecs"], 300);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn web_peek_messages_forwards_kafka_options_and_preserves_partial_results() {
+        use dbx_core::mq::{PeekMessagesOptions, PeekStartPosition, TopicRef};
+        use std::io::BufRead;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "POST /api/mq/subscriptions/peek-messages HTTP/1.1");
+            let mut content_length = 0;
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        content_length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+            }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["connectionId"], "kafka-peek");
+            assert_eq!(body["topic"]["topic"], "events");
+            assert_eq!(body["sub"], "__dbx_kafka_viewer__");
+            assert_eq!(body["count"], 7);
+            assert_eq!(body["options"], json!({"startPosition":"offset", "partition":2, "offset":17}));
+            let response = r#"{"messages":[{"position":1,"messageId":"2:17","payloadBase64":"/w==","headers":{"type":"binary"}}],"incomplete":true}"#;
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        });
+        let backend =
+            WebBackend::new_with_config(format!("http://{address}"), String::new(), None, None, None, false, None)
+                .unwrap();
+        backend.auth.lock().await.checked = true;
+        let connection = new_connection_config(
+            "kafka-peek".into(),
+            "Kafka".into(),
+            DatabaseType::MessageQueue,
+            "localhost".into(),
+            9092,
+            String::new(),
+            String::new(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let result = backend
+            .peek_messages(
+                &connection,
+                TopicRef { topic: "events".into(), ..Default::default() },
+                7,
+                PeekMessagesOptions {
+                    start_position: Some(PeekStartPosition::Offset),
+                    partition: Some(2),
+                    offset: Some(17),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(result.incomplete);
+        assert_eq!(result.messages[0].payload_base64, "/w==");
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("2:17"));
+        assert_eq!(result.messages[0].headers.get("type").map(String::as_str), Some("binary"));
+        server.join().unwrap();
     }
 
     #[tokio::test]

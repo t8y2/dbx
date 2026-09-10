@@ -7568,6 +7568,7 @@ export default {
     mcpToolOpenSession: "Open query session",
     mcpToolCloseSession: "Close query session",
     mcpToolExecuteRedisCommand: "Execute Redis command",
+    mcpToolPeekMessages: "Read Kafka messages",
     mcpToolSendMessage: "Send message queue message",
     mcpToolAddConnection: "Add connection",
     mcpToolDuplicateConnection: "Duplicate connection",

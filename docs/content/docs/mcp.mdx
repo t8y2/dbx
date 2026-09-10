@@ -87,7 +87,7 @@ Run `dsh web --dump-config` to verify the composed configuration, then restart D
 
 ## Tools
 
-DBX MCP currently provides 18 tools:
+DBX MCP provides the following tools (availability depends on build features and access settings):
 
 | Tool | Description |
 | --- | --- |
@@ -106,11 +106,34 @@ DBX MCP currently provides 18 tools:
 | `dbx_open_session` | Open a stateful SQL query session pinned to one backend connection |
 | `dbx_close_session` | Close a session and release its pinned connection resources |
 | `dbx_execute_redis_command` | Execute a Redis command |
+| `dbx_peek_messages` | Read Kafka messages without committing consumer offsets |
 | `dbx_send_message` | Send a message to a supported message queue topic or queue |
 | `dbx_open_table` | Open a table in the running DBX desktop app |
 | `dbx_execute_and_show` | Execute a query and display the result in DBX |
 
 Connection-scoped sessions hide connection-mutating and desktop UI tools.
+
+## Read Kafka Messages
+
+`dbx_peek_messages` is available in builds with `mq-admin`, in both local and Web modes. Select a saved Kafka connection by `connection_id` or `connection_name` and provide `topic`. It respects MCP connection scopes and tool allowlists and works with read-only and production connections without committing consumer offsets.
+
+```json
+{
+  "connection_name": "Kafka",
+  "topic": "events",
+  "count": 20,
+  "start_position": "offset",
+  "partition": 0,
+  "offset": 120
+}
+```
+
+- `count`: 1–100, defaults to 20.
+- `start_position`: `latest` (default), `earliest`, or `offset`. Supply a non-negative `offset` only with `offset` mode.
+- `partition`: optional non-negative partition number. If omitted, reads across topic partitions; in offset mode, the offset applies to every partition.
+- The JSON response contains `messages` with base64 payloads, lossless UTF-8 previews when available, message IDs and metadata. `incomplete` means the broker read reached a deadline or scan limit. `outputTruncated` means whole messages were omitted to fit the 256 KiB message output budget. A single oversized message may therefore yield no messages with `outputTruncated: true`; payloads are never silently clipped.
+
+This is a bounded snapshot, not a continuous consumer or a topic-wide text search. Other message queue types are rejected.
 
 ## Batch SQL Execution
 

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   executeQuery: vi.fn(),
   listDataTypes: vi.fn(),
   buildTableStructureChangeSql: vi.fn(),
+  previewSqliteTableStructureChange: vi.fn(),
   buildMysqlAutoIncrementSql: vi.fn(),
   updateEditorSettings: vi.fn(),
   loadObjectDdl: vi.fn(),
@@ -24,6 +25,12 @@ const mocks = vi.hoisted(() => ({
   getTablePartitionStatus: vi.fn(),
   getTableOwner: vi.fn(),
   buildTableOwnerChangeSql: vi.fn(),
+  editorSettings: {
+    structureEditorDensity: "compact",
+    sqlFormatter: {},
+    tableColumnTemplateFields: [],
+    generateSqlQuoteIdentifiers: true,
+  },
   toast: vi.fn(),
 }));
 
@@ -212,7 +219,7 @@ vi.mock("@/stores/queryStore", () => ({ useQueryStore: () => ({ tableStructureRe
 vi.mock("@/stores/historyStore", () => ({ useHistoryStore: () => ({ add: vi.fn() }) }));
 vi.mock("@/stores/settingsStore", () => ({
   useSettingsStore: () => ({
-    editorSettings: { structureEditorDensity: "compact", sqlFormatter: {}, tableColumnTemplateFields: [] },
+    editorSettings: mocks.editorSettings,
     updateEditorSettings: mocks.updateEditorSettings,
   }),
 }));
@@ -229,6 +236,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeQuery: mocks.executeQuery,
   listDataTypes: mocks.listDataTypes,
   buildTableStructureChangeSql: mocks.buildTableStructureChangeSql,
+  previewSqliteTableStructureChange: mocks.previewSqliteTableStructureChange,
   buildMysqlAutoIncrementSql: mocks.buildMysqlAutoIncrementSql,
   buildTableOwnerChangeSql: mocks.buildTableOwnerChangeSql,
   getTablePartitionStatus: mocks.getTablePartitionStatus,
@@ -352,6 +360,8 @@ function buttonWithText(root: HTMLElement, text: string): HTMLButtonElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.editorSettings.generateSqlQuoteIdentifiers = true;
+  mocks.previewSqliteTableStructureChange.mockResolvedValue({ statements: [], warnings: [], schemaRevision: "sqlite-revision" });
   mocks.loadObjectDdl.mockResolvedValue({ ddl: "CREATE TABLE users (id bigint)", cacheStatus: "remote" });
   mocks.invalidateObjectDdl.mockResolvedValue(undefined);
   mocks.invalidateObjectMetadataCache.mockResolvedValue(undefined);
@@ -570,6 +580,32 @@ describe("TableStructureEditor primary key editing", () => {
     await vi.waitFor(() => expect(root.textContent).toContain("ALTER TABLE users ALTER COLUMN id DROP NOT NULL;"));
     expect(buttonWithText(root, "structureEditor.copySql").disabled).toBe(false);
     expect(buttonWithText(root, "structureEditor.apply").disabled).toBe(false);
+  });
+
+  it.each([
+    ["postgres", "public"],
+    ["sqlite", "main"],
+  ] as const)("omits safe identifier quotes from generated %s SQL when quoting is disabled", async (databaseType, schema) => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor(databaseType);
+    mocks.buildTableStructureChangeSql.mockResolvedValueOnce({ statements: [`ALTER TABLE "${schema}"."demo_table" ADD "abc" VARCHAR(20) DEFAULT 'quoted value'`], warnings: [] });
+
+    buttonWithText(root, "structureEditor.addColumn").click();
+
+    await vi.waitFor(() => expect(root.textContent).toContain(`ALTER TABLE ${schema}.demo_table ADD abc VARCHAR(20) DEFAULT 'quoted value'`));
+    expect(root.textContent).not.toContain(`"${schema}"."demo_table"`);
+  });
+
+  it("keeps SQLite rebuild SQL aligned with the guarded apply plan", async () => {
+    mocks.editorSettings.generateSqlQuoteIdentifiers = false;
+    const root = await mountEditor("sqlite");
+    const preview = `ALTER TABLE "main"."demo_table" RENAME COLUMN "old_name" TO "new_name"`;
+    mocks.previewSqliteTableStructureChange.mockResolvedValueOnce({ statements: [preview], warnings: [], schemaRevision: "sqlite-revision" });
+
+    root.querySelector<HTMLButtonElement>('[data-searchable-select="true"]')?.click();
+
+    await vi.waitFor(() => expect(mocks.previewSqliteTableStructureChange).toHaveBeenCalled());
+    expect(root.textContent).toContain(preview);
   });
 
   it("debounces SQL preview generation while editing a column name", async () => {

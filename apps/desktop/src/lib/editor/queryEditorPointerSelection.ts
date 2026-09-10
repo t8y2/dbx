@@ -3,6 +3,11 @@ export interface QueryEditorPointerEvent {
   button: number;
 }
 
+export interface QueryEditorSelectionDragEvent {
+  detail: number;
+  shiftKey: boolean;
+}
+
 export interface QueryEditorObjectNavigationModifierEvent {
   altKey: boolean;
   ctrlKey: boolean;
@@ -11,6 +16,10 @@ export interface QueryEditorObjectNavigationModifierEvent {
 
 export function startsQueryEditorRectangularSelection(event: QueryEditorPointerEvent): boolean {
   return event.altKey || event.button === 1;
+}
+
+export function startsQueryEditorSelectionDrag(event: QueryEditorSelectionDragEvent): boolean {
+  return !event.shiftKey && event.detail <= 1;
 }
 
 export function usesQueryEditorObjectNavigationModifier(event: QueryEditorObjectNavigationModifierEvent): boolean {

@@ -1328,7 +1328,10 @@ fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseTyp
 fn is_postgres_transfer_dialect(db_type: &DatabaseType) -> bool {
     // KingbaseES supports the PostgreSQL DDL, type, and ON CONFLICT paths used by transfer;
     // other PG-wire databases stay opt-in until their transfer behavior is verified.
-    matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase)
+    // openGauss runs the native PostgreSQL wire protocol pool and its server-side
+    // pg_get_tabledef() DDL contains multiple statements per table, so it needs the
+    // same statement-splitting create-table path (verified against openGauss 6.0.3).
+    matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase | DatabaseType::OpenGauss)
 }
 
 fn transfer_table_needs_inline_postgres_schema_ensure(
@@ -11689,6 +11692,28 @@ mod tests {
         assert_eq!(
             statements,
             vec![
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer)".to_string(),
+                "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn opengauss_transfer_ddl_splits_reused_multi_statement_table_ddl() {
+        // openGauss reuses the source table DDL verbatim via pg_get_tabledef(), which
+        // emits several statements per table. Without the PostgreSQL dialect path the
+        // whole DDL runs as one prepared statement and fails with "cannot insert
+        // multiple commands into a prepared statement".
+        let ddl = "SET search_path = public;\n\
+                   CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS 'items';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::OpenGauss);
+
+        assert_eq!(
+            statements,
+            vec![
+                "SET search_path = public".to_string(),
                 "CREATE TABLE \"public\".\"items\" (\"id\" integer)".to_string(),
                 "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
             ]

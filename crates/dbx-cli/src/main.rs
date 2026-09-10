@@ -202,8 +202,12 @@ async fn run(argv: Vec<String>) -> Result<String, (CliError, bool)> {
 
     let backend: Arc<dyn DbxBackend> = if let Ok(base_url) = env::var("DBX_WEB_URL") {
         Arc::new(
-            WebBackend::new(base_url, env::var("DBX_WEB_PASSWORD").unwrap_or_default())
-                .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?,
+            WebBackend::new(
+                base_url,
+                env::var("DBX_WEB_PASSWORD").unwrap_or_default(),
+                env::var("DBX_WEB_USERNAME").ok(),
+            )
+            .map_err(|message| (CliError::new("CONNECTION_STORE_ERROR", message), json_output))?,
         )
     } else {
         let db_path = dbx_mcp::paths::storage_db_path()

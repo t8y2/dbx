@@ -186,7 +186,7 @@ Oracle、金仓KingbaseES 和虚谷需要匹配的 DBX 原生 Agent，但不需�
 
 ### DBX Web / Docker 模式
 
-设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为 Web 登录页使用的密码。
+设置 `DBX_WEB_URL` 后，MCP 会使用部署的 DBX Web 后端，而不是读取本机连接。如果 Web 登录启用了密码保护，还要设置 `DBX_WEB_PASSWORD`，值为该账号的登录密码；账号名不是 `admin` 时还需设置 `DBX_WEB_USERNAME`。
 
 DBX Web 请求遵循标准系统代理环境变量：https 地址读取 `HTTPS_PROXY`/`https_proxy`，http 地址读取 `HTTP_PROXY`/`http_proxy`，`ALL_PROXY`/`all_proxy` 作为兜底，`NO_PROXY`/`no_proxy`（逗号分隔的主机列表，例如 `localhost,127.0.0.1,.internal.example`）作为绕过列表。代理值为空或未设置时直连（不走代理）。支持 HTTP、HTTPS 与 SOCKS5 代理（`http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`）；需要认证的代理使用标准 `user:password@host:port` URL 形式，例如 `http://admin:admin123@127.0.0.1:7890`。如需为每次 DBX Web 请求附加自定义请求头（例如网关前的令牌认证），将 `DBX_WEB_HEADERS` 设置为 JSON 对象，键为请求头名称、值为字符串，例如 `{"Authorization":"Bearer <token>"}`。目标为自签名 HTTPS 时，证书验证默认开启：设置 `DBX_WEB_INSECURE_SKIP_VERIFY=1` 可跳过验证，或设置 `DBX_WEB_CA_CERT` 指向 PEM/DER CA 文件以信任私有 CA。同样的变量在 DBX CLI 的 Web 模式下同样生效。
 
@@ -248,6 +248,7 @@ DBX 在 **设置 → MCP** 中保存一份权威策略，并在每次请求时�
 | `DBX_DATA_DIR` | 覆盖本地 DBX 数据目录 |
 | `DBX_WEB_URL` | 使用 DBX Web/Docker 后端 |
 | `DBX_WEB_PASSWORD` | 登录 DBX Web |
+| `DBX_WEB_USERNAME` | 登录使用的账号名（默认为 `admin`） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` | DBX Web 请求的标准系统代理变量；空值表示不走代理。认证格式 `http://user:pass@host:port` |
 | `NO_PROXY` | 上述代理的标准绕过列表（逗号分隔主机） |
 | `DBX_WEB_HEADERS` | DBX Web 请求附加的请求头 JSON 对象，例如 `{"Authorization":"Bearer token"}` |

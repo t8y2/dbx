@@ -101,7 +101,7 @@ DBX_WEB_PASSWORD='your-login-password' \
 dbx connections list --json
 ```
 
-`DBX_WEB_PASSWORD` 是 Web 登录密码。Web 模式中的连接、权限、驱动和文件路径都属于服务器环境；`dbx open` 仍需要本机 Desktop bridge，不应作为远程 Web 自动化入口。
+`DBX_WEB_PASSWORD` 是该账号的 Web 登录密码；账号名不是 `admin` 时还需设置 `DBX_WEB_USERNAME`。Web 模式中的连接、权限、驱动和文件路径都属于服务器环境；`dbx open` 仍需要本机 Desktop bridge，不应作为远程 Web 自动化入口。
 
 ## 默认连接
 

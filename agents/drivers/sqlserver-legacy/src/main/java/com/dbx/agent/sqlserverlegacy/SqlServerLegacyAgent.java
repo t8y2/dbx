@@ -320,7 +320,66 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
 
     @Override
     public List<ColumnInfo> getColumns(String schema, String table) {
-        return super.getColumns(metadataSchema(schema, table), table);
+        String resolvedSchema = metadataSchema(schema, table);
+        List<ColumnInfo> columns = super.getColumns(resolvedSchema, table);
+        if (!sqlServer2000Mode || columns.isEmpty()) {
+            return columns;
+        }
+        try {
+            return mergeSqlServer2000ColumnComments(
+                columns,
+                readSqlServer2000ColumnComments(resolvedSchema, table)
+            );
+        } catch (SQLException error) {
+            // Comments are optional metadata. Keep the table usable when the
+            // legacy catalog is unavailable or the account cannot read it.
+            System.err.println(
+                "[sqlserver-legacy] SQL Server 2000 column comments unavailable: "
+                    + error.getClass().getName()
+                    + ": "
+                    + error.getMessage()
+            );
+            return columns;
+        }
+    }
+
+    private Map<String, String> readSqlServer2000ColumnComments(String schema, String table) throws SQLException {
+        Map<String, String> comments = new LinkedHashMap<>();
+        try (PreparedStatement statement = requireConnection().prepareStatement(sqlServer2000ColumnCommentsSql())) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    String column = resultSet.getString("column_name");
+                    String comment = resultSet.getString("column_comment");
+                    if (column != null && comment != null && !comment.trim().isEmpty()) {
+                        comments.put(column, comment);
+                    }
+                }
+            }
+        }
+        return comments;
+    }
+
+    static List<ColumnInfo> mergeSqlServer2000ColumnComments(
+        List<ColumnInfo> columns,
+        Map<String, String> comments
+    ) {
+        if (comments.isEmpty()) {
+            return columns;
+        }
+        for (ColumnInfo column : columns) {
+            String comment = comments.get(column.getName());
+            if (comment != null) {
+                column.setComment(comment);
+            }
+        }
+        return columns;
+    }
+
+    static String sqlServer2000ColumnCommentsSql() {
+        return "SELECT objname AS column_name, CONVERT(nvarchar(4000), value) AS column_comment "
+            + "FROM ::fn_listextendedproperty('MS_Description', 'user', ?, 'table', ?, 'column', default)";
     }
 
     @Override

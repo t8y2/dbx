@@ -1,12 +1,16 @@
 package com.dbx.agent.sqlserverlegacy;
 
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.ColumnInfo;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.security.Security;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 class SqlServerLegacyAgentTest {
     @Test
@@ -99,6 +103,38 @@ class SqlServerLegacyAgentTest {
                 + "ORDER BY c.colid",
             SqlServerLegacyAgent.sqlServer2000ObjectSourceSql()
         );
+    }
+
+    @Test
+    void sqlServer2000ColumnCommentsUseLegacyExtendedPropertyFunction() {
+        String sql = SqlServerLegacyAgent.sqlServer2000ColumnCommentsSql();
+
+        Assertions.assertTrue(sql.contains("FROM ::fn_listextendedproperty"));
+        Assertions.assertTrue(sql.contains("'MS_Description', 'user', ?, 'table', ?, 'column', default"));
+        Assertions.assertTrue(sql.contains("objname AS column_name"));
+        Assertions.assertTrue(sql.contains("CONVERT(nvarchar(4000), value) AS column_comment"));
+        Assertions.assertFalse(sql.contains("sys.extended_properties"));
+    }
+
+    @Test
+    void sqlServer2000ColumnCommentsMergeWithoutDiscardingJdbcMetadata() {
+        ColumnInfo id = new ColumnInfo("ID", "int", false, null, true);
+        ColumnInfo name = new ColumnInfo("NAME", "varchar", true, null, false);
+        ColumnInfo untouched = new ColumnInfo("CREATED_AT", "datetime", false, "getdate()", false);
+        untouched.setComment("JDBC remark");
+        List<ColumnInfo> columns = List.of(id, name, untouched);
+        Map<String, String> comments = new LinkedHashMap<>();
+        comments.put("ID", "Primary identifier");
+        comments.put("NAME", "Display name");
+
+        List<ColumnInfo> merged = SqlServerLegacyAgent.mergeSqlServer2000ColumnComments(columns, comments);
+
+        Assertions.assertSame(columns, merged);
+        Assertions.assertEquals("Primary identifier", id.getComment());
+        Assertions.assertEquals("Display name", name.getComment());
+        Assertions.assertEquals("JDBC remark", untouched.getComment());
+        Assertions.assertTrue(id.getIs_primary_key());
+        Assertions.assertEquals("getdate()", untouched.getColumn_default());
     }
 
     @Test

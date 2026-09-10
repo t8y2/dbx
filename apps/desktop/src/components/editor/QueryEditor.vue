@@ -204,6 +204,8 @@ const props = defineProps<{
   autoFocus?: boolean;
   forceWordWrap?: boolean;
   hideExecutionControls?: boolean;
+  enableExplainShortcut?: boolean;
+  canExplain?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
   statementExecutionMarkers?: StatementExecutionMarker[];
@@ -235,6 +237,7 @@ const emit = defineEmits<{
   formatError: [message: string];
   execute: [source: SqlExecutionOverride];
   executeInNewResultTab: [source: SqlExecutionOverride];
+  explain: [];
   exportQuery: [payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
@@ -2173,6 +2176,17 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
       );
   const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
+  const explainBindings = props.enableExplainShortcut
+    ? createQueryEditorExecutionShortcutBindings(
+        shortcuts.explainSql,
+        () => {
+          emit("explain");
+          return true;
+        },
+        (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+        () => !!props.canExplain,
+      )
+    : [];
   const replaceShortcutBindings = createQueryEditorReplaceShortcutBindings(shortcuts.replace, openReplace);
   const replaceShortcutHandler = createQueryEditorReplaceShortcutHandler({
     shortcut: shortcuts.replace,
@@ -2221,6 +2235,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
+        ...explainBindings,
         ...binding(shortcuts.saveSql, () => {
           emit("save");
           return true;

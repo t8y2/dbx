@@ -1298,6 +1298,8 @@ defineExpose({
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
               :force-word-wrap="activeTab.forceWordWrap"
+              enable-explain-shortcut
+              :can-explain="!activeTab.isExecuting && !activeTab.isExplaining && !!executableSql.trim()"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
               @selection-change="emit('editorSelectionChange', activeTab.id, $event)"
               @send-selection-to-ai="emit('sendSelectionToAi', activeTab.id, $event)"
@@ -1309,6 +1311,7 @@ defineExpose({
               @format-error="emit('formatError', activeTab.id)"
               @execute="emit('execute', activeTab.id, $event)"
               @execute-in-new-result-tab="emit('executeInNewResultTab', activeTab.id, $event)"
+              @explain="emit('explain', activeTab.id)"
               @export-query="handleExportQuery"
               @save="emit('saveSql', props.activeTab.id)"
               @click-table="onHandleClickTable"

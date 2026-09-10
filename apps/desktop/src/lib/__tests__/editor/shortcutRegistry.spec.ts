@@ -152,6 +152,14 @@ describe("shortcutRegistry editor actions", () => {
     expect(findShortcutConflict("expandSelectStar", DEFAULT_SHORTCUT_SETTINGS.expandSelectStar, DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
   });
 
+  it("registers a configurable editor shortcut for the explain plan", () => {
+    const definition = SHORTCUT_DEFINITIONS.find((item) => item.id === "explainSql");
+
+    expect(definition).toMatchObject({ labelKey: "toolbar.explainPlan", scope: "editor", defaultShortcut: "Mod+E" });
+    expect(shortcutToCodeMirrorKey(DEFAULT_SHORTCUT_SETTINGS.explainSql)).toBe("Mod-e");
+    expect(findShortcutConflict("explainSql", "Mod+E", DEFAULT_SHORTCUT_SETTINGS)).toBeNull();
+  });
+
   it("keeps current-view search and editor find contextual on Mod+F", () => {
     const focusSearch = SHORTCUT_DEFINITIONS.find((item) => item.id === "focusSearch");
     const find = SHORTCUT_DEFINITIONS.find((item) => item.id === "find");

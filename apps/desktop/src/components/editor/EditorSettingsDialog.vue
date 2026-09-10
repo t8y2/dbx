@@ -367,6 +367,9 @@ const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : Dia
 const showUnsavedSettingsCloseConfirm = ref(false);
 
 function requestCloseSettings(nextOpen: boolean) {
+  // Flush any pending debounced MCP query-timeout save so a value typed right
+  // before closing is persisted instead of dropped (see onMcpQueryTimeoutInput).
+  flushMcpQueryTimeoutSave();
   if (shouldConfirmEditorSettingsDialogClose(nextOpen, hasChanges())) {
     showUnsavedSettingsCloseConfirm.value = true;
     return;
@@ -2580,21 +2583,54 @@ watch(
   },
 );
 
-function onMcpQueryTimeoutInput() {
-  const raw = mcpQueryTimeoutInput.value.trim();
+// Debounce the persist so rapid typing coalesces into a single SQLite write.
+// `flushMcpQueryTimeoutSave` runs on the settings-close path so a value typed
+// right before closing is still persisted (the legacy @change binding only
+// fired on blur/Enter, silently dropping the value when the window closed).
+const MCP_QUERY_TIMEOUT_SAVE_DEBOUNCE_MS = 300;
+let mcpQueryTimeoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let mcpQueryTimeoutPendingValue: number | null | undefined;
+
+function onMcpQueryTimeoutInput(event: Event) {
+  // Read the value from the native input (not the ref): the Input component
+  // binds :model-value one-way, so the ref only updates after Vue re-renders;
+  // the event target always carries the just-typed value synchronously.
+  const target = event.currentTarget as HTMLInputElement;
+  const raw = target.value.trim();
   if (raw === "") {
-    void saveMcpPolicy({ queryTimeoutSecs: null });
-    return;
+    mcpQueryTimeoutPendingValue = null;
+  } else {
+    const parsed = Number(raw);
+    // Backend stores the value as u64; keep out-of-range integers on the
+    // invalid-value path instead of failing serde later with a generic error.
+    if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
+      toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
+      // Revert both the bound ref and the native input (the ref alone no
+      // longer drives the DOM because the input is one-way bound).
+      const reverted = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
+      mcpQueryTimeoutInput.value = reverted;
+      target.value = reverted;
+      mcpQueryTimeoutPendingValue = undefined;
+      return;
+    }
+    mcpQueryTimeoutPendingValue = parsed;
   }
-  const parsed = Number(raw);
-  // Backend stores the value as u64; keep out-of-range integers on the
-  // invalid-value path instead of failing serde later with a generic error.
-  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
-    toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
-    mcpQueryTimeoutInput.value = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
-    return;
+  if (mcpQueryTimeoutSaveTimer !== null) clearTimeout(mcpQueryTimeoutSaveTimer);
+  mcpQueryTimeoutSaveTimer = setTimeout(() => {
+    mcpQueryTimeoutSaveTimer = null;
+    flushMcpQueryTimeoutSave();
+  }, MCP_QUERY_TIMEOUT_SAVE_DEBOUNCE_MS);
+}
+
+function flushMcpQueryTimeoutSave() {
+  if (mcpQueryTimeoutSaveTimer !== null) {
+    clearTimeout(mcpQueryTimeoutSaveTimer);
+    mcpQueryTimeoutSaveTimer = null;
   }
-  void saveMcpPolicy({ queryTimeoutSecs: parsed });
+  if (mcpQueryTimeoutPendingValue === undefined) return;
+  const value = mcpQueryTimeoutPendingValue;
+  mcpQueryTimeoutPendingValue = undefined;
+  void saveMcpPolicy({ queryTimeoutSecs: value });
 }
 const mcpSelectableConnections = computed(() => connectionStore.connections);
 const mcpGroupRows = computed(() => connectionGroupDestinationRows(connectionStore.sidebarLayout));
@@ -5035,6 +5071,7 @@ watch(
 );
 
 onUnmounted(() => {
+  flushMcpQueryTimeoutSave();
   cleanupPreviewEditor();
   resetSettingsSearchState();
 });
@@ -8919,7 +8956,7 @@ LIMIT 100;</pre
                     </div>
                     <div class="grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,18rem)]">
                       <Label id="mcp-query-timeout-label">{{ t("settings.mcpQueryTimeout") }}</Label>
-                      <Input id="mcp-query-timeout" v-model="mcpQueryTimeoutInput" type="number" min="0" step="1" inputmode="numeric" placeholder="0" :disabled="mcpPolicyControlsDisabled" @change="onMcpQueryTimeoutInput" />
+                      <Input id="mcp-query-timeout" :model-value="mcpQueryTimeoutInput" type="number" min="0" step="1" inputmode="numeric" placeholder="0" :disabled="mcpPolicyControlsDisabled" @input="onMcpQueryTimeoutInput" />
                     </div>
                   </div>
                   <div v-if="mcpTransportTab === 'stdio'" class="space-y-3">

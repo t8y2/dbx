@@ -47,6 +47,8 @@ export interface ProcessColumn {
 }
 
 export interface ProcessListDriver {
+  /** Whether the panel offers multi-selection and batch query cancellation. */
+  supportsBatchCancel?: boolean;
   /** SQL that lists current sessions, one row each. */
   listSql: string;
   /** Compatibility query used when the primary list SQL references newer columns. */
@@ -103,6 +105,7 @@ const POSTGRES_COLUMNS: ProcessColumn[] = [
 ];
 
 const MYSQL_DRIVER: ProcessListDriver = {
+  supportsBatchCancel: true,
   listSql: MYSQL_PROCESS_LIST_SQL,
   ownSessionSql: "SELECT CONNECTION_ID()",
   columns: MYSQL_COLUMNS,

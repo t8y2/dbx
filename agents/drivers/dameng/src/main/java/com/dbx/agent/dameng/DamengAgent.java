@@ -753,7 +753,11 @@ public final class DamengAgent extends AbstractJdbcAgent {
                     || normalized.contains("all_views")
                     || normalized.contains("all_triggers")
                     || normalized.contains("all_sequences")
-                    || normalized.contains("systexts");
+                    || normalized.contains("systexts")
+                    // DM8 may report a view's metadata failure as an internal
+                    // index lookup error without mentioning DBMS_METADATA.
+                    || normalized.contains("内部索引")
+                    || normalized.contains("internal index");
                 boolean permissionDenied = normalized.contains("权限")
                     || normalized.contains("privilege")
                     || normalized.contains("permission")
@@ -762,6 +766,7 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 boolean missingObject = normalized.contains("解析失败")
                     || normalized.contains("无法解析")
                     || normalized.contains("不存在")
+                    || normalized.contains("未找到")
                     || normalized.contains("not exist")
                     || normalized.contains("does not exist")
                     || normalized.contains("not found")
@@ -1714,6 +1719,10 @@ public final class DamengAgent extends AbstractJdbcAgent {
             if (!isDamengMetadataUnavailableError(error)) {
                 throw error;
             }
+            String catalogDdl = catalogTableLikeDdl(schema, table);
+            if (catalogDdl != null) {
+                return catalogDdl;
+            }
             try {
                 return super.getTableDdl(schema, table);
             } catch (RuntimeException fallbackError) {
@@ -1721,6 +1730,58 @@ public final class DamengAgent extends AbstractJdbcAgent {
                 throw fallbackError;
             }
         }
+    }
+
+    /**
+     * DBMS_METADATA.GET_DDL('TABLE', ...) is also used for views by the generic
+     * table-DDL endpoint. DM8 can reject that call with an internal-index error,
+     * even though the view definition is available in ALL_VIEWS.
+     */
+    private String catalogTableLikeDdl(String schema, String table) throws RuntimeException {
+        if (schemaMatchesConnectedUser(schema)) {
+            try {
+                String materializedQuery = readCatalogText(
+                    "SELECT QUERY FROM USER_MVIEWS WHERE MVIEW_NAME = ?",
+                    table
+                );
+                if (notBlank(materializedQuery)) {
+                    return buildCatalogTableLikeDdl(schema, table, "MATERIALIZED VIEW", materializedQuery);
+                }
+            } catch (RuntimeException error) {
+                if (!isDamengMetadataUnavailableError(error)) {
+                    throw error;
+                }
+            }
+        }
+
+        String viewText = readCatalogText(
+            "SELECT TEXT FROM ALL_VIEWS WHERE OWNER = ? AND VIEW_NAME = ?",
+            schema,
+            table
+        );
+        if (notBlank(viewText)) {
+            return buildCatalogTableLikeDdl(schema, table, "VIEW", viewText);
+        }
+        return null;
+    }
+
+    private String readCatalogText(String sql, String... params) {
+        return unchecked(() -> {
+            try (PreparedStatement stmt = requireConnected().prepareStatement(sql)) {
+                for (int i = 0; i < params.length; i++) {
+                    stmt.setString(i + 1, params[i]);
+                }
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return rs.next() ? coalesce(readTextColumn(rs, 1)) : "";
+                }
+            }
+        });
+    }
+
+    private static String buildCatalogTableLikeDdl(String schema, String table, String objectType, String body) {
+        String normalizedBody = body.trim();
+        String statement = "CREATE " + objectType + " " + qualifiedName(schema, table) + " AS " + normalizedBody;
+        return ensureStatementTerminator(statement);
     }
 
     @Override

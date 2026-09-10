@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent, provide } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronsRight, FileText } from "@lucide/vue";
+import { FileText } from "@lucide/vue";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import AppToolbar from "@/components/layout/AppToolbar.vue";
 import AppTabBar from "@/components/layout/AppTabBar.vue";
@@ -3425,6 +3425,7 @@ onUnmounted(() => {
           v-if="!isDetachedWindowContext"
           :is-dark="isDark"
           :theme-mode="themeMode"
+          :show-sidebar-expand="!sidebarOpen && !isZenMode"
           :show-ai-panel="showAiPanel"
           :active-ai-run-count="activeAiRunCount"
           :awaiting-ai-run-count="awaitingAiRunCount"
@@ -3445,6 +3446,7 @@ onUnmounted(() => {
           :has-connections="connectionStore.connections.length > 0"
           :has-sql-file-connections="hasSqlFileConnections"
           @new-connection="showConnectionDialog = true"
+          @expand-sidebar="setSidebarOpen(true)"
           @new-query="newQuery"
           @set-theme-mode="setThemeMode"
           @toggle-ai="toggleRightSidebarPanel('ai')"
@@ -3475,11 +3477,6 @@ onUnmounted(() => {
             @open-settings="(initialTab) => openSettings(initialTab ?? 'appearance')"
             @add-to-ai="addToAi"
           />
-          <div v-if="!isDetachedWindowContext" v-show="!sidebarOpen && !isZenMode" class="flex h-full w-8 shrink-0 items-start justify-center border-r bg-background/80 pt-2" :class="isClassicLayout ? '' : 'rounded-md border border-border/80'">
-            <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('sidebar.expand')" :aria-label="t('sidebar.expand')" @click="setSidebarOpen(true)">
-              <ChevronsRight class="h-4 w-4" />
-            </Button>
-          </div>
 
           <div v-show="!isAiPanelMaximized || isZenMode" :class="isDetachedWindowContext ? 'flex-1 min-w-0 overflow-hidden bg-background' : isClassicLayout ? 'flex-1 min-w-0 overflow-hidden' : 'flex-1 min-w-0 overflow-hidden rounded-md border border-border/80 bg-background'">
             <div class="h-full flex min-h-0 min-w-0 flex-col">

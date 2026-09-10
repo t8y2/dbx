@@ -69,6 +69,7 @@ import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
 import { createRedisKeyViewYield } from "@/lib/redis/redisKeyViewScheduler";
+import { restoreRedisKeyBrowserState, saveRedisKeyBrowserState } from "@/lib/tabs/redisKeyBrowserStateCache";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();
@@ -121,8 +122,14 @@ const props = defineProps<{
   connectionId: string;
   db: number;
   blockDangerousRedisCommands: boolean;
+  /** Tab id; search conditions are cached per tab and restored on remount. */
+  stateKey?: string;
 }>();
 
+// This component is keyed by tab in ContentArea and unmounted on every tab
+// switch; without restoring from the per-tab cache, coming back to the tab
+// would silently drop the user's search pattern / mode / local filters.
+const restoredRedisKeyBrowserState = props.stateKey ? restoreRedisKeyBrowserState(props.stateKey) : undefined;
 const redisExpiryTransport = {
   setTtl: api.redisSetTtl,
   setExpireAt: api.redisSetExpireAt,
@@ -145,9 +152,9 @@ let redisKeyScrollRevision = 0;
 let latestRedisKeyScrollAnchor: RedisKeyViewportAnchor | null = null;
 const valueViewerRef = ref<{ focusSearch: () => boolean } | null>(null);
 const commandTerminalRef = ref<HTMLElement>();
-const searchPattern = ref("");
-const searchMode = ref<RedisSearchMode>("key");
-const fuzzyKeySearch = ref(false);
+const searchPattern = ref(restoredRedisKeyBrowserState?.searchPattern ?? "");
+const searchMode = ref<RedisSearchMode>(restoredRedisKeyBrowserState?.searchMode ?? "key");
+const fuzzyKeySearch = ref(restoredRedisKeyBrowserState?.fuzzyKeySearch ?? false);
 const keyTemplateMenuOpen = ref(false);
 const keyTemplateSelectedIndex = ref(0);
 const keyTemplateListboxId = `redis-key-template-suggestions-${uuid()}`;
@@ -312,7 +319,19 @@ watch(redisKeySeparator, () => {
 const lastTotalKeys = ref(0);
 // “仅看无过期”过滤开关：开启后只保留 TTL 为 -1（永不过期）的已加载 key。
 // TTL 为 -2 的行（fetch-all 链路未查询 TTL）不会出现在过滤结果里。
-const noExpiryOnly = ref(false);
+const noExpiryOnly = ref(restoredRedisKeyBrowserState?.noExpiryOnly ?? false);
+
+function persistRedisKeyBrowserState() {
+  if (!props.stateKey) return;
+  saveRedisKeyBrowserState(props.stateKey, {
+    searchPattern: searchPattern.value,
+    searchMode: searchMode.value,
+    fuzzyKeySearch: fuzzyKeySearch.value,
+    noExpiryOnly: noExpiryOnly.value,
+  });
+}
+
+watch([searchPattern, searchMode, fuzzyKeySearch, noExpiryOnly], persistRedisKeyBrowserState);
 const fetchAllFilteredKeyCount = ref<number | null>(null);
 // 过滤后的平铺 key 列表：未开启过滤时与 flatKeys 完全一致，避免额外开销
 const filteredFlatKeys = computed(() => {

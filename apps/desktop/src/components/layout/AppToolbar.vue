@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -27,6 +27,7 @@ const GithubIcon = {
 const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
+  showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
   /** Runs awaiting a write confirmation; the badge turns amber to outrank the
@@ -51,6 +52,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
   "set-theme-mode": [mode: AppThemeMode];
@@ -380,6 +382,11 @@ function handleWindowResize() {
 
 watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
 watch(
+  () => props.showSidebarExpand,
+  () => scheduleToolbarLayout(),
+  { flush: "post" },
+);
+watch(
   () => settingsStore.editorSettings.uiScale,
   () => {
     measuredTrafficLightInset.value = null;
@@ -534,6 +541,14 @@ const toolbarStyle = computed(() => {
 
 <template>
   <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
+    <Tooltip v-if="showSidebarExpand">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('sidebar.expand')" @click="emit('expand-sidebar')">
+          <ChevronsRight class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("sidebar.expand") }}</TooltipContent>
+    </Tooltip>
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <span class="inline-flex items-center gap-1">
         <DatabaseZap class="h-3.5 w-3.5" />

@@ -341,6 +341,16 @@ test("parseMongoFindCommand rewrites epoch-millisecond and numeric BSON construc
   });
 });
 
+test("parseMongoFindCommand rejects out-of-range integer constructor arguments", () => {
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(9223372036854775808)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(-9223372036854775809)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberInt(2147483648)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: new Date(99999999999999999999)})"), null);
+  const atBounds = parseMongoFindCommand("db.orders.find({a: NumberLong(9223372036854775807), b: NumberInt(-2147483648)})");
+  assert.ok(atBounds);
+  assert.deepEqual(JSON.parse(atBounds.filter), { a: { $numberLong: "9223372036854775807" }, b: { $numberInt: "-2147483648" } });
+});
+
 test("parseMongoFindCommand does not rewrite constructor text inside strings", () => {
   const command = parseMongoFindCommand(`db.orders.find({label: "new Date()", note: 'ObjectId()'})`);
   assert.ok(command);

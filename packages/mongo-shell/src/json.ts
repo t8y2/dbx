@@ -547,6 +547,19 @@ const QUOTED_ARGUMENT = /^(["'])([^\\]*)\1$/;
 const INTEGER_ARGUMENT = /^-?\d+$/;
 const DECIMAL_ARGUMENT = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 
+const INT64_BOUNDS = [-9223372036854775808n, 9223372036854775807n] as const;
+const INT32_BOUNDS = [-2147483648n, 2147483647n] as const;
+
+/** Bounds parity with the Rust parser, which range-checks before emitting $numberLong / $numberInt. */
+function fitsIntegerBounds(value: string, bounds: readonly [bigint, bigint]): boolean {
+  try {
+    const parsed = BigInt(value);
+    return parsed >= bounds[0] && parsed <= bounds[1];
+  } catch {
+    return false;
+  }
+}
+
 function replaceMongoShellConstructors(source: string): string {
   let result = "";
   let index = 0;
@@ -608,11 +621,12 @@ function shellConstructorToExtendedJson(name: string, args: string[]): string | 
       if (literal !== null) return wrap("$date", literal);
       // `new Date(1735689600000)` takes epoch milliseconds, which extended JSON
       // carries as a nested $numberLong rather than a bare number.
-      return INTEGER_ARGUMENT.test(arg) ? `{"$date":{"$numberLong":${JSON.stringify(arg)}}}` : null;
+      return INTEGER_ARGUMENT.test(arg) && fitsIntegerBounds(arg, INT64_BOUNDS) ? `{"$date":{"$numberLong":${JSON.stringify(arg)}}}` : null;
     case "NumberLong":
     case "NumberInt": {
       const value = literal ?? arg;
       if (value === undefined || !INTEGER_ARGUMENT.test(value)) return null;
+      if (!fitsIntegerBounds(value, name === "NumberLong" ? INT64_BOUNDS : INT32_BOUNDS)) return null;
       return wrap(name === "NumberLong" ? "$numberLong" : "$numberInt", value);
     }
     case "NumberDecimal": {

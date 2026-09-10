@@ -1241,6 +1241,16 @@ describe("RedisKeyBrowser command console echo", () => {
 });
 
 describe("RedisKeyBrowser expiry creation", () => {
+  it("opens the create-key dialog with an empty key name", async () => {
+    mountBrowser();
+    await settle();
+
+    requiredElement<HTMLButtonElement>('button[title="redis.createKey"]').click();
+    await settle();
+
+    expect(requiredElement<HTMLInputElement>('input[placeholder="redis.createKeyNamePlaceholder"]').value).toBe("");
+  });
+
   it.each(["string", "hash", "list", "set", "zset", "stream", "json"] as const)("writes %s before applying one relative TTL", async (type) => {
     mountBrowser();
     await settle();

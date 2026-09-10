@@ -3197,9 +3197,12 @@ where
 /// source deletion in the same server-side critical section.  Hash-field
 /// expiry commands were introduced after hashes themselves, so the script
 /// probes them with `pcall` and preserves expiry when the server supports
-/// HTTL/HEXPIRE while remaining usable on older Redis versions.  Permission
-/// errors are surfaced instead of being mistaken for an unsupported command,
-/// since silently dropping a field TTL would be data loss.
+/// HTTL/HEXPIRE while remaining usable on older Redis versions.  Some Redis
+/// cluster implementations reject the whole script before Lua can probe those
+/// commands, so this also retries with an equivalent script that never
+/// references field-expiry commands.  Permission errors are surfaced instead
+/// of being mistaken for an unsupported command, since silently dropping a
+/// field TTL would be data loss.
 pub async fn hash_field_update<C>(
     con: &mut C,
     key: &[u8],
@@ -3210,7 +3213,7 @@ pub async fn hash_field_update<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    const SCRIPT: &str = r#"
+    const SCRIPT_WITH_FIELD_TTL: &str = r#"
         local key = KEYS[1]
         local old_field = ARGV[1]
         local new_field = ARGV[2]
@@ -3338,8 +3341,76 @@ where
         return 2
     "#;
 
+    const SCRIPT_WITHOUT_FIELD_TTL: &str = r#"
+        local key = KEYS[1]
+        local old_field = ARGV[1]
+        local new_field = ARGV[2]
+        local value = ARGV[3]
+
+        if redis.call('HEXISTS', key, old_field) == 0 then
+            return 0
+        end
+        if redis.call('HGET', key, old_field) == false then
+            return 0
+        end
+        if old_field ~= new_field and redis.call('HEXISTS', key, new_field) == 1 then
+            return -1
+        end
+
+        if old_field ~= new_field then
+            local delete_probe = redis.pcall('HDEL', key, new_field)
+            if type(delete_probe) == 'table' and delete_probe.err ~= nil then
+                return -3
+            end
+        end
+
+        local written = redis.pcall('HSET', key, new_field, value)
+        if type(written) == 'table' and written.err ~= nil then
+            return -3
+        end
+
+        if old_field == new_field then
+            return 1
+        end
+
+        local deleted = redis.pcall('HDEL', key, old_field)
+        if type(deleted) == 'table' and deleted.err ~= nil then
+            redis.pcall('HDEL', key, new_field)
+            return -3
+        end
+        if tonumber(deleted) ~= 1 then
+            redis.pcall('HDEL', key, new_field)
+            return 0
+        end
+        return 2
+    "#;
+
+    let error =
+        match execute_hash_field_update_script(con, SCRIPT_WITH_FIELD_TTL, key, old_field, new_field, value).await {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+    if !is_hash_field_update_cluster_script_rejection(&error) {
+        return Err(error);
+    }
+
+    execute_hash_field_update_script(con, SCRIPT_WITHOUT_FIELD_TTL, key, old_field, new_field, value).await
+}
+
+async fn execute_hash_field_update_script<C>(
+    con: &mut C,
+    script: &str,
+    key: &[u8],
+    old_field: &str,
+    new_field: &str,
+    value: &str,
+) -> Result<(), String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
     let result = redis::cmd("EVAL")
-        .arg(SCRIPT)
+        .arg(script)
         .arg(1)
         .arg(key)
         .arg(old_field)
@@ -3381,6 +3452,11 @@ fn is_hash_field_update_acl_compatibility_error(error: &redis::RedisError) -> bo
         || detail.contains("hdel")
         || detail.contains("httl")
         || detail.contains("hexpire")
+}
+
+fn is_hash_field_update_cluster_script_rejection(error: &str) -> bool {
+    let detail = error.to_ascii_lowercase();
+    detail.contains("bad lua script for redis cluster") && (detail.contains("httl") || detail.contains("hexpire"))
 }
 
 pub async fn list_push<C>(con: &mut C, key: &[u8], value: &str, ttl: Option<i64>) -> Result<(), String>
@@ -4107,6 +4183,7 @@ where
 fn is_optional_hash_field_expiry_error(error: &redis::RedisError) -> bool {
     let detail = error.detail().unwrap_or_default().to_ascii_lowercase();
     detail.contains("unknown command")
+        || detail.contains("unknown redis command")
         || detail.contains("unsupported")
         || detail.contains("syntax error")
         || detail.contains("noperm")
@@ -6352,6 +6429,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hash_set_degrades_when_field_ttl_is_rejected_as_unknown_redis_command() {
+        let unsupported = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "unknown redis command HTTL".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(unsupported), Ok(RedisRawValue::Okay)]);
+
+        super::hash_set(&mut con, b"hash-key", "session", "Grace", None).await.unwrap();
+
+        assert_eq!(con.command_count("HTTL"), 1);
+        assert_eq!(con.command_count("HSET"), 1);
+        assert_eq!(con.command_count("HEXPIRE"), 0);
+    }
+
+    #[tokio::test]
     async fn hash_field_update_uses_one_atomic_script_and_carries_field_ttl() {
         let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(2)]);
 
@@ -6469,6 +6562,42 @@ mod tests {
         assert_eq!(con.command_count("EVAL"), 1);
         assert_eq!(con.command_count("HSET"), 0);
         assert_eq!(con.command_count("HDEL"), 0);
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_falls_back_when_cluster_rejects_field_ttl_script() {
+        let rejection = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "bad lua script for redis cluster, redis.call/pcall unknown redis command HTTL".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(rejection), Ok(RedisRawValue::Int(1))]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "session", "Grace").await.unwrap();
+
+        assert_eq!(con.command_count("EVAL"), 2);
+        assert!(con.commands[0].contains("redis.pcall('HTTL'"));
+        assert!(!con.commands[1].contains("redis.pcall('HTTL'"));
+        assert!(!con.commands[1].contains("redis.pcall('HEXPIRE'"));
+        assert!(con.commands[1].contains("redis.call('HSET'") || con.commands[1].contains("redis.pcall('HSET'"));
+    }
+
+    #[tokio::test]
+    async fn hash_field_update_falls_back_for_renames_when_cluster_rejects_field_ttl_script() {
+        let rejection = redis::RedisError::from((
+            redis::ErrorKind::ResponseError,
+            "An error was signalled by the server",
+            "bad lua script for redis cluster, redis.call/pcall unknown redis command HTTL".to_string(),
+        ));
+        let mut con = FakeRedisConnection::with_results(vec![Err(rejection), Ok(RedisRawValue::Int(2))]);
+
+        super::hash_field_update(&mut con, b"hash-key", "session", "account", "Grace").await.unwrap();
+
+        assert_eq!(con.command_count("EVAL"), 2);
+        assert!(!con.commands[1].contains("redis.pcall('HTTL'"));
+        assert!(!con.commands[1].contains("redis.pcall('HEXPIRE'"));
+        assert!(con.commands[1].contains("old_field ~= new_field"));
+        assert!(con.commands[1].contains("redis.pcall('HDEL', key, old_field)"));
     }
 
     #[tokio::test]

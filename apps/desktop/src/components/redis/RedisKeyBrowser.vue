@@ -2930,7 +2930,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog()">
                   <Plus class="h-3 w-3" />
                 </Button>
               </div>

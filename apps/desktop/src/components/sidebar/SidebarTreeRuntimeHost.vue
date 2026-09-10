@@ -61,6 +61,7 @@ import {
   Settings2,
   GitBranch,
   Sparkles,
+  Link2,
 } from "@lucide/vue";
 import type { ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { CONNECTION_ATTEMPT_CANCELLED_MESSAGE, useConnectionStore } from "@/stores/connectionStore";
@@ -70,7 +71,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useToast } from "@/composables/useToast";
 import { useDatabaseOptions } from "@/composables/useDatabaseOptions";
-import type { ColumnInfo, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
+import type { ColumnInfo, ConnectionConfig, DatabaseType, TreeNode, TreeNodeType } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import { queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
@@ -192,6 +193,7 @@ import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from 
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
+import { buildConnectionUrlCopy, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/savedSql/savedSqlClipboard";
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
@@ -2212,6 +2214,50 @@ function copyNameMenuItem(): ContextMenuItem {
     };
   }
   return { label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value };
+}
+
+const CONNECTION_URL_COPY_LABEL_KEYS: Record<ConnectionUrlCopyFormat, string> = {
+  url: "contextMenu.copyConnectionUrl",
+  urlNoPassword: "contextMenu.copyConnectionUrlNoPassword",
+  jdbcUrl: "contextMenu.copyJdbcUrl",
+  jdbcUrlWithCredentials: "contextMenu.copyJdbcUrlWithCredentials",
+  hostPort: "contextMenu.copyHostPort",
+  dsn: "contextMenu.copyDsn",
+  psqlCommand: "contextMenu.copyPsqlCommand",
+};
+
+/**
+ * "Copy Connection Info" submenu for connection/database nodes: standard URL,
+ * JDBC URL, host:port, libpq DSN and psql command, trimmed to what the
+ * connection's dialect actually supports. `databaseOverride` lets a database
+ * node copy the URL for that specific database instead of the default one.
+ */
+function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem | null {
+  const node = activeNode.value;
+  const config = node.connectionId ? connectionStore.getConfig(node.connectionId) : undefined;
+  if (!config) return null;
+  const formats = connectionUrlCopyFormats(config);
+  if (formats.length === 0) return null;
+  return {
+    label: t("contextMenu.copyConnectionInfo"),
+    icon: Link2,
+    children: formats.map((format) => ({
+      label: t(CONNECTION_URL_COPY_LABEL_KEYS[format]),
+      icon: Copy,
+      action: () => copyConnectionUrlFormat(config, format, databaseOverride),
+    })),
+  };
+}
+
+async function copyConnectionUrlFormat(config: ConnectionConfig, format: ConnectionUrlCopyFormat, databaseOverride?: string) {
+  const text = buildConnectionUrlCopy(config, format, { database: databaseOverride });
+  if (!text) return;
+  try {
+    await copyToClipboard(text);
+    toast(t("connection.copied"), 2000);
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
 }
 
 async function copyCustomTypeDdl() {
@@ -5347,6 +5393,8 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
     }
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.copyName"), action: copyName, icon: Copy, shortcut: shortcutCopyName.value });
+    const connectionUrlCopyMenu = connectionUrlCopyMenuItem();
+    if (connectionUrlCopyMenu) items.push(connectionUrlCopyMenu);
     items.push({ label: "", separator: true });
     const supportsQueryActions = supportsConnectionQueryActions(currentDatabaseType());
     const supportsAiContext = supportsAiAssistantContext(currentDatabaseType());
@@ -5565,6 +5613,8 @@ function buildDatabaseSidebarMenu(context: SidebarMenuFactoryContext): boolean {
       items.unshift({ label: t("contextMenu.closeDatabaseConnection"), action: closeDatabaseConnection, icon: Unplug });
     }
     items.push(copyNameMenuItem());
+    const databaseUrlCopyMenu = connectionUrlCopyMenuItem(node.database || undefined);
+    if (databaseUrlCopyMenu) items.push(databaseUrlCopyMenu);
     items.push({ label: "", separator: true });
     if (canOpenObjectBrowser.value) {
       items.push({ label: t("contextMenu.openObjectBrowser"), action: openObjectBrowser, icon: TableProperties });

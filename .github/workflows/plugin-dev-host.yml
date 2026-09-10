@@ -2,6 +2,7 @@ name: Plugin development host
 on:
   pull_request:
     paths:
+      - '.gitattributes'
       - 'plugins/sdk/cli/**'
       - 'plugins/sdk/dev-host/**'
       - 'packages/plugin-cli/**'

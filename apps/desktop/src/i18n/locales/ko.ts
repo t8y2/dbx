@@ -4572,6 +4572,8 @@ export default withEnglishFallback({
         keyspace: "키스페이스",
       },
     },
+    monitorStop: "모니터링 중지",
+    monitorListening: "MONITOR 모니터링 중 · 최근 1000개 보관 · 너무 긴 레코드는 잘림 표시",
   },
   mongo: {
     documents: "문서 {count}개",

@@ -1,5 +1,6 @@
 import { UPDATE_RESTORE_KEY, assertUpdateAllowsInteraction } from "@/lib/app/updatePreparation";
 import { defineStore } from "pinia";
+import { isRedisMonitorCommand, startRedisMonitor } from "@/lib/redis/redisMonitor";
 import { uuid } from "@/lib/common/utils";
 import { computed, markRaw, nextTick, onScopeDispose, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -789,6 +790,7 @@ function getI18nT() {
 }
 
 export const useQueryStore = defineStore("query", () => {
+  const redisMonitors = new Map<string, () => void>();
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
@@ -5769,6 +5771,43 @@ export const useQueryStore = defineStore("query", () => {
           .map((line) => line.trim())
           .filter((line) => line.length > 0);
         if (commands.length === 0) return false;
+        if (commands.length === 1 && isRedisMonitorCommand(commands[0])) {
+          const monitor = startRedisMonitor(
+            () => api.redisPubSubConnect(executionConnectionId, true),
+            (rows) => {
+              const current = findExecutionTab(id);
+              if (current?.executionId !== executionId) return;
+              current.result = markQueryResultRowsRaw(annotateQueryResultSource({ columns: ["MONITOR"], rows: rows.map((message) => [message]), affected_rows: 0, execution_time_ms: performance.now() - startedAt }, "MONITOR"));
+              current.results = undefined;
+              current.activeResultIndex = undefined;
+              current.queryEditabilityReason = undefined;
+              current.queryWriteTargets = undefined;
+              current.tableMeta = undefined;
+              current.resultBaseSql = "MONITOR";
+              current.redisMonitorActive = true;
+              current.queryAnalysis = undefined;
+              current.querySourceColumns = undefined;
+              current.resultColumnComments = undefined;
+              current.queryDisplaySourceColumns = undefined;
+              current.mongoEditTarget = undefined;
+              if (!producedResult) {
+                publishResultGeneration(current, "execute");
+                syncDisplayedResultRun(current, "MONITOR", captureResultRun);
+              }
+              producedResult = true;
+              touchResult(current);
+            },
+          );
+          redisMonitors.set(executionId, monitor.stop);
+          try {
+            await monitor.done;
+          } finally {
+            redisMonitors.delete(executionId);
+            const current = findExecutionTab(id);
+            if (current?.executionId === executionId) current.redisMonitorActive = false;
+          }
+          return producedResult;
+        }
         queryExecutionLog("info", "redis:start", { traceId, db: currentDb, commandCount: commands.length, sqlLength: sql.length });
 
         const allResults: QueryResult[] = [];
@@ -7205,6 +7244,13 @@ export const useQueryStore = defineStore("query", () => {
 
     const executionId = tab.executionId;
     if (!executionId) return false;
+    const stopMonitor = redisMonitors.get(executionId);
+    if (stopMonitor) {
+      tab.isCancelling = true;
+      tab.cancelRequestCount = (tab.cancelRequestCount ?? 0) + 1;
+      stopMonitor();
+      return true;
+    }
     tab.isCancelling = true;
     // 单调递增、不随取消结果回退：导航流程据此判断"执行期间用户请求过停止"
     // （isCancelling 在取消失败或查询先完成时会被清掉，无法承担这个语义）

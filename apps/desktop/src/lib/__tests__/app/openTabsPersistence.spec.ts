@@ -81,6 +81,15 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.isExecuting).toBe(false);
   });
 
+  it("does not resume a MONITOR stream when restoring tabs", () => {
+    const tab = queryTab({ sql: "MONITOR", redisMonitorActive: true, isExecuting: true });
+    const [saved] = serializeOpenTabs([tab]);
+    const [restored] = roundTrip([tab]);
+    expect(saved).not.toHaveProperty("redisMonitorActive");
+    expect(restored.redisMonitorActive).toBe(false);
+    expect(restored.isExecuting).toBe(false);
+  });
+
   it("preserves an external Doris catalog across tab restore", () => {
     const [restored] = roundTrip([queryTab({ database: "dbx_catalog_completion", catalog: "dbx_mysql_catalog" })]);
 

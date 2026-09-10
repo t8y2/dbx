@@ -4701,6 +4701,8 @@ export default withEnglishFallback({
     selectedKeysWriteDenied: "対象の接続には選択した Key への書き込み権限がないため、変更は実行されませんでした。",
   },
   redis: {
+    monitorStop: "監視を停止",
+    monitorListening: "MONITOR 監視中 · 最新1,000件を保持 · 長い記録は省略",
     setDatabaseAlias: "データベースの別名を設定",
     databaseAliasTitle: "db{db} の別名",
     databaseAliasPlaceholder: "例：注文、キャッシュ、開発",

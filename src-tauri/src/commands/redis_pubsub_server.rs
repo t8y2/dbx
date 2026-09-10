@@ -56,6 +56,8 @@ impl Drop for PubSubServerState {
 #[serde(rename_all = "camelCase")]
 struct PubSubWsParams {
     connection_id: String,
+    #[serde(default)]
+    monitor: bool,
 }
 
 pub fn build_pubsub_router(state: Arc<AppState>) -> Router {
@@ -93,7 +95,56 @@ async fn ws_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let connection_id = params.connection_id;
-    ws.on_upgrade(move |socket| handle_socket(socket, state, connection_id))
+    ws.on_upgrade(move |socket| async move {
+        if params.monitor {
+            handle_monitor_socket(socket, state, connection_id).await;
+        } else {
+            handle_socket(socket, state, connection_id).await;
+        }
+    })
+}
+
+async fn handle_monitor_socket(mut socket: WebSocket, state: Arc<AppState>, connection_id: String) {
+    let monitor = tokio::select! {
+        result = dbx_core::redis_ops::redis_create_monitor_core(&state, &connection_id) => result,
+        _ = socket.recv() => return,
+    };
+    let monitor = match monitor {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            let _ = socket.send(Message::Text(serde_json::json!({ "error": error }).to_string().into())).await;
+            return;
+        }
+    };
+    if socket.send(Message::Text(serde_json::json!({ "ready": true }).to_string().into())).await.is_err() {
+        return;
+    }
+    let mut messages = monitor.into_on_message::<String>();
+    let (mut sender, mut receiver) = socket.split();
+    loop {
+        tokio::select! {
+            incoming = receiver.next() => {
+                match incoming {
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sender.send(Message::Pong(payload)).await.is_err() { break; }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    _ => break,
+                }
+            }
+            message = messages.next() => {
+                let Some(message) = message else {
+                    let _ = sender.send(Message::Text(serde_json::json!({ "error": "Redis MONITOR connection closed" }).to_string().into())).await;
+                    break;
+                };
+                let event = Message::Text(serde_json::json!({ "message": message }).to_string().into());
+                match tokio::time::timeout(std::time::Duration::from_secs(5), sender.send(event)).await {
+                    Ok(Ok(())) => {}
+                    _ => break,
+                }
+            }
+        }
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, connection_id: String) {

@@ -1121,6 +1121,35 @@ pub async fn connect_direct_node(
     connect_client(client).await
 }
 
+pub async fn connect_monitor(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    timeout: std::time::Duration,
+) -> Result<redis::aio::Monitor, String> {
+    let mut last_error = String::new();
+    for info in standalone_connection_infos(config, host, port) {
+        let client = redis::Client::open(info).map_err(|error| error.to_string())?;
+        let connect = async {
+            let mut validation = client.get_multiplexed_async_connection().await?;
+            redis::cmd("MONITOR").query_async::<()>(&mut validation).await?;
+            drop(validation);
+            client.get_async_monitor().await
+        };
+        match tokio::time::timeout(timeout, connect).await {
+            Ok(Ok(monitor)) => return Ok(monitor),
+            Ok(Err(error)) => {
+                last_error = error.to_string();
+                if !is_redis_auth_error(&last_error) {
+                    break;
+                }
+            }
+            Err(_) => return Err("Redis MONITOR connection timed out".to_string()),
+        }
+    }
+    Err(last_error)
+}
+
 pub async fn connect_pubsub(
     config: &ConnectionConfig,
     host: &str,
@@ -2218,6 +2247,11 @@ where
 {
     let argv = parse_command_argv(command_text)?;
     let command = argv[0].to_ascii_uppercase();
+    if command == "MONITOR" {
+        return Err(
+            "MONITOR requires a dedicated streaming connection; run MONITOR alone in the query editor".to_string()
+        );
+    }
     let safety = classify_command(&command);
     if !skip_safety_check && safety == RedisCommandSafety::Blocked {
         return Err(format!("Redis command is blocked for safety: {command}"));

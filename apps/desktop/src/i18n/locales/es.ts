@@ -4674,6 +4674,8 @@ export default withEnglishFallback({
     summarySize: "tamaño",
   },
   redis: {
+    monitorStop: "Detener escucha",
+    monitorListening: "MONITOR activo · últimas 1000 entradas · entradas largas truncadas",
     setDatabaseAlias: "Establecer alias de base de datos",
     databaseAliasTitle: "Alias para db{db}",
     databaseAliasPlaceholder: "p. ej. pedidos, caché, desarrollo",

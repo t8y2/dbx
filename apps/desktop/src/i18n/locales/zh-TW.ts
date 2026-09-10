@@ -3994,6 +3994,8 @@ export default withEnglishFallback({
     dropTableNotSupported: "目前資料庫不支援從圖刪除資料表",
   },
   redis: {
+    monitorStop: "停止監聽",
+    monitorListening: "MONITOR 監聽中 · 保留最近 1000 筆 · 超長記錄截斷顯示",
     setDatabaseAlias: "設定資料庫別名",
     databaseAliasTitle: "設定 db{db} 的別名",
     databaseAliasPlaceholder: "例如：訂單、快取、開發環境",

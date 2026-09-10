@@ -4968,6 +4968,8 @@ export default {
     summarySize: "size",
   },
   redis: {
+    monitorStop: "Stop listening",
+    monitorListening: "MONITOR listening · latest 1,000 entries · long entries truncated",
     setDatabaseAlias: "Set Database Alias",
     databaseAliasTitle: "Alias for db{db}",
     databaseAliasPlaceholder: "e.g. orders, cache, development",

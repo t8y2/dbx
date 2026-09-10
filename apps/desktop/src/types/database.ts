@@ -1224,6 +1224,7 @@ export interface QueryTab {
   explainTableSql?: string;
   lastExplainedSql?: string;
   isExecuting: boolean;
+  redisMonitorActive?: boolean;
   isCancelling?: boolean;
   queryExecutionStartedAt?: number;
   /** Ephemeral per-statement progress for the latest multi-statement execution. */

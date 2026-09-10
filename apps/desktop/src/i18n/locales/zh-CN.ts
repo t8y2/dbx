@@ -4952,6 +4952,8 @@ export default withEnglishFallback({
     summarySize: "大小",
   },
   redis: {
+    monitorStop: "停止监听",
+    monitorListening: "MONITOR 监听中 · 保留最近 1000 条 · 超长记录截断显示",
     setDatabaseAlias: "设置数据库别名",
     databaseAliasTitle: "设置 db{db} 的别名",
     databaseAliasPlaceholder: "例如：订单、缓存、开发环境",

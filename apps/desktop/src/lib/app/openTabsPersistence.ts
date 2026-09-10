@@ -233,6 +233,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         mode,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
+        redisMonitorActive: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
         executingResultRunId: undefined,

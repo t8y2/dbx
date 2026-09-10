@@ -42,6 +42,7 @@ import {
   Search,
   ScrollText,
   ShieldCheck,
+  Sparkles,
   Square,
   Table,
   Table2,
@@ -70,7 +71,7 @@ import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { constraintsForConstraintsTab } from "@/lib/table/constraintPresentation";
@@ -188,6 +189,7 @@ const emit = defineEmits<{
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
+  addToAi: [tables: Array<{ name: string; schema?: string }>];
 }>();
 
 const { t } = useI18n();
@@ -3108,6 +3110,21 @@ function isSelectedBatchTableContext(item: ObjectBrowserRow): boolean {
   return item.type === "TABLE" && selectedTableCount.value > 1 && selectedTableIds.value.has(item.id);
 }
 
+function addToAiMenuItem(item: ObjectBrowserRow): ContextMenuItem {
+  const useBatch = isSelectedBatchTableContext(item);
+  const count = selectedTableCount.value;
+  // Schema stays per-row: the consumer (App.vue addToAi) resolves the final
+  // schema with its own fallback chain (table.schema || tab.schema || tab.database).
+  // ObjectBrowser is a single-schema view, but keeping row-level schemas makes
+  // the payload honest and future-proof if multi-schema selection ever appears.
+  const targets = useBatch ? selectedTableRows.value.map((row) => ({ name: row.name, schema: row.schema })) : [{ name: item.name, schema: item.schema }];
+  return {
+    label: useBatch ? t("contextMenu.addToAiMultiple", { count }) : t("contextMenu.addToAi"),
+    action: () => emit("addToAi", targets),
+    icon: Sparkles,
+  };
+}
+
 function selectedBatchTableCountLabel(key: "batchDrop" | "batchTruncate" | "batchEmpty"): string {
   return t(`contextMenu.${key}`, { count: selectedTableCount.value });
 }
@@ -3117,6 +3134,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     return [
       { label: t("contextMenu.viewData"), action: () => openViewData(item), icon: Table2 },
       { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+      ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
       { label: "", separator: true },
       exportDataSubmenu(item),
       { label: "", separator: true },
@@ -3160,6 +3178,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     ...(canOpenStructureEditor.value ? [{ label: t("contextMenu.editStructure"), action: () => openStructureEditor(item), icon: PencilRuler }] : []),
     ...(canRename(item) ? [{ label: t("contextMenu.renameObject"), action: () => requestRename(item), icon: Pencil }] : []),
     { label: t("contextMenu.newQuery"), action: () => openNewQuery(item), icon: TerminalSquare },
+    ...(supportsAiAssistantContext(effectiveDatabaseType.value) ? [addToAiMenuItem(item)] : []),
     ...(canOpenDiagram.value ? [{ label: t("diagram.open"), action: () => openDiagram(item), icon: Network }] : []),
     ...(canOpenTableImport.value ? [{ label: t("contextMenu.importData"), action: () => openTableImport(item), icon: Download }] : []),
     { label: t("dataCompare.title"), action: () => openDataCompare(item), icon: ArrowRightLeft },

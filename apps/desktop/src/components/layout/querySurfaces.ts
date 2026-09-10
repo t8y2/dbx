@@ -90,6 +90,7 @@ export interface ContentAreaSurfaceEmits {
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];
+  addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
   structureEditorSaved: [tabId: string, commentChanged: boolean];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];

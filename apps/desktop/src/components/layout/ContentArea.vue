@@ -2505,6 +2505,7 @@ defineExpose({
           @schema-change="emit('objectSchemaChange', activeTab.id, $event)"
           @viewport-change="emit('objectBrowserViewportChange', activeTab.id, $event)"
           @search-change="emit('objectBrowserSearchChange', activeTab.id, $event)"
+          @add-to-ai="emit('addObjectTableToAi', activeTab.id, $event)"
         />
       </div>
     </template>

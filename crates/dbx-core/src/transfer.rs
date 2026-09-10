@@ -4765,6 +4765,129 @@ fn value_to_sql_literal(value: &serde_json::Value, _db_type: &DatabaseType) -> S
     }
 }
 
+/// Source dialects whose transfer read loop may page with a keyset cursor
+/// (`WHERE (pk...) > <last page's keys>`) instead of `LIMIT n OFFSET m`.
+/// Keyset paging renders the cursor values as SQL text literals, so a dialect
+/// is only enabled once that rendering has been audited for it; the Postgres
+/// family shares quoting and implicit-cast rules and is covered first. Other
+/// dialects keep OFFSET paging (each page rescans and discards the rows before
+/// it, which is quadratic in table size) until their literal rules are audited.
+fn transfer_keyset_pagination_supported(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss | DatabaseType::Gaussdb | DatabaseType::Kingbase)
+}
+
+/// Column types whose keyset cursor value round-trips through a SQL text
+/// literal in a `>` comparison. Exotic types (arrays, interval, bytea, money,
+/// network/range types...) keep OFFSET paging: their JSON form does not
+/// reliably re-parse as the same value, and a failed cast aborting the
+/// transfer mid-way is worse than a slow scan.
+fn postgres_keyset_column_type_supported(data_type: &str) -> bool {
+    let normalized = data_type.trim().to_ascii_lowercase();
+    let base = normalized.split('(').next().unwrap_or("").trim();
+    if base.is_empty() || base.contains('[') || base.contains("range") || base.starts_with("interval") {
+        return false;
+    }
+    const SUPPORTED_PREFIXES: &[&str] = &[
+        "int",
+        "bigint",
+        "smallint",
+        "serial",
+        "bigserial",
+        "smallserial",
+        "numeric",
+        "decimal",
+        "real",
+        "float",
+        "double",
+        "text",
+        "varchar",
+        "char",
+        "bpchar",
+        "name",
+        "bool",
+        "date",
+        "time",
+        "timestamp",
+        "uuid",
+    ];
+    SUPPORTED_PREFIXES.iter().any(|prefix| base.starts_with(prefix))
+}
+
+/// Resolves the source primary key columns to their positions in the selected
+/// column list. Returns None — meaning the read loop keeps OFFSET paging — when
+/// the dialect is not keyset-capable, when a key column is not among the
+/// transferred columns (its cursor value could not be read back), or when a key
+/// column's type cannot round-trip through a text literal.
+fn transfer_keyset_column_indexes(
+    columns: &[db::ColumnInfo],
+    primary_keys: &[String],
+    db_type: &DatabaseType,
+) -> Option<Vec<usize>> {
+    if primary_keys.is_empty() || !transfer_keyset_pagination_supported(db_type) {
+        return None;
+    }
+    primary_keys
+        .iter()
+        .map(|pk| {
+            let index = columns.iter().position(|column| column.name == *pk)?;
+            postgres_keyset_column_type_supported(&columns[index].data_type).then_some(index)
+        })
+        .collect()
+}
+
+/// Reads the keyset cursor (the primary key values ordering the pages) from the
+/// last row of a page. A NULL component means the metadata overstated the key
+/// (for example a nullable unique column reported as a key): the caller must
+/// fall back to OFFSET paging, which stays consistent because it keeps ordering
+/// by the same key columns.
+fn keyset_cursor_from_last_row(
+    rows: &[Vec<serde_json::Value>],
+    key_indexes: &[usize],
+) -> Option<Vec<serde_json::Value>> {
+    let last = rows.last()?;
+    key_indexes
+        .iter()
+        .map(|&index| {
+            let value = last.get(index).cloned().unwrap_or(serde_json::Value::Null);
+            (!value.is_null()).then_some(value)
+        })
+        .collect()
+}
+
+/// Outcome of advancing the keyset cursor from the page just read.
+enum KeysetAdvance {
+    /// The cursor moved to the page's last row; the next page continues after it.
+    Advanced,
+    /// A key component was NULL, so the key metadata does not allow keyset
+    /// paging (for example a nullable unique column reported as a key). The
+    /// caller falls back to OFFSET paging for the remaining pages, which stays
+    /// consistent because it keeps ordering by the same key columns.
+    FallBackToOffset,
+}
+
+/// Advances the keyset cursor from the page just read. Returns Err when the
+/// cursor did not move, which would re-read the same page forever.
+fn advance_keyset_cursor(
+    cursor: &mut Vec<serde_json::Value>,
+    rows: &[Vec<serde_json::Value>],
+    key_indexes: &[usize],
+    table: &str,
+) -> Result<KeysetAdvance, String> {
+    if rows.is_empty() {
+        return Ok(KeysetAdvance::Advanced);
+    }
+    match keyset_cursor_from_last_row(rows, key_indexes) {
+        Some(next) if next == *cursor => {
+            Err(format!("Transfer stalled for table '{table}': keyset pagination did not advance past key {next:?}"))
+        }
+        Some(next) => {
+            *cursor = next;
+            Ok(KeysetAdvance::Advanced)
+        }
+        None => Ok(KeysetAdvance::FallBackToOffset),
+    }
+}
+
 fn is_mongodb_transfer_type(db_type: &DatabaseType) -> bool {
     matches!(db_type, DatabaseType::MongoDb)
 }
@@ -7240,6 +7363,11 @@ where
     let mut sql_target_column_names: Vec<String> = Vec::new();
     let mut sql_target_column_types: Vec<Option<String>> = Vec::new();
     let mut sql_target_prepared = false;
+    // Keyset paging state for SQL sources: pages seek with
+    // `WHERE (pk...) > <cursor>` instead of OFFSET, which rescans and discards
+    // every previously read row (quadratic in table size).
+    let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
+    let mut keyset_usable = true;
 
     loop {
         if is_cancelled(&request.transfer_id).await {
@@ -7283,17 +7411,46 @@ where
             .await?;
             let col_names = columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
             let primary_key_columns = transfer_key_columns(&columns, source_db_type);
-            let sql = pagination_sql_with_order(
-                &col_names,
-                table,
-                &request.source_schema,
-                source_db_type,
-                offset,
-                batch_size,
-                &primary_key_columns,
-                request.source_catalog.as_deref(),
-            );
+            let keyset_indexes = if keyset_usable {
+                transfer_keyset_column_indexes(&columns, &primary_key_columns, source_db_type)
+            } else {
+                None
+            };
+            let sql = if keyset_indexes.is_some() {
+                keyset_pagination_sql(
+                    &col_names,
+                    table,
+                    &request.source_schema,
+                    source_db_type,
+                    &primary_key_columns,
+                    &keyset_cursor,
+                    batch_size,
+                )
+            } else {
+                pagination_sql_with_order(
+                    &col_names,
+                    table,
+                    &request.source_schema,
+                    source_db_type,
+                    offset,
+                    batch_size,
+                    &primary_key_columns,
+                    request.source_catalog.as_deref(),
+                )
+            };
             let result = execute_on_pool(state, source_pool_key, &sql).await?;
+            if let Some(indexes) = keyset_indexes.as_deref() {
+                match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
+                    KeysetAdvance::Advanced => {}
+                    KeysetAdvance::FallBackToOffset => {
+                        log::warn!(
+                            "[transfer] {table}: NULL value in a key column at row {offset}; \
+                             falling back to OFFSET paging for the remaining rows"
+                        );
+                        keyset_usable = false;
+                    }
+                }
+            }
             sql_rows_to_mongo_documents(&col_names, &result.rows)
         };
 
@@ -8416,6 +8573,13 @@ where
     let batch_size = if request.batch_size == 0 { 1000 } else { request.batch_size };
     let mut offset: u64 = 0;
     let mut total_transferred: u64 = 0;
+    // Keyset paging state: when the source can page by key cursor, each page
+    // seeks with `WHERE (pk...) > <cursor>` instead of OFFSET, which rescans
+    // and discards every previously read row (quadratic in table size). Falls
+    // back to OFFSET (keeping the same key ordering) when the key metadata
+    // does not hold up mid-table.
+    let mut keyset_indexes = transfer_keyset_column_indexes(&writable_columns, &primary_key_columns, source_db_type);
+    let mut keyset_cursor: Vec<serde_json::Value> = Vec::new();
     // A single Agent cursor keeps Kyuubi/Impala rows in one query execution.
     // Re-running LIMIT/OFFSET pages is unstable for tables without a unique key.
     let use_hive_server_cursor = matches!(source_db_type, DatabaseType::Kyuubi | DatabaseType::Impala);
@@ -8450,16 +8614,28 @@ where
                     false,
                 )
             } else {
-                let sql = pagination_sql_with_order(
-                    &col_names,
-                    table,
-                    &request.source_schema,
-                    source_db_type,
-                    offset,
-                    batch_size,
-                    &primary_key_columns,
-                    request.source_catalog.as_deref(),
-                );
+                let sql = if keyset_indexes.is_some() {
+                    keyset_pagination_sql(
+                        &col_names,
+                        table,
+                        &request.source_schema,
+                        source_db_type,
+                        &primary_key_columns,
+                        &keyset_cursor,
+                        batch_size,
+                    )
+                } else {
+                    pagination_sql_with_order(
+                        &col_names,
+                        table,
+                        &request.source_schema,
+                        source_db_type,
+                        offset,
+                        batch_size,
+                        &primary_key_columns,
+                        request.source_catalog.as_deref(),
+                    )
+                };
                 let (sql, mysql_spatial_markers) =
                     mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
                 (execute_on_pool(state, source_pool_key, &sql).await?, mysql_spatial_markers)
@@ -8469,6 +8645,19 @@ where
 
             if row_count == 0 {
                 break;
+            }
+
+            if let Some(indexes) = keyset_indexes.as_deref() {
+                match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
+                    KeysetAdvance::Advanced => {}
+                    KeysetAdvance::FallBackToOffset => {
+                        log::warn!(
+                            "[transfer] {table}: NULL value in a key column at row {offset}; \
+                             falling back to OFFSET paging for the remaining rows"
+                        );
+                        keyset_indexes = None;
+                    }
+                }
             }
 
             let write_statements = generate_transfer_write_sql_batches_with_column_quoting(
@@ -12725,6 +12914,123 @@ mod tests {
             sql,
             "SELECT TOP (100) [tenant_id], [id], [name] FROM [dbo].[users] WHERE ([tenant_id] > 10 OR ([tenant_id] = 10 AND [id] > 25)) ORDER BY [tenant_id] ASC, [id] ASC"
         );
+    }
+
+    #[test]
+    fn keyset_column_indexes_require_keyset_capable_dialect() {
+        let columns = vec![db::ColumnInfo {
+            name: "id".to_string(),
+            data_type: "integer".to_string(),
+            is_primary_key: true,
+            ..Default::default()
+        }];
+        let pks = vec!["id".to_string()];
+
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Postgres), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::OpenGauss), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Gaussdb), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Kingbase), Some(vec![0]));
+        // Dialects whose cursor literal rendering is not audited keep OFFSET paging.
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Mysql), None);
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::SqlServer), None);
+        // No primary key → no keyset cursor.
+        assert_eq!(transfer_keyset_column_indexes(&columns, &[], &DatabaseType::Postgres), None);
+    }
+
+    #[test]
+    fn keyset_column_indexes_require_selected_round_trippable_key_columns() {
+        let columns = vec![
+            db::ColumnInfo { name: "payload".to_string(), data_type: "jsonb".to_string(), ..Default::default() },
+            db::ColumnInfo {
+                name: "id".to_string(),
+                data_type: "bigint".to_string(),
+                is_primary_key: true,
+                ..Default::default()
+            },
+        ];
+        let pks = vec!["id".to_string()];
+
+        // The key column may sit anywhere in the selected column list.
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Postgres), Some(vec![1]));
+
+        // A key column that is not selected (e.g. a generated-always identity
+        // excluded from the writable columns) cannot be read back from a page.
+        assert_eq!(transfer_keyset_column_indexes(&columns, &["missing".to_string()], &DatabaseType::Postgres), None);
+
+        // Key types that do not round-trip through a text literal keep OFFSET paging.
+        let columns = vec![db::ColumnInfo {
+            name: "id".to_string(),
+            data_type: "bytea".to_string(),
+            is_primary_key: true,
+            ..Default::default()
+        }];
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Postgres), None);
+    }
+
+    #[test]
+    fn postgres_keyset_column_type_support() {
+        for supported in [
+            "integer",
+            "int4",
+            "bigint",
+            "smallint",
+            "bigserial",
+            "numeric(10, 2)",
+            "decimal",
+            "real",
+            "double precision",
+            "float8",
+            "text",
+            "character varying(255)",
+            "bpchar",
+            "name",
+            "boolean",
+            "date",
+            "timestamp without time zone",
+            "timestamptz",
+            "time with time zone",
+            "uuid",
+        ] {
+            assert!(postgres_keyset_column_type_supported(supported), "{supported}");
+        }
+        for unsupported in
+            ["integer[]", "bytea", "interval", "money", "jsonb", "inet", "int4range", "numrange", "bit", ""]
+        {
+            assert!(!postgres_keyset_column_type_supported(unsupported), "{unsupported}");
+        }
+    }
+
+    #[test]
+    fn keyset_cursor_reads_key_values_from_last_row() {
+        let rows = vec![vec![json!(1), json!("a")], vec![json!(2), json!("b")]];
+
+        assert_eq!(keyset_cursor_from_last_row(&rows, &[0]), Some(vec![json!(2)]));
+        assert_eq!(keyset_cursor_from_last_row(&rows, &[1]), Some(vec![json!("b")]));
+        assert_eq!(keyset_cursor_from_last_row(&rows, &[0, 1]), Some(vec![json!(2), json!("b")]));
+        // Missing column index reads as NULL → no keyset cursor.
+        assert_eq!(keyset_cursor_from_last_row(&rows, &[5]), None);
+        assert_eq!(keyset_cursor_from_last_row(&Vec::new(), &[0]), None);
+        let null_rows = vec![vec![json!(1), serde_json::Value::Null]];
+        assert_eq!(keyset_cursor_from_last_row(&null_rows, &[1]), None);
+    }
+
+    #[test]
+    fn advance_keyset_cursor_detects_stall_and_null_fallback() {
+        let mut cursor = Vec::new();
+        let rows = vec![vec![json!(1)], vec![json!(2)]];
+
+        assert!(matches!(advance_keyset_cursor(&mut cursor, &rows, &[0], "t"), Ok(KeysetAdvance::Advanced)));
+        assert_eq!(cursor, vec![json!(2)]);
+        // Re-reading the same page must fail instead of looping forever.
+        assert!(advance_keyset_cursor(&mut cursor, &rows, &[0], "t").is_err());
+        // NULL keys degrade to OFFSET paging.
+        let null_rows = vec![vec![serde_json::Value::Null]];
+        assert!(matches!(
+            advance_keyset_cursor(&mut cursor, &null_rows, &[0], "t"),
+            Ok(KeysetAdvance::FallBackToOffset)
+        ));
+        // Empty pages leave the cursor untouched.
+        assert!(matches!(advance_keyset_cursor(&mut cursor, &Vec::new(), &[0], "t"), Ok(KeysetAdvance::Advanced)));
     }
 
     #[test]

@@ -6,7 +6,7 @@ import { useDataGridCellDetailEdit } from "@/composables/useDataGridCellDetailEd
 import { MONGO_DOCUMENT_GRID_NULL } from "@/lib/mongo/mongoDocumentValues";
 import type { DataGridCellDetail } from "@/lib/dataGrid/dataGridDetail";
 
-function detail(value: string): DataGridCellDetail {
+function detail(value: string, patch: Partial<DataGridCellDetail> = {}): DataGridCellDetail {
   return {
     rowNumber: 1,
     rowId: 3,
@@ -24,6 +24,7 @@ function detail(value: string): DataGridCellDetail {
     length: value.length,
     formattedJson: "",
     isEditable: true,
+    ...patch,
   };
 }
 
@@ -58,5 +59,97 @@ describe("useDataGridCellDetailEdit", () => {
 
     editor.setDetailNull();
     expect(applyCellValue).toHaveBeenLastCalledWith(3, 1, MONGO_DOCUMENT_GRID_NULL);
+  });
+
+  it("synchronizes the latest long value after asynchronous hydration", async () => {
+    const previewValue = "preview";
+    const longValue = "x".repeat(15000);
+    const activeDetail = ref<DataGridCellDetail | null>(detail(previewValue));
+    let finishHydration!: (result: boolean) => void;
+    const syncEditor = vi.fn();
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab: ref("valueEditor"),
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", previewValue]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: () => new Promise<boolean>((resolve) => (finishHydration = resolve)),
+      applyCellValue: vi.fn(),
+      restoreCellValue: vi.fn(),
+      syncEditor,
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit: vi.fn(),
+    });
+
+    const start = editor.startDetailEdit();
+    activeDetail.value = detail(longValue);
+    finishHydration(true);
+    await start;
+
+    expect(editor.detailEditValue.value).toBe(longValue);
+    expect(syncEditor).toHaveBeenLastCalledWith(longValue, "");
+  });
+
+  it("updates an already mounted editor when the selected cell changes", async () => {
+    const activeDetail = ref<DataGridCellDetail | null>(detail("short"));
+    const activeTab = ref<"details" | "valueEditor">("details");
+    const syncEditor = vi.fn();
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab,
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", "short"]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: async () => true,
+      applyCellValue: vi.fn(),
+      restoreCellValue: vi.fn(),
+      syncEditor,
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit: vi.fn(),
+    });
+
+    activeTab.value = "valueEditor";
+    await Promise.resolve();
+    await Promise.resolve();
+    syncEditor.mockClear();
+
+    const longValue = "x".repeat(15000);
+    activeDetail.value = detail(longValue, { rowId: 4 });
+    await Promise.resolve();
+
+    expect(editor.detailEditValue.value).toBe(longValue);
+    expect(syncEditor).toHaveBeenLastCalledWith(longValue, "");
+  });
+
+  it("ignores a late async start after the detail editor is reset", async () => {
+    const activeDetail = ref<DataGridCellDetail | null>(detail("preview"));
+    let finishHydration!: (result: boolean) => void;
+    const editor = useDataGridCellDetailEdit({
+      activeDetail: computed(() => activeDetail.value),
+      activeTab: ref("valueEditor"),
+      jsonFormatted: computed(() => false),
+      databaseType: computed(() => "mongodb"),
+      resultRows: computed(() => [["id", "preview"]]),
+      getColumnInfo: () => undefined,
+      getRowItem: () => ({ sourceIndex: 0, isNew: false, isDeleted: false }),
+      hydrateLargeValueCell: () => new Promise<boolean>((resolve) => (finishHydration = resolve)),
+      applyCellValue: vi.fn(),
+      restoreCellValue: vi.fn(),
+      syncEditor: vi.fn(),
+      refreshDetail: vi.fn(),
+      warnFormattedJsonEdit: vi.fn(),
+    });
+
+    const start = editor.startDetailEdit();
+    editor.resetDetailEdit();
+    finishHydration(true);
+    await start;
+
+    expect(editor.isEditingDetail.value).toBe(false);
+    expect(editor.detailEditValue.value).toBe("");
   });
 });

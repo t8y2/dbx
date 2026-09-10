@@ -1392,6 +1392,14 @@ describe("cell detail surfaces", () => {
     }
     expect(dataGridSource).not.toContain("activeCellDetailTabsGridClass");
 
+    const valueEditorLifecycleStart = dataGridSource.indexOf("watch(valueEditorContainer");
+    const valueEditorLifecycleEnd = dataGridSource.indexOf("const detailEdit = useDataGridCellDetailEdit", valueEditorLifecycleStart);
+    const valueEditorLifecycle = dataGridSource.slice(valueEditorLifecycleStart, valueEditorLifecycleEnd);
+    expect(valueEditorLifecycle).toContain("const editor = valueDetailEditor;");
+    expect(valueEditorLifecycle).toContain("if (valueDetailEditor !== editor) return;");
+    expect(valueEditorLifecycle).toContain("if (editor.getValue() !== detailEditValue.value)");
+    expect(valueEditorLifecycle).toContain("editor.setValue(detailEditValue.value, activeCellDetail.value?.type);");
+
     const valueEditorStart = dataGridSource.indexOf("<TabsContent v-if=\"activeCellDetailTabs.includes('valueEditor')\"");
     const valueEditorEnd = dataGridSource.indexOf("</TabsContent>", valueEditorStart);
     const valueEditor = dataGridSource.slice(valueEditorStart, valueEditorEnd);

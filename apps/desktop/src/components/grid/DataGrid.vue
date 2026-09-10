@@ -5786,7 +5786,16 @@ watch(valueEditorContainer, async (el) => {
       fontSize: editorFontSize,
       fontFamily: detailEditorFontFamily,
     });
-    await valueDetailEditor.create(el, detailEditValue.value, activeCellDetail.value?.type);
+    const editor = valueDetailEditor;
+    await editor.create(el, detailEditValue.value, activeCellDetail.value?.type);
+    // The editor initializes asynchronously (theme loading can yield here), so
+    // detailEditValue may have changed before CodeMirror owns the document.
+    // Reconcile the latest value after create and ignore an editor replaced by
+    // a fast tab unmount/remount.
+    if (valueDetailEditor !== editor) return;
+    if (editor.getValue() !== detailEditValue.value) {
+      editor.setValue(detailEditValue.value, activeCellDetail.value?.type);
+    }
   } else if (!el && valueDetailEditor) {
     valueDetailEditor.destroy();
     valueDetailEditor = null;
@@ -5809,7 +5818,7 @@ const detailEdit = useDataGridCellDetailEdit({
   restoreCellValue,
   syncEditor: (value, columnType) => {
     const editor = getDetailEditor();
-    if (editor) editor.setValue(value, columnType);
+    if (editor && editor.getValue() !== value) editor.setValue(value, columnType);
   },
   refreshDetail: () => {
     detailCell.value = detailCell.value ? { ...detailCell.value } : null;

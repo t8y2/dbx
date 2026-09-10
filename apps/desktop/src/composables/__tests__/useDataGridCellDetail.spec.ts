@@ -106,4 +106,51 @@ describe("useDataGridCellDetail", () => {
     await nextTick();
     scope.stop();
   });
+
+  it("reconciles the latest long value after asynchronous editor creation", async () => {
+    const scope = effectScope();
+    const editValue = ref("");
+    let finishCreate!: () => void;
+    mocks.create.mockImplementationOnce(() => new Promise<void>((resolve) => (finishCreate = resolve)));
+    const composable = scope.run(() => useDataGridCellDetail({ detail: ref(detail()), editValue, onCancel: vi.fn() }))!;
+
+    composable.detailsEditorContainer.value = document.createElement("div");
+    await nextTick();
+    expect(finishCreate).toBeTypeOf("function");
+
+    const longValue = "x".repeat(15000);
+    editValue.value = longValue;
+    await nextTick();
+    // The real editor ignores setValue until create has installed its view.
+    mocks.setValue.mockClear();
+
+    finishCreate();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(mocks.setValue).toHaveBeenCalledWith(longValue, "VARCHAR");
+
+    composable.detailsEditorContainer.value = undefined;
+    await nextTick();
+    scope.stop();
+  });
+
+  it("does not reconcile an editor that was destroyed during creation", async () => {
+    const scope = effectScope();
+    let finishCreate!: () => void;
+    mocks.create.mockImplementationOnce(() => new Promise<void>((resolve) => (finishCreate = resolve)));
+    const composable = scope.run(() => useDataGridCellDetail({ detail: ref(detail()), editValue: ref(""), onCancel: vi.fn() }))!;
+
+    composable.detailsEditorContainer.value = document.createElement("div");
+    await nextTick();
+    mocks.setValue.mockClear();
+    composable.detailsEditorContainer.value = undefined;
+    await nextTick();
+    expect(mocks.destroy).toHaveBeenCalledOnce();
+
+    finishCreate();
+    await Promise.resolve();
+    expect(mocks.setValue).not.toHaveBeenCalled();
+    scope.stop();
+  });
 });

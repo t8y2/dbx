@@ -24,8 +24,35 @@ const delayedItalianLocale = vi.hoisted(() => {
 
 vi.mock("@/i18n/locales/it", () => delayedItalianLocale.load());
 
+function installLocalStorageStub() {
+  const store = new Map<string, string>();
+  const storage = {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.get(key) ?? null;
+    },
+    key(index: number) {
+      return [...store.keys()][index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+  } as Storage;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+}
+
 describe("locale preview", () => {
   beforeEach(async () => {
+    installLocalStorageStub();
     delayedItalianLocale.reset();
     await setLocale("en");
     window.localStorage.clear();

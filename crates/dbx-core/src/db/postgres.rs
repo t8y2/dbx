@@ -6607,7 +6607,16 @@ fn postgres_set_preserved_search_path_sql(
         configured.to_string()
     };
     let selected_schema = pg_quote_ident(schema);
-    let mut path = if baseline.first_resolved_schema.as_deref() == Some(schema) {
+    // The first resolved schema can come from "$user". Once that placeholder is
+    // removed for compatible servers, the selected schema must replace it unless
+    // the configured path also contains that schema explicitly.
+    let selected_schema_is_explicit = configured_elements
+        .iter()
+        .any(|element| !is_postgres_user_placeholder(element) && (*element == schema || *element == selected_schema));
+    let selected_schema_was_removed = drops_user_placeholder
+        && baseline.first_resolved_schema.as_deref() == Some(schema)
+        && !selected_schema_is_explicit;
+    let mut path = if baseline.first_resolved_schema.as_deref() == Some(schema) && !selected_schema_was_removed {
         configured
     } else if configured.is_empty() {
         selected_schema.clone()
@@ -9722,6 +9731,47 @@ mod tests {
             postgres_set_preserved_search_path_sql("dwd_views", PostgresSearchPathContext::Query, &bare_baseline),
             "SET search_path TO \"dwd_views\", public, pg_catalog"
         );
+    }
+
+    #[test]
+    fn postgres_search_path_replaces_matching_user_placeholder_with_selected_schema() {
+        let baseline = PostgresSearchPathBaseline {
+            configured: "\"$user\", public".to_string(),
+            first_resolved_schema: Some("dbx_test".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("dbx_test", PostgresSearchPathContext::Query, &baseline),
+            "SET search_path TO \"dbx_test\", public, pg_catalog"
+        );
+
+        let explicit_baseline = PostgresSearchPathBaseline {
+            configured: "dbx_test, \"$user\", public".to_string(),
+            first_resolved_schema: Some("dbx_test".to_string()),
+            has_explicit_pg_catalog: false,
+        };
+        assert_eq!(
+            postgres_set_preserved_search_path_sql("dbx_test", PostgresSearchPathContext::Query, &explicit_baseline),
+            "SET search_path TO dbx_test, public, pg_catalog"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_TEST_GAUSSDB_URL, DBX_TEST_GAUSSDB_SCHEMA, and DBX_TEST_GAUSSDB_TABLE"]
+    async fn gaussdb_selected_schema_matching_user_is_applied() {
+        let url = std::env::var("DBX_TEST_GAUSSDB_URL").expect("DBX_TEST_GAUSSDB_URL");
+        let schema = std::env::var("DBX_TEST_GAUSSDB_SCHEMA").expect("DBX_TEST_GAUSSDB_SCHEMA");
+        let table = std::env::var("DBX_TEST_GAUSSDB_TABLE").expect("DBX_TEST_GAUSSDB_TABLE");
+        let pool = connect(&url, Duration::from_secs(5)).await.expect("connect gaussdb");
+
+        let current_schema =
+            execute_query_with_schema(&pool, &schema, "SELECT current_schema()").await.expect("query current schema");
+        assert_eq!(current_schema.rows[0][0].as_str(), Some(schema.as_str()));
+
+        execute_query_with_schema(&pool, &schema, &format!("SELECT 1 FROM {} LIMIT 1", pg_quote_ident(&table)))
+            .await
+            .expect("query unqualified table in selected schema");
     }
 
     #[test]

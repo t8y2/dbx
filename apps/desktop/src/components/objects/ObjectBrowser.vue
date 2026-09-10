@@ -180,6 +180,7 @@ const props = defineProps<{
   /** 显式"新建事件"请求号：每次菜单点击递增，用于打开/重新进入 CREATE 编辑器 */
   initialEventCreateRequestId?: number;
   initialObjectFilter?: "tables" | "events";
+  selectedObjectFilter?: ObjectFilter;
   initialSearchQuery?: string;
   viewport?: ObjectBrowserViewport;
 }>();
@@ -189,6 +190,7 @@ const emit = defineEmits<{
   schemaChange: [schema: string | undefined];
   viewportChange: [viewport: ObjectBrowserViewport];
   searchChange: [query: string];
+  filterChange: [filter: ObjectFilter];
   addToAi: [tables: Array<{ name: string; schema?: string }>];
 }>();
 
@@ -2805,7 +2807,7 @@ function openInitialEventIfNeeded() {
 
 function finishObjectBrowserRowsLoad() {
   loadingObjects.value = false;
-  const preferredFilter = props.initialObjectFilter ?? (props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : "tables");
+  const preferredFilter = props.initialEventName || props.initialEventCreateRequestId !== undefined ? "events" : (props.selectedObjectFilter ?? props.initialObjectFilter ?? "tables");
   if (!userHasSelectedFilter.value && objectCounts.value[preferredFilter] > 0) {
     // The default table filter is a presentation choice, not a user query
     // change, so preserve the tab's saved scroll offset across remounts.
@@ -2817,7 +2819,10 @@ function finishObjectBrowserRowsLoad() {
 }
 
 watch([() => props.initialEventName, () => props.initialEventOpenRequestId, () => props.initialEventCreateRequestId], ([name, requestId, createRequestId], [previousName, previousRequestId, previousCreateRequestId]) => {
-  if (name !== previousName || requestId !== previousRequestId || createRequestId !== previousCreateRequestId) openedInitialEvent.value = "";
+  if (name !== previousName || requestId !== previousRequestId || createRequestId !== previousCreateRequestId) {
+    openedInitialEvent.value = "";
+    if (name || createRequestId !== undefined) objectFilter.value = "events";
+  }
   openInitialEventIfNeeded();
 });
 
@@ -3008,6 +3013,12 @@ function filterLabel(filter: ObjectFilter) {
                         ? "tree.types"
                         : "objects.all";
   return `${t(key)} ${filterCount(filter)}`;
+}
+
+function selectObjectFilter(filter: ObjectFilter) {
+  userHasSelectedFilter.value = true;
+  objectFilter.value = filter;
+  emit("filterChange", filter);
 }
 
 function getSearchInput(): HTMLInputElement | null {
@@ -3323,17 +3334,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
           </button>
         </div>
         <div v-if="showObjectFilter && showInlineObjectFilter" class="flex h-7 shrink-0 items-center rounded border bg-muted/20 p-0.5">
-          <button
-            v-for="filter in objectFilters"
-            :key="filter"
-            type="button"
-            class="h-6 rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }"
-            @click="
-              userHasSelectedFilter = true;
-              objectFilter = filter;
-            "
-          >
+          <button v-for="filter in objectFilters" :key="filter" type="button" class="h-6 rounded-sm px-2 text-xs text-muted-foreground transition-colors hover:text-foreground" :class="{ 'bg-background text-foreground shadow-sm': objectFilter === filter }" @click="selectObjectFilter(filter)">
             {{ filterLabel(filter) }}
           </button>
         </div>
@@ -3419,17 +3420,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
         <DropdownMenuCheckboxItem :model-value="settingsStore.editorSettings.objectBrowserShowCheckbox" @select.prevent @update:model-value="toggleCheckboxColumn()">{{ t("objects.toggleCheckbox") }}</DropdownMenuCheckboxItem>
         <template v-if="showObjectFilter && toolbarTier >= 2">
           <DropdownMenuSeparator />
-          <DropdownMenuCheckboxItem
-            v-for="filter in objectFilters"
-            :key="filter"
-            :model-value="objectFilter === filter"
-            @select.prevent
-            @update:model-value="
-              userHasSelectedFilter = true;
-              objectFilter = filter;
-            "
-            >{{ filterLabel(filter) }}</DropdownMenuCheckboxItem
-          >
+          <DropdownMenuCheckboxItem v-for="filter in objectFilters" :key="filter" :model-value="objectFilter === filter" @select.prevent @update:model-value="selectObjectFilter(filter)">{{ filterLabel(filter) }}</DropdownMenuCheckboxItem>
         </template>
       </ToolbarOverflowMenu>
     </div>

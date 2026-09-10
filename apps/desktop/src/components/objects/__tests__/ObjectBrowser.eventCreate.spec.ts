@@ -55,10 +55,11 @@ describe("ObjectBrowser MySQL Event CREATE navigation", () => {
   it("re-triggers a create request when the request id changes on a reused tab", () => {
     expect(objectBrowserSource).toContain("() => props.initialEventCreateRequestId");
     expect(objectBrowserSource).toMatch(/watch\(\[\(\) => props\.initialEventName, \(\) => props\.initialEventOpenRequestId, \(\) => props\.initialEventCreateRequestId\][\s\S]*?openedInitialEvent\.value = "";[\s\S]*?openInitialEventIfNeeded\(\);/);
+    expect(objectBrowserSource).toContain('if (name || createRequestId !== undefined) objectFilter.value = "events";');
   });
 
   it("lists the events filter as the preferred view for a create request", () => {
-    expect(objectBrowserSource).toMatch(/const preferredFilter = props\.initialObjectFilter \?\? \(props\.initialEventName \|\| props\.initialEventCreateRequestId !== undefined \? "events" : "tables"\);/);
+    expect(objectBrowserSource).toMatch(/const preferredFilter = props\.initialEventName \|\| props\.initialEventCreateRequestId !== undefined \? "events" : \(props\.selectedObjectFilter \?\? props\.initialObjectFilter \?\? "tables"\);/);
   });
 
   it("ContentArea passes the create request id into ObjectBrowser", () => {

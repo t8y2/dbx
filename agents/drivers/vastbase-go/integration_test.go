@@ -142,6 +142,17 @@ func TestVastbaseIntegration(t *testing.T) {
 		t.Fatalf("third page failed: page=%v err=%v", third, err)
 	}
 
+	idlePage, err := server.executeQueryPage(queryOptions{SQL: "SELECT generate_series(1, 3)", MaxRows: 3, TimeoutSecs: 1}, 1)
+	if err != nil || idlePage.SessionID == nil || !idlePage.HasMore || len(idlePage.Rows) != 1 {
+		t.Fatalf("idle pagination first page failed: page=%v err=%v", idlePage, err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	idleSecond, err := server.fetchQueryPage(*idlePage.SessionID, 1)
+	if err != nil || !idleSecond.HasMore || len(idleSecond.Rows) != 1 {
+		t.Fatalf("idle time consumed the next page timeout: page=%v err=%v", idleSecond, err)
+	}
+	server.closeQuerySession(*idlePage.SessionID)
+
 	cancelStart := time.Now()
 	cancelResult := make(chan error, 1)
 	go func() {

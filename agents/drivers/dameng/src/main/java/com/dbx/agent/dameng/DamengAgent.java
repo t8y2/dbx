@@ -113,6 +113,19 @@ public final class DamengAgent extends AbstractJdbcAgent {
     private URLClassLoader externalDriverLoader;
     private List<URL> externalDriverUrls;
     private String externalDriverClass;
+
+    @Override
+    protected JdbcExecutor.ResultValueReader resultValueReader() {
+        return (JdbcExecutor.ColumnAwareResultValueReader) this::readDamengValue;
+    }
+
+    private Object readDamengValue(ResultSet resultSet, int index, int sqlType, String columnTypeName) throws SQLException {
+        if ("VARCHAR2".equalsIgnoreCase(columnTypeName == null ? "" : columnTypeName.trim())) {
+            String value = resultSet.getString(index);
+            return resultSet.wasNull() ? null : value;
+        }
+        return super.resultValue(resultSet, index, sqlType);
+    }
     private volatile boolean legacyJdbcMetadata;
     private volatile boolean dbmsOutputInitializationSupported = true;
     private final Map<Object, Boolean> dbmsOutputInitializedConnections =

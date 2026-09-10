@@ -110,6 +110,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             drop_table_if_exists: false,
             omit_auto_increment: false,
             fail_on_error: true,
+            prevent_overwrite: false,
             output_compression: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,

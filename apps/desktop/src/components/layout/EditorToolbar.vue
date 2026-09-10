@@ -25,6 +25,7 @@ import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { resolveNextEditorToolbarTier, type EditorToolbarTier } from "@/lib/tabs/editorToolbarLayout";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
+import { canFormatSqlForDatabaseType } from "@/lib/sql/sqlFormatter";
 import type { QueryTab, ConnectionConfig } from "@/types/database";
 
 const props = defineProps<{
@@ -326,7 +327,8 @@ const isActiveDatabaseDefault = computed(() => isDefaultDatabase(props.activeCon
 // tier contract.
 
 const showOverflowMenu = computed(() => toolbarTier.value >= 1);
-const showFormatButton = computed(() => toolbarTier.value < 2);
+const canFormatSql = computed(() => canFormatSqlForDatabaseType(props.activeConnection?.db_type));
+const showFormatButton = computed(() => canFormatSql.value && toolbarTier.value < 2);
 const showExplainAnalyzeToggle = computed(() => toolbarTier.value < 3);
 const showCompressButton = computed(() => toolbarTier.value < 1);
 const showKeywordCaseButton = computed(() => toolbarTier.value < 1);
@@ -608,7 +610,7 @@ async function changeCatalog(selectedCatalog: string) {
             {{ insertValueHintsToggleTooltip }}
           </DropdownMenuCheckboxItem>
           <template v-if="toolbarTier >= 2">
-            <DropdownMenuItem :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('formatSql')">
+            <DropdownMenuItem v-if="canFormatSql" :disabled="activeTab.isExecuting || activeTab.isExplaining || !activeTab.sql.trim()" @select="emit('formatSql')">
               <AlignLeft class="h-3.5 w-3.5" />
               {{ t("toolbar.formatSql") }}
             </DropdownMenuItem>

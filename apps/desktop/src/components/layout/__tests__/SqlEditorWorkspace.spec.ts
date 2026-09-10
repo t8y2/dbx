@@ -69,7 +69,8 @@ describe("SQL editor workspace single-group tracer bullet", () => {
     expect(tabMenuSource).toContain("visible: options.canRename");
     expect(groupTabBarSource).toContain("createRenameDuplicateTabItems");
     expect(groupTabBarSource).toContain("cleanupTabDrag");
-    expect(groupTabBarSource).toContain("onUnmounted(cleanupTabDrag)");
+    expect(groupTabBarSource).toContain("onUnmounted(() => {");
+    expect(groupTabBarSource).toContain("cleanupTabDrag();");
     expect(groupTabBarSource).toContain("pointercancel");
   });
 

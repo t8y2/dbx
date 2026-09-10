@@ -8,6 +8,19 @@ describe("AI message copy payload", () => {
     expect(resolveAiMessageCopyText({ role: "user", content }, false)).toBe(content);
   });
 
+  it("keeps table and SQL file references when copying a user message", () => {
+    const message = {
+      role: "user" as const,
+      content: "Explain this query",
+      mentions: [
+        { kind: "table" as const, raw: "@public.orders" },
+        { kind: "sqlFile" as const, raw: "@setup.sql" },
+      ],
+    };
+
+    expect(resolveAiMessageCopyText(message, false)).toBe("@public.orders @setup.sql\n\nExplain this query");
+  });
+
   it("copies only the assistant message body", () => {
     const message = {
       role: "assistant" as const,

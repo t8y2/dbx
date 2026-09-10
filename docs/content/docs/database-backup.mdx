@@ -15,7 +15,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
 | --- | --- |
 | Databases | MySQL and PostgreSQL |
 | Platform | DBX Desktop |
-| Output | The default template creates one directory per scheduled run, containing one `.sql` file per database/schema target; the directory structure can be customized with a template |
+| Output | The default template creates one directory per scheduled run, containing one `.sql` file per database/schema target; directory and file-name templates can be customized |
 | Frequency | Every N hours, daily at a time, or weekly on a weekday and time |
 | Contents | Table structure, data, database objects, and optional `DROP TABLE IF EXISTS` |
 | Table scope | All, include by pattern, or exclude by pattern |
@@ -68,7 +68,7 @@ For a backup that should run only once, use **Back up now** in Settings instead 
   <Step>
     ### Set directory and frequency
 
-    Select a local destination directory, choose a relative run-directory template, and configure hourly, daily, or weekly timing. Templates support `{schedule}`, `{date}`, `{timestamp}`, and `{runId}`. The default template includes `{runId}` for extra isolation, but you can use timestamp-only directories such as `dbx-backup_{timestamp}`. DBX previews the next run.
+    Select a local destination directory and configure the output path template, which combines a relative run-directory template with a file-name template. Directory templates support `{schedule}`, `{date}`, `{timestamp}`, and `{runId}`. File-name templates also support `{database}`. DBX previews the complete output path and automatically adds a missing database target. A run ID is included only when `{runId}` is explicitly present in the template; if a template resolves to a path already used by another run, DBX rejects the new run instead of overwriting the existing backup.
 
   </Step>
   <Step>

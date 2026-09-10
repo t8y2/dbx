@@ -434,6 +434,7 @@ async fn ensure_worker_consent(data_dir: &Path, identity: &str, dest: &str, dige
         port: port.parse().unwrap_or(22),
         key_type: Some("sha256".to_string()),
         fingerprint: Some(digest.to_string()),
+        previous_fingerprint: None,
         prompt: Some(dest.to_string()),
         echo: false,
     };

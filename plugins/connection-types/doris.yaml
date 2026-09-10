@@ -25,6 +25,6 @@ capabilities:
   sqlFileExecution: true
   databaseCreate: true
   fieldLineage: false
-  sqlExplain: false
+  sqlExplain: true
   userAdmin: true
   driverManagement: false

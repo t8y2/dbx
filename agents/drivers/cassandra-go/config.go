@@ -31,6 +31,10 @@ type cassandraConfig struct {
 	caCertPath               string
 	clientCertPath           string
 	clientKeyPath            string
+	truststorePath           string
+	truststorePassword       string
+	keystorePath             string
+	keystorePassword         string
 	hostVerification         bool
 	tcpNoDelay               bool
 	keepAlive                bool
@@ -61,6 +65,10 @@ func parseCassandraConfig(cp connectParams) (cassandraConfig, error) {
 		caCertPath:            cp.CACertPath,
 		clientCertPath:        cp.ClientCertPath,
 		clientKeyPath:         cp.ClientKeyPath,
+		truststorePath:        cp.TruststorePath,
+		truststorePassword:    cp.TruststorePassword,
+		keystorePath:          cp.KeystorePath,
+		keystorePassword:      cp.KeystorePassword,
 		hostVerification:      true,
 		tcpNoDelay:            true,
 		retryCount:            3,
@@ -224,6 +232,14 @@ func applyCassandraURLParams(config *cassandraConfig, params url.Values) error {
 				return fmt.Errorf("invalid host verification option: %w", err)
 			}
 			config.hostVerification = enabled
+		case "truststorepath":
+			config.truststorePath = value
+		case "truststorepassword":
+			config.truststorePassword = value
+		case "keystorepath":
+			config.keystorePath = value
+		case "keystorepassword":
+			config.keystorePassword = value
 		case "tcpnodelay":
 			enabled, err := strconv.ParseBool(value)
 			if err != nil {
@@ -406,12 +422,20 @@ func (config cassandraConfig) clusterConfig(keyspace string) (*gocql.ClusterConf
 		cluster.Authenticator = gocql.PasswordAuthenticator{Username: config.username, Password: config.password}
 	}
 	if config.secureConnectBundle == "" && config.ssl {
-		cluster.SslOpts = &gocql.SslOptions{
+		sslOptions := &gocql.SslOptions{
 			CaPath:                 config.caCertPath,
 			CertPath:               config.clientCertPath,
 			KeyPath:                config.clientKeyPath,
 			EnableHostVerification: config.hostVerification,
 		}
+		if config.truststorePath != "" || config.keystorePath != "" {
+			tlsConfig, err := buildCassandraTLSConfig(config)
+			if err != nil {
+				return nil, err
+			}
+			sslOptions.Config = tlsConfig
+		}
+		cluster.SslOpts = sslOptions
 	}
 	if config.debug {
 		cluster.Logger = gocql.NewLogger(gocql.LogLevelDebug)
@@ -434,6 +458,31 @@ func (config *cassandraConfig) finalize() error {
 	config.secureConnectBundle, err = normalizeLocalFilePath(config.secureConnectBundle)
 	if err != nil {
 		return fmt.Errorf("invalid Cassandra secureconnectbundle: %w", err)
+	}
+	if config.secureConnectBundle == "" {
+		config.truststorePath, err = normalizeLocalFilePath(config.truststorePath)
+		if err != nil {
+			return fmt.Errorf("invalid Cassandra truststore path: %w", err)
+		}
+		config.keystorePath, err = normalizeLocalFilePath(config.keystorePath)
+		if err != nil {
+			return fmt.Errorf("invalid Cassandra keystore path: %w", err)
+		}
+		if config.truststorePassword != "" && config.truststorePath == "" {
+			return fmt.Errorf("Cassandra truststore password requires a truststore path")
+		}
+		if config.keystorePassword != "" && config.keystorePath == "" {
+			return fmt.Errorf("Cassandra keystore password requires a keystore path")
+		}
+		if config.truststorePath != "" && strings.TrimSpace(config.caCertPath) != "" {
+			return fmt.Errorf("Cassandra truststore cannot be combined with a PEM CA certificate")
+		}
+		if config.keystorePath != "" && (strings.TrimSpace(config.clientCertPath) != "" || strings.TrimSpace(config.clientKeyPath) != "") {
+			return fmt.Errorf("Cassandra keystore cannot be combined with PEM client certificate settings")
+		}
+		if config.truststorePath != "" || config.keystorePath != "" {
+			config.ssl = true
+		}
 	}
 	if config.secureConnectBundle != "" && config.kerberos.enabled {
 		return fmt.Errorf("Cassandra secure connect bundles cannot be combined with Kerberos authentication")

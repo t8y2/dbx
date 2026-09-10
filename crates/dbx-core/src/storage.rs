@@ -15,6 +15,7 @@ use crate::ai::{
     AiRunStatus,
 };
 use crate::connection_secrets::{
+    CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
     NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
@@ -1360,6 +1361,17 @@ fn scrub_nacos_auth_secrets(config: &mut ConnectionConfig) {
             scrub_json_secret(auth, "password");
         }
     }
+}
+
+fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
+    if config.db_type != DatabaseType::Cassandra {
+        return;
+    }
+    let Some(tls) = cassandra_tls_object_mut(config.external_config.as_mut()) else {
+        return;
+    };
+    scrub_json_secret(tls, "truststore_password");
+    scrub_json_secret(tls, "keystore_password");
 }
 
 fn delete_secret_prefix_in_tx(
@@ -3190,6 +3202,7 @@ fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     scrub_mq_auth_secrets(&mut sanitized);
     scrub_mq_token_signing_secret(&mut sanitized);
     scrub_nacos_auth_secrets(&mut sanitized);
+    scrub_cassandra_tls_secrets(&mut sanitized);
     sanitized
 }
 
@@ -3265,7 +3278,8 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     }
     persist_mq_auth_secrets_in_tx(tx, &config)?;
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
-    persist_nacos_auth_secrets_in_tx(tx, &config)
+    persist_nacos_auth_secrets_in_tx(tx, &config)?;
+    persist_cassandra_tls_secrets_in_tx(tx, &config)
 }
 
 fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
@@ -3400,6 +3414,7 @@ impl Storage {
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
+                scrub_cassandra_tls_secrets(&mut sanitized);
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -3721,13 +3736,17 @@ impl Storage {
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
-            let needs_external_secret_rewrite =
-                needs_mq_auth_rewrite || needs_mq_token_signing_rewrite || needs_nacos_auth_rewrite;
+            let needs_cassandra_tls_rewrite = self.hydrate_cassandra_tls_secrets(&id, &mut config).await?;
+            let needs_external_secret_rewrite = needs_mq_auth_rewrite
+                || needs_mq_token_signing_rewrite
+                || needs_nacos_auth_rewrite
+                || needs_cassandra_tls_rewrite;
             if needs_external_secret_rewrite {
                 let mut sanitized = config.clone().canonicalized();
                 scrub_mq_auth_secrets(&mut sanitized);
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
+                scrub_cassandra_tls_secrets(&mut sanitized);
                 let sanitized_json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
                 let update_id = id.clone();
                 self.with_conn(move |conn| {
@@ -3837,6 +3856,36 @@ impl Storage {
             }
         }
         Ok(rewritten)
+    }
+
+    async fn hydrate_cassandra_tls_secrets(
+        &self,
+        connection_id: &str,
+        config: &mut ConnectionConfig,
+    ) -> Result<bool, String> {
+        if config.db_type != DatabaseType::Cassandra {
+            return Ok(false);
+        }
+        let Some(tls) = cassandra_tls_object_mut(config.external_config.as_mut()) else {
+            return Ok(false);
+        };
+        let truststore_rewrite = hydrate_mq_json_secret(
+            self,
+            connection_id,
+            CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
+            tls,
+            "truststore_password",
+        )
+        .await?;
+        let keystore_rewrite = hydrate_mq_json_secret(
+            self,
+            connection_id,
+            CASSANDRA_KEYSTORE_PASSWORD_KEY,
+            tls,
+            "keystore_password",
+        )
+        .await?;
+        Ok(truststore_rewrite || keystore_rewrite)
     }
 }
 
@@ -5104,6 +5153,36 @@ fn persist_nacos_auth_secrets_in_tx(tx: &rusqlite::Transaction<'_>, config: &Con
     Ok(())
 }
 
+fn persist_cassandra_tls_secrets_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    config: &ConnectionConfig,
+) -> Result<(), String> {
+    if config.db_type != DatabaseType::Cassandra {
+        delete_secret_prefix_in_tx(tx, &config.id, CASSANDRA_TLS_SECRET_PREFIX)?;
+        return Ok(());
+    }
+    let Some(tls) = cassandra_tls_object(config.external_config.as_ref()) else {
+        delete_secret_prefix_in_tx(tx, &config.id, CASSANDRA_TLS_SECRET_PREFIX)?;
+        return Ok(());
+    };
+    persist_secret_in_tx(
+        tx,
+        &config.id,
+        CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
+        tls.get("truststore_password")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    )?;
+    persist_secret_in_tx(
+        tx,
+        &config.id,
+        CASSANDRA_KEYSTORE_PASSWORD_KEY,
+        tls.get("keystore_password")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    )
+}
+
 fn persist_json_secret_if_present_in_tx(
     tx: &rusqlite::Transaction<'_>,
     connection_id: &str,
@@ -5165,6 +5244,18 @@ fn mq_token_signing_object_mut(
     value?.get_mut("tokenSigning")?.as_object_mut()
 }
 
+fn cassandra_tls_object(
+    value: Option<&serde_json::Value>,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    value?.get("tls")?.as_object()
+}
+
+fn cassandra_tls_object_mut(
+    value: Option<&mut serde_json::Value>,
+) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    value?.get_mut("tls")?.as_object_mut()
+}
+
 fn nacos_auth_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     value?.get("auth")?.as_object()
 }
@@ -5224,7 +5315,8 @@ mod tests {
     };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
-        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+        CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY,
+        MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
@@ -5842,6 +5934,71 @@ mod tests {
         .unwrap()
     }
 
+    fn cassandra_connection(id: &str) -> ConnectionConfig {
+        let mut config = plain_connection(id, "");
+        config.name = "Cassandra".to_string();
+        config.db_type = DatabaseType::Cassandra;
+        config.port = 9042;
+        config.ssl = true;
+        config.external_config = Some(serde_json::json!({
+            "tls": {
+                "truststore_path": "/certs/client.truststore",
+                "truststore_password": "trust-secret",
+                "keystore_path": "/certs/client.keystore",
+                "keystore_password": "key-secret"
+            }
+        }));
+        config
+    }
+
+    #[tokio::test]
+    async fn save_connections_moves_cassandra_tls_passwords_to_secret_table_and_restores_them() {
+        let path = temp_db_path("cassandra-tls-secrets");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage.save_connections(&[cassandra_connection("cassandra")]).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, "cassandra").await;
+        assert!(!raw_json.contains("trust-secret"));
+        assert!(!raw_json.contains("key-secret"));
+        assert_eq!(
+            storage
+                .get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("trust-secret")
+        );
+        assert_eq!(
+            storage
+                .get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("key-secret")
+        );
+
+        let loaded = storage.load_connections().await.unwrap();
+        let tls = loaded[0].external_config.as_ref().unwrap().get("tls").unwrap();
+        assert_eq!(tls["truststore_password"], "trust-secret");
+        assert_eq!(tls["keystore_password"], "key-secret");
+
+        let mut disabled = cassandra_connection("cassandra");
+        disabled.ssl = false;
+        disabled.external_config = None;
+        storage.save_connections(&[disabled]).await.unwrap();
+        assert_eq!(
+            storage.get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            storage.get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY).await.unwrap(),
+            None
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
     #[tokio::test]
     async fn save_connections_does_not_persist_password_when_save_password_false() {
         let path = temp_db_path("save-password-false");
@@ -5968,6 +6125,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -6037,6 +6195,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

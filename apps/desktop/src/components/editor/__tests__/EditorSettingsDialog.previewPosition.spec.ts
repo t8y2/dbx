@@ -71,10 +71,10 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(completionTriggerMode).toBeGreaterThan(completionSection);
     expect(selectFirstCompletion).toBeGreaterThan(completionTriggerMode);
     expect(editorSection).not.toContain('t("settings.sqlCompletionSection")');
-    expect(editorSection).toContain('class="flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode');
+    expect(editorSection).toContain('class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode');
     expect(editorSection).toContain('<SelectTrigger class="h-8 w-44 shrink-0">');
     expect(editorSection).toContain('class="grid gap-4 md:grid-cols-2" data-editor-execution-settings');
-    expect(editorSection).toContain('class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode');
+    expect(editorSection).toContain('class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode');
     expect(editorSection.match(/:model-value="editCompletionTriggerMode"/g)).toHaveLength(1);
     expect(editorSection.match(/id="editor-select-first-completion-on-open"/g)).toHaveLength(1);
   });
@@ -104,7 +104,7 @@ describe("EditorSettingsDialog live preview placement", () => {
   it("describes the execute shortcut below the mode selector in every supported locale", () => {
     expect(editorSection.indexOf("executeModeDescription")).toBeGreaterThan(editorSection.indexOf("executeModeLabel"));
 
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       expect(source, locale).toContain("executeModeDescription:");
     }
@@ -115,7 +115,7 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(editorSection).toContain("{{ completionTriggerModeDescription }}");
     expect(editorSection).not.toContain('t("settings.completionTriggerModeDescription")');
 
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       for (const key of ["completionTriggerModeManualDescription", "completionTriggerModeRequirePrefixDescription", "completionTriggerModePositionalDescription"]) {
         expect(source, `${locale}:${key}`).toContain(`${key}:`);
@@ -174,7 +174,7 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(dataSection.match(/editDataGridFilterEditorView = '(quick|conditions|text)'/g)).toHaveLength(3);
     expect(dataSection).not.toContain('<SelectTrigger id="data-grid-filter-view"');
 
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       for (const key of ["dataGridFilterViewPreview", "dataGridFilterViewPreviewExpand", "dataGridFilterViewPreviewCollapse"]) {
         expect(source, `${locale}:${key}`).toContain(`${key}:`);
@@ -215,7 +215,7 @@ describe("EditorSettingsDialog live preview placement", () => {
     expect(editorPreview.indexOf('t("settings.previewSyntaxErrorHint")')).toBeGreaterThan(preview);
   });
 
-  it.each(["en", "zh-CN", "zh-TW", "es", "pt-BR", "it", "ja", "ko", "tr"])("locale %s translates settings.previewSyntaxErrorHint", (locale) => {
+  it.each(["en", "zh-CN", "zh-TW", "es", "pt-BR", "it", "ja", "ko", "tr", "az"])("locale %s translates settings.previewSyntaxErrorHint", (locale) => {
     const localeSource = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
     expect(localeSource).toMatch(/previewSyntaxErrorHint: ".+"/);
   });

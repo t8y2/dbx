@@ -403,6 +403,34 @@ describe("connectionStore completion assistant", () => {
     expect(tables).toEqual([{ name: "accounts", schema: "public", type: "table", detail: "→ Customer accounts" }]);
   });
 
+  it("verifies selected-schema tables when the completion index is stale", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const listTables = vi.fn().mockResolvedValue([{ name: "accounts", table_type: "BASE TABLE", comment: "Customer accounts" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listSchemas: vi.fn().mockResolvedValue(["reporting"]),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const tables = await store.listCompletionTables("pg-1", "app", "accounts", 200, "reporting", false, "reporting", undefined, { verifySchemaMetadata: true });
+
+    expect(completionAssistantSearch).toHaveBeenCalledOnce();
+    expect(listTables).toHaveBeenCalledWith("pg-1", "app", "reporting", "accounts", 200);
+    expect(tables).toEqual([{ name: "accounts", schema: "reporting", type: "table", detail: "→ Customer accounts" }]);
+  });
+
   it("keeps schema-qualified local table completion scoped to the selected schema", async () => {
     const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
     const listTables = vi.fn(async (_connectionId: string, _database: string, schema: string, filter: string) => {

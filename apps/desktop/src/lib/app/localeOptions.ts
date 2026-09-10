@@ -2,6 +2,7 @@ import type { Locale } from "@/i18n";
 
 export const LOCALE_OPTIONS: { value: Locale; flag: string; label: string }[] = [
   { value: "en", flag: "🇺🇸", label: "English" },
+  { value: "az", flag: "🇦🇿", label: "Azərbaycan" },
   { value: "es", flag: "🇪🇸", label: "Español" },
   { value: "it", flag: "🇮🇹", label: "Italiano" },
   { value: "ja", flag: "🇯🇵", label: "日本語" },

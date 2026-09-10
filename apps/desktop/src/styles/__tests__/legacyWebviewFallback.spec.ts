@@ -16,6 +16,7 @@ const connectionDialogSource = readFileSync(new URL("../../components/connection
 const connectionTreeSource = readFileSync(new URL("../../components/sidebar/ConnectionTree.vue", import.meta.url), "utf8");
 const activeConnectionFilterSource = readFileSync(new URL("../../components/sidebar/ActiveConnectionFilterButton.vue", import.meta.url), "utf8");
 const scheduledDatabaseBackupSource = readFileSync(new URL("../../components/backup/ScheduledDatabaseBackupSettings.vue", import.meta.url), "utf8");
+const databaseBackupConfigFieldsSource = readFileSync(new URL("../../components/backup/DatabaseBackupConfigFields.vue", import.meta.url), "utf8");
 const driverStoreDialogSource = readFileSync(new URL("../../components/config/DriverStoreDialog.vue", import.meta.url), "utf8");
 const tunnelProfileManagerSource = readFileSync(new URL("../../components/connection/TunnelProfileManager.vue", import.meta.url), "utf8");
 const changelogPanelSource = readFileSync(new URL("../../components/settings/ChangelogPanel.vue", import.meta.url), "utf8");
@@ -88,6 +89,18 @@ describe("legacy WebView CSS fallbacks", () => {
     expect(fallback).toContain(".space-y-2\\.5 > * + *");
     expect(scheduledDatabaseBackupSource).toContain("dbx-form-dialog dbx-form-dialog--lg");
     expect(scheduledDatabaseBackupSource).toContain("max-w-[min(720px,calc(100vw-32px))]");
+    expect(scheduledDatabaseBackupSource).toContain("overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]");
+    expect(scheduledDatabaseBackupSource).toContain("dbx-backup-dialog");
+    expect(scheduledDatabaseBackupSource).toContain('class="backup-schedule-form grid gap-5 py-1"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-config-fields grid gap-5 py-1"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-destination-field"');
+    expect(databaseBackupConfigFieldsSource).toContain('class="backup-destination-picker"');
+    expect(databaseBackupConfigFieldsSource).toContain("padding-right: 2.5rem;");
+    expect(databaseBackupConfigFieldsSource).toContain("position: absolute;");
+    expect(databaseBackupConfigFieldsSource).toContain("grid-template-columns: minmax(0, 1fr);");
+    expect(databaseBackupConfigFieldsSource).toContain("overflow-wrap: anywhere;");
+    expect(databaseBackupConfigFieldsSource).toContain("word-break: break-all;");
+    expect(fallback).toContain('[data-slot="dialog-content"].dbx-backup-dialog > *');
     expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog');
     expect(fallback).toContain('[data-slot="dialog-content"].dbx-form-dialog--lg');
     expect(fallback).toContain("max-width: 45rem !important;");

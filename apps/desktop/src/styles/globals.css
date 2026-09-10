@@ -1908,6 +1908,12 @@ html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog--lg {
   max-width: 45rem !important;
 }
 
+html.dbx-legacy-webview [data-slot="dialog-content"].dbx-backup-dialog > * {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
 html.dbx-legacy-webview [data-slot="dialog-content"].dbx-form-dialog [data-slot="select-trigger"] {
   height: 2rem !important;
   min-height: 2rem !important;

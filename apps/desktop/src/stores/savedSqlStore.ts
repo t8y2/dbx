@@ -106,11 +106,8 @@ function savedSqlNameKey(name: string): string {
   return ensureSqlExtension(name).toLocaleLowerCase();
 }
 
-function savedSqlNameScopeKey(file: Pick<SavedSqlNameScope, "connectionId" | "catalog" | "database" | "folderId">): string {
-  // Database queries are displayed together below the database tree node, even
-  // when their SQL-library folders differ. Unassociated library queries retain
-  // normal folder semantics, so separate folders may use the same file name.
-  if (file.database) return JSON.stringify(["database", savedSqlDatabaseScopeKey(file)]);
+function savedSqlNameScopeKey(file: Pick<SavedSqlNameScope, "connectionId" | "folderId">): string {
+  // Execution targets do not change the SQL library's folder-scoped names.
   return JSON.stringify(["library-folder", file.connectionId, file.folderId || null]);
 }
 

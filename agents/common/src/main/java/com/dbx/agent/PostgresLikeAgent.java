@@ -546,7 +546,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
             String sql = "SELECT i.relname AS index_name, am.amname AS index_type, " +
                 "(ix.indisunique AND ix.indisvalid) AS is_unique, ix.indisprimary AS is_primary, " +
                 "COALESCE(a.attname, " + profile.catalogPrefixedFunction("get_indexdef") + "(ix.indexrelid, k.n, true)) AS column_text, " +
-                "(a.attname IS NULL) AS is_expression " +
+                "(a.attname IS NULL) AS is_expression, " +
+                "array_length(ix.indoption, 1) AS nkeyatts, k.n AS key_position, " +
+                "ix.indoption[(k.n - 1)::int] AS key_option " +
                 "FROM " + profile.catalogRelation("index") + " ix " +
                 "JOIN " + profile.catalogRelation("class") + " t ON t.oid = ix.indrelid " +
                 "JOIN " + profile.catalogRelation("class") + " i ON i.oid = ix.indexrelid " +
@@ -569,24 +571,36 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
                             indexName,
                             name -> new IndexBuilder(name, indexType, isUnique, isPrimary)
                         );
-                        builder.columns.add(rs.getString("column_text"));
+                        String columnText = rs.getString("column_text");
+                        if (rs.getObject("nkeyatts") != null && rs.getObject("key_position") != null
+                            && rs.getInt("key_position") > rs.getInt("nkeyatts")) {
+                            builder.includedColumns.add(columnText);
+                            continue;
+                        }
+                        builder.columns.add(columnText);
                         builder.keyIsExpression.add(rs.getBoolean("is_expression"));
+                        Object keyOption = rs.getObject("key_option");
+                        if (keyOption != null) {
+                            builder.keyOptions.add(rs.getInt("key_option"));
+                        }
                     }
                 }
             }
             List<IndexInfo> result = new ArrayList<>();
             for (IndexBuilder builder : byName.values()) {
-                result.add(new IndexInfo(
+                IndexInfo index = new IndexInfo(
                     builder.name,
                     builder.columns,
                     builder.isUnique,
                     builder.isPrimary,
                     null,
                     builder.indexType,
-                    null,
+                    builder.includedColumns.isEmpty() ? null : builder.includedColumns,
                     null,
                     builder.keyIsExpression
-                ));
+                );
+                index.setKey_options(builder.keyOptions);
+                result.add(index);
             }
             return result;
         });
@@ -598,8 +612,9 @@ public abstract class PostgresLikeAgent extends AbstractJdbcAgent {
         private final boolean isUnique;
         private final boolean isPrimary;
         private final List<String> columns = new ArrayList<>();
+        private final List<String> includedColumns = new ArrayList<>();
         private final List<Boolean> keyIsExpression = new ArrayList<>();
-
+        private final List<Integer> keyOptions = new ArrayList<>();
         private IndexBuilder(String name, String indexType, boolean isUnique, boolean isPrimary) {
             this.name = name;
             this.indexType = indexType;

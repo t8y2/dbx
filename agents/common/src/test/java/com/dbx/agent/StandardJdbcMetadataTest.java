@@ -44,6 +44,37 @@ class StandardJdbcMetadataTest {
     }
 
     @Test
+    void scopesSchemasToTheConnectionCatalog() {
+        AtomicReference<Object[]> capturedArgs = new AtomicReference<>();
+        DatabaseMetaData meta = proxy(DatabaseMetaData.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getSchemas".equals(method.getName())) {
+                    capturedArgs.set(args);
+                    return rows(row("TABLE_SCHEM", "APP"));
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+        Connection conn = proxy(Connection.class, new MethodHandler() {
+            @Override
+            public Object handle(Method method, Object[] args) {
+                if ("getMetaData".equals(method.getName())) {
+                    return meta;
+                }
+                if ("getCatalog".equals(method.getName())) {
+                    return "regular_catalog";
+                }
+                return defaultValue(method.getReturnType());
+            }
+        });
+
+        assertEquals(List.of("APP"), StandardJdbcMetadata.INSTANCE.listSchemas(conn, profile, "initial_catalog"));
+        assertEquals("regular_catalog", capturedArgs.get()[0]);
+        assertEquals(null, capturedArgs.get()[1]);
+    }
+
+    @Test
     void listsSchemasWhenConnectionGetSchemaIsUnsupported() {
         Connection conn = connection(
             rows(row("TABLE_SCHEM", "APP"), row("TABLE_SCHEM", "PUBLIC")),

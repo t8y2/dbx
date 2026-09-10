@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   setTableMeta: vi.fn(),
   clearInvalidDataTabSort: vi.fn(),
   activeResultExecutionTarget: vi.fn(),
+  lookupLocalCompletionTables: vi.fn(),
   metadataGeneration: 0,
 }));
 
@@ -47,6 +48,7 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: mocks.getConfig,
     ensureConnected: mocks.ensureConnected,
     metadataGenerationFor: () => mocks.metadataGeneration,
+    lookupLocalCompletionTables: mocks.lookupLocalCompletionTables,
   }),
 }));
 
@@ -145,6 +147,7 @@ describe("useDataGridActions", () => {
     mocks.buildSortedQuerySql.mockResolvedValue({ ok: true, sql: "SELECT sorted" });
     mocks.ensureConnected.mockResolvedValue(undefined);
     mocks.activeResultExecutionTarget.mockReturnValue(undefined);
+    mocks.lookupLocalCompletionTables.mockReturnValue([]);
     mocks.getColumns.mockResolvedValue([{ name: "id", data_type: "integer", is_nullable: false, column_default: null, is_primary_key: true, extra: null }]);
     mocks.listIndexes.mockResolvedValue([]);
   });
@@ -165,6 +168,39 @@ describe("useDataGridActions", () => {
     );
     expect(mocks.executeTabSql).toHaveBeenCalledWith("tab-1", "SELECT * FROM public.users LIMIT 250 OFFSET 0", expect.objectContaining({ pagination: { limit: 250, offset: 0 } }));
     expect(mocks.executeTabSql.mock.calls[0]?.[2]).not.toHaveProperty("preserveTotalRowCountDuringExecution");
+  });
+
+  it("repairs a restored Oracle view type before building paginated SQL", async () => {
+    mocks.getConfig.mockReturnValue({ id: "oracle-1", db_type: "oracle", default_schema: "REPORTING" });
+    mocks.lookupLocalCompletionTables.mockReturnValue([{ name: "REPORT_ROWS", schema: "REPORTING", type: "view" }]);
+    mocks.buildTableSelectSql.mockResolvedValueOnce('SELECT "ID" FROM "REPORTING"."REPORT_ROWS"');
+    const tab = tableDataTab({
+      connectionId: "oracle-1",
+      database: "XEPDB1",
+      title: "REPORT_ROWS",
+      tableMeta: {
+        schema: "REPORTING",
+        tableName: "REPORT_ROWS",
+        tableType: "TABLE",
+        columns: [{ name: "ID", data_type: "NUMBER", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: ["__DBX_ROWID"],
+      },
+    });
+    mocks.tabs.push(tab);
+    const actions = useDataGridActions(computed(() => tab));
+
+    await actions.onReloadData(tab.id, tab.sql, "", "", "", 100, 100, "refresh");
+
+    expect(tab.tableMeta?.tableType).toBe("VIEW");
+    expect(mocks.buildTableSelectSql).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tableName: "REPORT_ROWS",
+        tableType: "VIEW",
+        includeRowId: false,
+        limit: 100,
+        offset: 100,
+      }),
+    );
   });
 
   it("executes the WHERE apply SQL on the emitting tab (#8216)", async () => {

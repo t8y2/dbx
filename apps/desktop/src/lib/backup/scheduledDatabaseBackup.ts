@@ -7,6 +7,7 @@ export const DATABASE_BACKUP_RUNS_STORAGE_KEY = "dbx-database-backup-runs";
 export const DATABASE_BACKUP_CONFIG_CHANGED_EVENT = "dbx:database-backup-config-changed";
 export const MAX_DATABASE_BACKUP_HISTORY = 200;
 export const DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN = "dbx-backup__{schedule}__{timestamp}__{runId}";
+export const DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN = "dbx-backup__{schedule}__{timestamp}__{database}__{runId}";
 
 export type DatabaseBackupFrequency = "hourly" | "daily" | "weekly";
 export type DatabaseBackupExportStatus = "Running" | "Done" | "Error" | "Cancelled";
@@ -120,6 +121,8 @@ export interface DatabaseBackupExecutionConfig {
   includeObjects: boolean;
   dropTableIfExists: boolean;
   outputCompression: DatabaseBackupOutputCompression;
+  /** File-name template for each database target. The final extension is added automatically. */
+  fileNamePattern?: string;
 }
 
 export interface DatabaseBackupSchedule extends DatabaseBackupExecutionConfig {
@@ -152,6 +155,7 @@ export function toDatabaseBackupExecutionConfig(schedule: DatabaseBackupSchedule
     includeObjects: schedule.includeObjects,
     dropTableIfExists: schedule.dropTableIfExists,
     outputCompression: schedule.outputCompression,
+    fileNamePattern: schedule.fileNamePattern,
   };
 }
 
@@ -169,6 +173,8 @@ export interface DatabaseBackupRun {
   displayName?: string;
   connectionId: string;
   connectionName: string;
+  /** Selected root used to constrain cleanup of custom-named backup files. */
+  destinationDirectory?: string;
   trigger: DatabaseBackupRunTrigger;
   source: DatabaseBackupRunSource;
   status: DatabaseBackupRunStatus;
@@ -251,6 +257,7 @@ export function normalizeDatabaseBackupSchedule(value: unknown, now = new Date()
     includeObjects: booleanValue(input.includeObjects, true),
     dropTableIfExists: booleanValue(input.dropTableIfExists, false),
     outputCompression: input.outputCompression === "gzip" ? "gzip" : "none",
+    fileNamePattern: normalizeDatabaseBackupFileNamePattern(input.fileNamePattern),
     retentionCount: normalizeDatabaseBackupRetention(input.retentionCount),
     runDirectoryPattern: normalizeDatabaseBackupRunDirectoryPattern(input.runDirectoryPattern),
     createdAt: validIsoDate(input.createdAt, nowIso),
@@ -316,6 +323,7 @@ export function normalizeDatabaseBackupRun(value: unknown): DatabaseBackupRun | 
     displayName: stringValue(input.displayName).trim() || undefined,
     connectionId: stringValue(input.connectionId).trim(),
     connectionName: stringValue(input.connectionName).trim(),
+    destinationDirectory: stringValue(input.destinationDirectory).trim() || undefined,
     trigger: input.trigger === "scheduled" ? "scheduled" : "manual",
     source: input.source === "one-shot" ? "one-shot" : "scheduled",
     status,
@@ -388,6 +396,10 @@ export function sanitizeDatabaseBackupFileSegment(value: string): string {
     .replace(/[\\/:*?"<>|]+/g, "_")
     .replace(/[. ]+$/g, "")
     .trim();
+  // Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9）不能作为文件名主体，补下划线规避。
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(sanitized)) {
+    return `${sanitized}_`;
+  }
   return sanitized || "database";
 }
 
@@ -429,6 +441,35 @@ export function databaseBackupRunDirectoryPatternIsValid(pattern: string): boole
   }
 }
 
+/**
+ * A file-name template stays within the selected output directory. Empty and
+ * legacy configurations retain the previous file-name format.
+ */
+export function normalizeDatabaseBackupFileNamePattern(value: unknown): string {
+  return stringValue(value).trim() || DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN;
+}
+
+export function databaseBackupFileNamePatternIsValid(pattern: string): boolean {
+  const raw = stringValue(pattern);
+  if (!raw.trim()) return true;
+  return raw === raw.trim() && !/[\\/:*?"<>|]/.test(raw) && !/[. ]$/.test(raw);
+}
+
+function renderDatabaseBackupFileNamePattern(pattern: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string): string {
+  const normalized = normalizeDatabaseBackupFileNamePattern(pattern);
+  const timestamp = databaseBackupTimestamp(startedAt);
+  const variables = {
+    "{schedule}": sanitizeDatabaseBackupFileSegment(scheduleName),
+    "{date}": timestamp.slice(0, 8),
+    "{timestamp}": timestamp,
+    "{database}": sanitizeDatabaseBackupFileSegment(fileStem),
+    "{runId}": sanitizeDatabaseBackupFileSegment(runId).slice(0, 8),
+  };
+  const rendered = Object.entries(variables).reduce((value, [token, replacement]) => value.replaceAll(token, replacement), normalized);
+  const requiredSuffixes = [normalized.includes("{database}") ? "" : variables["{database}"]].filter(Boolean);
+  return [sanitizeDatabaseBackupFileSegment(rendered), ...requiredSuffixes].join("__");
+}
+
 export function databaseBackupTimestamp(value: Date | string): string {
   const date = value instanceof Date ? value : new Date(value);
   const part = (number: number) => String(number).padStart(2, "0");
@@ -440,8 +481,8 @@ export function joinDatabaseBackupPath(directory: string, fileName: string): str
   return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
 }
 
-export function databaseBackupFilePath(directory: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string, outputCompression: DatabaseBackupOutputCompression = "none"): string {
+export function databaseBackupFilePath(directory: string, scheduleName: string, fileStem: string, startedAt: Date | string, runId: string, outputCompression: DatabaseBackupOutputCompression = "none", fileNamePattern?: string): string {
   const suffix = outputCompression === "gzip" ? ".sql.gz" : ".sql";
-  const fileName = `dbx-backup__${sanitizeDatabaseBackupFileSegment(scheduleName)}__${databaseBackupTimestamp(startedAt)}__${sanitizeDatabaseBackupFileSegment(fileStem)}__${sanitizeDatabaseBackupFileSegment(runId).slice(0, 8)}${suffix}`;
+  const fileName = `${renderDatabaseBackupFileNamePattern(fileNamePattern ?? DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN, scheduleName, fileStem, startedAt, runId)}${suffix}`;
   return joinDatabaseBackupPath(directory, fileName);
 }

@@ -120,6 +120,7 @@ import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
+import { createUiScaleApplyQueue } from "@/lib/app/uiScaleApplyQueue";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { savedSqlDefaultTargetForWrite } from "@/lib/savedSql/savedSqlExecutionTarget";
 import { countActiveUpdateBlockingTasks } from "@/lib/app/appUpdateTaskGuard";
@@ -968,6 +969,16 @@ function activateQuerySurface() {
   activateMainContentSurface("query");
 }
 
+function activateOpenSpecialPageFallback() {
+  if (settingsPageTabOpen.value) {
+    activateMainContentSurface("settings");
+    return;
+  }
+  if (driverStoreTabOpen.value) {
+    activateMainContentSurface("driverStore");
+  }
+}
+
 function closeSettingsPage() {
   settingsPageTabOpen.value = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
@@ -1078,15 +1089,21 @@ const saveSqlFolders = computed(() => {
   }));
 });
 
-async function applyUiScale(scale: number) {
-  if (!isDesktop) return;
-  try {
+const uiScaleApplyQueue = createUiScaleApplyQueue(
+  async (scale) => {
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     await getCurrentWebview().setZoom(scale);
+  },
+  (scale) => {
     window.dispatchEvent(new CustomEvent("dbx:ui-scale-applied", { detail: { scale } }));
-  } catch (error) {
+  },
+  (scale, error) => {
     console.warn("[DBX] Failed to apply UI scale", { scale, error });
-  }
+  },
+);
+
+function applyUiScale(scale: number) {
+  if (isDesktop) uiScaleApplyQueue.request(scale);
 }
 
 function setGlobalUiScale(scale: number) {
@@ -1172,6 +1189,7 @@ watch(
     }
     if (id) newQueryContextSource.value = "tab";
     if (id) activateQuerySurface();
+    else if (previousId) activateOpenSpecialPageFallback();
     selectedSql.value = "";
     activeOutputView.value = "result";
     if (id) queryStore.reloadEvictedTab(id);
@@ -1403,6 +1421,9 @@ function resolveToolbarTab(tabId?: string) {
 function formatActiveSql(tabId?: string) {
   const tab = resolveToolbarTab(tabId);
   if (!tab || tab.mode !== "query" || !tab.sql.trim()) return;
+  const connection = connectionStore.getConfig(tab.connectionId);
+  const databaseType = effectiveDatabaseTypeForConnection(connection) ?? connection?.db_type;
+  if (!canFormatSqlForDatabaseType(databaseType)) return;
   formatSqlRequest.value = {
     id: (formatSqlRequest.value?.id ?? 0) + 1,
     tabId: tab.id,

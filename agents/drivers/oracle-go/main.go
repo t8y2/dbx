@@ -30,7 +30,11 @@ import (
 const protocolVersion = 1
 const multiSessionProtocolVersion = 2
 const defaultMaxRows = 1000
-const oracleDefaultPrefetchRows = "100"
+
+// A normal data-grid page contains 100 rows. Prefetching a little more than
+// one page reduces round trips while reading subsequent pages without
+// buffering the much larger export limit.
+const oracleDefaultPrefetchRows = "256"
 const oracleCharsetZHS32GB18030 = 854
 const legacyAgentSessionID = "__legacy__"
 const maxAgentSessions = 256
@@ -3972,6 +3976,13 @@ func readQuerySessionPage(session *querySession, pageSize int) (result queryPage
 	}
 	if session.remaining <= 0 {
 		result.Truncated = true
+		return result, nil
+	}
+	// A full page is enough evidence that another page may exist. Do not read
+	// one extra row just to decide has_more: with a prefetch boundary this
+	// forces another Oracle round trip before the first page can be displayed.
+	if len(result.Rows) >= pageSize {
+		result.HasMore = true
 		return result, nil
 	}
 	if session.rows.Next() {

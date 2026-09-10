@@ -117,6 +117,10 @@ pub struct DatabaseExportRequest {
     pub omit_auto_increment: bool,
     #[serde(default)]
     pub fail_on_error: bool,
+    /// Refuse to truncate an existing destination. Scheduled backups enable
+    /// this because user-defined templates may resolve to a previous file.
+    #[serde(default)]
+    pub prevent_overwrite: bool,
     #[serde(default)]
     pub output_compression: DatabaseExportOutputCompression,
     #[serde(default)]
@@ -2698,8 +2702,20 @@ async fn create_database_export_writer(
     if let Some(parent) = export_destination_parent_dir(&request.file_path) {
         expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
     }
-    let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to write file: {e}"))?;
-    // The directory check above and this `File::create` are separate
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(!request.prevent_overwrite)
+        .create_new(request.prevent_overwrite)
+        .open(&request.file_path)
+        .map_err(|error| {
+            if request.prevent_overwrite && error.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("Backup file already exists: {}", request.file_path)
+            } else {
+                format!("Failed to write file: {error}")
+            }
+        })?;
+    // The directory check above and this file open are separate
     // operations: the mount can disappear and be replaced by something else
     // at the same path in between. Re-check the identity of the handle we
     // actually opened, not just the path, and refuse to keep a backup that
@@ -3869,11 +3885,11 @@ mod tests {
     };
     use super::{
         build_database_export_object_source_sql, build_database_sql_export, build_export_insert_statements,
-        database_export_query_options_for_timeout, database_export_select_sql, database_export_total_objects,
-        drop_table_if_exists_sql, ensure_export_destination_dir, export_destination_identity_mismatch,
-        filter_export_table_infos, format_export_sql_literal, format_export_table_ddl,
-        format_mysql_spatial_export_literal, format_xugu_spatial_export_literal, generate_postgres_extension_ddl,
-        generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
+        create_database_export_writer, database_export_query_options_for_timeout, database_export_select_sql,
+        database_export_total_objects, drop_table_if_exists_sql, ensure_export_destination_dir,
+        export_destination_identity_mismatch, filter_export_table_infos, format_export_sql_literal,
+        format_export_table_ddl, format_mysql_spatial_export_literal, format_xugu_spatial_export_literal,
+        generate_postgres_extension_ddl, generate_postgres_sequence_create_ddl, generate_postgres_sequence_owner_ddl,
         generate_postgres_sequence_setval_sql, is_postgres_extension_member_routine, mysql_database_export_preamble,
         mysql_view_dependencies_from_rows, mysql_view_dependencies_sql, normalize_export_table_ddl,
         record_export_destination_identity, record_export_error, replace_database_export_select_list,
@@ -4078,6 +4094,7 @@ mod tests {
             drop_table_if_exists: false,
             omit_auto_increment: false,
             fail_on_error: false,
+            prevent_overwrite: false,
             output_compression: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
@@ -4099,6 +4116,25 @@ mod tests {
         let mut output = String::new();
         flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut output).unwrap();
         assert_eq!(output, "SELECT 1;\n");
+    }
+
+    #[tokio::test]
+    async fn backup_writer_does_not_overwrite_an_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("existing.sql");
+        std::fs::write(&path, b"keep me").unwrap();
+        let state = Arc::new(test_app_state(directory.path()).await);
+        let mut request = export_request(true, true, true, Vec::new());
+        request.file_path = path.to_string_lossy().to_string();
+        request.prevent_overwrite = true;
+
+        let error = match create_database_export_writer(&state, &request).await {
+            Ok(_) => panic!("existing backup should not be overwritten"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
     }
 
     #[test]

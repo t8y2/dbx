@@ -3498,7 +3498,15 @@ function splitQualifiedNameRawParts(input: string): string[] {
       continue;
     }
     if (ch === "[" && !inDoubleQuote && !inBacktick) inBracket = true;
-    if (ch === "]" && inBracket) inBracket = false;
+    if (ch === "]" && inBracket) {
+      current += ch;
+      if (input[i + 1] === "]") {
+        current += input[++i];
+      } else {
+        inBracket = false;
+      }
+      continue;
+    }
     if (ch === "." && !inDoubleQuote && !inBacktick && !inBracket) {
       parts.push(current.trim());
       current = "";
@@ -3537,6 +3545,8 @@ export function quoteSqlIdentifier(identifier: string, dialect?: SqlCompletionAp
 }
 
 const POSTGRES_IDENTIFIER_KEYWORDS = new Set(SQL_KEYWORDS.map((keyword) => keyword.toLowerCase()));
+const SQLSERVER_IDENTIFIER_KEYWORDS = new Set(sqlDialectCompletionWords(MSSQL.spec.keywords).map((keyword) => keyword.toLowerCase()));
+const SQLSERVER_REGULAR_IDENTIFIER = /^[\p{L}_][\p{L}\p{Nd}_@$#]*$/u;
 
 // Unlike quoteSqlIdentifier (also used by the data grid condition editor, which
 // intentionally leaves MySQL identifiers unquoted and applies backticks itself
@@ -3547,14 +3557,19 @@ function quoteCompletionApplyIdentifier(identifier: string, dialect?: SqlComplet
     if (!requiresMysqlIdentifierQuote(identifier, POSTGRES_IDENTIFIER_KEYWORDS)) return identifier;
     return `\`${identifier.replaceAll("`", "``")}\``;
   }
+  if (dialect === "sqlserver") {
+    if (SQLSERVER_REGULAR_IDENTIFIER.test(identifier) && !requiresMysqlIdentifierQuote(identifier.toLowerCase(), SQLSERVER_IDENTIFIER_KEYWORDS)) return identifier;
+    const escaped = identifier.replaceAll("]", "]]");
+    return `[${escaped}]`;
+  }
   return quoteSqlIdentifier(identifier, dialect);
 }
 
 function quoteCompletionApplyName(applyName: string, dialect?: SqlCompletionApplyDialect): string {
-  if (dialect !== "mysql" && dialect !== "oracle") return applyName;
+  if (dialect !== "mysql" && dialect !== "oracle" && dialect !== "sqlserver") return applyName;
   const parts = splitQualifiedNameRawParts(applyName);
   if (parts.length === 0) return applyName;
-  return parts.map((part) => (isQuotedIdentifier(part) ? part : quoteCompletionApplyIdentifier(part, dialect))).join(".");
+  return parts.map((part) => ((dialect === "sqlserver" && !part) || isQuotedIdentifier(part) ? part : quoteCompletionApplyIdentifier(part, dialect))).join(".");
 }
 
 function quoteCompletionRoutineIdentifier(identifier: string, dialect?: SqlCompletionApplyDialect): string {
@@ -3640,7 +3655,8 @@ function buildTableItems(
     .map((table) => {
       const qualifiedByContext = !!qualifierSchema && !!table.schema && normalizeIdentifierPart(qualifierSchema) === normalizeIdentifierPart(table.schema);
       const { ambiguousTableName, defaultApplyName } = resolveTableSchemaQualification(table, dialect, databaseType, currentSchema, schemasByTableName);
-      const suppliedApplyName = table.applyName?.trim();
+      const rawSuppliedApplyName = table.applyName?.trim();
+      const suppliedApplyName = dialect === "sqlserver" && rawSuppliedApplyName ? quoteCompletionApplyName(rawSuppliedApplyName, dialect) : rawSuppliedApplyName;
       const suppliedApplyNameIsQualified = suppliedApplyName?.includes(".") === true;
       const applyName = qualifiedByContext ? quoteCompletionApplyIdentifier(table.name, dialect) : ambiguousTableName && !!table.schema && (!suppliedApplyName || !suppliedApplyNameIsQualified) ? defaultApplyName : (suppliedApplyName ?? defaultApplyName);
       const alias = autoAliasTables ? generateTableCompletionAlias(table.name, existingAliases) : "";

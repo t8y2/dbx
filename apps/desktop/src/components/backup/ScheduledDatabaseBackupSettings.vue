@@ -18,6 +18,9 @@ import { translateBackendError } from "@/i18n/backend-errors";
 import { generateDatabaseExportId } from "@/lib/export/databaseExport";
 import {
   DEFAULT_DATABASE_BACKUP_RUN_DIRECTORY_PATTERN,
+  DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN,
+  databaseBackupFileNamePatternIsValid,
+  databaseBackupFilePath,
   databaseBackupRunDirectory,
   databaseBackupRunDirectoryPatternIsValid,
   nextDatabaseBackupRunAt,
@@ -114,6 +117,7 @@ function newBackupConfig(connectionId = sqlConnections.value[0]?.id ?? ""): Data
     includeObjects: true,
     dropTableIfExists: false,
     outputCompression: "none",
+    fileNamePattern: DEFAULT_DATABASE_BACKUP_FILE_NAME_PATTERN,
   };
 }
 
@@ -155,18 +159,34 @@ const canSave = computed(() => {
   const hasContent = draft.value.includeStructure || draft.value.includeData || draft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = draft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
-  return !!draft.value.name.trim() && !!draft.value.connectionId && !!draft.value.destinationDirectory.trim() && databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") && hasContent && hasDatabaseScope && hasTableScope && !saving.value && !loadingDatabases.value;
+  return (
+    !!draft.value.name.trim() &&
+    !!draft.value.connectionId &&
+    !!draft.value.destinationDirectory.trim() &&
+    databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") &&
+    databaseBackupFileNamePatternIsValid(draft.value.fileNamePattern || "") &&
+    hasContent &&
+    hasDatabaseScope &&
+    hasTableScope &&
+    !saving.value &&
+    !loadingDatabases.value
+  );
 });
 const nextRunPreview = computed(() => nextDatabaseBackupRunAt(draft.value, new Date()));
-const runDirectoryPreview = computed(() => {
-  if (!draft.value.destinationDirectory.trim() || !databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "")) return "";
-  return databaseBackupRunDirectory(draft.value.destinationDirectory, draft.value.runDirectoryPattern || "", draft.value.name.trim() || t("databaseBackup.defaultScheduleName"), nextRunPreview.value, "preview01");
+const scheduleOutputPathPreview = computed(() => {
+  if (!draft.value.destinationDirectory.trim() || !databaseBackupRunDirectoryPatternIsValid(draft.value.runDirectoryPattern || "") || !databaseBackupFileNamePatternIsValid(draft.value.fileNamePattern || "")) return "";
+  const directory = databaseBackupRunDirectory(draft.value.destinationDirectory, draft.value.runDirectoryPattern || "", draft.value.name.trim() || t("databaseBackup.defaultScheduleName"), nextRunPreview.value, "preview01");
+  return databaseBackupFilePath(directory, draft.value.name.trim() || t("databaseBackup.defaultScheduleName"), "database", nextRunPreview.value, "preview01", draft.value.outputCompression, draft.value.fileNamePattern);
+});
+const oneShotOutputPathPreview = computed(() => {
+  if (!oneShotDraft.value.destinationDirectory.trim() || !databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "")) return "";
+  return databaseBackupFilePath(oneShotDraft.value.destinationDirectory, t("databaseBackup.oneShotName"), "database", new Date(), "preview01", oneShotDraft.value.outputCompression, oneShotDraft.value.fileNamePattern);
 });
 const canStartOneShot = computed(() => {
   const hasContent = oneShotDraft.value.includeStructure || oneShotDraft.value.includeData || oneShotDraft.value.includeObjects;
   const hasDatabaseScope = allDatabases.value || selectedDatabases.value.length > 0;
   const hasTableScope = oneShotDraft.value.tableFilterMode === "all" || normalizeDatabaseBackupTablePatterns(tablePatternsInput.value).length > 0;
-  return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
+  return !!oneShotDraft.value.connectionId && !!oneShotDraft.value.destinationDirectory.trim() && databaseBackupFileNamePatternIsValid(oneShotDraft.value.fileNamePattern || "") && hasContent && hasDatabaseScope && hasTableScope && !oneShotStarting.value && !loadingDatabases.value;
 });
 
 function connectionName(connectionId: string): string {
@@ -771,12 +791,12 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   </div>
 
   <Dialog v-model:open="scheduleDialogOpen">
-    <DialogContent class="dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-y-auto">
+    <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
       <DialogHeader>
         <DialogTitle>{{ editingScheduleId ? t("databaseBackup.editSchedule") : t("databaseBackup.addSchedule") }}</DialogTitle>
       </DialogHeader>
 
-      <div class="grid gap-5 py-1">
+      <div class="backup-schedule-form grid gap-5 py-1">
         <div class="space-y-2">
           <Label>{{ t("databaseBackup.scheduleName") }}</Label>
           <Input v-model="draft.name" />
@@ -791,23 +811,16 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
           :table-patterns-input="tablePatternsInput"
           :loading-databases="loadingDatabases"
           :database-load-error="databaseLoadError"
+          :run-directory-pattern="draft.runDirectoryPattern"
+          :run-directory-pattern-valid="databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')"
+          :output-path-preview="scheduleOutputPathPreview"
           @change-connection="changeConnection"
           @choose-destination="chooseDestination"
           @toggle-database="toggleDatabase"
           @update:all-databases="setAllDatabases"
           @update:table-patterns-input="(value: string) => (tablePatternsInput = value)"
+          @update:run-directory-pattern="(value: string) => (draft.runDirectoryPattern = value)"
         />
-
-        <div class="space-y-2">
-          <Label>{{ t("databaseBackup.runDirectoryPattern") }}</Label>
-          <Input v-model="draft.runDirectoryPattern" data-backup-run-directory-pattern :aria-invalid="!databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')" />
-          <p class="text-xs text-muted-foreground">{{ t("databaseBackup.runDirectoryPatternHint") }}</p>
-          <div v-if="runDirectoryPreview" data-backup-run-directory-preview class="space-y-1 rounded-md border border-border/70 bg-muted/30 px-3 py-2">
-            <div class="text-xs font-medium text-muted-foreground">{{ t("databaseBackup.runDirectoryPreview") }}</div>
-            <div class="break-all font-mono text-xs text-foreground">{{ runDirectoryPreview }}</div>
-          </div>
-          <p v-if="!databaseBackupRunDirectoryPatternIsValid(draft.runDirectoryPattern || '')" class="text-xs text-destructive">{{ t("databaseBackup.runDirectoryPatternInvalid") }}</p>
-        </div>
 
         <div class="grid gap-4 sm:grid-cols-3">
           <div class="space-y-2">
@@ -865,7 +878,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
   </Dialog>
 
   <Dialog v-model:open="oneShotDialogOpen">
-    <DialogContent class="dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-y-auto">
+    <DialogContent class="dbx-backup-dialog dbx-form-dialog dbx-form-dialog--lg max-h-[min(760px,calc(var(--dbx-viewport-height)-32px))] max-w-[min(720px,calc(100vw-32px))] overflow-x-hidden overflow-y-auto pr-8 [scrollbar-gutter:stable]">
       <DialogHeader>
         <DialogTitle>{{ t("databaseBackup.oneShotBackup") }}</DialogTitle>
         <p class="text-sm text-muted-foreground">{{ t("databaseBackup.oneShotDescription") }}</p>
@@ -880,6 +893,7 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
         :table-patterns-input="tablePatternsInput"
         :loading-databases="loadingDatabases"
         :database-load-error="databaseLoadError"
+        :output-path-preview="oneShotOutputPathPreview"
         @change-connection="changeConnection"
         @choose-destination="chooseDestination"
         @toggle-database="toggleDatabase"
@@ -949,3 +963,12 @@ function restoreBackup(run: DatabaseBackupRun, file: DatabaseBackupFile) {
     </DialogContent>
   </Dialog>
 </template>
+
+<style scoped>
+.backup-schedule-form {
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+</style>

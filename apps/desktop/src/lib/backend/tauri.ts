@@ -2427,8 +2427,8 @@ export async function revealPathInFileManager(path: string): Promise<void> {
   return invoke("reveal_path_in_file_manager", { path });
 }
 
-export async function deleteDatabaseBackupFiles(paths: string[]): Promise<number> {
-  return invoke("delete_database_backup_files", { paths });
+export async function deleteDatabaseBackupFiles(paths: string[], allowedRoots: string[] = []): Promise<number> {
+  return invoke("delete_database_backup_files", { paths, allowedRoots });
 }
 
 export async function isSqliteDatabaseFile(path: string): Promise<boolean> {
@@ -4644,7 +4644,6 @@ export interface TransferOwnershipPreview {
   rebuild?: {
     sql: string;
     tables: Array<{ sourceTable: string; targetTable: string; backupTable?: string }>;
-    warnings: string[];
   };
 }
 
@@ -4863,6 +4862,7 @@ export interface DatabaseExportRequest {
   dropTableIfExists?: boolean;
   omitAutoIncrement?: boolean;
   failOnError?: boolean;
+  preventOverwrite?: boolean;
   outputCompression?: "none" | "gzip";
   snapshotSessionId?: string;
   batchSize: number;

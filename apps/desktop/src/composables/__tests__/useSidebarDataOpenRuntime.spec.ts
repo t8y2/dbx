@@ -565,6 +565,58 @@ describe("useSidebarDataOpenRuntime", () => {
     expect(mocks.loadTableMetadata).not.toHaveBeenCalled();
   });
 
+  it("repairs a restored Oracle view tab that was persisted as a table", async () => {
+    mocks.databaseType = "oracle";
+    const viewNode = { ...tableNode, id: "view-users", type: "view" as const, tableType: undefined };
+    mocks.tabs.push({
+      id: "existing-view-tab",
+      connectionId: "connection-1",
+      database: "app",
+      title: "users",
+      mode: "data",
+      schema: "public",
+      sql: "SELECT * FROM users",
+      isDirty: false,
+      isExecuting: true,
+      executionId: "running-query",
+      isCancelling: false,
+      isExplaining: false,
+      tableMeta: {
+        schema: "public",
+        tableName: "users",
+        tableType: "TABLE",
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        primaryKeys: ["__DBX_ROWID"],
+      },
+      tableMetaUpdatedAt: Date.now(),
+      tableMetaGeneration: 0,
+    } as QueryTab);
+    mocks.loadTableMetadata.mockImplementationOnce(async (request: { database: string; schema?: string; tableName: string; tableType?: string }) => ({
+      metadata: {
+        schema: request.schema,
+        tableName: request.tableName,
+        tableType: request.tableType,
+        database: request.database,
+        columns: [{ name: "id", data_type: "bigint", is_nullable: false, column_default: null, is_primary_key: false, extra: null }],
+        indexes: [],
+        primaryKeys: [],
+        cachedAt: Date.now(),
+      },
+      cacheStatus: "miss",
+      ageMs: 0,
+    }));
+
+    await useSidebarDataOpenRuntime().openData(viewNode);
+
+    expect(mocks.tabs[0]?.tableMeta?.tableType).toBe("VIEW");
+    expect(mocks.cancelTabExecution).not.toHaveBeenCalled();
+    expect(mocks.executeTabSql).not.toHaveBeenCalled();
+    await vi.waitFor(() => {
+      expect(mocks.loadTableMetadata).toHaveBeenCalledWith(expect.objectContaining({ tableName: "users", tableType: "VIEW" }));
+      expect(mocks.tabs[0]?.tableMeta?.primaryKeys).toEqual([]);
+    });
+  });
+
   it("does not mark row identity pending on a warm metadata cache", async () => {
     mocks.cachedMetadata = {
       metadata: {

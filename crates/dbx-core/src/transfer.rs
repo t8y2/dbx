@@ -239,7 +239,6 @@ pub struct TransferOwnershipPreview {
 pub struct TransferRebuildPreview {
     pub sql: String,
     pub tables: Vec<TransferRebuildPreviewTable>,
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -900,6 +899,20 @@ async fn list_transfer_tables_isolated(
     });
     let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
     task.await.map_err(|error| format!("Transfer table metadata task failed: {error}"))?
+}
+
+async fn get_transfer_table_comment_isolated(
+    state: Arc<AppState>,
+    connection_id: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<Option<String>, String> {
+    let task = tokio::spawn(async move {
+        crate::schema::get_table_comment_core(&state, &connection_id, &database, &schema, &table).await
+    });
+    let _abort_on_drop = AbortTransferTaskOnDrop(task.abort_handle());
+    task.await.map_err(|error| format!("Transfer table comment task failed: {error}"))?
 }
 
 async fn resolve_transfer_target_table_name(
@@ -2048,7 +2061,12 @@ fn sqlserver_row_number_page_sql(
     )
 }
 
-fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<&str>) -> String {
+fn postgres_index_column_sql(
+    column: &str,
+    is_expression: bool,
+    opclass: Option<&str>,
+    key_options: Option<i16>,
+) -> String {
     // The base key text: a real column is quoted as an identifier; an expression/functional
     // key part arrives as raw expression text (the per-column `pg_get_indexdef` omits the
     // opclass — see `crates/dbx-core/src/db/postgres.rs`), so quoting the whole thing as
@@ -2057,9 +2075,17 @@ fn postgres_index_column_sql(column: &str, is_expression: bool, opclass: Option<
     // The opclass is read separately from `pg_index.indclass` for every key position
     // (including expression keys) and appended uniformly — it never lives inside the
     // expression text, so there is no duplication risk.
-    match opclass.filter(|o| !o.is_empty()) {
+    let with_opclass = match opclass.filter(|o| !o.is_empty()) {
         Some(opc) => format!("{base} {opc}"),
         None => base,
+    };
+    match key_options {
+        Some(options) => format!(
+            "{with_opclass} {} NULLS {}",
+            if options & 1 != 0 { "DESC" } else { "ASC" },
+            if options & 2 != 0 { "FIRST" } else { "LAST" }
+        ),
+        None => with_opclass,
     }
 }
 
@@ -2085,7 +2111,12 @@ fn generate_postgres_index_ddl(indexes: &[db::IndexInfo], table: &str, schema: &
             .map(|(i, column)| {
                 let is_expr = index.key_is_expression.get(i).copied().unwrap_or(false);
                 let opclass = index.column_opclasses.get(i).and_then(|o| o.as_deref());
-                postgres_index_column_sql(column, is_expr, opclass)
+                let key_options = index
+                    .index_type
+                    .as_deref()
+                    .filter(|index_type| index_type.eq_ignore_ascii_case("btree"))
+                    .and_then(|_| index.key_options.get(i).copied());
+                postgres_index_column_sql(column, is_expr, opclass, key_options)
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -2325,6 +2356,7 @@ struct PostgresTransferSequence {
     cycle: bool,
     cache_value: String,
     last_value: Option<String>,
+    is_called: Option<bool>,
 }
 
 fn postgres_sequence_qualified_name(schema: &str, sequence_name: &str) -> String {
@@ -2358,8 +2390,9 @@ fn generate_postgres_transfer_sequence_setval_sql(sequence: &PostgresTransferSeq
     if last_value.is_empty() {
         return None;
     }
+    let is_called = sequence.is_called.unwrap_or(true);
     Some(format!(
-        "SELECT setval({}, {last_value}, true)",
+        "SELECT setval({}, {last_value}, {is_called})",
         quote_postgres_string_literal(&postgres_sequence_qualified_name(schema, &sequence.name))
     ))
 }
@@ -3523,7 +3556,7 @@ fn generate_comment_ddl_with_column_quoting(
         if let Some(comment) = table_comment {
             let trimmed = comment.trim();
             if !trimmed.is_empty() {
-                let escaped = trimmed.replace('\'', "''");
+                let escaped = comment.replace('\'', "''");
                 statements.push(format!("COMMENT ON TABLE {full_table} IS '{escaped}'"));
             }
         }
@@ -3535,7 +3568,7 @@ fn generate_comment_ddl_with_column_quoting(
             if trimmed.is_empty() {
                 continue;
             }
-            let escaped = trimmed.replace('\'', "''");
+            let escaped = comment.replace('\'', "''");
             let qcol = transfer_column_identifier(&c.name, target_db, quote_target_column_names);
 
             match target_db {
@@ -4111,6 +4144,36 @@ fn rewrite_transfer_source_table_ddl(
     } else {
         sql.to_string()
     }
+}
+
+fn rewrite_postgres_serial_columns_for_transfer(
+    sql: &str,
+    sequences: &[PostgresOwnedSequence],
+    target_schema: &str,
+) -> String {
+    let mut rewritten = sql.to_string();
+    for sequence in sequences {
+        let quoted_column = quote_identifier(&sequence.owner_column, &DatabaseType::Postgres);
+        let qualified_sequence = postgres_sequence_qualified_name(target_schema, &sequence.name);
+        let default_clause =
+            format!("DEFAULT nextval({}::regclass)", quote_postgres_string_literal(&qualified_sequence));
+        for (serial_type, concrete_type) in
+            [("smallserial", "smallint"), ("serial", "integer"), ("bigserial", "bigint")]
+        {
+            let needle = format!("{quoted_column} {serial_type}");
+            let replacement = format!("{quoted_column} {concrete_type} {default_clause}");
+            if rewritten.contains(&needle) {
+                rewritten = rewritten.replacen(&needle, &replacement, 1);
+                break;
+            }
+            let uppercase_needle = format!("{quoted_column} {}", serial_type.to_ascii_uppercase());
+            if rewritten.contains(&uppercase_needle) {
+                rewritten = rewritten.replacen(&uppercase_needle, &replacement, 1);
+                break;
+            }
+        }
+    }
+    rewritten
 }
 
 fn mysql_spatial_transfer_select_sql(
@@ -5605,6 +5668,25 @@ async fn get_postgres_owned_sequences_for_transfer(
         .collect())
 }
 
+async fn get_postgres_sequence_names_for_transfer(
+    state: &AppState,
+    pool_key: &str,
+    schema: &str,
+) -> Result<Vec<String>, String> {
+    let sql = format!(
+        "SELECT c.relname FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relkind = 'S' AND n.nspname = {} ORDER BY c.relname",
+        quote_string_literal(schema)
+    );
+    Ok(execute_on_pool(state, pool_key, &sql)
+        .await?
+        .rows
+        .into_iter()
+        .filter_map(|row| json_string_cell(&row, 0))
+        .collect())
+}
+
 const POSTGRES_OWNED_SEQUENCES_SQL: &str = "SELECT c.relname, \
               t.relname, \
               a.attname \
@@ -5692,7 +5774,7 @@ async fn get_postgres_selected_sequences_for_transfer(
     let Some(sql) = postgres_selected_sequences_sql(schema, names) else {
         return Ok(Vec::new());
     };
-    Ok(execute_on_pool(state, pool_key, &sql)
+    let mut sequences = execute_on_pool(state, pool_key, &sql)
         .await?
         .rows
         .into_iter()
@@ -5707,9 +5789,26 @@ async fn get_postgres_selected_sequences_for_transfer(
                 cycle: json_string_cell(&row, 6).as_deref() == Some("true"),
                 cache_value: json_string_cell(&row, 7)?,
                 last_value: json_string_cell(&row, 8),
+                is_called: None,
             })
         })
-        .collect())
+        .collect::<Vec<_>>();
+    for sequence in &mut sequences {
+        let sql = format!(
+            "SELECT last_value::text, is_called::text FROM {}",
+            postgres_sequence_qualified_name(schema, &sequence.name)
+        );
+        let row = execute_on_pool(state, pool_key, &sql).await?.rows.into_iter().next();
+        if let Some(row) = row {
+            sequence.last_value = json_string_cell(&row, 0).or(sequence.last_value.take());
+            sequence.is_called = json_string_cell(&row, 1).and_then(|value| match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+        }
+    }
+    Ok(sequences)
 }
 
 async fn get_existing_postgres_sequence_names_for_transfer(
@@ -5761,6 +5860,14 @@ async fn prepare_postgres_owned_sequences_for_transfer(
         return Ok(Vec::new());
     }
 
+    let sequence_names = owned_sequences.iter().map(|sequence| sequence.name.clone()).collect::<Vec<_>>();
+    let definitions =
+        get_postgres_selected_sequences_for_transfer(state, source_pool_key, &request.source_schema, &sequence_names)
+            .await?
+            .into_iter()
+            .map(|sequence| (sequence.name.clone(), sequence))
+            .collect::<HashMap<_, _>>();
+
     let existing_sequences =
         get_postgres_sequence_snapshots_for_transfer(state, target_pool_key, &request.target_schema)
             .await?
@@ -5775,8 +5882,10 @@ async fn prepare_postgres_owned_sequences_for_transfer(
             &request.target_schema,
         )?;
         if should_create {
-            let create_sql =
-                format!("CREATE SEQUENCE {}", postgres_sequence_qualified_name(&request.target_schema, &sequence.name));
+            let definition = definitions
+                .get(&sequence.name)
+                .ok_or_else(|| format!("PostgreSQL sequence definition not found: {}", sequence.name))?;
+            let create_sql = generate_postgres_transfer_sequence_create_ddl(definition, &request.target_schema);
             execute_on_pool(state, target_pool_key, &create_sql)
                 .await
                 .map_err(|e| format!("Failed to create PostgreSQL sequence for {target_table}: {e}"))?;
@@ -6853,13 +6962,7 @@ async fn build_rebuild_preview(
         phases.push(format!("-- 3. Drop backups after success\n{}", drop_statements.join(";\n")));
     }
 
-    let warnings = if resolved.iter().any(|(_, _, preexisting)| !preexisting) {
-        vec!["Some target tables do not exist yet and will be created without a backup.".to_string()]
-    } else {
-        Vec::new()
-    };
-
-    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables, warnings })
+    Ok(TransferRebuildPreview { sql: phases.join("\n\n"), tables })
 }
 
 pub async fn preview_transfer_ownership(
@@ -8017,6 +8120,11 @@ async fn create_transfer_target_table(
     .await?;
     let reused_source_ddl = prepared.reused_source_ddl;
     let ddl = prepared.ddl;
+    let ddl = if pg_compat_transfer && !owned_sequences.is_empty() {
+        rewrite_postgres_serial_columns_for_transfer(&ddl, &owned_sequences, &request.target_schema)
+    } else {
+        ddl
+    };
     let deferred_fk_alters = prepared.deferred_fk_alters;
     log::info!("[transfer] creating target table: {}", ddl.chars().take(200).collect::<String>());
     let target_table_created = transfer_create_table_created(
@@ -8120,23 +8228,37 @@ where
             ),
         };
 
-    // Fetch source table comment. Keep this list-tables metadata chain on its
-    // own task stack, just like the target-table lookup above.
-    let table_comment = list_transfer_tables_isolated(
-        state.clone(),
-        request.source_connection_id.clone(),
-        request.source_database.clone(),
-        request.source_schema.clone(),
-        request.source_catalog.clone(),
-        *source_db_type,
-        table.to_string(),
-        1,
-    )
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .next()
-    .and_then(|table| table.comment);
+    // PostgreSQL's table list filter is fuzzy, so it cannot identify the
+    // requested table's comment when similarly named tables exist.
+    let table_comment = if *source_db_type == DatabaseType::Postgres {
+        get_transfer_table_comment_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            table.to_string(),
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        // Keep the list-tables metadata chain on its own task stack, just like
+        // the target-table lookup above.
+        list_transfer_tables_isolated(
+            state.clone(),
+            request.source_connection_id.clone(),
+            request.source_database.clone(),
+            request.source_schema.clone(),
+            request.source_catalog.clone(),
+            *source_db_type,
+            table.to_string(),
+            1,
+        )
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .and_then(|table| table.comment)
+    };
 
     // Get source columns (deduplicate by name).
     //
@@ -8984,7 +9106,11 @@ where
         get_postgres_extension_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
     let enum_types = get_postgres_enum_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
     let domains = get_postgres_domain_sources_for_transfer(state, source_pool_key, &request.source_schema).await?;
-    let selected_sequence_names = selected_postgres_sequence_names(request);
+    let selected_sequence_names = if request.objects.is_empty() {
+        get_postgres_sequence_names_for_transfer(state, source_pool_key, &request.source_schema).await?
+    } else {
+        selected_postgres_sequence_names(request)
+    };
     let selected_sequences = get_postgres_selected_sequences_for_transfer(
         state,
         source_pool_key,
@@ -9493,6 +9619,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -10931,6 +11058,7 @@ mod tests {
                 cycle: true,
                 cache_value: "7".into(),
                 last_value: Some("41".into()),
+                is_called: Some(true),
             };
 
             assert_eq!(
@@ -10940,6 +11068,12 @@ mod tests {
             assert_eq!(
                 generate_postgres_transfer_sequence_setval_sql(&sequence, "archive"),
                 Some("SELECT setval('\"archive\".\"biz_banner_id_seq\"', 41, true)".into())
+            );
+
+            let not_called = PostgresTransferSequence { is_called: Some(false), ..sequence.clone() };
+            assert_eq!(
+                generate_postgres_transfer_sequence_setval_sql(&not_called, "archive"),
+                Some("SELECT setval('\"archive\".\"biz_banner_id_seq\"', 41, false)".into())
             );
 
             let never_called = PostgresTransferSequence { last_value: None, ..sequence };
@@ -11596,16 +11730,20 @@ mod tests {
     #[test]
     fn postgres_comment_ddl_generates_column_and_table_comments() {
         let cols = vec![
-            db::ColumnInfo { comment: Some("主键".to_string()), ..test_column("id", "int") },
+            db::ColumnInfo { comment: Some(" 主键's ".to_string()), ..test_column("id", "int") },
             db::ColumnInfo { comment: Some("名称".to_string()), ..test_column("name", "varchar(100)") },
         ];
 
-        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some("项目表"));
+        let stmts = generate_comment_ddl(&cols, "items", "public", &DatabaseType::Postgres, Some(" 项目表 "));
 
-        assert_eq!(stmts.len(), 3);
-        assert!(stmts[0].contains("COMMENT ON TABLE \"public\".\"items\" IS '项目表'"));
-        assert!(stmts[1].contains("COMMENT ON COLUMN \"public\".\"items\".\"id\" IS '主键'"));
-        assert!(stmts[2].contains("COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'"));
+        assert_eq!(
+            stmts,
+            vec![
+                "COMMENT ON TABLE \"public\".\"items\" IS ' 项目表 '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"id\" IS ' 主键''s '".to_string(),
+                "COMMENT ON COLUMN \"public\".\"items\".\"name\" IS '名称'".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -12740,6 +12878,7 @@ mod tests {
             comment: Some("lookup index".to_string()),
             key_is_expression: vec![true],
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
         let foreign_keys = vec![
@@ -12794,6 +12933,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12818,6 +12958,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![None, None],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12848,6 +12989,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![true],
             column_opclasses: vec![Some("gin_trgm_ops".to_string())],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12873,6 +13015,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false, false],
             column_opclasses: vec![Some("text_pattern_ops".to_string()), None],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -12881,6 +13024,62 @@ mod tests {
         assert_eq!(
             sql,
             vec!["CREATE INDEX IF NOT EXISTS \"users_name_status_idx\" ON \"public\".\"users\" USING btree (\"name\" text_pattern_ops, \"status\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_preserves_per_key_ordering_and_include_columns() {
+        let indexes = vec![db::IndexInfo {
+            name: "event_order_idx".to_string(),
+            columns: vec![
+                "created_at".to_string(),
+                "tenant_id".to_string(),
+                "score".to_string(),
+                "lower(payload)".to_string(),
+            ],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: Some(vec!["payload".to_string()]),
+            comment: None,
+            key_is_expression: vec![false, false, false, true],
+            column_opclasses: vec![None, None, None, None],
+            key_options: vec![1, 0, 2, 3],
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "event_log", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"event_order_idx\" ON \"public\".\"event_log\" USING btree (\"created_at\" DESC NULLS LAST, \"tenant_id\" ASC NULLS LAST, \"score\" ASC NULLS FIRST, lower(payload) DESC NULLS FIRST) INCLUDE (\"payload\")".to_string()]
+        );
+    }
+
+    #[test]
+    fn postgres_index_ddl_ignores_access_method_options_for_non_btree_indexes() {
+        let indexes = vec![db::IndexInfo {
+            name: "events_payload_idx".to_string(),
+            columns: vec!["payload".to_string()],
+            is_unique: false,
+            is_primary: false,
+            filter: None,
+            index_type: Some("gin".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: vec![false],
+            column_opclasses: vec![None],
+            key_options: vec![3],
+            constraint_backed: false,
+        }];
+
+        let sql = generate_postgres_index_ddl(&indexes, "events", "public");
+
+        assert_eq!(
+            sql,
+            vec!["CREATE INDEX IF NOT EXISTS \"events_payload_idx\" ON \"public\".\"events\" USING gin (\"payload\")"
+                .to_string()]
         );
     }
 
@@ -12897,6 +13096,7 @@ mod tests {
             comment: None,
             key_is_expression: vec![false],
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         }];
 
@@ -13048,6 +13248,21 @@ mod tests {
             owner_sql,
             "ALTER SEQUENCE \"public\".\"it_quick_entry_id_seq\" OWNED BY \"public\".\"it_quick_entry\".\"id\""
                 .to_string()
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_rewrites_serial_columns_to_existing_sequences() {
+        let sequence = PostgresOwnedSequence {
+            name: "ticket_id_seq".into(),
+            owner_table: "ticket".into(),
+            owner_column: "id".into(),
+        };
+        let ddl = "CREATE TABLE \"src\".\"ticket\" (\n  \"id\" serial NOT NULL\n)";
+
+        assert_eq!(
+            rewrite_postgres_serial_columns_for_transfer(ddl, &[sequence], "dst"),
+            "CREATE TABLE \"src\".\"ticket\" (\n  \"id\" integer DEFAULT nextval('\"dst\".\"ticket_id_seq\"'::regclass) NOT NULL\n)"
         );
     }
 
@@ -14278,6 +14493,7 @@ SELECT 1 FROM dual"#
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

@@ -1713,7 +1713,7 @@ function parseExplainFromData(explainData: unknown, dbType: string): ParsedExpla
     return parseOracleExplainText(explainData);
   }
   if (!explainData || typeof explainData !== "object") return undefined;
-  const supportedTypes = ["mysql", "postgres", "dameng", "questdb"] as const;
+  const supportedTypes = ["mysql", "postgres", "dameng", "questdb", "doris"] as const;
   if (!supportedTypes.includes(dbType as (typeof supportedTypes)[number])) return undefined;
   try {
     return parseExplainResult(dbType as (typeof supportedTypes)[number], explainData as import("@/types/database").QueryResult);

@@ -178,6 +178,7 @@ pub async fn list_indexes(pool: &Pool, _schema: &str, table: &str) -> Result<Vec
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                key_options: Vec::new(),
                 constraint_backed: false,
             }
         })

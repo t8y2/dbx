@@ -32,6 +32,12 @@ export interface TabResultSnapshot {
   resultLocalSortOriginalMongoCopyDocuments?: QueryResult["mongo_copy_documents"];
   resultRuns?: QueryTab["resultRuns"];
   activeResultRunId?: string;
+  /**
+   * Logical-result identity for the tab-switch view snapshot cache. Required at
+   * the tab level because a data tab has no result run to carry it; query tabs
+   * additionally carry it per run through `resultRuns`.
+   */
+  resultViewGeneration?: string;
   queryAnalysis?: QueryTab["queryAnalysis"];
   querySourceColumns?: QueryTab["querySourceColumns"];
   queryWriteTargets?: QueryTab["queryWriteTargets"];
@@ -747,6 +753,7 @@ export function buildTabResultSnapshot(tab: QueryTab): TabResultSnapshot | undef
     resultLocalSortOriginalMongoCopyDocuments: tab.resultLocalSortOriginalMongoCopyDocuments ? clonePlain(tab.resultLocalSortOriginalMongoCopyDocuments) : undefined,
     resultRuns: stripResultRunSessionIds(tab.resultRuns),
     activeResultRunId: tab.activeResultRunId,
+    resultViewGeneration: tab.resultViewGeneration,
     queryAnalysis: tab.queryAnalysis ? clonePlain(tab.queryAnalysis) : undefined,
     querySourceColumns: tab.querySourceColumns ? [...tab.querySourceColumns] : undefined,
     queryWriteTargets: tab.queryWriteTargets?.map((target) => ({ ...target, sourceColumns: [...target.sourceColumns] })),

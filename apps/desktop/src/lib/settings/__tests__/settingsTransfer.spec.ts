@@ -137,6 +137,25 @@ describe("settingsTransfer", () => {
     expect(result.value.categories).toEqual(["appearance"]);
   });
 
+  it("round-trips persistent filter editor expansion as a data setting", () => {
+    const result = parseSettingsTransferFile(fileWith({ dataGridKeepFilterEditorExpanded: true }));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.editorSettings.dataGridKeepFilterEditorExpanded).toBe(true);
+    expect(result.value.categories).toEqual(["data"]);
+    expect(transferCategoryForKey("dataGridKeepFilterEditorExpanded")).toBe("data");
+  });
+
+  it("migrates the legacy auto-hide filter preference from older exports", () => {
+    const expanded = parseSettingsTransferFile(fileWith({ dataGridAutoHideFilterBuilder: false }));
+    expect(expanded.ok).toBe(true);
+    if (expanded.ok) expect(expanded.value.editorSettings.dataGridKeepFilterEditorExpanded).toBe(true);
+
+    const collapsed = parseSettingsTransferFile(fileWith({ dataGridAutoHideFilterBuilder: true }));
+    expect(collapsed.ok).toBe(true);
+    if (collapsed.ok) expect(collapsed.value.editorSettings.dataGridKeepFilterEditorExpanded).toBe(false);
+  });
+
   it("ignores unknown fields instead of importing them", () => {
     const result = parseSettingsTransferFile(
       fileWith({

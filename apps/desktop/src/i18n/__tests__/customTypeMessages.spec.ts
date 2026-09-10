@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import az from "@/i18n/locales/az";
 import en from "@/i18n/locales/en";
 import es from "@/i18n/locales/es";
 import itLocale from "@/i18n/locales/it";
@@ -14,7 +15,7 @@ type Messages = {
   contextMenu: typeof en.contextMenu;
 };
 
-const locales = { es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW } as unknown as Record<string, Messages>;
+const locales = { az, es, it: itLocale, ja, ko, "pt-BR": ptBR, tr, "zh-CN": zhCN, "zh-TW": zhTW } as unknown as Record<string, Messages>;
 
 describe("custom type translations", () => {
   it("provides localized labels in every supported non-English locale", () => {

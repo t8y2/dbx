@@ -995,6 +995,63 @@ test("replaces typed Unicode prefixes through semantic SQL Server completion", (
   }
 });
 
+test("brackets only SQL Server completion identifiers that require delimiters", () => {
+  const sql = "select * from ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "Orders", schema: "dbo", type: "table" },
+      { name: "名称", schema: "dbo", type: "table" },
+      { name: "04保险事前", schema: "dbo", type: "table" },
+      { name: "含]括号", schema: "dbo", type: "table" },
+      { name: "BACKUP", schema: "dbo", type: "table" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.deepEqual(Object.fromEntries(items.filter((item) => item.type === "table").map((item) => [item.label, item.apply])), {
+    Orders: "Orders",
+    名称: "名称",
+    "04保险事前": "[04保险事前]",
+    "含]括号": "[含]]括号]",
+    BACKUP: "[BACKUP]",
+  });
+});
+
+test("quotes qualified SQL Server table apply names", () => {
+  const sql = "select * from ";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [
+      { name: "04保险事前", schema: "dbo", type: "table", applyName: "dbo.04保险事前" },
+      { name: "04归档", schema: "dbo", type: "table", applyName: "dbo.[04归档]" },
+      { name: "04省略模式", schema: "dbo", type: "table", applyName: "datacenter..04省略模式" },
+      { name: "含].括号", schema: "dbo", type: "table", applyName: "dbo.[含]].括号]" },
+    ],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(items.find((item) => item.label === "04保险事前")?.apply, "dbo.[04保险事前]");
+  assert.equal(items.find((item) => item.label === "04归档")?.apply, "dbo.[04归档]");
+  assert.equal(items.find((item) => item.label === "04省略模式")?.apply, "datacenter..[04省略模式]");
+  assert.equal(items.find((item) => item.label === "含].括号")?.apply, "dbo.[含]].括号]");
+});
+
+test("quotes qualified SQL Server routine apply names", () => {
+  const sql = "select run";
+  const items = buildSqlCompletionItems(sql, sql.length, {
+    tables: [],
+    objects: [{ name: "run_report", schema: "dbo", type: "procedure", applyName: "dbo.04备份" }],
+    columnsByTable: new Map(),
+    databaseType: "sqlserver",
+    dialect: "sqlserver",
+  });
+
+  assert.equal(items.find((item) => item.label === "run_report")?.apply, "dbo.[04备份]()");
+});
+
 test("replaces a Unicode prefix inside an open SQL Server bracket identifier", () => {
   const sql = "select * from test where [名";
   const cursor = sql.length;

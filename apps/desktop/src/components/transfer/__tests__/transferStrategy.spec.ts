@@ -46,7 +46,6 @@ function preview(overrides: Partial<TransferOwnershipPreview> = {}): TransferOwn
     rebuild: {
       sql: 'ALTER TABLE "reporting"."orders" RENAME TO "orders__dbx_bak_123";\nCREATE TABLE "reporting"."orders" ("id" INTEGER);',
       tables: [{ sourceTable: "Orders", targetTable: '"reporting"."orders"', backupTable: '"reporting"."orders__dbx_bak_123"' }],
-      warnings: ["Target-only metadata will be replaced"],
     },
     ...overrides,
   };

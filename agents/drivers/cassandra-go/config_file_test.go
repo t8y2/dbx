@@ -52,6 +52,10 @@ datastax-java-driver {
     ssl-engine-factory {
       class = DefaultSslEngineFactory
       hostname-validation = false
+      truststore-path = /certs/client.truststore
+      truststore-password = trust-secret
+      keystore-path = /certs/client.keystore
+      keystore-password = key-secret
     }
   }
 }
@@ -109,6 +113,12 @@ datastax-java-driver {
 	}
 	if !config.ssl || config.hostVerification {
 		t.Fatalf("unexpected TLS config: %#v", config)
+	}
+	if config.truststorePath != filepath.Clean("/certs/client.truststore") || config.truststorePassword != "trust-secret" {
+		t.Fatalf("unexpected truststore config: %#v", config)
+	}
+	if config.keystorePath != filepath.Clean("/certs/client.keystore") || config.keystorePassword != "key-secret" {
+		t.Fatalf("unexpected keystore config: %#v", config)
 	}
 }
 

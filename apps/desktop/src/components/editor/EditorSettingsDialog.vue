@@ -67,6 +67,7 @@ import {
   normalizeAiHeaders,
   getAiProviderPreset,
   getAiProviderPresetId,
+  getAiProviderPresetDefaultEndpoint,
   getAiProviderPresetOption,
   isAiPartnerProviderPreset,
   type AiProvider,
@@ -217,8 +218,19 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { usePromptTemplateStore } from "@/stores/promptTemplateStore";
 import { useTunnelProfileStore } from "@/stores/tunnelProfileStore";
-import { currentLocale, setLocale, type Locale } from "@/i18n";
-import { SETTINGS_SEARCH_DEFINITIONS, TOOLBAR_VISIBILITY_ITEMS, createShortcutSettingsSearchDefinitions, resolveSettingsSearchEntries, searchSettings, toolbarVisibilityItemLabel, type SettingsCategory, type SettingsSearchEntry, type ToolbarVisibilityItem } from "@/lib/settings/settingsSearch";
+import { currentLocale, previewLocale, restoreLocalePreview, setLocale, type Locale } from "@/i18n";
+import {
+  SETTINGS_SEARCH_DEFINITIONS,
+  TOOLBAR_VISIBILITY_ITEMS,
+  createShortcutSettingsSearchDefinitions,
+  resolveSettingsCategory,
+  resolveSettingsSearchEntries,
+  searchSettings,
+  toolbarVisibilityItemLabel,
+  type SettingsCategory,
+  type SettingsSearchEntry,
+  type ToolbarVisibilityItem,
+} from "@/lib/settings/settingsSearch";
 import { LOCALE_OPTIONS } from "@/lib/app/localeOptions";
 import { DEFAULT_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES, DEFAULT_WEB_DAV_REMOTE_PATH, normalizedWebDavAutoUploadInterval, writeWebDavAutoUploadFields } from "@/lib/webdav/webdavAutoUploadConfig";
 import { apiUrl, webPath } from "@/lib/common/webPath";
@@ -236,7 +248,7 @@ import { METADATA_CACHE_HARD_MAX_MEMORY_MB, METADATA_CACHE_MIN_MEMORY_MB, normal
 import { databaseManifestEntry, manifestDatabaseTypes } from "@/lib/database/databaseDriverManifest";
 import { buildConnectionGroupIdPathMap, connectionGroupDestinationRows, connectionIdsInGroups } from "@/lib/sidebar/sidebarLayout";
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
@@ -272,6 +284,18 @@ function onUiFontFamilyOpenChange(open: boolean) {
   } else {
     restoreUiFontFamilyPreview();
   }
+}
+
+function previewLocaleOption(locale: Locale) {
+  void previewLocale(locale);
+}
+
+function restoreLocaleOptionPreview() {
+  void restoreLocalePreview();
+}
+
+function onLocaleOpenChange(open: boolean) {
+  if (!open) restoreLocaleOptionPreview();
 }
 
 const appThemePaletteOptions = computed(
@@ -505,7 +529,7 @@ const editShowIndexIndicatorsInHeader = ref(settingsStore.editorSettings.showInd
 const editCompactColumnHeaderActions = ref(settingsStore.editorSettings.compactColumnHeaderActions);
 const editDataGridQuickEntry = ref(settingsStore.editorSettings.dataGridQuickEntry);
 const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore.editorSettings.dataGridFilterEditorView);
-const editDataGridAutoHideFilterBuilder = ref(settingsStore.editorSettings.dataGridAutoHideFilterBuilder);
+const editDataGridKeepFilterEditorExpanded = ref(settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
 const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsStore.editorSettings.multiStatementDefaultView);
@@ -731,7 +755,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     compactColumnHeaderActions: editCompactColumnHeaderActions.value,
     dataGridQuickEntry: editDataGridQuickEntry.value,
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
-    dataGridAutoHideFilterBuilder: editDataGridAutoHideFilterBuilder.value,
+    dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
     multiStatementDefaultView: editMultiStatementDefaultView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
@@ -1228,7 +1252,7 @@ function syncEditorSettingsDraftFromStore() {
   editCompactColumnHeaderActions.value = settingsStore.editorSettings.compactColumnHeaderActions;
   editDataGridQuickEntry.value = settingsStore.editorSettings.dataGridQuickEntry;
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
-  editDataGridAutoHideFilterBuilder.value = settingsStore.editorSettings.dataGridAutoHideFilterBuilder;
+  editDataGridKeepFilterEditorExpanded.value = settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
   editMultiStatementDefaultView.value = settingsStore.editorSettings.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
@@ -1344,7 +1368,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   compactColumnHeaderActions: editCompactColumnHeaderActions,
   dataGridQuickEntry: editDataGridQuickEntry,
   dataGridFilterEditorView: editDataGridFilterEditorView,
-  dataGridAutoHideFilterBuilder: editDataGridAutoHideFilterBuilder,
+  dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded,
   dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight,
   multiStatementDefaultView: editMultiStatementDefaultView,
   dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow,
@@ -1442,6 +1466,7 @@ watch(
     } else {
       clearThemePalettePreview();
       clearUiFontFamilyPreview();
+      restoreLocaleOptionPreview();
     }
   },
   { immediate: true },
@@ -1453,6 +1478,7 @@ watch(
     if (isSettingsPage.value && !active) {
       clearThemePalettePreview();
       clearUiFontFamilyPreview();
+      restoreLocaleOptionPreview();
     }
   },
   { immediate: true },
@@ -1648,6 +1674,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editAppCloseUnsavedTabsMode.value = DEFAULT_EDITOR_SETTINGS.appCloseUnsavedTabsMode;
     editSavedSqlOpenTargetMode.value = DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode;
     editShowTableDdlHoverPreview.value = DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview;
+    editExternalSqlEditorMaxMb.value = DEFAULT_EDITOR_SETTINGS.externalSqlEditorMaxMb;
     editClickTableNavigationTarget.value = DEFAULT_EDITOR_SETTINGS.clickTableNavigationTarget;
     editSqlVariableSubstitutionEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled;
     editSqlVariableSyntaxOverrides.value = normalizeSqlVariableSyntaxOverrides(DEFAULT_EDITOR_SETTINGS.sqlVariableSyntaxOverrides);
@@ -1710,7 +1737,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
     editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
-    editDataGridAutoHideFilterBuilder.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoHideFilterBuilder;
+    editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
     editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
@@ -1721,7 +1748,6 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editTableOpenPageSize.value = DEFAULT_EDITOR_SETTINGS.tableOpenPageSize;
     editQueryResultMaxRowsEnabled.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRowsEnabled;
     editQueryResultMaxRows.value = DEFAULT_EDITOR_SETTINGS.queryResultMaxRows;
-    editExternalSqlEditorMaxMb.value = DEFAULT_EDITOR_SETTINGS.externalSqlEditorMaxMb;
     editInfiniteScroll.value = DEFAULT_EDITOR_SETTINGS.infiniteScroll;
     editRegexMaxMatchCount.value = DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount;
     editAutoCalculateTotalRows.value = DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows;
@@ -1798,7 +1824,7 @@ function resetAllDefaults() {
   editCompactColumnHeaderActions.value = DEFAULT_EDITOR_SETTINGS.compactColumnHeaderActions;
   editDataGridQuickEntry.value = DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry;
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
-  editDataGridAutoHideFilterBuilder.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoHideFilterBuilder;
+  editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
   editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
@@ -2073,6 +2099,12 @@ function onLocaleChange(v: any) {
   if (typeof v === "string") void setLocale(v as Locale);
 }
 
+function onUiScaleChange(value: unknown) {
+  const next = Number(value);
+  if (!Number.isFinite(next)) return;
+  editUiScale.value = next;
+}
+
 function onUpdateDownloadSourceChange(v: any) {
   if (v === "official" || v === "cnb") editUpdateDownloadSource.value = v;
 }
@@ -2191,7 +2223,6 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   { value: "formatter", label: t("settings.sqlFormatterTab") },
   { value: "navigation", label: t("settings.navigationTab") },
   { value: "data", label: t("settings.dataTab") },
-  { value: "sqlFile", label: t("settings.sqlFileSizeTab") },
   ...(isWeb ? [] : [{ value: "backups" as const, label: t("databaseBackup.title") }]),
   { value: "tunnels", label: t("settings.tunnelsTab") },
   { value: "shortcuts", label: t("settings.shortcutsTab") },
@@ -2202,7 +2233,7 @@ const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[
   ...(isWeb ? [{ value: "security" as const, label: t("settings.securityTab") }] : []),
   { value: "about", label: t("settings.aboutTab") },
 ]);
-const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "sqlFile", "shortcuts", "snippets"]);
+const settingsTabsWithApplyFooter = new Set<SettingsCategory>(["editor", "formatter", "appearance", "navigation", "data", "shortcuts", "snippets"]);
 
 function hasSettingsApplyFooter(value: SettingsCategory): boolean {
   return settingsTabsWithApplyFooter.has(value);
@@ -3505,7 +3536,7 @@ watch(
       mcpPolicyLoadError.value = "";
       aiConfigListMode.value = "list";
       aiEditConfigId.value = null;
-      activeSettingsTab.value = props.initialTab || "appearance";
+      activeSettingsTab.value = resolveSettingsCategory(props.initialTab);
       passwordMessage.value = "";
       oldPassword.value = "";
       newPassword.value = "";
@@ -3575,7 +3606,7 @@ watch(
   () => props.initialTab,
   (tab) => {
     if (!settingsVisible.value || !tab) return;
-    activeSettingsTab.value = tab;
+    activeSettingsTab.value = resolveSettingsCategory(tab);
     void scrollToInitialSettingsSection();
   },
 );
@@ -3584,7 +3615,7 @@ watch(
   () => props.navigationRequestId,
   () => {
     if (!settingsVisible.value || !props.initialTab) return;
-    activeSettingsTab.value = props.initialTab;
+    activeSettingsTab.value = resolveSettingsCategory(props.initialTab);
     void scrollToInitialSettingsSection();
   },
 );
@@ -3630,7 +3661,7 @@ watch(activeSettingsTab, async (tab) => {
     await promptTemplateStore.ensureLoaded();
     editGlobalInstructions.value = promptTemplateStore.globalInstructions;
   }
-  if (tab === "sqlFile" && isWeb) void loadWebSqlFileUploadMaxMbSetting();
+  if (tab === "data" && isWeb) void loadWebSqlFileUploadMaxMbSetting();
   if (tab === "about" && !appSupportInfo.value) void refreshAppSupportInfo();
   if (tab === "appearance") {
     checkLayoutDescTruncation();
@@ -3669,6 +3700,7 @@ onMounted(() => {
 onUnmounted(() => {
   clearThemePalettePreview();
   clearUiFontFamilyPreview();
+  restoreLocaleOptionPreview();
   cleanupTableColumnTemplatePointerDrag();
   cleanupTruncationObservers();
 });
@@ -4337,7 +4369,7 @@ function aiSelectProvider(presetId: string) {
   aiEditProvider.value = provider;
   aiEditApiKey.value = "";
   aiEditAuthMethod.value = preset.authMethod;
-  aiEditEndpoint.value = preset.endpoint;
+  aiEditEndpoint.value = getAiProviderPresetDefaultEndpoint(preset, locale.value);
   aiEditModel.value = preset.group === "partner" ? preset.model : "";
   aiEditLegacyModels.value = preset.group === "partner" ? [...(preset.models ?? [])] : [];
   aiEditApiStyle.value = preset.apiStyle;
@@ -5176,7 +5208,7 @@ onUnmounted(() => {
               </div>
 
               <div class="grid grid-cols-2 gap-2 lg:grid-cols-4" data-editor-preview-controls>
-                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                <div class="settings-item flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
                   <div class="flex min-w-0 items-center gap-1">
                     <Label for="editor-show-statement-run-buttons" class="truncate text-xs">{{ t("settings.showStatementRunButtons") }}</Label>
                     <HelpTooltip :label="t('settings.showStatementRunButtons')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
@@ -5186,7 +5218,7 @@ onUnmounted(() => {
                   <Switch id="editor-show-statement-run-buttons" v-model="editShowStatementRunButtons" size="sm" />
                 </div>
 
-                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                <div class="settings-item flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
                   <div class="flex min-w-0 items-center gap-1">
                     <Label for="editor-show-line-numbers" class="truncate text-xs">{{ t("settings.showLineNumbers") }}</Label>
                     <HelpTooltip :label="t('settings.showLineNumbers')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
@@ -5196,7 +5228,7 @@ onUnmounted(() => {
                   <Switch id="editor-show-line-numbers" v-model="editShowLineNumbers" size="sm" />
                 </div>
 
-                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                <div class="settings-item flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
                   <div class="flex min-w-0 items-center gap-1">
                     <Label for="editor-show-current-statement-frame" class="truncate text-xs">{{ t("settings.showCurrentStatementFrame") }}</Label>
                     <HelpTooltip :label="t('settings.showCurrentStatementFrame')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
@@ -5206,7 +5238,7 @@ onUnmounted(() => {
                   <Switch id="editor-show-current-statement-frame" v-model="editShowCurrentStatementFrame" size="sm" />
                 </div>
 
-                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                <div class="settings-item flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
                   <div class="flex min-w-0 items-center gap-1">
                     <Label for="editor-sql-semantic-diagnostics" class="truncate text-xs">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
                     <HelpTooltip :label="t('settings.sqlSemanticDiagnosticsEnabled')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
@@ -5216,7 +5248,7 @@ onUnmounted(() => {
                   <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" size="sm" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
                 </div>
 
-                <div class="flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                <div class="settings-item flex min-w-0 items-center justify-between gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
                   <div class="flex min-w-0 items-center gap-1">
                     <Label for="editor-show-table-ddl-hover-preview" class="truncate text-xs">{{ t("settings.showTableDdlHoverPreview") }}</Label>
                     <HelpTooltip :label="t('settings.showTableDdlHoverPreview')" trigger-class="[&_svg]:h-3 [&_svg]:w-3" content-class="max-w-64">
@@ -5230,7 +5262,7 @@ onUnmounted(() => {
               <Separator />
 
               <div class="grid gap-4 md:grid-cols-2" data-editor-execution-settings>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-execute-mode>
                   <div class="min-w-0 space-y-1">
                     <Label>{{ executeModeLabel }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5248,7 +5280,7 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-default-transaction-mode>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-default-transaction-mode>
                   <div class="min-w-0 space-y-1">
                     <Label for="editor-default-transaction-mode">{{ t("settings.defaultTransactionMode") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5266,7 +5298,7 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">
                   <div class="space-y-1">
                     <Label for="editor-execute-all-on-blank-line">{{ t("settings.executeAllOnBlankLine") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5276,7 +5308,7 @@ onUnmounted(() => {
                   <Switch id="editor-execute-all-on-blank-line" v-model="editExecuteAllOnBlankLine" :disabled="editExecuteMode !== 'current'" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-execution-target-picker">{{ t("settings.showExecutionTargetPicker") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5286,7 +5318,7 @@ onUnmounted(() => {
                   <Switch id="editor-show-execution-target-picker" v-model="editShowExecutionTargetPicker" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5296,7 +5328,7 @@ onUnmounted(() => {
                   <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-continue-on-error">{{ t("settings.continueOnErrorOnBatch") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5310,7 +5342,7 @@ onUnmounted(() => {
               <Separator />
 
               <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" data-editor-sql-completion-settings>
-                <div class="flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode>
+                <div class="settings-item flex items-start justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" data-editor-completion-trigger-mode>
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.completionTriggerMode") }}</Label>
                     <p class="text-xs leading-tight text-muted-foreground">
@@ -5329,7 +5361,7 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-select-first-completion-on-open">{{ t("settings.selectFirstCompletionOnOpen") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5339,7 +5371,7 @@ onUnmounted(() => {
                   <Switch id="editor-select-first-completion-on-open" v-model="editSelectFirstCompletionOnOpen" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-auto-close-brackets">{{ t("settings.autoCloseBrackets") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5349,7 +5381,7 @@ onUnmounted(() => {
                   <Switch id="editor-auto-close-brackets" v-model="editAutoCloseBrackets" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-insert-space-after-completion">{{ t("settings.insertSpaceAfterCompletion") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5359,7 +5391,7 @@ onUnmounted(() => {
                   <Switch id="editor-insert-space-after-completion" v-model="editInsertSpaceAfterCompletion" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-sort-completion-columns-alphabetically">{{ t("settings.sortCompletionColumnsAlphabetically") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5369,7 +5401,7 @@ onUnmounted(() => {
                   <Switch id="editor-sort-completion-columns-alphabetically" v-model="editSortCompletionColumnsAlphabetically" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-auto-alias-tables">{{ t("settings.autoAliasTables") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5383,7 +5415,7 @@ onUnmounted(() => {
               <Separator />
 
               <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]" data-editor-other-settings>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-show-insert-value-hints">{{ t("settings.showInsertValueHints") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5393,7 +5425,7 @@ onUnmounted(() => {
                   <Switch id="editor-show-insert-value-hints" v-model="editShowInsertValueHints" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-word-wrap">{{ t("settings.wordWrap") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5403,7 +5435,7 @@ onUnmounted(() => {
                   <Switch id="editor-word-wrap" v-model="editWordWrap" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-vim-mode">{{ t("settings.vimMode") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5413,7 +5445,7 @@ onUnmounted(() => {
                   <Switch id="editor-vim-mode" v-model="editVimModeEnabled" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="regex-max-match-count">{{ t("settings.regexMaxMatchCount") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.regexMaxMatchCountDescription") }}</p>
@@ -5433,7 +5465,7 @@ onUnmounted(() => {
               <Separator />
 
               <div class="grid gap-3 md:grid-cols-2">
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2">
                   <div class="min-w-0 space-y-1">
                     <Label for="editor-saved-sql-open-target">{{ t("settings.savedSqlOpenTarget") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5451,7 +5483,7 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
-                <div class="rounded-md border bg-muted/20 p-3 md:col-span-2" data-editor-unsaved-sql-settings>
+                <div class="settings-item rounded-md border bg-muted/20 p-3 md:col-span-2" data-editor-unsaved-sql-settings>
                   <div class="grid gap-4 md:grid-cols-2">
                     <div class="flex min-w-0 items-start justify-between gap-4">
                       <div class="min-w-0 space-y-1">
@@ -5488,7 +5520,7 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="generate-sql-include-database-name">{{ t("settings.generateSqlIncludeDatabaseName") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5498,7 +5530,7 @@ onUnmounted(() => {
                   <Switch id="generate-sql-include-database-name" v-model="editGenerateSqlIncludeDatabaseName" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="generate-sql-quote-identifiers">{{ t("settings.generateSqlQuoteIdentifiers") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5508,7 +5540,7 @@ onUnmounted(() => {
                   <Switch id="generate-sql-quote-identifiers" v-model="editGenerateSqlQuoteIdentifiers" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="format-sql-on-sql-file-save">{{ t("settings.formatSqlOnSqlFileSave") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -5551,7 +5583,7 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <div class="grid gap-3 md:grid-cols-2">
-                  <div v-for="key in SQL_VARIABLE_SYNTAX_KEYS" :key="key" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': !editSqlVariableSubstitutionEnabled }">
+                  <div v-for="key in SQL_VARIABLE_SYNTAX_KEYS" :key="key" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': !editSqlVariableSubstitutionEnabled }">
                     <div class="min-w-0 space-y-1">
                       <Label :for="`sql-var-syntax-${key}`" class="flex items-center gap-1.5">
                         <span class="font-mono text-xs text-primary">{{ SQL_VARIABLE_SYNTAX_TOKENS[key] }}</span>
@@ -5563,6 +5595,34 @@ onUnmounted(() => {
                     </div>
                     <Switch :id="`sql-var-syntax-${key}`" :model-value="sqlVariableSyntaxToggle(key)" :disabled="!editSqlVariableSubstitutionEnabled" class="mt-0.5 shrink-0" @update:model-value="(value) => setSqlVariableSyntaxToggle(key, value as boolean)" />
                   </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div data-settings-search-id="editor-sql-file" :class="['space-y-3', settingsSearchTargetClass('editor-sql-file')]">
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.sqlFileSection") }}
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="external-sql-editor-max-mb">
+                      {{ t("settings.externalSqlEditorMaxMb") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.externalSqlEditorMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
+                    </p>
+                  </div>
+                  <Input
+                    id="external-sql-editor-max-mb"
+                    type="number"
+                    inputmode="numeric"
+                    class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                    :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
+                    :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
+                    :model-value="editExternalSqlEditorMaxMb"
+                    @input="updateExternalSqlEditorMaxMbInput"
+                  />
                 </div>
               </div>
             </section>
@@ -5650,7 +5710,7 @@ onUnmounted(() => {
                   <div class="flex h-9 items-end">
                     <Label class="whitespace-normal leading-tight">{{ t("settings.languageTitle") }}</Label>
                   </div>
-                  <Select :model-value="currentLocale()" @update:model-value="onLocaleChange">
+                  <Select :model-value="currentLocale()" @update:model-value="onLocaleChange" @update:open="onLocaleOpenChange">
                     <SelectTrigger class="h-8 w-full gap-0.5 px-0.5">
                       <SelectValue>
                         <span v-if="selectedLocaleOption" class="flex min-w-0 items-center gap-0.5">
@@ -5661,8 +5721,8 @@ onUnmounted(() => {
                         </span>
                       </SelectValue>
                     </SelectTrigger>
-                    <SelectContent class="w-[150px]">
-                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value">
+                    <SelectContent class="w-[150px]" @pointerleave="restoreLocaleOptionPreview">
+                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value" @pointerenter="previewLocaleOption(locale.value)" @focus="previewLocaleOption(locale.value)">
                         <div class="flex items-center gap-1">
                           <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
                             {{ locale.flag }}
@@ -5719,15 +5779,7 @@ onUnmounted(() => {
                       </HelpTooltip>
                     </div>
                   </div>
-                  <Select
-                    :model-value="String(editUiScale)"
-                    @update:model-value="
-                      (value: any) => {
-                        const next = Number(value);
-                        if (Number.isFinite(next)) editUiScale = next;
-                      }
-                    "
-                  >
+                  <Select :model-value="String(editUiScale)" @update:model-value="onUiScaleChange">
                     <SelectTrigger class="h-8 w-full">
                       <SelectValue>{{ Math.round(editUiScale * 100) }}%</SelectValue>
                     </SelectTrigger>
@@ -5773,6 +5825,7 @@ onUnmounted(() => {
                     :trigger-class="appearanceFontSearchTriggerClass"
                     :trigger-icon-class="appearanceFontSearchTriggerIconClass"
                     content-class="w-[var(--reka-popover-trigger-width)] min-w-[260px]"
+                    :content-style="{ fontFamily: editUiFontFamily || DEFAULT_UI_FONT_FAMILY }"
                     @update:model-value="onUiFontFamilyChange"
                     @update:open="onUiFontFamilyOpenChange"
                     @option-hover="previewUiFontOption"
@@ -5992,7 +6045,7 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div v-if="!isWeb" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="show-tray-icon">{{ t("settings.showTrayIcon") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6002,7 +6055,7 @@ onUnmounted(() => {
                 <Switch id="show-tray-icon" v-model="editShowTrayIcon" />
               </div>
 
-              <div v-if="!isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div v-if="!isWeb" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="quit-on-close">{{ t("settings.quitOnClose") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6012,7 +6065,7 @@ onUnmounted(() => {
                 <Switch id="quit-on-close" v-model="editQuitOnClose" />
               </div>
 
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="update-notifications-enabled">{{ t("settings.updateNotificationsEnabled") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6022,7 +6075,7 @@ onUnmounted(() => {
                 <Switch id="update-notifications-enabled" v-model="editUpdateNotificationsEnabled" />
               </div>
 
-              <div v-if="!isWeb" class="flex flex-col gap-3 rounded-md border bg-muted/20 px-3 py-2">
+              <div v-if="!isWeb" class="settings-item flex flex-col gap-3 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center justify-between gap-4">
                   <div class="space-y-1">
                     <Label for="debug-logging-enabled">{{ t("settings.debugLoggingEnabled") }}</Label>
@@ -6135,7 +6188,7 @@ onUnmounted(() => {
                     <p>{{ t("settings.toolbarHiddenHint") }}</p>
                   </HelpTooltip>
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border border-border/60 p-3">
                   <div class="space-y-1">
                     <Label for="exclusive-right-sidebar-panels" class="text-sm cursor-pointer">{{ t("settings.exclusiveRightSidebarPanels") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -6179,7 +6232,7 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-browse-objects-on-database-activation">{{ t("settings.sidebarBrowseObjectsOnDatabaseActivation") }}</Label>
                   <HelpTooltip :label="t('settings.sidebarBrowseObjectsOnDatabaseActivation')">
@@ -6249,7 +6302,7 @@ onUnmounted(() => {
                   </Button>
                 </div>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="open-data-tabs-next-to-active">{{ t("settings.openDataTabsNextToActive") }}</Label>
                   <HelpTooltip :label="t('settings.openDataTabsNextToActive')">
@@ -6328,7 +6381,7 @@ onUnmounted(() => {
                 </div>
               </div>
               <div class="grid gap-3 md:grid-cols-2">
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-click-table-navigation-ddl">{{ t("settings.clickTableNavigationTarget") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -6338,7 +6391,7 @@ onUnmounted(() => {
                   <Switch id="editor-click-table-navigation-ddl" :model-value="editClickTableNavigationTarget === 'ddl'" @update:model-value="editClickTableNavigationTarget = $event ? 'ddl' : 'data'" class="mt-0.5" />
                 </div>
 
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="editor-prefill-new-query">{{ t("settings.prefillNewQueryWithSelect") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -6348,7 +6401,7 @@ onUnmounted(() => {
                   <Switch id="editor-prefill-new-query" v-model="editPrefillNewQueryWithSelect" class="mt-0.5" />
                 </div>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-table-search-enabled">{{ t("settings.sidebarTableSearchEnabled") }}</Label>
                   <HelpTooltip :label="t('settings.sidebarTableSearchEnabled')">
@@ -6357,7 +6410,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="sidebar-table-search-enabled" v-model="editSidebarTableSearchEnabled" />
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="auto-select-active-sidebar-node">{{ t("settings.autoSelectActiveSidebarNode") }}</Label>
                   <HelpTooltip :label="t('settings.autoSelectActiveSidebarNode')">
@@ -6366,7 +6419,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="auto-select-active-sidebar-node" v-model="editAutoSelectActiveSidebarNode" />
               </div>
-              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="open-tabs-restore-mode">{{ t("settings.openTabsRestoreMode") }}</Label>
                   <HelpTooltip :label="t('settings.openTabsRestoreMode')">
@@ -6387,7 +6440,7 @@ onUnmounted(() => {
                   {{ t("settings.openTabsRestoreModeHint") }}
                 </p>
               </div>
-              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
                   <HelpTooltip :label="t('settings.disconnectTabHandlingMode')">
@@ -6412,7 +6465,7 @@ onUnmounted(() => {
                   {{ t(`settings.${disconnectTabHandlingModeDescriptionKey}`) }}
                 </p>
               </div>
-              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-object-info-mode">{{ t("settings.sidebarObjectInfoMode") }}</Label>
                   <HelpTooltip :label="t('settings.sidebarObjectInfoMode')">
@@ -6432,7 +6485,7 @@ onUnmounted(() => {
                   </SelectContent>
                 </Select>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-allow-horizontal-scroll">
                     {{ t("settings.sidebarAllowHorizontalScroll") }}
@@ -6443,7 +6496,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="sidebar-allow-horizontal-scroll" v-model="editSidebarAllowHorizontalScroll" />
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
                   <Label for="sidebar-show-tooltips">
                     {{ t("settings.sidebarShowTooltips") }}
@@ -6454,7 +6507,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="sidebar-show-tooltips" v-model="editSidebarShowTooltips" />
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-indent">{{ t("settings.sidebarIndent") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6477,7 +6530,7 @@ onUnmounted(() => {
                   "
                 />
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-font-size">{{ t("settings.sidebarFontSize") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6512,7 +6565,7 @@ onUnmounted(() => {
                   {{ t("settings.sidebarHiddenTablePrefixesDescription") }}
                 </p>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-copy-table-name-separator">{{ t("settings.sidebarCopyTableNameSeparator") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6537,7 +6590,7 @@ onUnmounted(() => {
                   </SelectContent>
                 </Select>
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-copy-table-name-include-schema">{{ t("settings.sidebarCopyTableNameIncludeSchema") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6546,7 +6599,7 @@ onUnmounted(() => {
                 </div>
                 <Switch id="sidebar-copy-table-name-include-schema" v-model="editSidebarCopyTableNameIncludeSchema" class="mt-0.5" />
               </div>
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+              <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="space-y-1">
                   <Label for="sidebar-table-page-size">{{ t("settings.sidebarTablePageSize") }}</Label>
                   <p class="text-xs text-muted-foreground">
@@ -6631,12 +6684,12 @@ onUnmounted(() => {
                       <span class="truncate">{{ t("grid.filterTextView") }}</span>
                     </Button>
                   </div>
-                  <div class="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
+                  <div v-if="editDataGridFilterEditorView !== 'quick'" class="settings-item flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
                     <div class="space-y-1">
-                      <Label for="data-grid-auto-hide-filter-builder">{{ t("settings.dataGridAutoHideFilterBuilder") }}</Label>
-                      <p class="text-xs text-muted-foreground">{{ t("settings.dataGridAutoHideFilterBuilderDescription") }}</p>
+                      <Label for="data-grid-keep-filter-editor-expanded">{{ t("settings.dataGridKeepFilterEditorExpanded") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.dataGridKeepFilterEditorExpandedDescription") }}</p>
                     </div>
-                    <Switch id="data-grid-auto-hide-filter-builder" v-model="editDataGridAutoHideFilterBuilder" />
+                    <Switch id="data-grid-keep-filter-editor-expanded" v-model="editDataGridKeepFilterEditorExpanded" />
                   </div>
                 </div>
 
@@ -6714,7 +6767,7 @@ onUnmounted(() => {
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dataGridDisplay") }}
                 </div>
-                <div data-settings-search-id="data-grid-type-colors" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-type-colors')]">
+                <div data-settings-search-id="data-grid-type-colors" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('data-grid-type-colors')]">
                   <div class="space-y-1 min-w-0">
                     <Label>{{ t("settings.dataGridTypeColorScheme") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -6729,7 +6782,7 @@ onUnmounted(() => {
                     </Button>
                   </div>
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="table-open-page-size">
                       {{ t("settings.tableOpenPageSize") }}
@@ -6740,7 +6793,7 @@ onUnmounted(() => {
                   </div>
                   <Input id="table-open-page-size" type="number" inputmode="numeric" class="h-7 w-24 px-2 text-left text-xs tabular-nums" :min="MIN_RESULT_PAGE_SIZE" :max="MAX_RESULT_PAGE_SIZE" :model-value="editTableOpenPageSize" @update:model-value="updateTableOpenPageSizeDraft" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="query-page-size">
                       {{ t("settings.queryPageSize") }}
@@ -6761,7 +6814,7 @@ onUnmounted(() => {
                     @update:model-value="updatePageSizeDraft"
                   />
                 </div>
-                <div data-settings-search-id="multi-statement-default-view" :class="['flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
+                <div data-settings-search-id="multi-statement-default-view" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
                   <div class="min-w-0 space-y-1">
                     <Label for="multi-statement-default-view">{{ t("settings.multiStatementDefaultView") }}</Label>
                     <p class="text-xs text-muted-foreground">{{ t("settings.multiStatementDefaultViewDescription") }}</p>
@@ -6776,7 +6829,7 @@ onUnmounted(() => {
                     </SelectContent>
                   </Select>
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="query-result-max-rows-enabled">
                       {{ t("settings.queryResultMaxRows") }}
@@ -6801,7 +6854,7 @@ onUnmounted(() => {
                     <Switch id="query-result-max-rows-enabled" v-model="editQueryResultMaxRowsEnabled" :aria-label="t('settings.queryResultMaxRowsEnabled')" />
                   </div>
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="infinite-scroll">
                       {{ t("settings.infiniteScroll") }}
@@ -6812,7 +6865,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="infinite-scroll" v-model="editInfiniteScroll" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="auto-calculate-total-rows">
                       {{ t("settings.autoCalculateTotalRows") }}
@@ -6823,7 +6876,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="auto-calculate-total-rows" v-model="editAutoCalculateTotalRows" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="show-column-comments-in-header">
                       {{ t("settings.showColumnCommentsInHeader") }}
@@ -6834,7 +6887,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="show-column-comments-in-header" v-model="editShowColumnCommentsInHeader" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="show-column-types-in-header">
                       {{ t("settings.showColumnTypesInHeader") }}
@@ -6845,7 +6898,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="show-column-types-in-header" v-model="editShowColumnTypesInHeader" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-show-transpose-field-metadata">
                       {{ t("settings.dataGridShowTransposeFieldMetadata") }}
@@ -6856,7 +6909,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="data-grid-show-transpose-field-metadata" v-model="editDataGridShowTransposeFieldMetadata" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="colorize-data-grid-cell-types">
                       {{ t("settings.colorizeDataGridCellTypes") }}
@@ -6867,7 +6920,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="colorize-data-grid-cell-types" v-model="editColorizeDataGridCellTypes" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="show-index-indicators-in-header">
                       {{ t("settings.showIndexIndicatorsInHeader") }}
@@ -6878,7 +6931,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="show-index-indicators-in-header" v-model="editShowIndexIndicatorsInHeader" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="compact-column-header-actions">
                       {{ t("settings.compactColumnHeaderActions") }}
@@ -6889,7 +6942,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="compact-column-header-actions" v-model="editCompactColumnHeaderActions" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-quick-entry">
                       {{ t("settings.dataGridQuickEntry") }}
@@ -6900,7 +6953,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="data-grid-quick-entry" v-model="editDataGridQuickEntry" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-auto-transpose-single-row">
                       {{ t("settings.dataGridAutoTransposeSingleRow") }}
@@ -6911,7 +6964,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="data-grid-auto-transpose-single-row" v-model="editDataGridAutoTransposeSingleRow" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-cell-detail-button-visible">
                       {{ t("settings.dataGridCellDetailButtonVisible") }}
@@ -6922,7 +6975,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="data-grid-cell-detail-button-visible" v-model="editDataGridCellDetailButtonVisible" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="data-grid-crosshair-highlight">
                       {{ t("settings.dataGridCrosshairHighlight") }}
@@ -6933,7 +6986,7 @@ onUnmounted(() => {
                   </div>
                   <Switch id="data-grid-crosshair-highlight" v-model="editDataGridCrosshairHighlight" />
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="flattening-multi-line">
                       {{ t("settings.flatteningMultiLineText") }}
@@ -6949,7 +7002,7 @@ onUnmounted(() => {
               <template v-if="!isWeb">
                 <div class="space-y-3">
                   <div class="text-sm font-medium text-muted-foreground">DuckDB</div>
-                  <div class="space-y-3 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="settings-item space-y-3 rounded-md border bg-muted/20 px-3 py-2">
                     <div class="flex items-start justify-between gap-4">
                       <div class="space-y-1">
                         <Label for="duckdb-worker-process-isolation">
@@ -7001,7 +7054,7 @@ onUnmounted(() => {
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.dateTimeSection") }}
                 </div>
-                <div class="grid gap-3 rounded-md border bg-muted/20 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(220px,0.8fr)] sm:items-center">
+                <div class="settings-item grid gap-3 rounded-md border bg-muted/20 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(220px,0.8fr)] sm:items-center">
                   <div>
                     <Label>{{ t("settings.globalDateTimeDisplayFormat") }}</Label>
                     <p class="mt-1 text-xs text-muted-foreground">
@@ -7151,11 +7204,45 @@ onUnmounted(() => {
 
               <Separator />
 
+              <div v-if="isWeb" data-settings-search-id="data-sql-file-upload" :class="['space-y-3', settingsSearchTargetClass('data-sql-file-upload')]">
+                <div class="text-sm font-medium text-muted-foreground">
+                  {{ t("settings.sqlFileSection") }}
+                </div>
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'settings-item-disabled': !webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbLoading }">
+                  <div class="space-y-1">
+                    <Label for="web-sql-file-upload-max-mb">
+                      {{ t("settings.webSqlFileUploadMaxMb") }}
+                    </Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.webSqlFileUploadMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <Input
+                      id="web-sql-file-upload-max-mb"
+                      v-model.number="editWebSqlFileUploadMaxMb"
+                      type="number"
+                      inputmode="numeric"
+                      class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
+                      :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
+                      :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
+                      :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbLoading"
+                      :aria-invalid="webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)"
+                    />
+                    <Button type="button" size="sm" variant="outline" :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbSaving || webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)" @click="saveWebSqlFileUploadMaxMbSetting">
+                      {{ t("settings.save") }}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
               <div data-settings-search-id="data-performance" :class="['space-y-3', settingsSearchTargetClass('data-performance')]">
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.performanceSection") }}
                 </div>
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="min-w-0 space-y-1">
                     <Label for="metadata-cache-memory-limit">{{ t("settings.metadataCacheMemoryLimit") }}</Label>
                     <p class="text-xs text-muted-foreground">
@@ -7175,7 +7262,7 @@ onUnmounted(() => {
                 <div class="text-sm font-medium text-muted-foreground">
                   {{ t("settings.tableStructureSection") }}
                 </div>
-                <div ref="tableColumnTemplateSectionRef" data-settings-search-id="table-column-templates" :class="['space-y-2 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('table-column-templates')]">
+                <div ref="tableColumnTemplateSectionRef" data-settings-search-id="table-column-templates" :class="['settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('table-column-templates')]">
                   <div class="flex items-start justify-between gap-3">
                     <div class="space-y-1">
                       <Label>{{ t("settings.tableColumnTemplateFields") }}</Label>
@@ -7274,55 +7361,6 @@ onUnmounted(() => {
                       </tbody>
                     </table>
                   </div>
-                </div>
-              </div>
-            </section>
-
-            <section v-else-if="activeSettingsTab === 'sqlFile'" data-settings-search-id="sqlFile" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('sqlFile')]">
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="external-sql-editor-max-mb">
-                    {{ t("settings.externalSqlEditorMaxMb") }}
-                  </Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.externalSqlEditorMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
-                  </p>
-                </div>
-                <Input
-                  id="external-sql-editor-max-mb"
-                  type="number"
-                  inputmode="numeric"
-                  class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
-                  :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
-                  :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
-                  :model-value="editExternalSqlEditorMaxMb"
-                  @input="updateExternalSqlEditorMaxMbInput"
-                />
-              </div>
-              <div v-if="isWeb" class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="web-sql-file-upload-max-mb">
-                    {{ t("settings.webSqlFileUploadMaxMb") }}
-                  </Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.webSqlFileUploadMaxMbDescription", { min: MIN_EXTERNAL_SQL_EDITOR_FILE_MB, max: MAX_EXTERNAL_SQL_EDITOR_FILE_MB }) }}
-                  </p>
-                </div>
-                <div class="flex shrink-0 items-center gap-2">
-                  <Input
-                    id="web-sql-file-upload-max-mb"
-                    v-model.number="editWebSqlFileUploadMaxMb"
-                    type="number"
-                    inputmode="numeric"
-                    class="h-7 w-[130px] px-2 text-left text-xs tabular-nums"
-                    :min="MIN_EXTERNAL_SQL_EDITOR_FILE_MB"
-                    :max="MAX_EXTERNAL_SQL_EDITOR_FILE_MB"
-                    :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbLoading"
-                    :aria-invalid="webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)"
-                  />
-                  <Button type="button" size="sm" variant="outline" :disabled="!webSqlFileUploadMaxMbLoaded || webSqlFileUploadMaxMbSaving || webSqlFileUploadMaxMbOutOfRange(editWebSqlFileUploadMaxMb)" @click="saveWebSqlFileUploadMaxMbSetting">
-                    {{ t("settings.save") }}
-                  </Button>
                 </div>
               </div>
             </section>
@@ -7618,7 +7656,7 @@ LIMIT 100;</pre
                         {{ t("settings.syncRemotePathDescription") }}
                       </p>
                     </div>
-                    <div class="space-y-2 md:col-span-2 rounded-md border bg-muted/20 px-3 py-3">
+                    <div class="settings-item space-y-2 md:col-span-2 rounded-md border bg-muted/20 px-3 py-3">
                       <label class="flex items-center gap-2 text-xs">
                         <input v-model="webdavAutoUploadEnabled" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
                         <span class="font-medium">{{ t("settings.syncAutoUpload") }}</span>
@@ -7775,7 +7813,7 @@ LIMIT 100;</pre
                 </TabsContent>
               </Tabs>
 
-              <div class="mt-5 space-y-3 rounded-md border bg-muted/20 px-3 py-3">
+              <div class="settings-item mt-5 space-y-3 rounded-md border bg-muted/20 px-3 py-3">
                 <div class="flex items-center justify-between gap-4">
                   <div class="space-y-1">
                     <Label for="sync-secrets">{{ t("settings.syncSecrets") }}</Label>
@@ -7924,7 +7962,7 @@ LIMIT 100;</pre
               <!-- Restore last AI conversation (list mode, global) -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-3">
                 <Separator />
-                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
                   <div class="space-y-1">
                     <Label for="ai-restore-last-conversation">
                       {{ t("ai.restoreLastConversation") }}
@@ -8483,7 +8521,7 @@ LIMIT 100;</pre
                         </div>
 
                         <div v-if="!isWeb" class="space-y-4">
-                          <div class="rounded-md border bg-muted/20 p-4">
+                          <div class="settings-item rounded-md border bg-muted/20 p-4" :class="{ 'settings-item-disabled': mcpHttpLoading || mcpHttpSaving }">
                             <div class="flex items-start justify-between gap-4">
                               <div class="space-y-1">
                                 <div class="flex items-center gap-2">
@@ -9179,7 +9217,7 @@ LIMIT 100;</pre
 
               <ChangelogPanel :checking-updates="props.checkingUpdates" @check-updates="emit('check-updates')" />
 
-              <div class="rounded-lg border p-4">
+              <div class="settings-item rounded-lg border p-4">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0 space-y-1">
                     <Label>{{ t("settings.updateDownloadSource") }}</Label>
@@ -9588,6 +9626,24 @@ LIMIT 100;</pre
 
 .settings-option-stack > * + * {
   margin-top: 0.625rem;
+}
+
+.settings-item:not(.settings-item-disabled):not(.opacity-50) {
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out;
+}
+
+.settings-item:not(.settings-item-disabled):not(.opacity-50):hover {
+  border-color: var(--muted-foreground);
+  background-color: var(--muted);
+}
+
+@supports (background: color-mix(in oklab, black, white)) {
+  .settings-item:not(.settings-item-disabled):not(.opacity-50):hover {
+    border-color: color-mix(in oklab, var(--border) 80%, var(--muted-foreground));
+    background-color: color-mix(in oklab, var(--muted) 40%, var(--background));
+  }
 }
 
 .settings-editor-live-preview {

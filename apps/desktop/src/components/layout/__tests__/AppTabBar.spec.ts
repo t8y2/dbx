@@ -14,6 +14,7 @@ describe("AppTabBar shared group navigation", () => {
     expect(tabBarSource).not.toContain("data-return-tab");
     expect(tabBarSource).not.toContain("createRenameDuplicateTabItems");
     expect(groupSource).toContain("<Teleport defer");
+    expect(groupSource).toContain("if (!tabBarPortal?.active.value) return undefined;");
     expect(groupSource).toContain(':disabled="!tabBarPortal?.active.value || !tabBarTarget"');
   });
 

@@ -437,7 +437,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 
-  it("previews the rendered run directory and updates it when the template changes", async () => {
+  it("previews the rendered output path and updates it when the directory template changes", async () => {
     mocks.connections.push({ id: "mysql-1", name: "Local MySQL", db_type: "mysql" });
     await mountSettings();
 
@@ -446,7 +446,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     buttonWithTitle(String(i18n.global.t("databaseBackup.selectDestination"))).click();
     await flush();
 
-    const preview = currentDialog().querySelector<HTMLElement>("[data-backup-run-directory-preview]");
+    const preview = currentDialog().querySelector<HTMLElement>("[data-backup-output-path-preview]");
     expect(preview?.textContent).toContain("/backups/dbx-backup__");
     expect(preview?.textContent).toContain("preview0");
 
@@ -457,7 +457,7 @@ describe("ScheduledDatabaseBackupSettings schedule dialog", () => {
     await flush();
 
     expect(currentDialog().textContent).toContain("{timestamp}");
-    expect(currentDialog().querySelector<HTMLElement>("[data-backup-run-directory-preview]")?.textContent).toContain("/backups/archive/");
+    expect(currentDialog().querySelector<HTMLElement>("[data-backup-output-path-preview]")?.textContent).toContain("/backups/archive/");
   });
 
   it("opens an independent one-shot dialog without schedule fields", async () => {

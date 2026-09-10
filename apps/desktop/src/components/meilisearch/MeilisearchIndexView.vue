@@ -5,6 +5,7 @@ import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 import "dayjs/locale/zh-cn";
 import "dayjs/locale/zh-tw";
+import "dayjs/locale/az";
 import "dayjs/locale/es";
 import "dayjs/locale/it";
 import "dayjs/locale/ja";
@@ -23,6 +24,7 @@ import MeilisearchTasksPage from "./MeilisearchTasksPage.vue";
 dayjs.extend(relativeTime);
 
 const DAYJS_LOCALES: Record<string, string> = {
+  az: "az",
   "zh-CN": "zh-cn",
   "zh-TW": "zh-tw",
   "pt-BR": "pt-br",

@@ -1,6 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { SETTINGS_SEARCH_DEFINITIONS, TOOLBAR_VISIBILITY_ITEMS, createShortcutSettingsSearchDefinitions, createToolbarVisibilitySettingsSearchDefinitions, resolveSettingsSearchEntries, searchSettings, type SettingsCategory, type SettingsSearchDefinition } from "@/lib/settings/settingsSearch";
+import {
+  SETTINGS_SEARCH_DEFINITIONS,
+  TOOLBAR_VISIBILITY_ITEMS,
+  createShortcutSettingsSearchDefinitions,
+  createToolbarVisibilitySettingsSearchDefinitions,
+  resolveSettingsCategory,
+  resolveSettingsSearchEntries,
+  searchSettings,
+  type SettingsCategory,
+  type SettingsSearchDefinition,
+} from "@/lib/settings/settingsSearch";
 
 const settingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 
@@ -78,6 +88,41 @@ describe("settings search", () => {
     expect(settingsDialogSource).toContain('v-model="editMultiStatementDefaultView"');
   });
 
+  it("places SQL file limits in their owning settings categories", () => {
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "sql-file-editor-max-mb",
+      category: "editor",
+      titleKey: "settings.externalSqlEditorMaxMb",
+      descriptionKey: "settings.externalSqlEditorMaxMbDescription",
+      targetId: "editor-sql-file",
+    });
+    expect(SETTINGS_SEARCH_DEFINITIONS).toContainEqual({
+      id: "sql-file-web-upload-max-mb",
+      category: "data",
+      titleKey: "settings.webSqlFileUploadMaxMb",
+      descriptionKey: "settings.webSqlFileUploadMaxMbDescription",
+      targetId: "data-sql-file-upload",
+      visible: expect.any(Function),
+    });
+
+    const desktopEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: false, visibleCategories: new Set<SettingsCategory>(["editor", "data"]) }, translate, categoryLabels);
+    const webEntries = resolveSettingsSearchEntries(SETTINGS_SEARCH_DEFINITIONS, { isWeb: true, visibleCategories: new Set<SettingsCategory>(["editor", "data"]) }, translate, categoryLabels);
+    expect(desktopEntries.map((entry) => entry.id)).toContain("sql-file-editor-max-mb");
+    expect(desktopEntries.map((entry) => entry.id)).not.toContain("sql-file-web-upload-max-mb");
+    expect(webEntries.map((entry) => entry.id)).toEqual(expect.arrayContaining(["sql-file-editor-max-mb", "sql-file-web-upload-max-mb"]));
+    expect(settingsDialogSource).toContain('data-settings-search-id="editor-sql-file"');
+    expect(settingsDialogSource).toContain('data-settings-search-id="data-sql-file-upload"');
+  });
+
+  it("maps legacy SQL file settings navigation to the editor", () => {
+    expect(resolveSettingsCategory("sqlFile")).toBe("editor");
+    expect(resolveSettingsCategory()).toBe("appearance");
+    expect(resolveSettingsCategory("removed-category")).toBe("appearance");
+    expect(settingsDialogSource).not.toContain('value: "sqlFile"');
+    expect(settingsDialogSource).not.toContain("activeSettingsTab === 'sqlFile'");
+    expect(settingsDialogSource).toMatch(/if \(tab === "data" && isWeb\) void loadWebSqlFileUploadMaxMbSetting\(\)/);
+  });
+
   it("matches translated title, description, and category without changing declared order", () => {
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: allCategories }, translate, categoryLabels);
     expect(searchSettings(entries, "TYPEFACE", "en").map((entry) => entry.id)).toEqual(["font"]);
@@ -101,7 +146,7 @@ describe("settings search", () => {
   });
 
   it("defines the WebDAV Web-runtime notice in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       expect(source, locale).toContain("syncWebDavWebDescription:");
     }
@@ -212,7 +257,7 @@ describe("settings search", () => {
   });
 
   it("defines the performance section title in every supported locale", () => {
-    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr"]) {
+    for (const locale of ["zh-CN", "zh-TW", "en", "es", "it", "ja", "ko", "pt-BR", "tr", "az"]) {
       const source = readFileSync(new URL(`../../../i18n/locales/${locale}.ts`, import.meta.url), "utf8");
       expect(source, locale).toContain("performanceSection:");
     }

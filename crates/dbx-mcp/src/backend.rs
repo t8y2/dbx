@@ -694,6 +694,17 @@ impl DbxBackend for LocalBackend {
     }
 
     async fn list_databases(&self, connection: &ConnectionConfig) -> Result<Vec<String>, String> {
+        if connection.db_type == DatabaseType::MongoDb {
+            if self.state.pool_handle(&connection.id).await.is_none() {
+                self.state.get_or_create_pool(&connection.id, None).await?;
+            }
+            if matches!(self.state.pool_handle(&connection.id).await, Some(dbx_core::connection::PoolKind::MongoDb(_)))
+            {
+                return dbx_core::mongo_ops::mongo_list_databases_core(&self.state, &connection.id).await;
+            }
+            // Keep the existing metadata retry path for MongoDB agent pools.
+        }
+
         // `list_databases_core` supports many database engines and therefore
         // produces a very large future. Boxing it here keeps the async-trait
         // implementation below Rust's type-layout recursion limit in desktop

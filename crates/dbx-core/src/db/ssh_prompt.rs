@@ -24,6 +24,8 @@ use uuid::Uuid;
 pub enum SshPromptKind {
     /// Confirm/deny a server host key (explicit TOFU).
     HostKeyVerify,
+    /// Confirm replacing a previously saved host key that no longer matches.
+    HostKeyChanged,
     /// Collect a secret typed by the user (e.g. a dynamic verification code).
     SecretInput,
     /// Confirm uploading the SQLite worker binary onto the file host.
@@ -41,9 +43,12 @@ pub struct SshPromptRequest {
     /// HostKeyVerify: key algorithm, e.g. `ssh-ed25519`.
     #[serde(default)]
     pub key_type: Option<String>,
-    /// HostKeyVerify: SHA256 fingerprint string, e.g. `SHA256:xxxx`.
+    /// HostKeyVerify / HostKeyChanged: SHA256 fingerprint string, e.g. `SHA256:xxxx`.
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// HostKeyChanged: previously saved SHA256 fingerprint for comparison.
+    #[serde(default)]
+    pub previous_fingerprint: Option<String>,
     /// SecretInput: the challenge text to show the user.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -109,6 +114,28 @@ pub fn host_key_verify_request(
         port,
         key_type,
         fingerprint,
+        previous_fingerprint: None,
+        prompt: None,
+        echo: false,
+    }
+}
+
+/// Build a [`SshPromptRequest`] for a changed-host-key confirmation.
+pub fn host_key_changed_request(
+    host: &str,
+    port: u16,
+    key_type: Option<String>,
+    fingerprint: Option<String>,
+    previous_fingerprint: Option<String>,
+) -> SshPromptRequest {
+    SshPromptRequest {
+        id: Uuid::new_v4().to_string(),
+        kind: SshPromptKind::HostKeyChanged,
+        host: host.to_string(),
+        port,
+        key_type,
+        fingerprint,
+        previous_fingerprint,
         prompt: None,
         echo: false,
     }
@@ -123,6 +150,7 @@ pub fn secret_input_request(host: &str, port: u16, prompt: String, echo: bool) -
         port,
         key_type: None,
         fingerprint: None,
+        previous_fingerprint: None,
         prompt: Some(prompt),
         echo,
     }

@@ -441,6 +441,26 @@ WHERE a.id = b.fk_kpi_set_score_id`,
     expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["id", "user_name"]);
   });
 
+  it("keeps projected aliases from a multiline derived table", () => {
+    const { items } = semanticCompletion(
+      `SELECT
+  t.DEPTNO,
+  t.|
+FROM (
+  SELECT
+    DEPTNO,
+    AVG(SAL) avg_sal,
+    RANK() OVER (ORDER BY AVG(SAL) DESC) AS rnk
+  FROM emp
+  GROUP BY DEPTNO
+) AS t`,
+      {},
+      { databaseType: "mysql", dialect: "mysql" },
+    );
+
+    expect(items.filter((item) => item.type === "column").map((item) => item.label)).toEqual(["DEPTNO", "avg_sal", "rnk"]);
+  });
+
   it("expands alias star from only the qualified row source", () => {
     const columnsByTable = new Map<string, SqlCompletionColumn[]>([
       ["users", ["id", "name"].map((name) => ({ name, table: "users" }))],

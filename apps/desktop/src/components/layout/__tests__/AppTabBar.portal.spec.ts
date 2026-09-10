@@ -328,6 +328,28 @@ describe("AppTabBar group navigation portal", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("moves a horizontal bar to the workspace rail after settings releases its portal", async () => {
+    const { host, settings, actions, warnings } = mountNavigation("top");
+    await settle();
+    const bar = element(host, ".editor-group[data-group-id='main'] [data-main-tab-bar]");
+
+    actions.activateSettingsPage();
+    await settle();
+    expect(element(host, "[data-special-page-tab-target='main']").contains(bar)).toBe(true);
+
+    actions.closeSettingsPage();
+    await settle();
+    expect(element(host, ".editor-group[data-group-id='main']").contains(bar)).toBe(true);
+
+    settings.editorSettings.tabGroupMode = "database-type";
+    settings.editorSettings.tabPlacement = "left";
+    await settle();
+
+    expect(element(host, "[data-workspace-tab-target='main']").contains(bar)).toBe(true);
+    expect(element(host, "[data-special-page-workspace]").style.display).toBe("none");
+    expect(warnings).toEqual([]);
+  });
+
   it.each(["left", "right"] as const)("synchronizes %s rail width and collapse with the persistent bar", async (placement) => {
     const { host, navigation, warnings } = mountNavigation(placement);
     await settle();

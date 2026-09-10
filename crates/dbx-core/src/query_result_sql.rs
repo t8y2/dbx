@@ -345,6 +345,19 @@ pub fn build_count_query_sql(options: CountQuerySqlOptions) -> QuerySqlBuildResu
     } else {
         quote_table_identifier(options.database_type, "dbx_count")
     };
+    if options.database_type == Some(DatabaseType::Hive) && starts_with_cte(&statement) {
+        if let Some(main_query_start) = top_level_sql_tokens(&statement)
+            .into_iter()
+            .find(|token| matches!(token.text.as_str(), "SELECT" | "FROM"))
+            .map(|token| token.start)
+        {
+            let (with_clause, main_query) = statement.split_at(main_query_start);
+            return ok(format!(
+                "{execution_hint}{with_clause}{}",
+                derived_table_sql("SELECT COUNT(*) AS dbx_total_rows FROM", main_query, &format!("{alias};"))
+            ));
+        }
+    }
     let wrapped_sql = match options.database_type {
         Some(DatabaseType::Iris) => iris_statement_for_derived_table(&statement),
         _ => statement,
@@ -4097,6 +4110,32 @@ WHERE u.id = picked.id;
         assert_eq!(
             result.sql.unwrap(),
             "SELECT COUNT(*) AS dbx_total_rows FROM (WITH cte AS (SELECT 1 AS id) SELECT * FROM cte) `dbx_count`;"
+        );
+    }
+
+    #[test]
+    fn hive_count_keeps_cte_outside_derived_table() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "WITH cte AS (SELECT 1 AS id) SELECT * FROM cte".to_string(),
+            database_type: Some(DatabaseType::Hive),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "WITH cte AS (SELECT 1 AS id) SELECT COUNT(*) AS dbx_total_rows FROM (SELECT * FROM cte) `dbx_count`;"
+        );
+    }
+
+    #[test]
+    fn hive_count_keeps_from_style_query_inside_derived_table() {
+        let result = build_count_query_sql(CountQuerySqlOptions {
+            original_sql: "WITH cte AS (SELECT 1 AS id) FROM cte SELECT *".to_string(),
+            database_type: Some(DatabaseType::Hive),
+        });
+
+        assert_eq!(
+            result.sql.unwrap(),
+            "WITH cte AS (SELECT 1 AS id) SELECT COUNT(*) AS dbx_total_rows FROM (FROM cte SELECT *) `dbx_count`;"
         );
     }
 

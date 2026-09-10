@@ -228,7 +228,13 @@ export function supportsObjectBrowser(dbType?: DatabaseType): boolean {
 
 export function supportsConnectionDatabaseBrowser(dbType?: DatabaseType): boolean {
   // MongoDB reuses the object browser for collections, not the SQL database list.
-  return supportsObjectBrowser(dbType) && dbType !== "mongodb";
+  //
+  // Message brokers (`mq` — Kafka/Pulsar/RocketMQ/RabbitMQ/NATS, separated only by
+  // driver_profile) keep the objectBrowser capability for their tenant/topic tree,
+  // but they expose no database namespace: the connection-level browser tab listed
+  // nothing and rendered "no databases found" (issue #8515). Their workbench is the
+  // MQ admin tab instead. MQTT is already excluded: it has no objectBrowser at all.
+  return supportsObjectBrowser(dbType) && dbType !== "mongodb" && dbType !== "mq";
 }
 
 export function supportsObjectBrowserTreeNode(dbType: DatabaseType | undefined, nodeType: TreeNodeType): boolean {

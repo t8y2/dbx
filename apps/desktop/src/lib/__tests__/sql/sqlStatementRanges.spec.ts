@@ -1375,6 +1375,20 @@ FROM orders;`;
 });
 
 describe("executableStatementRanges", () => {
+  it.each(["doris", "starrocks"] as const)("keeps %s half-open range partitions from swallowing the next statement", (databaseType) => {
+    const first = `CREATE TABLE fixed_partitions_1 (
+  sale_date date NULL,
+  product_id int NULL
+) ENGINE=OLAP
+DUPLICATE KEY(sale_date, product_id)
+PARTITION BY RANGE(sale_date) (
+  PARTITION p_2024_01 VALUES [('2024-02-01'), ('2024-03-01'))
+)
+DISTRIBUTED BY HASH(product_id) BUCKETS 1`;
+    const second = first.replace("fixed_partitions_1", "fixed_partitions_2");
+
+    expect(rangeSqlTexts(executableStatementRanges(`${first};\n\n${second};`, databaseType))).toEqual([first, second]);
+  });
   it("returns statement ranges starting only at statement starts", () => {
     const sql = "SELECT *\nFROM users\nWHERE active = 1;\nSELECT 2;";
     const ranges = executableStatementRanges(sql);

@@ -174,17 +174,25 @@ export function useSidebarDataOpenRuntime() {
 
     if (existingSameTableTab && (existingSameTableTab.isExecuting || canActivateExistingDataTableTab(existingSameTableTab, { activateExecuting: false }))) {
       if (node.comment !== undefined) existingSameTableTab.tableComment = node.comment;
+      const previousTableType = existingSameTableTab.tableMeta?.tableType?.trim().toUpperCase();
+      const tableTypeChanged = !!existingSameTableTab.tableMeta && previousTableType !== tableType;
+      if (tableTypeChanged) {
+        queryStore.setTableMeta(existingSameTableTab.id, {
+          ...existingSameTableTab.tableMeta!,
+          tableType,
+        });
+      }
       queryStore.switchTab(existingSameTableTab.id);
       logPhase("existing-tab-activated", { table: node.label });
       // 代次失配视同冷缓存（即使位于 30s TTL 窗口内也要重建）：disconnect /
       // 关库 / 死池重连都可能不改变 timestamp 判定而改变连接生命周期
       const connectionGeneration = connectionStore.metadataGenerationFor(node.connectionId, node.database);
-      if (isDataTabMetadataLifecycleStale(existingSameTableTab, connectionGeneration) || dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
+      if (tableTypeChanged || isDataTabMetadataLifecycleStale(existingSameTableTab, connectionGeneration) || dataTabMetadataNeedsRefresh(existingSameTableTab, DATA_TAB_METADATA_TTL_MS)) {
         // 真实列缺失时行标识未知：启动刷新的同时必须挂起编辑门控（所有
         // "真实列缺失且启动刷新"的入口统一置 pending）
         if (!existingSameTableTab.tableMeta?.columns.length) existingSameTableTab.tableMetaPending = true;
         void refreshTableMetaInBackground(existingSameTableTab.id, true);
-        logPhase("metadata-started", { tabId: existingSameTableTab.id, reason: "existing-tab-stale" });
+        logPhase("metadata-started", { tabId: existingSameTableTab.id, reason: tableTypeChanged ? "object-type-changed" : "existing-tab-stale" });
       }
       return;
     }

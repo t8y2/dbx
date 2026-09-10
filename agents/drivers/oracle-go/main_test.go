@@ -1183,6 +1183,27 @@ func TestBuildDSNUsesStableDefaultPrefetchRows(t *testing.T) {
 	}
 }
 
+func TestReadQuerySessionPageDoesNotLookAheadAfterFullPage(t *testing.T) {
+	db, _ := openOracleViewSourceTestDB(t, []oracleViewSourceQueryStep{{
+		queryContains: "SELECT * FROM TEST_VIEW",
+		args:          []driver.Value{},
+		columns:       []string{"ID"},
+		rows:          [][]driver.Value{{int64(1)}, {int64(2)}},
+	}})
+	s := newServer()
+	s.db = db
+	result, err := s.executeQueryPage(queryOptions{SQL: "SELECT * FROM TEST_VIEW"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 2 || !result.HasMore || result.SessionID == nil {
+		t.Fatalf("full page should keep a lazy session without look-ahead: %+v", result)
+	}
+	if !s.closeQuerySession(*result.SessionID) {
+		t.Fatal("expected the query session to close")
+	}
+}
+
 func TestBuildDSNPreservesConfiguredPrefetchRows(t *testing.T) {
 	tests := []connectParams{
 		{

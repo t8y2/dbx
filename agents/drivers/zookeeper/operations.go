@@ -33,7 +33,7 @@ type putRequest struct {
 
 type deleteRequest struct {
 	Key       string `json:"key"`
-	Recursive bool   `json:"recursive"`
+	Recursive *bool  `json:"recursive"`
 }
 
 type listRequest struct {
@@ -223,7 +223,8 @@ func (service *server) delete(params json.RawMessage) (map[string]any, error) {
 	if !exists {
 		return map[string]any{"deleted": 0}, nil
 	}
-	if !request.Recursive {
+	recursive := request.Recursive == nil || *request.Recursive
+	if !recursive {
 		if err := client.Delete(path); err != nil {
 			if err == zk.ErrNoNode {
 				return map[string]any{"deleted": 0}, nil

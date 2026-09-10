@@ -135,14 +135,14 @@ test("backup file names are unique and safe for schema-aware exports", () => {
   assert.equal(path, "C:\\backups\\dbx-backup__Nightly_ prod__20260716-020304__app_private__12345678.sql");
 });
 
+test("backup file names retain the target suffix without an implicit run suffix", () => {
+  const path = databaseBackupFilePath("C:\\backups", "Nightly", "app", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd", "gzip", "before-migration");
+
+  assert.equal(path, "C:\\backups\\before-migration__app.sql.gz");
+});
+
 test("scheduled runs render a user-defined relative directory template", () => {
-  const directory = databaseBackupRunDirectory(
-    "C:\\backups",
-    "archives/{schedule}/{date}/{timestamp}-{runId}",
-    "Nightly: prod",
-    new Date(2026, 6, 16, 2, 3, 4),
-    "12345678-abcd",
-  );
+  const directory = databaseBackupRunDirectory("C:\\backups", "archives/{schedule}/{date}/{timestamp}-{runId}", "Nightly: prod", new Date(2026, 6, 16, 2, 3, 4), "12345678-abcd");
 
   assert.equal(directory, "C:\\backups\\archives\\Nightly_ prod\\20260716\\20260716020304-12345678");
   assert.equal(databaseBackupRunDirectoryPatternIsValid("{schedule}/{runId}"), true);

@@ -222,9 +222,17 @@ func TestKVOperationsAndPagination(t *testing.T) {
 		t.Fatalf("continuation mismatch error=%v", err)
 	}
 
-	deleted, err := service.delete(json.RawMessage(`{"key":"/app","recursive":true}`))
+	if _, err := service.delete(json.RawMessage(`{"key":"/app","recursive":false}`)); err != zk.ErrNotEmpty {
+		t.Fatalf("non-recursive delete error=%v", err)
+	}
+	deleted, err := service.delete(json.RawMessage(`{"key":"/app"}`))
 	if err != nil || deleted["deleted"].(int) < 4 {
 		t.Fatalf("delete=%#v err=%v", deleted, err)
+	}
+	put(`{"key":"/recursive/child","value":{"data":"v"}}`)
+	deleted, err = service.delete(json.RawMessage(`{"key":"/recursive","recursive":true}`))
+	if err != nil || deleted["deleted"] != 2 {
+		t.Fatalf("explicit recursive delete=%#v err=%v", deleted, err)
 	}
 	missing, err := service.delete(json.RawMessage(`{"key":"/app","recursive":true}`))
 	if err != nil || missing["deleted"] != 0 {

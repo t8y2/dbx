@@ -905,6 +905,7 @@ fn index_info_from_model(model: IndexModel) -> IndexInfo {
         comment: None,
         key_is_expression: Vec::new(),
         column_opclasses: vec![],
+        key_options: Vec::new(),
         constraint_backed: false,
     }
 }
@@ -3640,6 +3641,7 @@ mod tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         });
 
@@ -3667,6 +3669,7 @@ mod tests {
             comment: None,
             key_is_expression: Vec::new(),
             column_opclasses: vec![],
+            key_options: Vec::new(),
             constraint_backed: false,
         });
 
@@ -3912,6 +3915,7 @@ mod tests {
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                key_options: Vec::new(),
                 constraint_backed: false,
             },
             IndexInfo {
@@ -3925,6 +3929,7 @@ mod tests {
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                key_options: Vec::new(),
                 constraint_backed: false,
             },
             IndexInfo {
@@ -3938,6 +3943,7 @@ mod tests {
                 comment: None,
                 key_is_expression: Vec::new(),
                 column_opclasses: vec![],
+                key_options: Vec::new(),
                 constraint_backed: false,
             },
         ];

@@ -47,6 +47,19 @@ fn h2_uses_custom_driver(config: &ConnectionConfig) -> bool {
         && config.driver_profile.as_deref().is_some_and(|profile| profile.eq_ignore_ascii_case("h2-custom"))
 }
 
+fn cassandra_tls_field<'a>(config: &'a ConnectionConfig, field: &str) -> &'a str {
+    if config.db_type != DatabaseType::Cassandra {
+        return "";
+    }
+    config
+        .external_config
+        .as_ref()
+        .and_then(|value| value.get("tls"))
+        .and_then(|value| value.get(field))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
 pub fn agent_connect_params(
     config: &ConnectionConfig,
     host: &str,
@@ -120,6 +133,10 @@ pub fn agent_connect_params_with_role(
         "ca_cert_path": config.ca_cert_path,
         "client_cert_path": config.client_cert_path,
         "client_key_path": config.client_key_path,
+        "truststore_path": cassandra_tls_field(config, "truststore_path"),
+        "truststore_password": cassandra_tls_field(config, "truststore_password"),
+        "keystore_path": cassandra_tls_field(config, "keystore_path"),
+        "keystore_password": cassandra_tls_field(config, "keystore_password"),
         "connect_timeout_secs": config.effective_connect_timeout_secs(),
         "etcd_endpoints": etcd_endpoints,
         "zookeeper_connect_string": zookeeper_connect_string,
@@ -741,6 +758,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),
@@ -774,6 +792,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params["sessionRole"], "metadata");
+    }
+
+    #[test]
+    fn cassandra_agent_connect_params_include_tls_stores() {
+        let mut cfg = config(DatabaseType::Cassandra, Some("app"));
+        cfg.ssl = true;
+        cfg.external_config = Some(serde_json::json!({
+            "tls": {
+                "truststore_path": "/certs/client.truststore",
+                "truststore_password": "trust-secret",
+                "keystore_path": "/certs/client.keystore",
+                "keystore_password": "key-secret"
+            }
+        }));
+
+        let params = agent_connect_params(&cfg, "cassandra.example.com", 9042, "app").unwrap();
+
+        assert_eq!(params["truststore_path"], "/certs/client.truststore");
+        assert_eq!(params["truststore_password"], "trust-secret");
+        assert_eq!(params["keystore_path"], "/certs/client.keystore");
+        assert_eq!(params["keystore_password"], "key-secret");
     }
 
     #[test]

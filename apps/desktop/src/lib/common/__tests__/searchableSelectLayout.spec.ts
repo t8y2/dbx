@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const searchableSelectSource = readFileSync(new URL("../../../components/ui/searchable-select/SearchableSelect.vue", import.meta.url), "utf8");
+const editorSettingsDialogSource = readFileSync(new URL("../../../components/editor/EditorSettingsDialog.vue", import.meta.url), "utf8");
 const dataTransferDialogSource = readFileSync(new URL("../../../components/transfer/DataTransferDialog.vue", import.meta.url), "utf8");
 const editorToolbarSource = readFileSync(new URL("../../../components/layout/EditorToolbar.vue", import.meta.url), "utf8");
 const schemaDiffConfigStepSource = readFileSync(new URL("../../../components/diff/SchemaDiffConfigStep.vue", import.meta.url), "utf8");
@@ -18,6 +19,15 @@ describe("SearchableSelect layout", () => {
     expect(searchableSelectSource).toContain("trimCustom?: boolean");
     expect(searchableSelectSource).toContain("trimCustom: true");
     expect(searchableSelectSource).toContain("props.trimCustom ? searchText.value.trim() : searchText.value");
+  });
+
+  it("forwards an optional style to its portaled content for local preview isolation", () => {
+    expect(searchableSelectSource).toContain('contentStyle?: HTMLAttributes["style"]');
+    expect(searchableSelectSource).toContain(':style="contentStyle"');
+    expect(editorSettingsDialogSource).toContain(':content-style="{ fontFamily: editUiFontFamily || DEFAULT_UI_FONT_FAMILY }"');
+    expect(editorSettingsDialogSource).toContain('@option-hover="previewUiFontOption"');
+    expect(editorSettingsDialogSource).toContain('@option-highlight="previewUiFontOption"');
+    expect(editorSettingsDialogSource).toContain('@option-leave="restoreUiFontFamilyPreview"');
   });
 
   it("renders data transfer connection pickers as sidebar-like trees", () => {

@@ -28,6 +28,11 @@ describe("App main content surface structure", () => {
     expect(appSource).not.toContain('v-if="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"');
   });
 
+  it("returns to an open special page after the final query tab closes", () => {
+    expect(appSource).toContain("else if (previousId) activateOpenSpecialPageFallback();");
+    expect(appSource).toMatch(/function activateOpenSpecialPageFallback\(\)[\s\S]*?settingsPageTabOpen\.value[\s\S]*?activateMainContentSurface\("settings"\)[\s\S]*?driverStoreTabOpen\.value[\s\S]*?activateMainContentSurface\("driverStore"\)/);
+  });
+
   it("anchors the drag-back hit test on every pane strip and the special-surfaces bar", () => {
     const groupBarSource = readFileSync(new URL("../EditorGroupTabBar.vue", import.meta.url), "utf8");
     const slimBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");

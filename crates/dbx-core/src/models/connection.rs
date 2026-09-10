@@ -69,6 +69,30 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
     serde_json::from_value::<DatabaseInfoEnvelope>(value.clone()).ok()?.database_info
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RedisKeyGroupRule {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub includes: Vec<String>,
+    pub excludes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RedisKeyGroupView {
+    List,
+    Tree,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RedisKeyGrouping {
+    pub version: u8,
+    pub enabled: bool,
+    pub inner_view: RedisKeyGroupView,
+    pub rules: Vec<RedisKeyGroupRule>,
+}
+
 #[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -159,6 +183,8 @@ pub struct ConnectionConfig {
     /// Empty means inherit the global editor setting.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redis_key_templates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redis_key_grouping: Option<RedisKeyGrouping>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub etcd_endpoints: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -596,6 +622,8 @@ struct ConnectionConfigData {
     #[serde(default)]
     pub redis_key_templates: Vec<String>,
     #[serde(default)]
+    pub redis_key_grouping: Option<RedisKeyGrouping>,
+    #[serde(default)]
     pub etcd_endpoints: String,
     #[serde(default)]
     pub gbase_server: String,
@@ -669,6 +697,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             redis_scan_page_size: data.redis_scan_page_size,
             redis_database_aliases: data.redis_database_aliases,
             redis_key_templates: data.redis_key_templates,
+            redis_key_grouping: data.redis_key_grouping,
             etcd_endpoints: data.etcd_endpoints,
             gbase_server: data.gbase_server,
             informix_server: data.informix_server,
@@ -693,6 +722,23 @@ impl<'de> Deserialize<'de> for ConnectionConfig {
         let mut value = Value::deserialize(deserializer)?;
         migrate_legacy_transport_layers(&mut value);
         let data = ConnectionConfigData::deserialize(value).map_err(serde::de::Error::custom)?;
+        if let Some(grouping) = &data.redis_key_grouping {
+            let mut ids = std::collections::HashSet::new();
+            if grouping.version != 1
+                || grouping.rules.len() > 64
+                || grouping.rules.iter().any(|rule| {
+                    rule.id.is_empty()
+                        || !ids.insert(&rule.id)
+                        || rule.name.trim().is_empty()
+                        || (rule.includes.is_empty() && rule.excludes.is_empty())
+                        || rule.includes.len() > 64
+                        || rule.excludes.len() > 64
+                        || rule.includes.iter().chain(&rule.excludes).any(|pattern| pattern.len() > 1024)
+                })
+            {
+                return Err(serde::de::Error::custom("Invalid Redis grouping configuration"));
+            }
+        }
         Ok(data.into())
     }
 }
@@ -2556,6 +2602,29 @@ fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redis_key_grouping_roundtrip_and_validation() {
+        let mut config = mysql_config("root", "", None);
+        assert!(config.redis_key_grouping.is_none());
+        config.redis_key_grouping = Some(super::RedisKeyGrouping {
+            version: 1,
+            enabled: true,
+            inner_view: super::RedisKeyGroupView::Tree,
+            rules: vec![super::RedisKeyGroupRule {
+                id: "r1".into(),
+                name: "Metadata".into(),
+                enabled: true,
+                includes: vec!["*:redisson_options".into()],
+                excludes: vec![],
+            }],
+        });
+        let value = serde_json::to_value(&config).unwrap();
+        let restored: super::ConnectionConfig = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.redis_key_grouping, config.redis_key_grouping);
+        let mut invalid = value;
+        invalid["redis_key_grouping"]["version"] = serde_json::json!(2);
+        assert!(serde_json::from_value::<super::ConnectionConfig>(invalid).is_err());
+    }
     use super::{
         database_info_from_protocol_value, default_query_timeout_secs, default_redis_key_separator,
         default_ssh_connect_timeout_secs, sqlserver_legacy_compatibility_param,
@@ -2679,6 +2748,7 @@ mod tests {
             redis_scan_page_size: None,
             redis_database_aliases: Default::default(),
             redis_key_templates: Vec::new(),
+            redis_key_grouping: None,
             etcd_endpoints: String::new(),
             gbase_server: String::new(),
             informix_server: String::new(),

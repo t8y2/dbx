@@ -54,6 +54,110 @@ func TestBuildQueryMessageCommandUsesBrokerHeaderNames(t *testing.T) {
 	}
 }
 
+func TestInvokeRemotingAllowCodesAcceptsQueryMessageNotFound(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer connection.Close()
+		frame, readErr := readRemotingFrame(connection)
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		request, decodeErr := remoting.Decode(frame[4:])
+		if decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		response := &remoting.RemotingCommand{Code: queryMessageNotFoundCode, Opaque: request.Opaque, Flag: 1}
+		encoded, encodeErr := response.Encode()
+		if encodeErr == nil {
+			_, encodeErr = connection.Write(encoded)
+		}
+		done <- encodeErr
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := invokeRemotingAllowCodes(ctx, listener.Addr().String(), time.Second,
+		remoting.NewRequest(remoting.QueryMessage, nil), remoting.Success, queryMessageNotFoundCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInvokeRemotingAllowCodesPreservesOtherErrors(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	done := make(chan error, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		defer connection.Close()
+		frame, readErr := readRemotingFrame(connection)
+		if readErr != nil {
+			done <- readErr
+			return
+		}
+		request, decodeErr := remoting.Decode(frame[4:])
+		if decodeErr != nil {
+			done <- decodeErr
+			return
+		}
+		response := &remoting.RemotingCommand{Code: remoting.ConsumerNotOnline, Opaque: request.Opaque, Flag: 1}
+		encoded, encodeErr := response.Encode()
+		if encodeErr == nil {
+			_, encodeErr = connection.Write(encoded)
+		}
+		done <- encodeErr
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, invokeErr := invokeRemotingAllowCodes(ctx, listener.Addr().String(), time.Second,
+		remoting.NewRequest(remoting.QueryMessage, nil), remoting.Success, queryMessageNotFoundCode)
+	if invokeErr == nil || !strings.Contains(invokeErr.Error(), "206") {
+		t.Fatalf("expected ConsumerNotOnline to remain an error, got %v", invokeErr)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilterMessagesByStoreTimestampUsesInclusiveBounds(t *testing.T) {
+	messages := []*admin.MessageExt{
+		{MsgId: "before", StoreTimestamp: 99},
+		{MsgId: "begin", StoreTimestamp: 100},
+		{MsgId: "middle", StoreTimestamp: 150},
+		{MsgId: "end", StoreTimestamp: 200},
+		{MsgId: "after", StoreTimestamp: 201},
+	}
+	filtered := filterMessagesByStoreTimestamp(messages, 100, 200)
+	if len(filtered) != 3 {
+		t.Fatalf("expected three messages in range, got %d", len(filtered))
+	}
+	for index, messageID := range []string{"begin", "middle", "end"} {
+		if filtered[index].MsgId != messageID {
+			t.Fatalf("unexpected message at index %d: %s", index, filtered[index].MsgId)
+		}
+	}
+}
+
 func TestInvokeRemotingAllowCodes(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -141,6 +141,54 @@ describe("EditorToolbar mount contract", () => {
     host.remove();
   });
 
+  it("does not expose SQL formatting for Redis connections", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [
+      {
+        id: "conn-redis",
+        name: "redis",
+        db_type: "redis",
+        host: "localhost",
+        port: 6379,
+      } as never,
+    ];
+
+    const host = createHost();
+    const app = createApp(EditorToolbar, {
+      activeTab: {
+        id: "tab-redis",
+        title: "Redis",
+        connectionId: "conn-redis",
+        database: "0",
+        sql: 'SET user:1 "hello world"',
+        mode: "query",
+        isExecuting: false,
+        isCancelling: false,
+        isExplaining: false,
+      },
+      activeConnection: connectionStore.getConfig("conn-redis"),
+      executableSql: 'SET user:1 "hello world"',
+      explainMode: "explain",
+      blockDangerousRedisCommands: true,
+      sqlKeywordCase: "preserve",
+      databaseRequiredSignal: 0,
+      autoCommit: true,
+      txnSessionId: undefined,
+      txnAutoRolledBack: false,
+      oracleTxnPossiblyDirty: false,
+      isOracleManualTransaction: false,
+    });
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    expect(host.textContent).not.toContain("toolbar.formatSql");
+
+    app.unmount();
+    host.remove();
+  });
+
   it("mounts for a schema-aware connection whose watchEffect reads tier-gated selectors", async () => {
     // Regression: the tier-gated showSchemaSelector is read eagerly by the
     // schema-loading watchEffect, so the tier refs must be declared before any

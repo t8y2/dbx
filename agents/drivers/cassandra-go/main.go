@@ -35,18 +35,22 @@ type response struct {
 }
 
 type connectParams struct {
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	Database         string `json:"database"`
-	Username         string `json:"username"`
-	Password         string `json:"password"`
-	URLParams        string `json:"url_params"`
-	ConnectionString string `json:"connection_string"`
-	SSL              bool   `json:"ssl"`
-	CACertPath       string `json:"ca_cert_path"`
-	ClientCertPath   string `json:"client_cert_path"`
-	ClientKeyPath    string `json:"client_key_path"`
-	SessionRole      string `json:"sessionRole"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Database           string `json:"database"`
+	Username           string `json:"username"`
+	Password           string `json:"password"`
+	URLParams          string `json:"url_params"`
+	ConnectionString   string `json:"connection_string"`
+	SSL                bool   `json:"ssl"`
+	CACertPath         string `json:"ca_cert_path"`
+	ClientCertPath     string `json:"client_cert_path"`
+	ClientKeyPath      string `json:"client_key_path"`
+	TruststorePath     string `json:"truststore_path"`
+	TruststorePassword string `json:"truststore_password"`
+	KeystorePath       string `json:"keystore_path"`
+	KeystorePassword   string `json:"keystore_password"`
+	SessionRole        string `json:"sessionRole"`
 }
 
 type queryOptions struct {

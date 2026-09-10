@@ -24,8 +24,8 @@ export interface SqlSemanticDiagnosticVisibleRange {
   to: number;
 }
 
-export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType): SqlTextRange[] {
-  const statements = databaseType === "sqlserver" ? sqlServerSemanticDiagnosticRanges(sql) : executableStatementRanges(sql, databaseType);
+export function sqlSemanticDiagnosticRangesForViewport(sql: string, visibleRanges: readonly SqlSemanticDiagnosticVisibleRange[], databaseType?: DatabaseType, cachedStatements?: readonly SqlTextRange[]): SqlTextRange[] {
+  const statements = databaseType === "sqlserver" ? sqlServerSemanticDiagnosticRanges(sql) : (cachedStatements ?? executableStatementRanges(sql, databaseType));
   if (statements.length === 0 || visibleRanges.length === 0) return [];
 
   const selected: SqlTextRange[] = [];

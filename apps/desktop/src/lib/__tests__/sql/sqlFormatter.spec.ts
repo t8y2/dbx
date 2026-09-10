@@ -11,7 +11,8 @@ describe("sqlFormatter", () => {
     expect(sqlFormatterSource).not.toContain("(?<=");
   });
 
-  it("disables SQL formatting for VictoriaMetrics queries", () => {
+  it("disables SQL formatting for Redis and VictoriaMetrics queries", () => {
+    expect(canFormatSqlForDatabaseType("redis")).toBe(false);
     expect(canFormatSqlForDatabaseType("victoriametrics")).toBe(false);
     expect(canFormatSqlForDatabaseType("mysql")).toBe(true);
   });

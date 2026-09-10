@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use russh::client::{self, AuthResult, Config, Handle, KeyboardInteractiveAuthResponse};
+use russh::client::{self, AuthResult, Config, GexParams, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::{client::AgentClient, AgentIdentity};
 use russh::keys::ssh_key::HashAlg;
 use russh::keys::{decode_secret_key, key::PrivateKeyWithHashAlg, PrivateKey};
@@ -177,7 +177,20 @@ impl SshClient {
 fn ssh_client_config() -> Config {
     let mut preferred = Preferred::default();
     let mut kex = preferred.kex.into_owned();
-    for algorithm in [kex::ECDH_SHA2_NISTP256, kex::ECDH_SHA2_NISTP384, kex::ECDH_SHA2_NISTP521, kex::DH_G14_SHA1] {
+    // Appended after russh's safe defaults, so a modern server still negotiates
+    // a modern algorithm. The SHA-1 group exchange and fixed-group entries are
+    // the last resort for legacy OpenSSH (< 6.7) and appliance/bastion SSH
+    // daemons whose entire offer is `diffie-hellman-group-exchange-sha1` plus
+    // `diffie-hellman-group1-sha1`; without them the handshake aborts with
+    // "No common Kex algorithm" before authentication is ever attempted.
+    for algorithm in [
+        kex::ECDH_SHA2_NISTP256,
+        kex::ECDH_SHA2_NISTP384,
+        kex::ECDH_SHA2_NISTP521,
+        kex::DH_G14_SHA1,
+        kex::DH_GEX_SHA1,
+        kex::DH_G1_SHA1,
+    ] {
         if !kex.contains(&algorithm) {
             kex.push(algorithm);
         }
@@ -193,7 +206,25 @@ fn ssh_client_config() -> Config {
     }
     preferred.mac = Cow::Owned(mac);
 
-    Config { nodelay: true, keepalive_interval: Some(Duration::from_secs(30)), preferred, ..Default::default() }
+    Config {
+        nodelay: true,
+        keepalive_interval: Some(Duration::from_secs(30)),
+        preferred,
+        gex: legacy_gex_params(),
+        ..Default::default()
+    }
+}
+
+/// Group-exchange bounds for the SHA-1 group exchange fallback above.
+///
+/// russh defaults to a 3072-bit minimum, which legacy daemons that only speak
+/// `diffie-hellman-group-exchange-sha1` cannot satisfy: they reject the request
+/// outright, so enabling the algorithm alone would still fail the handshake.
+/// 2048 bits is russh's own floor for a client config and stays within current
+/// guidance, while the preferred and maximum sizes keep russh's defaults so a
+/// capable server is still driven to the largest group it supports.
+fn legacy_gex_params() -> GexParams {
+    GexParams::for_client_config(2048, 8192, 8192).unwrap_or_default()
 }
 
 fn tofu_prompt_deadline(network_deadline: Instant, prompt_started_at: Instant) -> Option<Instant> {
@@ -2088,6 +2119,39 @@ mod tests {
 
         assert!(curve25519_index < ecdh_index);
         assert!(ecdh_index < group14_sha1_index);
+    }
+
+    #[test]
+    fn ssh_client_config_offers_sha1_group_exchange_kex_last() {
+        let config = ssh_client_config();
+        let kex = config.preferred.kex;
+        let position = |needle: russh::kex::Name| kex.iter().position(|algorithm| *algorithm == needle).unwrap();
+
+        // A server advertising only the two SHA-1 exchanges from issue #8722 has
+        // to find a common algorithm, or the handshake fails before auth.
+        let gex_sha1_index = position(russh::kex::DH_GEX_SHA1);
+        let group1_sha1_index = position(russh::kex::DH_G1_SHA1);
+
+        // Both stay behind every safe default, including the SHA-1 fallback that
+        // was already present, so a capable server never downgrades to them.
+        let group14_sha1_index = position(russh::kex::DH_G14_SHA1);
+        let gex_sha256_index = position(russh::kex::DH_GEX_SHA256);
+
+        assert!(gex_sha256_index < group14_sha1_index);
+        assert!(group14_sha1_index < gex_sha1_index);
+        assert!(gex_sha1_index < group1_sha1_index);
+    }
+
+    #[test]
+    fn ssh_client_config_lowers_group_exchange_minimum_for_legacy_servers() {
+        let config = ssh_client_config();
+
+        // russh's 3072-bit default minimum is rejected by the legacy daemons
+        // that need DH_GEX_SHA1 in the first place, which would leave the new
+        // fallback unusable.
+        assert_eq!(config.gex.min_group_size(), 2048);
+        assert_eq!(config.gex.preferred_group_size(), russh::client::GexParams::default().preferred_group_size());
+        assert_eq!(config.gex.max_group_size(), russh::client::GexParams::default().max_group_size());
     }
 
     #[test]

@@ -1240,7 +1240,7 @@ async fn find_documents_with_total(
         }
         Some(count.await.map_err(|e| e.to_string()))
     } else {
-        Some(col.estimated_document_count().await.map_err(|e| e.to_string()))
+        Some(estimated_document_count(client, database, collection).await)
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -1361,10 +1361,38 @@ pub async fn count_documents(
 
     if !accurate && filter_doc.is_empty() {
         // Legacy count() permits the metadata-backed fast path; countDocuments() must scan accurately.
-        col.estimated_document_count().await.map_err(|e| e.to_string())
+        estimated_document_count(client, database, collection).await
     } else {
         col.count_documents(filter_doc).await.map_err(|e| e.to_string())
     }
+}
+
+async fn estimated_document_count(client: &Client, database: &str, collection: &str) -> Result<u64, String> {
+    let result = client
+        .database(database)
+        .run_command(doc! { "count": collection, "query": {} })
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_count_command_result(&result)
+}
+
+fn parse_count_command_result(result: &Document) -> Result<u64, String> {
+    let value = result.get("n").ok_or_else(|| "MongoDB count command response is missing the 'n' field".to_string())?;
+
+    match value {
+        Bson::Int32(value) => u64::try_from(*value),
+        Bson::Int64(value) => u64::try_from(*value),
+        Bson::Double(value)
+            if value.is_finite()
+                && *value >= 0.0
+                && value.fract() == 0.0
+                && *value <= super::JS_MAX_SAFE_INTEGER as f64 =>
+        {
+            Ok(*value as u64)
+        }
+        _ => return Err(format!("MongoDB count command returned an invalid 'n' value: {value:?}")),
+    }
+    .map_err(|_| format!("MongoDB count command returned a negative 'n' value: {value:?}"))
 }
 
 /// Find MongoDB documents in a browser-friendly representation.
@@ -1399,7 +1427,7 @@ pub async fn find_documents_extended_json(
         }
         count.await.map_err(|e| e.to_string())
     } else {
-        col.estimated_document_count().await.map_err(|e| e.to_string())
+        estimated_document_count(client, database, collection).await
     };
 
     let mut find = col.find(filter_doc).skip(skip).limit(limit);
@@ -2841,6 +2869,37 @@ mod tests {
     fn mongo_find_count_success_preserves_count_semantics() {
         assert_eq!(resolve_mongo_find_total(Ok(250), true, 100, 25), (250, true));
         assert_eq!(resolve_mongo_find_total(Ok(250), false, 100, 25), (250, false));
+    }
+
+    #[test]
+    fn parses_sharded_mongo_count_returned_as_integral_double() {
+        let response = doc! {
+            "shards": { "shard01": 887_286_174.0, "shard02": 885_925_656.0 },
+            "n": 1_773_211_830.0,
+            "ok": 1.0,
+        };
+
+        assert_eq!(parse_count_command_result(&response), Ok(1_773_211_830));
+    }
+
+    #[test]
+    fn parses_integer_mongo_count_results() {
+        assert_eq!(parse_count_command_result(&doc! { "n": 42_i32 }), Ok(42));
+        assert_eq!(parse_count_command_result(&doc! { "n": 4_294_967_296_i64 }), Ok(4_294_967_296));
+    }
+
+    #[test]
+    fn rejects_invalid_mongo_count_results() {
+        for response in [
+            doc! {},
+            doc! { "n": -1_i32 },
+            doc! { "n": 1.5 },
+            doc! { "n": f64::NAN },
+            doc! { "n": (super::super::JS_MAX_SAFE_INTEGER as f64) + 1.0 },
+            doc! { "n": "10" },
+        ] {
+            assert!(parse_count_command_result(&response).is_err(), "response should be rejected: {response:?}");
+        }
     }
 
     #[test]

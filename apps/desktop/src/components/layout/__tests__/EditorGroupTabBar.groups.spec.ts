@@ -159,6 +159,9 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-group-mode="none"\] \.app-tab-pill\s*\{[^}]*border-right-width:\s*0\.5px;/s);
+    expect(sharedStyles).toMatch(
+      /\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="top"\]\[data-group-mode="none"\] \.app-tab-pill\[data-active-tab="true"\]\s*\{[^}]*border-top-color:\s*transparent;[^}]*border-right-color:\s*transparent;[^}]*border-left-color:\s*transparent;/s,
+    );
     expect(sharedStyles).toMatch(/\.tab-overflow-control\s*\{[^}]*width:\s*34px;[^}]*flex:\s*0 0 34px;/s);
     expect(sharedStyles).toContain("padding-inline-end: 2.125rem;");
     expect(sharedStyles).toContain("inset-inline-end: 2.125rem;");

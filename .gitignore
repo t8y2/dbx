@@ -83,6 +83,7 @@ review_classified.json
 
 # Logs
 *.log
+/.dbx-dev/
 
 
 # Generated changelog data

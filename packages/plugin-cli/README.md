@@ -20,7 +20,10 @@ dbx-plugin create my-plugin --template frontend
 dbx-plugin create my-rust-plugin --template rust
 dbx-plugin create my-go-plugin --template go
 dbx-plugin package my-plugin
+dbx-plugin dev --path my-plugin --port 5190
 ```
+
+The `dev` subcommand requires Node.js 22+ and runs the bundled browser development runtime, without DBX or source-tree dependencies. It supports frontend-only workbenches and Rust/Go backends, with JSONL or framed transport. Optional `[dev]` `ui_build` and `ui_watch` command arrays configure project builds. Development credentials are stored locally as plaintext under `.dbx-dev/` (or `--data-dir`). Other commands retain their existing Node requirements.
 
 ## 中文说明
 
@@ -38,3 +41,5 @@ npx @dbx-app/plugin-cli create my-plugin
 ```
 
 npm 主包会自动选择当前操作系统对应的预编译二进制，并携带匹配版本的 Rust 和 Go 插件 SDK。纯前端插件只需要 Node.js；只有插件自身包含 Rust 或 Go 后端时才需要对应语言的编译环境。
+
+使用 `dbx-plugin dev --path my-plugin --port 5190` 可在浏览器运行通用插件开发环境，无需启动 DBX。仅 `dev` 要求 Node.js 22+；运行时及外壳已包含在 npm 包中。开发配置和凭据以明文保存在 `.dbx-dev/`，不要提交或打包该目录。

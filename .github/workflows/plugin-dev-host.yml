@@ -1,0 +1,39 @@
+name: Plugin development host
+on:
+  pull_request:
+    paths:
+      - '.gitattributes'
+      - 'plugins/sdk/cli/**'
+      - 'plugins/sdk/dev-host/**'
+      - 'packages/plugin-cli/**'
+      - 'scripts/verify-plugin-cli-package.mjs'
+      - '.github/workflows/plugin-dev-host.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: false
+      - run: npm ci --prefix plugins/sdk/dev-host
+      - run: npm run lint --prefix plugins/sdk/dev-host
+      - run: npm run fmt:check --prefix plugins/sdk/dev-host
+      - run: npm test --prefix plugins/sdk/dev-host
+      - run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
+      - run: npm test --prefix packages/plugin-cli
+      - run: node scripts/verify-plugin-cli-package.mjs
+        env:
+          DBX_PLUGIN_CLI_VERIFY_NATIVE: '1'

@@ -132,6 +132,11 @@ jobs:
       - name: Test Rust CLI
         run: cargo test --locked --manifest-path plugins/sdk/cli/Cargo.toml
 
+      - name: Prepare and test plugin development runtime
+        run: |
+          npm ci --prefix plugins/sdk/dev-host
+          npm test --prefix plugins/sdk/dev-host
+
       - name: Test npm launcher
         run: npm --prefix packages/plugin-cli test
 
@@ -267,6 +272,9 @@ jobs:
         with:
           node-version: 22.13.0
           registry-url: https://registry.npmjs.org
+
+      - name: Prepare development runtime build dependencies
+        run: npm ci --prefix plugins/sdk/dev-host
 
       - name: Wait for platform packages
         env:

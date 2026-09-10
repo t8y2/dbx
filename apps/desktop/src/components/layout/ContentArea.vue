@@ -278,7 +278,7 @@ const columnInfoError = ref<string | undefined>(undefined);
 const dataGridRef = ref<DataGridHandle>();
 const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const elasticsearchJsonResponsePanelRef = ref<ElasticsearchJsonResponsePanelHandle>();
-const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean> }>();
+const tableStructureEditorRef = ref<{ applyChanges: () => Promise<boolean>; focusSearch: () => boolean }>();
 const standaloneResultToolbarRef = ref<HTMLElement | null>(null);
 const standaloneResultToolbarWidth = ref(0);
 const standaloneResultToolbarViewportWidth = ref(0);
@@ -917,6 +917,7 @@ function focusSearch(): boolean {
   if (props.activeTab.mode === "consul") return consulWorkspaceRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "databases") return databaseBrowserRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "objects") return objectBrowserRef.value?.focusSearch() ?? false;
+  if (props.activeTab.mode === "structure") return tableStructureEditorRef.value?.focusSearch() ?? false;
   if (props.activeTab.mode === "query") {
     // The shared result surface (resultOnly) owns the grid, not the editor;
     // route its search to the DataGrid instead of the missing QueryEditor.

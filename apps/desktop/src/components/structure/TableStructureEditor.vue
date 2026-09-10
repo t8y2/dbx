@@ -3025,6 +3025,22 @@ function focusIndexSearch() {
   });
 }
 
+function focusSearch(): boolean {
+  if (activeTab.value === "columns") {
+    focusColumnSearch();
+    return true;
+  }
+  if (activeTab.value === "indexes") {
+    focusIndexSearch();
+    return true;
+  }
+  if (activeTab.value === "ddl") {
+    ddlSearchPanelRef.value?.openSearch();
+    return true;
+  }
+  return false;
+}
+
 function scrollToIndexSearchMatch(direction: 1 | -1 = 1) {
   const query = indexSearchText.value.trim();
   if (!query) {
@@ -3653,7 +3669,7 @@ async function applyChanges() {
   }
 }
 
-defineExpose({ applyChanges });
+defineExpose({ applyChanges, focusSearch });
 
 function addItemForActiveTab(): boolean {
   if (activeTab.value === "columns" && canAddColumn.value) {
@@ -3719,10 +3735,10 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
     return;
   }
   if (isPlainModShortcut(event, "f")) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (activeTab.value === "columns") focusColumnSearch();
-    else if (activeTab.value === "ddl") ddlSearchPanelRef.value?.openSearch();
+    if (focusSearch()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
     return;
   }
   if (isPlainModShortcut(event, "s")) {

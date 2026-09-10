@@ -1368,12 +1368,21 @@ pub async fn count_documents(
 }
 
 async fn estimated_document_count(client: &Client, database: &str, collection: &str) -> Result<u64, String> {
-    let result = client
-        .database(database)
-        .run_command(doc! { "count": collection, "query": {} })
-        .await
-        .map_err(|e| e.to_string())?;
-    parse_count_command_result(&result)
+    let result = client.database(database).run_command(doc! { "count": collection }).await;
+    match result {
+        Ok(result) => parse_count_command_result(&result),
+        Err(error) => parse_count_command_error(&error.kind).ok_or_else(|| error.to_string()),
+    }
+}
+
+/// Resolves a failed `count` command the way the driver's `estimated_document_count` does:
+/// NamespaceNotFound (code 26) means the collection is missing, i.e. an empty count, while any
+/// other error must propagate. Mirrors mongodb's internal `Error::is_ns_not_found`.
+fn parse_count_command_error(kind: &mongodb::error::ErrorKind) -> Option<u64> {
+    match kind {
+        mongodb::error::ErrorKind::Command(error) if error.code == 26 => Some(0),
+        _ => None,
+    }
 }
 
 fn parse_count_command_result(result: &Document) -> Result<u64, String> {
@@ -2900,6 +2909,30 @@ mod tests {
         ] {
             assert!(parse_count_command_result(&response).is_err(), "response should be rejected: {response:?}");
         }
+    }
+
+    /// `CommandError` is `#[non_exhaustive]` with a private field, so tests build it through the
+    /// driver's derived `Deserialize`.
+    fn count_command_error(code: i32, code_name: &str) -> mongodb::error::CommandError {
+        serde_json::from_str(&format!(r#"{{"code": {code}, "codeName": "{code_name}", "errmsg": "count failed"}}"#))
+            .unwrap()
+    }
+
+    #[test]
+    fn maps_mongo_namespace_not_found_count_errors_to_zero() {
+        let kind = mongodb::error::ErrorKind::Command(count_command_error(26, "NamespaceNotFound"));
+
+        assert_eq!(parse_count_command_error(&kind), Some(0));
+    }
+
+    #[test]
+    fn propagates_mongo_count_errors_other_than_namespace_not_found() {
+        for (code, code_name) in [(13, "Unauthorized"), (17405, "CommandNotFound")] {
+            let kind = mongodb::error::ErrorKind::Command(count_command_error(code, code_name));
+
+            assert_eq!(parse_count_command_error(&kind), None, "code {code} should propagate");
+        }
+        assert_eq!(parse_count_command_error(&mongodb::error::ErrorKind::Shutdown), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { createApp, defineComponent, h, nextTick } from "vue";
+import { createApp, nextTick } from "vue";
 import { createI18n } from "vue-i18n";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearRedisKeyBrowserState, saveRedisKeyBrowserState } from "@/lib/tabs/redisKeyBrowserStateCache";
@@ -322,7 +322,8 @@ describe("RedisKeyBrowser tab state (tab switch persistence)", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
 
-    expect(mocks.redisScanKeysBatch.mock.calls.at(-1)![3]).toBe("monitor:job:*");
+    const afterSearchCalls = mocks.redisScanKeysBatch.mock.calls;
+    expect(afterSearchCalls[afterSearchCalls.length - 1]![3]).toBe("monitor:job:*");
 
     // Switch away (unmount) and back (remount) — what ContentArea does per tab.
     unmountBrowser(host);
@@ -332,7 +333,8 @@ describe("RedisKeyBrowser tab state (tab switch persistence)", () => {
 
     const restoredInput = restoredHost.querySelector("[data-redis-search-input]") as HTMLInputElement;
     expect(restoredInput.value).toBe("monitor:job:*");
-    expect(mocks.redisScanKeysBatch.mock.calls.at(-1)![3]).toBe("monitor:job:*");
+    const restoredCalls = mocks.redisScanKeysBatch.mock.calls;
+    expect(restoredCalls[restoredCalls.length - 1]![3]).toBe("monitor:job:*");
   });
 
   it("keeps tab states isolated from each other", async () => {
@@ -346,12 +348,14 @@ describe("RedisKeyBrowser tab state (tab switch persistence)", () => {
     const hostB = mountBrowser("tab-b");
     await settle();
     expect((hostB.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("");
-    expect(mocks.redisScanKeysBatch.mock.calls.at(-1)![3]).toBe("*");
+    const tabBCalls = mocks.redisScanKeysBatch.mock.calls;
+    expect(tabBCalls[tabBCalls.length - 1]![3]).toBe("*");
 
     unmountBrowser(hostB);
     const hostA = mountBrowser("tab-a");
     await settle();
     expect((hostA.querySelector("[data-redis-search-input]") as HTMLInputElement).value).toBe("alpha:*");
-    expect(mocks.redisScanKeysBatch.mock.calls.at(-1)![3]).toBe("alpha:*");
+    const tabACalls = mocks.redisScanKeysBatch.mock.calls;
+    expect(tabACalls[tabACalls.length - 1]![3]).toBe("alpha:*");
   });
 });

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Real-DOM integration for the MCP query-timeout input (#8616). The settings
-// dialog binds the Input component one-way (:model-value) and reads the fresh
-// value from the native event target inside @input. This test mounts the real
+// dialog reads the fresh value from the native event target in capture phase,
+// before Input's passive v-model proxy updates the parent ref. This test mounts the real
 // Input component with exactly that wiring and drives it with real DOM events
 // to prove the typing -> debounce -> saveMcpPolicy chain persists the fresh
 // value (a two-way v-model would make the passive proxy emit asynchronously,
@@ -32,7 +32,7 @@ describe("EditorSettingsDialog MCP query timeout real-DOM integration", () => {
             "onUpdate:modelValue": (v: string) => {
               wiring.modelValue.value = v;
             },
-            onInput: wiring.onInput,
+            onInputCapture: wiring.onInput,
           }),
       }),
     );
@@ -75,7 +75,7 @@ describe("EditorSettingsDialog MCP query timeout real-DOM integration", () => {
     // Elapse the debounce window and assert the FRESH value was saved.
     vi.advanceTimersByTime(300);
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 300 });
+    expect(saveMcpPolicy.mock.calls.at(-1)?.[0]).toEqual({ queryTimeoutSecs: 300 });
   });
 
   it("typing then flushing on close persists the fresh value immediately", async () => {
@@ -94,7 +94,7 @@ describe("EditorSettingsDialog MCP query timeout real-DOM integration", () => {
     // Close path: flush before the debounce elapses.
     harness.flushMcpQueryTimeoutSave();
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 120 });
+    expect(saveMcpPolicy.mock.calls.at(-1)?.[0]).toEqual({ queryTimeoutSecs: 120 });
   });
 
   it("rapid typing in the real DOM coalesces into one save of the last value", async () => {
@@ -118,6 +118,6 @@ describe("EditorSettingsDialog MCP query timeout real-DOM integration", () => {
     vi.advanceTimersByTime(300);
 
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 123 });
+    expect(saveMcpPolicy.mock.calls.at(-1)?.[0]).toEqual({ queryTimeoutSecs: 123 });
   });
 });

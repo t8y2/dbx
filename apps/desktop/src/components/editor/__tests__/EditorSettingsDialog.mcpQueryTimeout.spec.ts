@@ -49,17 +49,14 @@ describe("EditorSettingsDialog MCP query timeout persistence", () => {
     // The legacy @change binding must not come back.
     expect(inputLine).not.toContain("@change");
     // Typing must trigger the save path on every keystroke.
-    expect(inputLine).toContain('@input="onMcpQueryTimeoutInput"');
+    expect(inputLine).toContain('@input.capture="onMcpQueryTimeoutInput"');
   });
 
-  it("binds :model-value one-way so the handler reads the fresh native value", () => {
+  it("uses capture-phase input handling so the handler reads the fresh native value before Input's passive v-model update", () => {
     const inputLine = dialogSource.split("\n").find((line) => line.includes('id="mcp-query-timeout"'));
     expect(inputLine).toBeTruthy();
-    // A two-way v-model would make Input.vue's passive proxy emit asynchronously,
-    // so the @input handler would read a stale ref during the same native event.
-    // The project pattern (e.g. updateQueryResultMaxRowsInput) is :model-value.
-    expect(inputLine).toContain(':model-value="mcpQueryTimeoutInput"');
-    expect(inputLine).not.toContain("v-model");
+    expect(inputLine).toContain('v-model="mcpQueryTimeoutInput"');
+    expect(inputLine).toContain('@input.capture="onMcpQueryTimeoutInput"');
   });
 
   it("handler reads the value from the native event target, not the ref", () => {
@@ -99,7 +96,7 @@ describe("EditorSettingsDialog MCP query timeout persistence", () => {
     expect(flushBlockEnd).toBeGreaterThan(flushBlockStart);
     const flushBlock = dialogSource.slice(flushBlockStart, flushBlockEnd);
     // The debounced timer hands the pending value to the existing save path.
-    expect(flushBlock).toContain("void saveMcpPolicy({ queryTimeoutSecs: value })");
+    expect(flushBlock).toContain("queryTimeoutSecs: value");
     // A cleared pending value (no recent input) is a no-op.
     expect(flushBlock).toContain("mcpQueryTimeoutPendingValue === undefined");
   });
@@ -110,8 +107,13 @@ describe("EditorSettingsDialog MCP query timeout persistence", () => {
 // extracts the real debounce block from the .vue source, compiles it, and
 // drives it with fake timers + mocked deps to assert actual save behaviour.
 
-function nativeInputEvent(value: string): Event {
-  return { currentTarget: { value } } as unknown as Event;
+function nativeInputEvent(value: string, badInput = false): Event {
+  return { currentTarget: { value, validity: { badInput } } } as unknown as Event;
+}
+
+function expectQueryTimeoutSave(saveMcpPolicy: ReturnType<typeof vi.fn>, queryTimeoutSecs: number | null) {
+  expect(saveMcpPolicy).toHaveBeenCalled();
+  expect(saveMcpPolicy.mock.calls.at(-1)?.[0]).toEqual({ queryTimeoutSecs });
 }
 
 describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
@@ -132,7 +134,17 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     expect(saveMcpPolicy).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 300 });
+    expectQueryTimeoutSave(saveMcpPolicy, 300);
+  });
+
+  it("reports saving immediately and saved after the persistence callback", () => {
+    const setSaveStatus = vi.fn();
+    const saveMcpPolicy = vi.fn((_partial, callbacks?: { onSuccess?: () => void }) => callbacks?.onSuccess?.());
+    const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input: { value: "" }, policyQueryTimeoutSecs: null, saveMcpPolicy, setSaveStatus });
+    harness.onMcpQueryTimeoutInput(nativeInputEvent("300"));
+    expect(setSaveStatus).toHaveBeenLastCalledWith("saving");
+    harness.flushMcpQueryTimeoutSave();
+    expect(setSaveStatus).toHaveBeenLastCalledWith("saved");
   });
 
   it("coalesces rapid typing into a single save", () => {
@@ -145,7 +157,7 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     harness.onMcpQueryTimeoutInput(nativeInputEvent("123"));
     vi.advanceTimersByTime(300);
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 123 });
+    expectQueryTimeoutSave(saveMcpPolicy, 123);
   });
 
   it("flush persists a pending value before the debounce elapses", () => {
@@ -154,7 +166,7 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     harness.onMcpQueryTimeoutInput(nativeInputEvent("120"));
     harness.flushMcpQueryTimeoutSave();
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 120 });
+    expectQueryTimeoutSave(saveMcpPolicy, 120);
     // Flushing again with nothing pending is a no-op.
     harness.flushMcpQueryTimeoutSave();
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
@@ -170,12 +182,25 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     expect(saveMcpPolicy).toHaveBeenCalledTimes(1);
   });
 
+  it("retains a pending value while another MCP policy mutation holds the gate", () => {
+    const saveMcpPolicy = vi.fn();
+    const policyMutationBlocked = { value: true };
+    const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input: { value: "" }, policyQueryTimeoutSecs: null, saveMcpPolicy, policyMutationBlocked });
+    harness.onMcpQueryTimeoutInput(nativeInputEvent("60"));
+    vi.advanceTimersByTime(300);
+    expect(saveMcpPolicy).not.toHaveBeenCalled();
+
+    policyMutationBlocked.value = false;
+    harness.flushMcpQueryTimeoutSave();
+    expectQueryTimeoutSave(saveMcpPolicy, 60);
+  });
+
   it("empty input schedules null (inherit the connection)", () => {
     const saveMcpPolicy = vi.fn();
     const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input: { value: "" }, policyQueryTimeoutSecs: 300, saveMcpPolicy });
     harness.onMcpQueryTimeoutInput(nativeInputEvent(""));
     harness.flushMcpQueryTimeoutSave();
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: null });
+    expectQueryTimeoutSave(saveMcpPolicy, null);
   });
 
   it("zero input persists 0 (no limit)", () => {
@@ -183,7 +208,7 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input: { value: "" }, policyQueryTimeoutSecs: null, saveMcpPolicy });
     harness.onMcpQueryTimeoutInput(nativeInputEvent("0"));
     harness.flushMcpQueryTimeoutSave();
-    expect(saveMcpPolicy).toHaveBeenCalledWith({ queryTimeoutSecs: 0 });
+    expectQueryTimeoutSave(saveMcpPolicy, 0);
   });
 
   it("invalid input cancels the pending save and reverts the field", () => {
@@ -191,7 +216,7 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     const toast = vi.fn();
     const input = { value: "1.5" };
     const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input, policyQueryTimeoutSecs: null, saveMcpPolicy, toast });
-    const event = { currentTarget: { value: "1.5" } } as unknown as Event;
+    const event = nativeInputEvent("1.5");
     harness.onMcpQueryTimeoutInput(event);
     // Invalid input must not schedule anything.
     vi.advanceTimersByTime(300);
@@ -201,5 +226,16 @@ describe("EditorSettingsDialog MCP query timeout debounce runtime", () => {
     expect(input.value).toBe("");
     // The native input is reverted too (one-way binding needs the DOM write).
     expect((event.currentTarget as { value: string }).value).toBe("");
+  });
+
+  it("does not treat a bad number-input intermediate state as inherit", () => {
+    const saveMcpPolicy = vi.fn();
+    const harness = createMcpQueryTimeoutHarness({ source: dialogSource, input: { value: "" }, policyQueryTimeoutSecs: 90, saveMcpPolicy });
+    harness.onMcpQueryTimeoutInput(nativeInputEvent("45"));
+    vi.advanceTimersByTime(100);
+    harness.onMcpQueryTimeoutInput(nativeInputEvent("", true));
+    vi.advanceTimersByTime(200);
+    expectQueryTimeoutSave(saveMcpPolicy, 45);
+    expect(saveMcpPolicy.mock.calls.some(([partial]) => partial.queryTimeoutSecs === null)).toBe(false);
   });
 });

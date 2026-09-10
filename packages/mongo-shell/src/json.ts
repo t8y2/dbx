@@ -13,7 +13,8 @@ export function normalizeJsonArgument(value: string): string | null {
   if (!withoutComments) return "{}";
   const withoutEjsonDeserialize = replaceMongoEjsonDeserialize(withoutComments);
   // Rewrite mongo shell constructors that are not valid JSON into extended JSON
-  // (mongo_driver::json_value_to_bson): ObjectId / NumberLong / ISODate / new Date.
+  // (mongo_driver::json_value_to_bson): ObjectId / ISODate / new Date / NumberLong /
+  // NumberInt / NumberDecimal.
   const withExtendedJson = replaceMongoShellConstructors(withoutEjsonDeserialize);
   const preprocessed = quoteUnquotedObjectKeys(convertSingleQuotedStrings(withExtendedJson));
   try {
@@ -535,8 +536,18 @@ function replaceMongoEjsonDeserialize(source: string): string {
   return result;
 }
 
+/**
+ * Shell value constructors rewritten to extended JSON.
+ * `Date` is only recognised after `new`, matching the shell where a bare `Date()`
+ * returns a string rather than a date.
+ */
+const SHELL_CONSTRUCTORS = new Set(["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal"]);
+const CONSTRUCTOR_CALL = /^(new\s+)?([A-Za-z_$][\w$]*)\s*\(/;
+const QUOTED_ARGUMENT = /^(["'])([^\\]*)\1$/;
+const INTEGER_ARGUMENT = /^-?\d+$/;
+const DECIMAL_ARGUMENT = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
 function replaceMongoShellConstructors(source: string): string {
-  const constructor = /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
   let result = "";
   let index = 0;
   while (index < source.length) {
@@ -553,21 +564,86 @@ function replaceMongoShellConstructors(source: string): string {
       result += source.slice(start, index);
       continue;
     }
-    const match = source.slice(index).match(constructor);
-    if (!match) {
+    const call = matchShellConstructorCall(source, index);
+    if (!call) {
       result += source[index++]!;
       continue;
     }
-    if (match[1]) {
-      result += match[1] === "ObjectId" ? `{"$oid":"${match[2]}"}` : match[1] === "NumberLong" ? `{"$numberLong":"${match[2]}"}` : `{"$date":"${match[2]}"}`;
-    } else if (match[3]) {
-      result += match[3] === "NumberLong" ? `{"$numberLong":"${match[4]}"}` : `{"$oid":"${match[4]}"}`;
-    } else {
-      result += `{"$date":"${match[5]}"}`;
-    }
-    index += match[0].length;
+    result += call.json;
+    index = call.end;
   }
   return result;
+}
+
+/** Rewrite one `Name(...)` / `new Name(...)` call at {@link index}, or null when it is not a known constructor. */
+function matchShellConstructorCall(source: string, index: number): { json: string; end: number } | null {
+  const match = CONSTRUCTOR_CALL.exec(source.slice(index));
+  if (!match) return null;
+  const name = match[2]!;
+  if (!SHELL_CONSTRUCTORS.has(name)) return null;
+  if (name === "Date" && !match[1]) return null;
+
+  const openIndex = index + match[0].length - 1;
+  const closeIndex = findMatchingParen(source, openIndex);
+  if (closeIndex < 0) return null;
+
+  const inner = source.slice(openIndex + 1, closeIndex).trim();
+  const args = inner ? splitTopLevel(inner) : [];
+  const json = shellConstructorToExtendedJson(name, args);
+  return json === null ? null : { json, end: closeIndex + 1 };
+}
+
+function shellConstructorToExtendedJson(name: string, args: string[]): string | null {
+  if (args.length > 1) return null;
+  const arg = args[0]?.trim();
+  const literal = arg ? (QUOTED_ARGUMENT.exec(arg)?.[2] ?? null) : null;
+
+  switch (name) {
+    case "ObjectId":
+      if (!arg) return wrap("$oid", generateObjectIdHex());
+      return literal !== null || INTEGER_ARGUMENT.test(arg) ? wrap("$oid", literal ?? arg) : null;
+    case "ISODate":
+    case "Date":
+      if (!arg) return wrap("$date", new Date().toISOString());
+      if (literal !== null) return wrap("$date", literal);
+      // `new Date(1735689600000)` takes epoch milliseconds, which extended JSON
+      // carries as a nested $numberLong rather than a bare number.
+      return INTEGER_ARGUMENT.test(arg) ? `{"$date":{"$numberLong":${JSON.stringify(arg)}}}` : null;
+    case "NumberLong":
+    case "NumberInt": {
+      const value = literal ?? arg;
+      if (value === undefined || !INTEGER_ARGUMENT.test(value)) return null;
+      return wrap(name === "NumberLong" ? "$numberLong" : "$numberInt", value);
+    }
+    case "NumberDecimal": {
+      const value = literal ?? arg;
+      if (value === undefined || !DECIMAL_ARGUMENT.test(value)) return null;
+      return wrap("$numberDecimal", value);
+    }
+    default:
+      return null;
+  }
+}
+
+function wrap(key: string, value: string): string {
+  return `{${JSON.stringify(key)}:${JSON.stringify(value)}}`;
+}
+
+const OBJECT_ID_RANDOM = randomHex(5);
+let objectIdCounter = Math.floor(Math.random() * 0xffffff);
+
+/** Client-side ObjectId for a bare `ObjectId()`, mirroring how the shell fills one in. */
+function generateObjectIdHex(): string {
+  objectIdCounter = (objectIdCounter + 1) % 0x1000000;
+  const seconds = Math.floor(Date.now() / 1000) % 0x100000000;
+  return seconds.toString(16).padStart(8, "0") + OBJECT_ID_RANDOM + objectIdCounter.toString(16).padStart(6, "0");
+}
+
+function randomHex(bytes: number): string {
+  const values = new Uint8Array(bytes);
+  if (typeof globalThis.crypto?.getRandomValues === "function") globalThis.crypto.getRandomValues(values);
+  else for (let i = 0; i < bytes; i += 1) values[i] = Math.floor(Math.random() * 256);
+  return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
 }
 
 function convertSingleQuotedStrings(source: string): string {

@@ -19,7 +19,12 @@ pub struct ConsulClient {
 
 impl ConsulClient {
     pub async fn new(mut config: ConsulConfig) -> Result<Self, String> {
+        // The desktop build unifies reqwest with both `default-tls` and `rustls-tls`,
+        // and `TlsBackend` defaults to native-tls there, which rejects the PEM identity
+        // below with `incompatible TLS identity type`. Pin rustls like the etcd metrics
+        // client so mTLS Consul works in every target.
         let mut builder = reqwest::Client::builder()
+            .use_rustls_tls()
             .connect_timeout(Duration::from_secs(config.connect_timeout_secs.max(1)))
             .redirect(reqwest::redirect::Policy::none());
         if config.request_timeout_secs > 0 {

@@ -6913,6 +6913,9 @@ export default withEnglishFallback({
     shortcutConvertNamingStyle: "네이밍 스타일 전환",
     dataGridKeepFilterEditorExpanded: "필터 편집기 항상 펼치기",
     dataGridKeepFilterEditorExpandedDescription: "조건 및 텍스트 보기에서 편집기를 항상 펼칩니다.",
+    mcpQueryTimeoutSaveStatus_saving: "저장 중...",
+    mcpQueryTimeoutSaveStatus_saved: "저장됨",
+    mcpQueryTimeoutSaveStatus_failed: "저장 실패",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

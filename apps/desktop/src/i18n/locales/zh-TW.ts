@@ -6506,6 +6506,9 @@ export default withEnglishFallback({
     shortcutConvertNamingStyle: "切換命名風格",
     dataGridKeepFilterEditorExpanded: "篩選編輯器常駐展開",
     dataGridKeepFilterEditorExpandedDescription: "始終在條件檢視和文字檢視中展開編輯器。",
+    mcpQueryTimeoutSaveStatus_saving: "儲存中...",
+    mcpQueryTimeoutSaveStatus_saved: "已儲存",
+    mcpQueryTimeoutSaveStatus_failed: "儲存失敗",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

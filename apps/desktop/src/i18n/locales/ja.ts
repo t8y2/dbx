@@ -7241,6 +7241,9 @@ export default withEnglishFallback({
     shortcutConvertNamingStyle: "命名スタイルの切り替え",
     dataGridKeepFilterEditorExpanded: "フィルターエディターを常に展開する",
     dataGridKeepFilterEditorExpandedDescription: "条件ビューとテキストビューでエディターを常に展開します。",
+    mcpQueryTimeoutSaveStatus_saving: "保存中...",
+    mcpQueryTimeoutSaveStatus_saved: "保存済み",
+    mcpQueryTimeoutSaveStatus_failed: "保存失敗",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

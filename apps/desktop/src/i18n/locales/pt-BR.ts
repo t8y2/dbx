@@ -7191,6 +7191,9 @@ export default withEnglishFallback({
     shortcutConvertNamingStyle: "Alternar estilo de nomenclatura",
     dataGridKeepFilterEditorExpanded: "Manter o editor de filtros expandido",
     dataGridKeepFilterEditorExpandedDescription: "Mantém o editor sempre expandido nas visualizações Condições e Texto.",
+    mcpQueryTimeoutSaveStatus_saving: "Salvando...",
+    mcpQueryTimeoutSaveStatus_saved: "Salvo",
+    mcpQueryTimeoutSaveStatus_failed: "Falha ao salvar",
   },
   driverStore: {
     jreDirRemoveFailed: "Não foi possível remover o diretório JRE antigo: {path} (erro original: {error})",

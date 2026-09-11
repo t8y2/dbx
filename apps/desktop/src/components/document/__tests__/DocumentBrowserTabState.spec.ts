@@ -21,6 +21,8 @@ const dataGrid = vi.hoisted(() => ({
   pageOffset: undefined as number | undefined,
   rowCount: undefined as number | undefined,
   columnCount: undefined as number | undefined,
+  localColumnFilters: undefined as Record<string, string[]> | undefined,
+  localFiltersChange: undefined as ((filters: Record<string, string[]>) => void) | undefined,
   viewStateKey: undefined as string | undefined,
   viewGeneration: undefined as string | undefined,
 }));
@@ -88,6 +90,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
         dataGrid.sort = attrs.onSort as typeof dataGrid.sort;
         dataGrid.reload = attrs.onReload as typeof dataGrid.reload;
+        dataGrid.localFiltersChange = attrs.onLocalColumnFiltersChange as typeof dataGrid.localFiltersChange;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -114,6 +117,7 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
           dataGrid.viewGeneration = props.viewGeneration;
           dataGrid.rowCount = (props.result as { rows: unknown[] }).rows.length;
           dataGrid.columnCount = (props.result as { columns: unknown[] }).columns.length;
+          dataGrid.localColumnFilters = (props.result as { local_column_filters?: Record<string, string[]> }).local_column_filters;
           return h("div", [
             // Rendering the real search-bar slot exposes the filter/sort inputs
             // the same way the actual grid toolbar does.
@@ -231,6 +235,8 @@ beforeEach(async () => {
   dataGrid.pageOffset = undefined;
   dataGrid.rowCount = undefined;
   dataGrid.columnCount = undefined;
+  dataGrid.localColumnFilters = undefined;
+  dataGrid.localFiltersChange = undefined;
   dataGrid.viewStateKey = undefined;
   dataGrid.viewGeneration = undefined;
   settings.editorSettings.infiniteScroll = false;
@@ -352,6 +358,24 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
 
     expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
     expect(dataGrid.rowCount).toBe(2);
+  });
+
+  it("restores mongodb local column filters after a tab switch", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
   });
 
   it("still forces a real reload from the refresh button after a restore", async () => {

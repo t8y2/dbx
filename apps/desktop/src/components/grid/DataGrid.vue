@@ -2862,7 +2862,7 @@ const localFilterScopeKey = computed(() =>
 watch(
   () => localFilterScopeKey.value,
   () => {
-    localColumnFilters.value = {};
+    localColumnFilters.value = restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length);
     resetColumnVisibility();
     closeLocalFilter();
   },

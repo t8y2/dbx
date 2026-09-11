@@ -89,6 +89,7 @@ import { mongoDocumentsToQueryResult } from "@/lib/mongo/mongoShellCommand";
 import type { GridNewRowMeta } from "@/lib/dataGrid/gridNewRowPlacement";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { documentDataGridColumnLayoutScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
+import type { SerializedDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { documentGridColumnVisibilityScopeKey, migrateDocumentGridColumnVisibilityToLayout } from "@/lib/document/documentGridColumnVisibilityStorage";
 import { matchesElasticsearchIndexPattern, subscribeElasticsearchIndexCleared, type ElasticsearchIndexClearedDetail } from "@/lib/sidebar/elasticsearchIndexActions";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
@@ -176,6 +177,7 @@ const viewMode = computed<ViewMode>({
 });
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
+const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -353,10 +355,18 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
     page: page.value,
+    localColumnFilters: localColumnFilters.value,
     // Any condition change drops the payload; only the unmount capture stores
     // rows, so a cached page can never outlive the conditions that produced it.
     data: options.includeData ? captureDocumentBrowserData() : undefined,
   });
+}
+
+function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFilters) {
+  localColumnFilters.value = Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]]));
+  // Local value filters only change the client-side view. Keep the loaded rows
+  // in the tab snapshot so returning to the tab does not trigger a reload.
+  persistDocumentBrowserState({ includeData: true });
 }
 
 watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], () => persistDocumentBrowserState(), { deep: true });
@@ -558,6 +568,7 @@ const gridResult = computed<QueryResult>(() => {
       affected_rows: 0,
       execution_time_ms: 0,
       truncated: false,
+      local_column_filters: localColumnFilters.value,
     };
   }
 
@@ -571,6 +582,7 @@ const gridResult = computed<QueryResult>(() => {
     execution_time_ms: 0,
     truncated: false,
     appended_from_row_count: appendedFromRowCount.value,
+    local_column_filters: localColumnFilters.value,
   };
 });
 
@@ -2538,6 +2550,7 @@ defineExpose({ focusSearch });
       @sort="onSort"
       @reload="refreshDocuments"
       @paginate="(offset: number, limit: number) => paginate(offset, limit)"
+      @local-column-filters-change="handleLocalColumnFiltersChange"
     >
       <template #search-bar="{ localFilterCount, hasLocalColumnFilters, localFilterSummaries, clearLocalFilter }: { localFilterCount: number; hasLocalColumnFilters: boolean; localFilterSummaries: LocalFilterSummary[]; clearLocalFilter: (columnIndex?: number) => void }">
         <div ref="tableSearchSplitContainerRef" class="flex flex-1 min-w-0">

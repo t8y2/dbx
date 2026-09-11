@@ -14,6 +14,8 @@ import "./appTabBar.css";
 const props = defineProps<{
   driverStoreOpen?: boolean;
   driverStoreActive?: boolean;
+  pluginCenterOpen?: boolean;
+  pluginCenterActive?: boolean;
   settingsPageOpen?: boolean;
   settingsPageActive?: boolean;
   agentDriverUpdateCount?: number;
@@ -26,6 +28,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "activate-driver-store": [];
   "close-driver-store": [];
+  "activate-plugin-center": [];
+  "close-plugin-center": [];
   "activate-settings-page": [];
   "close-settings-page": [];
   "activate-tab": [tabId: string];
@@ -121,7 +125,7 @@ watch(
   },
 );
 
-type SpecialRegularSurface = "driverStore" | "settings";
+type SpecialRegularSurface = "driverStore" | "pluginCenter" | "settings";
 
 function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   if (keep !== "driverStore" && props.driverStoreOpen) {
@@ -129,6 +133,9 @@ function closeSpecialRegularSurfaces(keep?: SpecialRegularSurface) {
   }
   if (keep !== "settings" && props.settingsPageOpen) {
     emit("close-settings-page");
+  }
+  if (keep !== "pluginCenter" && props.pluginCenterOpen) {
+    emit("close-plugin-center");
   }
 }
 
@@ -141,6 +148,10 @@ function closeOtherActiveTabs() {
   }
   if (props.driverStoreActive) {
     closeSpecialRegularSurfaces("driverStore");
+    return;
+  }
+  if (props.pluginCenterActive) {
+    closeSpecialRegularSurfaces("pluginCenter");
     return;
   }
 
@@ -188,9 +199,12 @@ function handleCancelClose() {
 <template>
   <!-- Targets remain mounted while inactive so the original group bars can
        move here without losing their local presentation state. -->
-  <div v-show="driverStoreActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
+  <div v-show="driverStoreActive || pluginCenterActive || settingsPageActive" data-special-page-workspace class="flex min-h-0 min-w-0 flex-1 overflow-hidden" :class="layoutClass">
     <div data-special-page-navigation class="flex min-h-0 min-w-0 shrink-0 flex-col overflow-auto" :style="navigationStyle">
       <div v-for="group in queryStore.groups" :key="group.id" :ref="(element) => setTabBarTarget(group.id, element)" :data-special-page-tab-target="group.id" class="flex min-h-0 min-w-0" :class="isVerticalLayout ? 'flex-1' : 'shrink-0'" />
+      <button v-if="pluginCenterOpen" type="button" data-plugin-center-tab class="shrink-0 rounded-md px-2 py-1 text-left text-sm" :class="pluginCenterActive ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'" @click="emit('activate-plugin-center')">
+        {{ t("toolbar.pluginCenter") }}
+      </button>
     </div>
     <div data-special-page-content class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <slot />

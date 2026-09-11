@@ -9,3 +9,8 @@ license = "Apache-2.0"
 [dependencies]
 dbx-plugin-sdk = { path = "../../../sdk/rust/dbx-plugin-sdk" }
 serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

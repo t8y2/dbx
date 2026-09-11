@@ -2695,13 +2695,22 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
         }
         serde_json::Value::Object(obj) => {
             if obj.len() == 1 {
-                // Shell constructor wrappers (UUID/BinData/Timestamp/MinKey/MaxKey)
-                // and $regularExpression decode through the shared extended JSON
-                // parser, following the same precedent as $date below.
+                // Shell constructor wrappers (UUID/BinData/Timestamp/MinKey/MaxKey),
+                // $regularExpression, and the numeric type wrappers decode through
+                // the shared extended JSON parser, following the same precedent as
+                // $date below, so typed number literals compare correctly in filters.
                 if obj.keys().next().is_some_and(|key| {
                     matches!(
                         key.as_str(),
-                        "$regularExpression" | "$uuid" | "$binary" | "$timestamp" | "$minKey" | "$maxKey"
+                        "$regularExpression"
+                            | "$uuid"
+                            | "$binary"
+                            | "$timestamp"
+                            | "$minKey"
+                            | "$maxKey"
+                            | "$numberInt"
+                            | "$numberDouble"
+                            | "$numberDecimal"
                     )
                 }) {
                     if let Ok(Some(value)) = parse_extended_json_value(obj) {
@@ -3419,6 +3428,51 @@ mod tests {
             blob.get("$eq"),
             Some(Bson::Binary(binary)) if binary.subtype == mongodb::bson::spec::BinarySubtype::Generic && binary.bytes == [1, 2, 3]
         ));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_extended_json_number_wrappers() {
+        // Typed number literals must compare against the typed BSON value, not a
+        // raw { "$numberInt": ... } document the server rejects with
+        // "unknown operator" (or that silently matches nothing).
+        let filter = serde_json::json!({
+            "score": { "$numberInt": "5" },
+            "ratio": { "$numberDouble": "1.5" },
+            "price": { "$numberDecimal": "3.14" },
+        });
+        let doc = json_filter_to_document(&filter).unwrap();
+
+        assert_eq!(doc.get("score"), Some(&Bson::Int32(5)));
+        assert_eq!(doc.get("ratio"), Some(&Bson::Double(1.5)));
+        let expected_decimal: mongodb::bson::Decimal128 = "3.14".parse().unwrap();
+        assert_eq!(doc.get("price"), Some(&Bson::Decimal128(expected_decimal)));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_number_wrappers_inside_operators() {
+        // Range and $in operands must decode too, exactly like extended JSON
+        // dates: { score: { $gte: {"$numberInt": "5"} } } would otherwise
+        // compare against a sub-document and silently match nothing.
+        let filter = serde_json::json!({
+            "score": { "$gte": { "$numberInt": "5" } },
+            "tags": { "$in": [{ "$numberDecimal": "3.14" }, { "$numberDouble": "1.5" }] },
+        });
+        let doc = json_filter_to_document(&filter).unwrap();
+
+        let Some(Bson::Document(score)) = doc.get("score") else {
+            panic!("expected score operator document");
+        };
+        assert_eq!(score.get("$gte"), Some(&Bson::Int32(5)));
+
+        let Some(Bson::Document(tags)) = doc.get("tags") else {
+            panic!("expected tags operator document");
+        };
+        let Some(Bson::Array(values)) = tags.get("$in") else {
+            panic!("expected tags $in array");
+        };
+        let expected_decimal: mongodb::bson::Decimal128 = "3.14".parse().unwrap();
+        assert_eq!(values.first(), Some(&Bson::Decimal128(expected_decimal)));
+        assert_eq!(values.get(1), Some(&Bson::Double(1.5)));
     }
 
     #[test]

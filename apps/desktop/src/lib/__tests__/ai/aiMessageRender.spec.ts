@@ -79,6 +79,122 @@ describe("createAiMessageRenderer", () => {
     expect(code).toMatchObject({ type: "code", pending: false, html: "<span>SELECT 1</span>" });
   });
 
+  it("recovers a language fence appended to the preceding prose line", () => {
+    const markdown = (text: string) => `<p>${text}</p>`;
+    const highlightCode = (content: string) => `<span>${content}</span>`;
+    const renderer = createAiMessageRenderer({ markdown, highlightCode });
+
+    const segments = renderer.render("SQL 如下：```sql\nALTER TABLE users ADD COLUMN name TEXT;\n```\n\n字段允许为空。");
+
+    expect(segments).toEqual([
+      { type: "text", content: "SQL 如下：", html: "<p>SQL 如下：</p>" },
+      {
+        type: "code",
+        content: "ALTER TABLE users ADD COLUMN name TEXT;",
+        html: "<span>ALTER TABLE users ADD COLUMN name TEXT;</span>",
+        lang: "SQL",
+        isSql: true,
+        pending: false,
+      },
+      { type: "text", content: "\n字段允许为空。", html: "<p>\n字段允许为空。</p>" },
+    ]);
+  });
+
+  it("recovers an appended fence after inline code in the prose", () => {
+    const renderer = createAiMessageRenderer({
+      markdown: (text) => `<p>${text}</p>`,
+      highlightCode: (content) => `<span>${content}</span>`,
+    });
+
+    const segments = renderer.render("Run `EXPLAIN`：```sql\nSELECT 1;\n```\n\nDone.");
+
+    expect(segments.map((segment) => segment.type)).toEqual(["text", "code", "text"]);
+    expect(segments[1]).toMatchObject({ type: "code", content: "SELECT 1;", lang: "SQL", pending: false });
+    expect(segments[2]).toMatchObject({ type: "text", content: "\nDone." });
+  });
+
+  it("does not recover inline-looking fences inside an outer code fence", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+    const content = "````markdown\nPreview:```html\n<p>safe example</p>\n````";
+
+    expect(renderer.render(content)).toEqual([{ type: "text", content, html: `<p>${content}</p>` }]);
+    expect(markdown).toHaveBeenCalledWith(content);
+  });
+
+  it.each(["> ```sql\n> SELECT 1;\n> ```", "- ```sql\n  SELECT 1;\n  ```"])("leaves container code fences to the Markdown renderer", (content) => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+
+    expect(renderer.render(content)).toEqual([{ type: "text", content, html: `<p>${content}</p>` }]);
+    expect(markdown).toHaveBeenCalledWith(content);
+  });
+
+  it("leaves multiline code spans to the Markdown renderer", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+    const content = "Label: ```sql\nSELECT 1;\n``` remains literal.";
+
+    expect(renderer.render(content)).toEqual([{ type: "text", content, html: `<p>${content}</p>` }]);
+    expect(markdown).toHaveBeenCalledWith(content);
+  });
+
+  it("does not borrow a closing fence from a later tilde code block", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+    const content = "Label: ```sql\nSELECT 1;\n``` remains literal.\n\n~~~markdown\n```\n~~~";
+
+    const segments = renderer.render(content);
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toMatchObject({ type: "text", content: "Label: ```sql\nSELECT 1;\n``` remains literal.\n\n~~~markdown" });
+    expect(segments[1]).toMatchObject({ type: "code", content: "~~~", pending: true });
+  });
+
+  it("does not recover inline-looking fences inside raw HTML blocks", () => {
+    const renderer = createAiMessageRenderer({ markdown: (text) => `<p>${text}</p>` });
+    const content = "<!-- Example:```sql\nDROP TABLE users;\n```\n-->";
+
+    const segments = renderer.render(content);
+    expect(segments.some((segment) => segment.type === "code" && !segment.pending)).toBe(false);
+  });
+
+  it("does not recover inline-looking fences inside ordinary HTML blocks", () => {
+    const renderer = createAiMessageRenderer({ markdown: (text) => `<p>${text}</p>` });
+    const content = "<div>\nExample:```sql\nDROP TABLE users;\n```\n</div>";
+
+    const segments = renderer.render(content);
+    expect(segments.some((segment) => segment.type === "code" && !segment.pending)).toBe(false);
+  });
+
+  it("recovers appended language fences in CRLF messages", () => {
+    const renderer = createAiMessageRenderer({ markdown: (text) => `<p>${text}</p>` });
+
+    const segments = renderer.render("SQL：```sql\r\nSELECT 1;\r\n```\r\n\r\nDone.");
+
+    expect(segments.map((segment) => segment.type)).toEqual(["text", "code", "text"]);
+    expect(segments[1]).toMatchObject({ type: "code", content: "SELECT 1;", lang: "SQL", pending: false });
+    expect(segments[2]).toMatchObject({ type: "text", content: "\r\nDone." });
+  });
+
+  it("does not recover an appended fence without a parser-compatible close", () => {
+    const markdown = vi.fn((text: string) => `<p>${text}</p>`);
+    const renderer = createAiMessageRenderer({ markdown });
+    const content = "SQL:```sql\nSELECT 1;\n  ```\nDone.";
+
+    expect(renderer.render(content)).toEqual([{ type: "text", content, html: `<p>${content}</p>` }]);
+    expect(markdown).toHaveBeenCalledWith(content);
+  });
+
+  it("recovers multiple appended language fences in one message", () => {
+    const renderer = createAiMessageRenderer({ markdown: (text) => `<p>${text}</p>` });
+
+    const segments = renderer.render("First:```sql\nSELECT 1;\n```\n\nSecond:```bash\necho done\n```");
+
+    expect(segments.map((segment) => segment.type)).toEqual(["text", "code", "text", "code"]);
+    expect(segments[1]).toMatchObject({ type: "code", content: "SELECT 1;", lang: "SQL", pending: false });
+    expect(segments[3]).toMatchObject({ type: "code", content: "echo done", lang: "BASH", pending: false });
+  });
+
   it("falls back to escaped code when highlighting is not supported", () => {
     const markdown = (text: string) => `<p>${text}</p>`;
     const highlightCode = vi.fn(() => {

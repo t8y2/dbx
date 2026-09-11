@@ -50,6 +50,9 @@ const DEFAULT_MAX_CACHE_CHARS = 400_000;
 const STREAM_BLOCK_MIN_CHARS = 240;
 const BLANK_LINE_RE = /\n{2,}/g;
 const FENCE_LINE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const INLINE_LANGUAGE_FENCE_RE = /^(.*?)(```[a-zA-Z0-9_+.-]+)[ \t]*(\r?)$/;
+const MARKDOWN_CONTAINER_PREFIX_RE = /^[>*+\d.)-]+$/;
+const STANDALONE_CLOSING_FENCE_RE = /^```[ \t]*\r?$/;
 // Definitions inside block containers still apply to the whole document. Container indentation
 // may exceed three columns, so this prefix is intentionally conservative: a false positive only
 // disables streaming splits, while a false negative changes reference-link rendering.
@@ -57,6 +60,7 @@ const LINK_REFERENCE_RE = /^(?:[ \t]*(?:>[ \t]?|(?:[*+-]|\d{1,9}[.)])[ \t]+))*[ 
 // Raw HTML blocks stay open across blank lines, which no block boundary may cut:
 // comments, processing instructions, declarations, CDATA and the raw-text elements.
 const RAW_HTML_BLOCK_RE = /<!--|<\?|<!\[CDATA\[|<![A-Za-z]|<\/?(?:script|style|pre|textarea)\b/i;
+const HTML_TAG_RE = /<\/?[A-Za-z][^<>\n]*>/;
 const SQL_LANGUAGES = new Map([
   ["sql", "SQL"],
   ["mysql", "MYSQL"],
@@ -325,7 +329,7 @@ function createRenderCache<T>(maxEntries: number, maxChars: number) {
 
 export function parseAiMessage(text: string): MessageSegment[] {
   const segments: MessageSegment[] = [];
-  const lines = text.split("\n");
+  const lines = recoverInlineLanguageFences(text).split("\n");
   let i = 0;
 
   while (i < lines.length) {
@@ -354,6 +358,44 @@ export function parseAiMessage(text: string): MessageSegment[] {
   }
 
   return segments;
+}
+
+function recoverInlineLanguageFences(text: string): string {
+  if (RAW_HTML_BLOCK_RE.test(text) || HTML_TAG_RE.test(text)) return text;
+  const normalized: string[] = [];
+  let outerFence: FenceState = null;
+  const lines = text.split("\n");
+  const compatibleClosingFenceAhead = Array.from({ length: lines.length }, () => false);
+  let nextFenceIsCompatibleClose = false;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    compatibleClosingFenceAhead[index] = nextFenceIsCompatibleClose;
+    if (STANDALONE_CLOSING_FENCE_RE.test(lines[index])) nextFenceIsCompatibleClose = true;
+    else if (FENCE_LINE_RE.test(lines[index])) nextFenceIsCompatibleClose = false;
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const nextOuterFence = trackFenceState(line, outerFence);
+    if (outerFence || nextOuterFence) {
+      normalized.push(line);
+      outerFence = nextOuterFence;
+      continue;
+    }
+
+    const match = line.match(INLINE_LANGUAGE_FENCE_RE);
+    const rawProse = match?.[1] ?? "";
+    const prose = match?.[1].trimEnd();
+    if (!match || !prose || prose.endsWith("\\") || MARKDOWN_CONTAINER_PREFIX_RE.test(rawProse.replace(/[ \t]/g, "")) || !compatibleClosingFenceAhead[index]) {
+      normalized.push(line);
+      continue;
+    }
+
+    const carriageReturn = match[3];
+    normalized.push(`${prose}${carriageReturn}`, `${match[2]}${carriageReturn}`);
+    outerFence = { marker: "`", length: 3 };
+  }
+
+  return normalized.join("\n");
 }
 
 export function normalizeAiCodeLanguage(lang?: string): string {

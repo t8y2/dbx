@@ -28,8 +28,10 @@ const REPOSITORIES_FILE: &str = ".repositories.json";
 const REPOSITORIES_LOCK_FILE: &str = ".repositories.lock";
 const OFFICIAL_CATALOG_URL: &str = "https://raw.githubusercontent.com/t8y2/dbx-store/main/catalog/index.json";
 const ADDITIONAL_OFFICIAL_TRUSTED_KEYS_JSON: Option<&str> = option_env!("DBX_PLUGIN_MARKETPLACE_TRUSTED_KEYS_JSON");
-const BUILTIN_OFFICIAL_TRUSTED_KEYS: &[(&str, &str)] =
-    &[("dbx-store-preview-2026", "VRb0VscZfWwuFa7LYfeD/wEOJeyNP8wPGND9br8Icmk=")];
+const BUILTIN_OFFICIAL_TRUSTED_KEYS: &[(&str, &str)] = &[
+    ("dbx-store-preview-2026", "VRb0VscZfWwuFa7LYfeD/wEOJeyNP8wPGND9br8Icmk="),
+    ("dbx-store-release-2026", "9Ew1pCeGfTzg2Ltiqw7siiQlLsR+HK1MGqwsSVSC8ng"),
+];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

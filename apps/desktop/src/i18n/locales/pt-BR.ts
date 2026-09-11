@@ -2357,6 +2357,8 @@ export default withEnglishFallback({
     delete: "Excluir",
     disabled: "Desativado",
     back: "Voltar",
+    action: "Ação",
+    actions: "Ações",
   },
   dateTimePicker: {
     open: "Abrir seletor de data e hora",
@@ -6046,6 +6048,11 @@ export default withEnglishFallback({
     deployMixedTitle: "Parcialmente Implantado",
     deployRolledBackTitle: "Revertido",
     deployMixedWarning: "Algumas instruções podem já ter sido aplicadas enquanto outras falharam. O banco de dados pode estar em um estado inconsistente. Revise o log de transações e tome ação corretiva manual antes de tentar novamente.",
+    compareTablesSwitch: "Comparar tabelas",
+    tableCompareDisabled: "A comparação de tabelas está desativada. Ative o interruptor para incluir tabelas.",
+    dependencyGraph: "Grafo de dependências",
+    copySourceDdl: "Copiar DDL de origem",
+    copyTargetDdl: "Copiar DDL de destino",
   },
   rollbackComparison: {
     title: "Comparação de Reversão",

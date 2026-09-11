@@ -2355,6 +2355,8 @@ export default withEnglishFallback({
     delete: "刪除",
     disabled: "停用",
     back: "返回",
+    action: "操作",
+    actions: "操作",
   },
   dateTimePicker: {
     open: "開啟日期時間選擇器",
@@ -5364,6 +5366,11 @@ export default withEnglishFallback({
     deployMixedTitle: "部分已部署",
     deployRolledBackTitle: "已回溯",
     deployMixedWarning: "部分語句可能已生效，其餘語句失敗。資料庫可能處於不一致狀態，請在重試前檢查交易日誌並手動處理。",
+    compareTablesSwitch: "比較表",
+    tableCompareDisabled: "已關閉，不比較表。打開開關後才會納入對比。",
+    dependencyGraph: "依賴圖",
+    copySourceDdl: "複製來源 DDL",
+    copyTargetDdl: "複製目標 DDL",
   },
   rollbackComparison: {
     title: "回溯對比",

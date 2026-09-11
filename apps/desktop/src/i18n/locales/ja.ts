@@ -2382,6 +2382,8 @@ export default withEnglishFallback({
     delete: "削除",
     disabled: "無効",
     back: "戻る",
+    action: "操作",
+    actions: "操作",
   },
   dateTimePicker: {
     open: "日時ピッカーを開く",
@@ -6082,6 +6084,11 @@ export default withEnglishFallback({
     deployMixedTitle: "部分的にデプロイ",
     deployRolledBackTitle: "ロールバック済み",
     deployMixedWarning: "一部のステートメントは既に適用済みで、他のステートメントは失敗した可能性があります。データベースが不整合な状態にある可能性があります。再試行前にトランザクションログを確認し、手動で修正してください。",
+    compareTablesSwitch: "テーブルを比較",
+    tableCompareDisabled: "テーブル比較はオフです。スイッチをオンにするとテーブルが比較対象になります。",
+    dependencyGraph: "依存関係グラフ",
+    copySourceDdl: "ソース DDL をコピー",
+    copyTargetDdl: "ターゲット DDL をコピー",
   },
   rollbackComparison: {
     title: "ロールバック比較",

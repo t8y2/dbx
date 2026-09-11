@@ -18,6 +18,7 @@ import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomC
 import NacosConfigDiffDialog from "@/components/nacos/NacosConfigDiffDialog.vue";
 import KvValueEditor from "@/components/kv/KvValueEditor.vue";
 import type { KvCreateMode, KvDeleteOptions, KvGetOptions, KvGetResponse, KvHistoryEvent, KvHistoryResponse, KvInt64, KvKeySummary, KvListPrefixOptions, KvPutOptions, KvPutResponse, KvValue } from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import type { KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { buildKvKeyTree, flattenVisibleKvKeyTree, kvKeyTreeNodePath, preserveKvExpandedGroupIds, type KvKeyTreeNode } from "@/lib/kv/kvKeyTree";
 import { decideKvMetadataRefresh, hasPositiveKvLease, knownKvLeaseSummaries, mergeKvKeyMetadata, mergeKvValueRefresh, nextKvLeaseRefreshDelay, removeMissingKvKey, updateKvResponseTtl } from "@/lib/kv/kvMetadataRefresh";
@@ -712,7 +713,7 @@ async function loadKeys(reset = true, options: LoadKeysOptions = {}) {
     }
   } catch (error) {
     if (reset && generation === keyLoadGeneration && props.connectionId === connectionId) {
-      listError.value = error instanceof Error ? error.message : String(error);
+      listError.value = formatError(error);
     }
   } finally {
     if (generation === keyLoadGeneration && props.connectionId === connectionId) {
@@ -792,7 +793,7 @@ async function loadLazyRoot(reset = true, options: LoadKeysOptions = {}) {
     }
   } catch (error) {
     if (lazyLoadContextValid(context)) {
-      listError.value = error instanceof Error ? error.message : String(error);
+      listError.value = formatError(error);
     }
   } finally {
     if (lazyLoadContextValid(context)) loading.value = false;
@@ -966,7 +967,7 @@ async function loadSelectedKey(input: string | KvKeyRoute) {
     startKeyListRefresh();
   } catch (error) {
     if (requestId !== detailRequestId || selectedKey.value !== key || connectionId !== props.connectionId) return;
-    detailError.value = error instanceof Error ? error.message : String(error);
+    detailError.value = formatError(error);
   } finally {
     if (requestId === detailRequestId && connectionId === props.connectionId) detailLoading.value = false;
   }
@@ -1414,7 +1415,7 @@ async function deleteSelectedKey() {
     }
     toast(props.labels.deleted, 2500);
   } catch (error) {
-    detailError.value = error instanceof Error ? error.message : String(error);
+    detailError.value = formatError(error);
     showDeleteConfirm.value = false;
   } finally {
     deleting.value = false;
@@ -1471,7 +1472,7 @@ async function copySelectedValue() {
     }, 1500);
   } catch (error) {
     selectedValueCopied.value = false;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     const failureTemplate = props.labels.copyFailed || "Copy failed: {message}";
     toast(failureTemplate.includes("{message}") ? failureTemplate.replace("{message}", message) : `${failureTemplate}: ${message}`, 3500);
   }
@@ -1603,7 +1604,7 @@ async function moveOrCopySelectedKey() {
     await loadSelectedKey({ key: next, keyIdentity: next, keyBytes: { encoding: "utf8", data: next } });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    renameError.value = error instanceof Error ? error.message : String(error);
+    renameError.value = formatError(error);
   } finally {
     renaming.value = false;
   }
@@ -1626,7 +1627,7 @@ async function openHistory() {
     historyEvents.value = response.events;
   } catch (error) {
     historyEvents.value = [];
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     historyLoading.value = false;
   }
@@ -1650,7 +1651,7 @@ async function restoreHistory() {
     await loadKeys(true, { preserveSelection: true });
     toast(props.labels.saved, 2500);
   } catch (error) {
-    historyError.value = error instanceof Error ? error.message : String(error);
+    historyError.value = formatError(error);
   } finally {
     restoring.value = false;
   }

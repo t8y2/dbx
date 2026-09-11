@@ -14,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/composables/useToast";
 import { useTabUiState } from "@/lib/tabs/tabUiState";
 import * as api from "@/lib/backend/api";
+import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isKeyInKvExportScope, kvExportFilenameStem, kvValueByteIdentity, type KvExportScopeKind, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
 import { detectKvValueFormat } from "@/lib/kv/kvValueFormat";
@@ -596,7 +597,7 @@ async function exportTreeSelection(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -623,7 +624,7 @@ async function deleteSelectedTreeKeys() {
     toast(t("etcd.batchDeleteSuccess", { count: deleted }), 3000);
   } catch (error) {
     failed = true;
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     toast(t("etcd.batchDeletePartial", { count: deleted, error: message }), 5000);
   } finally {
     if (failed) browserRef.value?.clearMultiSelection();
@@ -711,7 +712,7 @@ async function exportAll(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: scan.entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -744,7 +745,7 @@ async function exportEtcdNodeScope(connectionId: string, request: KvExportScopeR
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: entries.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -776,7 +777,7 @@ async function onImportFile(event: Event) {
     transferOpen.value = true;
     await previewTransfer();
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -825,7 +826,7 @@ async function loadSyncPreview() {
     transferBundle.value = bundleFromSummaries(scan.entries, prefix, scan.revision);
     await previewTransfer();
   } catch (error) {
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
   } finally {
     transferLoading.value = false;
     transferLoadingDetail.value = "";
@@ -870,7 +871,7 @@ async function previewTransfer() {
     if (transferMode.value === "sync") syncConfigurationExpanded.value = false;
   } catch (error) {
     if (generation !== transferPreviewGeneration) return;
-    transferError.value = error instanceof Error ? error.message : String(error);
+    transferError.value = formatError(error);
     transferPreviewLoaded.value = false;
   } finally {
     if (generation === transferPreviewGeneration) {
@@ -915,7 +916,7 @@ async function applyTransfer() {
     transferOpen.value = false;
     if (targetId === props.connectionId) browserRef.value?.refresh();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = formatError(error);
     // Rebuild the preview so an ambiguous network failure or a successful
     // prefix of the batch is reflected before the user retries.
     let previewError = "";
@@ -1032,7 +1033,7 @@ async function runSearch() {
       return { id: `${identity}:${summary.modRevision || ""}`, displayKey: shown, keyIdentity: identity, summary: { ...summary, key: shown, keyBytes: bytes, keyIdentity: identity }, matchesKey, matchesValue, selected: true };
     });
   } catch (error) {
-    searchError.value = error instanceof Error ? error.message : String(error);
+    searchError.value = formatError(error);
   } finally {
     searchRunning.value = false;
   }
@@ -1063,7 +1064,7 @@ async function openOperations(nextMode: Extract<WorkbenchMode, "maintenance" | "
   try {
     operationsStatus.value = await api.etcdStatus(props.connectionId);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 5000);
+    toast(formatError(error), 5000);
   } finally {
     operationsLoading.value = false;
   }
@@ -1083,7 +1084,7 @@ async function refreshLeaseOptions() {
   try {
     leaseOptions.value = (await api.etcdLeaseList(props.connectionId)).leases;
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 
@@ -1099,7 +1100,7 @@ async function exportSearchResults(format: EtcdExportFormat) {
     const exported = await downloadExport(file);
     if (exported) toast(t("etcd.exported", { count: selected.length }), 2500);
   } catch (error) {
-    toast(error instanceof Error ? error.message : String(error), 4000);
+    toast(formatError(error), 4000);
   }
 }
 

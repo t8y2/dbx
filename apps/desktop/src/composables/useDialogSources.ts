@@ -45,6 +45,8 @@ const transferPrefillTargetSchema = ref("");
 const schemaDiffPrefillConnectionId = ref("");
 const schemaDiffPrefillDatabase = ref("");
 const schemaDiffPrefillSchema = ref("");
+const schemaDiffPrefillSelectedRoutines = ref<string[] | undefined>(undefined);
+const schemaDiffPrefillResultTab = ref<"tables" | "routines" | "">("");
 const schemaDiffSessionId = ref<string | null>(null);
 const dataComparePrefillConnectionId = ref("");
 const dataComparePrefillDatabase = ref("");
@@ -146,6 +148,8 @@ export function useDialogSources() {
           schemaDiffPrefillConnectionId.value = v.connectionId;
           schemaDiffPrefillDatabase.value = v.database;
           schemaDiffPrefillSchema.value = v.schema ?? "";
+          schemaDiffPrefillSelectedRoutines.value = v.selectedRoutines;
+          schemaDiffPrefillResultTab.value = v.preferredResultTab ?? "";
           schemaDiffSessionId.value = null;
           showSchemaDiffDialog.value = true;
           connectionStore.schemaDiffSource = null;
@@ -524,6 +528,8 @@ export function useDialogSources() {
     schemaDiffPrefillConnectionId,
     schemaDiffPrefillDatabase,
     schemaDiffPrefillSchema,
+    schemaDiffPrefillSelectedRoutines,
+    schemaDiffPrefillResultTab,
     schemaDiffSessionId,
     dataComparePrefillConnectionId,
     dataComparePrefillDatabase,

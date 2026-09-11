@@ -92,6 +92,8 @@ describe("schema diff table mappings", () => {
     expect(normalizeSchemaDiffCompareOptions({}).tableMappings).toEqual([]);
     expect(normalizeSchemaDiffCompareOptions({}).ignoreTableNameCase).toBe(false);
     expect(normalizeSchemaDiffCompareOptions({}).ignoreColumnNameCase).toBe(false);
+    expect(normalizeSchemaDiffCompareOptions({ tables: false, views: true }, "mysql").views).toBe(false);
+    expect(normalizeSchemaDiffCompareOptions({ tables: true, views: true }, "mysql").views).toBe(true);
   });
 
   it("swaps each mapping direction", () => {

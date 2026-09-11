@@ -69,7 +69,7 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(dialogSource).toContain("schemaDiffNextProgressLabel");
     expect(dialogSource).toContain('t("diff.progress.next"');
     expect(dialogSource).toContain('v-if="schemaDiffNextProgressLabel"');
-    expect(dialogSource).toContain("shouldLoadSchemaDiffExtraObjects");
+    expect(dialogSource).toContain("shouldLoadSchemaDiffExtraObjectPhase");
   });
 
   it("clears progress before preserving the existing comparison error flow", () => {
@@ -93,6 +93,24 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(configStepSource).toContain("restrictTables && localSelectedTables.length && canConfigureTableSelection && isTableIdentityReady('target')");
   });
 
+  it("resets stale target schema and object selection when the target identity changes", () => {
+    expect(dialogSource).toContain("suppressTargetIdentityReset");
+    expect(dialogSource).toContain("clearCompareObjectSelection");
+    expect(dialogSource).toContain("runWithoutTargetIdentityReset");
+    expect(dialogSource).toContain("watch(targetConnectionId,");
+    expect(dialogSource).toContain("watch(targetDatabase,");
+    expect(dialogSource).toContain("watch(targetDbType,");
+    expect(dialogSource).toContain('targetDatabase.value = ""');
+    expect(dialogSource).toContain('targetSchema.value = ""');
+    expect(dialogSource).toContain("isSchemaAware(dbType as DatabaseType)");
+    expect(dialogSource).toContain("selectedTables: undefined");
+    expect(dialogSource).toContain("selectedRoutines: undefined");
+  });
+
+  it("gates config table-list loading on the tables compare switch", () => {
+    expect(configStepSource).toContain("tablesCompareEnabled.value && shouldLoadSchemaDiffTableList");
+  });
+
   it("keeps explicit table selection in a shared scope below both sides", () => {
     const comparisonScope = configStepSource.indexOf("<!-- Comparison Scope -->");
     const targetInfo = configStepSource.indexOf("<!-- Target Info -->");
@@ -103,7 +121,7 @@ describe("SchemaDiffDialog fullscreen layout", () => {
 
     expect(comparisonScope).toBeGreaterThan(targetInfo);
     expect(comparisonScope).toBeLessThan(options);
-    expect(tableSelectors).toHaveLength(1);
+    expect(tableSelectors).toHaveLength(2);
     expect(tableSelector).toBeGreaterThan(comparisonScope);
     expect(tableSelector).toBeLessThan(options);
     expect(targetMatch).toBeGreaterThan(comparisonScope);
@@ -114,10 +132,87 @@ describe("SchemaDiffDialog fullscreen layout", () => {
     expect(configStepSource).toContain('@update:model-value="(value: string) => handleTableMappingUpdate(match.sourceTable, value)"');
     expect(configStepSource).toContain("tableMatchStatus.${match.kind}");
     expect(dialogSource).toContain('@update:table-mappings="handleTableMappingsUpdate"');
-    expect(sessionSource).toContain("tableMappings: options.selectedTables === undefined ? undefined : options.tableMappings");
-    expect(sessionSource).toContain("ignoreTableNameCase: options.ignoreTableNameCase");
-    expect(sessionSource).toContain("ignoreColumnNameCase: options.ignoreColumnNameCase");
+    expect(sessionSource).toContain("tableMappings: sessionOptions.selectedTables === undefined ? undefined : sessionOptions.tableMappings");
+    expect(sessionSource).toContain("ignoreTableNameCase: sessionOptions.ignoreTableNameCase");
+    expect(sessionSource).toContain("ignoreColumnNameCase: sessionOptions.ignoreColumnNameCase");
     expect(dialogSource).toContain("const swappedMappings = swapSchemaDiffTableMappings(currentOptions.tableMappings ?? []);");
+    expect(dialogSource).toContain('value="routines"');
+    expect(configStepSource).toContain("handleUpdateSelectedRoutines");
+  });
+
+  it("exposes table and routine compare switches on the config step", () => {
+    expect(configStepSource).toContain('import { Switch } from "@/components/ui/switch"');
+    expect(configStepSource).toContain("update:compareScope");
+    expect(configStepSource).toContain("handleTablesCompareEnabled");
+    expect(configStepSource).toContain("handleRoutinesCompareEnabled");
+    expect(configStepSource).toContain("effectiveRoutinesEnabled");
+    expect(configStepSource).toContain("const routinesEnabled = effectiveRoutinesEnabled.value");
+    expect(configStepSource).toContain("if (!tablesEnabled && !routinesEnabled) return false");
+    expect(configStepSource).toContain("unrestrictedRoutineLoadTooLarge");
+    expect(configStepSource).toContain("SCHEMA_DIFF_UNRESTRICTED_ROUTINE_LIMIT");
+    expect(configStepSource).toContain('t("diff.routineSelectionTooLarge"');
+    expect(configStepSource).toContain('t("diff.tableCompareDisabled")');
+    expect(configStepSource).toContain('t("diff.routineCompareDisabled")');
+    expect(configStepSource).toContain("schemaDiffRoutineObjectTypesIntersection");
+    expect(configStepSource).toContain('t("diff.routineSameNameMatchingOnly")');
+    expect(dialogSource).toContain('@update:compare-scope="handleCompareScopeUpdate"');
+    expect(dialogSource).toContain("function handleCompareScopeUpdate");
+    expect(dialogSource).toContain("const routinesCompareEnabled = computed(() => !!schemaDiffPanelOptions.value.functions)");
+    expect(dialogSource).toContain("effectiveRoutinesEnabled");
+    expect(dialogSource).not.toContain("functions: value === undefined ? activeConfig.value.options.functions : true");
+    expect(sessionSource).toContain("shouldLoadSchemaDiffRoutines");
+    expect(sessionSource).toContain("shouldLoadSchemaDiffExtraObjectPhase");
+    expect(sessionSource).toContain("const loadTableMetadata = !!(sessionOptions.tables || sessionOptions.views)");
+    expect(sessionSource).not.toContain("options.selectedRoutines !== undefined");
+    expect(sessionSource).not.toContain("wantRoutines");
+  });
+
+  it("shows result tabs only for enabled compare scopes", () => {
+    expect(dialogSource).toContain("showTableResultTab");
+    expect(dialogSource).toContain("showRoutineResultTab");
+    expect(dialogSource).toContain("showResultTabList");
+    expect(dialogSource).toContain("tablesCompareEnabled");
+    expect(dialogSource).toContain("routinesCompareEnabled");
+    expect(dialogSource).toContain("effectiveRoutinesEnabled");
+    expect(dialogSource).toContain("showNoDifferences");
+    expect(dialogSource).not.toContain("showRoutinesNotCompared");
+    expect(dialogSource).toContain("showRoutineNoDifferences");
+    expect(dialogSource).toContain('t("diff.resultTabTables"');
+    expect(dialogSource).toContain('t("diff.resultTabRoutines"');
+    expect(dialogSource).toContain('t("diff.noDifferences")');
+    expect(dialogSource).toContain("schemaDiffRoutineObjectTypesIntersection");
+    expect(dialogSource).toContain('v-if="showResultTabList"');
+    expect(dialogSource).toContain('v-if="showTableResultTab"');
+    expect(dialogSource).toContain("data-[state=inactive]:hidden");
+    expect(dialogSource).toContain("if (!showTableResultTab.value && showRoutineResultTab.value)");
+    expect(dialogSource).toContain("loadObjectSourceWithRoutineFallback");
+  });
+
+  it("defers routine deploy except for postgres-family targets", () => {
+    expect(dialogSource).toContain("showRoutineDeployDeferredHint");
+    expect(dialogSource).toContain("canDeployRoutines");
+    expect(dialogSource).toContain("isSchemaDiffPostgresLike");
+    expect(dialogSource).toContain('t("diff.routineSyncDeferredHint")');
+    expect(dialogSource).toContain('if (resultTab.value === "routines" && !canDeployRoutines.value) return false');
+    expect(dialogSource).toContain("nextStepDeployRoutines");
+    expect(dialogSource).toContain('t("diff.nextStepDeploy")');
+    expect(dialogSource).toContain(':selectable="canDeployRoutines"');
+    expect(configStepSource).toContain("api.listObjects");
+    expect(configStepSource).not.toContain("api.listFunctions");
+  });
+
+  it("uses the object tree for tables and a dedicated list plus text diff for routines", () => {
+    expect(dialogSource).toContain('import SchemaDiffObjectTree from "@/components/diff/SchemaDiffObjectTree.vue"');
+    expect(dialogSource).toContain('import SchemaDiffRoutineList from "@/components/diff/SchemaDiffRoutineList.vue"');
+    expect(dialogSource).toContain('import SideBySideTextDiff, { type TextDiffSide } from "@/components/common/SideBySideTextDiff.vue"');
+    expect(dialogSource).toContain('<SchemaDiffObjectTree :groups="tableDiffGroups"');
+    expect(dialogSource).toContain("<SchemaDiffDdlPanel");
+    expect(dialogSource).toContain("<SchemaDiffRoutineList");
+    expect(dialogSource).toContain(':objects="routineDiffObjects"');
+    expect(dialogSource).toContain("handleViewRoutineDiff");
+    expect(dialogSource).toContain("<SideBySideTextDiff");
+    expect(dialogSource).toContain('t("diff.selectRoutineToCompare")');
+    expect(dialogSource).not.toContain(':groups="routineDiffGroups"');
   });
 
   it("keeps focused and selected deployment SQL projections separate", () => {

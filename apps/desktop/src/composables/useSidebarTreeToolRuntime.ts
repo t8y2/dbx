@@ -4,6 +4,7 @@ import type { useQueryStore } from "@/stores/queryStore";
 import type { useSettingsStore } from "@/stores/settingsStore";
 import type { TreeNode } from "@/types/database";
 import { allDatabasesExportSourceForNode, databaseExportSourceForNode, sidebarSameSchemaStructureTargets } from "@/lib/sidebar/sidebarExportRuntime";
+import { schemaDiffRoutineKey } from "@/lib/schema/schemaDiffRoutine";
 
 interface SidebarTreeToolRuntimeOptions {
   activeNode: ShallowRef<TreeNode>;
@@ -26,13 +27,24 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
-  function openSchemaDiff() {
+  function openSchemaDiff(options?: { selectedRoutines?: string[]; preferredResultTab?: "tables" | "routines" }) {
     if (!activeNode.value.connectionId) return;
     connectionStore.schemaDiffSource = {
       connectionId: activeNode.value.connectionId,
       database: activeNode.value.database ?? "",
       schema: activeNode.value.schema,
+      selectedRoutines: options?.selectedRoutines,
+      preferredResultTab: options?.preferredResultTab,
     };
+  }
+
+  function openSchemaDiffForRoutine() {
+    const node = activeNode.value;
+    if (!node.connectionId || (node.type !== "procedure" && node.type !== "function")) return;
+    openSchemaDiff({
+      selectedRoutines: [schemaDiffRoutineKey(node.objectName || node.label, node.signature ?? "")],
+      preferredResultTab: "routines",
+    });
   }
 
   function openDataCompare() {
@@ -170,6 +182,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openFieldLineage,
     openScheduledBackups,
     openSchemaDiff,
+    openSchemaDiffForRoutine,
     openSqlFileExecution,
     openStructureEditor,
     openTableImport,

@@ -4,7 +4,6 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
 use crate::schema_diff::SchemaDiffPreparationOptions;
-use crate::types::FunctionInfo;
 
 #[derive(Debug, Clone)]
 pub enum FilterAction {
@@ -168,22 +167,16 @@ impl AstTransmitFilter {
         )
     }
 
+    /// Pass-through for schema-diff preparation options.
+    ///
+    /// Routine definitions are compared as metadata and must be preserved here.
+    /// Dangerous statement bodies are still blocked by `filter_sql` /
+    /// `is_dangerous_body_node` when SQL is whitelisted for transmit/sync.
     pub fn filter_diff_preparation_options(
         options: SchemaDiffPreparationOptions,
         _dialect: &str,
     ) -> SchemaDiffPreparationOptions {
-        let mut filtered = options;
-
-        let is_dangerous_fn = |f: &FunctionInfo| -> bool {
-            let upper = f.definition.to_ascii_uppercase();
-            let keywords = ["FUNCTION", "PROCEDURE", "TRIGGER", "BEGIN", "DECLARE", "LANGUAGE"];
-            keywords.iter().any(|kw| upper.contains(kw))
-        };
-
-        filtered.source_functions.retain(|f| !is_dangerous_fn(f));
-        filtered.target_functions.retain(|f| !is_dangerous_fn(f));
-
-        filtered
+        options
     }
 }
 
@@ -225,6 +218,7 @@ impl AstFilter for AstTransmitFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FunctionInfo;
 
     #[test]
     fn allows_create_table() {
@@ -334,20 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn filter_options_removes_dangerous_functions() {
+    fn filter_options_preserves_routine_definitions() {
         let opts = SchemaDiffPreparationOptions {
             source_functions: vec![
                 FunctionInfo {
                     name: "f1".into(),
-                    definition: "CREATE FUNCTION f1() RETURNS INT ...".into(),
+                    definition: "CREATE FUNCTION f1() RETURNS INT BEGIN RETURN 1; END".into(),
                     function_type: "FUNCTION".into(),
                     data_type: "int".into(),
                     arguments: "".into(),
                 },
                 FunctionInfo {
-                    name: "t1".into(),
-                    definition: "TABLE t1".into(),
-                    function_type: "TABLE".into(),
+                    name: "p1".into(),
+                    definition: "CREATE PROCEDURE p1() BEGIN SELECT 1; END".into(),
+                    function_type: "PROCEDURE".into(),
                     data_type: "".into(),
                     arguments: "".into(),
                 },
@@ -372,8 +366,11 @@ mod tests {
         };
 
         let filtered = AstTransmitFilter::filter_diff_preparation_options(opts, "mysql");
-        assert_eq!(filtered.source_functions.len(), 1);
-        assert_eq!(filtered.source_functions[0].name, "t1");
+        assert_eq!(filtered.source_functions.len(), 2);
+        assert_eq!(filtered.source_functions[0].name, "f1");
+        assert_eq!(filtered.source_functions[1].name, "p1");
+        assert!(filtered.source_functions[0].definition.contains("BEGIN"));
+        assert!(filtered.source_functions[1].definition.contains("PROCEDURE"));
     }
 
     #[test]

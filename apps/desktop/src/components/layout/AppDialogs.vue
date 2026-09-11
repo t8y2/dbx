@@ -262,6 +262,8 @@ watch(
     :prefill-connection-id="dialogs.schemaDiffPrefillConnectionId.value"
     :prefill-database="dialogs.schemaDiffPrefillDatabase.value"
     :prefill-schema="dialogs.schemaDiffPrefillSchema.value"
+    :prefill-selected-routines="dialogs.schemaDiffPrefillSelectedRoutines.value"
+    :prefill-result-tab="dialogs.schemaDiffPrefillResultTab.value || undefined"
     :session-id="dialogs.schemaDiffSessionId.value"
   />
   <DataCompareDialog

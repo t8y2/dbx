@@ -7549,16 +7549,135 @@ pub async fn list_functions_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || async {
+    let postgres_functions = retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
-            PoolKind::Postgres(p) => db::postgres::list_functions(p, schema).await,
-            _ => Ok(vec![]),
+            PoolKind::Postgres(p) => Ok(Some(db::postgres::list_functions(p, schema).await?)),
+            _ => Ok(None),
         }
     })
+    .await?;
+
+    if let Some(functions) = postgres_functions {
+        return Ok(functions);
+    }
+
+    // Non-Postgres: reuse sidebar list_objects + get_object_source paths.
+    list_functions_via_objects(state, connection_id, database, schema).await
+}
+
+/// Build FunctionInfo for non-Postgres pools by reusing list_objects + get_object_source
+/// (same paths the sidebar uses for PROCEDURE/FUNCTION).
+async fn list_functions_via_objects(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<db::FunctionInfo>, String> {
+    let object_types = ["PROCEDURE".to_string(), "FUNCTION".to_string()];
+    let objects =
+        list_objects_core(state, connection_id, database, schema, None, None, None, Some(&object_types), None).await?;
+
+    // Bound concurrent get_object_source calls (N+1) without requiring AppState: Clone.
+    const CONCURRENCY: usize = 8;
+    let mut functions = Vec::with_capacity(objects.len());
+    for chunk in objects.chunks(CONCURRENCY) {
+        let chunk_results = futures::future::join_all(
+            chunk
+                .iter()
+                .map(|object| load_function_info_via_object(state, connection_id, database, schema, object.clone())),
+        )
+        .await;
+        functions.extend(chunk_results.into_iter().flatten());
+    }
+
+    Ok(functions)
+}
+
+fn schema_diff_routine_kind(object_type: &str) -> Option<(&'static str, db::ObjectSourceKind)> {
+    let object_type_upper = object_type.to_ascii_uppercase();
+    if object_type_upper.contains("PROC") {
+        Some(("PROCEDURE", db::ObjectSourceKind::Procedure))
+    } else if object_type_upper.contains("FUNC") {
+        Some(("FUNCTION", db::ObjectSourceKind::Function))
+    } else {
+        None
+    }
+}
+
+async fn load_function_info_via_object(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    object: db::ObjectInfo,
+) -> Option<db::FunctionInfo> {
+    let (function_type, source_kind) = schema_diff_routine_kind(&object.object_type)?;
+
+    let definition = match get_object_source_core(
+        state,
+        connection_id,
+        database,
+        schema,
+        &object.name,
+        source_kind.clone(),
+        object.signature.as_deref(),
+        None,
+    )
     .await
+    {
+        Ok(source) if !source.source.trim().is_empty() => source.source,
+        Ok(_) | Err(_) => {
+            // Retry the alternate routine kind when the primary getter is empty/fails.
+            let alternate = match source_kind {
+                db::ObjectSourceKind::Procedure => db::ObjectSourceKind::Function,
+                db::ObjectSourceKind::Function => db::ObjectSourceKind::Procedure,
+                other => other,
+            };
+            match get_object_source_core(
+                state,
+                connection_id,
+                database,
+                schema,
+                &object.name,
+                alternate,
+                object.signature.as_deref(),
+                None,
+            )
+            .await
+            {
+                Ok(source) if !source.source.trim().is_empty() => source.source,
+                // Skip objects with no readable source so empty definitions are not treated as loaded.
+                _ => return None,
+            }
+        }
+    };
+
+    Some(db::FunctionInfo {
+        name: object.name,
+        function_type: function_type.to_string(),
+        data_type: String::new(),
+        definition,
+        arguments: object.signature.unwrap_or_default(),
+    })
+}
+
+#[cfg(test)]
+mod schema_diff_routine_kind_tests {
+    use super::schema_diff_routine_kind;
+    use crate::db::ObjectSourceKind;
+
+    #[test]
+    fn classifies_procedure_and_function_object_types() {
+        assert_eq!(schema_diff_routine_kind("PROCEDURE"), Some(("PROCEDURE", ObjectSourceKind::Procedure)));
+        assert_eq!(schema_diff_routine_kind("StoredProc"), Some(("PROCEDURE", ObjectSourceKind::Procedure)));
+        assert_eq!(schema_diff_routine_kind("FUNCTION"), Some(("FUNCTION", ObjectSourceKind::Function)));
+        assert_eq!(schema_diff_routine_kind("user_function"), Some(("FUNCTION", ObjectSourceKind::Function)));
+        assert!(schema_diff_routine_kind("TABLE").is_none());
+        assert!(schema_diff_routine_kind("VIEW").is_none());
+    }
 }
 
 pub async fn list_sequences_core(

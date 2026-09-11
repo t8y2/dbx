@@ -10,6 +10,7 @@ function setup(node: Partial<TreeNode>, options: { treeNodes?: TreeNode[]; selec
     docsSource: null as unknown,
     diagramSource: null as unknown,
     databaseExportSource: null as unknown,
+    schemaDiffSource: null as unknown,
     treeNodes: options.treeNodes ?? [],
     selectedTreeNodeIds: options.selectedTreeNodeIds ?? [],
   };
@@ -104,6 +105,30 @@ describe("useSidebarTreeToolRuntime diagram and database export", () => {
       database: "db",
       schema: "public",
       tableName: "users",
+    });
+  });
+});
+
+describe("useSidebarTreeToolRuntime openSchemaDiffForRoutine", () => {
+  it("prefills schema diff with a signature-aware routine key", () => {
+    const { connectionStore, runtime } = setup({
+      type: "function",
+      label: "add(integer)",
+      objectName: "add",
+      signature: "integer",
+      connectionId: "conn-1",
+      database: "shop",
+      schema: "public",
+    });
+
+    runtime.openSchemaDiffForRoutine();
+
+    expect(connectionStore.schemaDiffSource).toEqual({
+      connectionId: "conn-1",
+      database: "shop",
+      schema: "public",
+      selectedRoutines: ["add(integer)"],
+      preferredResultTab: "routines",
     });
   });
 });

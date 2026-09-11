@@ -466,6 +466,35 @@ test("snippet templates use placeholder syntax CodeMirror actually honours", () 
   }
 });
 
+test("treats extended JSON wrappers as scalars, not subdocuments", () => {
+  // The driver ships BSON scalars as extended JSON. Walking into them would offer
+  // `_id.$oid`, which is valid syntax that matches nothing on the server.
+  const inferred = inferMongoCompletionFields([
+    {
+      _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+      created_at: { $date: "2025-01-01T00:00:00Z" },
+      count: { $numberLong: "42" },
+      raw: { $binary: { base64: "AQID", subType: "00" } },
+      profile: { email: "a@example.com" },
+    },
+  ]);
+
+  for (const phantom of ["_id.$oid", "created_at.$date", "count.$numberLong", "raw.$binary"]) {
+    assert.equal(
+      inferred.some((field) => field.name === phantom),
+      false,
+      phantom,
+    );
+  }
+
+  assert.ok(inferred.find((field) => field.name === "_id" && field.type === "objectId"));
+  assert.ok(inferred.find((field) => field.name === "created_at" && field.type === "date"));
+  assert.ok(inferred.find((field) => field.name === "count" && field.type === "int64"));
+  assert.ok(inferred.find((field) => field.name === "raw" && field.type === "binary"));
+  // Genuine subdocuments are still walked.
+  assert.ok(inferred.find((field) => field.name === "profile.email" && field.type === "string"));
+});
+
 test("infers dotted MongoDB fields from sampled documents", () => {
   const inferred = inferMongoCompletionFields([
     { _id: "1", profile: { email: "a@example.com" }, tags: ["a"] },

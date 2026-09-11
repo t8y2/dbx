@@ -1,3 +1,4 @@
+import { mongoExtendedJsonValueType } from "@/lib/mongo/mongoDocumentValues";
 import { ACCUMULATORS, COMMON_OPERATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, UPDATE_OPERATOR_LABELS, VALUE_SNIPPETS, mongoOperatorItemType, type MongoOperatorSpec } from "@/lib/mongo/mongoCompletionTables";
 
 /**
@@ -1015,6 +1016,9 @@ function extractActiveCollection(text: string, cursor: number): string | undefin
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {
   if (depth > 4 || value == null || typeof value !== "object") return;
+  // A wrapper such as {$oid: "..."} is one BSON value. Walking into it would offer
+  // `_id.$oid`, a path that exists only in transport and matches nothing on the server.
+  if (mongoExtendedJsonValueType(value)) return;
   if (Array.isArray(value)) {
     for (const item of value.slice(0, 3)) collectFieldTypes(item, prefix, out, depth + 1);
     return;
@@ -1031,7 +1035,7 @@ function describeMongoValueType(value: unknown): string {
   if (value == null) return "null";
   if (Array.isArray(value)) return "array";
   if (value instanceof Date) return "date";
-  return typeof value === "object" ? "object" : typeof value;
+  return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 
 function quoteMongoFieldName(field: string, prefix: string): string {

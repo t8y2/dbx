@@ -15,7 +15,38 @@ export const MONGO_DOCUMENT_GRID_NULL = `${MONGO_DOCUMENT_GRID_PREFIX}null`;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 const MIN_BSON_INT64 = -9223372036854775808n;
 const MAX_BSON_INT64 = 9223372036854775807n;
-const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(["$binary", "$code", "$date", "$dbPointer", "$maxKey", "$minKey", "$numberDecimal", "$numberDouble", "$numberInt", "$numberLong", "$oid", "$regularExpression", "$symbol", "$timestamp", "$undefined", "$uuid"]);
+/** Extended JSON wrapper key -> the BSON scalar it stands for. */
+const MONGO_EXTENDED_JSON_VALUE_TYPES = new Map([
+  ["$binary", "binary"],
+  ["$code", "javascript"],
+  ["$date", "date"],
+  ["$dbPointer", "dbPointer"],
+  ["$maxKey", "maxKey"],
+  ["$minKey", "minKey"],
+  ["$numberDecimal", "decimal128"],
+  ["$numberDouble", "double"],
+  ["$numberInt", "int32"],
+  ["$numberLong", "int64"],
+  ["$oid", "objectId"],
+  ["$regularExpression", "regex"],
+  ["$symbol", "symbol"],
+  ["$timestamp", "timestamp"],
+  ["$undefined", "undefined"],
+  ["$uuid", "uuid"],
+]);
+const MONGO_EXTENDED_JSON_VALUE_KEYS = new Set(MONGO_EXTENDED_JSON_VALUE_TYPES.keys());
+
+/**
+ * The BSON scalar an extended JSON wrapper stands for, or undefined when the value is
+ * a plain object. `{$oid: "..."}` is how the driver ships an ObjectId over JSON; it is
+ * one value, not a subdocument with a `$oid` field.
+ */
+export function mongoExtendedJsonValueType(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (keys.length === 2 && keys.includes("$code") && keys.includes("$scope")) return "javascript";
+  return keys.length === 1 ? MONGO_EXTENDED_JSON_VALUE_TYPES.get(keys[0] ?? "") : undefined;
+}
 const MONGO_EXTENDED_JSON_NUMERIC_TYPES = new Map([
   ["$numberInt", "int32"],
   ["$numberLong", "int64"],

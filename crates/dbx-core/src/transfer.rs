@@ -6295,7 +6295,21 @@ pub fn should_transfer_schema_objects(
         return false;
     }
     if !objects.is_empty() {
-        return true;
+        // A table-only selection is already handled by the table transfer pass.
+        // Do not enter the PostgreSQL-family schema-object path just because the
+        // request also carries the selected table kind. This matters for
+        // Kingbase, whose catalog is not a drop-in PostgreSQL catalog.
+        return objects.iter().any(|selection| {
+            selection.object_type != TransferObjectKind::Table && !selection.names.is_empty()
+        });
+    }
+    if matches!(source_db_type, DatabaseType::Kingbase)
+        || matches!(target_db_type, DatabaseType::Kingbase)
+    {
+        // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
+        // by the optional object scanner. Empty selection means the legacy
+        // table-transfer request here, so avoid probing unsupported catalogs.
+        return false;
     }
     transfer_object_family(source_db_type) == Some(TransferObjectFamily::Postgres)
         && transfer_object_family(target_db_type) == Some(TransferObjectFamily::Postgres)
@@ -10572,11 +10586,23 @@ mod tests {
                 &TransferContent::StructureOnly,
                 &[]
             ));
-            assert!(should_transfer_schema_objects(
+            assert!(!should_transfer_schema_objects(
                 &DatabaseType::Kingbase,
                 &DatabaseType::Postgres,
                 &TransferContent::StructureAndData,
                 &[]
+            ));
+            assert!(!should_transfer_schema_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                &TransferContent::StructureAndData,
+                &[TransferObjectSelection { object_type: TransferObjectKind::Table, names: vec!["orders".into()] }]
+            ));
+            assert!(should_transfer_schema_objects(
+                &DatabaseType::Kingbase,
+                &DatabaseType::Kingbase,
+                &TransferContent::StructureOnly,
+                &[TransferObjectSelection { object_type: TransferObjectKind::View, names: vec!["v_orders".into()] }]
             ));
             assert!(should_transfer_schema_objects(
                 &DatabaseType::Postgres,

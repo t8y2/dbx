@@ -1,3 +1,5 @@
+use chrono::{SecondsFormat, Utc};
+use mongodb::bson::oid::ObjectId;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -1045,6 +1047,11 @@ fn is_shell_regex_value_prefix(previous_significant: Option<char>) -> bool {
     previous_significant.is_none_or(|character| matches!(character, ':' | '[' | ',' | '('))
 }
 
+/// Shell value constructors rewritten to extended JSON before json5 parsing.
+/// `Date` is only recognised after `new`, matching the shell where a bare `Date()`
+/// returns a string rather than a date.
+const SHELL_CONSTRUCTORS: [&str; 6] = ["ObjectId", "ISODate", "Date", "NumberLong", "NumberInt", "NumberDecimal"];
+
 fn transform_shell_constructors(input: &str) -> Result<String, String> {
     let mut output = String::with_capacity(input.len());
     let mut index = 0;
@@ -1069,27 +1076,84 @@ fn transform_shell_constructors(input: &str) -> Result<String, String> {
             output.push_str(&input[start..index]);
             continue;
         }
-        let constructor = if rest.starts_with("ObjectId(") {
-            Some("ObjectId(")
-        } else if rest.starts_with("ISODate(") {
-            Some("ISODate(")
-        } else {
-            None
-        };
-        let Some(constructor) = constructor else {
-            output.push(ch);
-            index += ch.len_utf8();
+        if let Some((json, end)) = shell_constructor_call(input, index)? {
+            output.push_str(&json);
+            index = end;
             continue;
-        };
-        let open = index + constructor.len() - 1;
-        let close = matching_paren(input, open).ok_or("Unclosed MongoDB value constructor.")?;
-        let inner = input[open + 1..close].trim();
-        let value = parse_string_arg(inner)?;
-        let key = if constructor.starts_with("ObjectId") { "$oid" } else { "$date" };
-        output.push_str(&format!("{{\"{key}\":{}}}", serde_json::to_string(&value).unwrap()));
-        index = close + 1;
+        }
+        output.push(ch);
+        index += ch.len_utf8();
     }
     Ok(output)
+}
+
+/// Rewrite one `Name(...)` / `new Name(...)` call at `index`, or None when it is not a known constructor.
+fn shell_constructor_call(input: &str, index: usize) -> Result<Option<(String, usize)>, String> {
+    let rest = &input[index..];
+    let (name_start, is_new) = match rest.strip_prefix("new") {
+        Some(after) if after.starts_with(|ch: char| ch.is_whitespace()) => {
+            (index + 3 + after.len() - after.trim_start().len(), true)
+        }
+        _ => (index, false),
+    };
+    let name_len = input[name_start..]
+        .find(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '$')
+        .unwrap_or(input.len() - name_start);
+    let name = &input[name_start..name_start + name_len];
+    if !SHELL_CONSTRUCTORS.contains(&name) {
+        return Ok(None);
+    }
+    if name == "Date" && !is_new {
+        return Ok(None);
+    }
+    let after_name = &input[name_start + name_len..];
+    let paren_offset = after_name.len() - after_name.trim_start().len();
+    if !after_name[paren_offset..].starts_with('(') {
+        return Ok(None);
+    }
+    let open = name_start + name_len + paren_offset;
+    let close = matching_paren(input, open).ok_or("Unclosed MongoDB value constructor.")?;
+    let inner = input[open + 1..close].trim();
+    Ok(Some((shell_constructor_to_extended_json(name, inner)?, close + 1)))
+}
+
+fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String, String> {
+    let integer = inner.parse::<i64>().ok();
+    match name {
+        "ObjectId" if inner.is_empty() => Ok(extended_json("$oid", &ObjectId::new().to_hex())),
+        "ObjectId" => Ok(extended_json("$oid", &parse_string_arg(inner)?)),
+        "ISODate" | "Date" if inner.is_empty() => {
+            Ok(extended_json("$date", &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)))
+        }
+        // `new Date(1735689600000)` takes epoch milliseconds, which extended JSON
+        // carries as a nested $numberLong rather than a bare number.
+        "ISODate" | "Date" => match integer {
+            Some(millis) => Ok(format!(r#"{{"$date":{{"$numberLong":"{millis}"}}}}"#)),
+            None => Ok(extended_json("$date", &parse_string_arg(inner)?)),
+        },
+        "NumberLong" | "NumberInt" => {
+            let key = if name == "NumberLong" { "$numberLong" } else { "$numberInt" };
+            let value = match integer {
+                Some(value) => value.to_string(),
+                None => parse_string_arg(inner)?,
+            };
+            value.parse::<i64>().map_err(|_| format!("MongoDB {name}() requires an integer argument."))?;
+            Ok(extended_json(key, &value))
+        }
+        "NumberDecimal" => {
+            let value = match parse_json_value(inner) {
+                Some(Value::Number(number)) => number.to_string(),
+                _ => parse_string_arg(inner)?,
+            };
+            value.parse::<f64>().map_err(|_| "MongoDB NumberDecimal() requires a numeric argument.".to_string())?;
+            Ok(extended_json("$numberDecimal", &value))
+        }
+        _ => Err(format!("Unsupported MongoDB value constructor {name}().")),
+    }
+}
+
+fn extended_json(key: &str, value: &str) -> String {
+    format!("{{\"{key}\":{}}}", serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()))
 }
 
 fn parse_json_value(value: &str) -> Option<Value> {
@@ -1375,6 +1439,53 @@ mod tests {
         assert_eq!(validate_safety(&command, false, false, false), Err(MongoSafetyError::WritesDisabled));
         assert_eq!(validate_safety(&command, true, false, false), Err(MongoSafetyError::Dangerous));
         assert_eq!(validate_safety(&command, true, true, false), Ok(()));
+    }
+
+    #[test]
+    fn fills_in_zero_argument_value_constructors() {
+        let MongoCommand::Update { update, filter, options, .. } = parse(
+            r#"db.reports.updateOne(
+                {phone_number: "+84905421172", code: "VN"},
+                {$set: {type: ObjectId("5bbc28701f3fd80f00e0211c"), created_at: new Date(), updated_at: ISODate()}},
+                {upsert: true}
+            )"#,
+        )
+        .unwrap() else {
+            panic!("expected an update command");
+        };
+        assert_eq!(filter, r#"{"phone_number":"+84905421172","code":"VN"}"#);
+        assert_eq!(options.as_deref(), Some(r#"{"upsert":true}"#));
+
+        let set = &parse_json_value(&update).unwrap()["$set"];
+        assert_eq!(set["type"]["$oid"], "5bbc28701f3fd80f00e0211c");
+        for field in ["created_at", "updated_at"] {
+            let filled = set[field]["$date"].as_str().expect("filled-in date");
+            let filled = chrono::DateTime::parse_from_rfc3339(filled).expect("rfc3339 date");
+            assert!(
+                (Utc::now() - filled.with_timezone(&Utc)).num_seconds().abs() < 60,
+                "{field} is not the current time"
+            );
+        }
+
+        let MongoCommand::Find { filter, .. } = parse("db.reports.find({_id: ObjectId()})").unwrap() else {
+            panic!("expected a find command");
+        };
+        let oid = parse_json_value(&filter).unwrap()["_id"]["$oid"].as_str().unwrap().to_string();
+        assert!(oid.len() == 24 && oid.chars().all(|ch| ch.is_ascii_hexdigit()), "{oid}");
+    }
+
+    #[test]
+    fn rewrites_epoch_millisecond_and_numeric_value_constructors() {
+        let MongoCommand::Find { filter, .. } =
+            parse(r#"db.orders.find({at: new Date(1735689600000), qty: NumberInt(3), sequence: NumberLong("9223372036854775807"), total: NumberDecimal("12.34")})"#)
+                .unwrap()
+        else {
+            panic!("expected a find command");
+        };
+        assert_eq!(
+            filter,
+            r#"{"at":{"$date":{"$numberLong":"1735689600000"}},"qty":{"$numberInt":"3"},"sequence":{"$numberLong":"9223372036854775807"},"total":{"$numberDecimal":"12.34"}}"#
+        );
     }
 
     #[test]

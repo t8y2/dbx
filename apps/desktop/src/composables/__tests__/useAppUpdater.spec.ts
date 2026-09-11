@@ -1,59 +1,32 @@
 // @vitest-environment happy-dom
-
-import { createApp, defineComponent, h, ref, type App } from "vue";
+import { createApp, defineComponent, h, reactive, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "@/i18n";
 import { useAppUpdater } from "@/composables/useAppUpdater";
-
-const apiMock = vi.hoisted(() => ({
-  cancelUpdateDownload: vi.fn<() => Promise<void>>(),
-  downloadUpdate: vi.fn<() => Promise<void>>(),
-  installDownloadedUpdate: vi.fn<() => Promise<void>>(),
+const mocks = vi.hoisted(() => ({
   checkForUpdates: vi.fn(),
+  downloadUpdate: vi.fn(),
+  cancelUpdateDownload: vi.fn(),
+  installDownloadedUpdate: vi.fn(),
+  getDownloadedUpdate: vi.fn(),
+  discardDownloadedUpdate: vi.fn(),
+  getAppVersion: vi.fn(),
+  listen: vi.fn(),
+  relaunch: vi.fn(),
+  persist: vi.fn(),
+  toast: vi.fn(),
 }));
-const listenMock = vi.hoisted(() => vi.fn());
-const toastMock = vi.hoisted(() => vi.fn());
-
-vi.mock("@/lib/backend/api", () => apiMock);
-vi.mock("@/lib/backend/tauriRuntime", () => ({
-  isTauriRuntime: () => true,
-}));
-vi.mock("@/composables/useToast", () => ({
-  useToast: () => ({ toast: toastMock }),
-}));
-const settingsStoreMock = vi.hoisted(() => ({
-  editorSettings: { updateDownloadSource: "official", ignoredUpdateVersion: "" },
-  updateEditorSettingsAndPersist: vi.fn<() => Promise<void>>(),
-}));
-vi.mock("@/stores/settingsStore", () => ({
-  useSettingsStore: () => settingsStoreMock,
-}));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: listenMock,
-}));
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: Deferred<T>["resolve"];
-  let reject!: Deferred<T>["reject"];
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
-
-let app: App | undefined;
-let container: HTMLDivElement | undefined;
-
-function mountUpdater(options: { getActiveTaskCount?: () => number } = {}) {
-  container = document.createElement("div");
-  document.body.append(container);
+vi.mock("@/lib/backend/api", () => mocks);
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: mocks.relaunch }));
+vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: mocks.toast }) }));
+const settings = reactive({ updateDownloadSource: "official", ignoredUpdateVersion: "", updateNotificationsEnabled: true });
+vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: settings, updateEditorSettingsAndPersist: mocks.persist }) }));
+const info = { current_version: "1.0.0", latest_version: "1.1.0", update_available: true, portable_mode: false, manual_update_only: false, release_name: "v1.1.0", release_url: "https://example.com", release_notes: "Changes" };
+const cache = { cache_id: "cached", version: "1.1.0", portable_mode: false, release_url: "https://example.com", release_notes: "Changes", downloaded_at: 1 };
+let app: App;
+function mount(options: Parameters<typeof useAppUpdater>[0] = {}) {
   let updater!: ReturnType<typeof useAppUpdater>;
   app = createApp(
     defineComponent({
@@ -64,299 +37,258 @@ function mountUpdater(options: { getActiveTaskCount?: () => number } = {}) {
     }),
   );
   app.use(i18n);
-  app.mount(container);
-  updater.updateInfo.value = {
-    current_version: "0.5.69",
-    latest_version: "0.5.70",
-    update_available: true,
-    release_name: "DBX v0.5.70",
-    release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
-    release_notes: "",
-  };
+  app.mount(document.createElement("div"));
   return updater;
 }
-
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+async function flush() {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  await nextTick();
+}
 beforeEach(() => {
-  vi.clearAllMocks();
-  settingsStoreMock.editorSettings.ignoredUpdateVersion = "";
-  settingsStoreMock.updateEditorSettingsAndPersist.mockResolvedValue();
-  listenMock.mockResolvedValue(vi.fn());
-  apiMock.installDownloadedUpdate.mockResolvedValue();
+  vi.resetAllMocks();
+  settings.updateDownloadSource = "official";
+  settings.ignoredUpdateVersion = "";
+  settings.updateNotificationsEnabled = true;
+  mocks.checkForUpdates.mockResolvedValue(info);
+  mocks.downloadUpdate.mockResolvedValue(cache);
+  mocks.getDownloadedUpdate.mockResolvedValue(null);
+  mocks.getAppVersion.mockResolvedValue("1.0.0");
+  mocks.listen.mockResolvedValue(vi.fn());
+  mocks.persist.mockImplementation(async (values) => Object.assign(settings, values));
 });
-
 afterEach(() => {
   app?.unmount();
-  container?.remove();
-  app = undefined;
-  container = undefined;
+  vi.useRealTimers();
 });
-
-describe("useAppUpdater download attempts", () => {
-  it("waits for cancellation and ignores stale completion from the previous attempt", async () => {
-    const firstDownload = deferred<void>();
-    const secondDownload = deferred<void>();
-    const cancellation = deferred<void>();
-    apiMock.downloadUpdate.mockImplementationOnce(() => firstDownload.promise).mockImplementationOnce(() => secondDownload.promise);
-    apiMock.cancelUpdateDownload.mockReturnValueOnce(cancellation.promise);
-
-    const updater = mountUpdater();
-
-    const firstAttempt = updater.downloadUpdateInBackground();
-    await vi.waitFor(() => expect(apiMock.downloadUpdate).toHaveBeenCalledTimes(1));
-
-    const cancelAttempt = updater.cancelDownload();
-    expect(updater.isDownloadingUpdate.value).toBe(false);
-
-    const retryAttempt = updater.downloadUpdateInBackground();
-    await Promise.resolve();
-    expect(apiMock.downloadUpdate).toHaveBeenCalledTimes(1);
-    expect(updater.isDownloadingUpdate.value).toBe(true);
-
-    cancellation.resolve();
-    await cancelAttempt;
-    await vi.waitFor(() => expect(apiMock.downloadUpdate).toHaveBeenCalledTimes(2));
-
-    firstDownload.reject(new Error("Download canceled by user."));
-    await firstAttempt;
-    expect(updater.isDownloadingUpdate.value).toBe(true);
-    // The retry is in flight with no progress event yet, so progress is indeterminate.
-    expect(updater.downloadProgress.value).toBeNull();
-
-    secondDownload.resolve();
-    await retryAttempt;
-
-    // No active tasks by default, so the successful download auto-installs and lands on
-    // "ready to restart" instead of waiting for a manual "Install Now" click.
-    expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce();
-    expect(updater.isDownloadingUpdate.value).toBe(false);
-    expect(updater.downloadProgress.value).toBe(100);
-    expect(updater.updateDownloaded.value).toBe(false);
-    expect(updater.updateReady.value).toBe(true);
-    expect(toastMock).toHaveBeenLastCalledWith("DBX has been updated. Restart to finish.", 10000, expect.objectContaining({ label: "Exit & Restart", onClick: expect.any(Function) }));
-  });
-
-  it("auto-installs once the download finishes while idle, without waiting for a manual click", async () => {
-    apiMock.downloadUpdate.mockResolvedValueOnce();
-    const updater = mountUpdater();
-    updater.showUpdateDialog.value = true;
-
-    const attempt = updater.downloadUpdateInBackground();
+describe("silent update lifecycle", () => {
+  it("automatically downloads without surfacing or installing, even while idle", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    expect(mocks.downloadUpdate).toHaveBeenCalledWith("official", "1.1.0", expect.any(String), "Changes");
+    expect(updater.phase.value).toBe("ready");
+    expect(updater.hasUpdateAvailable.value).toBe(true);
     expect(updater.showUpdateDialog.value).toBe(false);
-    await attempt;
-
-    expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce();
-    expect(updater.updateDownloaded.value).toBe(false);
-    expect(updater.updateReady.value).toBe(true);
-    expect(toastMock).toHaveBeenLastCalledWith("DBX has been updated. Restart to finish.", 10000, expect.objectContaining({ label: "Exit & Restart", onClick: expect.any(Function) }));
+    expect(mocks.toast).not.toHaveBeenCalled();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.relaunch).not.toHaveBeenCalled();
   });
-
-  it("falls back to a manual Install Now toast when tasks are still active once the download finishes", async () => {
-    apiMock.downloadUpdate.mockResolvedValueOnce();
-    // Must be a reactive ref, not a plain closure variable — useAppUpdater's activeTaskCount
-    // is a computed(), which only invalidates its cache when a tracked reactive source changes.
-    const activeTaskCount = ref(2);
-    const updater = mountUpdater({ getActiveTaskCount: () => activeTaskCount.value });
-
-    await updater.downloadUpdateInBackground();
-
-    expect(apiMock.installDownloadedUpdate).not.toHaveBeenCalled();
+  it("shows no badge until a download finishes, and closing does not cancel", async () => {
+    const pending = deferred<typeof cache>();
+    mocks.downloadUpdate.mockReturnValue(pending.promise);
+    const updater = mount();
+    const checking = updater.checkUpdates();
+    await flush();
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    updater.showUpdateDialog.value = false;
+    pending.resolve(cache);
+    await checking;
     expect(updater.updateDownloaded.value).toBe(true);
-    expect(toastMock).toHaveBeenLastCalledWith("DBX v0.5.70 is ready to install.", 10000, expect.objectContaining({ label: "Install Now", onClick: expect.any(Function) }));
-
-    activeTaskCount.value = 0;
-    const [, , action] = toastMock.mock.lastCall!;
-    action.onClick();
-
-    await vi.waitFor(() => expect(apiMock.installDownloadedUpdate).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(toastMock).toHaveBeenLastCalledWith("DBX has been updated. Restart to finish.", 10000, expect.objectContaining({ label: "Exit & Restart", onClick: expect.any(Function) })));
-    expect(updater.updateReady.value).toBe(true);
+    expect(mocks.cancelUpdateDownload).not.toHaveBeenCalled();
   });
-
-  it("tracks download progress and stays indeterminate when the backend reports no total", async () => {
-    const download = deferred<void>();
-    apiMock.downloadUpdate.mockReturnValueOnce(download.promise);
-    const updater = mountUpdater();
-
-    const downloadAttempt = updater.downloadUpdateInBackground();
-    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledOnce());
-    // No progress event yet — the size is unknown, so progress stays indeterminate.
-    expect(updater.downloadProgress.value).toBeNull();
-
-    const onProgress = listenMock.mock.calls[0][1] as (event: { payload: { downloaded: number; total: number | null } }) => void;
-    onProgress({ payload: { downloaded: 25, total: 100 } });
-    expect(updater.downloadProgress.value).toBe(25);
-
-    // Mirrors may stream chunks without a total; progress must not freeze at a stale percentage.
-    onProgress({ payload: { downloaded: 64, total: null } });
-    expect(updater.downloadProgress.value).toBeNull();
-
-    download.resolve();
-    await downloadAttempt;
-    expect(updater.downloadProgress.value).toBe(100);
+  it("restores offline and one click saves before installing and restarting without downloading", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const release = vi.fn();
+    const prepare = vi.fn(async () => release);
+    const updater = mount({ prepareForUpdate: prepare });
+    await updater.initialize();
+    await updater.installDownloadedUpdate();
+    expect(mocks.checkForUpdates).not.toHaveBeenCalled();
+    expect(mocks.downloadUpdate).not.toHaveBeenCalled();
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledWith("cached", "1.1.0");
+    expect(prepare.mock.invocationCallOrder[0]).toBeLessThan(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]);
+    expect(mocks.installDownloadedUpdate.mock.invocationCallOrder[0]).toBeLessThan(mocks.relaunch.mock.invocationCallOrder[0]);
+    expect(release).not.toHaveBeenCalled();
   });
-});
-
-describe("useAppUpdater reopening the dialog from the toolbar", () => {
-  it("resurfaces the dialog without re-checking while a download is in progress", async () => {
-    const download = deferred<void>();
-    apiMock.downloadUpdate.mockReturnValueOnce(download.promise);
-    const updater = mountUpdater();
-
-    const downloadAttempt = updater.downloadUpdateInBackground();
-    await vi.waitFor(() => expect(updater.isDownloadingUpdate.value).toBe(true));
-
-    await updater.checkUpdates();
-
-    expect(apiMock.checkForUpdates).not.toHaveBeenCalled();
-    expect(updater.showUpdateDialog.value).toBe(true);
-
-    download.resolve();
-    await downloadAttempt;
+  it("preparation failure retains the package and repeated clicks cannot bypass preparation", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const pending = deferred<() => void>();
+    const updater = mount({ prepareForUpdate: () => pending.promise });
+    await updater.checkUpdates({ silent: true });
+    const install = updater.installDownloadedUpdate();
+    await updater.installDownloadedUpdate();
+    pending.reject(new Error("unsaved grid"));
+    await install;
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.phase.value).toBe("ready");
+    expect(updater.updateCheckMessage.value).toContain("unsaved grid");
   });
-
-  it("resurfaces the dialog without re-checking once the update is downloaded and ready to install", async () => {
-    apiMock.downloadUpdate.mockResolvedValueOnce();
-    // Busy at download-completion time so the install step stays pending instead of auto-running.
-    const updater = mountUpdater({ getActiveTaskCount: () => 1 });
-
-    await updater.downloadUpdateInBackground();
+  it("blocks installation for active work but never blocks automatic download", async () => {
+    const updater = mount({ getActiveTaskCount: () => 2 });
+    await updater.checkUpdates({ silent: true });
     expect(updater.updateDownloaded.value).toBe(true);
+    await updater.installDownloadedUpdate();
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("retries only restart after relaunch fails", async () => {
+    mocks.relaunch.mockRejectedValueOnce(new Error("restart failed"));
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    await updater.restartApp();
+    expect(mocks.installDownloadedUpdate).toHaveBeenCalledOnce();
+    expect(mocks.relaunch).toHaveBeenCalledTimes(2);
+  });
+  it("persists ignore before deleting a ready cache", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.ignoreCurrentVersion();
+    expect(mocks.persist).toHaveBeenCalledWith({ ignoredUpdateVersion: "1.1.0" });
+    expect(mocks.discardDownloadedUpdate).toHaveBeenCalledWith("cached");
+    expect(updater.updateDownloaded.value).toBe(false);
+  });
+  it("keeps ready cache if ignoring cannot persist", async () => {
+    mocks.persist.mockRejectedValue(new Error("disk full"));
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.ignoreCurrentVersion();
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+    expect(updater.updateDownloaded.value).toBe(true);
+  });
+  it("hides ready badge when notifications disabled but preserves manual installation", async () => {
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount();
+    await updater.initialize();
+    settings.updateNotificationsEnabled = false;
+    await flush();
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(mocks.discardDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("ignores progress belonging to another version or download attempt", async () => {
+    const pending = deferred<typeof cache>();
+    mocks.downloadUpdate.mockReturnValue(pending.promise);
+    const updater = mount();
+    const checking = updater.checkUpdates({ silent: true });
+    await vi.waitFor(() => expect(mocks.listen).toHaveBeenCalled());
+    const callback = mocks.listen.mock.calls[0][1];
+    const attempt = mocks.downloadUpdate.mock.calls[0][2];
+    callback({ payload: { downloaded: 90, total: 100, attempt_id: "old", version: "1.1.0" } });
+    expect(updater.downloadProgress.value).toBeNull();
+    callback({ payload: { downloaded: 30, total: 100, attempt_id: attempt, version: "1.1.0" } });
+    expect(updater.downloadProgress.value).toBe(30);
+    pending.resolve(cache);
+    await checking;
+  });
+  it("silently backs off after failed downloads at 1, 5 and 15 minutes", async () => {
+    vi.useFakeTimers();
+    mocks.downloadUpdate.mockRejectedValue(new Error("network down"));
+    const updater = mount();
+    await updater.initialize();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
+    for (const [index, delay] of [60_000, 300_000, 900_000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay);
+      expect(mocks.downloadUpdate).toHaveBeenCalledTimes(index + 2);
+    }
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mocks.downloadUpdate).toHaveBeenCalledTimes(4);
     expect(updater.showUpdateDialog.value).toBe(false);
-
-    await updater.checkUpdates();
-
-    expect(apiMock.checkForUpdates).not.toHaveBeenCalled();
-    expect(updater.showUpdateDialog.value).toBe(true);
+    expect(mocks.toast).not.toHaveBeenCalled();
+  });
+  it("changing source keeps an already prepared package", async () => {
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.changeUpdateDownloadSource("cnb");
+    expect(mocks.downloadUpdate).toHaveBeenCalledOnce();
+    expect(mocks.checkForUpdates).toHaveBeenCalledOnce();
+  });
+  it("reconciles a download that commits just before cancellation without installing it", async () => {
+    const pending = deferred<typeof cache>();
+    mocks.downloadUpdate.mockReturnValue(pending.promise);
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    mocks.cancelUpdateDownload.mockImplementation(async () => {
+      pending.resolve(cache);
+    });
+    const updater = mount();
+    const check = updater.checkUpdates({ silent: true });
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalled());
+    await updater.cancelDownload();
+    await check;
+    expect(updater.updateDownloaded.value).toBe(true);
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+  });
+  it("does not resurrect a logically ignored package if removing its files fails", async () => {
+    mocks.discardDownloadedUpdate.mockRejectedValue(new Error("file busy"));
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.ignoreCurrentVersion();
+    expect(settings.ignoredUpdateVersion).toBe("1.1.0");
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(updater.hasUpdateAvailable.value).toBe(false);
+    expect(updater.updateCheckMessage.value).toContain("file busy");
+  });
+  it("clears a corrupt installation cache so download can be retried", async () => {
+    mocks.installDownloadedUpdate.mockRejectedValue(new Error("signature invalid"));
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    expect(updater.phase.value).toBe("idle");
+    expect(updater.updateDownloaded.value).toBe(false);
+    expect(mocks.relaunch).not.toHaveBeenCalled();
   });
 
-  it("resurfaces the dialog without re-checking once the update is installed and awaiting restart", async () => {
-    apiMock.downloadUpdate.mockResolvedValueOnce();
-    const updater = mountUpdater();
+  it("holds the preparation barrier through install and releases it only on failure", async () => {
+    const release = vi.fn();
+    mocks.installDownloadedUpdate.mockRejectedValue(new Error("installer failed"));
+    mocks.getDownloadedUpdate.mockResolvedValue(cache);
+    const updater = mount({ prepareForUpdate: async () => release });
+    await updater.checkUpdates({ silent: true });
+    await updater.installDownloadedUpdate();
+    expect(release).toHaveBeenCalledOnce();
+    expect(updater.updateDownloaded.value).toBe(true);
+  });
+  it("checks fresh metadata immediately once when the downloaded version changes", async () => {
+    mocks.downloadUpdate.mockRejectedValueOnce(new Error("Update version changed; check for updates again."));
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledTimes(2));
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(updater.updateDownloaded.value).toBe(true);
+  });
 
+  it("cannot install or switch sources while an ignore setting is being persisted", async () => {
+    const persist = deferred<void>();
+    mocks.persist.mockReturnValue(persist.promise);
+    const updater = mount();
+    await updater.checkUpdates({ silent: true });
+    const ignoring = updater.ignoreCurrentVersion();
+    await updater.installDownloadedUpdate();
+    await updater.changeUpdateDownloadSource("cnb");
+    await updater.checkUpdates({ silent: true });
     await updater.downloadUpdateInBackground();
-    expect(updater.updateReady.value).toBe(true);
-
-    await updater.checkUpdates();
-
-    expect(apiMock.checkForUpdates).not.toHaveBeenCalled();
-    expect(updater.showUpdateDialog.value).toBe(true);
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.installDownloadedUpdate).not.toHaveBeenCalled();
+    expect(mocks.persist).toHaveBeenCalledTimes(1);
+    persist.resolve();
+    await ignoring;
+    expect(updater.updateDownloaded.value).toBe(false);
   });
 
-  it("still checks the network for a silent background check even mid-download", async () => {
-    const download = deferred<void>();
-    apiMock.downloadUpdate.mockReturnValueOnce(download.promise);
-    apiMock.checkForUpdates.mockResolvedValueOnce({
-      current_version: "0.5.69",
-      latest_version: "0.5.70",
-      update_available: true,
-      release_name: "DBX v0.5.70",
-      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
-      release_notes: "",
-    });
-    const updater = mountUpdater();
-
-    const downloadAttempt = updater.downloadUpdateInBackground();
-    await vi.waitFor(() => expect(updater.isDownloadingUpdate.value).toBe(true));
-
-    await updater.checkUpdates({ silent: true });
-
-    expect(apiMock.checkForUpdates).toHaveBeenCalledOnce();
-
-    download.resolve();
-    await downloadAttempt;
-  });
-});
-
-describe("useAppUpdater failure state handling", () => {
-  interface UpdateInfo {
-    current_version: string;
-    latest_version: string;
-    update_available: boolean;
-    release_name: string;
-    release_url: string;
-    release_notes: string;
-  }
-
-  it("keeps the failed state visible while a retry is in flight and clears it on success", async () => {
-    apiMock.checkForUpdates.mockRejectedValueOnce(new Error("boom"));
-    const updater = mountUpdater();
-
-    await updater.checkUpdates();
-    expect(updater.updateCheckFailed.value).toBe(true);
-    expect(updater.updateCheckMessage.value).not.toBe("");
-
-    const retry = deferred<UpdateInfo>();
-    apiMock.checkForUpdates.mockReturnValueOnce(retry.promise);
-    const pending = updater.checkUpdates();
-    await vi.waitFor(() => expect(updater.checkingUpdates.value).toBe(true));
-
-    // Mid-retry: the source switcher stays mounted (updateCheckFailed) and
-    // the dialog must not fall through to "up to date" with an empty version.
-    expect(updater.updateCheckFailed.value).toBe(true);
-    expect(updater.updateCheckMessage.value).not.toBe("");
-
-    retry.resolve({
-      current_version: "0.5.69",
-      latest_version: "0.5.69",
-      update_available: false,
-      release_name: "",
-      release_url: "",
-      release_notes: "",
-    });
-    await pending;
-
-    expect(updater.updateCheckFailed.value).toBe(false);
-    expect(updater.updateCheckMessage.value).toContain("0.5.69");
-  });
-
-  it("keeps the last update info when a silent background check fails", async () => {
-    apiMock.checkForUpdates.mockResolvedValueOnce({
-      current_version: "0.5.69",
-      latest_version: "0.5.70",
-      update_available: true,
-      release_name: "DBX v0.5.70",
-      release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.70",
-      release_notes: "",
-    });
-    const updater = mountUpdater();
-    await updater.checkUpdates({ silent: true });
-    expect(updater.updateInfo.value?.update_available).toBe(true);
-
-    apiMock.checkForUpdates.mockRejectedValueOnce(new Error("network down"));
-    await updater.checkUpdates({ silent: true });
-
-    expect(updater.updateInfo.value?.update_available).toBe(true);
-    expect(updater.updateCheckFailed.value).toBe(false);
-    expect(updater.showUpdateDialog.value).toBe(false);
-  });
-});
-
-describe("useAppUpdater ignore version", () => {
-  it("persists the ignored latest version and closes the update dialog", async () => {
-    const updater = mountUpdater();
-    updater.showUpdateDialog.value = true;
-
-    await updater.ignoreCurrentVersion();
-
-    expect(settingsStoreMock.updateEditorSettingsAndPersist).toHaveBeenCalledWith({ ignoredUpdateVersion: "0.5.70" });
-    expect(updater.showUpdateDialog.value).toBe(false);
-    expect(toastMock).toHaveBeenCalledWith("Version v0.5.70 ignored. You'll be reminded when the next version releases.", 5000);
-  });
-
-  it("keeps the dialog open and allows retry when persistence fails", async () => {
-    settingsStoreMock.updateEditorSettingsAndPersist.mockRejectedValueOnce(new Error("storage unavailable")).mockResolvedValueOnce();
-    const updater = mountUpdater();
-    updater.showUpdateDialog.value = true;
-
-    await updater.ignoreCurrentVersion();
-
-    expect(updater.showUpdateDialog.value).toBe(true);
-    expect(updater.isIgnoringUpdate.value).toBe(false);
-    expect(toastMock).toHaveBeenLastCalledWith("Failed to save the ignored version: storage unavailable", 5000);
-
-    await updater.ignoreCurrentVersion();
-
-    expect(settingsStoreMock.updateEditorSettingsAndPersist).toHaveBeenCalledTimes(2);
-    expect(updater.showUpdateDialog.value).toBe(false);
+  it("resumes after notifications are reenabled while cancellation is pending", async () => {
+    const pendingDownload = deferred<typeof cache>();
+    const pendingCancel = deferred<void>();
+    mocks.downloadUpdate.mockReturnValueOnce(pendingDownload.promise);
+    mocks.cancelUpdateDownload.mockReturnValue(pendingCancel.promise);
+    const updater = mount();
+    await updater.initialize();
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledTimes(1));
+    settings.updateNotificationsEnabled = false;
+    await nextTick();
+    settings.updateNotificationsEnabled = true;
+    await nextTick();
+    pendingDownload.reject(new Error("cancelled"));
+    pendingCancel.resolve();
+    await vi.waitFor(() => expect(mocks.downloadUpdate).toHaveBeenCalledTimes(2));
+    expect(updater.updateDownloaded.value).toBe(true);
   });
 });

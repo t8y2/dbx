@@ -10,6 +10,7 @@ import * as api from "@/lib/backend/api";
 import type { RedisNodeEndpoint, RedisCommandResult } from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +36,15 @@ const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 
+interface RedisDashboardTabUiState {
+  selectedNodeAddress?: string;
+  searchQuery?: string;
+  collapsedSections?: string[];
+  autoRefreshInterval?: number;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<RedisDashboardTabUiState>({}, "RedisDashboard");
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -44,9 +54,11 @@ const error = ref<string | null>(null);
 const rawSections = ref<InfoSection[]>([]);
 const masterNodes = ref<RedisNodeEndpoint[]>([]);
 const selectedNodeIndex = ref("0"); // string for Select compatibility
-const searchQuery = ref("");
-const collapsedSections = ref<Set<string>>(new Set());
-const autoRefreshInterval = ref<number>(0); // 0 = off, 5, 10, 30, 60 (seconds)
+const searchQuery = ref(restoredUiState.searchQuery ?? "");
+const collapsedSections = ref<Set<string>>(new Set(restoredUiState.collapsedSections ?? []));
+const autoRefreshInterval = ref<number>([0, 5, 10, 30, 60].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 0); // 0 = off
+let collapsedSectionsInitialized = restoredUiState.collapsedSections !== undefined;
+let restoredNodeAddress = restoredUiState.selectedNodeAddress;
 
 const infoSectionI18nKeys: Record<string, string> = {
   Server: "redis.dashboard.sections.server",
@@ -79,6 +91,20 @@ const showNodeSelector = computed(() => isClusterMode.value);
 const nodeOptions = computed(() => {
   return masterNodes.value.map((n) => `${n.host}:${n.port}`);
 });
+
+trackUiState(() => ({
+  selectedNodeAddress: nodeOptions.value[Number(selectedNodeIndex.value)],
+  searchQuery: searchQuery.value,
+  collapsedSections: [...collapsedSections.value],
+  autoRefreshInterval: autoRefreshInterval.value,
+}));
+
+function restoreSelectedNode() {
+  if (!restoredNodeAddress) return;
+  const index = nodeOptions.value.indexOf(restoredNodeAddress);
+  if (index >= 0) selectedNodeIndex.value = String(index);
+  restoredNodeAddress = undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Parsing helpers
@@ -123,6 +149,7 @@ async function fetchInfo() {
           const [host, portStr] = addr.split(":");
           return { host, port: parseInt(portStr, 10) || 6379 };
         });
+        restoreSelectedNode();
       }
       // Match selected node by address, fall back to first node
       const selectedAddr = nodeOptions.value[Number(selectedNodeIndex.value)];
@@ -138,8 +165,9 @@ async function fetchInfo() {
 
     rawSections.value = parseInfoText(infoText);
     // Default all sections to collapsed (only on first load to preserve user interactions)
-    if (collapsedSections.value.size === 0) {
+    if (!collapsedSectionsInitialized) {
       collapsedSections.value = new Set(rawSections.value.map((s) => s.name));
+      collapsedSectionsInitialized = true;
     }
   } catch (e: any) {
     error.value = e?.message || String(e);
@@ -154,6 +182,7 @@ async function fetchClusterNodes() {
   if (!isClusterMode.value) return;
   try {
     masterNodes.value = await api.redisClusterMasterNodes(props.connectionId);
+    restoreSelectedNode();
   } catch (e: any) {
     // Nodes will be populated from the INFO response instead
     console.warn("Failed to fetch cluster master nodes:", e?.message || e);

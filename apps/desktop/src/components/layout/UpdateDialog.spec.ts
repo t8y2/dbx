@@ -14,6 +14,7 @@ const mountedApps: App[] = [];
 interface DialogState {
   open: boolean;
   portableMode: boolean;
+  releaseNotes: string;
   manualUpdateOnly: boolean;
   isDownloadingUpdate: boolean;
   downloadProgress: number | null;
@@ -32,6 +33,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
   const state = reactive<DialogState>({
     open: true,
     portableMode: false,
+    releaseNotes: "",
     manualUpdateOnly: false,
     isDownloadingUpdate: false,
     downloadProgress: 0,
@@ -76,7 +78,7 @@ async function mountDialog(activeTaskCount: number, initialState: Partial<Dialog
               manual_update_only: state.manualUpdateOnly,
               release_name: "DBX v0.5.61",
               release_url: "https://github.com/t8y2/dbx/releases/tag/v0.5.61",
-              release_notes: "",
+              release_notes: state.releaseNotes,
             },
             updateCheckMessage: "",
             checkingUpdates: false,
@@ -110,7 +112,7 @@ function buttonWithText(text: string): HTMLButtonElement | undefined {
 }
 
 function downloadButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Download in Background");
+  return buttonWithText("Retry Download");
 }
 
 function cancelDownloadButton(): HTMLButtonElement | undefined {
@@ -118,7 +120,7 @@ function cancelDownloadButton(): HTMLButtonElement | undefined {
 }
 
 function installDownloadedButton(): HTMLButtonElement | undefined {
-  return buttonWithText("Exit & Update");
+  return buttonWithText("Restart & Update");
 }
 
 async function pressEscape() {
@@ -338,15 +340,26 @@ describe("UpdateDialog ignore version", () => {
     expect(ignoreVersion).toHaveBeenCalledOnce();
   });
 
-  it("hides the ignore button once an update has been downloaded", async () => {
+  it("allows ignoring a downloaded update", async () => {
     await mountDialog(0, { updateDownloaded: true, downloadProgress: 100 });
 
-    expect(buttonWithText("Ignore this version")).toBeUndefined();
+    expect(buttonWithText("Ignore this version")).toBeDefined();
   });
 
   it("disables the ignore button while the setting is being persisted", async () => {
     await mountDialog(0, { isIgnoringUpdate: true });
 
     expect(buttonWithText("Ignore this version")?.disabled).toBe(true);
+  });
+});
+
+describe("UpdateDialog release notes safety", () => {
+  it("renders remote HTML as text and never creates unsafe links or image requests", async () => {
+    await mountDialog(0, { releaseNotes: '<img src="https://example.com/tracker" onerror="alert(1)"><script>alert(1)</script> [bad](javascript:alert) ![remote](https://example.com/image) [safe](https://example.com/release)' });
+    await vi.waitFor(() => {
+      expect(document.body.querySelector('a[href="https://example.com/release"]')).not.toBeNull();
+    });
+    expect(document.body.querySelector("script, img")).toBeNull();
+    expect(Array.from(document.body.querySelectorAll("a")).every((anchor) => anchor.href.startsWith("https://"))).toBe(true);
   });
 });

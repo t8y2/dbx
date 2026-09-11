@@ -114,6 +114,16 @@ Key statistics and Slowlog require additional Redis commands. Limit scope and en
 
 Flush, bulk delete, and `FLUSH*` operations cannot be undone. Read-only connections reject writes, while production and dangerous-command checks remain active.
 
+## Live MONITOR
+
+![Live Redis MONITOR logs](/screenshots/redis-monitor.png)
+
+Run `MONITOR` on its own in the Redis query editor to receive live command logs instead of only the initial `OK`. Monitoring covers all databases on the connected node, regardless of the database selected in the editor.
+
+Use **Stop listening**, the execution toolbar's stop button, or close the tab to release the dedicated connection. The result retains the latest 1,000 entries, with each entry limited to 16,384 characters. Stopping preserves the displayed results.
+
+Direct Redis node connections, including their TLS and tunnel settings, are supported. For Sentinel or Cluster, create a direct connection to the node to inspect; logs are not aggregated across nodes. The Redis account needs permission to execute `MONITOR`, which adds server overhead while active.
+
 ## Safety and Performance Guidance
 
 - Use a read-only account or ACL for production and enable DBX read-only/production protection

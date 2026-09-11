@@ -1,4 +1,5 @@
-import type { QueryTab } from "@/types/database";
+import type { QueryTab, TabOutputView } from "@/types/database";
+import { sanitizeTabUiState } from "@/lib/tabs/tabUiState";
 
 export const OPEN_TABS_STORAGE_KEY = "dbx-open-tabs";
 export const ACTIVE_TAB_STORAGE_KEY = "dbx-active-tab";
@@ -52,6 +53,7 @@ export interface SavedOpenTab {
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureDraft?: QueryTab["structureDraft"];
   objectBrowser?: QueryTab["objectBrowser"];
   objectSource?: QueryTab["objectSource"];
   sourceView?: boolean;
@@ -63,6 +65,7 @@ export interface SavedOpenTab {
   resultRuns?: SavedQueryResultRun[];
   activeResultRunId?: string;
   resultAutoSave?: boolean;
+  uiState?: QueryTab["uiState"];
 }
 
 export interface RestoredOpenTabs {
@@ -102,7 +105,7 @@ function shouldPersistTabSql(tab: QueryTab) {
 function restoredOriginalSql(tab: SavedOpenTab, mode: QueryTab["mode"], sql: string) {
   if (mode !== "query") return undefined;
   if (tab.externalSqlPath) return tab.originalSql ?? sql;
-  if (tab.savedSqlId) return sql ? "" : undefined;
+  if (tab.savedSqlId) return tab.originalSql ?? (sql ? "" : undefined);
   // Prefer the persisted originalSql so a clean prefilled query tab (sql === originalSql)
   // restores clean instead of being marked dirty. Older saved state without this field
   // falls through to "" (preserving prior behavior for user-edited scratch tabs).
@@ -128,6 +131,21 @@ function restoredEditorViewport(tab: SavedOpenTab): QueryTab["editorViewport"] {
   };
 }
 
+const TAB_OUTPUT_VIEWS = new Set<TabOutputView>(["result", "summary", "explain", "chart", "messages", "profile"]);
+
+function restoredTabUiState(tab: SavedOpenTab): QueryTab["uiState"] {
+  const activeOutputView = tab.uiState?.activeOutputView;
+  const resultPaneOpen = tab.uiState?.resultPaneOpen;
+  const restored: NonNullable<QueryTab["uiState"]> = {};
+  if (activeOutputView && TAB_OUTPUT_VIEWS.has(activeOutputView)) restored.activeOutputView = activeOutputView;
+  if (typeof resultPaneOpen === "boolean") restored.resultPaneOpen = resultPaneOpen;
+  if (tab.uiState?.page) {
+    const sanitized = sanitizeTabUiState({ page: tab.uiState.page });
+    if (sanitized?.page) restored.page = sanitized.page;
+  }
+  return Object.keys(restored).length > 0 ? restored : undefined;
+}
+
 export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
   return tabs.map((tab) => ({
     id: tab.id,
@@ -141,9 +159,9 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     sql: shouldPersistTabSql(tab) ? tab.sql : "",
     ...(tab.editorViewport ? { editorViewport: tab.editorViewport } : {}),
     ...(tab.editorSelection ? { editorSelection: tab.editorSelection } : {}),
-    // Plain query tabs always round-trip originalSql. External-file tabs only persist it
-    // while dirty so their disk baseline survives restart without duplicating clean SQL.
-    ...(tab.originalSql !== undefined && !tab.savedSqlId && (!tab.externalSqlPath || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
+    // File-backed drafts retain their baseline, including when the edited SQL is empty.
+    // Clean file-backed tabs omit it so startup can hydrate the current file content.
+    ...(tab.originalSql !== undefined && ((!tab.savedSqlId && !tab.externalSqlPath) || tab.sql !== tab.originalSql) ? { originalSql: tab.originalSql } : {}),
     savedSqlId: tab.savedSqlId,
     externalSqlPath: tab.externalSqlPath,
     ...(tab.externalSqlFileVersion ? { externalSqlFileVersion: tab.externalSqlFileVersion } : {}),
@@ -168,6 +186,7 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
     ...(tab.nacosNamespace !== undefined ? { nacosNamespace: tab.nacosNamespace } : {}),
     ...(tab.nacosNamespaceName !== undefined ? { nacosNamespaceName: tab.nacosNamespaceName } : {}),
     ...(tab.structureTableName !== undefined ? { structureTableName: tab.structureTableName } : {}),
+    ...(tab.structureDraft ? { structureDraft: JSON.parse(JSON.stringify(tab.structureDraft)) } : {}),
     objectBrowser: tab.objectBrowser,
     objectSource: tab.objectSource,
     ...(tab.sourceView ? { sourceView: true } : {}),
@@ -192,7 +211,8 @@ export function serializeOpenTabs(tabs: QueryTab[]): SavedOpenTab[] {
         }
       : {}),
     ...(tab.mode === "query" && tab.activeResultRunId !== undefined ? { activeResultRunId: tab.activeResultRunId } : {}),
-    ...(tab.mode === "query" && tab.resultAutoSave ? { resultAutoSave: true } : {}),
+    ...(tab.mode === "query" && typeof tab.resultAutoSave === "boolean" ? { resultAutoSave: tab.resultAutoSave } : {}),
+    ...(tab.uiState ? { uiState: sanitizeTabUiState(tab.uiState) } : {}),
   }));
 }
 
@@ -231,6 +251,7 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         mode,
         sql: typeof tab.sql === "string" ? tab.sql : "",
         isExecuting: false,
+        redisMonitorActive: false,
         isCancelling: false,
         queryExecutionStartedAt: undefined,
         executingResultRunId: undefined,
@@ -243,7 +264,8 @@ function restoreOpenTabsArray(parsed: unknown, rawActiveTabId: string | null, op
         resultCacheState: mode !== "data" && tab.resultCacheKey ? "disk" : undefined,
         resultRuns,
         activeResultRunId: resultRuns?.some((run) => run.id === tab.activeResultRunId) ? tab.activeResultRunId : resultRuns?.[0]?.id,
-        resultAutoSave: mode === "query" && tab.resultAutoSave ? true : undefined,
+        resultAutoSave: mode === "query" && typeof tab.resultAutoSave === "boolean" ? tab.resultAutoSave : undefined,
+        uiState: restoredTabUiState(tab),
       };
     });
     const activeTabId = rawActiveTabId || null;

@@ -30,6 +30,7 @@ import {
   queryResultToObjects,
   type DamengJob,
 } from "@/lib/database/damengJobAdmin";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -40,17 +41,18 @@ type DetailTab = "steps" | "schedules" | "histories";
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ selectedJobName?: string; search?: string; detailTab?: DetailTab }>({}, "DamengJobAdmin");
 
 const jobs = ref<DamengJob[]>([]);
-const selectedJobName = ref("");
-const search = ref("");
+const selectedJobName = ref(restoredUiState.selectedJobName ?? "");
+const search = ref(restoredUiState.search ?? "");
 const loadingJobs = ref(false);
 const loadingDetails = ref(false);
 const applying = ref(false);
 const jobEnvironmentReady = ref(true);
 const loadError = ref("");
 const detailError = ref("");
-const detailTab = ref<DetailTab>("steps");
+const detailTab = ref<DetailTab>(["steps", "schedules", "histories"].includes(restoredUiState.detailTab ?? "") ? restoredUiState.detailTab! : "steps");
 const detailRows = ref<Record<string, unknown>[]>([]);
 
 const createDialogOpen = ref(false);
@@ -71,6 +73,8 @@ const createStartDate = ref("CURDATE");
 const createStartTime = ref("00:00:00");
 const createEndTime = ref("");
 const createMinuteInterval = ref(0);
+
+trackUiState(() => ({ selectedJobName: selectedJobName.value, search: search.value, detailTab: detailTab.value }));
 
 const supported = computed(() => props.connection.db_type === "dameng");
 const executionDatabase = computed(() => (props.connection.db_type === "dameng" ? "" : props.connection.database || ""));

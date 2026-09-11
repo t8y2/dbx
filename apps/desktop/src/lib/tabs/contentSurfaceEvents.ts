@@ -35,6 +35,8 @@ export const contentSurfaceEventNames = [
   "objectSchemaChange",
   "objectBrowserViewportChange",
   "objectBrowserSearchChange",
+  "objectBrowserFilterChange",
+  "addObjectTableToAi",
   "structureEditorSaved",
   "structureEditorClose",
   "previewStatement",

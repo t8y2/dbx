@@ -18,3 +18,7 @@ export function queryEditorCommentTokens(dbType?: DatabaseType) {
     block: { open: "/*", close: "*/" },
   };
 }
+
+export function queryEditorWordLanguageData(dbType?: DatabaseType) {
+  return dbType === "sqlserver" ? [{ wordChars: "@" }] : [];
+}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, shallowRef, nextTick, watch, onMounted, onBeforeUnmount, toRaw } from "vue";
 import { uuid } from "@/lib/common/utils";
 import { useI18n } from "vue-i18n";
 import { RefreshCw, Trash2, Plus, Save, ChevronDown, ChevronLeft, ChevronRight, Table2, Braces, X, Search, Wrench, Filter, Columns3Cog, SquareDashed, Minus, Rows3, AlignLeft, AlignRight, EyeOff, Palette, Copy } from "@lucide/vue";
@@ -69,7 +69,7 @@ import {
   documentStoreValueForGrid,
 } from "@/lib/app/documentJsonValues";
 import { applyDocumentStoreIdentityPlan, formatMeilisearchDocumentOperationPreview, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
-import { restoreDocumentBrowserState, saveDocumentBrowserState } from "@/lib/tabs/documentBrowserStateCache";
+import { restoreDocumentBrowserState, saveDocumentBrowserState, type DocumentBrowserDataSnapshot } from "@/lib/tabs/documentBrowserStateCache";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import {
@@ -78,6 +78,7 @@ import {
   buildMongoUpdateDocument,
   formatMongoShellLiteral,
   mongoDocumentDisplayValue,
+  mongoDocumentGridValue,
   mongoDocumentGridColumnTypes,
   mongoDocumentIdForGrid,
   parseMongoDocumentInputValue,
@@ -121,12 +122,13 @@ const DYNAMODB_DEFAULT_EXPORT_ROW_LIMIT = 10_000;
 
 // This component is keyed by tab in ContentArea and unmounted on every tab
 // switch; without restoring from the per-tab cache, coming back to the tab
-// would silently drop the user's filter/sort conditions. Page position only
-// survives for skip-based paging: cursor stores (DynamoDB/Elasticsearch)
-// cannot resume a page without their cursor stacks, and infinite scroll
-// always restarts from the first segment.
+// would silently drop the user's filter/sort conditions and re-query the
+// server. Page position and rows only survive for skip-based paging: cursor
+// stores (DynamoDB/Elasticsearch) cannot resume a page without their cursor
+// stacks, and infinite scroll always restarts from the first segment.
 const restoredDocumentBrowserState = props.stateKey ? restoreDocumentBrowserState(props.stateKey) : undefined;
-const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && (documentStoreProviderFor(props.databaseType).kind === "mongodb" || documentStoreProviderFor(props.databaseType).kind === "meilisearch");
+const skipBasedDocumentStore = documentStoreProviderFor(props.databaseType).kind === "mongodb" || documentStoreProviderFor(props.databaseType).kind === "meilisearch";
+const restoresSkipBasedPage = !!restoredDocumentBrowserState && !settingsStore.editorSettings.infiniteScroll && skipBasedDocumentStore;
 
 const documents = ref<JsonRecord[]>([]);
 const copyDocuments = ref<JsonRecord[]>([]);
@@ -141,6 +143,11 @@ const mongoCopyDocumentsAvailable = ref(false);
 const lastGridColumns = ref<string[]>([]);
 const lastGridColumnTypes = ref<string[]>([]);
 const total = ref<number | undefined>(undefined);
+// Logical-result identity for DataGrid's tab-switch view snapshot. A data tab
+// gets this from queryStore.publishResultGeneration; document tabs have no
+// store-side result, so the browser mints one per completed load and inherits
+// it on an infinite-scroll append and on a cache restore.
+const documentViewGeneration = ref<string | undefined>(undefined);
 const totalIsExact = ref(true);
 const paginationTotal = ref<number | undefined>(undefined);
 const loading = ref(false);
@@ -299,7 +306,46 @@ const documentFilterFieldSearch = ref<Record<string, string>>({});
 const documentFilterRules = ref<DocumentFilterRule[]>(restoredDocumentBrowserState?.documentFilterRules ?? []);
 const appliedDocumentFilter = ref<Record<string, unknown> | null>(restoredDocumentBrowserState?.appliedDocumentFilter ?? null);
 
-function persistDocumentBrowserState() {
+// Identity + conditions the currently held rows were loaded under. Rows are
+// only worth replaying while this still matches the live inputs; a filter edit
+// with a load still in flight would otherwise pair new conditions with stale
+// rows on the next remount.
+function documentDataSignature(): string | undefined {
+  try {
+    return JSON.stringify([documentStoreProvider.value.kind, props.connectionId, props.database, props.collection, currentDocumentFilter() ?? null, currentDocumentSortJson(sortInput.value) ?? null, page.value, pageSize.value, settingsStore.editorSettings.infiniteScroll === true]);
+  } catch {
+    // Malformed filter/sort JSON: nothing stable to key rows against.
+    return undefined;
+  }
+}
+
+let loadedDocumentDataSignature: string | undefined;
+
+function captureDocumentBrowserData(): DocumentBrowserDataSnapshot | undefined {
+  // Cursor stores (DynamoDB/Elasticsearch) drop their cursor stacks on unmount
+  // and cannot resume a page without them, so they keep restarting at page 0.
+  if (!skipBasedDocumentStore) return undefined;
+  // Never completed a load, mid-flight, or errored — let the remount retry.
+  if (lastGridColumns.value.length === 0 || loading.value || error.value) return undefined;
+  const signature = documentDataSignature();
+  if (!signature || signature !== loadedDocumentDataSignature) return undefined;
+  return {
+    signature,
+    viewGeneration: documentViewGeneration.value,
+    // Unwrap the reactive proxies: this snapshot outlives the component.
+    documents: toRaw(documents.value),
+    copyDocuments: toRaw(copyDocuments.value),
+    copyDocumentsAvailable: mongoCopyDocumentsAvailable.value,
+    gridColumns: toRaw(lastGridColumns.value),
+    gridColumnTypes: toRaw(lastGridColumnTypes.value),
+    total: total.value,
+    totalIsExact: totalIsExact.value,
+    paginationTotal: paginationTotal.value,
+    selectedIdx: selectedIdx.value,
+  };
+}
+
+function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
   if (!props.stateKey) return;
   saveDocumentBrowserState(props.stateKey, {
     filterInput: filterInput.value,
@@ -307,10 +353,49 @@ function persistDocumentBrowserState() {
     appliedDocumentFilter: appliedDocumentFilter.value,
     documentFilterRules: documentFilterRules.value,
     page: page.value,
+    // Any condition change drops the payload; only the unmount capture stores
+    // rows, so a cached page can never outlive the conditions that produced it.
+    data: options.includeData ? captureDocumentBrowserData() : undefined,
   });
 }
 
-watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], persistDocumentBrowserState, { deep: true });
+watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], () => persistDocumentBrowserState(), { deep: true });
+
+// Seed the grid from the cached page so a tab switch costs no round trip
+// (#8679). The signature guard rejects a snapshot whose identity or conditions
+// no longer match — a changed page-size setting, say — and falls through to a
+// normal load.
+const restoredDocumentData = skipBasedDocumentStore && restoredDocumentBrowserState?.data && restoredDocumentBrowserState.data.signature === documentDataSignature() ? restoredDocumentBrowserState.data : undefined;
+if (restoredDocumentData) {
+  // Assign the columns before committing so a collection that loaded empty
+  // stays distinguishable from one that never loaded: commitLoadedDocuments
+  // reads a non-empty lastGridColumns as "a load has completed", which is what
+  // drives the refresh toolbar for an empty collection.
+  lastGridColumns.value = restoredDocumentData.gridColumns;
+  lastGridColumnTypes.value = restoredDocumentData.gridColumnTypes;
+  commitLoadedDocuments(restoredDocumentData.documents, restoredDocumentData.copyDocuments, restoredDocumentData.copyDocumentsAvailable, false, documentStoreProvider.value.kind);
+  total.value = restoredDocumentData.total;
+  totalIsExact.value = restoredDocumentData.totalIsExact;
+  paginationTotal.value = restoredDocumentData.paginationTotal;
+  loadedDocumentDataSignature = restoredDocumentData.signature;
+  // Same rows as before the switch, so the grid may replay its viewport.
+  documentViewGeneration.value = restoredDocumentData.viewGeneration;
+  const restoredSelectedIdx = restoredDocumentData.selectedIdx;
+  if (restoredSelectedIdx !== null && restoredSelectedIdx >= 0 && restoredSelectedIdx < documents.value.length) {
+    selectedIdx.value = restoredSelectedIdx;
+    editJson.value = stringifyDocumentStoreValue(documents.value[restoredSelectedIdx], documentStoreProvider.value.kind, 2);
+  }
+  // Keep the grid's "count total rows" action working without a preceding load.
+  loadedDocumentQueryTotalCountRequest = {
+    connectionId: props.connectionId,
+    database: props.database,
+    collection: props.collection,
+    filter: currentDocumentFilter(),
+    generation: documentRequestGeneration,
+    storeKind: documentStoreProvider.value.kind,
+  };
+}
+
 const elasticsearchMappingFields = ref<ColumnInfo[]>([]);
 function elasticsearchGridColumnTypesFor(columns: readonly string[]): string[] {
   const mappingTypes = elasticsearchFieldTypes.value;
@@ -414,7 +499,12 @@ function documentGridColumns(documentsToRender: JsonRecord[]): string[] {
 
 function documentGridRow(doc: JsonRecord, columns: string[], kind: DocumentStoreKind): QueryResult["rows"][number] {
   return columns.map((column) => {
-    const value = mongoDocumentDisplayValue(doc[column]);
+    const rawValue = doc[column];
+    // MongoDB distinguishes a missing field from an explicit BSON null. Keep a
+    // missing field visually blank; the NULL grid sentinel is reserved for an
+    // existing field whose BSON value is null.
+    if (kind === "mongodb" && rawValue === undefined) return "";
+    const value = kind === "mongodb" ? mongoDocumentGridValue(rawValue) : mongoDocumentDisplayValue(rawValue);
     if (value === undefined || value === null) return null;
     if (column === "_id") return kind === "mongodb" ? mongoDocumentIdForGrid(value) : documentStoreValueForGrid(value, kind);
     if (typeof value === "object") return documentStoreValueForGrid(value, kind);
@@ -1453,6 +1543,12 @@ async function load(options: { page?: number; append?: boolean; offset?: number;
     // Commit page + rows together so stale rows never briefly show last-page indexes.
     if (options.page !== undefined) page.value = options.page;
     commitLoadedDocuments(nextDocuments, nextCopyDocuments, hasTypePreservingCopyDocuments, options.append === true, storeKind);
+    // Mark which conditions these rows belong to, so the unmount capture can
+    // tell a still-valid page from one the user has since edited away.
+    loadedDocumentDataSignature = documentDataSignature();
+    // A replacement dataset must not adopt the previous viewport; an
+    // infinite-scroll append keeps rendering the same logical result.
+    if (options.append !== true || !documentViewGeneration.value) documentViewGeneration.value = uuid();
     loadedDocumentQueryTotalCountRequest = countRequest;
     if (storeKind === "dynamodb") {
       const nextCursors = dynamodbPageCursors.value.slice(0, requestPage + 1);
@@ -2133,7 +2229,9 @@ onMounted(async () => {
   window.addEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   unsubscribeElasticsearchIndexCleared = subscribeElasticsearchIndexCleared(handleElasticsearchIndexCleared);
   try {
-    await connectionStore.ensureConnected(props.connectionId);
+    // A restored tab issues no query, so a blocking health probe here would be
+    // the only round trip left on the switch.
+    await connectionStore.ensureConnected(props.connectionId, restoredDocumentData ? { verifyHealth: false } : {});
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
@@ -2141,11 +2239,14 @@ onMounted(async () => {
   // Mapping metadata enriches the filter builder, but it must not delay the
   // first page of documents when the mapping endpoint is slow.
   void loadElasticsearchMappingFields();
-  void load();
+  // A restored snapshot already holds the rows the last load produced, so a tab
+  // switch must not re-issue the collection query (#8679). Refresh and every
+  // mutation path still force a real load.
+  if (!restoredDocumentData) void load();
   void nextTick(resizeDocumentQueryInputs);
 });
 onBeforeUnmount(() => {
-  persistDocumentBrowserState();
+  persistDocumentBrowserState({ includeData: true });
   window.removeEventListener("pointerdown", handleDocumentBrowserPointerDown, true);
   unsubscribeElasticsearchIndexCleared?.();
   unsubscribeElasticsearchIndexCleared = undefined;
@@ -2415,9 +2516,12 @@ defineExpose({ focusSearch });
       :database="props.database"
       :table-meta="props.tableMeta"
       :column-layout-scope-key="documentColumnLayoutScopeKey"
+      :view-state-key="props.stateKey"
+      :view-generation="documentViewGeneration"
       context="results"
       page-size-preference="table-open"
       :database-type="props.databaseType"
+      :mongo-collection-grid="documentStoreProvider.kind === 'mongodb'"
       :mongo-update-target="mongoUpdateTarget"
       :editable="documentStoreEditable"
       :custom-save-handler="customSaveHandler"

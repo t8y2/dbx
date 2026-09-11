@@ -122,9 +122,9 @@ test("wires the active task guard into update installation and restart, but not 
   assert.match(appSource, /getActiveTaskCount: \(\) => trackedUpdateTaskCount\.value/);
   // Only restarting/exiting to finish the install has to wait on active work;
   // starting the background download itself never blocks.
-  assert.equal(updaterSource.match(/if \(blockUpdateForActiveTasks\(\)\) return;/g)?.length, 1);
+  assert.match(updaterSource, /shouldBlockAppUpdate\(activeTaskCount.value\)/);
   assert.match(dialogSource, /role="alert"[\s\S]*updates\.activeTasksBlockUpdate/);
-  assert.equal(dialogSource.match(/:disabled="activeTaskCount > 0"/g)?.length, 2);
+  assert.equal(dialogSource.match(/:disabled="activeTaskCount > 0 \|\| isIgnoringUpdate"/g)?.length, 2);
   assert.match(dialogSource, /ignore-version/);
   assert.match(updaterSource, /ignoreCurrentVersion/);
 });

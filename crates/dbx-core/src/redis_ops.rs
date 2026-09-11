@@ -1141,6 +1141,28 @@ pub async fn redis_publish_core(
     }
 }
 
+pub async fn redis_create_monitor_core(state: &AppState, connection_id: &str) -> Result<redis::aio::Monitor, String> {
+    let config = state.configs.read().await.get(connection_id).ok_or("Connection config not found")?.clone();
+    if config.db_type != crate::models::connection::DatabaseType::Redis {
+        return Err("Not a Redis connection".to_string());
+    }
+    if config.uses_redis_sentinel() || config.uses_redis_cluster() {
+        return Err(
+            "MONITOR requires a direct Redis node connection; connect to the node you want to monitor".to_string()
+        );
+    }
+    let (host, port) = state.connection_host_port(connection_id, &config).await?;
+    let mut runtime_config = config.clone();
+    state.apply_session_credential(&config, &mut runtime_config, connection_id);
+    redis_driver::connect_monitor(
+        &runtime_config,
+        &host,
+        port,
+        std::time::Duration::from_secs(config.effective_connect_timeout_secs()),
+    )
+    .await
+}
+
 pub async fn redis_create_pubsub_core(state: &AppState, connection_id: &str) -> Result<redis::aio::PubSub, String> {
     let configs = state.configs.read().await;
     let config = configs.get(connection_id).ok_or("Connection config not found")?.clone();

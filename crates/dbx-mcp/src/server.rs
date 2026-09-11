@@ -197,6 +197,32 @@ pub struct ExecuteRedisCommandRequest {
     pub command: String,
 }
 
+#[derive(Debug, Default, serde::Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PeekStartPosition {
+    #[default]
+    Latest,
+    Earliest,
+    Offset,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PeekMessagesRequest {
+    #[serde(flatten)]
+    pub selector: ConnectionSelector,
+    #[schemars(description = "Kafka topic name")]
+    pub topic: String,
+    #[schemars(description = "Number of messages, 1 to 100 (default 20)", extend("type" = "integer"))]
+    pub count: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "Read latest messages (default), earliest messages, or from an offset")]
+    pub start_position: PeekStartPosition,
+    #[schemars(description = "Non-negative partition; omit to read across partitions", extend("type" = "integer"))]
+    pub partition: Option<i32>,
+    #[schemars(description = "Non-negative offset, required only for start_position=offset", extend("type" = "integer"))]
+    pub offset: Option<i64>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendMessageRequest {
     #[serde(flatten)]
@@ -382,7 +408,10 @@ impl DbxMcpServer {
             tool_router.disable_route("dbx_execute_and_show");
         }
         #[cfg(not(feature = "mq-admin"))]
-        tool_router.disable_route("dbx_send_message");
+        {
+            tool_router.disable_route("dbx_send_message");
+            tool_router.disable_route("dbx_peek_messages");
+        }
         Self { backend, scope, sessions: McpSessionStore::new(), tool_router }
     }
 
@@ -1056,6 +1085,68 @@ impl DbxMcpServer {
         {
             Ok(result) => text(format_redis_result(&result)),
             Err(error) => backend_tool_error("REDIS_COMMAND_ERROR", error),
+        }
+    }
+
+    #[tool(
+        name = "dbx_peek_messages",
+        description = "Read up to 100 Kafka messages without committing consumer offsets. Defaults to the latest 20 messages. Returns JSON with base64 payloads, UTF-8 previews, metadata, incomplete (partial broker read), and outputTruncated (256 KiB message output budget). Only Kafka is supported."
+    )]
+    async fn peek_messages(&self, Parameters(request): Parameters<PeekMessagesRequest>) -> CallToolResult {
+        if let Err(error) = self.ensure_tool_allowed("dbx_peek_messages").await {
+            return error;
+        }
+        #[cfg(not(feature = "mq-admin"))]
+        {
+            let _ = request;
+            tool_error("MQ_UNSUPPORTED", "Message queue support is not compiled into this DBX MCP build.")
+        }
+        #[cfg(feature = "mq-admin")]
+        {
+            use dbx_core::mq::{
+                config::MqAdminConfig, MqSystemKind, PeekMessagesOptions, PeekStartPosition as Start, TopicRef,
+            };
+            let resolved = match self.resolve_connection(&request.selector).await {
+                Ok(resolved) => resolved,
+                Err(error) => return error,
+            };
+            match MqAdminConfig::from_connection(&resolved.connection) {
+                Ok(config) if config.system_kind == MqSystemKind::Kafka => {}
+                _ => {
+                    return tool_error("MQ_UNSUPPORTED", "Message reading through MCP supports Kafka connections only.")
+                }
+            }
+            let count = request.count.unwrap_or(20);
+            let start_position = match request.start_position {
+                PeekStartPosition::Latest => Start::Latest,
+                PeekStartPosition::Earliest => Start::Earliest,
+                PeekStartPosition::Offset => Start::Offset,
+            };
+            if request.topic.trim().is_empty() {
+                return tool_error("MESSAGE_TOPIC_REQUIRED", "Message topic must not be empty.");
+            }
+            if !(1..=100).contains(&count)
+                || request.partition.is_some_and(|value| value < 0)
+                || request.offset.is_some_and(|value| value < 0)
+                || (start_position == Start::Offset) != request.offset.is_some()
+            {
+                return tool_error("INVALID_PEEK_OPTIONS", "count must be 1..100; partition and offset must be non-negative; offset is required only for start_position=offset.");
+            }
+            let topic = TopicRef {
+                tenant: "_kafka".into(),
+                namespace: "default".into(),
+                topic: request.topic.trim().into(),
+                ..Default::default()
+            };
+            let options = PeekMessagesOptions {
+                start_position: Some(start_position),
+                partition: request.partition,
+                offset: request.offset,
+            };
+            match self.backend.peek_messages(&resolved.connection, topic, count, options).await {
+                Ok(result) => text(format_peek_messages_result(result, count as usize)),
+                Err(error) => backend_tool_error("MESSAGE_PEEK_ERROR", error),
+            }
         }
     }
 
@@ -2128,6 +2219,23 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 #[cfg(feature = "mq-admin")]
+fn format_peek_messages_result(result: dbx_core::mq::PeekMessagesResult, count: usize) -> String {
+    let mut messages = Vec::new();
+    let mut bytes = 0;
+    let mut truncated = result.messages.len() > count;
+    for message in result.messages.into_iter().take(count) {
+        let value = serde_json::to_value(message).expect("message is JSON serializable");
+        bytes += value.to_string().len();
+        if bytes > 256 * 1024 {
+            truncated = true;
+            break;
+        }
+        messages.push(value);
+    }
+    json!({ "messages": messages, "incomplete": result.incomplete, "outputTruncated": truncated }).to_string()
+}
+
+#[cfg(feature = "mq-admin")]
 fn format_send_message_result(
     system_kind: &dbx_core::mq::MqSystemKind,
     result: &dbx_core::mq::SendMessageResponse,
@@ -2391,6 +2499,28 @@ mod tests {
             }
         }
 
+        #[cfg(feature = "mq-admin")]
+        async fn peek_messages(
+            &self,
+            connection: &ConnectionConfig,
+            topic: dbx_core::mq::TopicRef,
+            count: u32,
+            options: dbx_core::mq::PeekMessagesOptions,
+        ) -> Result<dbx_core::mq::PeekMessagesResult, String> {
+            self.recorded_arguments.lock().unwrap().push((
+                "peek_messages".into(),
+                json!({"connectionId": connection.id, "topic": topic, "count": count, "options": options}),
+            ));
+            Ok(dbx_core::mq::PeekMessagesResult {
+                messages: vec![dbx_core::mq::PeekedMessage {
+                    payload_base64: "aGk=".into(),
+                    payload_text: Some("hi".into()),
+                    ..Default::default()
+                }],
+                incomplete: true,
+            })
+        }
+
         async fn close_client_session(
             &self,
             _connection_id: &str,
@@ -2480,6 +2610,155 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mq-admin")]
+    fn kafka_connection() -> ConnectionConfig {
+        let mut conn = connection("kafka", "Kafka", "mq", "");
+        conn.read_only = true;
+        conn.is_production = true;
+        conn.external_config = Some(
+            json!({"systemKind":"kafka", "adminUrl":"", "auth":{"kind":"none"}, "extra":{"bootstrapServers":"localhost:9092"}}),
+        );
+        conn
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn peek_messages_reads_with_read_only_policy_and_forwards_positions() {
+        let backend = Arc::new(FakeBackend { connections: vec![kafka_connection()], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for (extra, expected) in [
+            (json!({}), json!({"startPosition":"latest"})),
+            (json!({"start_position":"earliest", "partition":0}), json!({"startPosition":"earliest", "partition":0})),
+            (
+                json!({"start_position":"offset", "partition":2, "offset":17}),
+                json!({"startPosition":"offset", "partition":2, "offset":17}),
+            ),
+            (json!({"start_position":"offset", "offset":0}), json!({"startPosition":"offset", "offset":0})),
+        ] {
+            let mut request = json!({"connection_id":"kafka", "topic":" events "});
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let result = server.peek_messages(Parameters(serde_json::from_value(request).unwrap())).await;
+            assert_ne!(result.is_error, Some(true), "{}", result_text(&result));
+            let response: serde_json::Value = serde_json::from_str(result_text(&result)).unwrap();
+            assert_eq!(response["messages"][0]["payloadBase64"], "aGk=");
+            assert_eq!(response["incomplete"], true);
+            assert_eq!(response["outputTruncated"], false);
+            let calls = backend.recorded_arguments.lock().unwrap();
+            let args = &calls.last().unwrap().1;
+            assert_eq!(args["options"], expected);
+            assert_eq!(args["count"], 20);
+            assert_eq!(args["topic"]["topic"], "events");
+        }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn peek_messages_rejects_invalid_options_before_backend_call() {
+        let backend = Arc::new(FakeBackend { connections: vec![kafka_connection()], ..Default::default() });
+        let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+        for extra in [
+            json!({"count":0}),
+            json!({"count":101}),
+            json!({"partition":-1}),
+            json!({"start_position":"offset"}),
+            json!({"offset":1}),
+            json!({"start_position":"earliest", "offset":0}),
+            json!({"start_position":"offset", "offset":-1}),
+            json!({"topic":" "}),
+        ] {
+            let mut request = json!({"connection_id":"kafka", "topic":"events"});
+            request.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let result = server.peek_messages(Parameters(serde_json::from_value(request).unwrap())).await;
+            assert_eq!(result.is_error, Some(true), "{}", result_text(&result));
+        }
+        assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn peek_messages_enforces_tool_connection_scope_and_kafka_only() {
+        for (policy, conn, expected) in [
+            (
+                McpGlobalPolicy { allowed_tool_names: Some(vec![]), ..Default::default() },
+                kafka_connection(),
+                "TOOL_OUT_OF_SCOPE",
+            ),
+            (
+                McpGlobalPolicy { allowed_connection_ids: Some(vec![]), ..Default::default() },
+                kafka_connection(),
+                "CONNECTION_OUT_OF_SCOPE",
+            ),
+            (McpGlobalPolicy::default(), connection("kafka", "redis", "redis", "0"), "MQ_UNSUPPORTED"),
+        ] {
+            let backend = Arc::new(FakeBackend { policy, connections: vec![conn], ..Default::default() });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), McpScope::default(), false);
+            let result = server
+                .peek_messages(Parameters(
+                    serde_json::from_value(json!({"connection_id":"kafka", "topic":"events"})).unwrap(),
+                ))
+                .await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(result_text(&result).contains(expected), "{}", result_text(&result));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn peek_messages_respects_session_scope_and_rejects_other_queues() {
+        let mut rabbit = kafka_connection();
+        rabbit.external_config.as_mut().unwrap()["systemKind"] = json!("rabbitmq");
+        for (conn, scope, expected) in [
+            (
+                kafka_connection(),
+                McpScope { connection_ids: vec!["other".into()], ..Default::default() },
+                "CONNECTION_OUT_OF_SCOPE",
+            ),
+            (rabbit, McpScope::default(), "MQ_UNSUPPORTED"),
+        ] {
+            let backend = Arc::new(FakeBackend { connections: vec![conn], ..Default::default() });
+            let server = DbxMcpServer::with_runtime_options(backend.clone(), scope, false);
+            let result = server
+                .peek_messages(Parameters(
+                    serde_json::from_value(json!({"connection_id":"kafka", "topic":"events"})).unwrap(),
+                ))
+                .await;
+            assert_eq!(result.is_error, Some(true));
+            assert!(result_text(&result).contains(expected), "{}", result_text(&result));
+            assert!(backend.recorded_arguments.lock().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[test]
+    fn peek_messages_output_preserves_metadata_and_bounds_whole_messages() {
+        use dbx_core::mq::{PeekMessagesResult, PeekedMessage};
+        let message = PeekedMessage {
+            payload_base64: "/w==".into(),
+            message_id: Some("2:17".into()),
+            headers: [("kind".into(), "event".into())].into(),
+            ..Default::default()
+        };
+        let output = format_peek_messages_result(PeekMessagesResult::complete(vec![message.clone(), message]), 1);
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(result["messages"][0]["messageId"], "2:17");
+        assert_eq!(result["messages"][0]["headers"]["kind"], "event");
+        assert_eq!(result["outputTruncated"], true);
+        assert_eq!(result["incomplete"], false);
+        let output = format_peek_messages_result(
+            PeekMessagesResult::complete(vec![PeekedMessage {
+                payload_base64: "a".repeat(300_000),
+                ..Default::default()
+            }]),
+            20,
+        );
+        let result: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(result["messages"].as_array().unwrap().is_empty());
+        assert_eq!(result["outputTruncated"], true);
+        assert!(output.len() < 256 * 1024);
+    }
+
     #[test]
     fn connection_table_escapes_markdown_cells() {
         let output = format_connections(&[ConnectionSummary {
@@ -2502,9 +2781,13 @@ mod tests {
         let tools = server.tool_router.list_all();
         let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         #[cfg(not(feature = "mq-admin"))]
         assert_eq!(tools.len(), 17);
+        #[cfg(feature = "mq-admin")]
+        assert!(names.contains(&"dbx_peek_messages"));
+        #[cfg(not(feature = "mq-admin"))]
+        assert!(!names.contains(&"dbx_peek_messages"));
         assert!(names.contains(&"dbx_list_connections"));
         assert!(names.contains(&"dbx_list_databases"));
         assert!(names.contains(&"dbx_list_tables"));
@@ -2638,6 +2921,8 @@ mod tests {
         checks
             .push(("dbx_send_message", &["key", "payload_text", "partition", "exchange", "routing_key", "namespace"]));
 
+        #[cfg(feature = "mq-admin")]
+        checks.push(("dbx_peek_messages", &["count", "partition", "offset"]));
         for (tool_name, fields) in checks {
             let tool = tools.iter().find(|tool| tool.name == *tool_name).expect("tool should be registered");
             let properties = tool
@@ -2748,7 +3033,7 @@ mod tests {
         );
         let names = server.tool_router.list_all().into_iter().map(|tool| tool.name).collect::<Vec<_>>();
         #[cfg(feature = "mq-admin")]
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 14);
         #[cfg(not(feature = "mq-admin"))]
         assert_eq!(names.len(), 12);
         assert!(!names.iter().any(|name| name == "dbx_add_connection"));

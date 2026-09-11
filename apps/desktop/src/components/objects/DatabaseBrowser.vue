@@ -10,6 +10,7 @@ import { useToolbarOverflow } from "@/composables/useToolbarOverflow";
 import * as api from "@/lib/backend/api";
 import { filterDatabaseNamesForConnection } from "@/lib/database/visibleDatabases";
 import { formatObjectBrowserBytes, formatObjectBrowserTimestamp } from "@/lib/table/objectBrowserRows";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
@@ -28,21 +29,7 @@ type DatabaseBrowserColumnKey = "name" | "sizeBytes" | "createdAt" | "updatedAt"
 type DatabaseBrowserSortKey = DatabaseBrowserColumnKey;
 type SortDirection = "asc" | "desc";
 
-const props = defineProps<{
-  connection: ConnectionConfig;
-}>();
-
-const { t } = useI18n();
-const queryStore = useQueryStore();
-const settingsStore = useSettingsStore();
-const searchInput = ref<InstanceType<typeof Input>>();
-const search = ref("");
-const rows = ref<DatabaseRow[]>([]);
-const loading = ref(false);
-const error = ref("");
-const sortKey = ref<DatabaseBrowserSortKey>("name");
-const sortDirection = ref<SortDirection>("asc");
-const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>({
+const DEFAULT_COLUMN_WIDTHS: Record<DatabaseBrowserColumnKey, number> = {
   name: 260,
   sizeBytes: 100,
   createdAt: 150,
@@ -50,8 +37,42 @@ const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>({
   defaultCharset: 130,
   defaultCollation: 170,
   comment: 260,
-});
+};
+const DATABASE_BROWSER_COLUMN_KEYS = Object.keys(DEFAULT_COLUMN_WIDTHS) as DatabaseBrowserColumnKey[];
+
+interface DatabaseBrowserTabUiState {
+  search?: string;
+  sortKey?: DatabaseBrowserSortKey;
+  sortDirection?: SortDirection;
+  columnWidths?: Partial<Record<DatabaseBrowserColumnKey, number>>;
+}
+
+const props = defineProps<{
+  connection: ConnectionConfig;
+}>();
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<DatabaseBrowserTabUiState>({}, "DatabaseBrowser");
+const { t } = useI18n();
+const queryStore = useQueryStore();
+const settingsStore = useSettingsStore();
+const searchInput = ref<InstanceType<typeof Input>>();
+const search = ref(restoredUiState.search ?? "");
+const rows = ref<DatabaseRow[]>([]);
+const loading = ref(false);
+const error = ref("");
+const sortKey = ref<DatabaseBrowserSortKey>(DATABASE_BROWSER_COLUMN_KEYS.includes(restoredUiState.sortKey as DatabaseBrowserColumnKey) ? restoredUiState.sortKey! : "name");
+const sortDirection = ref<SortDirection>(restoredUiState.sortDirection === "desc" ? "desc" : "asc");
+const columnWidths = ref<Record<DatabaseBrowserColumnKey, number>>(
+  Object.fromEntries(
+    DATABASE_BROWSER_COLUMN_KEYS.map((key) => {
+      const restored = restoredUiState.columnWidths?.[key];
+      return [key, typeof restored === "number" && Number.isFinite(restored) ? Math.max(key === "name" || key === "comment" ? 120 : 72, restored) : DEFAULT_COLUMN_WIDTHS[key]];
+    }),
+  ) as Record<DatabaseBrowserColumnKey, number>,
+);
 let stopColumnResize: (() => void) | null = null;
+
+trackUiState(() => ({ search: search.value, sortKey: sortKey.value, sortDirection: sortDirection.value, columnWidths: columnWidths.value }));
 
 const hasSize = computed(() => rows.value.some((row) => row.sizeBytes != null));
 const hasCreatedAt = computed(() => rows.value.some((row) => !!row.createdAt?.trim()));
@@ -233,10 +254,12 @@ watch(sortKeyOptions, (options) => {
   }
 });
 
+let initialConnectionWatch = true;
 watch(
   () => props.connection.id,
   () => {
-    search.value = "";
+    if (initialConnectionWatch) initialConnectionWatch = false;
+    else search.value = "";
     void refresh();
   },
   { immediate: true },

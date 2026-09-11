@@ -1,11 +1,11 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/az";
-import { consulUiMessages } from "./consulUi";
+import { consulAzMessages } from "./consulAz";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementAz } from "./meilisearchManagement";
 
 const consul = {
-  ...consulUiMessages,
+  ...consulAzMessages,
   prefixPlaceholder: "Açar prefiksi, məsələn, app/ və ya services/",
   newKey: "Yeni açar",
   loadingKeys: "Açarlar yüklənir...",
@@ -285,6 +285,19 @@ export default withEnglishFallback({
     changedAgain: "Fayl yadda saxlanılarkən yenidən dəyişdirildi. Yenidən cəhd edin.",
   },
   updates: {
+    preparationWindowOperation: "Yeniləmədən əvvəl cari pəncərə əməliyyatının bitməsini gözləyin.",
+    preparationBusy: "Yeniləmə artıq hazırlanır.",
+    preparationCancelled: "Yeniləmə hazırlığı ləğv edildi.",
+    preparationTimeout: "Pəncərə 5 saniyə ərzində saxlanmadı. Yenidən sınayın.",
+    preparationWindowsChanged: "Açıq pəncərələr dəyişdi. Yenidən sınayın.",
+    preparationTasks: "Aktiv tapşırıqları və tranzaksiyaları bitirin.",
+    preparationDrafts: "Dəyişiklikləri saxlayın və ya ləğv edin.",
+    preparationConfig: "Konfiqurasiya redaktəsini bitirin.",
+    preparationNotReady: "Yeniləmə hazır deyil. Yenidən sınayın.",
+    downloadedReady: "v{version} versiyası endirilib. Yeniləmək üçün yenidən başladın.",
+    restartAndUpdate: "Yenidən başladın və yeniləyin",
+    preparing: "Yeniləmə hazırlanır…",
+    retryDownload: "Endirməni yenidən sınayın",
     title: "Yeniləmələr",
     check: "Yeniləmələri yoxla",
     updateReadyTooltip: "Yeniləmə hazırdır — quraşdırmaq üçün klikləyin",
@@ -683,7 +696,7 @@ export default withEnglishFallback({
     consulAgentTargetHint: "Agentin yazma əməliyyatları üçün tələb olunur. DNS/yük tarazlaşdırıcılı və nəqliyyat qatı son nöqtələri yalnız oxuma üçün qalır.",
     consulMeshFeatures: "Xidmət şəbəkəsi",
     consulMeshVisible: "Təkmil xidmət şəbəkəsi iş sahəsini göstər",
-    consulMeshVisibleHint: "Yalnız Connect, niyyətlər və ya həmyaşıd əlaqələrini idarə etmək üçün aktiv edin. Deaktiv olduqda iş sahəsi gizli qalır.",
+    consulMeshVisibleHint: "Yalnız Connect, giriş qaydaları və ya həmkar bağlantılarını idarə etmək üçün aktiv edin. Deaktiv olduqda iş sahəsi gizli qalır.",
     consulOperatorWrites: "Operator yazma əməliyyatları",
     consulOperatorVisible: "Təcrübi Operator iş sahəsini göstər",
     consulOperatorSnapshotRestore: "Ani görüntüdən bərpanı aktiv et",
@@ -2364,6 +2377,7 @@ export default withEnglishFallback({
     import: "İdxal et",
     remove: "Çıxar",
     retry: "Yenidən cəhd et",
+    refresh: "Yenilə",
     more: "Daha çox",
     decrease: "Azalt",
     increase: "Artır",
@@ -3620,6 +3634,14 @@ export default withEnglishFallback({
     noInstalled: "Heç bir genişləndirmə quraşdırılmayıb.",
   },
   processList: {
+    batchCancel: "Seçilmiş sorğuları ləğv et ({count})",
+    batchNeedsSession: "Cari sessiya məlum deyil. Yeniləyin və yenidən cəhd edin.",
+    selectAll: "Cari filtrdə yüklənmiş uyğun sessiyaları seç",
+    selectSession: "{id} sessiyasını seç",
+    batchTitle: "Seçilmiş sorğuları ləğv et",
+    batchConfirm: "Bu {count} sessiyada işləyən sorğular ləğv edilsin? Sessiyalar bağlı qalacaq.",
+    batchRunning: "Sorğular ləğv edilir…",
+    batchSummary: "Ləğv sorğuları: {succeeded} uğurlu, {failed} uğursuz.",
     title: "Proses siyahısı",
     sessionCount: "{count} sessiya",
     filter: "Sessiyaları süzgəcdən keçir",
@@ -6735,7 +6757,7 @@ export default withEnglishFallback({
     closeActionQuit: "DBX-dən çıx",
     closeActionMinimize: "Sistem treyinə kiçilt",
     updateNotificationsEnabled: "Yeniləmə xatırlatmalarını aktiv et",
-    updateNotificationsEnabledDescription: "Deaktiv olduqda DBX tətbiq və ya drayver yeniləmələrini avtomatik yoxlamayacaq və yeniləmə nişanlarını göstərməyəcək. Əl ilə yoxlama yenə mümkündür.",
+    updateNotificationsEnabledDescription: "Tətbiq və sürücü yeniləmələrini avtomatik yoxlayır, tətbiq yeniləmələrini səssiz endirir. Söndürüldükdə avtomatik yoxlamalar, endirmələr və nişanlar dayanır. Əl ilə yoxlama və endirilmiş yeniləmələrin quraşdırılması mümkündür.",
     updateDownloadSource: "Yeniləmələrin endirmə mənbəyi",
     updateDownloadSourceDescription: "Tətbiq yeniləmələrinin, verilənlər bazası agentlərinin, drayverlərin və idarə olunan JRE-lərin haradan endiriləcəyini seçin. Rəsmi mənbə tövsiyə olunur; CNB materik Çin şəbəkələrində daha sürətli ola bilər.",
     updateDownloadSourceOfficial: "Rəsmi mənbə (tövsiyə olunur)",
@@ -6774,6 +6796,8 @@ export default withEnglishFallback({
     tableOpenPageSizeDescription: "Yeni cədvəl açıldıqda hər səhifədə yüklənən sətirlər. Cədvəldə səhifə başına sətir sayını dəyişmək gələcək cədvəl vərəqləri üçün bu standartı yeniləyir.",
     queryPageSize: "Sorğuda səhifə başına standart sətir sayı",
     queryPageSizeDescription: "Sorğu nəticəsinin hər səhifəsində yüklənən sətirlər. Dəstəklənən maksimum səhifə ölçüsü {max} təşkil edir.",
+    defaultAutoKeepResults: "Sorğu nəticələrini standart olaraq avtomatik saxla",
+    defaultAutoKeepResultsDescription: "Tətbiq edildikdə açıq sorğu vərəqləri yenilənir və yeni vərəqlər üçün standart təyin olunur. Hər vərəqdə ayrıca dəyişə bilərsiniz.",
     multiStatementDefaultView: "Bir neçə əmr üçün standart görünüş",
     multiStatementDefaultViewDescription: "Bir neçə SQL əmrindən ibarət toplunun nəticə cədvəlində, yoxsa icra xülasəsində açılacağını seçin.",
     queryResultMaxRows: "Sorğu nəticəsində maksimum sətir sayı",
@@ -7553,6 +7577,7 @@ export default withEnglishFallback({
     mcpToolOpenSession: "Sorğu sessiyasını aç",
     mcpToolCloseSession: "Sorğu sessiyasını bağla",
     mcpToolExecuteRedisCommand: "Redis əmrini icra et",
+    mcpToolPeekMessages: "Kafka mesajlarını oxu",
     mcpToolSendMessage: "Mesaj növbəsinə mesaj göndər",
     mcpToolAddConnection: "Əlaqə əlavə et",
     mcpToolDuplicateConnection: "Əlaqənin surətini yarat",

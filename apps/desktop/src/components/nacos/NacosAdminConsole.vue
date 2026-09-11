@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useUpdateBlocker } from "@/lib/app/updatePreparation";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, useId, watch } from "vue";
 import { Compartment, StateEffect, StateField } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
@@ -86,6 +87,7 @@ import type {
 } from "@/types/nacos";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -98,6 +100,28 @@ const props = defineProps<{
   readOnly?: boolean;
   zenMode?: boolean;
 }>();
+
+interface NacosTabUiState {
+  activeTab?: AdminTab;
+  configGroup?: string;
+  configDataId?: string;
+  configAppName?: string;
+  configPageNo?: number;
+  configPageSize?: number;
+  configAdvancedOpen?: boolean;
+  historyOpen?: boolean;
+  historyPageNo?: number;
+  historyPageSize?: number;
+  serviceGroup?: string;
+  serviceName?: string;
+  serviceCluster?: string;
+  servicePageNo?: number;
+  servicePageSize?: number;
+  serviceDetailExpanded?: boolean;
+  nacosSplitSize?: number;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<NacosTabUiState>({}, "NacosAdminConsole");
 
 const emit = defineEmits<{
   toggleZenMode: [];
@@ -112,21 +136,21 @@ const settingsStore = useSettingsStore();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const { isDark, themePalette } = useTheme();
-const activeTab = ref<AdminTab>("configs");
+const activeTab = ref<AdminTab>(restoredUiState.activeTab ?? "configs");
 const connectionInfo = ref<NacosConnectionInfo | null>(null);
 const connectionError = ref("");
 const infoLoading = ref(false);
 
 const configLoading = ref(false);
 const configError = ref("");
-const configGroup = ref("");
-const configDataId = ref("");
-const configAppName = ref("");
-const configPageNo = ref(1);
+const configGroup = ref(restoredUiState.configGroup ?? "");
+const configDataId = ref(restoredUiState.configDataId ?? "");
+const configAppName = ref(restoredUiState.configAppName ?? "");
+const configPageNo = ref(restoredUiState.configPageNo ?? 1);
 const NACOS_CONFIG_PAGE_SIZE_OPTIONS = [20, 50, 100, 200, 500] as const;
 const NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY = "dbx-nacos-config-page-size";
 const savedNacosConfigPageSize = Number(safeLocalStorageGet(NACOS_CONFIG_PAGE_SIZE_STORAGE_KEY));
-const configPageSize = ref<number>(NACOS_CONFIG_PAGE_SIZE_OPTIONS.find((size) => size === savedNacosConfigPageSize) ?? 20);
+const configPageSize = ref<number>(restoredUiState.configPageSize ?? NACOS_CONFIG_PAGE_SIZE_OPTIONS.find((size) => size === savedNacosConfigPageSize) ?? 20);
 const configs = ref<NacosConfigItem[]>([]);
 const configTotal = ref(0);
 const selectedConfig = ref<NacosConfigItem | null>(null);
@@ -138,7 +162,7 @@ const originalConfigType = ref("text");
 const originalConfigMetadata = ref({ appName: "", desc: "", tags: "" });
 const savingConfig = ref(false);
 const deletingConfig = ref(false);
-const configAdvancedOpen = ref(false);
+const configAdvancedOpen = ref(restoredUiState.configAdvancedOpen ?? false);
 const configSaveNotice = ref("");
 const configValidationOpen = ref(false);
 const configValidationDiagnostics = ref<NacosConfigDiagnostic[]>([]);
@@ -150,12 +174,12 @@ interface NacosBatchDeleteSnapshot {
   keys: NacosConfigKey[];
 }
 const pendingBatchDelete = ref<NacosBatchDeleteSnapshot | null>(null);
-const historyOpen = ref(false);
+const historyOpen = ref(restoredUiState.historyOpen ?? false);
 const historyLoading = ref(false);
 const historyError = ref("");
 const historyItems = ref<NacosConfigHistoryItem[]>([]);
-const historyPageNo = ref(1);
-const historyPageSize = ref(20);
+const historyPageNo = ref(restoredUiState.historyPageNo ?? 1);
+const historyPageSize = ref(restoredUiState.historyPageSize ?? 20);
 const historyTotal = ref(0);
 const historyViewingItem = ref<NacosConfigHistoryItem | null>(null);
 const historyViewingContent = ref("");
@@ -229,18 +253,18 @@ let latestConfigSaveRequestId = 0;
 
 const servicesLoading = ref(false);
 const servicesError = ref("");
-const serviceGroup = ref("");
-const serviceName = ref("");
-const serviceCluster = ref("");
-const servicePageNo = ref(1);
-const servicePageSize = ref(20);
+const serviceGroup = ref(restoredUiState.serviceGroup ?? "");
+const serviceName = ref(restoredUiState.serviceName ?? "");
+const serviceCluster = ref(restoredUiState.serviceCluster ?? "");
+const servicePageNo = ref(restoredUiState.servicePageNo ?? 1);
+const servicePageSize = ref(restoredUiState.servicePageSize ?? 20);
 const services = ref<NacosServiceInfo[]>([]);
 const serviceTotal = ref(0);
 const selectedService = ref<NacosServiceInfo | null>(null);
 const selectedServiceDetail = ref<NacosServiceDetail | null>(null);
 const serviceDetailLoading = ref(false);
 const serviceDetailError = ref("");
-const serviceDetailExpanded = ref(false);
+const serviceDetailExpanded = ref(restoredUiState.serviceDetailExpanded ?? false);
 const instances = ref<NacosInstanceInfo[]>([]);
 const instancesLoading = ref(false);
 const instancesError = ref("");
@@ -274,7 +298,27 @@ let serviceMutationSequence = 0;
 
 const NACOS_SPLIT_SIZE_KEY = "dbx-nacos-admin-split-size";
 const savedNacosSplitSize = Number(safeLocalStorageGet(NACOS_SPLIT_SIZE_KEY));
-const nacosSplitSize = ref(savedNacosSplitSize >= 20 && savedNacosSplitSize <= 80 ? savedNacosSplitSize : 42);
+const nacosSplitSize = ref(restoredUiState.nacosSplitSize ?? (savedNacosSplitSize >= 20 && savedNacosSplitSize <= 80 ? savedNacosSplitSize : 42));
+
+trackUiState(() => ({
+  activeTab: activeTab.value,
+  configGroup: configGroup.value,
+  configDataId: configDataId.value,
+  configAppName: configAppName.value,
+  configPageNo: configPageNo.value,
+  configPageSize: configPageSize.value,
+  configAdvancedOpen: configAdvancedOpen.value,
+  historyOpen: historyOpen.value,
+  historyPageNo: historyPageNo.value,
+  historyPageSize: historyPageSize.value,
+  serviceGroup: serviceGroup.value,
+  serviceName: serviceName.value,
+  serviceCluster: serviceCluster.value,
+  servicePageNo: servicePageNo.value,
+  servicePageSize: servicePageSize.value,
+  serviceDetailExpanded: serviceDetailExpanded.value,
+  nacosSplitSize: nacosSplitSize.value,
+}));
 const CONNECTION_NOT_FOUND_RETRY_DELAYS_MS = [150, 350, 700];
 const configListViewport = ref<HTMLElement | null>(null);
 const configListViewportWidth = ref(0);
@@ -2604,7 +2648,7 @@ onMounted(async () => {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
   await loadInfo();
-  await Promise.all([loadConfigsWithRetry(1), loadServicesWithRetry(1)]);
+  await Promise.all([loadConfigsWithRetry(configPageNo.value), loadServicesWithRetry(servicePageNo.value)]);
   if (props.targetDataId) await openTargetConfig(props.targetDataId, props.targetGroup || "DEFAULT_GROUP", props.targetKeyword);
   else await restoreSelectedConfig();
 });
@@ -2659,6 +2703,29 @@ function openNacosConsole() {
   }
   window.open(url, "_blank", "noopener,noreferrer");
 }
+useUpdateBlocker(() =>
+  isConfigDirty.value ||
+  isCreatingConfig.value ||
+  savingConfig.value ||
+  deletingConfig.value ||
+  pendingConfigSave.value ||
+  pendingDeleteConfig.value ||
+  pendingBatchDelete.value ||
+  pendingHistoryRollback.value ||
+  rollingBackHistory.value ||
+  instanceEditorOpen.value ||
+  serviceEditorOpen.value ||
+  registerInstanceOpen.value ||
+  pendingInstanceUpdate.value ||
+  pendingInstanceDeregister.value ||
+  pendingServiceDelete.value ||
+  deletingService.value ||
+  registeringInstance.value ||
+  Object.keys(updatingInstanceKeys.value).length > 0 ||
+  Object.keys(instanceWeightDrafts.value).length > 0
+    ? t("updates.preparationDrafts")
+    : undefined,
+);
 </script>
 
 <template>

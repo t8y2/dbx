@@ -84,6 +84,8 @@ export interface UseDataGridExportOptions {
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
   displayValue?: (value: CellValue, columnIndex: number) => string;
+  cellClipboardText?: (value: CellValue, columnIndex: number) => string | undefined;
+  externalCellValue?: (value: CellValue, columnIndex: number) => CellValue;
   identifierQuote?: ComputedRef<string | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
@@ -355,7 +357,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const document = documents[rowIndex];
       if (!document || typeof document !== "object" || Array.isArray(document)) return row;
       const source = document as Record<string, unknown>;
-      return columnsToExport.map((column, columnIndex) => (Object.prototype.hasOwnProperty.call(source, column) ? (source[column] as CellValue) : (row[columnIndex] ?? null)));
+      return columnsToExport.map((column) => (Object.prototype.hasOwnProperty.call(source, column) ? (source[column] as CellValue) : null));
     });
   }
 
@@ -364,6 +366,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const document = rowToJsonObject(item);
       return columns.value.map((column) => (document[column] as CellValue) ?? null);
     });
+  }
+
+  function externalizeRows(rows: CellValue[][]): CellValue[][] {
+    if (!options.externalCellValue) return rows;
+    return rows.map((row) => row.map((value, columnIndex) => options.externalCellValue!(value, columnIndex)));
   }
 
   async function resultToExport(
@@ -386,7 +393,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       if (result) {
         const columnComments = buildXlsxHeaderOverrides(result.columns, commentsForExportColumns(result.columns), headerMode);
         return {
-          ...applyGlobalDateTimeExportFormat({ columns: result.columns, columnTypes: result.column_types ?? [], rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(result.columns, result.rows, result.mongo_copy_documents) : result.rows }, formatDateTime && !preserveMongoExtendedJson),
+          ...applyGlobalDateTimeExportFormat(
+            // fullExportResult returns source rows, not the collection grid's
+            // marker-encoded rows. Applying externalCellValue here would
+            // mistake a real BSON string in the reserved namespace for a grid
+            // marker and corrupt the exported value.
+            { columns: result.columns, columnTypes: result.column_types ?? [], rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(result.columns, result.rows, result.mongo_copy_documents) : result.rows },
+            formatDateTime && !preserveMongoExtendedJson,
+          ),
           columnComments,
           spatialColumns: result.spatial_columns,
           spatialValues: result.spatial_values,
@@ -403,7 +417,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       const columnComments = buildXlsxHeaderOverrides(normalized.columns, normalized.columnComments, headerMode);
       return {
         ...applyGlobalDateTimeExportFormat(
-          { columns: normalized.columns, columnTypes: normalized.columnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : normalized.rows },
+          { columns: normalized.columns, columnTypes: normalized.columnTypes, rows: preserveMongoExtendedJson ? mongoDocumentRowsForJson(normalized.columns, normalized.rows, normalized.mongoCopyDocuments) : externalizeRows(normalized.rows) },
           formatDateTime && !preserveMongoExtendedJson,
         ),
         columnComments,
@@ -421,7 +435,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         {
           columns: columns.value,
           columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-          rows: preserveMongoExtendedJson && databaseType.value === "mongodb" ? mongoLocalRowsForJson(exportItems) : exportItems.map((item) => item.data),
+          rows: preserveMongoExtendedJson && databaseType.value === "mongodb" ? mongoLocalRowsForJson(exportItems) : externalizeRows(exportItems.map((item) => item.data)),
         },
         formatDateTime && !preserveMongoExtendedJson,
       ),
@@ -537,6 +551,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return binaryCellClipboardText(value, columnTypes.value?.[columnIndex], databaseType.value) ?? value;
   }
 
+  function externalCellValue(value: CellValue, columnIndex: number): CellValue {
+    const externalValue = options.externalCellValue?.(value, columnIndex);
+    return externalValue === undefined ? value : externalValue;
+  }
+
   function rowToJsonObject(item: RowItem): Record<string, unknown> {
     if (options.databaseType.value === "mongodb" && item.sourceIndex !== undefined) {
       const original = options.mongoDocuments?.value?.[item.sourceIndex];
@@ -545,7 +564,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
     const obj: Record<string, unknown> = {};
     columns.value.forEach((col, i) => {
-      const value = binaryClipboardCellValue(item.data[i], i);
+      const value = externalCellValue(binaryClipboardCellValue(item.data[i], i), i);
       if (typeof value === "string" && columnTypes.value?.[i]?.trim().toLowerCase() === "json") {
         try {
           obj[col] = JSON.parse(value);
@@ -577,7 +596,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const [resolvedItem] = await resolveVisibleRowValues([item], [sourceIndex]);
     const val = resolvedItem?.data[contextCell.value.col] ?? null;
     // 外部剪贴板呈现文本型 MySQL VARBINARY（NULL 也按空串输出）；内部网格副本仍保留原 hex，保证回粘无损。
-    const rawValue = clipboardCellValue(binaryClipboardCellValue(val, contextCell.value.col));
+    const rawValue = options.cellClipboardText?.(val, sourceIndex) ?? clipboardCellValue(binaryClipboardCellValue(val, contextCell.value.col));
     const copyValue = options.databaseType.value === "oracle" && isTemporalColumnType(options.columnTypes.value?.[contextCell.value.col]) ? (options.displayValue?.(val, sourceIndex) ?? rawValue) : rawValue;
     await copyText(copyValue, { rows: [[val]] });
   }
@@ -716,6 +735,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     buildMongoInsert: buildMongoExtractorInsert,
     buildMongoUpdate: buildMongoExtractorUpdate,
     canBuildMongoUpdate: canBuildMongoExtractorUpdate,
+    externalCellValue: (value, columnIndex) => {
+      const externalValue = options.externalCellValue?.(value as CellValue, columnIndex);
+      return externalValue === undefined ? value : externalValue;
+    },
     contextCell,
     contextSelectionIsSynthetic,
   });
@@ -723,7 +746,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   async function copyAll() {
     const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
     // formatTsv 引用处理解码后文本中可能出现的制表符/换行；内部副本仍用原始 rows（hex）保证回粘无损。
-    const decodedRows = rows.map((row) => row.map((cell, index) => binaryClipboardCellValue(cell, index)));
+    const decodedRows = rows.map((row) => row.map((cell, index) => externalCellValue(binaryClipboardCellValue(cell, index), index)));
     await copyText(formatTsv(columns.value, decodedRows), { rows, header: columns.value });
   }
 

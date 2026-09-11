@@ -17,25 +17,16 @@ function functionBody(name: string): string {
 }
 
 describe("ObjectBrowser scaffold refresh race", () => {
-  // Scope A hits stale cache and starts a background revalidate (refreshingObjects = true);
-  // before it settles, the user switches to scope B which hits fresh cache and early-returns.
-  // A's finally() can no longer run (the load guard's epoch moved on), so the flag must be
-  // cleared by the newest request (B) at entry — otherwise the toolbar icon spins forever.
-  it("resets the transient refresh flags at entry, before the cache decision", () => {
+  it("restores cached rows without revalidating on a tab remount", () => {
     const body = functionBody("loadObjects");
 
-    const loadingReset = body.indexOf("loadingObjects.value = false;");
-    const refreshingReset = body.indexOf("refreshingObjects.value = false;");
     const cachedBranch = body.indexOf("const cached =");
+    const cachedReturn = body.indexOf("finishOnce();\n    return;", cachedBranch);
 
-    expect(loadingReset).toBeGreaterThanOrEqual(0);
-    expect(refreshingReset).toBeGreaterThanOrEqual(0);
-    // Both resets must precede the cached fresh/stale decision so the newest request
-    // owns the spinner state even when a superseded request's finally() cannot run.
-    expect(Math.min(loadingReset, refreshingReset)).toBeLessThan(cachedBranch);
-    // And neither flag may be turned back on before the branch decides the indicator.
-    expect(body.indexOf("refreshingObjects.value = true;")).toBeGreaterThan(cachedBranch);
-    expect(body.indexOf("loadingObjects.value = true;")).toBeGreaterThan(cachedBranch);
+    expect(cachedBranch).toBeGreaterThanOrEqual(0);
+    expect(cachedReturn).toBeGreaterThan(cachedBranch);
+    expect(body.slice(cachedBranch, cachedReturn)).not.toContain("cached.stale");
+    expect(body.slice(cachedBranch, cachedReturn)).not.toContain("refreshingObjects.value = true;");
   });
 
   it("exposes a non-blocking refresh flag distinct from the blocking full-area load", () => {

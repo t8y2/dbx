@@ -119,6 +119,10 @@ export interface UseDataGridEditorOptions {
   dataGridQuickEntryEnabled?: ComputedRef<boolean>;
   confirmDangerousRowDeletion?: ComputedRef<boolean>;
   initialEditColumn?: ComputedRef<number>;
+  /** Converts a grid value to the text presented by the cell editor. */
+  cellEditorText?: (value: CellValue, columnIndex: number) => string;
+  /** Normalizes user-entered editor text before cell type coercion. */
+  normalizeEditorInput?: (value: string, columnIndex: number) => string;
   getRowItem: (rowId: number) => RowItem | undefined;
   pageSize: Ref<number>;
   currentPage: Ref<number>;
@@ -241,6 +245,8 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     dataGridQuickEntryEnabled = computed(() => false),
     confirmDangerousRowDeletion = computed(() => true),
     initialEditColumn,
+    cellEditorText,
+    normalizeEditorInput,
     getRowItem,
     pageSize,
     currentPage,
@@ -640,7 +646,7 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
 
   function coerceCellValue(value: string, oldValue: CellValue | undefined, columnIndex: number, options: ApplyCellValueOptions = {}): CellValue {
     return coerceDataGridCellValue({
-      value,
+      value: normalizeEditorInput?.(value, columnIndex) ?? value,
       oldValue,
       databaseType: resolvedDatabaseType.value,
       columnInfo: tableColumnForGridColumn(columnIndex),
@@ -650,11 +656,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
   }
 
   function coerceCommittedCellValue(value: string, currentValue: CellValue | undefined, oldValue: CellValue | undefined, columnIndex: number): CellValue {
-    const editorText = dataGridCellEditorText({
-      value: currentValue,
-      databaseType: resolvedDatabaseType.value,
-      columnInfo: tableColumnForGridColumn(columnIndex),
-    });
+    const editorText =
+      cellEditorText?.(currentValue ?? null, columnIndex) ??
+      dataGridCellEditorText({
+        value: currentValue,
+        databaseType: resolvedDatabaseType.value,
+        columnInfo: tableColumnForGridColumn(columnIndex),
+      });
     // Keep the original CellValue when the editor text was not changed. This
     // avoids turning a displayed value such as number 1 into string "1" when
     // result and table metadata use different representations.
@@ -819,11 +827,13 @@ export function useDataGridEditor(options: UseDataGridEditorOptions) {
     suppressNextBlurCommit = false;
     editingCell.value = { rowId, col: colIdx };
     const val = item?.data[colIdx] ?? null;
-    editValue.value = dataGridCellEditorText({
-      value: val,
-      databaseType: resolvedDatabaseType.value,
-      columnInfo: tableColumnForGridColumn(colIdx),
-    });
+    editValue.value =
+      cellEditorText?.(val, colIdx) ??
+      dataGridCellEditorText({
+        value: val,
+        databaseType: resolvedDatabaseType.value,
+        columnInfo: tableColumnForGridColumn(colIdx),
+      });
     focusEditInput(selectOnFocus);
   }
 

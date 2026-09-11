@@ -12,6 +12,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { isKeyInKvExportScope, kvExportFilenameStem, kvValueByteIdentity, type KvExportScopeKind, type KvExportScopeRequest } from "@/lib/kv/kvExportScope";
@@ -95,6 +96,23 @@ const TRANSFER_PREVIEW_PAGE_SIZE = 100;
 const TARGET_LOOKUP_CONCURRENCY = 8;
 
 const props = defineProps<{ connectionId: string }>();
+interface EtcdTabUiState {
+  mode?: WorkbenchMode;
+  activeOperation?: "maintenance" | "watch" | "lease";
+  searchQuery?: string;
+  searchPrefix?: string;
+  searchScope?: SearchScope;
+  transferOpen?: boolean;
+  transferMode?: "import" | "sync";
+  targetConnectionId?: string;
+  transferKeyFilter?: string;
+  syncPrefix?: string;
+  syncScope?: EtcdSyncScope;
+  transferConflictPolicy?: EtcdConflictPolicy;
+  transferCurrentPage?: number;
+  syncConfigurationExpanded?: boolean;
+}
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<EtcdTabUiState>({}, "EtcdKeyBrowser");
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
@@ -106,11 +124,11 @@ const ttlCapabilityRefreshIntervalMs = 5000;
 let ttlCapabilityRequest = 0;
 let ttlCapabilityInFlightConnection: string | null = null;
 let ttlCapabilityRefreshTimer: ReturnType<typeof setInterval> | null = null;
-const mode = ref<WorkbenchMode>("keys");
+const mode = ref<WorkbenchMode>(restoredUiState.mode ?? "keys");
 const operationsStatus = ref<api.KvStatusResponse | null>(null);
 const operationsLoading = ref(false);
 const watchPreset = ref<EtcdWatchPreset | null>(null);
-const activeOperation = ref<"maintenance" | "watch" | "lease">("maintenance");
+const activeOperation = ref<"maintenance" | "watch" | "lease">(restoredUiState.activeOperation ?? "maintenance");
 const isOperationsMode = computed(() => mode.value === "maintenance" || mode.value === "watch" || mode.value === "lease");
 const keyBytesByDisplay = new Map<string, Map<string, api.KvValue>>();
 const keySuggestionVersion = ref(0);
@@ -123,9 +141,9 @@ const selectedTreeKeys = ref<EtcdMultiSelection[]>([]);
 const batchDeleteOpen = ref(false);
 const batchDeleting = ref(false);
 
-const searchQuery = ref("");
-const searchPrefix = ref("");
-const searchScope = ref<SearchScope>("all");
+const searchQuery = ref(restoredUiState.searchQuery ?? "");
+const searchPrefix = ref(restoredUiState.searchPrefix ?? "");
+const searchScope = ref<SearchScope>(restoredUiState.searchScope ?? "all");
 const searchResults = ref<SearchResult[]>([]);
 const searchRunning = ref(false);
 const searchScanned = ref(0);
@@ -137,22 +155,39 @@ const searchError = ref("");
 let searchCancelled = false;
 let transferPreviewGeneration = 0;
 
-const transferOpen = ref(false);
-const transferMode = ref<"import" | "sync">("import");
+const transferOpen = ref(restoredUiState.transferOpen ?? false);
+const transferMode = ref<"import" | "sync">(restoredUiState.transferMode ?? "import");
 const transferBundle = ref<EtcdBundle | null>(null);
-const targetConnectionId = ref("");
+const targetConnectionId = ref(restoredUiState.targetConnectionId ?? "");
 const transferRows = ref<TransferRow[]>([]);
 const transferLoading = ref(false);
 const transferApplying = ref(false);
 const transferError = ref("");
-const transferKeyFilter = ref("");
-const syncPrefix = ref("");
-const syncScope = ref<EtcdSyncScope>("prefix");
-const transferConflictPolicy = ref<EtcdConflictPolicy>("ABORT");
-const transferCurrentPage = ref(1);
+const transferKeyFilter = ref(restoredUiState.transferKeyFilter ?? "");
+const syncPrefix = ref(restoredUiState.syncPrefix ?? "");
+const syncScope = ref<EtcdSyncScope>(restoredUiState.syncScope ?? "prefix");
+const transferConflictPolicy = ref<EtcdConflictPolicy>(restoredUiState.transferConflictPolicy ?? "ABORT");
+const transferCurrentPage = ref(restoredUiState.transferCurrentPage ?? 1);
 const transferLoadingDetail = ref("");
 const transferPreviewLoaded = ref(false);
-const syncConfigurationExpanded = ref(true);
+const syncConfigurationExpanded = ref(restoredUiState.syncConfigurationExpanded ?? true);
+
+trackUiState(() => ({
+  mode: mode.value,
+  activeOperation: activeOperation.value,
+  searchQuery: searchQuery.value,
+  searchPrefix: searchPrefix.value,
+  searchScope: searchScope.value,
+  transferOpen: transferOpen.value,
+  transferMode: transferMode.value,
+  targetConnectionId: targetConnectionId.value,
+  transferKeyFilter: transferKeyFilter.value,
+  syncPrefix: syncPrefix.value,
+  syncScope: syncScope.value,
+  transferConflictPolicy: transferConflictPolicy.value,
+  transferCurrentPage: transferCurrentPage.value,
+  syncConfigurationExpanded: syncConfigurationExpanded.value,
+}));
 
 const etcdAccess = computed(() => connectionStore.getEtcdAccessCapabilities(props.connectionId));
 const canManageEtcd = computed(() => etcdAccess.value.admin);

@@ -2466,6 +2466,8 @@ pub fn run() {
             commands::update::check_for_updates,
             commands::update::fetch_changelog,
             commands::update::get_system_proxy_url,
+            commands::update::get_downloaded_update,
+            commands::update::discard_downloaded_update,
             commands::update::download_update,
             commands::update::cancel_update_download,
             commands::update::install_downloaded_update,

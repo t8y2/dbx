@@ -58,6 +58,7 @@ pub mod text_export;
 pub mod transfer;
 pub mod tunnel_profiles;
 pub mod update;
+mod update_cache;
 mod update_portable;
 pub mod vector_cmd;
 pub mod window_controls;

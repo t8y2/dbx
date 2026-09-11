@@ -72,7 +72,10 @@ describe("right sidebar panel entry points", () => {
     expect(appSource).toContain("isToggleZenModeShortcut(e, shortcuts) && supportsZenMode(activeTab.value?.mode)");
     expect(appSource).toContain('@toggle-zen-mode="toggleZenMode"');
     expect(appSource).toContain('v-show="sidebarOpen && !isZenMode"');
-    expect(appSource).toContain('v-show="!sidebarOpen && !isZenMode"');
+    expect(appSource).toContain(':show-sidebar-expand="!sidebarOpen && !isZenMode"');
+    expect(toolbarSource).toContain('<Tooltip v-if="showSidebarExpand">');
+    expect(toolbarSource).toContain("@click=\"emit('expand-sidebar')\"");
+    expect(appSource).toContain('@expand-sidebar="setSidebarOpen(true)"');
     expect(appSource).toContain('v-show="!isAiPanelMaximized || isZenMode"');
     expect(appSource).toContain('v-show="!isZenMode"');
   });

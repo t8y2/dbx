@@ -1,4 +1,5 @@
-// Shared fallback for Consul's advanced workspaces. Individual locales may override these keys.
+// Canonical English messages and key schema for Consul's advanced workspaces.
+// Operator confirmation phrases are checked verbatim by the backend; keep them in English in every locale.
 export const consulUiMessages = {
   ui: {
     unknown: "Unknown",
@@ -91,6 +92,17 @@ export const consulUiMessages = {
     agentWriteReady: "Writable",
     agentReadOnly: "Read-only",
     agentWriteDisabledHint: "No matching Agent target is configured, so maintenance and deregistration are disabled. Detected Agent: {target}.",
+    agentWriteBlocked: {
+      connectionUnavailable: "Connection configuration is unavailable. Reconnect before writing.",
+      readOnly: "This connection is read-only. Service deregistration is disabled.",
+      transport: "Agent writes are unavailable through Transport Layers. Connect directly to the target Agent.",
+      targetRequired: "Edit the connection and configure the Agent target node and address. The node must match the current Agent, and the address must match the connection endpoint.",
+      identityUnavailable: "Unable to read the Agent identity. Writes are disabled. Check the connection and Agent read permissions, then refresh.",
+      nodeMismatch: "The configured target node does not match the current Agent. Check the connection settings.",
+      directAddressRequired: "Agent writes require a direct IP or localhost endpoint. DNS and load-balanced addresses are not supported.",
+      addressMismatch: "The Agent target address does not match the connection endpoint. Check the connection settings.",
+      invalidAddress: "The Consul connection address is invalid. Check the connection settings.",
+    },
     register: "Register",
     registrationHint: "HTTP Agent registrations belong to the target Agent runtime and do not modify its persistent configuration files.",
     name: "Name",
@@ -106,6 +118,10 @@ export const consulUiMessages = {
     disableMaintenance: "Disable maintenance",
     deregister: "Deregister",
     deregisterService: "Deregister local service {id} from {node}?",
+    deregistering: "Deregistering",
+    deregisterServiceHint: "This removes the service registration and associated checks. The Catalog will sync afterward. The service process keeps running and may register itself again.",
+    deregisterServiceSucceeded: "Service {id} was deregistered from {node}. Catalog synchronization may take a moment; the service may reappear if the application registers it again.",
+    deregisterRefreshFailed: "Service deregistered, but refreshing failed. Refresh manually",
     maintenanceReason: "DBX user request",
     serviceDetails: "{service} details",
     kind: "Kind",
@@ -199,8 +215,8 @@ export const consulUiMessages = {
     serviceChecks: "Service checks",
     nodeCheckShort: "Node",
     serviceCheckShort: "Service",
-    serviceChecksPlaceholder: "service:api:health@namespace-a",
-    serviceChecksHint: "Comma-separated check IDs; use ID@namespace for a scoped check.",
+    serviceChecksPlaceholder: "service:api:health{'@'}namespace-a",
+    serviceChecksHint: "Comma-separated check IDs; use ID{'@'}namespace for a scoped check.",
     lockHint: "Inspect the key, select a Session, then acquire or release the advisory lock.",
     key: "Key",
     inspectKey: "Inspect key",
@@ -453,3 +469,7 @@ export const consulUiMessages = {
     operation: { create: "Create", update: "Update", unchanged: "Unchanged", skipped: "Skipped", conflict: "Conflict", locked: "Locked", succeeded: "Succeeded", conflicted: "Conflicted", failed: "Failed" },
   },
 } as const;
+
+type LocalizedMessages<T> = { [Key in keyof T]: T[Key] extends string ? string : LocalizedMessages<T[Key]> };
+
+export type ConsulMessages = LocalizedMessages<typeof consulUiMessages>;

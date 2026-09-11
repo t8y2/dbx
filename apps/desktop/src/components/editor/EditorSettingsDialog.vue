@@ -367,6 +367,9 @@ const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : Dia
 const showUnsavedSettingsCloseConfirm = ref(false);
 
 function requestCloseSettings(nextOpen: boolean) {
+  // Flush any pending debounced MCP query-timeout save so a value typed right
+  // before closing is persisted instead of dropped (see onMcpQueryTimeoutInput).
+  flushMcpQueryTimeoutSave();
   if (shouldConfirmEditorSettingsDialogClose(nextOpen, hasChanges())) {
     showUnsavedSettingsCloseConfirm.value = true;
     return;
@@ -532,6 +535,7 @@ const editDataGridFilterEditorView = ref<DataGridFilterEditorView>(settingsStore
 const editDataGridKeepFilterEditorExpanded = ref(settingsStore.editorSettings.dataGridKeepFilterEditorExpanded);
 const dataGridFilterViewPreviewExpanded = ref(true);
 const editDataGridTextFilterPanelHeight = ref(settingsStore.editorSettings.dataGridTextFilterPanelHeight);
+const editDefaultAutoKeepResults = ref(settingsStore.editorSettings.defaultAutoKeepResults);
 const editMultiStatementDefaultView = ref<MultiStatementDefaultView>(settingsStore.editorSettings.multiStatementDefaultView);
 const editDataGridAutoTransposeSingleRow = ref(settingsStore.editorSettings.dataGridAutoTransposeSingleRow);
 const editDataGridCellDetailButtonVisible = ref(settingsStore.editorSettings.dataGridCellDetailButtonVisible);
@@ -757,6 +761,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     dataGridFilterEditorView: editDataGridFilterEditorView.value,
     dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded.value,
     dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight.value,
+    defaultAutoKeepResults: editDefaultAutoKeepResults.value,
     multiStatementDefaultView: editMultiStatementDefaultView.value,
     dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow.value,
     dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible.value,
@@ -1254,6 +1259,7 @@ function syncEditorSettingsDraftFromStore() {
   editDataGridFilterEditorView.value = settingsStore.editorSettings.dataGridFilterEditorView;
   editDataGridKeepFilterEditorExpanded.value = settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = settingsStore.editorSettings.dataGridTextFilterPanelHeight;
+  editDefaultAutoKeepResults.value = settingsStore.editorSettings.defaultAutoKeepResults;
   editMultiStatementDefaultView.value = settingsStore.editorSettings.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = settingsStore.editorSettings.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = settingsStore.editorSettings.dataGridCellDetailButtonVisible;
@@ -1370,6 +1376,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   dataGridFilterEditorView: editDataGridFilterEditorView,
   dataGridKeepFilterEditorExpanded: editDataGridKeepFilterEditorExpanded,
   dataGridTextFilterPanelHeight: editDataGridTextFilterPanelHeight,
+  defaultAutoKeepResults: editDefaultAutoKeepResults,
   multiStatementDefaultView: editMultiStatementDefaultView,
   dataGridAutoTransposeSingleRow: editDataGridAutoTransposeSingleRow,
   dataGridCellDetailButtonVisible: editDataGridCellDetailButtonVisible,
@@ -1739,6 +1746,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
     editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
     editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+    editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
     editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
     editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
     editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
@@ -1826,6 +1834,7 @@ function resetAllDefaults() {
   editDataGridFilterEditorView.value = DEFAULT_EDITOR_SETTINGS.dataGridFilterEditorView;
   editDataGridKeepFilterEditorExpanded.value = DEFAULT_EDITOR_SETTINGS.dataGridKeepFilterEditorExpanded;
   editDataGridTextFilterPanelHeight.value = DEFAULT_EDITOR_SETTINGS.dataGridTextFilterPanelHeight;
+  editDefaultAutoKeepResults.value = DEFAULT_EDITOR_SETTINGS.defaultAutoKeepResults;
   editMultiStatementDefaultView.value = DEFAULT_EDITOR_SETTINGS.multiStatementDefaultView;
   editDataGridAutoTransposeSingleRow.value = DEFAULT_EDITOR_SETTINGS.dataGridAutoTransposeSingleRow;
   editDataGridCellDetailButtonVisible.value = DEFAULT_EDITOR_SETTINGS.dataGridCellDetailButtonVisible;
@@ -2580,21 +2589,85 @@ watch(
   },
 );
 
-function onMcpQueryTimeoutInput() {
-  const raw = mcpQueryTimeoutInput.value.trim();
+type McpQueryTimeoutSaveStatus = "idle" | "saving" | "saved" | "failed";
+const mcpQueryTimeoutSaveStatus = ref<McpQueryTimeoutSaveStatus>("idle");
+let mcpQueryTimeoutSavedStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+function setMcpQueryTimeoutSaveStatus(status: McpQueryTimeoutSaveStatus) {
+  if (mcpQueryTimeoutSavedStatusTimer !== null) {
+    clearTimeout(mcpQueryTimeoutSavedStatusTimer);
+    mcpQueryTimeoutSavedStatusTimer = null;
+  }
+  mcpQueryTimeoutSaveStatus.value = status;
+  if (status === "saved") {
+    mcpQueryTimeoutSavedStatusTimer = setTimeout(() => {
+      mcpQueryTimeoutSavedStatusTimer = null;
+      mcpQueryTimeoutSaveStatus.value = "idle";
+    }, 1600);
+  }
+}
+
+// Debounce the persist so rapid typing coalesces into a single SQLite write.
+// `flushMcpQueryTimeoutSave` runs on the settings-close path so a value typed
+// right before closing is still persisted (the legacy @change binding only
+// fired on blur/Enter, silently dropping the value when the window closed).
+const MCP_QUERY_TIMEOUT_SAVE_DEBOUNCE_MS = 300;
+let mcpQueryTimeoutSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let mcpQueryTimeoutPendingValue: number | null | undefined;
+
+function onMcpQueryTimeoutInput(event: Event) {
+  // Read the value from the native input (not the ref). This handler runs in
+  // capture phase, before Input's passive v-model proxy updates the ref.
+  const target = event.currentTarget as HTMLInputElement;
+  // Number inputs expose incomplete/invalid edits as an empty value. Do not
+  // mistake that browser state for an explicit request to inherit the timeout.
+  if (target.validity.badInput) return;
+  const raw = target.value.trim();
+  setMcpQueryTimeoutSaveStatus("saving");
   if (raw === "") {
-    void saveMcpPolicy({ queryTimeoutSecs: null });
-    return;
+    mcpQueryTimeoutPendingValue = null;
+  } else {
+    const parsed = Number(raw);
+    // Backend stores the value as u64; keep out-of-range integers on the
+    // invalid-value path instead of failing serde later with a generic error.
+    if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
+      toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
+      // Revert before Input's bubble-phase v-model handler sees the value, so
+      // the proxy and parent ref remain aligned.
+      const reverted = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
+      mcpQueryTimeoutInput.value = reverted;
+      target.value = reverted;
+      mcpQueryTimeoutPendingValue = undefined;
+      setMcpQueryTimeoutSaveStatus("idle");
+      return;
+    }
+    mcpQueryTimeoutPendingValue = parsed;
   }
-  const parsed = Number(raw);
-  // Backend stores the value as u64; keep out-of-range integers on the
-  // invalid-value path instead of failing serde later with a generic error.
-  if (!Number.isFinite(parsed) || parsed < 0 || !Number.isInteger(parsed) || parsed > Number("18446744073709551615")) {
-    toast(t("settings.mcpQueryTimeoutInvalid"), 5000);
-    mcpQueryTimeoutInput.value = settingsStore.mcpGlobalPolicy.queryTimeoutSecs === null ? "" : String(settingsStore.mcpGlobalPolicy.queryTimeoutSecs);
-    return;
+  if (mcpQueryTimeoutSaveTimer !== null) clearTimeout(mcpQueryTimeoutSaveTimer);
+  mcpQueryTimeoutSaveTimer = setTimeout(() => {
+    mcpQueryTimeoutSaveTimer = null;
+    flushMcpQueryTimeoutSave();
+  }, MCP_QUERY_TIMEOUT_SAVE_DEBOUNCE_MS);
+}
+
+function flushMcpQueryTimeoutSave() {
+  if (mcpQueryTimeoutSaveTimer !== null) {
+    clearTimeout(mcpQueryTimeoutSaveTimer);
+    mcpQueryTimeoutSaveTimer = null;
   }
-  void saveMcpPolicy({ queryTimeoutSecs: parsed });
+  if (mcpQueryTimeoutPendingValue === undefined) return;
+  // Another MCP policy mutation may be in flight. Retain the value until the
+  // shared mutation gate reopens; saveMcpPolicy's finally block retries it.
+  if (mcpPolicyControlsDisabled.value) return;
+  const value = mcpQueryTimeoutPendingValue;
+  mcpQueryTimeoutPendingValue = undefined;
+  void saveMcpPolicy(
+    { queryTimeoutSecs: value },
+    {
+      onSuccess: () => setMcpQueryTimeoutSaveStatus("saved"),
+      onFailure: () => setMcpQueryTimeoutSaveStatus("failed"),
+    },
+  );
 }
 const mcpSelectableConnections = computed(() => connectionStore.connections);
 const mcpGroupRows = computed(() => connectionGroupDestinationRows(connectionStore.sidebarLayout));
@@ -2649,33 +2722,41 @@ const mcpHttpHasUnsavedChanges = computed(() => {
 
 const webMcpEndpoint = computed(() => (webMcpHttpStatus.value ? `${window.location.origin}${webMcpHttpStatus.value.endpointPath}` : ""));
 
-async function saveMcpPolicy(partial: {
-  readOnly?: boolean;
-  allowDangerousSql?: boolean;
-  allowedConnectionIds?: string[] | null;
-  allowedGroupIds?: string[];
-  allowedToolNames?: string[] | null;
-  connectionPolicies?: {
-    connectionId: string;
-    readOnly: boolean;
-    allowDangerousSql: boolean;
-    executionModeConfigured: boolean;
-    executionModePolicyVersion: number | null;
-    databaseScope: "all" | "selected" | "none";
-    allowedDatabases: string[];
-    databasePolicies: { databaseName: string; readOnly: boolean; allowDangerousSql: boolean }[];
-  }[];
-  groupPolicies?: McpGroupPolicy[];
-  queryTimeoutSecs?: number | null;
-}) {
+async function saveMcpPolicy(
+  partial: {
+    readOnly?: boolean;
+    allowDangerousSql?: boolean;
+    allowedConnectionIds?: string[] | null;
+    allowedGroupIds?: string[];
+    allowedToolNames?: string[] | null;
+    connectionPolicies?: {
+      connectionId: string;
+      readOnly: boolean;
+      allowDangerousSql: boolean;
+      executionModeConfigured: boolean;
+      executionModePolicyVersion: number | null;
+      databaseScope: "all" | "selected" | "none";
+      allowedDatabases: string[];
+      databasePolicies: { databaseName: string; readOnly: boolean; allowDangerousSql: boolean }[];
+    }[];
+    groupPolicies?: McpGroupPolicy[];
+    queryTimeoutSecs?: number | null;
+  },
+  callbacks?: { onSuccess?: () => void; onFailure?: () => void },
+) {
   if (mcpPolicyControlsDisabled.value) return;
   mcpPolicySaving.value = true;
   try {
     await settingsStore.updateMcpGlobalPolicy(partial);
+    callbacks?.onSuccess?.();
   } catch (e: any) {
     toast(t("settings.mcpPolicySaveFailed", { error: e?.message || String(e) }), 5000);
+    callbacks?.onFailure?.();
   } finally {
     mcpPolicySaving.value = false;
+    // A query-timeout edit can have debounced while another policy write held
+    // the shared gate. Persist it once that write releases the gate.
+    if (mcpQueryTimeoutPendingValue !== undefined) flushMcpQueryTimeoutSave();
   }
 }
 
@@ -5035,6 +5116,8 @@ watch(
 );
 
 onUnmounted(() => {
+  flushMcpQueryTimeoutSave();
+  if (mcpQueryTimeoutSavedStatusTimer !== null) clearTimeout(mcpQueryTimeoutSavedStatusTimer);
   cleanupPreviewEditor();
   resetSettingsSearchState();
 });
@@ -6813,6 +6896,13 @@ onUnmounted(() => {
                     :aria-invalid="hasBlockingQueryResultRowLimit"
                     @update:model-value="updatePageSizeDraft"
                   />
+                </div>
+                <div data-settings-search-id="default-auto-keep-results" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('default-auto-keep-results')]">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="default-auto-keep-results">{{ t("settings.defaultAutoKeepResults") }}</Label>
+                    <p class="text-xs text-muted-foreground">{{ t("settings.defaultAutoKeepResultsDescription") }}</p>
+                  </div>
+                  <Switch id="default-auto-keep-results" v-model="editDefaultAutoKeepResults" :aria-label="t('settings.defaultAutoKeepResults')" />
                 </div>
                 <div data-settings-search-id="multi-statement-default-view" :class="['settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2', settingsSearchTargetClass('multi-statement-default-view')]">
                   <div class="min-w-0 space-y-1">
@@ -8919,7 +9009,15 @@ LIMIT 100;</pre
                     </div>
                     <div class="grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,18rem)]">
                       <Label id="mcp-query-timeout-label">{{ t("settings.mcpQueryTimeout") }}</Label>
-                      <Input id="mcp-query-timeout" v-model="mcpQueryTimeoutInput" type="number" min="0" step="1" inputmode="numeric" placeholder="0" :disabled="mcpPolicyControlsDisabled" @change="onMcpQueryTimeoutInput" />
+                      <div class="space-y-1">
+                        <Input id="mcp-query-timeout" v-model="mcpQueryTimeoutInput" type="number" min="0" step="1" inputmode="numeric" placeholder="0" :disabled="mcpPolicyControlsDisabled" @input.capture="onMcpQueryTimeoutInput" />
+                        <p v-if="mcpQueryTimeoutSaveStatus !== 'idle'" class="flex h-4 items-center justify-end gap-1 text-[11px] text-muted-foreground" role="status" aria-live="polite">
+                          <Loader2 v-if="mcpQueryTimeoutSaveStatus === 'saving'" class="size-3 animate-spin" />
+                          <Check v-else-if="mcpQueryTimeoutSaveStatus === 'saved'" class="size-3 text-emerald-600 dark:text-emerald-400" />
+                          <AlertTriangle v-else class="size-3 text-destructive" />
+                          {{ t(`settings.mcpQueryTimeoutSaveStatus_${mcpQueryTimeoutSaveStatus}`) }}
+                        </p>
+                      </div>
                     </div>
                   </div>
                   <div v-if="mcpTransportTab === 'stdio'" class="space-y-3">

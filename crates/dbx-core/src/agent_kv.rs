@@ -1224,7 +1224,12 @@ async fn build_etcd_metrics_client_with_identity(
     options: &EtcdMetricsConnectionOptions,
     include_identity: bool,
 ) -> Result<reqwest::Client, String> {
+    // The desktop binary pulls in reqwest's default `default-tls` feature, which unifies with
+    // this crate's `rustls-tls` and makes `Client::builder()` silently select native-tls.
+    // native-tls rejects the PEM client identity built below with `incompatible TLS identity
+    // type`, so an mTLS etcd would lose its client certificate and fail the handshake.
     let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
         .connect_timeout(ETCD_METRICS_TIMEOUT)
         .timeout(ETCD_METRICS_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none());

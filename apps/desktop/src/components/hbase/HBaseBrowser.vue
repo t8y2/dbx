@@ -15,12 +15,13 @@ import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 import { encodeHBaseTextInput, hbaseCellInput } from "@/lib/hbase/hbaseValues";
-import { loadHBaseRowLimit, saveHBaseRowLimit } from "@/lib/hbase/hbaseBrowserPreferences";
+import { loadHBaseRowLimit, normalizeHBaseRowLimit, saveHBaseRowLimit } from "@/lib/hbase/hbaseBrowserPreferences";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useQueryStore } from "@/stores/queryStore";
 import type { QueryResult } from "@/types/database";
 import type { HBaseCellInput, HBasePutRowInput, HBaseRow, HBaseTableSchema, HBaseValueEncoding } from "@/types/hbase";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   tabId: string;
@@ -29,6 +30,20 @@ const props = defineProps<{
   table: string;
   createTableOnOpen?: boolean;
 }>();
+
+type HBaseTabUiState = {
+  lookupMode?: LookupMode;
+  rowKeyInput?: string;
+  rowLimit?: string;
+  schemaDialogOpen?: boolean;
+  writeDialogOpen?: boolean;
+  writeJson?: string;
+  createTableDialogOpen?: boolean;
+  createTableName?: string;
+  createColumnFamilies?: string;
+  deleteTableDialogOpen?: boolean;
+};
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<HBaseTabUiState>({}, "HBaseBrowser");
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -40,26 +55,41 @@ type LookupMode = "prefix" | "exact";
 const rows = ref<HBaseRow[]>([]);
 const loading = ref(false);
 const error = ref("");
-const lookupMode = ref<LookupMode>("prefix");
-const rowKeyInput = ref("");
-const rowLimit = ref(loadHBaseRowLimit());
+const lookupMode = ref<LookupMode>(restoredUiState.lookupMode ?? "prefix");
+const rowKeyInput = ref(restoredUiState.rowKeyInput ?? "");
+const rowLimit = ref(normalizeHBaseRowLimit(restoredUiState.rowLimit ?? loadHBaseRowLimit()));
 const truncated = ref(false);
 const elapsedMs = ref(0);
 const schema = ref<HBaseTableSchema>();
 const schemaLoading = ref(false);
-const schemaDialogOpen = ref(false);
-const writeDialogOpen = ref(false);
-const writeJson = ref("");
+const schemaDialogOpen = ref(restoredUiState.schemaDialogOpen ?? false);
+const writeDialogOpen = ref(restoredUiState.writeDialogOpen ?? false);
+const writeJson = ref(restoredUiState.writeJson ?? "");
 const writeLoading = ref(false);
 const writeError = ref("");
-const createTableDialogOpen = ref(false);
-const createTableName = ref("");
-const createColumnFamilies = ref("");
+const createTableDialogOpen = ref(restoredUiState.createTableDialogOpen ?? false);
+const createTableName = ref(restoredUiState.createTableName ?? "");
+const createColumnFamilies = ref(restoredUiState.createColumnFamilies ?? "");
 const createTableLoading = ref(false);
 const createTableError = ref("");
-const deleteTableDialogOpen = ref(false);
+const deleteTableDialogOpen = ref(restoredUiState.deleteTableDialogOpen ?? false);
 const deleteTableLoading = ref(false);
 const deleteTableError = ref("");
+
+trackUiState(() => ({
+  lookupMode: lookupMode.value,
+  rowKeyInput: rowKeyInput.value,
+  rowLimit: rowLimit.value,
+  schemaDialogOpen: schemaDialogOpen.value,
+  writeDialogOpen: writeDialogOpen.value,
+  writeJson: writeJson.value,
+  createTableDialogOpen: createTableDialogOpen.value,
+  createTableName: createTableName.value,
+  createColumnFamilies: createColumnFamilies.value,
+  deleteTableDialogOpen: deleteTableDialogOpen.value,
+}));
+
+let initialHBaseInputsRestored = false;
 
 const hasTable = computed(() => props.table.trim().length > 0);
 const readOnly = computed(() => connectionIsEffectivelyReadOnly(connectionStore.getConfig(props.connectionId)));
@@ -108,7 +138,8 @@ watch(
   () => {
     rows.value = [];
     schema.value = undefined;
-    rowKeyInput.value = "";
+    if (!initialHBaseInputsRestored) initialHBaseInputsRestored = true;
+    else rowKeyInput.value = "";
     if (hasTable.value) void refreshRows();
   },
   { immediate: true },

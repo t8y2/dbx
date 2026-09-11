@@ -42,6 +42,7 @@ import {
   type DamengSysPrivilege,
   type DamengUser,
 } from "@/lib/database/damengPrincipalAdmin";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -52,17 +53,18 @@ type DetailTab = "members" | "privileges";
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ selectedRoleName?: string; search?: string; detailTab?: DetailTab }>({}, "DamengRoleAdmin");
 
 const roles = ref<DamengRole[]>([]);
 const allUsers = ref<DamengUser[]>([]);
-const selectedRoleName = ref("");
-const search = ref("");
+const selectedRoleName = ref(restoredUiState.selectedRoleName ?? "");
+const search = ref(restoredUiState.search ?? "");
 const loadingRoles = ref(false);
 const loadingDetails = ref(false);
 const applying = ref(false);
 const loadError = ref("");
 const detailError = ref("");
-const detailTab = ref<DetailTab>("members");
+const detailTab = ref<DetailTab>(restoredUiState.detailTab === "privileges" ? "privileges" : "members");
 const members = ref<DamengGrant[]>([]);
 const grantedPrivileges = ref<DamengSysPrivilege[]>([]);
 const systemPrivilegeMap = ref<Set<string> | null>(null);
@@ -80,6 +82,8 @@ const previewDialogOpen = ref(false);
 const pendingSql = ref("");
 const pendingAfterApply = ref<(() => void | Promise<void>) | undefined>();
 const pendingDanger = ref(false);
+
+trackUiState(() => ({ selectedRoleName: selectedRoleName.value, search: search.value, detailTab: detailTab.value }));
 
 const supported = computed(() => props.connection.db_type === "dameng");
 const executionDatabase = computed(() => (props.connection.db_type === "dameng" ? "" : props.connection.database || ""));

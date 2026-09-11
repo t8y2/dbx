@@ -43,6 +43,7 @@ import {
   type LazyKvPathStyle,
 } from "@/lib/kv/slashPrefixLazyKeyTree";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import { detectKvValueFormat, validateKvValue, type KvValueFormat } from "@/lib/kv/kvValueFormat";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -240,12 +241,36 @@ const emit = defineEmits<{
   selectionChange: [selection: KvMultiSelection[]];
 }>();
 
+interface KvTabUiState {
+  prefix?: string;
+  expandedGroupIds?: string[];
+  selectedKey?: string | null;
+  showEditDialog?: boolean;
+  isCreating?: boolean;
+  editKey?: string;
+  editValue?: string;
+  editTtl?: string | number;
+  editFlags?: string;
+  editExpiryMode?: KvExpiryMode;
+  editLeaseId?: string;
+  editFormat?: KvValueFormat;
+  editEncoding?: "utf8" | "base64";
+  showRenameDialog?: boolean;
+  renameValue?: string;
+  renameMode?: "rename" | "copy";
+  selectedCreateMode?: KvCreateMode;
+  selectedBase64ViewMode?: "utf8" | "base64";
+  kvBrowserSplitSize?: number;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<KvTabUiState>({}, "KvKeyBrowser");
+
 const { t } = useI18n();
 const { toast } = useToast();
 const connectionStore = useConnectionStore();
 const settingsStore = useSettingsStore();
 const searchInputRef = ref<HTMLInputElement>();
-const prefix = ref("");
+const prefix = ref(restoredUiState.prefix ?? "");
 const keySuggestionOpen = ref(false);
 const keySuggestionIndex = ref(-1);
 const remoteKeySuggestions = ref<KvKeySummary[]>([]);
@@ -256,23 +281,23 @@ const listFilteredByAcls = ref(false);
 const loading = ref(false);
 const loadingMore = ref(false);
 const listError = ref("");
-const expandedGroupIds = ref<Set<string>>(new Set());
-const selectedKey = ref<string | null>(null);
-const selectedKeyIdentity = ref<string | null>(null);
+const expandedGroupIds = ref<Set<string>>(new Set(restoredUiState.expandedGroupIds ?? []));
+const selectedKey = ref<string | null>(restoredUiState.selectedKey ?? null);
+const selectedKeyIdentity = ref<string | null>(restoredUiState.selectedKey ?? null);
 const selectedRouteKeyBytes = ref<KvValue | null>(null);
 const selectedValue = ref<KvGetResponse | null>(null);
 const detailLoading = ref(false);
 const detailError = ref("");
-const showEditDialog = ref(false);
-const isCreating = ref(false);
-const editKey = ref("");
-const editValue = ref("");
-const editTtl = ref<string | number>("");
-const editFlags = ref("0");
-const editExpiryMode = ref<KvExpiryMode>("permanent");
-const editLeaseId = ref("");
-const editFormat = ref<KvValueFormat>("text");
-const editEncoding = ref<"utf8" | "base64">("utf8");
+const showEditDialog = ref(restoredUiState.showEditDialog ?? false);
+const isCreating = ref(restoredUiState.isCreating ?? false);
+const editKey = ref(restoredUiState.editKey ?? "");
+const editValue = ref(restoredUiState.editValue ?? "");
+const editTtl = ref<string | number>(restoredUiState.editTtl ?? "");
+const editFlags = ref(restoredUiState.editFlags ?? "0");
+const editExpiryMode = ref<KvExpiryMode>(restoredUiState.editExpiryMode ?? "permanent");
+const editLeaseId = ref(restoredUiState.editLeaseId ?? "");
+const editFormat = ref<KvValueFormat>(restoredUiState.editFormat ?? "text");
+const editEncoding = ref<"utf8" | "base64">(restoredUiState.editEncoding ?? "utf8");
 const editError = ref("");
 const editErrorKind = ref<KvMutationErrorKind>("request");
 const saving = ref(false);
@@ -281,11 +306,11 @@ const showSaveDiff = ref(false);
 const pendingSave = ref<{ key: string; value: KvValue; options?: KvPutOptions } | null>(null);
 const showDeleteConfirm = ref(false);
 const deleting = ref(false);
-const showRenameDialog = ref(false);
-const renameValue = ref("");
+const showRenameDialog = ref(restoredUiState.showRenameDialog ?? false);
+const renameValue = ref(restoredUiState.renameValue ?? "");
 const renameError = ref("");
 const renaming = ref(false);
-const renameMode = ref<"rename" | "copy">("rename");
+const renameMode = ref<"rename" | "copy">(restoredUiState.renameMode ?? "rename");
 const showHistoryDialog = ref(false);
 const historyLoading = ref(false);
 const historyError = ref("");
@@ -293,9 +318,9 @@ const historyEvents = ref<KvHistoryEvent[]>([]);
 const selectedHistoryEvent = ref<KvHistoryEvent | null>(null);
 const showHistoryDiff = ref(false);
 const restoring = ref(false);
-const selectedCreateMode = ref<KvCreateMode>("persistent");
+const selectedCreateMode = ref<KvCreateMode>(restoredUiState.selectedCreateMode ?? "persistent");
 const selectedPrettyValue = ref<string | null>(null);
-const selectedBase64ViewMode = ref<"utf8" | "base64">("utf8");
+const selectedBase64ViewMode = ref<"utf8" | "base64">(restoredUiState.selectedBase64ViewMode ?? "utf8");
 const selectedValueCopied = ref(false);
 const lazyTreeState = reactive(createLazyKvKeyTreeState(lazyKvRootPath(props.lazyPathStyle), props.lazyPathStyle));
 const multiSelectedKeys = ref<Map<string, KvMultiSelection>>(new Map());
@@ -305,7 +330,29 @@ const keyListRefreshBaseIntervalMs = 2000;
 const keyListRefreshMaxIntervalMs = 30000;
 const kvBrowserSplitSizeStorageKey = "dbx-kv-browser-split-size";
 const savedKvBrowserSplitSize = Number(safeLocalStorageGet(kvBrowserSplitSizeStorageKey));
-const kvBrowserSplitSize = ref(savedKvBrowserSplitSize >= 20 && savedKvBrowserSplitSize <= 70 ? savedKvBrowserSplitSize : 38);
+const kvBrowserSplitSize = ref(restoredUiState.kvBrowserSplitSize ?? (savedKvBrowserSplitSize >= 20 && savedKvBrowserSplitSize <= 70 ? savedKvBrowserSplitSize : 38));
+
+trackUiState(() => ({
+  prefix: prefix.value,
+  expandedGroupIds: [...expandedGroupIds.value].slice(0, 512),
+  selectedKey: selectedKey.value,
+  showEditDialog: showEditDialog.value,
+  isCreating: isCreating.value,
+  editKey: editKey.value,
+  editValue: editValue.value,
+  editTtl: editTtl.value,
+  editFlags: editFlags.value,
+  editExpiryMode: editExpiryMode.value,
+  editLeaseId: editLeaseId.value,
+  editFormat: editFormat.value,
+  editEncoding: editEncoding.value,
+  showRenameDialog: showRenameDialog.value,
+  renameValue: renameValue.value,
+  renameMode: renameMode.value,
+  selectedCreateMode: selectedCreateMode.value,
+  selectedBase64ViewMode: selectedBase64ViewMode.value,
+  kvBrowserSplitSize: kvBrowserSplitSize.value,
+}));
 let keyLoadGeneration = 0;
 let detailRequestId = 0;
 let metadataRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -1829,7 +1876,7 @@ onMounted(() => {
       console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
     }
     try {
-      await loadKeys(true);
+      await loadKeys(true, { preserveSelection: Boolean(restoredUiState.selectedKey) });
     } catch {
       // The browser's normal refresh path can retry after a transient failure.
     }

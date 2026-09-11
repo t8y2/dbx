@@ -53,6 +53,7 @@ const { t } = useI18n();
 const search = ref("");
 const expandedGroupIds = ref(new Set<string>());
 const initializedExpansion = ref(false);
+const lastCustomScope = ref<{ allowedGroupIds: string[]; allowedConnectionIds: string[] } | null>(null);
 
 const scopeMode = computed<ScopeMode>(() => (props.allowedConnectionIds === null ? "all" : "custom"));
 const connectionById = computed(() => new Map(props.connections.map((connection) => [connection.id, connection])));
@@ -205,10 +206,19 @@ const visibleRows = computed(() => {
   return rows;
 });
 
+function copyCustomScope(groupIds: readonly string[], connectionIds: readonly string[] | null): { allowedGroupIds: string[]; allowedConnectionIds: string[] } {
+  return { allowedGroupIds: [...groupIds], allowedConnectionIds: [...(connectionIds ?? [])] };
+}
+
 function setScopeMode(mode: ScopeMode) {
-  if (props.disabled || mode === scopeMode.value) return;
-  if (mode === "all" && (props.allowedGroupIds.length > 0 || (props.allowedConnectionIds?.length ?? 0) > 0) && !window.confirm(t("settings.mcpResourceScopeAllConfirm"))) return;
-  emit("update:scope", mode === "all" ? { allowedGroupIds: [], allowedConnectionIds: null } : { allowedGroupIds: [], allowedConnectionIds: [] });
+  if (props.disabled || props.busy || mode === scopeMode.value) return;
+  if (mode === "all") {
+    if ((props.allowedGroupIds.length > 0 || (props.allowedConnectionIds?.length ?? 0) > 0) && !window.confirm(t("settings.mcpResourceScopeAllConfirm"))) return;
+    lastCustomScope.value = copyCustomScope(props.allowedGroupIds, props.allowedConnectionIds);
+    emit("update:scope", { allowedGroupIds: [], allowedConnectionIds: null });
+    return;
+  }
+  emit("update:scope", copyCustomScope(lastCustomScope.value?.allowedGroupIds ?? [], lastCustomScope.value?.allowedConnectionIds ?? []));
 }
 
 function groupHasSelectedDescendant(group: GroupNode): boolean {
@@ -266,10 +276,10 @@ function connectionPolicyMode(connectionId: string): ExecutionMode | "inherit" {
     </div>
 
     <div class="grid grid-cols-2 gap-1 border-t bg-muted/40 p-1" role="radiogroup" :aria-label="t('settings.mcpResourceScopeTitle')">
-      <Button type="button" role="radio" variant="ghost" class="h-9" :class="scopeMode === 'all' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-checked="scopeMode === 'all'" :disabled="disabled" @click="setScopeMode('all')">
+      <Button type="button" role="radio" variant="ghost" class="h-9" data-scope-mode="all" :class="scopeMode === 'all' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-checked="scopeMode === 'all'" :disabled="disabled || busy" @click="setScopeMode('all')">
         {{ t("settings.mcpScopeModeAll") }}
       </Button>
-      <Button type="button" role="radio" variant="ghost" class="h-9" :class="scopeMode === 'custom' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-checked="scopeMode === 'custom'" :disabled="disabled" @click="setScopeMode('custom')">
+      <Button type="button" role="radio" variant="ghost" class="h-9" data-scope-mode="custom" :class="scopeMode === 'custom' ? 'bg-background shadow-sm' : 'text-muted-foreground'" :aria-checked="scopeMode === 'custom'" :disabled="disabled || busy" @click="setScopeMode('custom')">
         {{ t("settings.mcpResourceScopeModeCustom") }}
       </Button>
     </div>

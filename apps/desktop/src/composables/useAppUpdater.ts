@@ -1,17 +1,16 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch, onScopeDispose } from "vue";
 import { useI18n } from "vue-i18n";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
-import { useToast } from "@/composables/useToast";
 import * as api from "@/lib/backend/api";
 import { useSettingsStore } from "@/stores/settingsStore";
 import type { UpdateDownloadSource as SettingsUpdateDownloadSource } from "@/stores/settingsStore";
 import type { UpdateDownloadProgress } from "@/lib/backend/tauri";
 import { currentLocale } from "@/i18n";
 import { shouldBlockAppUpdate } from "@/lib/app/appUpdateTaskGuard";
-import { installDownloadedUpdateWhenIdle } from "@/lib/app/appUpdateInstallFlow";
 
 interface UseAppUpdaterOptions {
   getActiveTaskCount?: () => number;
+  prepareForUpdate?: () => Promise<() => void>;
 }
 
 export function shouldOpenUpdateDialog(options: { silent?: boolean }) {
@@ -110,252 +109,324 @@ export async function resolveUpdaterProxy(): Promise<string | undefined> {
 
 export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
   const { t } = useI18n();
-  const { toast } = useToast();
   const settingsStore = useSettingsStore();
-
-  const checkingUpdates = ref(false);
+  type Phase = "idle" | "checking" | "downloading" | "ready" | "preparing" | "installing" | "restart";
+  const phase = ref<Phase>("idle");
+  const downloaded = ref<api.DownloadedUpdate | null>(null);
   const updateInfo = ref<api.UpdateInfo | null>(null);
   const updateCheckMessage = ref("");
   const updateCheckFailed = ref(false);
   const showUpdateDialog = ref(false);
-  const isDownloadingUpdate = ref(false);
-  // null while the download size is unknown (backend reported no total) — the UI shows an indeterminate state.
-  const downloadProgress = ref<number | null>(0);
-  const updateDownloaded = ref(false);
-  const isInstallingUpdate = ref(false);
-  const updateReady = ref(false);
+  const downloadProgress = ref<number | null>(null);
   const isIgnoringUpdate = ref(false);
+  const checkingUpdates = computed(() => phase.value === "checking");
+  const isDownloadingUpdate = computed(() => phase.value === "downloading");
+  const updateDownloaded = computed(() => downloaded.value !== null);
+  const isPreparingUpdate = computed(() => phase.value === "preparing");
+  const isInstallingUpdate = computed(() => phase.value === "installing" || isPreparingUpdate.value);
+  const updateReady = computed(() => phase.value === "restart");
   const activeTaskCount = computed(() => Math.max(0, Math.trunc(options.getActiveTaskCount?.() ?? 0)));
-  const hasUpdateAvailable = computed(() => updateInfo.value?.update_available === true && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion));
+  const notificationsEnabled = computed(() => settingsStore.editorSettings.updateNotificationsEnabled !== false);
+  const hasUpdateAvailable = computed(
+    () => notificationsEnabled.value && (updateDownloaded.value || updateReady.value || (updateInfo.value?.update_available === true && (!isTauriRuntime() || updateInfo.value.manual_update_only))) && !isUpdateIgnored(updateInfo.value, settingsStore.editorSettings.ignoredUpdateVersion),
+  );
   const latestReleaseUrl = "https://github.com/t8y2/dbx/releases/latest";
-  let activeDownloadAttempt = 0;
-  let pendingCancellation: Promise<void> | undefined;
+  let generation = 0;
+  let activeDownload: Promise<void> | undefined;
+  let cancellation: Promise<void> | undefined;
+  let cancelOperation: Promise<void> | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let hourlyTimer: ReturnType<typeof setInterval> | undefined;
+  let retries = 0;
+  let initialized = false;
+  let disposed = false;
+  let versionRecheckPending = false;
+  let updatePreparationRelease: (() => void) | undefined;
 
+  function clearRetry() {
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+  }
+  function fail(error: unknown) {
+    updateCheckFailed.value = true;
+    updateCheckMessage.value = formatUpdateError(error instanceof Error ? error.message : String(error));
+  }
+  function clearError() {
+    updateCheckFailed.value = false;
+    updateCheckMessage.value = "";
+  }
+  function scheduleRetry() {
+    clearRetry();
+    if (!initialized || disposed || !notificationsEnabled.value || retries >= 3) return;
+    const delay = [60_000, 300_000, 900_000][retries++];
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      void checkUpdates({ silent: true });
+    }, delay);
+  }
+  function setDownloaded(cache: api.DownloadedUpdate) {
+    downloaded.value = cache;
+    updateInfo.value = {
+      current_version: updateInfo.value?.current_version ?? "",
+      latest_version: cache.version,
+      update_available: true,
+      portable_mode: cache.portable_mode,
+      manual_update_only: false,
+      release_name: tagVersion(cache.version),
+      release_url: cache.release_url,
+      release_notes: cache.release_notes,
+    };
+    phase.value = "ready";
+    downloadProgress.value = 100;
+    retries = 0;
+    clearRetry();
+    clearError();
+  }
   function openUrl(url: string) {
-    if (isTauriRuntime()) {
-      import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
-    } else {
-      window.open(url, "_blank");
-    }
+    if (isTauriRuntime()) void import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
+    else window.open(url, "_blank", "noopener,noreferrer");
   }
-
-  async function checkUpdates(options: { silent?: boolean } = {}) {
-    if (checkingUpdates.value) return;
-    // The toolbar icon reuses this as its click handler. If a download/install is already
-    // in flight or finished, just resurface the dialog instead of hitting the network again.
-    if (!options.silent && (isDownloadingUpdate.value || updateDownloaded.value || updateReady.value)) {
-      showUpdateDialog.value = true;
-      return;
-    }
-    checkingUpdates.value = true;
-    // Keep the previous message/failed state visible while the check is in
-    // flight: pre-clearing would flip the dialog to "up to date" with an empty
-    // version and unmount the source switcher until the request settles.
-    try {
-      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
-      updateInfo.value = info;
-      updateCheckMessage.value = "";
-      updateCheckFailed.value = false;
-      if (info.update_available) {
-        if (shouldOpenUpdateDialog({ silent: options.silent })) {
-          showUpdateDialog.value = true;
-        }
-      } else if (!options.silent) {
-        updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
-        showUpdateDialog.value = true;
-      }
-    } catch (e: any) {
-      if (!options.silent) {
-        // Drop the stale update info only on a surfaced failure; silent
-        // background checks keep the last known state so the toolbar
-        // indicator and an in-flight download's portable-mode flag survive
-        // a single failed poll.
-        updateInfo.value = null;
-        updateCheckMessage.value = formatUpdateError(String(e));
-        updateCheckFailed.value = true;
-        showUpdateDialog.value = true;
-      }
-    } finally {
-      checkingUpdates.value = false;
-    }
+  function openLatestRelease() {
+    openUrl(resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl));
   }
-
   function formatUpdateError(message: string): string {
     const lower = message.toLowerCase();
-    if (lower.includes("canceled") || lower.includes("cancelled")) {
-      return t("updates.downloadCanceled");
-    }
-    if (lower.includes("403") || lower.includes("rate limit")) {
-      return t("updates.rateLimited");
-    }
-    if (lower.includes("stalled") || lower.includes("timeout") || lower.includes("all available mirrors") || lower.includes("error sending request") || lower.includes("failed to download")) {
-      return t("updates.networkOrMirrorFailed");
-    }
+    if (lower.includes("cancel")) return t("updates.downloadCanceled");
+    if (lower.includes("403") || lower.includes("rate limit")) return t("updates.rateLimited");
+    if (["stalled", "timeout", "all available mirrors", "error sending request", "failed to download"].some((part) => lower.includes(part))) return t("updates.networkOrMirrorFailed");
     return t("updates.downloadFailed", { error: message });
   }
-
-  function openLatestRelease() {
-    const url = resolveUpdateReleaseUrl(updateInfo.value, settingsStore.editorSettings.updateDownloadSource, latestReleaseUrl);
-    openUrl(url);
+  async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
+    if (disposed || isIgnoringUpdate.value) return;
+    if (!checkOptions.silent) showUpdateDialog.value = true;
+    if (phase.value !== "idle" || downloaded.value || (checkOptions.silent && !notificationsEnabled.value)) return;
+    clearRetry();
+    const token = ++generation;
+    phase.value = "checking";
+    clearError();
+    try {
+      const info = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource));
+      if (token !== generation || disposed) return;
+      updateInfo.value = info;
+      phase.value = "idle";
+      if (!info.update_available) updateCheckMessage.value = t("updates.upToDate", { version: info.current_version });
+      if (canDownloadAndInstallUpdate(info, isTauriRuntime()) && !isUpdateIgnored(info, settingsStore.editorSettings.ignoredUpdateVersion)) {
+        await downloadUpdateInBackground();
+      }
+    } catch (error) {
+      if (token !== generation || disposed) return;
+      phase.value = "idle";
+      fail(error);
+      scheduleRetry();
+    }
   }
-
+  async function downloadUpdateInBackground() {
+    if (disposed || isIgnoringUpdate.value || phase.value !== "idle" || downloaded.value || !canDownloadAndInstallUpdate(updateInfo.value, isTauriRuntime())) return;
+    const version = updateInfo.value!.latest_version;
+    const token = ++generation;
+    const attemptId = crypto.randomUUID();
+    phase.value = "downloading";
+    downloadProgress.value = null;
+    clearError();
+    clearRetry();
+    const run = async () => {
+      let unlisten: (() => void) | undefined;
+      try {
+        await cancellation;
+        if (token !== generation || disposed) return;
+        const { listen } = await import("@tauri-apps/api/event");
+        unlisten = await listen<UpdateDownloadProgress>("update-download-progress", ({ payload }) => {
+          if (token !== generation || payload.attempt_id !== attemptId || payload.version !== version) return;
+          downloadProgress.value = payload.total && payload.total > 0 ? Math.min(100, Math.round((payload.downloaded / payload.total) * 100)) : null;
+        });
+        if (token !== generation || disposed) return;
+        const cache = await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), version, attemptId, updateInfo.value?.release_notes);
+        if (token !== generation || disposed) return;
+        if (cache.version !== version) throw new Error("Downloaded update version changed; check for updates again.");
+        setDownloaded(cache);
+      } catch (error) {
+        if (token !== generation || disposed) return;
+        phase.value = "idle";
+        fail(error);
+        if ((String(error).includes("VERSION_CHANGED") || String(error).toLowerCase().includes("version changed")) && !versionRecheckPending) {
+          versionRecheckPending = true;
+          setTimeout(() => {
+            void checkUpdates({ silent: true }).finally(() => {
+              versionRecheckPending = false;
+            });
+          });
+        } else scheduleRetry();
+      } finally {
+        unlisten?.();
+      }
+    };
+    activeDownload = run();
+    await activeDownload;
+    activeDownload = undefined;
+  }
+  function cancelDownload(): Promise<void> {
+    if (cancelOperation) return cancelOperation;
+    cancelOperation = cancelDownloadImpl().finally(() => {
+      cancelOperation = undefined;
+    });
+    return cancelOperation;
+  }
+  async function cancelDownloadImpl() {
+    clearRetry();
+    generation++;
+    const running = activeDownload;
+    if (phase.value === "checking") phase.value = "idle";
+    if (!running) return;
+    const pending = api.cancelUpdateDownload();
+    cancellation = pending;
+    try {
+      await pending;
+      await running;
+      if (!disposed) {
+        const cache = await api.getDownloadedUpdate();
+        if (cache && !isUpdateIgnored({ latest_version: cache.version } as api.UpdateInfo, settingsStore.editorSettings.ignoredUpdateVersion)) setDownloaded(cache);
+      }
+    } finally {
+      if (cancellation === pending) cancellation = undefined;
+      if (phase.value === "downloading") phase.value = "idle";
+    }
+  }
   async function changeUpdateDownloadSource(source: SettingsUpdateDownloadSource) {
-    await settingsStore.updateEditorSettingsAndPersist({ updateDownloadSource: source });
-    await checkUpdates();
+    if (isIgnoringUpdate.value || isInstallingUpdate.value) return;
+    try {
+      await settingsStore.updateEditorSettingsAndPersist({ updateDownloadSource: source });
+      if (downloaded.value || updateReady.value || isInstallingUpdate.value) return;
+      await cancelDownload();
+      retries = 0;
+      await checkUpdates();
+    } catch (error) {
+      fail(error);
+    }
   }
-
   async function ignoreCurrentVersion() {
-    const latest = updateInfo.value?.latest_version;
-    if (!latest || isIgnoringUpdate.value) return;
+    const version = updateInfo.value?.latest_version;
+    if (!version || isIgnoringUpdate.value || isInstallingUpdate.value || updateReady.value) return;
     isIgnoringUpdate.value = true;
     try {
-      await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: latest });
+      await cancelDownload();
+      await settingsStore.updateEditorSettingsAndPersist({ ignoredUpdateVersion: version });
+      const cache = downloaded.value;
+      downloaded.value = null;
+      phase.value = "idle";
+      if (cache) await api.discardDownloadedUpdate(cache.cache_id);
       showUpdateDialog.value = false;
-      toast(t("updates.versionIgnored", { version: tagVersion(latest) }), 5000);
     } catch (error) {
-      toast(t("updates.ignoreVersionFailed", { error: error instanceof Error ? error.message : String(error) }), 5000);
+      fail(error);
     } finally {
       isIgnoringUpdate.value = false;
     }
   }
-
-  function blockUpdateForActiveTasks(): boolean {
-    if (!shouldBlockAppUpdate(activeTaskCount.value)) return false;
-    toast(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }), 5000);
-    return true;
-  }
-
-  async function downloadUpdateInBackground() {
-    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || updateDownloaded.value || updateReady.value) return;
-    if (!canDownloadAndInstallUpdate(updateInfo.value, true)) {
-      openLatestRelease();
-      return;
-    }
-    // Starting the download never has to wait on active work — only installing
-    // (file replacement) is disruptive, so that guard applies at install time instead.
-    showUpdateDialog.value = false;
-    const attempt = ++activeDownloadAttempt;
-    isDownloadingUpdate.value = true;
-    // The total is unknown until the first progress event arrives.
-    downloadProgress.value = null;
-    let unlisten: (() => void) | undefined;
-    const latestVersion = updateInfo.value?.latest_version;
-    toast(t("updates.downloadStarted", { version: latestVersion ? tagVersion(latestVersion) : "" }), 3000);
+  async function performInstall(restartOnly: boolean) {
+    if (!isTauriRuntime() || isInstallingUpdate.value || isIgnoringUpdate.value || (!restartOnly && !downloaded.value)) return;
+    const cache = downloaded.value;
+    let release: (() => void) | undefined;
+    phase.value = "preparing";
+    clearError();
+    let installed = restartOnly;
+    let failed = false;
     try {
-      await pendingCancellation;
-      if (attempt !== activeDownloadAttempt) return;
-      const { listen } = await import("@tauri-apps/api/event");
-      unlisten = await listen<UpdateDownloadProgress>("update-download-progress", (event) => {
-        if (attempt !== activeDownloadAttempt) return;
-        const total = event.payload.total ?? 0;
-        downloadProgress.value = total > 0 ? Math.round((event.payload.downloaded / total) * 100) : null;
-      });
-      await api.downloadUpdate(normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), latestVersion);
-      if (attempt !== activeDownloadAttempt) return;
-      downloadProgress.value = 100;
-      updateDownloaded.value = true;
-      // The download phase is truly finished — flip this now so the install guard (which
-      // checks isDownloadingUpdate) can evaluate freely instead of treating us as still busy.
-      isDownloadingUpdate.value = false;
-      if (shouldBlockAppUpdate(activeTaskCount.value)) {
-        // Matches the pre-refactor behavior: installing waits for active work to finish, but
-        // unlike before, only installing waits — the download itself never blocked on it.
-        toast(t("updates.readyToInstall", { version: latestVersion ? tagVersion(latestVersion) : "" }), 10000, {
-          label: t("updates.installNow"),
-          onClick: () => {
-            void installDownloadedUpdate();
-          },
-        });
-      } else {
-        // Restores the pre-refactor auto-install-when-idle behavior for the install step.
-        await installDownloadedUpdate();
+      release = await options.prepareForUpdate?.();
+      updatePreparationRelease = release;
+      if (shouldBlockAppUpdate(activeTaskCount.value)) throw new Error(t("updates.activeTasksBlockUpdate", { count: activeTaskCount.value }));
+      phase.value = "installing";
+      if (!restartOnly && cache) {
+        await api.installDownloadedUpdate(cache.cache_id, cache.version);
+        installed = true;
+        downloaded.value = null;
       }
-    } catch (e: any) {
-      if (attempt !== activeDownloadAttempt) return;
-      downloadProgress.value = 0;
-      const rawMsg = e?.message || String(e);
-      console.error("[DBX update error]", rawMsg);
-      const lower = rawMsg.toLowerCase();
-      if (lower.includes("canceled") || lower.includes("cancelled")) {
-        return;
+      // Windows installers and the portable helper own process replacement/relaunch.
+      if (!cache?.portable_mode && !navigator.userAgent.includes("Windows")) {
+        phase.value = "restart";
+        const { relaunch } = await import("@tauri-apps/plugin-process");
+        await relaunch();
       }
-      toast(formatUpdateError(rawMsg), 5000);
+    } catch (error) {
+      failed = true;
+      phase.value = installed ? "restart" : "ready";
+      updateCheckFailed.value = true;
+      updateCheckMessage.value = t(installed ? "updates.restartFailed" : "updates.installFailed", { error: error instanceof Error ? error.message : String(error) });
     } finally {
-      unlisten?.();
-      if (attempt === activeDownloadAttempt) {
-        isDownloadingUpdate.value = false;
+      // Successful handoff must keep every window frozen until the process exits.
+      if (failed) {
+        release?.();
+        updatePreparationRelease = undefined;
       }
-    }
-  }
-
-  async function installPendingUpdate() {
-    isInstallingUpdate.value = true;
-    try {
-      const portableMode = updateInfo.value?.portable_mode === true;
-      await api.installDownloadedUpdate();
-      updateDownloaded.value = false;
-      // The portable helper exits and relaunches DBX after the invoke response is delivered.
-      updateReady.value = !portableMode;
-    } finally {
-      isInstallingUpdate.value = false;
-    }
-  }
-
-  async function installDownloadedUpdate() {
-    if (!isTauriRuntime() || isDownloadingUpdate.value || isInstallingUpdate.value || !updateDownloaded.value) return;
-    try {
-      const installed = await installDownloadedUpdateWhenIdle({
-        getActiveTaskCount: () => activeTaskCount.value,
-        install: installPendingUpdate,
-      });
-      if (!installed) {
-        blockUpdateForActiveTasks();
-        return;
-      }
-      if (updateReady.value) {
-        toast(t("updates.installedReadyToRestart"), 10000, {
-          label: t("updates.restart"),
-          onClick: () => {
-            void restartApp();
-          },
-        });
-      }
-    } catch (e: any) {
-      toast(t("updates.installFailed", { error: e?.message || String(e) }), 5000);
-    }
-  }
-
-  async function restartApp() {
-    if (!isTauriRuntime()) return;
-    if (blockUpdateForActiveTasks()) return;
-    try {
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
-    } catch (e: any) {
-      toast(t("updates.restartFailed", { error: e?.message || String(e) }), 5000);
-    }
-  }
-
-  async function cancelDownload() {
-    if (isDownloadingUpdate.value) {
-      activeDownloadAttempt += 1;
-      isDownloadingUpdate.value = false;
-      downloadProgress.value = 0;
-      if (isTauriRuntime()) {
-        const cancellation = api.cancelUpdateDownload().catch(() => {});
-        pendingCancellation = cancellation;
+      if (!installed && cache) {
         try {
-          await cancellation;
-        } finally {
-          if (pendingCancellation === cancellation) {
-            pendingCancellation = undefined;
+          const restored = await api.getDownloadedUpdate();
+          if (!restored || restored.cache_id !== cache.cache_id) {
+            downloaded.value = null;
+            phase.value = "idle";
           }
+        } catch {
+          /* Keep the original installation error available for retry. */
         }
       }
     }
   }
-
+  async function installDownloadedUpdate() {
+    await performInstall(false);
+  }
+  async function restartApp() {
+    if (updateReady.value) await performInstall(true);
+  }
+  async function initialize() {
+    if (initialized || disposed) return;
+    initialized = true;
+    if (isTauriRuntime()) {
+      phase.value = "checking";
+      try {
+        const cache = await api.getDownloadedUpdate();
+        if (disposed) return;
+        if (cache) {
+          const ignored = isUpdateIgnored({ latest_version: cache.version } as api.UpdateInfo, settingsStore.editorSettings.ignoredUpdateVersion);
+          if (ignored) await api.discardDownloadedUpdate(cache.cache_id);
+          else {
+            setDownloaded(cache);
+            updateInfo.value!.current_version = await api.getAppVersion();
+          }
+        }
+      } catch (error) {
+        fail(error);
+      } finally {
+        if (phase.value === "checking") phase.value = "idle";
+      }
+    }
+    if (disposed) return;
+    hourlyTimer = setInterval(() => {
+      if (!retryTimer) {
+        retries = 0;
+        void checkUpdates({ silent: true });
+      }
+    }, 3_600_000);
+    void checkUpdates({ silent: true });
+  }
+  const stopSettingsWatch = watch(notificationsEnabled, (enabled) => {
+    if (!initialized || disposed) return;
+    const settle = enabled ? (cancelOperation ?? Promise.resolve()) : cancelDownload();
+    void settle
+      .then(() => {
+        if (notificationsEnabled.value && !disposed) void checkUpdates({ silent: true });
+      })
+      .catch(fail);
+  });
+  function dispose() {
+    disposed = true;
+    clearRetry();
+    clearInterval(hourlyTimer);
+    stopSettingsWatch();
+    updatePreparationRelease?.();
+    updatePreparationRelease = undefined;
+    void cancelDownload().catch(() => {});
+  }
+  onScopeDispose(dispose);
   return {
+    phase,
     checkingUpdates,
     updateInfo,
     updateCheckMessage,
@@ -365,6 +436,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     downloadProgress,
     updateDownloaded,
     isInstallingUpdate,
+    isPreparingUpdate,
     updateReady,
     isIgnoringUpdate,
     activeTaskCount,
@@ -380,5 +452,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     cancelDownload,
     installDownloadedUpdate,
     restartApp,
+    initialize,
+    dispose,
   };
 }

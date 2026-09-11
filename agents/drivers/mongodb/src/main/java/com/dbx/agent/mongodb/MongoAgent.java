@@ -1609,9 +1609,16 @@ public final class MongoAgent {
         }
         Document options = Document.parse(optionsJson);
         for (String key : options.keySet()) {
-            if (!"arrayFilters".equals(key)) {
+            if (!"arrayFilters".equals(key) && !"upsert".equals(key)) {
                 throw new IllegalArgumentException("Unsupported update option: " + key);
             }
+        }
+        Object rawUpsert = options.get("upsert");
+        if (rawUpsert != null) {
+            if (!(rawUpsert instanceof Boolean)) {
+                throw new IllegalArgumentException("upsert must be a boolean");
+            }
+            result.upsert((Boolean) rawUpsert);
         }
         Object rawFilters = options.get("arrayFilters");
         if (rawFilters == null) {

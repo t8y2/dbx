@@ -23,6 +23,7 @@ import {
 } from "@/lib/mq/mqConsoleDefaults";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { AcceptableValue } from "reka-ui";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import TenantsPanel from "./TenantsPanel.vue";
 import NamespacesPanel from "./NamespacesPanel.vue";
 import TopicsPanel from "./TopicsPanel.vue";
@@ -53,6 +54,19 @@ interface Props {
 
 const props = defineProps<Props>();
 const { t } = useI18n();
+
+interface MqTabUiState {
+  activeTab?: MqTab;
+  selectedTenant?: string;
+  selectedNamespace?: string;
+  selectedTopic?: Pick<TopicInfo, "name" | "shortName" | "partitioned" | "persistent" | "namespace">;
+  selectedSubscriptionName?: string;
+  preferDlqTopic?: boolean;
+  showCreateNamespaceDialog?: boolean;
+  createNamespaceName?: string;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqTabUiState>({}, "MqAdminConsole");
 const connectionStore = useConnectionStore();
 const { confirmMqWrite } = useMqMutationGuard(() => props.connectionId);
 const isProductionConnection = computed(() => !!connectionStore.getConfig(props.connectionId)?.is_production);
@@ -77,29 +91,49 @@ function initialMqNamespace(systemKind: MqSystemKind | undefined): string | unde
 
 // State
 const activeTab = ref<MqTab>(
-  resolveInitialMqTab({
-    initialTab: props.initialTab,
-    initialTenant: props.initialTenant,
-    systemKind: configuredSystemKind.value,
-  }),
+  restoredUiState.activeTab ??
+    resolveInitialMqTab({
+      initialTab: props.initialTab,
+      initialTenant: props.initialTenant,
+      systemKind: configuredSystemKind.value,
+    }),
 );
-const selectedTenant = ref<string | undefined>(normalizeFlatMqTenant(props.initialTenant, configuredSystemKind.value));
-const selectedNamespace = ref<string | undefined>(initialMqNamespace(configuredSystemKind.value));
-const selectedTopic = ref<TopicInfo>();
-const selectedSubscriptionName = ref<string>();
+const selectedTenant = ref<string | undefined>(restoredUiState.selectedTenant ?? normalizeFlatMqTenant(props.initialTenant, configuredSystemKind.value));
+const selectedNamespace = ref<string | undefined>(restoredUiState.selectedNamespace ?? initialMqNamespace(configuredSystemKind.value));
+const selectedTopic = ref<TopicInfo | undefined>(restoredUiState.selectedTopic);
+const selectedSubscriptionName = ref<string | undefined>(restoredUiState.selectedSubscriptionName);
 const capabilities = ref<MqClusterInfo["capabilities"]>();
 const clusterInfo = ref<MqClusterInfo>();
 const loading = ref(false);
 const error = ref<string>();
-const preferDlqTopic = ref(props.initialTab === "dlq");
+const preferDlqTopic = ref(restoredUiState.preferDlqTopic ?? props.initialTab === "dlq");
 
 // RabbitMQ vhost switcher (tab-bar namespace dropdown).
 const CREATE_NAMESPACE_VALUE = "__create_namespace__";
 const rabbitMqVhosts = ref<string[]>([]);
-const showCreateNamespaceDialog = ref(false);
-const createNamespaceName = ref("");
+const showCreateNamespaceDialog = ref(restoredUiState.showCreateNamespaceDialog ?? false);
+const createNamespaceName = ref(restoredUiState.createNamespaceName ?? "");
 const createNamespaceError = ref<string>();
 const creatingNamespace = ref(false);
+
+trackUiState(() => ({
+  activeTab: activeTab.value,
+  selectedTenant: selectedTenant.value,
+  selectedNamespace: selectedNamespace.value,
+  selectedTopic: selectedTopic.value
+    ? {
+        name: selectedTopic.value.name,
+        shortName: selectedTopic.value.shortName,
+        partitioned: selectedTopic.value.partitioned,
+        persistent: selectedTopic.value.persistent,
+        namespace: selectedTopic.value.namespace,
+      }
+    : undefined,
+  selectedSubscriptionName: selectedSubscriptionName.value,
+  preferDlqTopic: preferDlqTopic.value,
+  showCreateNamespaceDialog: showCreateNamespaceDialog.value,
+  createNamespaceName: createNamespaceName.value,
+}));
 
 // Computed
 const mqSystemKind = computed<MqSystemKind | undefined>(() => clusterInfo.value?.systemKind ?? configuredSystemKind.value);

@@ -982,12 +982,38 @@ class MongoAgentTest {
     }
 
     @Test
+    void parsesUpsertUpdateOption() {
+        assertTrue(MongoAgent.updateOptionsForWrite("{\"upsert\":true}").isUpsert());
+        assertFalse(MongoAgent.updateOptionsForWrite("{\"upsert\":false}").isUpsert());
+        assertFalse(MongoAgent.updateOptionsForWrite("{}").isUpsert());
+    }
+
+    @Test
+    void parsesUpsertAlongsideArrayFilters() {
+        UpdateOptions options = MongoAgent.updateOptionsForWrite(
+            "{\"upsert\":true,\"arrayFilters\":[{\"item.id\":322678}]}"
+        );
+
+        assertTrue(options.isUpsert());
+        assertEquals(1, options.getArrayFilters().size());
+    }
+
+    @Test
+    void rejectsNonBooleanUpsertUpdateOption() {
+        IllegalArgumentException error = assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.updateOptionsForWrite("{\"upsert\":\"yes\"}")
+        );
+        assertEquals("upsert must be a boolean", error.getMessage());
+    }
+
+    @Test
     void rejectsUnsupportedUpdateOptions() {
         IllegalArgumentException error = assertThrows(
             IllegalArgumentException.class,
-            () -> MongoAgent.updateOptionsForWrite("{\"upsert\":true}")
+            () -> MongoAgent.updateOptionsForWrite("{\"collation\":{\"locale\":\"en\"}}")
         );
-        assertEquals("Unsupported update option: upsert", error.getMessage());
+        assertEquals("Unsupported update option: collation", error.getMessage());
     }
 
     @Test

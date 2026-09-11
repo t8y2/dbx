@@ -17,11 +17,19 @@ describe("DataGrid tab-switch view snapshots", () => {
   const restoreSource = functionSource("restoreTabSwitchViewSnapshot", "const multiRowCount = computed(");
 
   it("captures only with an owner key and a generation, and skips transpose", () => {
-    expect(captureFnSource).toContain("if (!props.cacheKey || !props.viewGeneration) return;");
+    expect(captureFnSource).toContain("if (!ownerKey || !props.viewGeneration) return;");
     expect(captureFnSource).toContain("if (showTranspose.value) return;");
-    expect(captureFnSource).toContain("ownerKey: props.cacheKey");
+    expect(captureFnSource).toContain("ownerKey,");
     expect(captureFnSource).toContain("viewGeneration: props.viewGeneration");
     expect(captureFnSource).toContain("probe: currentViewProbe()");
+  });
+
+  it("takes the snapshot owner from viewStateKey, falling back to cacheKey", () => {
+    // Document tabs need their own owner key: cacheKey also scopes structured
+    // filters, column widths and pending edits, which they leave untouched.
+    expect(dataGridSource).toContain("const viewSnapshotOwnerKey = computed(() => props.viewStateKey?.trim() || props.cacheKey?.trim() || undefined);");
+    expect(captureFnSource).toContain("const ownerKey = viewSnapshotOwnerKey.value;");
+    expect(restoreSource).toContain("const ownerKey = viewSnapshotOwnerKey.value;");
   });
 
   it("captures the selection in O(selection size), never through the refresh identity scan", () => {

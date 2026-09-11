@@ -7,9 +7,15 @@ describe("TableStructureEditor DDL search wiring", () => {
   it("uses a CodeMirror editor and the shared search panel", () => {
     expect(source).toContain('import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";');
     expect(source).toContain('key: "Mod-f"');
-    expect(source).toContain('else if (activeTab.value === "ddl") ddlSearchPanelRef.value?.openSearch();');
+    expect(source).toMatch(/if \(activeTab\.value === "ddl"\) \{\s*ddlSearchPanelRef\.value\?\.openSearch\(\);\s*return true;/);
     expect(source).not.toContain("ddlPreRef");
     expect(source).not.toContain("onDdlKeydown");
+  });
+
+  it("routes the global search command to the active searchable structure tab", () => {
+    expect(source).toMatch(/function focusSearch\(\): boolean \{[\s\S]*activeTab\.value === "columns"[\s\S]*focusColumnSearch\(\);[\s\S]*activeTab\.value === "indexes"[\s\S]*focusIndexSearch\(\);[\s\S]*activeTab\.value === "ddl"[\s\S]*ddlSearchPanelRef\.value\?\.openSearch\(\)/);
+    expect(source).toContain("defineExpose({ applyChanges, focusSearch });");
+    expect(source).toMatch(/if \(isPlainModShortcut\(event, "f"\)\) \{\s*if \(focusSearch\(\)\)/);
   });
 
   it("keeps the DDL editable only where an executable script makes sense", () => {

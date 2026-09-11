@@ -59,14 +59,14 @@ export function createQueryEditorPostCompositionKeyGuard(options: { navigator?: 
  * document, so the app-level shortcut fallback also checks the editor state.
  * This guard covers the keymap path when CodeMirror still dispatches it.
  */
-export function createQueryEditorExecutionShortcutBindings(shortcut: string, run: Command, isComposing: (view: EditorView) => boolean): KeyBinding[] {
+export function createQueryEditorExecutionShortcutBindings(shortcut: string, run: Command, isComposing: (view: EditorView) => boolean, isEnabled: () => boolean = () => true): KeyBinding[] {
   if (!shortcut) return [];
   return [
     {
       key: shortcutToCodeMirrorKey(shortcut),
       preventDefault: true,
       run(view) {
-        if (isComposing(view)) return true;
+        if (isComposing(view) || !isEnabled()) return true;
         return run(view);
       },
     },

@@ -3,7 +3,7 @@ import { toggleLineComment } from "@codemirror/commands";
 import { sql } from "@codemirror/lang-sql";
 import { EditorState, Prec, type Transaction } from "@codemirror/state";
 import { describe, expect, it, vi } from "vitest";
-import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
+import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 
 const queryEditorSource = readFileSync(new URL("../../../components/editor/QueryEditor.vue", import.meta.url), "utf8");
 const editorThemesSource = readFileSync(new URL("../../editor/editorThemes.ts", import.meta.url), "utf8");
@@ -44,6 +44,18 @@ describe("queryEditorLineCommentToken", () => {
     expect(queryEditorLineCommentToken(undefined)).toBe("--");
     expect(queryEditorLineCommentToken("mysql")).toBe("--");
     expect(queryEditorLineCommentToken("postgres")).toBe("--");
+  });
+});
+
+describe("QueryEditor word selection", () => {
+  it("includes the @ prefix in SQL Server variable words", () => {
+    const sqlServer = EditorState.create({ doc: "@name", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("sqlserver"))] });
+    const mysql = EditorState.create({ doc: "@name", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("mysql"))] });
+    const systemVariable = EditorState.create({ doc: "@@ROWCOUNT", extensions: [EditorState.languageData.of(() => queryEditorWordLanguageData("sqlserver"))] });
+
+    for (let position = 0; position <= 5; position += 1) expect(sqlServer.wordAt(position)).toMatchObject({ from: 0, to: 5 });
+    expect(mysql.wordAt(2)).toMatchObject({ from: 1, to: 5 });
+    expect(systemVariable.wordAt(1)).toMatchObject({ from: 0, to: 10 });
   });
 });
 

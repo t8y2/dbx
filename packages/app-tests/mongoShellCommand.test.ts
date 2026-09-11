@@ -313,6 +313,50 @@ test("parseMongoFindCommand rewrites NumberLong into extended JSON", () => {
   assert.deepEqual(JSON.parse(unquoted.filter), { snowflake: { $numberLong: "9007199254740993" } });
 });
 
+test("parseMongoWriteCommand fills in zero-argument new Date, ISODate and ObjectId", () => {
+  const before = Date.now();
+  const command = parseMongoWriteCommand(`db.reports.updateOne(
+    { phone_number: "+84905421172", code: "VN" },
+    { $set: { type: ObjectId("5bbc28701f3fd80f00e0211c"), created_at: new Date(), updated_at: ISODate() } },
+    { upsert: true }
+  )`);
+  assert.ok(command);
+  assert.equal(command.kind, "update");
+  const update = JSON.parse(command.update) as { $set: Record<string, { $date?: string; $oid?: string }> };
+  assert.deepEqual(update.$set.type, { $oid: "5bbc28701f3fd80f00e0211c" });
+  for (const field of ["created_at", "updated_at"] as const) {
+    const filled = Date.parse(update.$set[field]!.$date!);
+    assert.ok(filled >= before && filled <= Date.now(), `${field} is not the current time`);
+  }
+  assert.match(JSON.parse(parseMongoFindCommand("db.reports.find({_id: ObjectId()})")!.filter)._id.$oid, /^[0-9a-f]{24}$/);
+});
+
+test("parseMongoFindCommand rewrites epoch-millisecond and numeric BSON constructors", () => {
+  const command = parseMongoFindCommand('db.orders.find({at: new Date(1735689600000), qty: NumberInt(3), total: NumberDecimal("12.34")})');
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), {
+    at: { $date: { $numberLong: "1735689600000" } },
+    qty: { $numberInt: "3" },
+    total: { $numberDecimal: "12.34" },
+  });
+});
+
+test("parseMongoFindCommand rejects out-of-range integer constructor arguments", () => {
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(9223372036854775808)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberLong(-9223372036854775809)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: NumberInt(2147483648)})"), null);
+  assert.equal(parseMongoFindCommand("db.orders.find({a: new Date(99999999999999999999)})"), null);
+  const atBounds = parseMongoFindCommand("db.orders.find({a: NumberLong(9223372036854775807), b: NumberInt(-2147483648)})");
+  assert.ok(atBounds);
+  assert.deepEqual(JSON.parse(atBounds.filter), { a: { $numberLong: "9223372036854775807" }, b: { $numberInt: "-2147483648" } });
+});
+
+test("parseMongoFindCommand does not rewrite constructor text inside strings", () => {
+  const command = parseMongoFindCommand(`db.orders.find({label: "new Date()", note: 'ObjectId()'})`);
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), { label: "new Date()", note: "ObjectId()" });
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);

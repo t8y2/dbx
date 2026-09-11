@@ -97,7 +97,7 @@ defineExpose({ openSearch });
         </div>
         <div class="space-y-1">
           <div class="text-muted-foreground">{{ t("grid.nullValue") }}</div>
-          <div>{{ detail.value === null ? "true" : "false" }}</div>
+          <div>{{ (detail.isNull ?? detail.value === null) ? "true" : "false" }}</div>
         </div>
         <div class="space-y-1">
           <div class="text-muted-foreground">{{ t("grid.valueLength") }}</div>
@@ -124,7 +124,7 @@ defineExpose({ openSearch });
           </div>
           <div class="space-y-1">
             <div class="text-muted-foreground">{{ t("grid.nullValue") }}</div>
-            <div>{{ detail.value === null ? "true" : "false" }}</div>
+            <div>{{ (detail.isNull ?? detail.value === null) ? "true" : "false" }}</div>
           </div>
           <div class="space-y-1">
             <div class="text-muted-foreground">{{ t("grid.valueLength") }}</div>
@@ -202,7 +202,7 @@ defineExpose({ openSearch });
         ><Button variant="outline" size="sm" class="h-6 text-xs" @click="emit('cancel')">{{ t("dangerDialog.cancel") }}</Button>
       </div>
       <div class="min-w-0 flex flex-wrap gap-1" :class="panelIsBottom ? 'ml-auto justify-end' : 'flex-col'">
-        <Button v-if="detail.isEditable && detail.value !== null" variant="ghost" size="sm" class="h-6 justify-start text-xs" @click="emit('setNull')"><X class="w-3 h-3 mr-2" />{{ t("grid.setNull") }}</Button
+        <Button v-if="detail.isEditable && !(detail.isNull ?? detail.value === null)" variant="ghost" size="sm" class="h-6 justify-start text-xs" @click="emit('setNull')"><X class="w-3 h-3 mr-2" />{{ t("grid.setNull") }}</Button
         ><Button variant="ghost" size="sm" class="h-6 justify-start text-xs" @click="emit('copyColumnName')"><Copy class="w-3 h-3 mr-2" />{{ t("grid.copyColumnName") }}</Button
         ><Button variant="ghost" size="sm" class="h-6 justify-start text-xs" :disabled="!canCopySqlCondition()" @click="emit('copySqlCondition')"><Code2 class="w-3 h-3 mr-2" />{{ t("grid.copySqlCondition") }}</Button>
       </div>

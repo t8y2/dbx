@@ -17,7 +17,12 @@ const backend = vi.hoisted(() => ({
 const dataGrid = vi.hoisted(() => ({
   paginate: undefined as ((offset: number, limit: number) => Promise<void>) | undefined,
   sort: undefined as ((column: string, columnIndex: number, direction: "asc" | "desc" | null) => void) | undefined,
+  reload: undefined as (() => Promise<void>) | undefined,
   pageOffset: undefined as number | undefined,
+  rowCount: undefined as number | undefined,
+  columnCount: undefined as number | undefined,
+  viewStateKey: undefined as string | undefined,
+  viewGeneration: undefined as string | undefined,
 }));
 
 const settings = vi.hoisted(() => ({
@@ -76,10 +81,13 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         pageOffset: { type: Number, required: false },
         pageLimit: { type: Number, required: false },
         pageSizePreference: { type: String, required: false },
+        viewStateKey: { type: String, required: false },
+        viewGeneration: { type: String, required: false },
       },
       setup(props, { attrs, expose, slots }) {
         dataGrid.paginate = attrs.onPaginate as typeof dataGrid.paginate;
         dataGrid.sort = attrs.onSort as typeof dataGrid.sort;
+        dataGrid.reload = attrs.onReload as typeof dataGrid.reload;
         expose({
           visibleColumnCount: 2,
           displayableColumnCount: 2,
@@ -102,6 +110,10 @@ vi.mock("@/components/grid/DataGrid.vue", () => {
         });
         return () => {
           dataGrid.pageOffset = props.pageOffset;
+          dataGrid.viewStateKey = props.viewStateKey;
+          dataGrid.viewGeneration = props.viewGeneration;
+          dataGrid.rowCount = (props.result as { rows: unknown[] }).rows.length;
+          dataGrid.columnCount = (props.result as { columns: unknown[] }).columns.length;
           return h("div", [
             // Rendering the real search-bar slot exposes the filter/sort inputs
             // the same way the actual grid toolbar does.
@@ -151,6 +163,7 @@ vi.mock("@/components/ui/select", async () => {
 });
 
 import DocumentBrowser from "@/components/document/DocumentBrowser.vue";
+import { resetBrowserStateCaches } from "@/lib/tabs/documentBrowserStateCache";
 
 let app: App<Element> | null = null;
 let root: HTMLDivElement | null = null;
@@ -214,8 +227,15 @@ beforeEach(async () => {
   backend.documentFindDocuments.mockResolvedValue(documentResult(1, 2, 2));
   dataGrid.paginate = undefined;
   dataGrid.sort = undefined;
+  dataGrid.reload = undefined;
   dataGrid.pageOffset = undefined;
+  dataGrid.rowCount = undefined;
+  dataGrid.columnCount = undefined;
+  dataGrid.viewStateKey = undefined;
+  dataGrid.viewGeneration = undefined;
   settings.editorSettings.infiniteScroll = false;
+  settings.editorSettings.tableOpenPageSize = 2;
+  resetBrowserStateCaches();
 
   root = document.createElement("div");
   document.body.appendChild(root);
@@ -253,14 +273,20 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
     await flushUi();
     await mountBrowser({ stateKey: "tab-filter-sort" });
 
-    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(4);
-    const restoredCall = backend.documentFindDocuments.mock.calls[3]!;
-    expect(restoredCall[5]).toBe(JSON.stringify({ name: "row_1" }));
-    expect(restoredCall[7]).toBe(JSON.stringify({ name: 1 }));
+    // The remount replays the cached page instead of re-querying (#8679).
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(3);
 
     const [restoredFilter, restoredSort] = queryTextareas();
     expect(restoredFilter.value).toBe('{"name":"row_1"}');
     expect(restoredSort.value).toBe(JSON.stringify({ name: 1 }));
+
+    // The restored conditions are live, not merely cosmetic: the next query
+    // built from them still carries the filter and the new sort direction.
+    dataGrid.sort!("name", 1, "desc");
+    await flushUi();
+    const nextCall = backend.documentFindDocuments.mock.calls[3]!;
+    expect(nextCall[5]).toBe(JSON.stringify({ name: "row_1" }));
+    expect(nextCall[7]).toBe(JSON.stringify({ name: -1 }));
   });
 
   it("restores the page position for skip-based stores", async () => {
@@ -280,9 +306,15 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
     await flushUi();
     await mountBrowser({ stateKey: "tab-page" });
 
-    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(3);
-    expect(backend.documentFindDocuments.mock.calls[2]![3]).toBe(2);
+    // Restored from cache: the page position survives with no extra query.
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
     expect(dataGrid.pageOffset).toBe(2);
+
+    // Paging still works from the restored page.
+    await dataGrid.paginate!(0, 2);
+    await flushUi();
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(3);
+    expect(backend.documentFindDocuments.mock.calls[2]![3]).toBe(0);
   });
 
   it("restarts from the first page for cursor-based stores (elasticsearch)", async () => {
@@ -305,6 +337,127 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
     const restoredCall = backend.documentFindDocuments.mock.calls.at(-1)!;
     expect(restoredCall[3]).toBe(0);
     expect(restoredCall[10]).toBeUndefined();
+  });
+
+  it("does not re-query the collection when a tab switch remounts a mongodb browser", async () => {
+    await mountBrowser({ stateKey: "tab-no-reload" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.rowCount).toBe(2);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-no-reload" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.rowCount).toBe(2);
+  });
+
+  it("still forces a real reload from the refresh button after a restore", async () => {
+    await mountBrowser({ stateKey: "tab-refresh" });
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-refresh" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+
+    await dataGrid.reload!();
+    await flushUi();
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-queries when the page size changed while the tab was inactive", async () => {
+    await mountBrowser({ stateKey: "tab-page-size" });
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+
+    settings.editorSettings.tableOpenPageSize = 10;
+    await mountBrowser({ stateKey: "tab-page-size" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-queries when the previous load failed", async () => {
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockRejectedValueOnce(new Error("boom")).mockResolvedValue(documentResult(1, 2, 2));
+
+    await mountBrowser({ stateKey: "tab-error" });
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-error" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a loaded-but-empty collection distinguishable from a never-loaded one across a remount", async () => {
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue({ documents: [], total: 0, total_is_exact: true });
+
+    await mountBrowser({ stateKey: "tab-empty" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    const loadedColumnCount = dataGrid.columnCount;
+    expect(loadedColumnCount).toBeGreaterThan(0);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-empty" });
+
+    // No reload, and the grid still reads as "a load has completed" so the
+    // refresh toolbar stays available (see the empty-collection behavior).
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.columnCount).toBe(loadedColumnCount);
+  });
+
+  it("re-queries a cursor-based store on remount", async () => {
+    backend.documentFindDocuments.mockReset();
+    backend.documentFindDocuments.mockResolvedValue(documentResult(1, 2, 6));
+
+    await mountBrowser({ databaseType: "elasticsearch", stateKey: "tab-es-reload" });
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ databaseType: "elasticsearch", stateKey: "tab-es-reload" });
+
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(2);
+  });
+
+  it("hands the grid a stable view identity so scroll and selection survive the switch", async () => {
+    await mountBrowser({ stateKey: "tab-view-state" });
+    expect(dataGrid.viewStateKey).toBe("tab-view-state");
+    const generation = dataGrid.viewGeneration;
+    expect(generation).toBeTruthy();
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-view-state" });
+
+    // Same logical result, so DataGrid may replay its cached viewport.
+    expect(backend.documentFindDocuments).toHaveBeenCalledTimes(1);
+    expect(dataGrid.viewGeneration).toBe(generation);
+  });
+
+  it("mints a new view identity when the data is actually reloaded", async () => {
+    await mountBrowser({ stateKey: "tab-view-generation" });
+    const generation = dataGrid.viewGeneration;
+
+    await dataGrid.reload!();
+    await flushUi();
+
+    // A replacement dataset must not adopt the previous viewport.
+    expect(dataGrid.viewGeneration).not.toBe(generation);
   });
 
   it("keeps tab states isolated from each other", async () => {

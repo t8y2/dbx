@@ -111,6 +111,61 @@ describe("queryStore editor groups", () => {
     expect(store.activateTab("missing")).toBe(false);
   });
 
+  it("keeps UI state isolated when switching tabs", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const firstId = store.createTab("pg-1", "app", "Query 1", "query");
+    const secondId = store.createTab("pg-1", "app", "Query 2", "query");
+
+    store.updateTabUiState(firstId, { activeOutputView: "chart", resultPaneOpen: false });
+    store.updateTabUiState(secondId, { activeOutputView: "summary", resultPaneOpen: true });
+
+    store.activateTab(firstId);
+    expect(store.tabs.find((tab) => tab.id === firstId)?.uiState).toEqual({ activeOutputView: "chart", resultPaneOpen: false });
+    store.activateTab(secondId);
+    expect(store.tabs.find((tab) => tab.id === secondId)?.uiState).toEqual({ activeOutputView: "summary", resultPaneOpen: true });
+  });
+
+  it("rejects stale or wrong-mode special-page UI updates", async () => {
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Keys", "etcd");
+    const owner = store.tabs.find((tab) => tab.id === tabId)!;
+
+    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "search" } }, owner);
+    store.updateTabPageUiState(tabId, "query", { QueryEditor: { draft: "stale" } }, owner);
+    store.updateTabPageUiState(tabId, "etcd", { EtcdKeyBrowser: { mode: "watch" } }, { ...owner });
+
+    expect(owner.uiState?.page).toEqual({ etcd: { EtcdKeyBrowser: { mode: "search" } } });
+  });
+
+  it("persists tab UI state with the open-tabs snapshot", async () => {
+    const api = await import("@/lib/backend/api");
+    const storeApi = vi.mocked(api.saveOpenTabsState);
+    storeApi.mockClear();
+    const { useQueryStore } = await import("@/stores/queryStore");
+    const store = useQueryStore();
+    const tabId = store.createTab("pg-1", "app", "Query 1", "query");
+
+    store.updateTabUiState(tabId, { activeOutputView: "messages", resultPaneOpen: false });
+    store.updateTabPageUiState(tabId, "query", { QueryEditor: { inspectorOpen: true } });
+    await store.flushPendingPersist();
+
+    expect(storeApi).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tabs: [
+          expect.objectContaining({
+            uiState: {
+              activeOutputView: "messages",
+              resultPaneOpen: false,
+              page: { query: { QueryEditor: { inspectorOpen: true } } },
+            },
+          }),
+        ],
+      }),
+    );
+  });
+
   it("close all in group only closes the same pinned partition as the trigger tab", async () => {
     const { useQueryStore } = await import("@/stores/queryStore");
     const store = useQueryStore();

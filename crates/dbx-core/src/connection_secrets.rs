@@ -560,10 +560,7 @@ fn scrub_mq_token_signing_secret(config: &mut ConnectionConfig) {
     scrub_json_secret(signing, "key");
 }
 
-fn persist_cassandra_tls_secrets(
-    store: &dyn ConnectionSecretStore,
-    config: &ConnectionConfig,
-) -> Result<(), String> {
+fn persist_cassandra_tls_secrets(store: &dyn ConnectionSecretStore, config: &ConnectionConfig) -> Result<(), String> {
     if config.db_type != DatabaseType::Cassandra {
         return delete_secret_prefix(store, &config.id, CASSANDRA_TLS_SECRET_PREFIX);
     }
@@ -574,17 +571,13 @@ fn persist_cassandra_tls_secrets(
         store,
         &config.id,
         CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-        tls.get("truststore_password")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(""),
+        tls.get("truststore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )?;
     persist_secret(
         store,
         &config.id,
         CASSANDRA_KEYSTORE_PASSWORD_KEY,
-        tls.get("keystore_password")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(""),
+        tls.get("keystore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )
 }
 
@@ -608,14 +601,7 @@ fn hydrate_cassandra_tls_secrets(
         "truststore_password",
         needs_rewrite,
     )?;
-    hydrate_json_secret(
-        store,
-        &connection_id,
-        CASSANDRA_KEYSTORE_PASSWORD_KEY,
-        tls,
-        "keystore_password",
-        needs_rewrite,
-    )
+    hydrate_json_secret(store, &connection_id, CASSANDRA_KEYSTORE_PASSWORD_KEY, tls, "keystore_password", needs_rewrite)
 }
 
 fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
@@ -629,9 +615,7 @@ fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
     scrub_json_secret(tls, "keystore_password");
 }
 
-fn cassandra_tls_object(
-    value: Option<&serde_json::Value>,
-) -> Option<&serde_json::Map<String, serde_json::Value>> {
+fn cassandra_tls_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     value?.get("tls")?.as_object()
 }
 
@@ -845,11 +829,10 @@ pub fn secret_account(connection_id: &str, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        load_connections_from_file, save_connections_to_file, ConnectionSecretStore,
-        CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-        CONNECTION_STRING_KEY, INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY, MQTT_AUTH_PASSWORD_KEY,
-        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, REDIS_SENTINEL_PASSWORD_KEY,
-        SSH_PASSWORD_KEY,
+        load_connections_from_file, save_connections_to_file, ConnectionSecretStore, CASSANDRA_KEYSTORE_PASSWORD_KEY,
+        CASSANDRA_TRUSTSTORE_PASSWORD_KEY, CONNECTION_STRING_KEY, INIT_SCRIPT_KEY, MAIN_PASSWORD_KEY,
+        MQTT_AUTH_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
+        REDIS_SENTINEL_PASSWORD_KEY, SSH_PASSWORD_KEY,
     };
     use crate::models::connection::{
         ConnectionConfig, DatabaseType, HttpTunnelConfig, SshTunnelConfig, TransportLayerConfig,
@@ -1234,38 +1217,16 @@ mod tests {
 
         save_connections_to_file(&path, &[config], &store).unwrap();
 
-        assert_eq!(
-            store
-                .get_existing("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY)
-                .as_deref(),
-            Some("trust-secret")
-        );
-        assert_eq!(
-            store
-                .get_existing("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY)
-                .as_deref(),
-            Some("key-secret")
-        );
+        assert_eq!(store.get_existing("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY).as_deref(), Some("trust-secret"));
+        assert_eq!(store.get_existing("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY).as_deref(), Some("key-secret"));
         let persisted_json = std::fs::read_to_string(&path).unwrap();
         assert!(!persisted_json.contains("trust-secret"));
         assert!(!persisted_json.contains("key-secret"));
 
         let loaded = load_connections_from_file(&path, &store).unwrap();
-        let tls = loaded[0]
-            .external_config
-            .as_ref()
-            .and_then(|value| value.get("tls"))
-            .unwrap();
-        assert_eq!(
-            tls.get("truststore_password")
-                .and_then(serde_json::Value::as_str),
-            Some("trust-secret")
-        );
-        assert_eq!(
-            tls.get("keystore_password")
-                .and_then(serde_json::Value::as_str),
-            Some("key-secret")
-        );
+        let tls = loaded[0].external_config.as_ref().and_then(|value| value.get("tls")).unwrap();
+        assert_eq!(tls.get("truststore_password").and_then(serde_json::Value::as_str), Some("trust-secret"));
+        assert_eq!(tls.get("keystore_password").and_then(serde_json::Value::as_str), Some("key-secret"));
     }
 
     #[test]

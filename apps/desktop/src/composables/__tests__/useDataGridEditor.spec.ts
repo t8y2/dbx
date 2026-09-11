@@ -2,6 +2,8 @@
 import { computed, nextTick, ref, type Ref } from "vue";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearDataGridPendingSnapshot, DATA_GRID_QUICK_ENTRY_DRAFT_ROW_ID, useDataGridEditor } from "@/composables/useDataGridEditor";
+import { clearDataGridClipboardCopy, parseDataGridClipboard, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
+import { buildMongoUpdateDocument, MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridInputValue, mongoDocumentGridValue } from "@/lib/mongo/mongoDocumentValues";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
 
 const mocks = vi.hoisted(() => ({
@@ -46,6 +48,7 @@ function createEditorWithResult(
   existingRows: CellValue[][] = [],
   onCellValueChanged?: (rowId: number, columnIndex: number) => void,
   tableColumns?: Array<{ name: string; data_type: string; extra?: string; column_default?: string }>,
+  mongoCollectionGrid = false,
 ) {
   let editor: ReturnType<typeof useDataGridEditor>;
   const result = ref<{ columns: string[]; rows: CellValue[][] }>({
@@ -56,7 +59,8 @@ function createEditorWithResult(
   editor = useDataGridEditor({
     result: computed(() => result.value),
     editable: computed(() => true),
-    databaseType: computed(() => "postgres"),
+    databaseType: computed(() => (mongoCollectionGrid ? "mongodb" : "postgres")),
+    normalizeEditorInput: mongoCollectionGrid ? mongoDocumentGridInputValue : undefined,
     connectionId: computed(() => "connection-1"),
     database: computed(() => "app"),
     tableMeta: computed(() => ({
@@ -1186,5 +1190,23 @@ describe("useDataGridEditor cell edit focus", () => {
     expect(select).toHaveBeenCalledTimes(1);
     expect(setSelectionRange).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("Mongo collection-grid clipboard round-trip", () => {
+  it.each([null, MONGO_DOCUMENT_GRID_NULL, "\u0000dbx:mongo-document-grid:string:literal", "NULL"])("preserves BSON value %j through paste and save", (bsonValue) => {
+    const encoded = mongoDocumentGridValue(bsonValue) as string;
+    const editor = createEditor(undefined, true, undefined, undefined, [["before", "", ""]], undefined, undefined, true);
+    try {
+      // The OS clipboard is display text; the internal matrix retains encoding.
+      rememberDataGridClipboardCopy("copied text", [[encoded]]);
+      const pasted = parseDataGridClipboard("copied text")[0]![0]!;
+      editor.applyCellValue(0, 0, pasted);
+      const changes = editor.dirtyRows.value.get(0)!;
+      expect(changes.get(0)).toBe(encoded);
+      expect(buildMongoUpdateDocument(changes, ["value"], { value: "before" })).toEqual({ $set: { value: bsonValue } });
+    } finally {
+      clearDataGridClipboardCopy();
+    }
   });
 });

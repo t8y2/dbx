@@ -5283,6 +5283,10 @@ fn connection_remote_endpoint(config: &ConnectionConfig) -> (String, u16) {
             .and_then(parse_jdbc_host_port)
             .unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::MessageQueue {
+        #[cfg(feature = "mq-admin")]
+        if let Some(endpoint) = parse_rabbitmq_amqp_host_port(config) {
+            return endpoint;
+        }
         parse_mq_admin_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
     } else if config.db_type == DatabaseType::Mqtt {
         parse_mqtt_broker_host_port(config).unwrap_or_else(|| (config.host.clone(), config.port))
@@ -5301,6 +5305,15 @@ fn rnacos_console_transport_id(connection_id: &str) -> String {
 
 fn rabbitmq_management_transport_id(connection_id: &str) -> String {
     format!("{connection_id}:rabbitmq-management")
+}
+
+#[cfg(feature = "mq-admin")]
+fn parse_rabbitmq_amqp_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
+    let mqc = crate::mq::config::MqAdminConfig::from_connection(config).ok()?;
+    if mqc.system_kind != crate::mq::types::MqSystemKind::RabbitMq {
+        return None;
+    }
+    crate::mq::adapters::rabbitmq::primary_amqp_endpoint(&mqc).ok()
 }
 
 fn parse_mq_admin_host_port(config: &ConnectionConfig) -> Option<(String, u16)> {
@@ -9533,6 +9546,52 @@ for line in sys.stdin:
         state.reset_connection_transport_for_config("proxied-rabbitmq", &config).await;
         assert!(state.proxy_tunnels.local_port("proxied-rabbitmq:transport:0").await.is_none());
         assert!(state.proxy_tunnels.local_port("proxied-rabbitmq:rabbitmq-management:transport:0").await.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(feature = "mq-admin")]
+    #[tokio::test]
+    async fn rabbitmq_transport_does_not_reuse_prestarted_management_tunnel_for_amqp() {
+        let (state, dir) = test_app_state().await;
+        let mut config = mysql_config(None);
+        config.id = "proxied-rabbitmq-custom-ports".to_string();
+        config.db_type = DatabaseType::MessageQueue;
+        config.host = "127.0.0.1".to_string();
+        config.port = 35672;
+        config.external_config = Some(serde_json::json!({
+            "systemKind": "rabbitmq",
+            "adminUrl": "http://127.0.0.1:35673",
+            "auth": { "kind": "none" },
+            "extra": {
+                "addresses": "127.0.0.1:35672",
+                "virtualHost": "/"
+            }
+        }));
+        config.transport_layers = vec![TransportLayerConfig::Proxy(ProxyTunnelConfig {
+            profile_id: String::new(),
+            id: "proxy".to_string(),
+            name: String::new(),
+            enabled: true,
+            proxy_type: ProxyType::Socks5,
+            host: "127.0.0.1".to_string(),
+            port: 65000,
+            username: String::new(),
+            password: String::new(),
+            test_target: None,
+        })];
+
+        assert_eq!(connection_remote_endpoint(&config), ("127.0.0.1".to_string(), 35672));
+
+        let prestarted_amqp_port =
+            state.connection_host_port("proxied-rabbitmq-custom-ports", &config).await.unwrap().1;
+        let mqc = state.mq_admin_config_for_connection("proxied-rabbitmq-custom-ports", &config).await.unwrap();
+        let amqp_override = mqc.connect_override.expect("RabbitMQ AMQP tunnel override");
+        let management_override = mqc.management_connect_override.expect("RabbitMQ Management tunnel override");
+
+        assert_eq!(amqp_override.port, prestarted_amqp_port);
+        assert_ne!(amqp_override.port, management_override.port);
+
+        state.reset_connection_transport_for_config("proxied-rabbitmq-custom-ports", &config).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 

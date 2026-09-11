@@ -10,7 +10,7 @@ import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useConsulStore } from "@/stores/consulStore";
 import { nextWatchIndex } from "@/lib/consul/watchState";
-import { consulAgentWriteTargetSafe } from "@/lib/consul/agentTarget";
+import { consulAgentWriteBlockedReason } from "@/lib/consul/agentTarget";
 import { clampConsulPage, CONSUL_LIST_PAGE_SIZE, paginateConsulItems } from "@/lib/consul/pagination";
 import { useI18n } from "vue-i18n";
 import type { ConsulAgentIdentity, ConsulAgentService, ConsulAgentServiceRegistration, ConsulCatalogNode, ConsulCatalogServiceNode, ConsulDomainWatchResponse, ConsulHealthCheck, ConsulNodeServices, ConsulScope } from "@/types/consul";
@@ -35,7 +35,13 @@ const agentTarget = computed(() => {
   const address = String(target.address || "").trim();
   return node && address ? { node, address } : null;
 });
-const canAgentWrite = computed(() => consulAgentWriteTargetSafe(store.getConfig(props.connectionId), identity.value?.node));
+const agentWriteBlockedReason = computed(() => consulAgentWriteBlockedReason(store.getConfig(props.connectionId), identity.value?.node));
+const canAgentWrite = computed(() => agentWriteBlockedReason.value === null);
+const agentWriteDisabledMessage = computed(() => {
+  if (agentLoading.value && !identity.value) return t("consul.ui.agentTargetVerifying");
+  const reason = agentWriteBlockedReason.value;
+  return reason ? t(`consul.ui.agentWriteBlocked.${reason}`) : "";
+});
 const agentTargetStatus = computed<"verifying" | "writable" | "readonly">(() => {
   if (agentLoading.value && !identity.value) return "verifying";
   return canAgentWrite.value ? "writable" : "readonly";
@@ -59,6 +65,8 @@ const agentLoading = ref(true);
 const saving = ref(false);
 const editorOpen = ref(false);
 const maintenancePendingId = ref("");
+const deregisterPendingId = ref("");
+const deregisterSuccess = ref("");
 const form = ref({ id: "", name: "", tags: "", address: "", port: 0 });
 let sequence = 0;
 const watchEnabled = ref(false);
@@ -361,11 +369,12 @@ async function load() {
     if (browseMode.value === "service") await loadInstances();
     else await loadNodeServices();
   }
-  void loadAgentData(current);
+  if (current === sequence) await loadAgentData(current);
 }
 
 async function loadAgentData(current = sequence) {
   agentLoading.value = true;
+  identity.value = null;
   await Promise.all([
     independent(t("consul.ui.agent"), async () => {
       const result = await withTimeout(api.consulAgentSelf(props.connectionId), 8_000, t("consul.ui.agentIdentityRequestTimedOut"));
@@ -498,15 +507,41 @@ async function registerService() {
 }
 
 async function deregister(id: string) {
-  if (!canAgentWrite.value || !window.confirm(t("consul.ui.deregisterService", { id, node: agentTarget.value?.node || t("consul.ui.targetAgent") }))) return;
-  await independent(t("consul.ui.writeOperation"), async () => {
-    await api.consulAgentDeregisterService(props.connectionId, id);
+  if (!canAgentWrite.value || deregisterPendingId.value || maintenancePendingId.value) return;
+  const node = agentTarget.value?.node;
+  if (!node) return;
+  if (!window.confirm(`${t("consul.ui.deregisterService", { id, node })}\n\n${t("consul.ui.deregisterServiceHint")}`)) return;
+  const connectionId = props.connectionId;
+  const generation = consulStore.generation;
+  const isCurrent = () => connectionId === props.connectionId && generation === consulStore.generation;
+  deregisterPendingId.value = id;
+  deregisterSuccess.value = "";
+  const writeErrorKey = t("consul.ui.writeOperation");
+  const remainingErrors = { ...errors.value };
+  delete remainingErrors[writeErrorKey];
+  errors.value = remainingErrors;
+  try {
+    await api.consulAgentDeregisterService(connectionId, id);
+  } catch (error) {
+    if (isCurrent()) errors.value = { ...errors.value, [writeErrorKey]: errorMessage(error) };
+    deregisterPendingId.value = "";
+    return;
+  }
+  try {
+    if (!isCurrent()) return;
+    deregisterSuccess.value = t("consul.ui.deregisterServiceSucceeded", { id, node });
+    if (selectedLocalService.value?.ID === id) selectedLocalService.value = null;
+    // The write has succeeded; subsequent read failures must not be reported as a failed deregistration.
     await load();
-  });
+  } catch (error) {
+    if (isCurrent()) errors.value = { ...errors.value, [t("consul.ui.deregisterRefreshFailed")]: errorMessage(error) };
+  } finally {
+    deregisterPendingId.value = "";
+  }
 }
 
 async function maintenance(id: string, enable: boolean) {
-  if (!canAgentWrite.value) return;
+  if (!canAgentWrite.value || deregisterPendingId.value || maintenancePendingId.value) return;
   maintenancePendingId.value = id;
   try {
     await independent(t("consul.ui.writeOperation"), async () => {
@@ -541,8 +576,15 @@ watch(filteredLocalServiceItems, (items) => {
   localServicePage.value = clampConsulPage(localServicePage.value, items.length);
 });
 watch(
+  () => consulStore.generation,
+  () => {
+    deregisterSuccess.value = "";
+  },
+);
+watch(
   () => props.connectionId,
   async () => {
+    deregisterSuccess.value = "";
     await stopWatches();
     watchEnabled.value = false;
     watchPaused.value = false;
@@ -873,8 +915,9 @@ defineExpose({ refresh: () => (void load(), true) });
           </div>
         </div>
         <div v-if="!canAgentWrite && (identity || !agentLoading)" class="flex items-start gap-2 border-b border-amber-300/70 bg-amber-50/70 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-200">
-          <LockKeyhole class="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{{ t("consul.ui.agentWriteDisabledHint", { target: identity ? `${identity.node} (${identity.address})` : t("consul.ui.unknownWritesDisabled") }) }}</span>
+          <LockKeyhole class="mt-0.5 h-3.5 w-3.5 shrink-0" /><span>{{ agentWriteDisabledMessage }}</span>
         </div>
+        <div v-if="deregisterSuccess" role="status" class="border-b px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">{{ deregisterSuccess }}</div>
         <div v-for="service in pagedLocalServices" :key="service.ID" class="border-b last:border-0" :class="selectedLocalService?.ID === service.ID && 'bg-muted/20'">
           <div class="grid gap-3 px-3 py-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
             <button type="button" class="flex min-w-0 items-start gap-3 text-left" :aria-expanded="selectedLocalService?.ID === service.ID" @click="openLocalService(service.ID)">
@@ -890,12 +933,21 @@ defineExpose({ refresh: () => (void load(), true) });
                 ></span
               >
             </button>
-            <div v-if="canAgentWrite" class="flex shrink-0 items-center gap-1 lg:border-l lg:pl-3">
-              <Button v-if="!isServiceInMaintenance(service.ID)" size="sm" variant="ghost" class="h-7 gap-1 px-2 text-xs" :disabled="maintenancePendingId === service.ID" :title="t('consul.ui.enableMaintenance')" @click.stop="maintenance(service.ID, true)"
+            <div class="flex shrink-0 items-center gap-1 lg:border-l lg:pl-3" :title="agentWriteDisabledMessage || undefined">
+              <Button v-if="canAgentWrite && !isServiceInMaintenance(service.ID)" size="sm" variant="ghost" class="h-7 gap-1 px-2 text-xs" :disabled="!!maintenancePendingId || !!deregisterPendingId" :title="t('consul.ui.enableMaintenance')" @click.stop="maintenance(service.ID, true)"
                 ><Loader2 v-if="maintenancePendingId === service.ID" class="h-3.5 w-3.5 animate-spin" /><Wrench v-else class="h-3.5 w-3.5" />{{ t("consul.ui.enableMaintenance") }}</Button
-              ><Button v-else size="sm" variant="ghost" class="h-7 gap-1 px-2 text-xs text-amber-700 hover:text-amber-700 dark:text-amber-300" :disabled="maintenancePendingId === service.ID" :title="t('consul.ui.disableMaintenance')" @click.stop="maintenance(service.ID, false)"
+              ><Button
+                v-else-if="canAgentWrite"
+                size="sm"
+                variant="ghost"
+                class="h-7 gap-1 px-2 text-xs text-amber-700 hover:text-amber-700 dark:text-amber-300"
+                :disabled="!!maintenancePendingId || !!deregisterPendingId"
+                :title="t('consul.ui.disableMaintenance')"
+                @click.stop="maintenance(service.ID, false)"
                 ><Loader2 v-if="maintenancePendingId === service.ID" class="h-3.5 w-3.5 animate-spin" /><CircleCheck v-else class="h-3.5 w-3.5" />{{ t("consul.ui.disableMaintenance") }}</Button
-              ><Button size="sm" variant="ghost" class="h-7 gap-1 px-2 text-xs text-destructive hover:text-destructive" :title="t('consul.ui.deregister')" @click.stop="deregister(service.ID)"><Trash2 class="h-3.5 w-3.5" />{{ t("consul.ui.deregister") }}</Button>
+              ><Button size="sm" variant="ghost" class="h-7 gap-1 px-2 text-xs text-destructive hover:text-destructive" :disabled="!canAgentWrite || !!deregisterPendingId || !!maintenancePendingId" :title="agentWriteDisabledMessage || t('consul.ui.deregister')" @click.stop="deregister(service.ID)"
+                ><Loader2 v-if="deregisterPendingId === service.ID" class="h-3.5 w-3.5 animate-spin" /><Trash2 v-else class="h-3.5 w-3.5" />{{ deregisterPendingId === service.ID ? t("consul.ui.deregistering") : t("consul.ui.deregister") }}</Button
+              >
             </div>
           </div>
           <div v-if="selectedLocalService?.ID === service.ID" class="border-t bg-background px-4 py-3 text-xs">

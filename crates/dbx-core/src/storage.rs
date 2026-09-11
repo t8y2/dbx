@@ -3869,22 +3869,12 @@ impl Storage {
         let Some(tls) = cassandra_tls_object_mut(config.external_config.as_mut()) else {
             return Ok(false);
         };
-        let truststore_rewrite = hydrate_mq_json_secret(
-            self,
-            connection_id,
-            CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-            tls,
-            "truststore_password",
-        )
-        .await?;
-        let keystore_rewrite = hydrate_mq_json_secret(
-            self,
-            connection_id,
-            CASSANDRA_KEYSTORE_PASSWORD_KEY,
-            tls,
-            "keystore_password",
-        )
-        .await?;
+        let truststore_rewrite =
+            hydrate_mq_json_secret(self, connection_id, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, tls, "truststore_password")
+                .await?;
+        let keystore_rewrite =
+            hydrate_mq_json_secret(self, connection_id, CASSANDRA_KEYSTORE_PASSWORD_KEY, tls, "keystore_password")
+                .await?;
         Ok(truststore_rewrite || keystore_rewrite)
     }
 }
@@ -5169,17 +5159,13 @@ fn persist_cassandra_tls_secrets_in_tx(
         tx,
         &config.id,
         CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-        tls.get("truststore_password")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(""),
+        tls.get("truststore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )?;
     persist_secret_in_tx(
         tx,
         &config.id,
         CASSANDRA_KEYSTORE_PASSWORD_KEY,
-        tls.get("keystore_password")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(""),
+        tls.get("keystore_password").and_then(serde_json::Value::as_str).unwrap_or(""),
     )
 }
 
@@ -5244,9 +5230,7 @@ fn mq_token_signing_object_mut(
     value?.get_mut("tokenSigning")?.as_object_mut()
 }
 
-fn cassandra_tls_object(
-    value: Option<&serde_json::Value>,
-) -> Option<&serde_json::Map<String, serde_json::Value>> {
+fn cassandra_tls_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     value?.get("tls")?.as_object()
 }
 
@@ -5315,8 +5299,8 @@ mod tests {
     };
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
-        CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY,
-        MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+        CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
+        MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
@@ -5962,19 +5946,11 @@ mod tests {
         assert!(!raw_json.contains("trust-secret"));
         assert!(!raw_json.contains("key-secret"));
         assert_eq!(
-            storage
-                .get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY)
-                .await
-                .unwrap()
-                .as_deref(),
+            storage.get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY).await.unwrap().as_deref(),
             Some("trust-secret")
         );
         assert_eq!(
-            storage
-                .get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY)
-                .await
-                .unwrap()
-                .as_deref(),
+            storage.get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY).await.unwrap().as_deref(),
             Some("key-secret")
         );
 
@@ -5987,14 +5963,8 @@ mod tests {
         disabled.ssl = false;
         disabled.external_config = None;
         storage.save_connections(&[disabled]).await.unwrap();
-        assert_eq!(
-            storage.get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY).await.unwrap(),
-            None
-        );
-        assert_eq!(
-            storage.get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY).await.unwrap(),
-            None
-        );
+        assert_eq!(storage.get_secret("cassandra", CASSANDRA_TRUSTSTORE_PASSWORD_KEY).await.unwrap(), None);
+        assert_eq!(storage.get_secret("cassandra", CASSANDRA_KEYSTORE_PASSWORD_KEY).await.unwrap(), None);
 
         let _ = std::fs::remove_file(path);
     }

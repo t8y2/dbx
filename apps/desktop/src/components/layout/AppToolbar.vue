@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -27,6 +27,7 @@ const GithubIcon = {
 const props = defineProps<{
   isDark: boolean;
   themeMode: AppThemeMode;
+  showSidebarExpand?: boolean;
   showAiPanel: boolean;
   activeAiRunCount: number;
   /** Runs awaiting a write confirmation; the badge turns amber to outrank the
@@ -39,6 +40,7 @@ const props = defineProps<{
   showDriverStore: boolean;
   showSettingsPage: boolean;
   checkingUpdates: boolean;
+  updateVersion?: string;
   hasUpdateAvailable: boolean;
   isDownloadingUpdate: boolean;
   downloadProgress: number | null;
@@ -51,6 +53,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "expand-sidebar": [];
   "new-connection": [];
   "new-query": [];
   "set-theme-mode": [mode: AppThemeMode];
@@ -73,15 +76,12 @@ const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
-const checkingUpdates = computed(() => props.checkingUpdates);
 const updateTooltip = computed(() => {
-  if (props.isDownloadingUpdate) return t("updates.downloading", { progress: props.downloadProgress ?? 0 });
-  if (props.updateReady) return t("updates.restartRequiredTooltip");
-  if (props.updateReadyToInstall) return t("updates.updateReadyTooltip");
+  if (props.hasUpdateAvailable && props.updateReady) return t("updates.restartRequiredTooltip");
+  if (props.hasUpdateAvailable && props.updateReadyToInstall) return t("updates.downloadedReady", { version: props.updateVersion ?? "" });
   return t("updates.check");
 });
-// ToolbarUpdateIcon takes a 0..1 fraction, with null meaning the download size is unknown.
-const updateDownloadProgress = computed(() => (props.downloadProgress == null ? null : Math.min(1, Math.max(0, props.downloadProgress / 100))));
+
 const sqlLibrarySaveFeedbackActive = ref(false);
 const SQL_LIBRARY_BOOKMARK_PATH = "M10 2 L10 10 L13 7 L16 10 L16 2";
 const SQL_LIBRARY_CHECK_PATH = "M9 9.5 L9 9.5 L11 11.5 L15 7.5 L15 7.5";
@@ -197,7 +197,7 @@ const collapsibleRightItemDefs = computed(() => {
       label: t("updates.check"),
       icon: CloudDownload,
       action: () => emit("check-updates"),
-      disabled: checkingUpdates.value,
+      disabled: false,
     });
   }
   items.push({
@@ -380,6 +380,11 @@ function handleWindowResize() {
 
 watch(collapsibleRightItemDefs, () => scheduleToolbarLayout(), { flush: "post" });
 watch(
+  () => props.showSidebarExpand,
+  () => scheduleToolbarLayout(),
+  { flush: "post" },
+);
+watch(
   () => settingsStore.editorSettings.uiScale,
   () => {
     measuredTrafficLightInset.value = null;
@@ -534,6 +539,14 @@ const toolbarStyle = computed(() => {
 
 <template>
   <div ref="toolbarEl" class="app-toolbar h-10 flex items-center gap-1 px-2 border-b bg-muted/30 shrink-0 overflow-hidden" :style="toolbarStyle" data-tauri-drag-region @dblclick="onToolbarDblClick">
+    <Tooltip v-if="showSidebarExpand">
+      <TooltipTrigger as-child>
+        <Button variant="ghost" size="icon" class="toolbar-action-button h-8 w-8 shrink-0" :aria-label="t('sidebar.expand')" @click="emit('expand-sidebar')">
+          <ChevronsRight class="h-4 w-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{{ t("sidebar.expand") }}</TooltipContent>
+    </Tooltip>
     <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('new-connection')">
       <span class="inline-flex items-center gap-1">
         <DatabaseZap class="h-3.5 w-3.5" />
@@ -597,10 +610,9 @@ const toolbarStyle = computed(() => {
       <template v-if="toolbarItems.checkUpdates">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :disabled="checkingUpdates" @click="emit('check-updates')">
-              <ToolbarUpdateIcon :loading="checkingUpdates" :downloading="isDownloadingUpdate" :progress="updateDownloadProgress" />
-              <span v-if="updateReady || updateReadyToInstall" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-background" />
-              <span v-else-if="hasUpdateAvailable && !isDownloadingUpdate" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
+            <Button v-show="isRightItemVisible('checkUpdates')" data-toolbar-update-trigger variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" @click="emit('check-updates')">
+              <ToolbarUpdateIcon />
+              <span v-if="hasUpdateAvailable" class="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-red-500 ring-2 ring-background" />
             </Button>
           </TooltipTrigger>
           <TooltipContent>{{ updateTooltip }}</TooltipContent>

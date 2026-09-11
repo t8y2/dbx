@@ -29,6 +29,7 @@ import {
   type AuthorizationStepResult,
   type DatabaseAuthorizationSelection,
 } from "@/lib/database/databaseAuthorizationPlan";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -39,11 +40,24 @@ const connectionStore = useConnectionStore();
 const { toast } = useToast();
 const { highlight } = useSqlHighlighter();
 
+interface DatabaseUserAdminTabUiState {
+  selectedUserKey?: string;
+  search?: string;
+  privilegeDatabase?: string;
+  privilegeTable?: string;
+  privilegeScope?: PrivilegeScope;
+  privilegeRole?: string;
+  grantOption?: boolean;
+  selectedPrivileges?: string[];
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<DatabaseUserAdminTabUiState>({}, "DatabaseUserAdmin");
+const privilegeScopes: PrivilegeScope[] = ["mysql", "database", "schema", "table", "role"];
 const users = ref<DatabaseUserIdentity[]>([]);
-const selectedUserKey = ref("");
+const selectedUserKey = ref(restoredUiState.selectedUserKey ?? "");
 const grants = ref<string[]>([]);
 const grantsLoaded = ref(false);
-const search = ref("");
+const search = ref(restoredUiState.search ?? "");
 const loadingUsers = ref(false);
 const loadingGrants = ref(false);
 const applying = ref(false);
@@ -66,12 +80,12 @@ const createHost = ref("%");
 const createPassword = ref("");
 const newHost = ref("");
 const newPassword = ref("");
-const privilegeDatabase = ref(props.connection.database || "*");
-const privilegeTable = ref("*");
-const privilegeScope = ref<PrivilegeScope>("mysql");
-const privilegeRole = ref("");
-const grantOption = ref(false);
-const selectedPrivileges = ref<string[]>(["SELECT"]);
+const privilegeDatabase = ref(restoredUiState.privilegeDatabase ?? (props.connection.database || "*"));
+const privilegeTable = ref(restoredUiState.privilegeTable ?? "*");
+const privilegeScope = ref<PrivilegeScope>(privilegeScopes.includes(restoredUiState.privilegeScope as PrivilegeScope) ? restoredUiState.privilegeScope! : "mysql");
+const privilegeRole = ref(restoredUiState.privilegeRole ?? "");
+const grantOption = ref(restoredUiState.grantOption ?? false);
+const selectedPrivileges = ref<string[]>(restoredUiState.selectedPrivileges ?? ["SELECT"]);
 const createCanLogin = ref(true);
 const createAccountType = ref<AuthorizationAccountType>("standard");
 const createDatabases = ref<string[]>([]);
@@ -83,6 +97,18 @@ const createDatabaseTablesLoading = ref<Record<string, boolean>>({});
 const createDatabaseTableErrors = ref<Record<string, string>>({});
 const createDatabaseTableSearch = ref<Record<string, string>>({});
 let createPlanRequestId = 0;
+let preserveRestoredPrivilegeSelection = restoredUiState.selectedPrivileges !== undefined || restoredUiState.grantOption !== undefined;
+
+trackUiState(() => ({
+  selectedUserKey: selectedUserKey.value,
+  search: search.value,
+  privilegeDatabase: privilegeDatabase.value,
+  privilegeTable: privilegeTable.value,
+  privilegeScope: privilegeScope.value,
+  privilegeRole: privilegeRole.value,
+  grantOption: grantOption.value,
+  selectedPrivileges: selectedPrivileges.value,
+}));
 
 const provider = computed(() => resolveDatabaseUserAdminProviderForConnection(props.connection));
 const supported = computed(() => provider.value !== null);
@@ -136,6 +162,10 @@ const canPreviewHostChange = computed(() => {
 function syncPrivilegeSelectionFromGrants() {
   const selectionFromGrants = provider.value?.privilegeSelectionFromGrants;
   if (!grantsLoaded.value || !selectionFromGrants) return;
+  if (preserveRestoredPrivilegeSelection) {
+    preserveRestoredPrivilegeSelection = false;
+    return;
+  }
   const selection = selectionFromGrants({
     grants: grants.value,
     database: privilegeDatabase.value,
@@ -617,9 +647,14 @@ watch(
   },
 );
 
+let initialProviderSync = true;
 watch(
   () => provider.value,
   () => {
+    if (initialProviderSync) {
+      initialProviderSync = false;
+      if (restoredUiState.privilegeScope !== undefined) return;
+    }
     privilegeScope.value = provider.value?.defaultScope ?? "mysql";
     resetPrivilegeDefaults(privilegeScope.value);
   },

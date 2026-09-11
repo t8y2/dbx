@@ -1124,6 +1124,8 @@ export interface TableStructureEditorViewport {
 
 export type ObjectBrowserViewMode = "list" | "grid";
 
+export type ObjectBrowserFilter = "all" | "tables" | "views" | "materializedViews" | "procedures" | "functions" | "triggers" | "events" | "sequences" | "packages" | "types";
+
 export interface ObjectBrowserViewport {
   scrollTop: number;
   viewMode: ObjectBrowserViewMode;
@@ -1148,6 +1150,18 @@ export interface QueryPageJumpProgress {
   completedRequests: number;
   totalRequests: number;
   targetPage: number;
+}
+
+export type TabOutputView = "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+
+export type TabPageUiState = Record<string, unknown>;
+
+/** UI-only state that must survive an inactive tab's component being unmounted. */
+export interface TabUiState {
+  activeOutputView?: TabOutputView;
+  resultPaneOpen?: boolean;
+  /** Small JSON-compatible snapshots owned by special-page components. */
+  page?: Record<string, TabPageUiState>;
 }
 
 export interface QueryTab {
@@ -1211,7 +1225,9 @@ export interface QueryTab {
   resultViewGeneration?: string;
   resultRuns?: QueryResultRun[];
   activeResultRunId?: string;
+  /** Undefined inherits the default on open; false preserves an explicit per-tab opt-out. */
   resultAutoSave?: boolean;
+  uiState?: TabUiState;
   explainPlan?: import("@/lib/diagram/explainPlan").ParsedExplainPlan;
   /** MySQL's regular EXPLAIN result, kept alongside its JSON visual plan. */
   explainTableResult?: QueryResult;
@@ -1221,6 +1237,7 @@ export interface QueryTab {
   explainTableSql?: string;
   lastExplainedSql?: string;
   isExecuting: boolean;
+  redisMonitorActive?: boolean;
   isCancelling?: boolean;
   queryExecutionStartedAt?: number;
   /** Ephemeral per-statement progress for the latest multi-statement execution. */
@@ -1305,6 +1322,7 @@ export interface QueryTab {
     /** 显式的"新建事件"请求：单调递增，用于让已复用 tab 也能重复进入 CREATE 编辑器 */
     eventCreateRequestId?: number;
     initialObjectFilter?: "tables" | "events";
+    filter?: ObjectBrowserFilter;
     searchQuery?: string;
     viewport?: ObjectBrowserViewport;
   };

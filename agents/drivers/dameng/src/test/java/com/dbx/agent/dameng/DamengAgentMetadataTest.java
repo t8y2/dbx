@@ -609,6 +609,96 @@ class DamengAgentMetadataTest {
     }
 
     @Test
+    void fallsBackToViewCatalogWhenDbmsMetadataReportsInternalIndexError() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String sql = (String) args[0];
+                if (sql.contains("DBMS_METADATA.GET_DDL")) {
+                    return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                        if ("executeQuery".equals(statementMethod.getName())) {
+                            throw new SQLException("未找到对象或不允许查询系统定义的内部索引");
+                        }
+                        if ("close".equals(statementMethod.getName())) {
+                            return null;
+                        }
+                        return defaultValue(statementMethod.getReturnType());
+                    });
+                }
+                if (sql.contains("ALL_VIEWS")) {
+                    return metadataStatement(List.of(List.of("SELECT 1 AS ID FROM DUAL")));
+                }
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        }));
+
+        ObjectSource source = agent.getObjectSource("APP", "ACTIVE_VIEW", "VIEW");
+
+        Assertions.assertTrue(source.getSource().contains("SELECT 1 AS ID FROM DUAL"), source.getSource());
+        Assertions.assertTrue(source.getSource().contains("系统字典视图"), source.getSource());
+    }
+
+    @Test
+    void tableDdlFallsBackToViewAndMaterializedViewCatalogDefinitions() {
+        DamengAgent agent = new DamengAgent();
+        TestSupport.setPrivateConnection(agent, proxy(Connection.class, (method, args) -> {
+            if ("prepareStatement".equals(method.getName())) {
+                String sql = (String) args[0];
+                if (sql.contains("DBMS_METADATA.GET_DDL")) {
+                    return failingMetadataStatement(new SQLException("未找到对象或不允许查询系统定义的内部索引"));
+                }
+                if (sql.contains("USER_MVIEWS")) {
+                    String[] boundTable = {null};
+                    return proxy(PreparedStatement.class, (statementMethod, statementArgs) -> {
+                        if ("setString".equals(statementMethod.getName())) {
+                            boundTable[0] = (String) statementArgs[1];
+                            return null;
+                        }
+                        if ("executeQuery".equals(statementMethod.getName())) {
+                            return metadataResultSet("ISSUE_3418_MV".equals(boundTable[0])
+                                ? List.of(List.of("SELECT 1 AS ID FROM DUAL"))
+                                : List.of());
+                        }
+                        if ("close".equals(statementMethod.getName())) {
+                            return null;
+                        }
+                        return defaultValue(statementMethod.getReturnType());
+                    });
+                }
+                if (sql.contains("ALL_VIEWS")) {
+                    return metadataStatement(List.of(List.of("SELECT 2 AS ID FROM DUAL")));
+                }
+            }
+            if ("close".equals(method.getName())) {
+                return null;
+            }
+            if ("isClosed".equals(method.getName())) {
+                return false;
+            }
+            return defaultValue(method.getReturnType());
+        }));
+        setConnectedUsername(agent, "APP");
+
+        String viewDdl = agent.getTableDdl("APP", "ACTIVE_VIEW");
+        String materializedViewDdl = agent.getTableDdl("APP", "ISSUE_3418_MV");
+
+        Assertions.assertEquals(
+            "CREATE VIEW \"APP\".\"ACTIVE_VIEW\" AS SELECT 2 AS ID FROM DUAL;",
+            viewDdl
+        );
+        Assertions.assertEquals(
+            "CREATE MATERIALIZED VIEW \"APP\".\"ISSUE_3418_MV\" AS SELECT 1 AS ID FROM DUAL;",
+            materializedViewDdl
+        );
+    }
+
+    @Test
     void readsViewSourceWithDbmsMetadataType() {
         DamengAgent agent = new DamengAgent();
         List<String> params = new ArrayList<>();
@@ -1623,11 +1713,21 @@ class DamengAgentMetadataTest {
                     return metadataStatement(rows);
                 }
                 if (sql.contains("USER_MVIEWS")) {
+                    if (sql.contains("SELECT QUERY")) {
+                        return metadataStatement(
+                            includeMaterializedView
+                                ? List.of(List.of("SELECT 1 AS ID FROM DUAL"))
+                                : List.of()
+                        );
+                    }
                     return metadataStatement(
                         includeMaterializedView
                             ? List.of(List.of("USER_SUMMARY_MV"))
                             : List.of()
                     );
+                }
+                if (sql.contains("ALL_VIEWS")) {
+                    return metadataStatement(List.of());
                 }
                 if (sql.contains("ALL_COL_COMMENTS") && !sql.contains("ALL_TAB_COLUMNS")) {
                     return metadataStatement(List.of());

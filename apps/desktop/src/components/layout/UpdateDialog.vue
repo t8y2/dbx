@@ -19,6 +19,7 @@ const props = defineProps<{
   downloadProgress: number | null;
   updateDownloaded: boolean;
   isInstallingUpdate: boolean;
+  isPreparingUpdate?: boolean;
   updateReady: boolean;
   isIgnoringUpdate: boolean;
   activeTaskCount: number;
@@ -45,7 +46,7 @@ const renderedNotes = ref("");
 // download survives the dialog closing, so closing it never cancels the download.
 const isCloseBlocked = computed(() => props.isInstallingUpdate);
 const blocksImplicitDismiss = computed(() => props.isInstallingUpdate);
-const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.updateDownloaded && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady);
+const canIgnoreVersion = computed(() => props.updateInfo?.update_available === true && !props.isDownloadingUpdate && !props.isInstallingUpdate && !props.updateReady);
 
 function handleCancel() {
   handleOpenChange(false);
@@ -66,7 +67,7 @@ function handleReleaseNotesClick(event: MouseEvent) {
   if (!anchor) return;
   event.preventDefault();
   const url = anchor.getAttribute("href");
-  if (!url) return;
+  if (!url || !/^https?:\/\//i.test(url)) return;
   if (isTauriRuntime()) {
     import("@tauri-apps/plugin-shell").then(({ open }) => open(url));
   } else {
@@ -82,7 +83,19 @@ watch(
       return;
     }
     const { Marked } = await import("marked");
-    const marked = new Marked({ breaks: true, gfm: true });
+    const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    const marked = new Marked({
+      breaks: true,
+      gfm: true,
+      renderer: {
+        html: ({ text }) => escapeHtml(text),
+        link({ href, tokens }) {
+          const text = this.parser.parseInline(tokens);
+          return /^https?:\/\//i.test(href) ? `<a href="${escapeHtml(href)}" rel="noopener noreferrer">${text}</a>` : text;
+        },
+        image: ({ text }) => escapeHtml(text),
+      },
+    });
     renderedNotes.value = marked.parse(notes) as string;
   },
   { immediate: true },
@@ -117,7 +130,7 @@ watch(
             })
           }}
         </p>
-        <p v-else class="text-muted-foreground">
+        <p v-else-if="!checkingUpdates" class="text-muted-foreground">
           {{ updateCheckMessage || t("updates.upToDate", { version: updateInfo?.current_version || "" }) }}
         </p>
         <div
@@ -142,10 +155,13 @@ watch(
           <span>{{ t("updates.activeTasksBlockUpdate", { count: activeTaskCount }) }}</span>
         </div>
       </div>
+      <p v-if="checkingUpdates" class="text-sm text-muted-foreground">{{ t("updates.checking") }}</p>
+      <p v-if="updateDownloaded && !isInstallingUpdate" class="text-sm">{{ t("updates.downloadedReady", { version: updateInfo?.latest_version }) }}</p>
+      <p v-if="updateCheckFailed && updateInfo?.update_available" role="alert" class="text-sm text-destructive">{{ updateCheckMessage }}</p>
       <DialogFooter class="relative min-w-0 sm:justify-end">
-        <div v-if="updateCheckFailed && !isDownloadingUpdate && !updateReady" class="flex items-center gap-1.5 self-start sm:absolute sm:left-4 sm:top-1/2 sm:-translate-y-1/2">
+        <div v-if="!updateReady && !isInstallingUpdate && !updateDownloaded && (updateInfo?.update_available || updateCheckFailed)" class="flex items-center gap-1.5 self-start sm:absolute sm:left-4 sm:top-1/2 sm:-translate-y-1/2">
           <span class="text-xs text-muted-foreground">{{ t("updates.source") }}</span>
-          <Select :model-value="updateDownloadSource" :disabled="checkingUpdates" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
+          <Select :model-value="updateDownloadSource" :disabled="checkingUpdates || isIgnoringUpdate" @update:model-value="(value) => value && emit('change-download-source', value as UpdateDownloadSource)">
             <SelectTrigger class="h-8 w-[150px] text-xs">
               <SelectValue />
             </SelectTrigger>
@@ -165,10 +181,10 @@ watch(
             <Button variant="outline" class="shrink-0" @click="emit('open-latest-release')">{{ t("updates.openRelease") }}</Button>
           </div>
           <template v-if="canDownloadAndInstallUpdate(updateInfo, isDesktop)">
-            <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('restart')">{{ t("updates.restart") }}</Button>
+            <Button v-if="updateReady" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate" @click="emit('restart')">{{ t("updates.restart") }}</Button>
             <Button v-else-if="isInstallingUpdate" class="shrink-0" disabled>
               <Loader2 class="h-4 w-4 animate-spin" />
-              {{ t("updates.installing") }}
+              {{ t(isPreparingUpdate ? "updates.preparing" : "updates.installing") }}
             </Button>
             <template v-else-if="isDownloadingUpdate">
               <Button variant="ghost" class="shrink-0" @click="emit('cancel-download')">{{ t("updates.cancelDownload") }}</Button>
@@ -177,8 +193,8 @@ watch(
                 {{ t("updates.downloading", { progress: downloadProgress ?? 0 }) }}
               </Button>
             </template>
-            <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0" @click="emit('install-downloaded')">{{ t("updates.exitAndUpdate") }}</Button>
-            <Button v-else class="shrink-0" @click="emit('download-in-background')">{{ t("updates.downloadInBackground") }}</Button>
+            <Button v-else-if="updateDownloaded" class="shrink-0" :disabled="activeTaskCount > 0 || isIgnoringUpdate" @click="emit('install-downloaded')">{{ t("updates.restartAndUpdate") }}</Button>
+            <Button v-else-if="!checkingUpdates" class="shrink-0" :disabled="isIgnoringUpdate" @click="emit('download-in-background')">{{ t("updates.retryDownload") }}</Button>
           </template>
         </template>
         <template v-else>

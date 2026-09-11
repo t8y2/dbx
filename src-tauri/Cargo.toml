@@ -1,6 +1,6 @@
 [package]
 name = "dbx"
-version = "0.6.9"
+version = "0.6.10"
 description = "Open-source database management tool"
 authors = ["skyler"]
 license = "Apache-2.0"
@@ -51,7 +51,7 @@ tauri-plugin-dialog = "2.7.0"
 tauri-plugin-fs = "2.5.0"
 tauri-plugin-single-instance = "2.4.2"
 tauri-plugin-shell = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "=2.10.1"
 tauri-plugin-process = "2"
 tauri-plugin-window-state = "2"
 redis = { version = "0.32.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "cluster-async"] }

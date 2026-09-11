@@ -1,4 +1,5 @@
 import { computed, ref } from "vue";
+import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useDataGridExport, type UseDataGridExportOptions } from "@/composables/useDataGridExport";
 import type { DatabaseType } from "@/types/database";
@@ -7,9 +8,10 @@ import { copyToClipboard } from "@/lib/common/clipboard";
 import type { DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import type { CellSelectionMatrix, SelectionData } from "@/lib/dataGrid/gridSelection";
 import type { CellValue } from "@/lib/dataGrid/cellValue";
-import { extractDataGridSelection, exportQueryResultJson } from "@/lib/backend/api";
+import { extractDataGridSelection, exportQueryResultCsv, exportQueryResultJson } from "@/lib/backend/api";
 import { DEFAULT_DATA_GRID_EXTRACTOR_OPTIONS } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { clearDataGridClipboardCopy, parseDataGridClipboard } from "@/lib/dataGrid/dataGridClipboard";
+import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridExternalValue } from "@/lib/mongo/mongoDocumentValues";
 
 const toast = vi.fn();
 
@@ -46,6 +48,7 @@ vi.mock("@/lib/backend/api", async (importOriginal) => {
   return {
     ...original,
     extractDataGridSelection: vi.fn(),
+    exportQueryResultCsv: vi.fn(),
     exportQueryResultJson: vi.fn(),
   };
 });
@@ -72,6 +75,7 @@ function createMongoExportState(options: {
   contextColumn?: number;
   syntheticContext?: boolean;
   fullExportResult?: UseDataGridExportOptions["fullExportResult"];
+  externalCellValue?: UseDataGridExportOptions["externalCellValue"];
 }) {
   const items = options.items ?? [options.item];
   const selectedRowIds = options.selectedRowIds ?? new Set<number>();
@@ -102,6 +106,7 @@ function createMongoExportState(options: {
     selectedRowIds: ref(selectedRowIds),
     hasRowSelection: computed(() => selectedRowIds.size > 0),
     fullExportResult: options.fullExportResult,
+    externalCellValue: options.externalCellValue,
   };
   return useDataGridExport(state);
 }
@@ -1511,6 +1516,74 @@ describe("useDataGridExport prepared row statements", () => {
     await expect(state.copyWithExtractor("sql-updates")).resolves.toBe(false);
     expect(extractDataGridSelection).not.toHaveBeenCalled();
     expect(copyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it("restores Mongo collection-grid values before bulk copy, extractors, and CSV export", async () => {
+    const item = { ...row(["1", MONGO_DOCUMENT_GRID_NULL]), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns: ["_id", "nullable"],
+      item,
+      mongoDocuments: [{ _id: "1", nullable: null }],
+      externalCellValue: (value) => mongoDocumentGridExternalValue(value) as CellValue,
+      selectedCellMatrix: {
+        rowIndexes: [0],
+        columnIndexes: [1],
+        columns: ["nullable"],
+        rows: [[MONGO_DOCUMENT_GRID_NULL]],
+      },
+    });
+
+    await state.copyAll();
+    expect(copyToClipboard).toHaveBeenCalledWith("_id\tnullable\n1\t");
+
+    vi.mocked(extractDataGridSelection).mockResolvedValueOnce({ text: "", mimeType: "text/tab-separated-values", fileExtension: "tsv", rowCount: 1, columnCount: 1 });
+    await expect(state.copyWithExtractor("tsv")).resolves.toBe(true);
+    expect(extractDataGridSelection).toHaveBeenCalledWith(expect.objectContaining({ rows: [[null]] }));
+
+    setActivePinia(createPinia());
+    await state.exportCurrentPageCsv();
+    expect(exportQueryResultCsv).toHaveBeenCalledWith(expect.any(String), ["_id", "nullable"], [["1", null]], expect.anything());
+
+    const reservedString = MONGO_DOCUMENT_GRID_NULL;
+    const fullExportState = createMongoExportState({
+      columns: ["_id", "value"],
+      item: { ...row(["1", mongoDocumentGridExternalValue(reservedString)]), sourceIndex: 0 },
+      mongoDocuments: [{ _id: "1", value: reservedString }],
+      externalCellValue: (value) => mongoDocumentGridExternalValue(value) as CellValue,
+      fullExportResult: async () => ({
+        columns: ["_id", "value"],
+        column_types: ["", ""],
+        rows: [["1", reservedString]],
+        mongo_documents: [{ _id: "1", value: reservedString }],
+        affected_rows: 1,
+        execution_time_ms: 1,
+      }),
+    });
+
+    await fullExportState.exportCsv();
+    expect(exportQueryResultCsv).toHaveBeenLastCalledWith(expect.any(String), ["_id", "value"], [["1", reservedString]], expect.anything());
+  });
+
+  it("exports missing Mongo fields as null while retaining explicit empty strings", async () => {
+    const columns = ["_id", "missing", "nullable", "empty"];
+    const document = { _id: "1", nullable: null, empty: "" };
+    const item = { ...row(["1", "", MONGO_DOCUMENT_GRID_NULL, ""]), sourceIndex: 0 };
+    const state = createMongoExportState({
+      columns,
+      item,
+      mongoDocuments: [document],
+      externalCellValue: mongoDocumentGridExternalValue,
+      fullExportResult: async () => ({
+        columns,
+        column_types: ["", "", "", ""],
+        rows: [item.data],
+        mongo_copy_documents: [document],
+        affected_rows: 1,
+        execution_time_ms: 1,
+      }),
+    });
+    await state.exportJson();
+    expect(exportQueryResultJson).toHaveBeenCalledWith(expect.any(String), columns, [["1", null, null, ""]]);
   });
 
   it("preserves Mongo Extended JSON objects and dates in JSON exports", async () => {

@@ -1432,133 +1432,13 @@ fn normalize_export_table_ddl(
 
 fn format_export_table_ddl(ddl: &str, database_type: Option<DatabaseType>, opts: DdlNormalizeOptions) -> String {
     let ddl = normalize_export_table_ddl(ddl, database_type, opts);
-    let ddl =
-        if database_type == Some(DatabaseType::OpenGauss) { normalize_opengauss_table_ddl_comments(&ddl) } else { ddl };
+    let ddl = if database_type == Some(DatabaseType::OpenGauss) {
+        crate::schema::normalize_opengauss_table_ddl_comments(&ddl)
+    } else {
+        ddl
+    };
     let ddl = ddl.trim().trim_end_matches(';').trim_end();
     format!("{ddl};")
-}
-
-/// openGauss 6.x `pg_get_tabledef` can concatenate comment text into a
-/// `COMMENT ON` literal without escaping embedded single quotes. Normalize
-/// only those generated comment statements; all other DDL text remains
-/// untouched.
-fn normalize_opengauss_table_ddl_comments(ddl: &str) -> String {
-    let mut normalized = String::with_capacity(ddl.len());
-    for line in ddl.split_inclusive('\n') {
-        let (line_body, line_ending) = match line.strip_suffix('\n') {
-            Some(body) => match body.strip_suffix('\r') {
-                Some(body) => (body, "\r\n"),
-                None => (body, "\n"),
-            },
-            None => (line, ""),
-        };
-        let leading = line_body.len() - line_body.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
-        let statement = &line_body[leading..];
-        if let Some(statement) = normalize_opengauss_comment_statement(statement) {
-            normalized.push_str(&line_body[..leading]);
-            normalized.push_str(&statement);
-        } else {
-            normalized.push_str(line_body);
-        }
-        normalized.push_str(line_ending);
-    }
-    normalized
-}
-
-fn normalize_opengauss_comment_statement(statement: &str) -> Option<String> {
-    let uppercase = statement.to_ascii_uppercase();
-    if !uppercase.starts_with("COMMENT ON ") {
-        return None;
-    }
-
-    let is_pos = find_opengauss_comment_is_keyword(statement, &uppercase)?;
-    let value_start = is_pos + " IS ".len();
-    let value = &statement[value_start..];
-    let value_leading = value.len() - value.trim_start_matches(|ch: char| ch.is_ascii_whitespace()).len();
-    let value = &value[value_leading..];
-    let quote_offset = match value.as_bytes() {
-        [b'\'', ..] => 0,
-        [b'e' | b'E', b'\'', ..] => 1,
-        _ => return None,
-    };
-    let opening_quote = value_start + value_leading + quote_offset;
-    let statement_end = statement.trim_end().len();
-    let literal_end = statement[..statement_end]
-        .strip_suffix(';')
-        .map_or(statement_end, |without_terminator| without_terminator.len());
-    if opening_quote >= literal_end {
-        return None;
-    }
-
-    let closing_quote = statement[..literal_end].rfind('\'')?;
-    if closing_quote <= opening_quote || !statement[closing_quote + 1..literal_end].trim().is_empty() {
-        return None;
-    }
-    let literal = &statement[opening_quote..=closing_quote];
-    if opengauss_comment_literal_is_valid(literal) {
-        return Some(statement.to_string());
-    }
-
-    let raw_comment = &statement[opening_quote + 1..closing_quote];
-    let escaped_comment = raw_comment.replace('\'', "''");
-    let mut normalized = String::with_capacity(statement.len() + escaped_comment.len() - raw_comment.len());
-    normalized.push_str(&statement[..opening_quote + 1]);
-    normalized.push_str(&escaped_comment);
-    normalized.push_str(&statement[closing_quote..]);
-    Some(normalized)
-}
-
-fn find_opengauss_comment_is_keyword(statement: &str, uppercase: &str) -> Option<usize> {
-    let mut cursor = "COMMENT ON ".len();
-    while cursor + " IS ".len() <= statement.len() {
-        if statement.as_bytes().get(cursor) == Some(&b'\"') {
-            cursor = skip_opengauss_quoted_identifier(statement, cursor);
-            continue;
-        }
-        if uppercase.get(cursor..cursor + " IS ".len()) == Some(" IS ") {
-            return Some(cursor);
-        }
-        cursor += statement[cursor..].chars().next()?.len_utf8();
-    }
-    None
-}
-
-fn skip_opengauss_quoted_identifier(sql: &str, start: usize) -> usize {
-    let bytes = sql.as_bytes();
-    let mut cursor = start + 1;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'\"' {
-            if bytes.get(cursor + 1) == Some(&b'\"') {
-                cursor += 2;
-            } else {
-                return cursor + 1;
-            }
-        } else {
-            cursor += 1;
-        }
-    }
-    bytes.len()
-}
-
-fn opengauss_comment_literal_is_valid(literal: &str) -> bool {
-    let bytes = literal.as_bytes();
-    if bytes.len() < 2 || bytes.first() != Some(&b'\'') || bytes.last() != Some(&b'\'') {
-        return false;
-    }
-
-    let mut cursor = 1;
-    while cursor < bytes.len() - 1 {
-        if bytes[cursor] == b'\'' {
-            if cursor + 1 < bytes.len() - 1 && bytes[cursor + 1] == b'\'' {
-                cursor += 2;
-            } else {
-                return false;
-            }
-        } else {
-            cursor += 1;
-        }
-    }
-    true
 }
 
 fn split_postgres_export_table_triggers(ddl: &str, database_type: DatabaseType) -> (String, Vec<String>) {

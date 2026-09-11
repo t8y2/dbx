@@ -40,8 +40,10 @@ import {
   type XuguTablespaceSummary,
   type XuguTransactionSummary,
 } from "@/lib/database/xuguServerStatus";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{ connectionId: string }>();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ refreshSeconds?: number }>({}, "XuguServerDashboard");
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 
@@ -72,8 +74,10 @@ const availability = reactive({
   lockModes: false,
   tablespaces: false,
 });
-const refreshSeconds = ref(5);
+const refreshSeconds = ref([0, 5, 10, 30].includes(restoredUiState.refreshSeconds ?? -1) ? restoredUiState.refreshSeconds! : 5);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+trackUiState(() => ({ refreshSeconds: refreshSeconds.value }));
 
 const connection = computed(() => connectionStore.getConfig(props.connectionId));
 const connectionName = computed(() => connection.value?.name ?? "");

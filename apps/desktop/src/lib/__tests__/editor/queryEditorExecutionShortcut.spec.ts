@@ -39,6 +39,24 @@ describe("QueryEditor execution shortcuts", () => {
     view.destroy();
   });
 
+  it("checks shortcut eligibility at dispatch time without rebuilding the keymap", () => {
+    let enabled = false;
+    const explain = vi.fn(() => true);
+    const view = createView([createQueryEditorExecutionShortcutBindings("Mod+E", explain, isComposing, () => enabled)]);
+
+    expect(runScopeHandlers(view, executeEvent("e"), "editor")).toBe(true);
+    expect(explain).not.toHaveBeenCalled();
+
+    enabled = true;
+    expect(runScopeHandlers(view, executeEvent("e"), "editor")).toBe(true);
+    expect(explain).toHaveBeenCalledOnce();
+
+    enabled = false;
+    expect(runScopeHandlers(view, executeEvent("e"), "editor")).toBe(true);
+    expect(explain).toHaveBeenCalledOnce();
+    view.destroy();
+  });
+
   it("consumes the SQL shortcut without executing during IME composition", () => {
     const execute = vi.fn(() => true);
     const view = createView([createQueryEditorExecutionShortcutBindings("Mod+Enter", execute, isComposing)]);

@@ -87,8 +87,10 @@ describe("Consul Catalog and Health watch views", () => {
     expect(services).toContain("maintenance(service.ID, false)");
     expect(services).toContain('t("consul.ui.enableMaintenance")');
     expect(services).toContain('t("consul.ui.disableMaintenance")');
-    expect(services).toContain('v-if="canAgentWrite"');
-    expect(services).toContain('t("consul.ui.agentWriteDisabledHint"');
+    expect(services).toContain('v-if="canAgentWrite && !isServiceInMaintenance(service.ID)"');
+    expect(services).toContain('v-else-if="canAgentWrite"');
+    expect(services).toContain("t(`consul.ui.agentWriteBlocked.${reason}`)");
+    expect(services).toContain("{{ agentWriteDisabledMessage }}");
   });
 
   it("keeps Catalog browsing searchable and separates readable Catalog data from Agent actions", () => {
@@ -104,7 +106,11 @@ describe("Consul Catalog and Health watch views", () => {
     expect(services).toContain('@click="selectService(name)"');
     expect(services).toContain('@click="selectNode(name)"');
     expect(services).toContain("Catalog browsing must remain responsive even when an Agent endpoint is slow or unavailable.");
-    expect(services).toContain("void loadAgentData(current);");
+    const loadSource = services.slice(services.indexOf("async function load() {"), services.indexOf("async function loadAgentData("));
+    const catalogReady = loadSource.indexOf("loading.value = false;");
+    const agentLoad = loadSource.indexOf("if (current === sequence) await loadAgentData(current);");
+    expect(catalogReady).toBeGreaterThanOrEqual(0);
+    expect(agentLoad).toBeGreaterThan(catalogReady);
     expect(services).toContain("t('consul.ui.searchAllServices')");
     expect(services).toContain("t('consul.ui.searchLocalServices')");
   });
@@ -138,9 +144,11 @@ describe("Consul Catalog and Health watch views", () => {
   it("gates Agent writes on an explicit target that matches the Agent node", () => {
     for (const source of [services, health]) {
       expect(source).toContain("config.agentTarget || config.agent_target");
-      expect(source).toContain("consulAgentWriteTargetSafe(store.getConfig(props.connectionId), identity.value?.node)");
       expect(source).toContain(':disabled="!canAgentWrite"');
     }
+    expect(services).toContain("consulAgentWriteBlockedReason(store.getConfig(props.connectionId), identity.value?.node)");
+    expect(services).toContain("const canAgentWrite = computed(() => agentWriteBlockedReason.value === null);");
+    expect(health).toContain("consulAgentWriteTargetSafe(store.getConfig(props.connectionId), identity.value?.node)");
   });
 
   it("supports exact-Key and prefix KV watches and exposes batch atomicity", () => {
@@ -245,7 +253,7 @@ describe("Consul Catalog and Health watch views", () => {
   });
 
   it("starts with KV and keeps the cluster overview as a sidebar surface", () => {
-    expect(workspace).toContain('const activeTab = ref<WorkspaceTab>("kv");');
+    expect(workspace).toContain('const activeTab = ref<WorkspaceTab>(restoredUiState.activeTab ?? "kv");');
     expect(workspace).not.toContain('<TabsTrigger value="overview"');
     expect(workspace).not.toContain('<TabsContent value="overview"');
   });

@@ -14,8 +14,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use crate::ai::AiConfigItem;
 use crate::connection_secrets::{
     CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_API_KEY_VALUE_KEY,
-    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY,
-    NACOS_AUTH_PASSWORD_KEY, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
+    MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+    NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 };
 use crate::models::connection::{ConnectionConfig, DatabaseType, TransportLayerConfig};
 use crate::saved_sql::SavedSqlLibrary;
@@ -1115,20 +1115,8 @@ fn push_cassandra_tls_secrets(secrets: &mut Vec<ConnectionSecretSnapshot>, confi
     else {
         return;
     };
-    push_json_secret(
-        secrets,
-        &config.id,
-        CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
-        tls,
-        "truststore_password",
-    );
-    push_json_secret(
-        secrets,
-        &config.id,
-        CASSANDRA_KEYSTORE_PASSWORD_KEY,
-        tls,
-        "keystore_password",
-    );
+    push_json_secret(secrets, &config.id, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, tls, "truststore_password");
+    push_json_secret(secrets, &config.id, CASSANDRA_KEYSTORE_PASSWORD_KEY, tls, "keystore_password");
 }
 
 fn scrub_cassandra_tls_secrets(config: &mut ConnectionConfig) {
@@ -2234,11 +2222,8 @@ mod tests {
         let config = cassandra_connection("cassandra");
         let mut public_config = config.clone();
         scrub_connection_secrets(&mut public_config);
-        let tls = public_config
-            .external_config
-            .as_ref()
-            .and_then(|external_config| external_config.get("tls"))
-            .unwrap();
+        let tls =
+            public_config.external_config.as_ref().and_then(|external_config| external_config.get("tls")).unwrap();
         assert_eq!(tls["truststore_password"], "");
         assert_eq!(tls["keystore_password"], "");
 

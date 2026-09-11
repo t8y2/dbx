@@ -137,10 +137,10 @@ import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
 import { createDbxCodeMirrorSqlDialect, type CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 import { sqlSemanticTableNameSpansForSyntaxTree } from "@/lib/editor/codemirrorSqlSemanticHighlight";
-import { startsQueryEditorRectangularSelection, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
+import { startsQueryEditorRectangularSelection, startsQueryEditorSelectionDrag, usesQueryEditorObjectNavigationModifier } from "@/lib/editor/queryEditorPointerSelection";
 import { LARGE_PASTE_HISTORY_USER_EVENT, normalizeQueryEditorPasteText, recoverableNativePasteSuffix, shouldRecoverLargeTauriPaste } from "@/lib/editor/queryEditorLargePaste";
 import { computePasteCaretResyncTarget } from "@/lib/editor/queryEditorPasteCaretResync";
-import { queryEditorCommentTokens, queryEditorLineCommentToken } from "@/lib/editor/queryEditorLineComment";
+import { queryEditorCommentTokens, queryEditorLineCommentToken, queryEditorWordLanguageData } from "@/lib/editor/queryEditorLineComment";
 import { createShellLineCommentHighlight } from "@/lib/editor/codemirrorShellLineCommentHighlight";
 import { extendQueryEditorSelection, runQueryEditorAltExtendSelection } from "@/lib/editor/queryEditorExtendSelection";
 import { addNextQueryEditorSelectionOccurrence, selectAllQueryEditorSelectionOccurrences } from "@/lib/editor/queryEditorOccurrenceSelection";
@@ -204,6 +204,8 @@ const props = defineProps<{
   autoFocus?: boolean;
   forceWordWrap?: boolean;
   hideExecutionControls?: boolean;
+  enableExplainShortcut?: boolean;
+  canExplain?: boolean;
   initialViewport?: { scrollTop: number; scrollLeft: number };
   initialSelection?: { anchor: number; head: number };
   statementExecutionMarkers?: StatementExecutionMarker[];
@@ -235,6 +237,7 @@ const emit = defineEmits<{
   formatError: [message: string];
   execute: [source: SqlExecutionOverride];
   executeInNewResultTab: [source: SqlExecutionOverride];
+  explain: [];
   exportQuery: [payload: { sql: string; format: "csv" | "xlsx" | "txt"; columnComments?: (string | null)[] }];
   save: [];
   clickTable: [target: SqlObjectNavigationTarget];
@@ -1417,10 +1420,7 @@ function updateEditorSelectionDropCursor(currentView: EditorViewType, event: Mou
 }
 
 function startEditorSelectionDrag(currentView: EditorViewType, event: MouseEvent): boolean {
-  // Shift is CodeMirror's native extend-selection gesture. Keep it out of the
-  // custom selection drag path so a shift-click inside the current selection
-  // extends or shrinks the selection instead of collapsing it to the cursor.
-  if (event.shiftKey) return false;
+  if (!startsQueryEditorSelectionDrag(event)) return false;
 
   const selection = selectedRangeAtPointer(currentView, event);
   if (!selection) return false;
@@ -2176,6 +2176,17 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
       );
   const executeInNewResultTabBindings = props.hideExecutionControls ? [] : createQueryEditorExecutionShortcutBindings(shortcuts.executeSqlInNewResultTab, requestExecuteInNewResultTab, (currentView) => shouldBlockExecutionShortcut(undefined, currentView));
+  const explainBindings = props.enableExplainShortcut
+    ? createQueryEditorExecutionShortcutBindings(
+        shortcuts.explainSql,
+        () => {
+          emit("explain");
+          return true;
+        },
+        (currentView) => shouldBlockExecutionShortcut(undefined, currentView),
+        () => !!props.canExplain,
+      )
+    : [];
   const replaceShortcutBindings = createQueryEditorReplaceShortcutBindings(shortcuts.replace, openReplace);
   const replaceShortcutHandler = createQueryEditorReplaceShortcutHandler({
     shortcut: shortcuts.replace,
@@ -2224,6 +2235,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         ...replaceShortcutBindings,
         ...executeInNewResultTabBindings,
         ...executeBindings,
+        ...explainBindings,
         ...binding(shortcuts.saveSql, () => {
           emit("save");
           return true;
@@ -6035,6 +6047,7 @@ onMounted(async () => {
     // Non-SQL editors (MongoDB shell) keep the SQL grammar for highlighting, so override the
     // comment marker that toggleLineComment reads from language data.
     Prec.highest(EditorState.languageData.of(() => [{ commentTokens: queryEditorCommentTokens(props.databaseType) }])),
+    Prec.highest(EditorState.languageData.of(() => queryEditorWordLanguageData(props.databaseType))),
     // The SQL grammar does not tokenize `//`, so those comments are highlighted by hand.
     queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
   ];

@@ -10,6 +10,7 @@ import MqttPublishPanel from "./MqttPublishDialog.vue";
 import { decodePayload, PAYLOAD_ENCODINGS, PAYLOAD_ENCODING_LABELS, type PayloadEncoding } from "@/lib/mqtt/mqttPayloadCodec";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { ChevronDown, ChevronUp, Pause, Play } from "@lucide/vue";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 interface Props {
   connectionId: string;
@@ -18,28 +19,60 @@ interface Props {
 const props = defineProps<Props>();
 const { t } = useI18n();
 
+interface MqttTabUiState {
+  selectedTopic?: string;
+  messagesPaused?: boolean;
+  displayEncoding?: PayloadEncoding;
+  topicSearch?: string;
+  payloadSearch?: string;
+  showSubscriptionDialog?: boolean;
+  formTopic?: string;
+  formQos?: MqttQoS;
+  formNoLocal?: boolean;
+  formEnabled?: boolean;
+  editingTopic?: string | null;
+  publishPanelCollapsed?: boolean;
+}
+
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<MqttTabUiState>({}, "MqttAdminConsole");
+
 const brokerInfo = ref<MqttBrokerInfo | null>(null);
 const savedTopics = ref<MqttSavedTopic[]>([]);
 const subscribedTopics = ref<[string, string][]>([]);
 const messages = ref<MqttMessage[]>([]);
 const noLocalSubscribe = ref(false);
-const selectedTopic = ref<string>(props.initialTopic ?? "");
+const selectedTopic = ref<string>(restoredUiState.selectedTopic ?? props.initialTopic ?? "");
 const loading = ref(true);
 const error = ref<string | null>(null);
 const pollingTimer = ref<ReturnType<typeof setInterval> | null>(null);
-const messagesPaused = ref(false);
-const displayEncoding = ref<PayloadEncoding>("plaintext");
-const topicSearch = ref("");
-const payloadSearch = ref("");
-const showSubscriptionDialog = ref(false);
+const messagesPaused = ref(restoredUiState.messagesPaused ?? false);
+const displayEncoding = ref<PayloadEncoding>(restoredUiState.displayEncoding ?? "plaintext");
+const topicSearch = ref(restoredUiState.topicSearch ?? "");
+const payloadSearch = ref(restoredUiState.payloadSearch ?? "");
+const showSubscriptionDialog = ref(restoredUiState.showSubscriptionDialog ?? false);
 const savingSubscription = ref(false);
-const formTopic = ref("");
-const formQos = ref<MqttQoS>("atmostonce");
-const formNoLocal = ref(false);
-const formEnabled = ref(true);
-const editingTopic = ref<string | null>(null);
+const formTopic = ref(restoredUiState.formTopic ?? "");
+const formQos = ref<MqttQoS>(restoredUiState.formQos ?? "atmostonce");
+const formNoLocal = ref(restoredUiState.formNoLocal ?? false);
+const formEnabled = ref(restoredUiState.formEnabled ?? true);
+const editingTopic = ref<string | null>(restoredUiState.editingTopic ?? null);
 const MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY = "dbx-mqtt-publish-panel-collapsed";
-const publishPanelCollapsed = ref(safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
+const publishPanelCollapsed = ref(restoredUiState.publishPanelCollapsed ?? safeLocalStorageGet(MQTT_PUBLISH_PANEL_COLLAPSED_STORAGE_KEY) === "true");
+
+trackUiState(() => ({
+  selectedTopic: selectedTopic.value,
+  messagesPaused: messagesPaused.value,
+  displayEncoding: displayEncoding.value,
+  topicSearch: topicSearch.value,
+  payloadSearch: payloadSearch.value,
+  showSubscriptionDialog: showSubscriptionDialog.value,
+  formTopic: formTopic.value,
+  formQos: formQos.value,
+  formNoLocal: formNoLocal.value,
+  formEnabled: formEnabled.value,
+  editingTopic: editingTopic.value,
+  publishPanelCollapsed: publishPanelCollapsed.value,
+}));
 
 const connected = computed(() => brokerInfo.value?.connected ?? false);
 const mqtt5 = computed(() => brokerInfo.value?.protocolVersion?.includes("5") ?? false);

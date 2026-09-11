@@ -1,4 +1,4 @@
-import type { ConnectionConfig, ObjectBrowserViewport, QueryTab } from "@/types/database";
+import type { ConnectionConfig, ObjectBrowserFilter, ObjectBrowserViewport, QueryTab, TabOutputView } from "@/types/database";
 import type { DataGridReloadIntent } from "@/lib/dataGrid/dataGridToolbar";
 import type { DataGridSortMode } from "@/lib/dataGrid/dataGridSort";
 import type { SqlObjectNavigationTarget } from "@/lib/sql/sqlNavigation";
@@ -44,7 +44,7 @@ export interface ContentAreaSurfaceProps {
   activeTab: QueryTab;
   activeConnection?: ConnectionConfig;
   executableSql: string;
-  activeOutputView: "result" | "summary" | "explain" | "chart" | "messages" | "profile";
+  activeOutputView: TabOutputView;
   formatSqlRequest: { id: number; tabId: string } | null;
   compressSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
@@ -61,7 +61,7 @@ export interface ContentAreaSurfaceProps {
  * global active tab after an await (see redevelopment guide §6.1).
  */
 export interface ContentAreaSurfaceEmits {
-  "update:activeOutputView": [tabId: string, value: "result" | "summary" | "explain" | "chart" | "messages" | "profile"];
+  "update:activeOutputView": [tabId: string, value: TabOutputView];
   fixWithAi: [tabId: string, errorMessage: string];
   sendSelectionToAi: [tabId: string, sql: string];
   previewChangesAvailable: [tabId: string, value: boolean];
@@ -90,6 +90,8 @@ export interface ContentAreaSurfaceEmits {
   objectSchemaChange: [tabId: string, schema: string | undefined];
   objectBrowserViewportChange: [tabId: string, viewport: ObjectBrowserViewport];
   objectBrowserSearchChange: [tabId: string, query: string];
+  objectBrowserFilterChange: [tabId: string, filter: ObjectBrowserFilter];
+  addObjectTableToAi: [tabId: string, tables: Array<{ name: string; schema?: string }>];
   structureEditorSaved: [tabId: string, commentChanged: boolean];
   structureEditorClose: [tabId: string];
   previewStatement: [tabId: string, range: StatementRange | null];

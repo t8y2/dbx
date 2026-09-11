@@ -30,6 +30,11 @@ describe("SQL editor workspace single-group tracer bullet", () => {
     expect(contentAreaSource).toContain("resultOnly?: boolean");
   });
 
+  it("routes structure-tab search to the table editor instead of the sidebar", () => {
+    expect(contentAreaSource).toContain('if (props.activeTab.mode === "structure") return tableStructureEditorRef.value?.focusSearch() ?? false;');
+    expect(contentAreaSource).toContain("focusSearch: () => boolean");
+  });
+
   it("keeps AppTabBar as the global special-page bar while regular tabs move to groups", () => {
     const tabBarSource = readFileSync(new URL("../AppTabBar.vue", import.meta.url), "utf8");
     expect(tabBarSource).not.toContain("hideRegularTabs");

@@ -140,7 +140,13 @@ const SHARED_RESULT_PANE_DEFAULT_SIZE = 32;
 const SHARED_RESULT_PANE_STORAGE_KEY = "dbx-shared-results-pane-size";
 const storedResultPaneSize = Number(safeLocalStorageGet(SHARED_RESULT_PANE_STORAGE_KEY));
 const resultPaneSize = ref(Number.isFinite(storedResultPaneSize) && storedResultPaneSize >= SHARED_RESULT_PANE_MIN_SIZE && storedResultPaneSize <= SHARED_RESULT_PANE_MAX_SIZE ? storedResultPaneSize : SHARED_RESULT_PANE_DEFAULT_SIZE);
-const showResultPane = ref(true);
+const showResultPane = computed({
+  get: () => activeTab.value?.uiState?.resultPaneOpen ?? true,
+  set: (open: boolean) => {
+    const tab = activeTab.value;
+    if (tab?.mode === "query") queryStore.updateTabUiState(tab.id, { resultPaneOpen: open });
+  },
+});
 const isResultPaneVisible = computed(() => hasSharedOutput.value && showResultPane.value);
 // Keep the pane mounted, but apply its target size immediately so available
 // results never wait for an expansion animation before becoming visible.

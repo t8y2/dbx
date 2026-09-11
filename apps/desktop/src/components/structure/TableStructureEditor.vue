@@ -27,6 +27,7 @@ import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect
 import { useToast } from "@/composables/useToast";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
+import { omitDdlIdentifierQuotes } from "@/lib/sql/ddlDisplay";
 import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { formatSqlForDisplay, sqlFormatDialectForDbType } from "@/lib/sql/sqlFormatter";
@@ -1717,7 +1718,9 @@ async function refreshSqlPreview() {
       }),
     ]);
     if (requestId !== sqlPreviewRequestId) return;
-    pendingStatements.value = [...result.statements, ...ownerResult.statements, ...(mysqlAutoIncrementStatement ? [mysqlAutoIncrementStatement] : [])];
+    const statements = [...result.statements, ...ownerResult.statements, ...(mysqlAutoIncrementStatement ? [mysqlAutoIncrementStatement] : [])];
+    // SQLite type-change apply regenerates this revision-checked plan, so its preview must stay byte-for-byte aligned.
+    pendingStatements.value = settingsStore.editorSettings.generateSqlQuoteIdentifiers || hasSqliteTypeChange.value ? statements : statements.map((statement) => omitDdlIdentifierQuotes(statement, sqlFormatDialectForDbType(databaseType.value)));
     warnings.value = [...result.warnings, ...ownerResult.warnings];
     sqliteSchemaRevision.value = "schemaRevision" in result && typeof result.schemaRevision === "string" ? result.schemaRevision : undefined;
   } catch (e: any) {
@@ -3022,6 +3025,22 @@ function focusIndexSearch() {
   });
 }
 
+function focusSearch(): boolean {
+  if (activeTab.value === "columns") {
+    focusColumnSearch();
+    return true;
+  }
+  if (activeTab.value === "indexes") {
+    focusIndexSearch();
+    return true;
+  }
+  if (activeTab.value === "ddl") {
+    ddlSearchPanelRef.value?.openSearch();
+    return true;
+  }
+  return false;
+}
+
 function scrollToIndexSearchMatch(direction: 1 | -1 = 1) {
   const query = indexSearchText.value.trim();
   if (!query) {
@@ -3650,7 +3669,7 @@ async function applyChanges() {
   }
 }
 
-defineExpose({ applyChanges });
+defineExpose({ applyChanges, focusSearch });
 
 function addItemForActiveTab(): boolean {
   if (activeTab.value === "columns" && canAddColumn.value) {
@@ -3716,10 +3735,10 @@ function onStructureEditorKeydown(event: KeyboardEvent) {
     return;
   }
   if (isPlainModShortcut(event, "f")) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (activeTab.value === "columns") focusColumnSearch();
-    else if (activeTab.value === "ddl") ddlSearchPanelRef.value?.openSearch();
+    if (focusSearch()) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
     return;
   }
   if (isPlainModShortcut(event, "s")) {

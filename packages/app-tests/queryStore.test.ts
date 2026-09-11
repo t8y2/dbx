@@ -515,7 +515,9 @@ test("hydrating saved SQL content preserves its restored runtime target", async 
     store.createTab("current-connection", "runtime_database", "current.sql", "query", "runtime_schema");
     const tabId = store.openSavedSql(file);
     const tab = store.tabs.find((item) => item.id === tabId)!;
+    // Clean restored tabs omit both fields until their saved file is hydrated.
     tab.sql = "";
+    tab.originalSql = undefined;
 
     await store.hydrateSavedSqlTabs();
 

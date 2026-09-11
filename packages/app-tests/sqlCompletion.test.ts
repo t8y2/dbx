@@ -245,6 +245,43 @@ test("suggests database-specific data types and functions", () => {
   assert.ok(mysqlCreateViewItems.some((item) => item.type === "function" && item.label === "DATE"));
 });
 
+test("suggests PostgreSQL CURRENT_DATE as a keyword without parentheses", () => {
+  const itemsFor = (sql: string, databaseType: DatabaseType = "postgres") =>
+    buildSqlCompletionItems(sql, sql.length, {
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType,
+    });
+  const assertBareKeyword = (items: ReturnType<typeof itemsFor>, label: string) => {
+    const item = items.find((candidate) => candidate.label === label);
+    assert.ok(item, `expected keyword ${label}`);
+    assert.equal(item.type, "keyword");
+    assert.equal((item.apply ?? item.label).includes("("), false);
+  };
+
+  assertBareKeyword(itemsFor("select current_d"), "CURRENT_DATE");
+
+  const currentPrefixItems = itemsFor("select current");
+  assertBareKeyword(currentPrefixItems, "CURRENT_DATE");
+  assertBareKeyword(currentPrefixItems, "CURRENT_TIMESTAMP");
+  assertBareKeyword(currentPrefixItems, "CURRENT_TIME");
+
+  const localtimeItems = itemsFor("select localt");
+  assertBareKeyword(localtimeItems, "LOCALTIME");
+  assertBareKeyword(localtimeItems, "LOCALTIMESTAMP");
+
+  const reportedSql = `SELECT * FROM "public"."table" where "CreateTime" >= current`;
+  assertBareKeyword(itemsFor(reportedSql), "CURRENT_DATE");
+
+  const mysqlCurrentDate = itemsFor("select current_d", "mysql").find((item) => item.label === "CURRENT_DATE");
+  assert.equal(mysqlCurrentDate?.type, "function");
+
+  assert.equal(
+    itemsFor("select current_d", "sqlserver").some((item) => item.label === "CURRENT_DATE"),
+    false,
+  );
+});
+
 test("suggests MySQL VERSION and REVERSE without broadening other dialects", () => {
   const buildFunctionItems = (prefix: string, databaseType?: "mysql" | "postgres" | "sqlserver") =>
     buildSqlCompletionItems(`select ${prefix}`, `select ${prefix}`.length, {

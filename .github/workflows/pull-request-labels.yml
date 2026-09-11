@@ -23,21 +23,37 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
+          # The ref is always the trusted base SHA; when a fork head is synced
+          # to the same commit as the base, checkout v5 refuses the SHA because
+          # it matches pull_request.head.sha. That commit is still trusted
+          # content, so opt out of the guard here.
+          allow-unsafe-pr-checkout: true
 
       - name: Fetch pull request head without checkout
+        id: verify_head
         env:
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           git fetch --no-tags origin "pull/${PULL_REQUEST_NUMBER}/head"
-          test "$(git rev-parse FETCH_HEAD)" = "${EXPECTED_HEAD_SHA}"
+          ACTUAL_HEAD_SHA="$(git rev-parse FETCH_HEAD)"
+          if [ "$ACTUAL_HEAD_SHA" != "${EXPECTED_HEAD_SHA}" ]; then
+            # The PR was pushed to after this event was queued; that push
+            # triggers its own labeling run, so skip this stale one.
+            echo "::notice::Pull request head is now ${ACTUAL_HEAD_SHA}, expected ${EXPECTED_HEAD_SHA}; skipping stale labeling run."
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Setup Node.js
+        if: steps.verify_head.outputs.stale != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 22.13.0
 
       - name: Synchronize pull request labels
+        if: steps.verify_head.outputs.stale != 'true'
         run: node .github/scripts/label-pull-request.mjs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

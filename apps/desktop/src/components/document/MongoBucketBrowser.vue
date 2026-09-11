@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Download, Filter, LoaderCircle, Plus, RefreshCcw, Trash2, Upload, X } from "@lucide/vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
@@ -20,12 +20,22 @@ import { clampGridFsPage, gridFsTotalPages, paginateGridFsItems } from "@/lib/do
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { restoreGridFsBrowserState, saveGridFsBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 
 const props = defineProps<{
   connectionId: string;
   database: string;
   bucket: string;
+  /** Tab id; query conditions and the file listing are cached per tab. */
+  stateKey?: string;
 }>();
+
+type GridFsFile = Awaited<ReturnType<typeof api.documentListGridFsFiles>>[number];
+
+// ContentArea renders only the active tab, so this component is unmounted on
+// every tab switch. Without the per-tab cache, coming back re-lists the whole
+// bucket and drops the user's filter/sort (#8679).
+const restoredGridFsState = props.stateKey ? restoreGridFsBrowserState<GridFsFile>(props.stateKey) : undefined;
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -37,16 +47,16 @@ const uploading = ref(false);
 const downloading = ref(false);
 const deleting = ref(false);
 const error = ref("");
-const files = ref<Awaited<ReturnType<typeof api.documentListGridFsFiles>>>([]);
-const selectedFileId = ref("");
+const files = ref<GridFsFile[]>([]);
+const selectedFileId = ref(restoredGridFsState?.selectedId ?? "");
 const checkedFileIds = ref<Set<string>>(new Set());
 const showDeleteConfirm = ref(false);
-const filterInput = ref("");
-const sortInput = ref("");
+const filterInput = ref(restoredGridFsState?.filterInput ?? "");
+const sortInput = ref(restoredGridFsState?.sortInput ?? "");
 const filterBuilderOpen = ref(false);
-const filterRules = ref<DocumentFilterRule[]>([createGridFsFileFilterRule(uuid())]);
-const appliedStructuredFilter = ref<Record<string, unknown> | null>(null);
-const page = ref(0);
+const filterRules = ref<DocumentFilterRule[]>(restoredGridFsState?.filterRules ?? [createGridFsFileFilterRule(uuid())]);
+const appliedStructuredFilter = ref<Record<string, unknown> | null>(restoredGridFsState?.appliedStructuredFilter ?? null);
+const page = ref(Math.max(0, Math.trunc(restoredGridFsState?.page ?? 0)));
 const pageSize = ref(normalizeResultPageSize(settingsStore.editorSettings.pageSize));
 
 const totalBytes = computed(() => files.value.reduce((sum, file) => sum + (file.length || 0), 0));
@@ -186,12 +196,48 @@ function updatePageSize(nextValue: unknown) {
   settingsStore.updateEditorSettings({ pageSize: normalized });
 }
 
+function gridFsSignature(): string {
+  return JSON.stringify([props.connectionId, props.database, props.bucket, filterInput.value, sortInput.value, appliedStructuredFilter.value ?? null]);
+}
+
+// Rows are only replayed when the conditions that produced them still match, so
+// an edit made while a listing was in flight can never pair new conditions with
+// stale rows on the next remount.
+let loadedGridFsSignature: string | undefined;
+if (restoredGridFsState?.rows && restoredGridFsState.signature === gridFsSignature()) {
+  files.value = restoredGridFsState.rows;
+  loadedGridFsSignature = restoredGridFsState.signature;
+  // Paging is client-side, so the page size setting may have moved while the
+  // tab was inactive without invalidating the listing itself.
+  ensurePageInRange();
+}
+const restoredGridFsFiles = loadedGridFsSignature !== undefined;
+
+function persistGridFsState(options: { includeRows?: boolean } = {}) {
+  if (!props.stateKey) return;
+  const signature = gridFsSignature();
+  const keepRows = options.includeRows === true && !loading.value && !error.value && loadedGridFsSignature === signature;
+  saveGridFsBrowserState(props.stateKey, {
+    filterInput: filterInput.value,
+    sortInput: sortInput.value,
+    appliedStructuredFilter: appliedStructuredFilter.value,
+    filterRules: toRaw(filterRules.value),
+    page: page.value,
+    selectedId: selectedFileId.value,
+    signature: keepRows ? signature : undefined,
+    rows: keepRows ? toRaw(files.value) : undefined,
+  });
+}
+
+watch([filterInput, sortInput, appliedStructuredFilter, filterRules, page, selectedFileId], () => persistGridFsState(), { deep: true });
+
 async function loadFiles() {
   loading.value = true;
   error.value = "";
   try {
     const nextFiles = await api.documentListGridFsFiles(props.connectionId, props.database, props.bucket, currentFilesFilter(), currentDocumentSortJson(sortInput.value));
     files.value = nextFiles;
+    loadedGridFsSignature = gridFsSignature();
     checkedFileIds.value = new Set(nextFiles.filter((file) => checkedFileIds.value.has(file.id)).map((file) => file.id));
     if (selectedFileId.value && !nextFiles.some((file) => file.id === selectedFileId.value)) {
       selectedFileId.value = "";
@@ -372,7 +418,12 @@ async function deleteSelectedFile() {
 }
 
 onMounted(() => {
-  void loadFiles();
+  // A restored listing means the tab switch costs no round trip; every explicit
+  // refresh and mutation path still calls loadFiles().
+  if (!restoredGridFsFiles) void loadFiles();
+});
+onBeforeUnmount(() => {
+  persistGridFsState({ includeRows: true });
 });
 
 watch(

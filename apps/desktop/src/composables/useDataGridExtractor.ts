@@ -60,6 +60,7 @@ interface UseDataGridExtractorOptions {
   contextCell: ComputedRef<{ rowId: number; rowIndex: number; col: number } | null> | Ref<{ rowId: number; rowIndex: number; col: number } | null>;
   contextSelectionIsSynthetic: ComputedRef<boolean> | Ref<boolean>;
   copyText: (text: string, gridCopy?: { rows: readonly (readonly unknown[])[]; header?: readonly unknown[] }) => Promise<boolean>;
+  externalCellValue?: (value: unknown, columnIndex: number) => unknown;
   canCopySqlInsert: (request: DataGridExtractRequest) => boolean;
   buildMongoInsert: (extractorOptions: DataGridExtractorOptions, rowLimit?: number) => Promise<string | undefined>;
   buildMongoUpdate?: (request: DataGridExtractRequest, rowLimit?: number) => Promise<string | undefined>;
@@ -83,12 +84,14 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
 
   // 除 SQL 外的剪贴板展示格式都可把文本型 MySQL VARBINARY 从 `0x<hex>` 还原为原始字符串。
   // SQL 必须继续持有 hex 才能保证 round-trip；rawRows 则始终保存原值，供 DBX 内部网格回粘使用。
-  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, presentBinaryText: boolean): unknown {
+  function extractorCellValue(value: unknown, columnType: string | undefined, normalizeValues: boolean, presentBinaryText: boolean, columnIndex: number): unknown {
     if (presentBinaryText) {
       const text = binaryCellClipboardText(value, columnType, options.databaseType.value);
       if (text !== null) return text;
     }
-    return normalizeValues ? normalizeCellValue(value, columnType) : value;
+    const normalized = normalizeValues ? normalizeCellValue(value, columnType) : value;
+    const externalValue = options.externalCellValue?.(normalized, columnIndex);
+    return externalValue === undefined ? normalized : externalValue;
   }
 
   function selectionData(): SelectionData | null {
@@ -210,7 +213,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
     const normalizeValues = descriptor.category === "json" || descriptor.category === "sql";
     const presentBinaryText = descriptor.category !== "sql";
     const rawRows = sourceRows.map((row) => requiredSourceIndexes.map((sourceIndex) => row[sourceIndex]));
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, presentBinaryText)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, columnTypes[index], normalizeValues, presentBinaryText, index)));
     const tableMeta =
       descriptor.category === "sql"
         ? compactTableMeta(
@@ -269,7 +272,7 @@ export function useDataGridExtractor(options: UseDataGridExtractorOptions) {
         return sourceIndex !== undefined && values.has(sourceIndex) ? values.get(sourceIndex) : value;
       });
     });
-    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.presentBinaryText)));
+    const rows = rawRows.map((row) => row.map((value, index) => extractorCellValue(value, limitedSource.columnTypes[index], limitedSource.normalizeValues, limitedSource.presentBinaryText, index)));
     const resolvedRequest = { ...request, rows };
     requestSources.set(resolvedRequest, { ...limitedSource, rawRows });
     return resolvedRequest;

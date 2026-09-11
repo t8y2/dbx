@@ -108,7 +108,7 @@ describe("NacosAdminConsole config workbench layout", () => {
   });
 
   it("keeps verbose service details collapsed until the user expands them", () => {
-    expect(source).toContain("const serviceDetailExpanded = ref(false);");
+    expect(source).toContain("const serviceDetailExpanded = ref(restoredUiState.serviceDetailExpanded ?? false);");
   });
 
   it("reserves the cluster-clear action space so entering a filter cannot reflow the toolbar", () => {

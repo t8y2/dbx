@@ -25,6 +25,7 @@ import {
   type NacosDashboardSample,
   type NullableMetric,
 } from "@/lib/nacos/nacosDashboard";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -33,14 +34,17 @@ const props = defineProps<{
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ autoRefreshInterval?: number }>({}, "NacosDashboard");
 const loading = ref(false);
 const fetching = ref(false);
 const error = ref("");
 const samples = ref<NacosDashboardSample[]>([]);
-const autoRefreshInterval = ref(10);
+const autoRefreshInterval = ref([0, 5, 10, 30, 60].includes(restoredUiState.autoRefreshInterval ?? -1) ? restoredUiState.autoRefreshInterval! : 10);
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let activeRequestKey = "";
 let latestRequestId = 0;
+
+trackUiState(() => ({ autoRefreshInterval: autoRefreshInterval.value }));
 
 const latest = computed(() => samples.value[samples.value.length - 1]);
 const snapshot = computed(() => latest.value?.snapshot);

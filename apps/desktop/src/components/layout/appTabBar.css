@@ -593,6 +593,15 @@
   border-right-width: 0.5px;
 }
 
+/* In the default classic single-row layout, the bottom indicator is enough to
+ * identify the active tab. Remove its surrounding three-sided outline so the
+ * selected state does not look boxed in. */
+.app-tab-bar.classic-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="top"][data-group-mode="none"] .app-tab-pill[data-active-tab="true"] {
+  border-top-color: transparent;
+  border-right-color: transparent;
+  border-left-color: transparent;
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-header-content,
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-header-content {
   background: color-mix(in srgb, var(--tab-group-color) 18%, transparent);

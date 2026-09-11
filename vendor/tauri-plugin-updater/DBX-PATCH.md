@@ -1,0 +1,1 @@
+Based on tauri-plugin-updater 2.10.1. Keeps upstream licenses. Adds offline restore_update using the same construction as network check, verify using the configured signing key, and checks ShellExecuteW before Windows process exit. Cached metadata never supplies executable paths or runtime configuration.

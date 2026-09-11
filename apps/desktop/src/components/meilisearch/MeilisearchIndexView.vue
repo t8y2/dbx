@@ -17,6 +17,7 @@ import * as api from "@/lib/backend/api";
 import type { MeilisearchIndexOverview } from "@/lib/backend/tauri";
 import { formatBytes } from "@/lib/database/serverMetrics";
 import { useToast } from "@/composables/useToast";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 import MeilisearchDocumentsPage from "./MeilisearchDocumentsPage.vue";
 import MeilisearchSettingsPage from "./MeilisearchSettingsPage.vue";
 import MeilisearchTasksPage from "./MeilisearchTasksPage.vue";
@@ -42,11 +43,15 @@ const props = defineProps<{
 
 type ActiveSection = "documents" | "tasks" | "settings";
 
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ activeSection?: ActiveSection }>({}, "MeilisearchIndexView");
+
 const { t, locale } = useI18n();
 const { toast } = useToast();
 
-const activeSection = ref<ActiveSection>("documents");
+const activeSection = ref<ActiveSection>(restoredUiState.activeSection ?? "documents");
 const overview = ref<MeilisearchIndexOverview | null>(null);
+
+trackUiState(() => ({ activeSection: activeSection.value }));
 
 const navSections = computed<Array<{ value: ActiveSection; label: string; icon: typeof FileText }>>(() => [
   { value: "documents", label: t("meilisearch.documents"), icon: FileText },

@@ -97,6 +97,13 @@ describe("MCP tool permission selection", () => {
     expect(next).not.toContain("dbx_send_message");
   });
 
+  it("keeps Kafka reading independent from message sending", () => {
+    const next = toggleMcpAllowedToolName(null, "dbx_send_message", false);
+    expect(next).toContain("dbx_peek_messages");
+    expect(toggleMcpAllowedToolName(next, "dbx_peek_messages", false)).not.toContain("dbx_peek_messages");
+    expect(toggleMcpAllowedToolName([], "dbx_peek_messages", true)).toEqual(["dbx_peek_messages"]);
+  });
+
   it("lets batch execution be enabled and disabled independently", () => {
     expect(toggleMcpAllowedToolName(["dbx_execute_query"], "dbx_execute_batch", true)).toEqual(["dbx_execute_query", "dbx_execute_batch"]);
     expect(toggleMcpAllowedToolName(["dbx_execute_query", "dbx_execute_batch"], "dbx_execute_batch", false)).toEqual(["dbx_execute_query"]);

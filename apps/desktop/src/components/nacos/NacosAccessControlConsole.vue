@@ -9,6 +9,7 @@ import NacosRoleAccessControl from "@/components/nacos/NacosRoleAccessControl.vu
 import * as api from "@/lib/backend/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import type { NacosConnectionInfo } from "@/types/nacos";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connectionId: string;
@@ -20,12 +21,15 @@ type AccessControlWorkspace = { refresh: () => Promise<void> };
 
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{ activeTab?: AccessTab }>({}, "NacosAccessControlConsole");
 const connectionInfo = ref<NacosConnectionInfo | null>(null);
 const connectionError = ref("");
 const loading = ref(false);
-const activeTab = ref<AccessTab>("users");
+const activeTab = ref<AccessTab>(restoredUiState.activeTab === "roles" ? "roles" : "users");
 const legacyWorkspace = ref<AccessControlWorkspace | null>(null);
 const enhancedWorkspaceRef = ref<AccessControlWorkspace | null>(null);
+
+trackUiState(() => ({ activeTab: activeTab.value }));
 
 const accessControl = computed(() => connectionInfo.value?.capabilities.accessControl);
 const supportsUsers = computed(() => accessControl.value?.listUsers.supported === true);

@@ -398,6 +398,35 @@ const constraintsLoaded = ref(false);
 const constraintsForTab = computed(() => constraintsForConstraintsTab(constraints.value, tableMetadataCapabilities.value.foreignKeys));
 const triggers = ref<EditableStructureTrigger[]>([]);
 const triggersLoaded = ref(false);
+// Master-detail layout: the list shows one compact row per trigger and the
+// selected trigger's editors render in the detail pane below (#8822).
+const selectedTriggerId = ref<string | null>(null);
+const selectedTrigger = computed(() => triggers.value.find((trigger) => trigger.id === selectedTriggerId.value) ?? null);
+// Inline rename state: the list row itself stays a click-to-select target;
+// the pencil button flips the name cell into an input (#8822 feedback).
+const renamingTriggerId = ref<string | null>(null);
+
+function startRenameTrigger(trigger: EditableStructureTrigger) {
+  selectedTriggerId.value = trigger.id;
+  renamingTriggerId.value = trigger.id;
+}
+watch(
+  [triggers, selectedTriggerId],
+  () => {
+    if (triggers.value.length === 0) {
+      if (selectedTriggerId.value !== null) selectedTriggerId.value = null;
+      return;
+    }
+    if (!triggers.value.some((trigger) => trigger.id === selectedTriggerId.value)) {
+      selectedTriggerId.value = triggers.value[0].id;
+    }
+  },
+  { immediate: true },
+);
+
+function selectTrigger(trigger: EditableStructureTrigger) {
+  selectedTriggerId.value = trigger.id;
+}
 const secondaryMetadataLoading = computed(() => indexesLoading.value || foreignKeysLoading.value || constraintsLoading.value || triggersLoading.value);
 
 function sameList(left: string[] | null | undefined, right: string[] | null | undefined): boolean {
@@ -3474,14 +3503,16 @@ function canEditForeignKeyDraft(foreignKey: EditableStructureForeignKey): boolea
 function addTrigger() {
   if (!canEditTriggers.value || triggersLoading.value) return;
   activeTab.value = "triggers";
-  triggers.value.push({
+  const draft: EditableStructureTrigger = {
     id: `new:${uuid()}`,
     name: "",
     timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
     statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
     markedForDrop: false,
-  });
+  };
+  triggers.value.push(draft);
+  selectedTriggerId.value = draft.id;
 }
 
 function removeNewTrigger(trigger: EditableStructureTrigger) {
@@ -4921,47 +4952,76 @@ watch(
             <div v-else-if="triggers.length === 0" class="py-10 text-center text-muted-foreground">
               {{ t("structureEditor.emptyReadonly") }}
             </div>
-            <div v-else class="space-y-1.5">
-              <div v-for="trigger in triggers" :key="trigger.id" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="trigger.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
-                <div class="grid grid-cols-[minmax(140px,1fr)_minmax(130px,180px)_minmax(140px,1fr)_auto] gap-1.5">
-                  <Input v-model="trigger.name" :class="structureControlClass" :placeholder="t('structureEditor.triggerName')" :disabled="!canEditTriggerDraft(trigger)" />
-                  <Input v-if="isOracleTriggerEditor" v-model="trigger.timing" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+            <div v-else class="flex h-full min-h-0 flex-col gap-1.5">
+              <!-- Trigger list (master): compact rows with inline timing/event editors -->
+              <div class="min-h-24 shrink-0 overflow-auto rounded-md border" :class="selectedTrigger ? 'max-h-[45%]' : 'max-h-full'">
+                <div
+                  v-for="trigger in triggers"
+                  :key="trigger.id"
+                  class="flex w-full cursor-pointer items-center gap-1.5 border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-left text-[length:var(--structure-font-size)] last:border-b-0 hover:bg-accent/40"
+                  :class="[trigger.id === selectedTriggerId ? 'bg-accent text-accent-foreground' : '', trigger.markedForDrop ? 'bg-destructive/5 opacity-60' : '']"
+                  @click="selectTrigger(trigger)"
+                >
+                  <template v-if="renamingTriggerId === trigger.id">
+                    <Input
+                      v-model="trigger.name"
+                      class="h-[var(--structure-control-height)] min-w-0 flex-1 rounded-[6px] px-[var(--structure-control-px)] font-mono"
+                      :placeholder="t('structureEditor.triggerName')"
+                      :disabled="!canEditTriggerDraft(trigger)"
+                      @click.stop
+                      @keydown.enter.prevent="renamingTriggerId = null"
+                      @keydown.escape.prevent="renamingTriggerId = null"
+                      @blur="renamingTriggerId = null"
+                    />
+                  </template>
+                  <span v-else class="min-w-0 flex-1 truncate font-mono" :class="trigger.name ? '' : 'italic text-muted-foreground'" :title="trigger.name || t('structureEditor.triggerName')">{{ trigger.name || t("structureEditor.triggerName") }}</span>
+                  <Button v-if="renamingTriggerId === trigger.id" variant="ghost" size="sm" :class="structureToolbarButtonClass" :title="t('structureEditor.triggerName')" @click.stop="renamingTriggerId = null">
+                    <Check :class="structureIconClass" />
+                  </Button>
+                  <Button v-else variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditTriggerDraft(trigger)" :title="t('structureEditor.triggerName')" @click.stop="startRenameTrigger(trigger)">
+                    <Pencil :class="structureIconClass" />
+                  </Button>
+                  <Input v-if="isOracleTriggerEditor" v-model="trigger.timing" class="h-[var(--structure-control-height)] w-28 shrink-0 rounded-[6px] px-[var(--structure-control-px)]" :disabled="!canEditTriggerDraft(trigger)" @click.stop />
                   <Select v-else v-model="trigger.timing" :disabled="!canEditTriggerDraft(trigger)">
-                    <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                    <SelectTrigger class="w-28 shrink-0" @click.stop>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="timing in triggerTimingOptions" :key="timing" :value="timing">{{ timing }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Input v-if="isOracleTriggerEditor || isSqlServerTriggerEditor" v-model="trigger.event" :class="structureControlClass" :disabled="!canEditTriggerDraft(trigger)" />
+                  <Input v-if="isOracleTriggerEditor || isSqlServerTriggerEditor" v-model="trigger.event" class="h-[var(--structure-control-height)] w-28 shrink-0 rounded-[6px] px-[var(--structure-control-px)]" :disabled="!canEditTriggerDraft(trigger)" @click.stop />
                   <Select v-else v-model="trigger.event" :disabled="!canEditTriggerDraft(trigger)">
-                    <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
+                    <SelectTrigger class="w-24 shrink-0" @click.stop>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem v-for="event in triggerEventOptions" :key="event" :value="event">{{ event }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <div class="flex items-center justify-end gap-1">
-                    <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
-                      {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
-                    </Badge>
-                    <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click="toggleDropTrigger(trigger)">
-                      <Trash2 :class="structureIconClass" />
-                      {{ trigger.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
-                    </Button>
-                    <Button v-else variant="ghost" size="sm" :class="structureToolbarButtonClass" @click="removeNewTrigger(trigger)">
-                      <X :class="structureIconClass" />
-                      {{ t("structureEditor.remove") }}
-                    </Button>
-                  </div>
+                  <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                    {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  </Badge>
+                  <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="toggleDropTrigger(trigger)">
+                    <Trash2 :class="structureIconClass" />
+                    {{ trigger.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
+                  </Button>
+                  <Button v-else variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="removeNewTrigger(trigger)">
+                    <X :class="structureIconClass" />
+                    {{ t("structureEditor.remove") }}
+                  </Button>
+                </div>
+              </div>
+              <!-- Statement editor (detail): title + SQL sized to its content -->
+              <div v-if="selectedTrigger" class="flex min-h-0 flex-1 flex-col rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="selectedTrigger.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
+                <div class="flex min-w-0 items-center gap-1.5 font-mono font-medium" :title="selectedTrigger.name">
+                  <span class="truncate">{{ selectedTrigger.name || t("structureEditor.triggerName") }}</span>
                 </div>
                 <textarea
-                  v-model="trigger.statement"
-                  class="mt-1.5 min-h-28 w-full resize-y rounded-[6px] border bg-background px-[var(--structure-control-px)] py-[var(--structure-cell-py)] font-mono text-[length:var(--structure-font-size)] leading-5 outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25 disabled:cursor-not-allowed disabled:opacity-50"
+                  v-model="selectedTrigger.statement"
+                  class="mt-1.5 min-h-0 w-full flex-1 resize-none overflow-auto rounded-[6px] border bg-background px-[var(--structure-control-px)] py-[var(--structure-cell-py)] font-mono text-[length:var(--structure-font-size)] leading-5 outline-none focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25 disabled:cursor-not-allowed disabled:opacity-50"
                   :placeholder="t('structureEditor.triggerStatement')"
-                  :disabled="!canEditTriggerDraft(trigger)"
+                  :disabled="!canEditTriggerDraft(selectedTrigger)"
                 />
               </div>
             </div>

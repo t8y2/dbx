@@ -425,6 +425,7 @@ const collapsingTabGroups = ref<Set<string>>(new Set());
 const tabGroupCollapseTimers = new Map<string, number>();
 const TAB_GROUP_COLLAPSE_MS = 140;
 const pendingTabScrollRestore = ref<{ fixed: number; regular: number } | null>(null);
+const pendingExpandedTabGroupReveal = ref<string | null>(null);
 const tabGroupPalette = ["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"];
 const tabGroupEditorOpen = ref(false);
 const editingTabGroupKey = ref("");
@@ -493,6 +494,29 @@ function restoreTabScrollPosition(position: { fixed: number; regular: number }) 
   if (regularTabsRowRef.value) regularTabsRowRef.value.scrollLeft = position.regular;
 }
 
+function revealExpandedTabGroupStartIfHidden(groupId: string) {
+  if (pendingExpandedTabGroupReveal.value !== groupId) return;
+  pendingExpandedTabGroupReveal.value = null;
+  if (isWrapLayout.value || isVerticalLayout.value) return;
+
+  const entries = Array.from(tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]") ?? []).filter((entry) => entry.dataset.tabGroupId === groupId && !entry.classList.contains("tab-group-entry--collapsed"));
+  const pills = entries.map((entry) => entry.querySelector<HTMLElement>(".tab-group-tab")).filter((pill): pill is HTMLElement => !!pill);
+  const firstPill = pills[0];
+  if (!firstPill) return;
+
+  const scrollContainer = hasHorizontalFixedRows.value ? firstPill.closest<HTMLElement>(".tab-section--horizontal") : tabsContainerRef.value;
+  if (!scrollContainer) return;
+  const viewport = scrollContainer.getBoundingClientRect();
+  const firstRect = firstPill.getBoundingClientRect();
+  const viewportPadding = 4;
+  const scrollRight = firstRect.right - (viewport.right - viewportPadding);
+  const scrollLeft = firstRect.left - (viewport.left + viewportPadding);
+  const scrollDelta = scrollRight > 0 ? scrollRight : scrollLeft < 0 ? scrollLeft : 0;
+  if (scrollDelta === 0) return;
+
+  scrollContainer.scrollBy({ left: scrollDelta, behavior: tabScrollBehavior.value });
+}
+
 function captureExpandedTabGroupWidths(groupIds: Set<string>) {
   if (isWrapLayout.value || isVerticalLayout.value) return;
   tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]").forEach((entry) => {
@@ -552,6 +576,8 @@ function handleTabGroupTransitionEnd(event: TransitionEvent) {
   const entry = event.currentTarget as HTMLElement;
   if (!entry.classList.contains("tab-group-entry--collapsed")) {
     entry.style.removeProperty("--tab-group-entry-expanded-width");
+    const groupId = entry.dataset.tabGroupId;
+    if (groupId) revealExpandedTabGroupStartIfHidden(groupId);
   }
   refreshHorizontalTabOverflow();
 }
@@ -564,11 +590,13 @@ function toggleTabGroup(tab: QueryTab) {
   }
   const next = new Set(collapsedTabGroups.value);
   if (next.has(groupId)) {
+    pendingExpandedTabGroupReveal.value = !isWrapLayout.value && !isVerticalLayout.value ? groupId : null;
     next.delete(groupId);
     collapsedTabGroups.value = next;
     nextTick(refreshHorizontalTabOverflow);
     return;
   }
+  if (pendingExpandedTabGroupReveal.value === groupId) pendingExpandedTabGroupReveal.value = null;
   beginTabGroupCollapse(new Set([groupId]));
 }
 

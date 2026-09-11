@@ -676,6 +676,29 @@
   opacity: 0.82;
 }
 
+/* Wrapped group entries can span multiple flex rows. Draw the accent on each
+ * member pill as well so every row keeps its own bottom rule when the entry's
+ * bounding box does not cover the pill's painted height. */
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-tab::after {
+  content: "";
+  display: block;
+  position: absolute;
+  z-index: 1;
+  right: 0;
+  bottom: -0.5px;
+  left: 0;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode)[data-placement="bottom"] .tab-group-tab::after {
+  top: -0.5px;
+  bottom: auto;
+}
+
 /* Single-row entries clip their contents while animating group expansion.
  * Draw the accent on the pill so it remains visible, compensating for the
  * pill's 0.5px border to align it with the header accent. */

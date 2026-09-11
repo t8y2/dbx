@@ -171,6 +171,8 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\) \.tab-group-header::after\s*\{[^}]*bottom:\s*0;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\) \.tab-group-tab::after\s*\{[^}]*bottom:\s*-0\.5px;[^}]*background:\s*var\(--tab-group-color\);/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;[^}]*bottom:\s*auto;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
@@ -429,6 +431,70 @@ describe("EditorGroupTabBar group behavior", () => {
     pgHeader.click();
     await settle();
     expect(host.querySelectorAll("[data-tab-id]").length).toBe(3);
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("only reveals a right-edge group when expansion leaves every member offscreen", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabLayout = "scroll";
+    const mysql = store.createTab("mysql-1", "app", "MY 1", "query");
+    store.createTab("pg-1", "app", "PG 1", "query");
+    store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), mysql, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    const pgHeader = headers.find((header) => header.title === "pg-1")!;
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+
+    const container = host.querySelector<HTMLElement>(".app-tab-scroll")!;
+    container.getBoundingClientRect = () => ({ left: 0, right: 300 }) as DOMRect;
+    const pgEntries = Array.from(host.querySelectorAll<HTMLElement>('[data-tab-group-id="regular:connection:pg-1"]'));
+    const pgPills = pgEntries.map((entry) => entry.querySelector<HTMLElement>(".tab-group-tab")!);
+    pgPills.forEach((pill, index) => {
+      pill.getBoundingClientRect = () => ({ left: 320 + index * 100, right: 420 + index * 100 }) as DOMRect;
+    });
+    const scrollBy = vi.fn();
+    container.scrollBy = scrollBy;
+
+    const transitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(transitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(transitionEnd);
+
+    expect(scrollBy).toHaveBeenCalledWith({ left: 124, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 250, right: 350 }) as DOMRect;
+    const partialScrollBy = vi.fn();
+    container.scrollBy = partialScrollBy;
+    const visibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(visibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(visibleTransitionEnd);
+
+    expect(partialScrollBy).toHaveBeenCalledWith({ left: 54, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 100, right: 200 }) as DOMRect;
+    const fullyVisibleScrollBy = vi.fn();
+    container.scrollBy = fullyVisibleScrollBy;
+    const fullyVisibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(fullyVisibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(fullyVisibleTransitionEnd);
+
+    expect(fullyVisibleScrollBy).not.toHaveBeenCalled();
 
     app.unmount();
     host.remove();

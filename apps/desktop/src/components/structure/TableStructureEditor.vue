@@ -76,6 +76,11 @@ import {
   generateUniqueIndexName,
   getColumnEditorControls,
   getDataTypeOptions,
+  POSTGRES_GEOMETRY_TYPES,
+  combinePostgresGeometryType,
+  isPostgresGeometryDataType,
+  postgresGeometrySridValue,
+  postgresGeometryTypeValue,
   getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
@@ -2796,6 +2801,11 @@ function updateColumnDataTypeLength(column: EditableStructureColumn, value: stri
   syncDamengIdentityForDataType(column);
 }
 
+function updatePostgresGeometryColumn(column: EditableStructureColumn, geomType: string, srid: string) {
+  const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
+  column.dataType = combinePostgresGeometryType(baseType, geomType, srid);
+}
+
 function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
   const baseType = dataTypeBaseInputValue(databaseType.value, column.dataType);
   const unit = value === "__default" ? "" : String(value ?? "");
@@ -4453,6 +4463,32 @@ watch(
                           </div>
                         </PopoverContent>
                       </Popover>
+                      <div v-else-if="isPostgresGeometryDataType(databaseType, column.dataType)" class="flex min-w-0 flex-col gap-0.5">
+                        <div class="flex min-w-0 items-center gap-1" :title="t('structureEditor.geometrySridHint')">
+                          <SearchableSelect
+                            :model-value="postgresGeometryTypeValue(column.dataType)"
+                            :options="[...POSTGRES_GEOMETRY_TYPES]"
+                            :allow-custom="true"
+                            :clearable="true"
+                            :placeholder="t('structureEditor.geometryTypePlaceholder')"
+                            :search-placeholder="t('structureEditor.geometryTypePlaceholder')"
+                            :empty-text="t('structureEditor.noMatchingType')"
+                            :trigger-class="[structureMonoControlClass, 'min-w-0 flex-1']"
+                            :disabled="isColumnTypeDisabled(column)"
+                            @update:model-value="(v: string) => updatePostgresGeometryColumn(column, v, postgresGeometrySridValue(column.dataType))"
+                          />
+                          <Input
+                            :model-value="postgresGeometrySridValue(column.dataType)"
+                            :class="[structureMonoControlClass, 'w-20 shrink-0']"
+                            :placeholder="t('structureEditor.sridPlaceholder')"
+                            :disabled="isColumnTypeDisabled(column)"
+                            @update:model-value="(v: string | number) => updatePostgresGeometryColumn(column, postgresGeometryTypeValue(column.dataType), String(v))"
+                          />
+                        </div>
+                        <p v-if="!postgresGeometryTypeValue(column.dataType) && postgresGeometrySridValue(column.dataType)" class="text-[length:var(--structure-font-size)] text-muted-foreground leading-tight">
+                          {{ t("structureEditor.geometryEmptyTypeHint") }}
+                        </p>
+                      </div>
                       <div v-else class="flex min-w-0 items-center gap-1">
                         <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
                         <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">

@@ -240,15 +240,17 @@ function handleKeydown(event: KeyboardEvent) {
 
 <template>
   <Popover v-model:open="open">
-    <PopoverTrigger as-child>
-      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn(triggerBaseClass, triggerClass)">
-        <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
-          <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
-        </slot>
-        <X v-if="clearable && !disabled && modelValue" :class="cn('shrink-0 opacity-60 hover:opacity-100', triggerIconClass)" @pointerdown.stop.prevent="emit('update:modelValue', '')" />
-        <ChevronDown v-else :class="cn('shrink-0 opacity-60', triggerIconClass)" />
-      </Button>
-    </PopoverTrigger>
+    <div class="relative">
+      <PopoverTrigger as-child>
+        <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn(triggerBaseClass, triggerClass)">
+          <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
+            <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
+          </slot>
+          <ChevronDown :class="cn('shrink-0 opacity-60', clearable && !disabled && modelValue && 'invisible', triggerIconClass)" />
+        </Button>
+      </PopoverTrigger>
+      <X v-if="clearable && !disabled && modelValue" :class="cn('shrink-0 opacity-60 hover:opacity-100 absolute right-2 top-1/2 -translate-y-1/2 z-10', triggerIconClass)" @click.stop.prevent="emit('update:modelValue', '')" />
+    </div>
     <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)" :style="contentStyle">
       <div class="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
         <div ref="listCard" :class="cn('shrink-0 rounded-md border bg-popover p-1.5 shadow-md', listClass)">

@@ -6222,8 +6222,14 @@ mod tests {
 
     #[test]
     fn oracle_schema_sync_drops_indexes_without_if_exists() {
-        assert_eq!(drop_index_sql("orders", "idx_orders_status", DatabaseType::Oracle, Some("APP")), "DROP INDEX APP.IDX_ORDERS_STATUS;");
-        assert_eq!(drop_index_sql("orders", "idx_orders_status", DatabaseType::OceanbaseOracle, Some("APP")), "DROP INDEX APP.IDX_ORDERS_STATUS;");
+        assert_eq!(
+            drop_index_sql("orders", "idx_orders_status", DatabaseType::Oracle, Some("APP")),
+            "DROP INDEX APP.IDX_ORDERS_STATUS;"
+        );
+        assert_eq!(
+            drop_index_sql("orders", "idx_orders_status", DatabaseType::OceanbaseOracle, Some("APP")),
+            "DROP INDEX APP.IDX_ORDERS_STATUS;"
+        );
     }
 
     #[test]

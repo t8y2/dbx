@@ -51,6 +51,12 @@ describe("QueryEditor auto focus wiring", () => {
   it("restores focus when the active query tab changes", () => {
     expect(queryEditorSource).toMatch(/if \(tabId !== prevTabId\) \{[\s\S]*?activateTabDocument\(prevTabId, tabId, val\);[\s\S]*?if \(props\.autoFocus\) restoreEditorFocus\(\);/);
   });
+
+  it("does not steal focus when a non-focused editor group is reactivated", () => {
+    const start = queryEditorSource.indexOf("function resumeQueryEditorBackgroundWork()");
+    const end = queryEditorSource.indexOf("\n}", start);
+    expect(queryEditorSource.slice(start, end)).toContain("if (props.autoFocus) restoreEditorFocus();");
+  });
 });
 
 describe("QueryEditor toolbar focus", () => {

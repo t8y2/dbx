@@ -7158,7 +7158,7 @@ function resumeQueryEditorBackgroundWork() {
   scheduleSemanticDiagnostics();
   if (view.value) schedulePreviewContextRefresh(view.value);
   restoreEditorSelection();
-  restoreEditorFocus();
+  if (props.autoFocus) restoreEditorFocus();
   restoreEditorViewport();
 }
 

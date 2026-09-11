@@ -209,9 +209,11 @@ const groupExecutableSql = computed(() => {
         @clear-default-database="activeTab && toolbar.clearDefaultDatabase(activeTab.id)"
       />
       <div class="relative flex-1 min-h-0">
-        <QueryEditorSurface v-if="activeTab?.mode === 'query'" ref="activeSurfaceRef" v-bind="surfaceBindings" :auto-focus="groupId === queryStore.focusedGroupId" class="h-full" />
-        <ContentArea v-else-if="activeTab" ref="activeSurfaceRef" v-bind="surfaceBindings" class="h-full" />
-        <slot v-else name="empty">
+        <KeepAlive>
+          <QueryEditorSurface v-if="activeTab?.mode === 'query'" ref="activeSurfaceRef" v-bind="surfaceBindings" :auto-focus="groupId === queryStore.focusedGroupId" class="h-full" />
+        </KeepAlive>
+        <ContentArea v-if="activeTab && activeTab.mode !== 'query'" ref="activeSurfaceRef" v-bind="surfaceBindings" class="h-full" />
+        <slot v-if="!activeTab" name="empty">
           <div class="flex h-full items-center justify-center text-sm text-muted-foreground">
             {{ t("tabs.emptyGroup") }}
           </div>

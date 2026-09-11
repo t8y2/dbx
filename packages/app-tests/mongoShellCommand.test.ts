@@ -427,6 +427,25 @@ test("parseMongoFindCommand rejects malformed UUID, BinData, Timestamp and MinKe
   }
 });
 
+test("parseMongoFindCommand validates UUID strings at parse time", () => {
+  // mongosh requires the canonical 8-4-4-4-12 hex form: dashes at fixed
+  // positions, hex digits elsewhere.
+  for (const source of [
+    'db.c.find({u: UUID("3b241101e2bb42558caf4136c566a962")})',
+    'db.c.find({u: UUID("3b241101-e2bb-4255-8caf-4136c566a96")})',
+    'db.c.find({u: UUID("3b241101-e2bb-4255-8caf-4136c566a9620")})',
+    'db.c.find({u: UUID("zb241101-e2bb-4255-8caf-4136c566a962")})',
+    'db.c.find({u: UUID("3b241101_e2bb_4255_8caf_4136c566a962")})',
+  ]) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+  }
+
+  // Upper-case hex is accepted and preserved verbatim.
+  const command = parseMongoFindCommand('db.c.find({u: UUID("3B241101-E2BB-4255-8CAF-4136C566A962")})');
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), { u: { $uuid: "3B241101-E2BB-4255-8CAF-4136C566A962" } });
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);

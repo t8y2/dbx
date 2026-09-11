@@ -553,6 +553,8 @@ const CONSTRUCTOR_CALL = /^(new\s+)?([A-Za-z_$][\w$]*)\s*\(/;
 const QUOTED_ARGUMENT = /^(["'])([^\\]*)\1$/;
 const INTEGER_ARGUMENT = /^-?\d+$/;
 const DECIMAL_ARGUMENT = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+/** Canonical 8-4-4-4-12 hex form, as mongosh requires for `UUID("...")`. */
+const UUID_ARGUMENT = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
 const INT64_BOUNDS = [-9223372036854775808n, 9223372036854775807n] as const;
 const INT32_BOUNDS = [-2147483648n, 2147483647n] as const;
@@ -641,7 +643,7 @@ function shellConstructorToExtendedJson(name: string, args: string[]): string | 
       return arg ? null : keyConstantJson(name);
     case "UUID":
       if (!arg) return wrap("$uuid", generateUuid());
-      return literal !== null ? wrap("$uuid", literal) : null;
+      return literal !== null && UUID_ARGUMENT.test(literal) ? wrap("$uuid", literal) : null;
     case "ObjectId":
       if (!arg) return wrap("$oid", generateObjectIdHex());
       return literal !== null || INTEGER_ARGUMENT.test(arg) ? wrap("$oid", literal ?? arg) : null;

@@ -1185,7 +1185,7 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
         "MinKey" | "MaxKey" if inner.is_empty() => Ok(key_constant_json(name)),
         "MinKey" | "MaxKey" => Err(format!("MongoDB {name}() takes no arguments.")),
         "UUID" if inner.is_empty() => Ok(extended_json("$uuid", &Uuid::new_v4().to_string())),
-        "UUID" => Ok(extended_json("$uuid", &parse_string_arg(inner)?)),
+        "UUID" => Ok(extended_json("$uuid", &parse_uuid_arg(inner)?)),
         "ObjectId" if inner.is_empty() => Ok(extended_json("$oid", &ObjectId::new().to_hex())),
         "ObjectId" => Ok(extended_json("$oid", &parse_string_arg(inner)?)),
         "ISODate" | "Date" if inner.is_empty() => {
@@ -1216,6 +1216,26 @@ fn shell_constructor_to_extended_json(name: &str, inner: &str) -> Result<String,
         }
         _ => Err(format!("Unsupported MongoDB value constructor {name}().")),
     }
+}
+
+/// `UUID("...")` takes the canonical 8-4-4-4-12 hex form, matching mongosh
+/// (hex digits only, dashes required, upper or lower case).
+fn parse_uuid_arg(arg: &str) -> Result<String, String> {
+    let value = parse_string_arg(arg)?;
+    if is_canonical_uuid(&value) {
+        Ok(value)
+    } else {
+        Err("MongoDB UUID() requires a canonical 8-4-4-4-12 hex string.".to_string())
+    }
+}
+
+fn is_canonical_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 fn two_argument_constructor_to_extended_json(name: &str, inner: &str) -> Result<String, String> {
@@ -1708,6 +1728,30 @@ mod tests {
             let error = parse(source).unwrap_err();
             assert!(error.contains(expected), "{source} => {error}");
         }
+    }
+
+    #[test]
+    fn validates_uuid_strings_at_parse_time() {
+        // mongosh requires the canonical 8-4-4-4-12 hex form: dashes at fixed
+        // positions, hex digits elsewhere, upper or lower case.
+        for source in [
+            r#"db.c.find({u: UUID("3b241101e2bb42558caf4136c566a962")})"#,
+            r#"db.c.find({u: UUID("3b241101-e2bb-4255-8caf-4136c566a96")})"#,
+            r#"db.c.find({u: UUID("3b241101-e2bb-4255-8caf-4136c566a9620")})"#,
+            r#"db.c.find({u: UUID("zb241101-e2bb-4255-8caf-4136c566a962")})"#,
+            r#"db.c.find({u: UUID("3b241101_e2bb_4255_8caf_4136c566a962")})"#,
+        ] {
+            let error = parse(source).unwrap_err();
+            assert!(error.contains("UUID() requires"), "{source} => {error}");
+        }
+
+        // Upper-case hex is accepted and preserved verbatim.
+        let MongoCommand::Find { filter, .. } =
+            parse(r#"db.c.find({u: UUID("3B241101-E2BB-4255-8CAF-4136C566A962")})"#).unwrap()
+        else {
+            panic!("expected a find command");
+        };
+        assert_eq!(filter, r#"{"u":{"$uuid":"3B241101-E2BB-4255-8CAF-4136C566A962"}}"#);
     }
 
     #[test]

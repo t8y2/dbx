@@ -2695,7 +2695,15 @@ fn json_filter_value_to_bson(value: &serde_json::Value, field_name: Option<&str>
         }
         serde_json::Value::Object(obj) => {
             if obj.len() == 1 {
-                if obj.contains_key("$regularExpression") {
+                // Shell constructor wrappers (UUID/BinData/Timestamp/MinKey/MaxKey)
+                // and $regularExpression decode through the shared extended JSON
+                // parser, following the same precedent as $date below.
+                if obj.keys().next().is_some_and(|key| {
+                    matches!(
+                        key.as_str(),
+                        "$regularExpression" | "$uuid" | "$binary" | "$timestamp" | "$minKey" | "$maxKey"
+                    )
+                }) {
                     if let Ok(Some(value)) = parse_extended_json_value(obj) {
                         return value;
                     }
@@ -3332,6 +3340,85 @@ mod tests {
             panic!("expected operator document");
         };
         assert_eq!(op.get("$gte"), Some(&Bson::DateTime(expected)));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_uuid_binary_timestamp_and_key_constants() {
+        // Equality on shell constructor values must compare against the typed
+        // BSON value, not a raw { "$uuid": ... } document the server rejects
+        // with "unknown operator: $uuid" (or silently matches nothing).
+        let filter = serde_json::json!({
+            "_id": { "$uuid": "3b241101-e2bb-4255-8caf-4136c566a962" },
+            "payload": { "$binary": { "base64": "AQID", "subType": "80" } },
+            "moment": { "$timestamp": { "t": 1735689600, "i": 7 } },
+            "lower": { "$minKey": 1 },
+            "upper": { "$maxKey": 1 },
+        });
+        let doc = json_filter_to_document(&filter).unwrap();
+
+        let expected_uuid = uuid::Uuid::parse_str("3b241101-e2bb-4255-8caf-4136c566a962").unwrap();
+        assert!(matches!(
+            doc.get("_id"),
+            Some(Bson::Binary(binary))
+                if binary.subtype == mongodb::bson::spec::BinarySubtype::Uuid && binary.bytes == expected_uuid.as_bytes()
+        ));
+        assert!(matches!(
+            doc.get("payload"),
+            Some(Bson::Binary(binary))
+                if binary.subtype == mongodb::bson::spec::BinarySubtype::UserDefined(0x80) && binary.bytes == [1, 2, 3]
+        ));
+        assert!(matches!(
+            doc.get("moment"),
+            Some(Bson::Timestamp(timestamp)) if timestamp.time == 1735689600 && timestamp.increment == 7
+        ));
+        assert!(matches!(doc.get("lower"), Some(Bson::MinKey)));
+        assert!(matches!(doc.get("upper"), Some(Bson::MaxKey)));
+    }
+
+    #[test]
+    fn json_filter_to_document_decodes_key_constants_inside_operators() {
+        // Range operands must be decoded too, exactly like extended JSON dates:
+        // { score: { $gt: MinKey } } and { _id: { $gt: UUID(...) } } would
+        // otherwise compare against a sub-document and silently match nothing.
+        // The _id case also covers the all-$ operator document branch, where
+        // operators like $gt keep recursing through json_filter_value_to_bson.
+        let filter = serde_json::json!({
+            "score": { "$gt": { "$minKey": 1 }, "$lt": { "$maxKey": 1 } },
+            "_id": { "$gt": { "$uuid": "3b241101-e2bb-4255-8caf-4136c566a962" } },
+            "snapshot": { "$gte": { "$timestamp": { "t": 1735689600, "i": 7 } } },
+            "blob": { "$eq": { "$binary": { "base64": "AQID", "subType": "00" } } },
+        });
+        let doc = json_filter_to_document(&filter).unwrap();
+
+        let Some(Bson::Document(score)) = doc.get("score") else {
+            panic!("expected score operator document");
+        };
+        assert_eq!(score.get("$gt"), Some(&Bson::MinKey));
+        assert_eq!(score.get("$lt"), Some(&Bson::MaxKey));
+
+        let Some(Bson::Document(id_filter)) = doc.get("_id") else {
+            panic!("expected _id operator document");
+        };
+        assert!(matches!(
+            id_filter.get("$gt"),
+            Some(Bson::Binary(binary)) if binary.subtype == mongodb::bson::spec::BinarySubtype::Uuid
+        ));
+
+        let Some(Bson::Document(snapshot)) = doc.get("snapshot") else {
+            panic!("expected snapshot operator document");
+        };
+        assert!(matches!(
+            snapshot.get("$gte"),
+            Some(Bson::Timestamp(timestamp)) if timestamp.time == 1735689600 && timestamp.increment == 7
+        ));
+
+        let Some(Bson::Document(blob)) = doc.get("blob") else {
+            panic!("expected blob operator document");
+        };
+        assert!(matches!(
+            blob.get("$eq"),
+            Some(Bson::Binary(binary)) if binary.subtype == mongodb::bson::spec::BinarySubtype::Generic && binary.bytes == [1, 2, 3]
+        ));
     }
 
     #[test]

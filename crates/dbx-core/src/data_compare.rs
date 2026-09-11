@@ -736,6 +736,36 @@ fn column_index_map(columns: &[String]) -> HashMap<&str, usize> {
     indexes
 }
 
+/// Resolves the ignored-column names to indexes in `columns`.
+///
+/// An exact identifier match always wins. When an ignored name has no exact
+/// match, a unique ASCII case-insensitive match is accepted so that a normal
+/// user input such as `created_at` works with metadata returned as
+/// `CREATED_AT` by databases such as Oracle. If case-insensitive matching is
+/// ambiguous, it is deliberately treated as unknown so quoted identifiers
+/// that differ only by case are never both (or arbitrarily) ignored.
+fn resolved_ignored_column_indexes(columns: &[String], ignored_columns: &[String]) -> HashSet<usize> {
+    let mut indexes = HashSet::with_capacity(ignored_columns.len());
+
+    for ignored_column in ignored_columns {
+        if let Some(index) = columns.iter().position(|column| column == ignored_column) {
+            indexes.insert(index);
+            continue;
+        }
+
+        let mut matches = columns.iter().enumerate().filter(|(_, column)| column.eq_ignore_ascii_case(ignored_column));
+        let Some((index, _)) = matches.next() else {
+            continue;
+        };
+
+        if matches.next().is_none() {
+            indexes.insert(index);
+        }
+    }
+
+    indexes
+}
+
 /// Indexes into `columns` of the columns that participate in value diff and
 /// checksum verification: every column except key columns and ignored columns.
 /// Key columns win over ignored columns, and names that are not present in
@@ -746,11 +776,11 @@ fn effective_compare_column_indexes(
     ignored_columns: &[String],
 ) -> Vec<usize> {
     let key_set: HashSet<&str> = key_columns.iter().map(String::as_str).collect();
-    let ignored_set: HashSet<&str> = ignored_columns.iter().map(String::as_str).collect();
+    let ignored_indexes = resolved_ignored_column_indexes(columns, ignored_columns);
     columns
         .iter()
         .enumerate()
-        .filter(|(_, column)| !key_set.contains(column.as_str()) && !ignored_set.contains(column.as_str()))
+        .filter(|(index, column)| !key_set.contains(column.as_str()) && !ignored_indexes.contains(index))
         .map(|(index, _)| index)
         .collect()
 }
@@ -2331,9 +2361,12 @@ mod tests {
 
     #[test]
     fn ignored_column_difference_does_not_mark_rows_modified() {
+        // Oracle-style metadata is uppercase while the UI placeholder and
+        // common user input are lowercase. A unique case-insensitive match
+        // must still ignore the timestamp difference.
         let diff = compare_data_rows(CompareDataRowsOptions {
-            columns: vec!["id".to_string(), "name".to_string(), "status".to_string(), "updated_at".to_string()],
-            key_columns: vec!["id".to_string()],
+            columns: vec!["ID".to_string(), "NAME".to_string(), "STATUS".to_string(), "UPDATED_AT".to_string()],
+            key_columns: vec!["ID".to_string()],
             ignored_columns: vec!["updated_at".to_string()],
             source_rows: vec![vec![json!(1), json!("Ada"), json!("active"), json!("2024-01-01T00:00:00Z")]],
             target_rows: vec![vec![json!(1), json!("Ada"), json!("active"), json!("2024-06-01T00:00:00Z")]],
@@ -2979,6 +3012,27 @@ mod tests {
         assert_eq!(
             effective_compare_column_indexes(&columns, &key_columns, &["id".to_string(), "status".to_string()]),
             vec![1, 2]
+        );
+
+        // A lowercase input resolves to a unique uppercase metadata column.
+        let uppercase_columns =
+            vec!["ID".to_string(), "NAME".to_string(), "UPDATED_AT".to_string(), "STATUS".to_string()];
+        assert_eq!(
+            effective_compare_column_indexes(&uppercase_columns, &["ID".to_string()], &["updated_at".to_string()]),
+            vec![1, 3]
+        );
+
+        // Exact matches remain precise. A non-exact case-insensitive match is
+        // skipped when two quoted identifiers differ only by case.
+        let case_distinct_columns =
+            vec!["ID".to_string(), "Created_At".to_string(), "created_at".to_string(), "NAME".to_string()];
+        assert_eq!(
+            effective_compare_column_indexes(&case_distinct_columns, &["ID".to_string()], &["CREATED_AT".to_string()]),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            effective_compare_column_indexes(&case_distinct_columns, &["ID".to_string()], &["Created_At".to_string()]),
+            vec![2, 3]
         );
     }
 

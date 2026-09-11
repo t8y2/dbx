@@ -4944,6 +4944,10 @@ export default withEnglishFallback({
       },
     },
     field: "campo",
+    keySearchHistory: "Historial de búsqueda",
+    keySearchHistoryForget: "Eliminar del historial",
+    keySearchHistoryEmpty: "No hay historial",
+    keySearchHistoryNoMatches: "No hay coincidencias en el historial",
   },
   mongo: {
     documents: "{count} documentos",

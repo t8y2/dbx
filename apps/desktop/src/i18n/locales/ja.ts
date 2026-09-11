@@ -4971,6 +4971,10 @@ export default withEnglishFallback({
       },
     },
     field: "フィールド",
+    keySearchHistory: "検索履歴",
+    keySearchHistoryForget: "履歴から削除",
+    keySearchHistoryEmpty: "履歴はありません",
+    keySearchHistoryNoMatches: "一致する履歴がありません",
   },
   mongo: {
     documents: "{count}ドキュメント",

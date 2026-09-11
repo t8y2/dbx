@@ -4575,6 +4575,10 @@ export default withEnglishFallback({
     },
     monitorStop: "모니터링 중지",
     monitorListening: "MONITOR 모니터링 중 · 최근 1000개 보관 · 너무 긴 레코드는 잘림 표시",
+    keySearchHistory: "검색 기록",
+    keySearchHistoryForget: "기록에서 제거",
+    keySearchHistoryEmpty: "검색 기록이 없습니다",
+    keySearchHistoryNoMatches: "일치하는 검색 기록이 없습니다",
   },
   mongo: {
     documents: "문서 {count}개",

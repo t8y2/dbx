@@ -156,6 +156,9 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain('isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout"');
     expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
     expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
+    expect(source).toContain('<span v-if="isVerticalLayout" class="tab-group-marker" aria-hidden="true" />');
+    expect(source).toContain("tab-group-chevron--collapsed");
+    expect(source).toContain('<DatabaseIcon :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon" aria-hidden="true" />');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-group-mode="none"\] \.app-tab-pill\s*\{[^}]*border-right-width:\s*0\.5px;/s);
@@ -176,6 +179,8 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
+    expect(sharedStyles).toMatch(/\.tab-group-chevron\s*\{[^}]*width:\s*0\.875rem;[^}]*height:\s*0\.875rem;[^}]*transition:[\s\S]*transform 180ms cubic-bezier\(0\.2, 0\.8, 0\.2, 1\)/s);
+    expect(sharedStyles).toMatch(/\.tab-group-chevron--collapsed\s*\{[^}]*transform:\s*rotate\(-90deg\);/s);
     expect(sharedStyles).toContain("row-gap: 0.375rem;");
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)");
     expect(sharedStyles).toContain('[data-group-mode="none"] .tab-section--horizontal');
@@ -525,6 +530,12 @@ describe("EditorGroupTabBar group behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+
+  it("keeps Redis logical databases in one database group", () => {
+    expect(source).toContain('if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis")');
+    expect(source).toContain('return JSON.stringify([tab.connectionId, tab.catalog || "", "redis"]);');
+    expect(source).toContain('if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") return tabConnectionLabel(tab);');
   });
 
   it("exposes the drag-back hit-test anchor and highlights itself as the detached drop target", async () => {

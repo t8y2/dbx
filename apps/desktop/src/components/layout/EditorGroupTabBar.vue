@@ -38,6 +38,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
@@ -51,7 +52,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -338,6 +339,9 @@ function updateTabPlacement(value: string) {
 
 function databaseTabGroupKey(tab: QueryTab) {
   const database = tab.database || "";
+  if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") {
+    return JSON.stringify([tab.connectionId, tab.catalog || "", "redis"]);
+  }
   // A connection-level tab has no database scope, so its catalog cannot split the group.
   return JSON.stringify([tab.connectionId, database ? tab.catalog || "" : "", database]);
 }
@@ -371,6 +375,7 @@ function tabConnectionTargetLabel(tab: QueryTab) {
 }
 
 function databaseTabGroupBaseLabel(tab: QueryTab) {
+  if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") return tabConnectionLabel(tab);
   if (!tab.database) return tabConnectionLabel(tab);
   return [tab.database, ...(tab.catalog ? [tab.catalog] : [])].join(" · ");
 }
@@ -1477,9 +1482,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
                     >
                       <span class="tab-group-header-content">
-                        <span class="tab-group-marker" aria-hidden="true" />
+                        <span v-if="isVerticalLayout" class="tab-group-marker" aria-hidden="true" />
                         <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
-                        <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(entry.tab) ? '-rotate-90' : ''" aria-hidden="true" />
+                        <ChevronDown class="tab-group-chevron" :class="{ 'tab-group-chevron--collapsed': isTabGroupCollapsed(entry.tab) }" aria-hidden="true" />
+                        <DatabaseIcon :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon" aria-hidden="true" />
                         <span class="tab-group-label">{{ tabGroupLabel(entry.tab) }}</span>
                         <span v-if="isTabGroupCollapsed(entry.tab)" class="tab-group-count">{{ entry.count }}</span>
                       </span>
@@ -1663,7 +1669,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   "
                 >
                   <TabExecutionStatus :tab="tab">
-                    <TabModeIcon :tab="tab" class="h-3.5 w-3.5 shrink-0" />
+                    <TabModeIcon :tab="tab" class="h-3.5 w-3.5 shrink-0" :class="tabIconClass(tab)" />
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>

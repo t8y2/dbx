@@ -71,6 +71,45 @@ pub struct RedisScanResult {
     pub total_keys: u64,
 }
 
+/// The expiration shapes the Key Browser may apply to a batch of selected keys.
+///
+/// The variants mirror [`set_ttl`] and [`set_expire_at`] exactly, so a batch edit
+/// and a single-key edit send the same Redis command for the same user choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedisKeysExpiry {
+    Persist,
+    Ttl(i64),
+    At(i64),
+}
+
+impl RedisKeysExpiry {
+    /// Keeps the single-key convention where a non-positive TTL means PERSIST.
+    pub fn from_ttl(ttl: i64) -> Self {
+        if ttl > 0 {
+            Self::Ttl(ttl)
+        } else {
+            Self::Persist
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Persist => "PERSIST",
+            Self::Ttl(_) => "EXPIRE",
+            Self::At(_) => "EXPIREAT",
+        }
+    }
+}
+
+/// Per-key outcome of a batch expiration so a partial failure stays reportable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisKeysExpiryResult {
+    /// Keys the server confirmed as updated.
+    pub applied: u64,
+    /// Selected keys that no longer exist, so the caller can offer a retry.
+    pub missing_key_raws: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisValue {
     pub key_display: String,
@@ -3662,6 +3701,69 @@ where
     }
 }
 
+/// Applies one expiration command per selected key in a single bounded round trip.
+///
+/// Keys the caller already selected may disappear concurrently, so this reports
+/// them instead of failing the whole batch. `PERSIST` stays idempotent: Redis
+/// answers 0 both for a missing key and for a key that is already persistent.
+pub async fn set_keys_expiry<C>(
+    con: &mut C,
+    keys: &[Vec<u8>],
+    expiry: RedisKeysExpiry,
+) -> Result<RedisKeysExpiryResult, String>
+where
+    C: ConnectionLike + Send + Sync + Unpin,
+{
+    if keys.is_empty() {
+        return Ok(RedisKeysExpiryResult::default());
+    }
+
+    let mut pipeline = Pipeline::with_capacity(keys.len());
+    for key in keys {
+        match expiry {
+            RedisKeysExpiry::Persist => {
+                pipeline.cmd("PERSIST").arg(key.as_slice());
+            }
+            RedisKeysExpiry::Ttl(ttl) => {
+                pipeline.cmd("EXPIRE").arg(key.as_slice()).arg(ttl);
+            }
+            RedisKeysExpiry::At(expire_at) => {
+                pipeline.cmd("EXPIREAT").arg(key.as_slice()).arg(expire_at);
+            }
+        }
+    }
+
+    let replies: Vec<RedisRawValue> = pipeline.query_async(con).await.map_err(|error| error.to_string())?;
+    summarize_keys_expiry(keys, expiry, &replies)
+}
+
+fn summarize_keys_expiry(
+    keys: &[Vec<u8>],
+    expiry: RedisKeysExpiry,
+    replies: &[RedisRawValue],
+) -> Result<RedisKeysExpiryResult, String> {
+    let mut result = RedisKeysExpiryResult::default();
+    for (index, key) in keys.iter().enumerate() {
+        let applied = match expiry {
+            // Redis answers 0 for an already-persistent key as well, so PERSIST
+            // must not be reported as a missing key.
+            RedisKeysExpiry::Persist => true,
+            _ => match replies.get(index) {
+                Some(RedisRawValue::Int(reply)) => *reply == 1,
+                // A server error or a short reply must not be silently counted
+                // as a per-key miss, or the batch would report a false success.
+                _ => return Err(format!("{} did not return one reply per selected key", expiry.command())),
+            },
+        };
+        if applied {
+            result.applied += 1;
+        } else {
+            result.missing_key_raws.push(redis_key_bytes_to_raw(key));
+        }
+    }
+    Ok(result)
+}
+
 pub async fn set_hash_field_ttl<C>(con: &mut C, key: &[u8], field: &str, ttl: i64) -> Result<(), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
@@ -5362,6 +5464,82 @@ mod tests {
         assert_eq!(con.command_count("PERSIST"), 1);
         assert_eq!(con.command_count("EXISTS"), 0);
         assert_eq!(con.command_count("EVAL"), 0);
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_expires_every_selected_key_in_one_pipeline() {
+        let mut con =
+            FakeRedisConnection::new(vec![RedisRawValue::Int(1), RedisRawValue::Int(1), RedisRawValue::Int(1)]);
+        let keys = vec![b"key:a".to_vec(), b"key:b".to_vec(), b"key:c".to_vec()];
+
+        let result = super::set_keys_expiry(&mut con, &keys, super::RedisKeysExpiry::Ttl(3_600)).await.unwrap();
+
+        assert_eq!(result, super::RedisKeysExpiryResult { applied: 3, missing_key_raws: Vec::new() });
+        // One pipeline for the whole selection, with one command per selected key.
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.commands[0].matches("\r\nEXPIRE\r\n").count(), 3);
+        assert_eq!(con.commands[0].matches("\r\nEXPIREAT\r\n").count(), 0);
+        assert_eq!(con.commands[0].matches("\r\nPERSIST\r\n").count(), 0);
+        assert_eq!(con.commands[0].matches("\r\n3600\r\n").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_reports_only_the_keys_that_disappeared() {
+        let mut con =
+            FakeRedisConnection::new(vec![RedisRawValue::Int(1), RedisRawValue::Int(0), RedisRawValue::Int(1)]);
+        let keys = vec![b"key:a".to_vec(), b"key:b".to_vec(), b"key:c".to_vec()];
+
+        let result = super::set_keys_expiry(&mut con, &keys, super::RedisKeysExpiry::At(1_735_689_600)).await.unwrap();
+
+        assert_eq!(result.applied, 2);
+        assert_eq!(result.missing_key_raws, vec![super::redis_key_bytes_to_raw(b"key:b")]);
+        assert_eq!(con.commands[0].matches("\r\nEXPIREAT\r\n").count(), 3);
+        assert!(con.commands[0].contains("\r\n1735689600\r\n"));
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_treats_persist_as_idempotent_for_every_key() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(0), RedisRawValue::Int(1)]);
+        let keys = vec![b"key:a".to_vec(), b"key:b".to_vec()];
+
+        let result = super::set_keys_expiry(&mut con, &keys, super::RedisKeysExpiry::from_ttl(-1)).await.unwrap();
+
+        assert_eq!(result, super::RedisKeysExpiryResult { applied: 2, missing_key_raws: Vec::new() });
+        assert_eq!(con.commands.len(), 1);
+        assert_eq!(con.commands[0].matches("\r\nPERSIST\r\n").count(), 2);
+        assert_eq!(con.commands[0].matches("\r\nEXPIRE\r\n").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_keeps_ttl_zero_on_the_persist_path() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+
+        let result =
+            super::set_keys_expiry(&mut con, &[b"key:a".to_vec()], super::RedisKeysExpiry::from_ttl(0)).await.unwrap();
+
+        assert_eq!(result.applied, 1);
+        assert_eq!(con.command_count("PERSIST"), 1);
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_does_not_send_a_command_for_an_empty_selection() {
+        let mut con = FakeRedisConnection::new(Vec::new());
+
+        let result = super::set_keys_expiry(&mut con, &[], super::RedisKeysExpiry::Ttl(60)).await.unwrap();
+
+        assert_eq!(result, super::RedisKeysExpiryResult::default());
+        assert!(con.commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_keys_expiry_fails_loudly_when_a_reply_is_missing() {
+        let mut con = FakeRedisConnection::new(vec![RedisRawValue::Int(1)]);
+        let keys = vec![b"key:a".to_vec(), b"key:b".to_vec()];
+
+        let error = super::set_keys_expiry(&mut con, &keys, super::RedisKeysExpiry::Ttl(60)).await.unwrap_err();
+
+        // A short or failed reply must not be reported as two successful keys.
+        assert!(error.contains("EXPIRE did not return one reply per selected key"));
     }
 
     #[tokio::test]

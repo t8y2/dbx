@@ -86,6 +86,7 @@ import type {
   RedisStreamPage,
   RedisStreamPendingPage,
   RedisValue,
+  RedisKeysExpiryResult,
   RedisScanResult,
   RedisCommandResult,
   RedisSlowlogEntry,
@@ -2948,6 +2949,14 @@ export async function redisSetExpireAt(connectionId: string, db: number, keyRaw:
     keyRaw,
     expireAt,
   });
+}
+
+export async function redisSetKeysTtl(connectionId: string, db: number, keyRaws: string[], ttl: number): Promise<RedisKeysExpiryResult> {
+  return post("/api/redis/set-keys-ttl", { connectionId, db, keyRaws, ttl });
+}
+
+export async function redisSetKeysExpireAt(connectionId: string, db: number, keyRaws: string[], expireAt: number): Promise<RedisKeysExpiryResult> {
+  return post("/api/redis/set-keys-expire-at", { connectionId, db, keyRaws, expireAt });
 }
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {

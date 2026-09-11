@@ -1,7 +1,7 @@
 import { CalendarDateTime, resetLocalTimeZone, setLocalTimeZone } from "@internationalized/date";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { calendarDateTimeToUnixSeconds, formatLocalDateTime, parseLocalDateTime, unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
-import { applyRedisExpiryPolicy, parseRedisTtl, redisExpiryModeForTtl, validateRedisExpiry } from "./redisExpiry";
+import { applyRedisBatchExpiryPolicy, applyRedisExpiryPolicy, parseRedisTtl, redisExpiryModeForTtl, validateRedisExpiry } from "./redisExpiry";
 
 afterEach(() => {
   resetLocalTimeZone();
@@ -69,5 +69,81 @@ describe("Redis expiry helpers", () => {
     expect(transport.setTtl).toHaveBeenNthCalledWith(2, "connection", 3, "key", 45);
     expect(transport.setExpireAt).toHaveBeenCalledOnce();
     expect(transport.setExpireAt).toHaveBeenCalledWith("connection", 3, "key", 1_735_689_600);
+  });
+});
+
+function batchTransport(results: { applied: number; missing_key_raws: string[] }[] = []) {
+  const queue = [...results];
+  const next = () => Promise.resolve(queue.shift() ?? { applied: 0, missing_key_raws: [] });
+  return {
+    setKeysTtl: vi.fn().mockImplementation(next),
+    setKeysExpireAt: vi.fn().mockImplementation(next),
+  };
+}
+
+describe("Redis batch expiry helpers", () => {
+  it("applies one PERSIST for an empty policy, a TTL for a relative policy, and one EXPIREAT for an absolute policy", async () => {
+    const none = batchTransport([{ applied: 1, missing_key_raws: [] }]);
+    await applyRedisBatchExpiryPolicy(none, "connection", 3, ["key:a"], { mode: "none" });
+    expect(none.setKeysTtl).toHaveBeenCalledWith("connection", 3, ["key:a"], -1);
+    expect(none.setKeysExpireAt).not.toHaveBeenCalled();
+
+    const ttl = batchTransport([{ applied: 2, missing_key_raws: [] }]);
+    await applyRedisBatchExpiryPolicy(ttl, "connection", 3, ["key:a", "key:b"], { mode: "ttl", ttl: 3_600 });
+    expect(ttl.setKeysTtl).toHaveBeenCalledWith("connection", 3, ["key:a", "key:b"], 3_600);
+    expect(ttl.setKeysExpireAt).not.toHaveBeenCalled();
+
+    const at = batchTransport([{ applied: 2, missing_key_raws: [] }]);
+    await applyRedisBatchExpiryPolicy(at, "connection", 3, ["key:a", "key:b"], { mode: "at", expireAt: 1_735_689_600 });
+    expect(at.setKeysExpireAt).toHaveBeenCalledWith("connection", 3, ["key:a", "key:b"], 1_735_689_600);
+    expect(at.setKeysTtl).not.toHaveBeenCalled();
+  });
+
+  it("sums per-key results and reports the keys the server did not update", async () => {
+    const transport = batchTransport([
+      { applied: 1, missing_key_raws: ["key:b"] },
+      { applied: 1, missing_key_raws: [] },
+    ]);
+
+    const summary = await applyRedisBatchExpiryPolicy(transport, "connection", 3, ["key:a", "key:b", "key:c"], { mode: "ttl", ttl: 60 }, 2);
+
+    expect(transport.setKeysTtl).toHaveBeenCalledTimes(2);
+    expect(transport.setKeysTtl).toHaveBeenNthCalledWith(1, "connection", 3, ["key:a", "key:b"], 60);
+    expect(transport.setKeysTtl).toHaveBeenNthCalledWith(2, "connection", 3, ["key:c"], 60);
+    expect(summary).toEqual({ applied: 2, failedKeyRaws: ["key:b"], errors: [] });
+  });
+
+  it("sends a large selection as bounded chunks instead of one request per key", async () => {
+    const keyRaws = Array.from({ length: 2_501 }, (_, index) => `key:${index}`);
+    const transport = batchTransport();
+
+    const summary = await applyRedisBatchExpiryPolicy(transport, "connection", 3, keyRaws, { mode: "none" });
+
+    expect(transport.setKeysTtl.mock.calls.map((call) => call[2].length)).toEqual([1_000, 1_000, 501]);
+    expect(summary.failedKeyRaws).toEqual([]);
+  });
+
+  it("keeps the keys an earlier chunk already updated when a later chunk fails", async () => {
+    const transport = batchTransport([{ applied: 2, missing_key_raws: [] }]);
+    transport.setKeysTtl.mockImplementationOnce(() => Promise.resolve({ applied: 2, missing_key_raws: [] }));
+    transport.setKeysTtl.mockImplementationOnce(() => Promise.reject(new Error("connection lost")));
+
+    const summary = await applyRedisBatchExpiryPolicy(transport, "connection", 3, ["key:a", "key:b", "key:c"], { mode: "ttl", ttl: 60 }, 2);
+
+    expect(summary.applied).toBe(2);
+    expect(summary.failedKeyRaws).toEqual(["key:c"]);
+    expect(summary.errors).toEqual(["connection lost"]);
+  });
+
+  it("deduplicates the selection and sends nothing for an empty one", async () => {
+    const transport = batchTransport([{ applied: 1, missing_key_raws: [] }]);
+
+    const empty = await applyRedisBatchExpiryPolicy(transport, "connection", 3, [], { mode: "none" });
+    expect(empty).toEqual({ applied: 0, failedKeyRaws: [], errors: [] });
+    expect(transport.setKeysTtl).not.toHaveBeenCalled();
+
+    const summary = await applyRedisBatchExpiryPolicy(transport, "connection", 3, ["key:a", "key:a"], { mode: "none" });
+    expect(transport.setKeysTtl).toHaveBeenCalledWith("connection", 3, ["key:a"], -1);
+    expect(summary.applied).toBe(1);
   });
 });

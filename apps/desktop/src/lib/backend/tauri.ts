@@ -2604,6 +2604,11 @@ export interface RedisZsetItem {
   member: RedisBlob;
 }
 
+export interface RedisKeysExpiryResult {
+  applied: number;
+  missing_key_raws: string[];
+}
+
 export interface RedisStreamField {
   field: string;
   value: string;
@@ -2890,6 +2895,14 @@ export async function redisSetTtl(connectionId: string, db: number, keyRaw: stri
 
 export async function redisSetExpireAt(connectionId: string, db: number, keyRaw: string, expireAt: number): Promise<void> {
   return invoke("redis_set_expire_at", { connectionId, db, keyRaw, expireAt });
+}
+
+export async function redisSetKeysTtl(connectionId: string, db: number, keyRaws: string[], ttl: number): Promise<RedisKeysExpiryResult> {
+  return invoke("redis_set_keys_ttl", { connectionId, db, keyRaws, ttl });
+}
+
+export async function redisSetKeysExpireAt(connectionId: string, db: number, keyRaws: string[], expireAt: number): Promise<RedisKeysExpiryResult> {
+  return invoke("redis_set_keys_expire_at", { connectionId, db, keyRaws, expireAt });
 }
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {

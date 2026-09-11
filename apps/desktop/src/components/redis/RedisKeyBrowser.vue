@@ -65,7 +65,7 @@ import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
-import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { applyRedisBatchExpiryPolicy, applyRedisExpiryPolicy, type RedisExpiryMode, type RedisExpiryPolicy, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
@@ -136,6 +136,11 @@ const redisExpiryTransport = {
   setExpireAt: api.redisSetExpireAt,
 };
 
+const redisBatchExpiryTransport = {
+  setKeysTtl: api.redisSetKeysTtl,
+  setKeysExpireAt: api.redisSetKeysExpireAt,
+};
+
 const flatKeys = shallowRef<RedisKeyInfo[]>([]);
 const treeKeys = shallowRef<RedisKeyTreeNode[]>([]);
 let flatKeyByRaw = new Map<string, RedisKeyInfo>();
@@ -178,6 +183,13 @@ const noExpiryProjectionEpoch = ref(0);
 const selectionAnchorRowId = ref<string | null>(null);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
+const showBatchExpiryDialog = ref(false);
+const savingBatchExpiry = ref(false);
+const batchExpiryMode = ref<RedisExpiryMode>("none");
+const batchExpiryTtl = ref("");
+const batchExpiryExpireAt = shallowRef<CalendarDateTime | null>(null);
+/** Snapshot taken when the dialog opens so a background refresh cannot retarget the batch. */
+const batchExpiryKeyRaws = shallowRef<string[]>([]);
 const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "command"; command: string } | null>(null);
 const showDangerConfirm = ref(false);
 const commandText = ref("");
@@ -293,7 +305,9 @@ const isFuzzyKeySearch = computed(() => searchMode.value === "key" && isSearchMo
 const fuzzyTreeLimitReached = computed(() => isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(flatKeys.value.length));
 const useFlatKeySearchRows = computed(() => showCustomGrouping.value || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
 const isFuzzyHierarchyView = computed(() => isFuzzyKeySearch.value && !fuzzyTreeLimitReached.value);
-const selectionBusy = computed(() => deletingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
+/** True while a key-list mutation (delete or batch expiry) owns the visible result set. */
+const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value);
+const selectionBusy = computed(() => mutatingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
 const allKeysSelected = computed(() => (customGrouping.value.enabled ? filteredFlatKeys.value.length > 0 && checkedKeys.value.size === filteredFlatKeys.value.length : allLoadedKeysSelected.value && !hasMore.value));
@@ -1142,7 +1156,7 @@ function onRedisKeyScroll(event: Event) {
     const shouldLoad = shouldLoadMoreRedisKeys({
       enabled: redisInfiniteScrollEnabled.value,
       hasMore: hasMore.value,
-      busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+      busy: loading.value || loadingMore.value || searchPending.value || mutatingKeys.value || isFetchingAll.value,
       loadedKeys: flatKeys.value.length,
       maxKeys: redisInfiniteScrollMaxKeys.value,
       scrollTop: scroller.scrollTop,
@@ -1787,6 +1801,116 @@ function scrollCommandTerminalToEnd() {
     if (!commandTerminalRef.value) return;
     commandTerminalRef.value.scrollTop = commandTerminalRef.value.scrollHeight;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Batch expiration
+// ---------------------------------------------------------------------------
+
+/** Keeps only the given loaded keys checked, so a partial batch failure can be retried. */
+function retainCheckedKeys(keyRaws: Iterable<string>) {
+  const keep = new Set(keyRaws);
+  const nextChecked = new Set<string>();
+  for (const keyRaw of checkedKeys.value) {
+    if (keep.has(keyRaw) && loadedKeyRaws.has(keyRaw)) nextChecked.add(keyRaw);
+  }
+  checkedKeys.value = nextChecked;
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(nextChecked);
+  selectionEpoch.value++;
+}
+
+/**
+ * Writes a server-confirmed TTL straight into one loaded row, and reports
+ * whether its no-expiry membership changed.
+ *
+ * The batch result already carries the applied TTL, so the list badge and its
+ * countdown update without one refresh request per key.
+ */
+function applyKeyTtlMetadata(keyRaw: string, ttl: number): boolean {
+  const keyInfo = flatKeyByRaw.get(keyRaw);
+  if (!keyInfo) return false;
+  const previousTtl = keyInfo.ttl ?? -2;
+  const nextKeyInfo: RedisKeyInfo = { ...keyInfo, ttl };
+  if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, nextKeyInfo)) return false;
+  recordKeyTtlObservedAt(nextKeyInfo);
+  if (treeIndex) updateRedisKeyTreeLeafMetadata(treeIndex, nextKeyInfo);
+  return (previousTtl === -1) !== (ttl === -1);
+}
+
+function applyBatchExpiryMetadata(keyRaws: readonly string[], policy: RedisExpiryPolicy) {
+  const nowSeconds = Math.ceil(Date.now() / 1_000);
+  let noExpiryMembershipChanged = false;
+
+  for (const keyRaw of keyRaws) {
+    if (policy.mode === "at") {
+      const remaining = policy.expireAt - nowSeconds;
+      // EXPIREAT with an already-past timestamp deletes the key instead of expiring it.
+      if (remaining <= 0) {
+        onKeyDeleted(keyRaw);
+        continue;
+      }
+      if (applyKeyTtlMetadata(keyRaw, remaining)) noExpiryMembershipChanged = true;
+      continue;
+    }
+    if (applyKeyTtlMetadata(keyRaw, policy.mode === "ttl" ? policy.ttl : -1)) noExpiryMembershipChanged = true;
+  }
+
+  // Publish one metadata refresh for the whole batch: a 1000-key selection must
+  // not schedule 1000 reactive updates or 1000 countdown-timer re-checks.
+  if (noExpiryMembershipChanged) noExpiryProjectionEpoch.value++;
+  keyMetadataEpoch.value++;
+  syncListTtlTimer();
+}
+
+function openBatchExpiryDialog() {
+  if (checkedKeys.value.size === 0 || selectionBusy.value) return;
+  batchExpiryKeyRaws.value = [...checkedKeys.value];
+  batchExpiryMode.value = "none";
+  batchExpiryTtl.value = "";
+  batchExpiryExpireAt.value = null;
+  showBatchExpiryDialog.value = true;
+}
+
+function onBatchExpiryDialogOpenChange(open: boolean) {
+  if (!open && savingBatchExpiry.value) return;
+  showBatchExpiryDialog.value = open;
+}
+
+async function saveBatchExpiry() {
+  if (savingBatchExpiry.value || batchExpiryKeyRaws.value.length === 0) return;
+  const validation = validateRedisExpiry(batchExpiryMode.value, batchExpiryTtl.value, batchExpiryExpireAt.value);
+  if (!validation.valid) {
+    toast(expiryValidationMessage(validation.reason), 3000);
+    return;
+  }
+
+  const keyRaws = batchExpiryKeyRaws.value;
+  savingBatchExpiry.value = true;
+  try {
+    const summary = await applyRedisBatchExpiryPolicy(redisBatchExpiryTransport, props.connectionId, props.db, keyRaws, validation.policy);
+    const failed = new Set(summary.failedKeyRaws);
+    applyBatchExpiryMetadata(
+      keyRaws.filter((keyRaw) => !failed.has(keyRaw)),
+      validation.policy,
+    );
+
+    if (failed.size > 0) {
+      // Keep only the keys that were not updated so the user can retry them directly.
+      retainCheckedKeys(failed);
+      toast(t("redis.batchExpiryPartial", { success: summary.applied, failed: failed.size }), 5000);
+    } else {
+      resetCheckedKeys();
+      toast(t("redis.batchExpirySuccess", { count: summary.applied }), 3000);
+    }
+    // Surface the underlying cause as well; the count toast above keeps the partial result.
+    if (summary.errors.length > 0) toast(summary.errors[0], 5000);
+  } catch (error) {
+    toast(errorMessage(error), 5000);
+  } finally {
+    savingBatchExpiry.value = false;
+    showBatchExpiryDialog.value = false;
+    batchExpiryKeyRaws.value = [];
+  }
 }
 
 function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">): number {
@@ -3044,8 +3168,9 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"><Clock class="w-3 h-3 mr-1" />{{ t("redis.batchExpiry") }}</Button>
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
                 </Button>
@@ -3204,7 +3329,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-else-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
             <template v-if="hasMore">
               <span class="mb-3">{{ t("redis.noKeysInScanHint") }}</span>
-              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || deletingKeys" @click="loadMore()">
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || mutatingKeys" @click="loadMore()">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
               </Button>
@@ -3303,11 +3428,11 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             {{ t("redis.fuzzyTreeLimit", { count: flatKeys.length }) }}
           </div>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || deletingKeys" @click="loadMore()">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || mutatingKeys" @click="loadMore()">
               <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
               {{ t("redis.loadMoreKeys") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || searchPending || deletingKeys || !hasMore" @click="fetchAll">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || searchPending || mutatingKeys || !hasMore" @click="fetchAll">
               {{ t("redis.fetchAllKeys") }}
             </Button>
           </div>
@@ -3315,7 +3440,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <div class="text-xs text-muted-foreground text-center">
               {{ fetchAllProgressText }}
             </div>
-            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" :disabled="fetchAllStopRequested || deletingKeys" @click="stopFetchAll">
+            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" :disabled="fetchAllStopRequested || mutatingKeys" @click="stopFetchAll">
               {{ t("redis.stopFetchAll") }}
             </Button>
           </div>
@@ -3453,6 +3578,49 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
     </Splitpanes>
 
     <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind !== 'delete-keys'" @confirm="applyDangerAction" />
+
+    <Dialog :open="showBatchExpiryDialog" @update:open="onBatchExpiryDialogOpenChange">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("redis.batchExpiryTitle") }}</DialogTitle>
+        </DialogHeader>
+
+        <div class="grid gap-3">
+          <p v-if="batchExpiryKeyRaws.length > 0" class="text-xs text-muted-foreground">{{ t("redis.batchExpirySelected", { count: batchExpiryKeyRaws.length }) }}</p>
+          <div class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("redis.expiry") }}</span>
+            <Select v-model="batchExpiryMode" :disabled="savingBatchExpiry">
+              <SelectTrigger class="h-8 text-xs" data-redis-batch-expiry-mode>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent data-redis-expiry-mode-content>
+                <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+                <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+                <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <label v-if="batchExpiryMode === 'ttl'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.createKeyTtl") }}</span>
+              <Input v-model="batchExpiryTtl" data-redis-batch-expiry-ttl class="dbx-editor-font-family h-8 text-xs" :disabled="savingBatchExpiry" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveBatchExpiry" />
+            </label>
+            <label v-else-if="batchExpiryMode === 'at'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.expiryAt") }}</span>
+              <DateTimePicker v-model="batchExpiryExpireAt" full-width :locale="locale" :disabled="savingBatchExpiry" />
+            </label>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" :disabled="savingBatchExpiry" @click="showBatchExpiryDialog = false">
+            {{ t("dangerDialog.cancel") }}
+          </Button>
+          <Button :disabled="savingBatchExpiry || batchExpiryKeyRaws.length === 0" data-redis-batch-expiry-apply @click="saveBatchExpiry">
+            <Loader2 v-if="savingBatchExpiry" class="h-4 w-4 animate-spin" />
+            {{ t("redis.batchExpiryApply") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showCreateKeyDialog" @update:open="onCreateKeyDialogOpenChange">
       <DialogContent class="sm:max-w-md" :show-close-button="!creatingKey" :style="editorFontFamilyStyle">

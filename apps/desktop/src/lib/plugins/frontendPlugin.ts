@@ -15,6 +15,7 @@ import type {
   PluginWorkbenchContribution,
 } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
+import { clonePluginData } from "./pluginData";
 
 const PLUGIN_CONNECTION_PROVIDER_OPTION_PREFIX = "plugin-provider:";
 
@@ -146,7 +147,7 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
 }
 
 export function buildPluginConnectionConfig(pluginId: string, contribution: PluginConnectionProviderContribution, values: Record<string, PluginFormFieldValue>, existing?: ConnectionConfig): ConnectionConfig {
-  const externalConfig: Record<string, unknown> = isRecord(existing?.external_config) ? structuredClone(existing.external_config) : {};
+  const externalConfig: Record<string, unknown> = isRecord(existing?.external_config) ? clonePluginData(existing.external_config) : {};
   const connectionSecrets = { ...existing?.connection_secrets };
   const config: ConnectionConfig = {
     id: existing?.id || uuid(),

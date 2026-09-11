@@ -131,6 +131,10 @@ export interface ConnectionConfig {
   gbase_server?: string;
   informix_server?: string;
   external_config?: unknown;
+  plugin_id?: string;
+  plugin_connection_provider?: string;
+  plugin_connection_type?: string;
+  connection_secrets?: Record<string, string>;
   one_time?: boolean;
   /**
    * Whether the database password may be persisted locally. When false, the
@@ -431,19 +435,155 @@ export interface PluginManifestLocalization {
   contributions?: Record<string, PluginContributionLocalization>;
 }
 
+export interface PluginCompatibility {
+  compatible: boolean;
+  errors?: string[];
+  warnings?: string[];
+  target?: string;
+}
+
 export interface PluginManifest {
+  manifest_version?: number;
   id: string;
   name: string;
+  icon?: string;
   version?: string;
+  publisher?: string;
+  engines?: PluginEngines;
+  permissions?: string[];
+  entrypoints?: PluginEntrypoints;
   protocol_version?: number;
   description?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  contributions?: PluginContribution[];
+  localizations?: Record<string, PluginManifestLocalization>;
 }
 
 export interface InstalledPlugin {
   manifest: PluginManifest;
-  path: string;
+  compatibility: PluginCompatibility;
+  path?: string;
+}
+
+export interface PluginTrustedKey {
+  keyId: string;
+  publicKey: string;
+}
+
+export type PluginRepositoryKind = "official" | "custom" | "enterprise";
+
+export interface PluginRepository {
+  id: string;
+  name: string;
+  kind: PluginRepositoryKind;
+  catalogUrl?: string;
+  enabled: boolean;
+  managed: boolean;
+}
+
+export interface PluginMarketplaceRepositoryMetadata {
+  id: string;
+  name: string;
+  homepage?: string;
+}
+
+export interface PluginMarketplaceLocalization {
+  name?: string;
+  description?: string;
+}
+
+export interface PluginMarketplaceArtifact {
+  target: string;
+  url: string;
+  sha256: string;
+  signingKeyId: string;
+  size?: number;
+}
+
+export interface PluginMarketplaceVersion {
+  version: string;
+  releasedAt?: string;
+  releaseNotes?: string;
+  artifacts: PluginMarketplaceArtifact[];
+}
+
+export interface PluginMarketplacePlugin {
+  id: string;
+  name: string;
+  description: string;
+  publisher: string;
+  verified: boolean;
+  icon?: string;
+  tags: string[];
+  permissions: string[];
+  source?: string;
+  homepage?: string;
+  license?: string;
+  latestVersion: string;
+  versions: PluginMarketplaceVersion[];
+  localizations?: Record<string, PluginMarketplaceLocalization>;
+}
+
+export interface PluginMarketplaceCatalog {
+  catalogVersion: number;
+  repository: PluginMarketplaceRepositoryMetadata;
+  generatedAt?: string;
+  plugins: PluginMarketplacePlugin[];
+}
+
+export interface PluginRepositoryCatalogResult {
+  repository: PluginRepository;
+  target: string;
+  catalog?: PluginMarketplaceCatalog;
+  error?: string;
+}
+
+export interface PluginMarketplaceInstallRequest {
+  repositoryId: string;
+  pluginId: string;
+  version?: string;
+}
+
+export interface ActivePluginSession {
+  pluginId: string;
+  processId?: number;
+  state: "starting" | "running" | "stopping" | "stopped" | "exited";
+}
+
+export interface PluginUiAssetPayload {
+  contentType: string;
+  dataBase64: string;
+  etag: string;
+}
+
+export interface PluginConnectionActionResult {
+  message?: string;
+  fieldValues?: Record<string, PluginFormFieldValue | null>;
+}
+
+export interface PluginInstallResult {
+  plugin: InstalledPlugin;
+  previousVersion?: string;
+  packageSha256: string;
+  signature: { status: "trusted"; key_id: string } | { status: "unsigned" };
+}
+
+export interface PluginRollbackResult {
+  plugin: InstalledPlugin;
+  previousVersion: string;
+}
+
+export interface PluginEvent {
+  pluginId: string;
+  method: string;
+  params: unknown;
+}
+
+export interface PluginBinaryEvent {
+  pluginId: string;
+  channel: string;
+  dataBase64: string;
 }
 
 export interface JdbcDriverInfo {
@@ -1465,7 +1605,20 @@ export interface QueryTab {
     | "mysql-dashboard"
     | "postgres-dashboard"
     | "xugu-dashboard"
-    | "dolt-version-control";
+    | "dolt-version-control"
+    | "plugin-workbench"
+    | "plugin-filesystem";
+  pluginWorkbench?: {
+    pluginId: string;
+    contributionId: string;
+    context?: Record<string, unknown>;
+  };
+  pluginFilesystem?: {
+    pluginId: string;
+    providerId: string;
+    rootUri?: string;
+    currentUri?: string;
+  };
   /** Ephemeral navigation intent; it is consumed by HBaseBrowser and is not persisted. */
   hbaseCreateTableOnOpen?: boolean;
   mqTenant?: string;

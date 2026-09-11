@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { reactive, readonly } from "vue";
 import { PluginHostBridge, pluginSandboxDocument } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
@@ -55,6 +56,65 @@ describe("PluginHostBridge", () => {
     bridge.sendInit();
 
     expect(messages[0]).toMatchObject({ source: "dbx-host", type: "init", locale: "zh-CN", context: { connectionId: "connection" } });
+  });
+
+  it("snapshots nested Vue reactive context values before sending them to the plugin", () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const context = {
+      connectionId: "connection",
+      values: reactive({ path: "/tmp", options: readonly({ recursive: true }) }),
+    };
+    const bridge = new PluginHostBridge(plugin(), workbench, context, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+    });
+
+    bridge.sendInit();
+
+    expect(messages[0]).toMatchObject({
+      type: "init",
+      context: { connectionId: "connection", values: { path: "/tmp", options: { recursive: true } } },
+    });
+    expect((messages[0] as { context: typeof context }).context).not.toBe(context);
+  });
+
+  it("reports unsupported plugin context values", () => {
+    expect(
+      () =>
+        new PluginHostBridge(plugin(), workbench, { value: () => undefined }, () => null, {
+          invoke: vi.fn(),
+          notify: vi.fn(),
+          sendBinary: vi.fn(),
+          readAsset: vi.fn(),
+        }),
+    ).toThrow("Plugin workbench context contains an unsupported value");
+  });
+
+  it("rejects circular and oversized plugin contexts", () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(
+      () =>
+        new PluginHostBridge(plugin(), workbench, circular, () => null, {
+          invoke: vi.fn(),
+          notify: vi.fn(),
+          sendBinary: vi.fn(),
+          readAsset: vi.fn(),
+        }),
+    ).toThrow("circular reference");
+
+    expect(
+      () =>
+        new PluginHostBridge(plugin(), workbench, { value: "x".repeat(2 * 1024 * 1024) }, () => null, {
+          invoke: vi.fn(),
+          notify: vi.fn(),
+          sendBinary: vi.fn(),
+          readAsset: vi.fn(),
+        }),
+    ).toThrow("exceeds");
   });
 
   it("rejects privileged host calls without manifest permission", async () => {

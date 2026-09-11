@@ -1,4 +1,5 @@
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginWorkbenchContribution } from "@/types/database";
+import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 
 const PLUGIN_MESSAGE_SOURCE = "dbx-plugin";
 const HOST_MESSAGE_SOURCE = "dbx-host";
@@ -54,9 +55,9 @@ export class PluginHostBridge {
     locale = "en",
     theme?: PluginBridgeTheme,
   ) {
-    this.context = structuredCloneSafe(context);
+    this.context = snapshotPluginWorkbenchContext(context);
     this.locale = locale;
-    this.theme = theme ? structuredCloneSafe(theme) : undefined;
+    this.theme = theme ? clonePluginData(theme) : undefined;
   }
 
   handleWindowMessage(event: MessageEvent): boolean {
@@ -80,9 +81,9 @@ export class PluginHostBridge {
       pluginId: this.plugin.manifest.id,
       contributionId: this.workbench.id,
       locale: this.locale,
-      theme: this.theme ? structuredCloneSafe(this.theme) : undefined,
+      theme: this.theme ? clonePluginData(this.theme) : undefined,
       permissions: [...(this.plugin.manifest.permissions || [])],
-      context: structuredCloneSafe(this.context),
+      context: snapshotPluginWorkbenchContext(this.context),
     });
   }
 
@@ -92,8 +93,8 @@ export class PluginHostBridge {
    * a full reload; context-only changes must not lose plugin state.
    */
   updateContext(context: PluginWorkbenchContext): void {
-    this.context = structuredCloneSafe(context);
-    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: structuredCloneSafe(this.context) });
+    this.context = snapshotPluginWorkbenchContext(context);
+    this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "context", context: snapshotPluginWorkbenchContext(this.context) });
   }
 
   /** Notify the plugin UI about a locale change without a reload. */
@@ -104,7 +105,7 @@ export class PluginHostBridge {
 
   /** Push resolved theme tokens so the plugin UI can follow DBX light/dark and palette changes. */
   updateTheme(theme: PluginBridgeTheme): void {
-    this.theme = structuredCloneSafe(theme);
+    this.theme = clonePluginData(theme);
     this.post({ source: HOST_MESSAGE_SOURCE, version: BRIDGE_VERSION, type: "env", locale: this.locale, theme: this.theme });
   }
 
@@ -132,7 +133,7 @@ export class PluginHostBridge {
   }
 
   private async dispatch(method: string, params: unknown, binary?: ArrayBuffer): Promise<unknown> {
-    if (method === "host.getContext") return structuredCloneSafe(this.context);
+    if (method === "host.getContext") return snapshotPluginWorkbenchContext(this.context);
     if (method === "backend.invoke") {
       const input = requireRecord(params, "backend.invoke params");
       const backendMethod = requireProtocolName(input.method, "backend method");
@@ -449,11 +450,6 @@ function enforcePayloadLimit(value: unknown): void {
   if (value === undefined) return;
   const bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
   if (bytes > MAX_BRIDGE_PAYLOAD_BYTES) throw new Error("Plugin bridge request is too large");
-}
-
-function structuredCloneSafe<T>(value: T): T {
-  if (typeof structuredClone === "function") return structuredClone(value);
-  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function isRecord(value: unknown): value is Record<string, any> {

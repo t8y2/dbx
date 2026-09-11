@@ -975,6 +975,7 @@ const { setupTauriListeners, cleanupTauriListeners } = useTauriEvents({
   openDbFilePath,
   openConnectionDeepLink,
   openAiConfigDeepLink,
+  closeActiveSurface,
 });
 const { showCloseActionPrompt, chooseQuit, chooseMinimize, cancelCloseActionPrompt, performCloseAction, setupCloseActionPromptListener, cleanupCloseActionPromptListener } = useCloseActionPrompt({ requestClose: requestAppClose });
 useVisibilityChange();
@@ -2389,6 +2390,19 @@ async function openConnectionQuery(connectionId: string) {
     try {
       await connectionStore.ensureConnected(connectionId);
       await connectionStore.loadNacosNamespaces(connectionId);
+    } catch (e: any) {
+      toast(
+        t("connection.connectFailed", {
+          message: translateBackendError(t, e),
+        }),
+        5000,
+      );
+    }
+    return;
+  }
+  if (initialTarget.kind === "plugin-workbench") {
+    try {
+      await queryStore.openPluginConnection(connectionId);
     } catch (e: any) {
       toast(
         t("connection.connectFailed", {

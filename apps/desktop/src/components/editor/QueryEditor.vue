@@ -5218,7 +5218,10 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
   let databaseNames = localCompletionDatabaseNames(completionContext);
   let currentDatabaseSchemaNames = localCompletionSchemasForDatabaseDisambiguation(completionContext, databaseNames, scope);
   const mayCompleteDatabaseSchema = mayCompleteDatabaseSchemaQualifier(completionContext);
-  if (!localOnlyMetadata && supportsDatabaseNameCompletion(props.databaseType) && completionContext.suggestTables && !completionContext.insertTable && (!completionContext.qualifier || mayCompleteDatabaseSchema)) {
+  const qualifierParts = completionContext.qualifierParts?.filter(Boolean) ?? completionContext.qualifier?.split(".").filter(Boolean) ?? [];
+  const sqlDatabaseQualifier = supportsDatabaseSchemaQualifierCompletion() && qualifierParts.length >= 2 ? qualifierParts[qualifierParts.length - 2] : undefined;
+  const hasDifferentDatabaseQualifier = !!sqlDatabaseQualifier && sqlDatabaseQualifier.toLowerCase() !== scope.database.toLowerCase();
+  if (!localOnlyMetadata && supportsDatabaseNameCompletion(props.databaseType) && completionContext.suggestTables && !completionContext.insertTable && !hasDifferentDatabaseQualifier && (!completionContext.qualifier || mayCompleteDatabaseSchema)) {
     const [databasesResult, schemasResult] = await Promise.allSettled([connectionStore.listCompletionDatabases(props.connectionId!), mayCompleteDatabaseSchema ? connectionStore.listCompletionSchemas(props.connectionId!, scope.database) : Promise.resolve(currentDatabaseSchemaNames)]);
     databaseNames = databasesResult.status === "fulfilled" ? databasesResult.value : [];
     if (schemasResult.status === "fulfilled") currentDatabaseSchemaNames = mergeSqlCompletionQualifierNames(scope.schema ? [scope.schema] : [], schemasResult.value);

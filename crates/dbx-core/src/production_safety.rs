@@ -26,7 +26,7 @@ static LEADING_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static DDL_OBJECT_TARGET_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|TRIGGER|EVENT|TYPE|SYNONYM)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?({TARGET_NAME_PATTERN})"
+        r"(?is)\b(?:CREATE|ALTER|DROP)\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|INDEX|SEQUENCE|FUNCTION|PROCEDURE|ROUTINE|TRIGGER|EVENT|TYPE|SYNONYM|PACKAGE(?:\s+BODY)?)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?({TARGET_NAME_PATTERN})"
     ))
     .expect("valid DDL object target regex")
 });
@@ -564,7 +564,7 @@ fn first_keyword(statement: &str) -> Option<String> {
 }
 
 fn is_transaction_keyword(keyword: &str) -> bool {
-    matches!(keyword, "begin" | "start" | "commit" | "rollback" | "abort" | "savepoint" | "release")
+    matches!(keyword, "begin" | "start" | "commit" | "rollback" | "abort" | "savepoint" | "release" | "end" | "declare")
 }
 
 fn sql_target_safety_text(sql: &str) -> SqlTargetSafetyText {
@@ -923,6 +923,36 @@ mod tests {
             &allowed,
         ));
         assert!(!sql_references_disallowed_database("SELECT * FROM dbo.users", &sqlserver, "reporting", &allowed,));
+    }
+
+    #[test]
+    fn plsql_block_terminators_do_not_trip_mcp_database_scope() {
+        // PL/SQL 按分号切分后会产生 "end"/"end loop"/"declare ..." 这类无对象目标的
+        // 碎片；它们不是事务语句但同样不应被误判为无法解析目标的写语句，否则任何
+        // 含 "; end;" 的匿名块、存储过程、包都会被 MCP 库范围整体拒绝。
+        let allowed = vec!["mesdev".to_string()];
+        let oracle = DatabaseType::Oracle;
+        for sql in [
+            "begin null; end;",
+            "BEGIN NULL; END;",
+            "begin\n  insert into reporting_rows values (1);\nend;",
+            "declare\n  v_count number;\nbegin\n  null;\nend;",
+            "create or replace procedure zap as begin null; end;",
+            "create or replace package body zap as procedure go is begin null; end; end;",
+        ] {
+            assert!(
+                !sql_references_disallowed_database(sql, &oracle, "mesdev", &allowed),
+                "PL/SQL must not be rejected by database scope: {sql}"
+            );
+        }
+        // 白名单只豁免歧义启发式；限定名引用的收集不受影响，跨库写入仍然拦截
+        //（Oracle 属 schema-first 方言，两段式名字首段不计为 database，用 MySQL 验证）。
+        assert!(sql_references_disallowed_database(
+            "begin delete from production.audit_log; end;",
+            &DatabaseType::Mysql,
+            "reporting",
+            &["reporting".to_string()],
+        ));
     }
 
     #[test]

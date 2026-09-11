@@ -72,6 +72,15 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     @Override
+    public boolean supportsConnectionPooling() {
+        // The mssql-jdbc -> jTDS fallback is session state on this Agent
+        // instance. A shared JDBC pool could hand a jTDS connection to another
+        // session that still believes it is using mssql-jdbc, and SQL Server
+        // 2000 is particularly prone to resetting those reused connections.
+        return false;
+    }
+
+    @Override
     protected String buildJdbcUrl(ConnectParams params) {
         return sqlServer2000Mode ? jtdsUrl(params) : legacyTlsUrl(params);
     }

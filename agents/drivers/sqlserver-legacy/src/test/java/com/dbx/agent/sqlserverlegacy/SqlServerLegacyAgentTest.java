@@ -179,6 +179,11 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void doesNotShareJdbcConnectionsAcrossLegacyAgentSessions() {
+        Assertions.assertFalse(new SqlServerLegacyAgent().supportsConnectionPooling());
+    }
+
+    @Test
     void sqlServer2000AllNulCharacterPaddingBecomesEmptyString() {
         Assertions.assertEquals(
             "",

@@ -29,7 +29,7 @@ use crate::models::connection::{
 use crate::mongo_oidc::MongoOidcBrowserOpener;
 use crate::nacos::config::{NACOS_CONSOLE_SESSION_PASSWORD, NACOS_PRIMARY_SESSION_PASSWORD};
 use crate::path_utils::expand_tilde;
-use crate::plugins::{PluginDriverSession, PluginRegistry, PluginRuntimeEnv};
+use crate::plugins::{PluginConnectionHandle, PluginDriverSession, PluginHost, PluginRegistry, PluginRuntimeEnv};
 use crate::query_cancel::RunningQueries;
 use crate::session_credentials::SessionCredentialStore;
 use crate::storage::{normalize_duckdb_worker_max_processes, Storage, DUCKDB_WORKER_MAX_PROCESSES_DEFAULT};
@@ -110,6 +110,7 @@ pub enum PoolKind {
         config: Arc<ConnectionConfig>,
         session: Arc<PluginDriverSession>,
     },
+    PluginConnection(PluginConnectionHandle),
     /// Message queue admin connection (not a data query pool; serves as a
     /// marker that this connection_id is a valid MQ admin connection).
     MessageQueue,
@@ -331,6 +332,7 @@ pub struct AppState {
     pub http_tunnels: HttpTunnelManager,
     pub storage: Storage,
     pub plugins: PluginRegistry,
+    pub plugin_host: PluginHost,
     pub agent_manager: crate::agent_manager::AgentManager,
     pub nacos_registry: crate::nacos::NacosAdminRegistry,
     duckdb_worker_process_isolation: AtomicBool,
@@ -1357,7 +1359,8 @@ impl AppState {
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
             storage,
-            plugins: PluginRegistry::new(plugin_dir),
+            plugins: PluginRegistry::new(plugin_dir.clone()),
+            plugin_host: PluginHost::new(PluginRegistry::new(plugin_dir)),
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,
@@ -2777,6 +2780,7 @@ impl AppState {
                 }
                 self.external_driver_pool("jdbc", &jdbc_config).await?
             }
+            DatabaseType::Plugin => return Err("Plugin-owned connections use the plugin host".to_string()),
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 // MQ admin connections don't hold a data query pool. We just test
@@ -3830,6 +3834,7 @@ impl AppState {
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
+                | PoolKind::PluginConnection(_)
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => false,
@@ -4864,6 +4869,7 @@ impl AppState {
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
+                | PoolKind::PluginConnection(_)
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => true,
@@ -4876,7 +4882,6 @@ impl AppState {
                         false
                     }
                 },
-                PoolKind::Redis(_) => unreachable!("Redis handled separately"),
             };
             if !healthy && !matches!(pool, PoolKind::Agent(_)) {
                 dead_pools.push((key.clone(), checked.publication.clone()));
@@ -4972,6 +4977,20 @@ impl AppState {
         self.pool_routing_control().close_removed(removed).await;
     }
 
+    pub async fn remove_plugin_connection_pools(&self, plugin_id: &str) {
+        let removed = self.drain_plugin_connection_pools(plugin_id).await;
+        self.pool_routing_control().close_removed(removed).await;
+    }
+
+    pub async fn invoke_plugin_connection_action(
+        &self,
+        config: ConnectionConfig,
+        action_id: &str,
+    ) -> Result<crate::plugins::PluginConnectionActionResult, String> {
+        let (host, port) = self.connection_host_port(&config.id, &config).await?;
+        self.plugin_host.invoke_connection_action(&config, action_id, &host, port).await
+    }
+
     async fn drain_connection_pools(&self, connection_id: &str) -> Vec<(String, PoolKind)> {
         let pool_prefix = format!("{connection_id}:");
         let keys_to_remove: Vec<String> = self
@@ -5044,6 +5063,34 @@ impl AppState {
                 PoolKind::ExternalDriver { driver_id: pool_driver_id, .. } if pool_driver_id == driver_id => {
                     Some(key.clone())
                 }
+                _ => None,
+            })
+            .collect();
+        self.stop_keepalive_tasks(&keys_to_remove).await;
+        {
+            let mut activity = self.pool_activity.write().await;
+            for key in &keys_to_remove {
+                activity.remove(key);
+            }
+        }
+        let mut conns = self.connections.write().await;
+        let mut removed = Vec::with_capacity(keys_to_remove.len());
+        for key in keys_to_remove {
+            if let Some(pool) = conns.remove(&key) {
+                removed.push((key, pool));
+            }
+        }
+        removed
+    }
+
+    async fn drain_plugin_connection_pools(&self, plugin_id: &str) -> Vec<(String, PoolKind)> {
+        let keys_to_remove: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .iter()
+            .filter_map(|(key, pool)| match pool {
+                PoolKind::PluginConnection(handle) if handle.plugin_id == plugin_id => Some(key.clone()),
                 _ => None,
             })
             .collect();
@@ -5602,7 +5649,6 @@ fn pool_key_for_session_role(
 
 #[cfg(test)]
 fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
-    pool.clone()
     match pool {
         PoolKind::Mysql(p, mode) => PoolKind::Mysql(p.clone(), *mode),
         PoolKind::Postgres(p) => PoolKind::Postgres(p.clone()),
@@ -5630,6 +5676,7 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::ExternalDriver { driver_id, config, session } => {
             PoolKind::ExternalDriver { driver_id: driver_id.clone(), config: config.clone(), session: session.clone() }
         }
+        PoolKind::PluginConnection(handle) => PoolKind::PluginConnection(handle.clone()),
         PoolKind::MessageQueue => PoolKind::MessageQueue,
         PoolKind::Nacos => PoolKind::Nacos,
         PoolKind::Consul(client) => PoolKind::Consul(client.clone()),
@@ -5637,18 +5684,6 @@ fn clone_pool_kind(pool: &PoolKind) -> PoolKind {
         PoolKind::Mqtt(client) => PoolKind::Mqtt(Arc::clone(client)),
         PoolKind::Redis(_) => panic!("clone_pool_kind not supported for Redis — handled separately"),
     }
-}
-
-fn remove_mysql_pool_if_current(
-    connections: &mut HashMap<String, PoolKind>,
-    pool_key: &str,
-    expected: &db::mysql::MySqlPool,
-) -> Option<PoolKind> {
-    let is_current = matches!(
-        connections.get(pool_key),
-        Some(PoolKind::Mysql(current, _)) if expected.is_same_pool(current)
-    );
-    is_current.then(|| connections.remove(pool_key)).flatten()
 }
 
 async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
@@ -5714,6 +5749,9 @@ async fn close_pool_kind(pool: PoolKind) -> Result<(), String> {
         }
         PoolKind::ExternalDriver { session, .. } => {
             session.shutdown().await;
+        }
+        PoolKind::PluginConnection(handle) => {
+            handle.disconnect().await?;
         }
         PoolKind::MessageQueue => {}
         PoolKind::Nacos => {}

@@ -586,8 +586,8 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
   duckdb: ["COMMENT"],
   clickhouse: ["COMMENT"],
-  doris: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW"],
-  starrocks: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW"],
+  doris: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "AGGREGATE KEY", "UNIQUE KEY", "PRIMARY KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW", "EXPLODE", "ARRAY", "MAP", "STRUCT", "BITMAP", "HLL"],
+  starrocks: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW"],
   dameng: ["COMMENT"],
   kingbase: ["COMMENT"],
   vastbase: ["COMMENT"],
@@ -5042,12 +5042,11 @@ function activeFunctionSignatures(databaseType?: DatabaseType): Map<string, stri
   return signatures;
 }
 
+const DORIS_FUNCTION_DESCRIPTIONS = new Map(DORIS_FUNCTION_DOCS);
+const EMPTY_FUNCTION_DESCRIPTIONS = new Map<string, string>();
+
 function activeFunctionDescriptions(databaseType?: DatabaseType): Map<string, string> {
-  const descriptions = new Map<string, string>();
-  if (databaseType === "doris" || databaseType === "starrocks") {
-    for (const [name, description] of DORIS_FUNCTION_DOCS) descriptions.set(name, description);
-  }
-  return descriptions;
+  return databaseType === "doris" || databaseType === "starrocks" ? DORIS_FUNCTION_DESCRIPTIONS : EMPTY_FUNCTION_DESCRIPTIONS;
 }
 
 function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean): string {

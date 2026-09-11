@@ -339,9 +339,11 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                 columns,
                 readSqlServer2000ColumnComments(resolvedSchema, table)
             );
-        } catch (SQLException error) {
+        } catch (SQLException | RuntimeException error) {
             // Comments are optional metadata. Keep the table usable when the
             // legacy catalog is unavailable or the account cannot read it.
+            // Legacy drivers can also throw runtime errors from their catalog
+            // code, mirroring the RuntimeException guards in getTableDdl.
             System.err.println(
                 "[sqlserver-legacy] SQL Server 2000 column comments unavailable: "
                     + error.getClass().getName()

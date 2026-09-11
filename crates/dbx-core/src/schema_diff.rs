@@ -3954,6 +3954,12 @@ fn drop_index_sql(table_name: &str, index_name: &str, db_type: DatabaseType, sch
         return sqlserver_single_statement_batch(&batch);
     }
     let index = qualified_name(index_name, db_type, schema);
+    if matches!(db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
+        // Oracle versions before 23c do not support `DROP INDEX IF EXISTS`.
+        // Schema comparison already identified this index as present, so the
+        // direct form is both valid and sufficient for the generated script.
+        return format!("DROP INDEX {index};");
+    }
     if profile.drop_index_uses_on_table {
         format!("DROP INDEX {} ON {table};", quote_id(index_name, db_type))
     } else {
@@ -6212,6 +6218,12 @@ mod tests {
             target_dialect: Some(DialectKind::Mysql),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn oracle_schema_sync_drops_indexes_without_if_exists() {
+        assert_eq!(drop_index_sql("orders", "idx_orders_status", DatabaseType::Oracle, Some("APP")), "DROP INDEX APP.IDX_ORDERS_STATUS;");
+        assert_eq!(drop_index_sql("orders", "idx_orders_status", DatabaseType::OceanbaseOracle, Some("APP")), "DROP INDEX APP.IDX_ORDERS_STATUS;");
     }
 
     #[test]

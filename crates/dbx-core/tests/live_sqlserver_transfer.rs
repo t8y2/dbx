@@ -286,6 +286,118 @@ async fn live_sqlserver_transfer_rebuild_releases_constraint_and_index_names() {
 
 #[tokio::test]
 #[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_transfer_overwrite_handles_existing_identity_target() {
+    let database = std::env::var("DBX_LIVE_SQLSERVER_DATABASE").unwrap_or_else(|_| "dbx_sqlserver_demo".to_string());
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("live-sqlserver-8690-{suffix}");
+    let source_schema = format!("dbx_8690_src_{}", &suffix[..12]);
+    let target_schema = format!("dbx_8690_dst_{}", &suffix[..12]);
+    let table = "identity_rows";
+
+    let mut client = sqlserver_connect(&database).await;
+    for statement in [
+        format!("CREATE SCHEMA [{source_schema}]"),
+        format!("CREATE SCHEMA [{target_schema}]"),
+        format!(
+            "CREATE TABLE [{source_schema}].[{table}] (id INT IDENTITY(100,1) NOT NULL CONSTRAINT [PK_8690_src_{suffix}] PRIMARY KEY, name NVARCHAR(64) NOT NULL)"
+        ),
+        format!(
+            "CREATE TABLE [{target_schema}].[{table}] (id INT IDENTITY(1,1) NOT NULL CONSTRAINT [PK_8690_dst_{suffix}] PRIMARY KEY, name NVARCHAR(64) NOT NULL)"
+        ),
+        format!("INSERT INTO [{source_schema}].[{table}] (name) VALUES (N'first'), (N'second')"),
+        format!("INSERT INTO [{target_schema}].[{table}] (name) VALUES (N'stale')"),
+    ] {
+        dbx_core::db::sqlserver::execute_batch(&mut client, &statement)
+            .await
+            .expect("create issue #8690 fixtures");
+    }
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-8690-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create issue #8690 directory");
+    let storage = Storage::open(&dir.join("storage.db")).await.expect("open issue #8690 storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
+    let pool_key = state
+        .get_or_create_pool(&connection_id, Some(&database))
+        .await
+        .expect("create SQL Server pool");
+    let request = TransferRequest {
+        transfer_id: format!("live-sqlserver-8690-transfer-{suffix}"),
+        source_connection_id: connection_id.clone(),
+        source_database: database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: connection_id.clone(),
+        target_database: database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec![table.to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Overwrite,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 1,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            table,
+            0,
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            &pool_key,
+            &pool_key,
+            &HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 2);
+
+        let rows = dbx_core::db::sqlserver::execute_query(
+            &mut client,
+            &format!("SELECT id, name FROM [{target_schema}].[{table}] ORDER BY id"),
+        )
+        .await
+        .map_err(|error| format!("read transferred rows: {error}"))?;
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(rows.rows[0][0].as_i64(), Some(100));
+        assert_eq!(rows.rows[1][0].as_i64(), Some(101));
+        assert_eq!(rows.rows[0][1].as_str(), Some("first"));
+        assert_eq!(rows.rows[1][1].as_str(), Some("second"));
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut client,
+        &format!(
+            "IF OBJECT_ID(N'[{target_schema}].[{table}]', N'U') IS NOT NULL DROP TABLE [{target_schema}].[{table}]; \
+             IF OBJECT_ID(N'[{source_schema}].[{table}]', N'U') IS NOT NULL DROP TABLE [{source_schema}].[{table}]; \
+             IF SCHEMA_ID(N'{target_schema}') IS NOT NULL DROP SCHEMA [{target_schema}]; \
+             IF SCHEMA_ID(N'{source_schema}') IS NOT NULL DROP SCHEMA [{source_schema}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("cleanup issue #8690 fixtures");
+    test_result.expect("SQL Server overwrite transfer should preserve explicit identity values");
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
 async fn live_sqlserver_keyset_pagination_copies_every_row() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let source_db = format!("dbx_keyset_src_{}", &suffix[..12]);

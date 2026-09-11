@@ -1738,6 +1738,22 @@ pub(crate) fn wrap_dameng_identity_insert_sql_for_table(insert_sql: &str, full_t
     format!("SET IDENTITY_INSERT {full_table} ON;\n{trimmed};\nSET IDENTITY_INSERT {full_table} OFF;")
 }
 
+async fn execute_sqlserver_identity_batch(
+    client: &mut db::sqlserver::SqlServerClient,
+    sql: &str,
+    timeout: Option<std::time::Duration>,
+) -> Result<(), String> {
+    let future = db::sqlserver::execute_simple_batch_with_max_rows(client, sql, None);
+    let result: Vec<db::QueryResult> = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| format!("Query timed out after {} seconds", timeout.as_secs().max(1)))??,
+        None => future.await?,
+    };
+    drop(result);
+    Ok(())
+}
+
 async fn execute_transfer_write_statement(
     state: &AppState,
     target_pool_key: &str,
@@ -1754,6 +1770,52 @@ async fn execute_transfer_write_statement(
 
     let enable_sql = identity_insert_statement(table, schema, target_db_type, true);
     let disable_sql = identity_insert_statement(table, schema, target_db_type, false);
+
+    if *target_db_type == DatabaseType::SqlServer {
+        // SQL Server scopes IDENTITY_INSERT to the current session. The generic
+        // pool helper may check out a different physical connection for each
+        // statement, so keep all three statements on the same locked client.
+        crate::query::check_read_only_for_connection(state, target_pool_key, sql).await?;
+        let (_, _, _, query_timeout_secs) = transfer_pool_context(state, target_pool_key).await;
+        let query_timeout = query_timeout_duration(query_timeout_secs);
+        let pool_handle = state.pool_handle(target_pool_key).await;
+        let client = match pool_handle.as_ref() {
+            Some(PoolKind::SqlServer(client)) => client.clone(),
+            _ => return Err("SQL Server connection not found".to_string()),
+        };
+        let mut client = client.lock().await;
+
+        let enable_result = execute_sqlserver_identity_batch(&mut client, &enable_sql, query_timeout).await;
+        if let Err(error) = enable_result {
+            drop(client);
+            if is_transfer_query_timeout(&error) {
+                state.remove_pool_by_key(target_pool_key).await;
+            }
+            return Err(format!("Failed to enable IDENTITY_INSERT for {table}: {error}"));
+        }
+
+        let write_result = execute_sqlserver_identity_batch(&mut client, sql, query_timeout).await;
+        let disable_result = execute_sqlserver_identity_batch(&mut client, &disable_sql, query_timeout).await;
+        drop(client);
+
+        if write_result.as_ref().is_err_and(|error| is_transfer_query_timeout(error))
+            || disable_result.as_ref().is_err_and(|error| is_transfer_query_timeout(error))
+        {
+            state.remove_pool_by_key(target_pool_key).await;
+        }
+
+        return match (write_result, disable_result) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(write_error), Ok(_)) => Err(write_error),
+            (Ok(_), Err(disable_error)) => {
+                Err(format!("Failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
+            }
+            (Err(write_error), Err(disable_error)) => {
+                Err(format!("{write_error}; also failed to disable IDENTITY_INSERT for {table}: {disable_error}"))
+            }
+        };
+    }
+
     execute_on_pool(state, target_pool_key, &enable_sql)
         .await
         .map_err(|e| format!("Failed to enable IDENTITY_INSERT for {table}: {e}"))?;

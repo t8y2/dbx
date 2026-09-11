@@ -301,6 +301,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  zhipu: {
+    label: "Zhipu",
+    iconSlug: "zhipu",
+    provider: "zhipu",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-5.3",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
   minimax: {
     label: "MiniMax",
     iconSlug: "minimax",
@@ -490,6 +500,9 @@ export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | Ai
   if (preset.provider === "minimax" && locale === "zh-CN") {
     return "https://api.minimaxi.com/v1";
   }
+  if (preset.provider === "zhipu" && locale !== "zh-CN") {
+    return "https://api.z.ai/api/paas/v4";
+  }
   return preset.endpoint;
 }
 
@@ -588,6 +601,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   if (endpoint.includes("deepseek") || model.includes("deepseek")) return "deepseek";
   if (endpoint.includes("moonshot") || endpoint.includes("kimi.com") || model.includes("kimi")) return "kimi";
   if (endpoint.includes("dashscope") || endpoint.includes("aliyuncs") || model.includes("qwen")) return "qwen";
+  if (endpoint.includes("bigmodel.cn") || endpoint.includes("api.z.ai") || model.startsWith("glm-")) return "zhipu";
   if (endpoint.includes("generativelanguage.googleapis.com") || model.includes("gemini")) return "gemini";
   if (endpoint.includes("minimax.io") || endpoint.includes("minimaxi.com") || model.includes("minimax")) return "minimax";
   if (endpoint.includes("localhost:11434") || endpoint.includes("127.0.0.1:11434")) return "ollama";

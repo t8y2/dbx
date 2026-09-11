@@ -78,7 +78,7 @@ pub fn static_effort_capability(config: &AiConfig, model_id: &str) -> Option<AiE
         AiProvider::Deepseek => deepseek_capability(&model, source),
         AiProvider::Kimi => kimi_capability(&model, source),
         AiProvider::Qwen => qwen_capability(&model, source),
-        AiProvider::Ollama => ollama_capability(&model, source),
+        AiProvider::Zhipu | AiProvider::Ollama => ollama_capability(&model, source),
         AiProvider::MiniMax if matches_family(&model, "minimax-m3") => Some(boolean_capability(source)),
         AiProvider::MiniMax => None,
         AiProvider::AnthropicCompatible | AiProvider::OpenaiCompatible | AiProvider::Custom => {
@@ -208,7 +208,7 @@ pub fn registry_source_url(provider: &AiProvider) -> Option<&'static str> {
         AiProvider::Deepseek => Some(DEEPSEEK_THINKING_DOCS),
         AiProvider::Kimi => Some(KIMI_REASONING_DOCS),
         AiProvider::Qwen => Some(QWEN_THINKING_DOCS),
-        AiProvider::Ollama => Some(OLLAMA_THINKING_DOCS),
+        AiProvider::Zhipu | AiProvider::Ollama => Some(OLLAMA_THINKING_DOCS),
         AiProvider::MiniMax => Some(MINIMAX_THINKING_DOCS),
         AiProvider::Claude
         | AiProvider::AnthropicCompatible
@@ -287,7 +287,7 @@ pub fn apply_runtime_effort(body: &mut Value, config: &AiConfig) {
         AiProvider::Deepseek => apply_deepseek_effort(object, selection),
         AiProvider::Kimi => apply_kimi_effort(object, &config.model, selection),
         AiProvider::Qwen => apply_qwen_effort(object, selection),
-        AiProvider::Ollama => apply_openai_effort(object, &config.api_style, selection),
+        AiProvider::Zhipu | AiProvider::Ollama => apply_openai_effort(object, &config.api_style, selection),
         AiProvider::MiniMax => apply_minimax_effort(object, selection),
         AiProvider::Openai | AiProvider::OpenaiCompatible => apply_openai_effort(object, &config.api_style, selection),
         AiProvider::Custom => {

@@ -4971,6 +4971,10 @@ where
 /// The statement runs under an inactivity budget: the clock is reset for every
 /// row MySQL delivers, so a large table that keeps streaming is never cancelled
 /// merely for exceeding the timeout in total — only a genuine stall is.
+///
+/// Unlike the Postgres/SQL Server variants there is no returns-rows gate here:
+/// a write delivers no rows, so no progress mark ever resets the clock and the
+/// budget degrades to the same plain wall-clock timeout anyway.
 pub(crate) async fn execute_query_with_max_rows_progress<P>(
     pool: &P,
     sql: &str,

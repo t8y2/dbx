@@ -1877,10 +1877,12 @@ async fn live_postgres_keyset_pagination_copies_every_row() {
     .unwrap();
     assert_eq!(transferred, 25, "keyset pagination must copy every row");
 
-    let rows =
-        postgres::execute_query(&target_pool, &format!("SELECT \"id\" FROM \"{target_schema}\".\"big\" ORDER BY \"id\""))
-            .await
-            .unwrap();
+    let rows = postgres::execute_query(
+        &target_pool,
+        &format!("SELECT \"id\" FROM \"{target_schema}\".\"big\" ORDER BY \"id\""),
+    )
+    .await
+    .unwrap();
     let collected: Vec<i64> = rows.rows.iter().map(|row| row[0].as_i64().unwrap()).collect();
     assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
 
@@ -1911,7 +1913,9 @@ async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
         &[
             format!("CREATE SCHEMA \"{source_schema}\""),
             format!("CREATE TABLE \"{source_schema}\".\"big\" (\"id\" bigint PRIMARY KEY, \"name\" text NOT NULL)"),
-            format!("INSERT INTO \"{source_schema}\".\"big\" SELECT g, repeat('x', 200) FROM generate_series(1, 50000) g"),
+            format!(
+                "INSERT INTO \"{source_schema}\".\"big\" SELECT g, repeat('x', 200) FROM generate_series(1, 50000) g"
+            ),
         ],
     )
     .await

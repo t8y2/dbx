@@ -4908,8 +4908,20 @@ fn mysql_keyset_column_type_supported(data_type: &str) -> bool {
     let base = data_type.trim().to_ascii_lowercase();
     let base = base.split('(').next().unwrap_or("").trim();
     const SUPPORTED: &[&str] = &[
-        "int", "integer", "tinyint", "smallint", "mediumint", "bigint", "char", "varchar", "date", "datetime",
-        "timestamp", "year", "decimal", "numeric",
+        "int",
+        "integer",
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "bigint",
+        "char",
+        "varchar",
+        "date",
+        "datetime",
+        "timestamp",
+        "year",
+        "decimal",
+        "numeric",
     ];
     SUPPORTED.iter().any(|prefix| base.starts_with(prefix))
 }
@@ -4925,8 +4937,24 @@ fn sqlserver_keyset_column_type_supported(data_type: &str) -> bool {
     let base = data_type.trim().to_ascii_lowercase();
     let base = base.split('(').next().unwrap_or("").trim();
     const SUPPORTED: &[&str] = &[
-        "int", "bigint", "smallint", "tinyint", "char", "varchar", "nchar", "nvarchar", "uniqueidentifier",
-        "date", "datetime", "datetime2", "smalldatetime", "time", "decimal", "numeric", "money", "smallmoney",
+        "int",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "char",
+        "varchar",
+        "nchar",
+        "nvarchar",
+        "uniqueidentifier",
+        "date",
+        "datetime",
+        "datetime2",
+        "smalldatetime",
+        "time",
+        "decimal",
+        "numeric",
+        "money",
+        "smallmoney",
     ];
     SUPPORTED.iter().any(|prefix| base.starts_with(prefix))
 }
@@ -8866,7 +8894,10 @@ where
                     mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
                 // Cap the result at `batch_size` (not the 10k default row limit), so a
                 // large batch is never truncated into looking like a short final page.
-                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, mysql_spatial_markers)
+                (
+                    execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?,
+                    mysql_spatial_markers,
+                )
             };
             let has_more = result.has_more;
             let row_count = result.rows.len();

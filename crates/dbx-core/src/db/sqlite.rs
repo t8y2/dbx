@@ -682,9 +682,7 @@ mod tests {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
         execute_query(&pool, "CREATE TABLE progress_probe (id INTEGER PRIMARY KEY)").await.expect("create table");
         for id in 1..=5 {
-            execute_query(&pool, &format!("INSERT INTO progress_probe (id) VALUES ({id})"))
-                .await
-                .expect("insert row");
+            execute_query(&pool, &format!("INSERT INTO progress_probe (id) VALUES ({id})")).await.expect("insert row");
         }
 
         let progress_clock = std::sync::Arc::new(crate::query::StreamProgressClock::new());
@@ -2886,11 +2884,9 @@ pub(crate) async fn execute_query_with_max_rows_progress(
     let clock_for_query = progress_clock.clone();
     crate::query::await_stream_with_progress_timeout(
         async move {
-            tokio::task::spawn_blocking(move || {
-                execute_query_blocking(&pool, &sql, max_rows, Some(&clock_for_query))
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows, Some(&clock_for_query)))
+                .await
+                .map_err(|e| e.to_string())?
         },
         timeout,
         progress_clock,

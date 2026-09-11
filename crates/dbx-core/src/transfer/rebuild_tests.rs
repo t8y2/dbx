@@ -136,9 +136,7 @@ async fn transfer_keyset_pagination_copies_every_row_across_many_batches() {
 
     execute_on_pool(&state, &source_pool, "CREATE TABLE big(id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
     for id in 1..=25 {
-        execute_on_pool(&state, &source_pool, &format!("INSERT INTO big VALUES({id}, 'row-{id}')"))
-            .await
-            .unwrap();
+        execute_on_pool(&state, &source_pool, &format!("INSERT INTO big VALUES({id}, 'row-{id}')")).await.unwrap();
     }
 
     let request: TransferRequest = serde_json::from_value(json!({

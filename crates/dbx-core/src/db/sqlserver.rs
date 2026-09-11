@@ -3186,7 +3186,12 @@ pub(crate) async fn execute_query_with_max_rows_progress(
     if !returns_rows {
         // DDL/DML expose no incremental progress, so keep the original wall-clock
         // budget: a hung write must still be bounded by the configured timeout.
-        return crate::query::wait_for_query_opt(None, timeout, execute_query_with_max_rows_inner(client, sql, max_rows, None)).await;
+        return crate::query::wait_for_query_opt(
+            None,
+            timeout,
+            execute_query_with_max_rows_inner(client, sql, max_rows, None),
+        )
+        .await;
     }
     let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
     let clock_for_query = progress_clock.clone();
@@ -4382,9 +4387,8 @@ mod tests {
 
         let first_result = source.split("async fn execute_simple_batch_first_result_with_max_rows").nth(1).unwrap();
         let first_result = first_result.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
-        assert!(
-            first_result.contains("collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None)")
-        );
+        assert!(first_result
+            .contains("collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None)"));
         assert!(!first_result.contains("collect_result_sets_limited"));
     }
 

@@ -617,9 +617,7 @@ async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
         .await
         .expect("read target uids");
         let collected: Vec<String> = rows.rows.iter().map(|row| row[0].as_str().unwrap().to_string()).collect();
-        let expected: Vec<String> = (1..=8)
-            .map(|i| format!("00000000-0000-0000-0000-{i:012}"))
-            .collect();
+        let expected: Vec<String> = (1..=8).map(|i| format!("00000000-0000-0000-0000-{i:012}")).collect();
         assert_eq!(collected, expected, "uniqueidentifier + datetime2 keyset cursor must round-trip every row");
         Ok::<_, String>(())
     }

@@ -1984,7 +1984,8 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
     .unwrap();
 
     let task_tmp = std::path::PathBuf::from(
-        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
     );
     let dir = task_tmp.join(format!("live-mysql-keyset-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -2036,10 +2037,13 @@ async fn live_mysql_keyset_pagination_copies_every_row() {
     .unwrap();
     assert_eq!(transferred, 25, "keyset pagination must copy every row");
 
-    let rows =
-        mysql::execute_query(&target_setup_pool, &format!("SELECT id FROM `{target_database}`.`big` ORDER BY id"), false)
-            .await
-            .unwrap();
+    let rows = mysql::execute_query(
+        &target_setup_pool,
+        &format!("SELECT id FROM `{target_database}`.`big` ORDER BY id"),
+        false,
+    )
+    .await
+    .unwrap();
     let collected: Vec<i64> = rows
         .rows
         .iter()
@@ -2100,7 +2104,8 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
     .unwrap();
 
     let task_tmp = std::path::PathBuf::from(
-        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR").unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
     );
     let dir = task_tmp.join(format!("live-mysql-progress-transfer-{suffix}"));
     std::fs::create_dir_all(&dir).unwrap();
@@ -2156,13 +2161,10 @@ async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
     .unwrap();
     assert_eq!(transferred, 50000, "the whole table must be transferred across multiple pages without timing out");
 
-    let count = mysql::execute_query(
-        &target_setup_pool,
-        &format!("SELECT COUNT(*) FROM `{target_database}`.`big`"),
-        false,
-    )
-    .await
-    .unwrap();
+    let count =
+        mysql::execute_query(&target_setup_pool, &format!("SELECT COUNT(*) FROM `{target_database}`.`big`"), false)
+            .await
+            .unwrap();
     let count_value = &count.rows[0][0];
     let count_num = count_value.as_i64().or_else(|| count_value.as_str().and_then(|s| s.parse().ok())).unwrap();
     assert_eq!(count_num, 50000, "no row may be dropped or duplicated");

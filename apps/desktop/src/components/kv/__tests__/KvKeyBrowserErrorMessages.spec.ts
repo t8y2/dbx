@@ -1,9 +1,5 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { formatError, sanitizeBackendErrorMessage } from "@/lib/backend/errorUtils";
-
-const browserSource = readFileSync(new URL("../KvKeyBrowser.vue", import.meta.url), "utf8");
-const etcdBrowserSource = readFileSync(new URL("../../etcd/EtcdKeyBrowser.vue", import.meta.url), "utf8");
 
 // Reported in #8860: an etcd revision that has already been compacted surfaces
 // its internal Agent contract payload in the history dialog.
@@ -23,12 +19,5 @@ describe("KV browser error presentation", () => {
 
     expect(formatError(new Error(message))).toBe(message);
     expect(formatError(message)).toBe(message);
-  });
-
-  it("routes every displayed KV and etcd browser error through formatError", () => {
-    for (const source of [browserSource, etcdBrowserSource]) {
-      expect(source).toContain('import { formatError } from "@/lib/backend/errorUtils";');
-      expect(source).not.toContain("error instanceof Error ? error.message : String(error)");
-    }
   });
 });

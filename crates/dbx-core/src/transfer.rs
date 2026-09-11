@@ -4836,7 +4836,19 @@ fn value_to_sql_literal(value: &serde_json::Value, _db_type: &DatabaseType) -> S
 /// dialects keep OFFSET paging (each page rescans and discards the rows before
 /// it, which is quadratic in table size) until their literal rules are audited.
 fn transfer_keyset_pagination_supported(db_type: &DatabaseType) -> bool {
-    matches!(db_type, DatabaseType::Postgres | DatabaseType::OpenGauss | DatabaseType::Gaussdb | DatabaseType::Kingbase)
+    matches!(
+        db_type,
+        DatabaseType::Postgres
+            | DatabaseType::OpenGauss
+            | DatabaseType::Gaussdb
+            | DatabaseType::Kingbase
+            | DatabaseType::Mysql
+            | DatabaseType::Doris
+            | DatabaseType::StarRocks
+            | DatabaseType::ManticoreSearch
+            | DatabaseType::Sqlite
+            | DatabaseType::SqlServer
+    )
 }
 
 /// Column types whose keyset cursor value round-trips through a SQL text
@@ -4876,6 +4888,49 @@ fn postgres_keyset_column_type_supported(data_type: &str) -> bool {
     SUPPORTED_PREFIXES.iter().any(|prefix| base.starts_with(prefix))
 }
 
+/// Dialect-aware keyset column-type gate. The Postgres family is covered by
+/// [`postgres_keyset_column_type_supported`]; MySQL-family, SQLite and SQL Server
+/// primary-key types that round-trip through `value_to_sql_literal` are enabled
+/// here. Binary types stay OFF — their JSON form is lossy — so those keys keep
+/// OFFSET paging.
+fn keyset_column_type_supported(db_type: &DatabaseType, data_type: &str) -> bool {
+    match db_type {
+        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::ManticoreSearch => {
+            mysql_keyset_column_type_supported(data_type)
+        }
+        DatabaseType::Sqlite => sqlite_keyset_column_type_supported(data_type),
+        DatabaseType::SqlServer => sqlserver_keyset_column_type_supported(data_type),
+        _ => postgres_keyset_column_type_supported(data_type),
+    }
+}
+
+fn mysql_keyset_column_type_supported(data_type: &str) -> bool {
+    let base = data_type.trim().to_ascii_lowercase();
+    let base = base.split('(').next().unwrap_or("").trim();
+    const SUPPORTED: &[&str] = &[
+        "int", "integer", "tinyint", "smallint", "mediumint", "bigint", "char", "varchar", "date", "datetime",
+        "timestamp", "year", "decimal", "numeric",
+    ];
+    SUPPORTED.iter().any(|prefix| base.starts_with(prefix))
+}
+
+fn sqlite_keyset_column_type_supported(data_type: &str) -> bool {
+    let base = data_type.trim().to_ascii_lowercase();
+    let base = base.split('(').next().unwrap_or("").trim();
+    const SUPPORTED: &[&str] = &["int", "integer", "text", "char", "varchar", "character", "numeric", "decimal"];
+    SUPPORTED.iter().any(|prefix| base.starts_with(prefix))
+}
+
+fn sqlserver_keyset_column_type_supported(data_type: &str) -> bool {
+    let base = data_type.trim().to_ascii_lowercase();
+    let base = base.split('(').next().unwrap_or("").trim();
+    const SUPPORTED: &[&str] = &[
+        "int", "bigint", "smallint", "tinyint", "char", "varchar", "nchar", "nvarchar", "uniqueidentifier",
+        "date", "datetime", "datetime2", "smalldatetime", "time", "decimal", "numeric", "money", "smallmoney",
+    ];
+    SUPPORTED.iter().any(|prefix| base.starts_with(prefix))
+}
+
 /// Resolves the source primary key columns to their positions in the selected
 /// column list. Returns None — meaning the read loop keeps OFFSET paging — when
 /// the dialect is not keyset-capable, when a key column is not among the
@@ -4893,7 +4948,7 @@ fn transfer_keyset_column_indexes(
         .iter()
         .map(|pk| {
             let index = columns.iter().position(|column| column.name == *pk)?;
-            postgres_keyset_column_type_supported(&columns[index].data_type).then_some(index)
+            keyset_column_type_supported(db_type, &columns[index].data_type).then_some(index)
         })
         .collect()
 }
@@ -13137,11 +13192,37 @@ mod tests {
         assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::OpenGauss), Some(vec![0]));
         assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Gaussdb), Some(vec![0]));
         assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Kingbase), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Mysql), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Sqlite), Some(vec![0]));
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::SqlServer), Some(vec![0]));
         // Dialects whose cursor literal rendering is not audited keep OFFSET paging.
-        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::Mysql), None);
-        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::SqlServer), None);
+        assert_eq!(transfer_keyset_column_indexes(&columns, &pks, &DatabaseType::ClickHouse), None);
         // No primary key → no keyset cursor.
         assert_eq!(transfer_keyset_column_indexes(&columns, &[], &DatabaseType::Postgres), None);
+    }
+
+    #[test]
+    fn mysql_sqlite_sqlserver_keyset_column_types_are_audited() {
+        // MySQL-family: integers, strings, dates and decimals round-trip; binary/blob stay OFF.
+        assert!(keyset_column_type_supported(&DatabaseType::Mysql, "int"));
+        assert!(keyset_column_type_supported(&DatabaseType::Mysql, "bigint unsigned"));
+        assert!(keyset_column_type_supported(&DatabaseType::Mysql, "varchar(64)"));
+        assert!(keyset_column_type_supported(&DatabaseType::Mysql, "datetime"));
+        assert!(!keyset_column_type_supported(&DatabaseType::Mysql, "binary(16)"));
+        assert!(!keyset_column_type_supported(&DatabaseType::Mysql, "varbinary(255)"));
+        assert!(!keyset_column_type_supported(&DatabaseType::Mysql, "blob"));
+
+        // SQLite: integer/text; blob stays OFF.
+        assert!(keyset_column_type_supported(&DatabaseType::Sqlite, "INTEGER"));
+        assert!(keyset_column_type_supported(&DatabaseType::Sqlite, "TEXT"));
+        assert!(!keyset_column_type_supported(&DatabaseType::Sqlite, "BLOB"));
+
+        // SQL Server: integers, strings, uniqueidentifier, dates; binary stays OFF.
+        assert!(keyset_column_type_supported(&DatabaseType::SqlServer, "int"));
+        assert!(keyset_column_type_supported(&DatabaseType::SqlServer, "nvarchar(64)"));
+        assert!(keyset_column_type_supported(&DatabaseType::SqlServer, "uniqueidentifier"));
+        assert!(keyset_column_type_supported(&DatabaseType::SqlServer, "datetime2"));
+        assert!(!keyset_column_type_supported(&DatabaseType::SqlServer, "varbinary(32)"));
     }
 
     #[test]

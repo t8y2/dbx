@@ -4106,6 +4106,7 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
              array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
+             , EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7743,6 +7744,7 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                ORDER BY pos.n \
              ) AS key_is_expression, \
              string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
+             , EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7876,7 +7878,7 @@ async fn list_indexes_with_sql(
                 key_is_expression,
                 column_opclasses: key_opclasses,
                 key_options,
-                constraint_backed: false,
+                constraint_backed: pg_row_try_bool(row, 12).unwrap_or(false),
             }
         })
         .collect())

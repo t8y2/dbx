@@ -193,7 +193,7 @@ import { formatSidebarTableCopyText, type FormatSidebarTableNamesOptions } from 
 import { supportsScheduledDatabaseBackup } from "@/lib/backup/scheduledDatabaseBackup";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { copyToClipboard } from "@/lib/common/clipboard";
-import { buildConnectionUrlCopy, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
+import { buildConnectionUrlCopy, CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS, connectionUrlCopyFormats, type ConnectionUrlCopyFormat } from "@/lib/connection/connectionUrlBuilder";
 import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/savedSqlHistory";
 import { savedSqlClipboardFileIds, savedSqlPasteTargetForNode } from "@/lib/savedSql/savedSqlClipboard";
 import { exportSavedSqlFileContent } from "@/lib/savedSql/savedSqlExport";
@@ -2218,19 +2218,22 @@ function copyNameMenuItem(): ContextMenuItem {
 
 const CONNECTION_URL_COPY_LABEL_KEYS: Record<ConnectionUrlCopyFormat, string> = {
   url: "contextMenu.copyConnectionUrl",
-  urlNoPassword: "contextMenu.copyConnectionUrlNoPassword",
+  urlWithPassword: "contextMenu.copyConnectionUrlWithPassword",
   jdbcUrl: "contextMenu.copyJdbcUrl",
   jdbcUrlWithCredentials: "contextMenu.copyJdbcUrlWithCredentials",
   hostPort: "contextMenu.copyHostPort",
   dsn: "contextMenu.copyDsn",
+  dsnWithPassword: "contextMenu.copyDsnWithPassword",
   psqlCommand: "contextMenu.copyPsqlCommand",
 };
 
 /**
  * "Copy Connection Info" submenu for connection/database nodes: standard URL,
  * JDBC URL, host:port, libpq DSN and psql command, trimmed to what the
- * connection's dialect actually supports. `databaseOverride` lets a database
- * node copy the URL for that specific database instead of the default one.
+ * connection's dialect actually supports. The primary entries never embed the
+ * stored password; password-inclusive entries say so in their label and are
+ * gated behind a confirmation dialog. `databaseOverride` lets a database node
+ * copy the URL for that specific database instead of the default one.
  */
 function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem | null {
   const node = activeNode.value;
@@ -2243,13 +2246,24 @@ function connectionUrlCopyMenuItem(databaseOverride?: string): ContextMenuItem |
     icon: Link2,
     children: formats.map((format) => ({
       label: t(CONNECTION_URL_COPY_LABEL_KEYS[format]),
-      icon: Copy,
       action: () => copyConnectionUrlFormat(config, format, databaseOverride),
     })),
   };
 }
 
-async function copyConnectionUrlFormat(config: ConnectionConfig, format: ConnectionUrlCopyFormat, databaseOverride?: string) {
+const showCopyConnectionSecretConfirm = shallowRef(false);
+let pendingConnectionSecretCopy: { config: ConnectionConfig; format: ConnectionUrlCopyFormat; databaseOverride?: string } | null = null;
+
+function copyConnectionUrlFormat(config: ConnectionConfig, format: ConnectionUrlCopyFormat, databaseOverride?: string) {
+  if (CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS.has(format)) {
+    pendingConnectionSecretCopy = { config, format, databaseOverride };
+    showCopyConnectionSecretConfirm.value = true;
+    return;
+  }
+  return performConnectionUrlCopy(config, format, databaseOverride);
+}
+
+async function performConnectionUrlCopy(config: ConnectionConfig, format: ConnectionUrlCopyFormat, databaseOverride?: string) {
   const text = buildConnectionUrlCopy(config, format, { database: databaseOverride });
   if (!text) return;
   try {
@@ -4696,6 +4710,19 @@ routeDangerDialog(showDeleteSavedSqlConfirm, () =>
     message: t("savedSql.deleteFileConfirm", { name: activeNode.value.label }),
     confirmLabel: t("dangerDialog.confirm"),
     confirm: confirmDeleteSavedSqlFile,
+  }),
+);
+
+routeDangerDialog(showCopyConnectionSecretConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.copyPasswordConfirmTitle"),
+    message: t("contextMenu.copyPasswordConfirmMessage"),
+    confirmLabel: t("contextMenu.copyPasswordConfirmAction"),
+    confirm: () => {
+      const pending = pendingConnectionSecretCopy;
+      pendingConnectionSecretCopy = null;
+      if (pending) return performConnectionUrlCopy(pending.config, pending.format, pending.databaseOverride);
+    },
   }),
 );
 

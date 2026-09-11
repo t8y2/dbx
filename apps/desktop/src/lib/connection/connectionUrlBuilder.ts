@@ -7,9 +7,18 @@ import { GAUSSDB_M_JDBC_DRIVER_PROFILE } from "@/lib/database/jdbcDialect";
  * `parseConnectionUrl()` in `connectionUrl.ts`: only formats that are actually
  * usable in application code are produced, and unknown dialects are hidden
  * from the menu instead of guessing a wrong URL.
+ *
+ * Password safety: the primary formats (`url`, `jdbcUrl`, `dsn`) never embed
+ * the stored password. Formats that do (`urlWithPassword`,
+ * `jdbcUrlWithCredentials`, `dsnWithPassword`) are only offered when a
+ * password is actually available, and the caller gates them behind an
+ * explicit confirmation.
  */
 
-export type ConnectionUrlCopyFormat = "url" | "urlNoPassword" | "jdbcUrl" | "jdbcUrlWithCredentials" | "hostPort" | "dsn" | "psqlCommand";
+export type ConnectionUrlCopyFormat = "url" | "urlWithPassword" | "jdbcUrl" | "jdbcUrlWithCredentials" | "hostPort" | "dsn" | "dsnWithPassword" | "psqlCommand";
+
+/** Formats whose output embeds the stored password; callers should confirm before copying. */
+export const CONNECTION_URL_COPY_WITH_PASSWORD_FORMATS: ReadonlySet<ConnectionUrlCopyFormat> = new Set(["urlWithPassword", "jdbcUrlWithCredentials", "dsnWithPassword"]);
 
 export type ConnectionUrlCopyConfig = Pick<ConnectionConfig, "db_type" | "host" | "port" | "username" | "password" | "database" | "url_params" | "ssl" | "connection_string"> & Partial<Pick<ConnectionConfig, "driver_profile" | "oracle_connection_type">>;
 
@@ -347,7 +356,7 @@ function jdbcQuery(config: ConnectionUrlCopyConfig, prefix: string, withCredenti
 
 function buildJdbcUrl(config: ConnectionUrlCopyConfig, options: ConnectionUrlCopyOptions & { withCredentials: boolean }): string | null {
   const explicit = explicitConnectionString(config);
-  if (explicit && /^jdbc:/i.test(explicit)) return explicit;
+  if (explicit && /^jdbc:/i.test(explicit)) return options.withCredentials ? explicit : redactConnectionStringSecrets(explicit);
   const host = config.host?.trim() ?? "";
   if (!host) return null;
 
@@ -383,15 +392,15 @@ function isPostgresWireFamily(config: ConnectionUrlCopyConfig): boolean {
   return !(explicit && /^jdbc:/i.test(explicit));
 }
 
-/** libpq-style `host=... port=... user=... password=... dbname=...` DSN. */
-function buildKeyvalueDsn(config: ConnectionUrlCopyConfig, options: ConnectionUrlCopyOptions): string | null {
+/** libpq-style `host=... port=... user=... [password=...] dbname=...` DSN. */
+function buildKeyvalueDsn(config: ConnectionUrlCopyConfig, options: ConnectionUrlCopyOptions & { includePassword: boolean }): string | null {
   const host = config.host?.trim() ?? "";
   if (!host) return null;
   const parts = [`host=${quoteDsnValue(host)}`];
   if (shouldAppendPort(config)) parts.push(`port=${config.port}`);
   const user = config.username?.trim() ?? "";
   if (user) parts.push(`user=${quoteDsnValue(user)}`);
-  if (config.password) parts.push(`password=${quoteDsnValue(config.password)}`);
+  if (options.includePassword && config.password) parts.push(`password=${quoteDsnValue(config.password)}`);
   const database = effectiveDatabase(config, options);
   if (database) parts.push(`dbname=${quoteDsnValue(database)}`);
   const raw = (config.url_params ?? "").trim().replace(/^[?&]+/, "");
@@ -417,27 +426,45 @@ function buildPsqlCommand(config: ConnectionUrlCopyConfig, options: ConnectionUr
 }
 
 /**
+ * Whether a password-inclusive copy would actually carry a secret: either a
+ * stored password or an explicit connection string with embedded credentials.
+ */
+function hasCopyableSecret(config: ConnectionUrlCopyConfig): boolean {
+  if (config.password) return true;
+  const explicit = explicitConnectionString(config);
+  return !!explicit && redactConnectionStringSecrets(explicit) !== explicit;
+}
+
+/**
  * Lists the copy formats available for a connection, deduplicating entries
  * that would produce identical text (e.g. no stored password, or an explicit
- * connection string that already is the JDBC URL).
+ * connection string that already is the JDBC URL). Password-inclusive formats
+ * are only offered when a secret is actually available, so the plain items
+ * are always safe to paste.
  */
 export function connectionUrlCopyFormats(config: ConnectionUrlCopyConfig | undefined): ConnectionUrlCopyFormat[] {
   if (!connectionSupportsUrlCopy(config)) return [];
   const candidate = config as ConnectionUrlCopyConfig;
   const formats: ConnectionUrlCopyFormat[] = [];
-  const url = buildStandardUrl(candidate, { includePassword: true });
-  const urlNoPassword = buildStandardUrl(candidate, { includePassword: false });
+  const hasSecret = hasCopyableSecret(candidate);
+  const url = buildStandardUrl(candidate, { includePassword: false });
+  const urlWithPassword = buildStandardUrl(candidate, { includePassword: true });
   if (url) formats.push("url");
-  if (urlNoPassword && urlNoPassword !== url) formats.push("urlNoPassword");
+  if (urlWithPassword && hasSecret && urlWithPassword !== url) formats.push("urlWithPassword");
   const jdbcUrl = buildJdbcUrl(candidate, { withCredentials: false });
   const jdbcUrlWithCredentials = buildJdbcUrl(candidate, { withCredentials: true });
   if (jdbcUrl && jdbcUrl !== url) formats.push("jdbcUrl");
-  // Without a stored password the "with credentials" URL would only add `user=`
-  // (or nothing), which is misleading next to its label — hide it in that case.
-  if (jdbcUrlWithCredentials && candidate.password && jdbcUrlWithCredentials !== jdbcUrl && jdbcUrlWithCredentials !== url) formats.push("jdbcUrlWithCredentials");
+  // Without a secret the "with credentials" URL would only add `user=` (or
+  // nothing), which is misleading next to its label — hide it in that case.
+  if (jdbcUrlWithCredentials && hasSecret && jdbcUrlWithCredentials !== jdbcUrl && jdbcUrlWithCredentials !== urlWithPassword && jdbcUrlWithCredentials !== url) formats.push("jdbcUrlWithCredentials");
   if (buildHostPort(candidate)) formats.push("hostPort");
-  if (isPostgresWireFamily(candidate) && buildKeyvalueDsn(candidate, {})) formats.push("dsn");
-  if (isPostgresWireFamily(candidate) && buildPsqlCommand(candidate, {})) formats.push("psqlCommand");
+  if (isPostgresWireFamily(candidate)) {
+    const dsn = buildKeyvalueDsn(candidate, { includePassword: false });
+    const dsnWithPassword = buildKeyvalueDsn(candidate, { includePassword: true });
+    if (dsn) formats.push("dsn");
+    if (dsnWithPassword && hasSecret && dsnWithPassword !== dsn) formats.push("dsnWithPassword");
+    if (buildPsqlCommand(candidate, {})) formats.push("psqlCommand");
+  }
   return formats;
 }
 
@@ -446,9 +473,9 @@ export function buildConnectionUrlCopy(config: ConnectionUrlCopyConfig | undefin
   const candidate = config as ConnectionUrlCopyConfig;
   switch (format) {
     case "url":
-      return buildStandardUrl(candidate, { ...options, includePassword: true });
-    case "urlNoPassword":
       return buildStandardUrl(candidate, { ...options, includePassword: false });
+    case "urlWithPassword":
+      return buildStandardUrl(candidate, { ...options, includePassword: true });
     case "jdbcUrl":
       return buildJdbcUrl(candidate, { ...options, withCredentials: false });
     case "jdbcUrlWithCredentials":
@@ -456,7 +483,9 @@ export function buildConnectionUrlCopy(config: ConnectionUrlCopyConfig | undefin
     case "hostPort":
       return buildHostPort(candidate);
     case "dsn":
-      return isPostgresWireFamily(candidate) ? buildKeyvalueDsn(candidate, options ?? {}) : null;
+      return isPostgresWireFamily(candidate) ? buildKeyvalueDsn(candidate, { ...options, includePassword: false }) : null;
+    case "dsnWithPassword":
+      return isPostgresWireFamily(candidate) ? buildKeyvalueDsn(candidate, { ...options, includePassword: true }) : null;
     case "psqlCommand":
       return isPostgresWireFamily(candidate) ? buildPsqlCommand(candidate, options ?? {}) : null;
     default:

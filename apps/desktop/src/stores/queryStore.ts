@@ -3174,9 +3174,7 @@ export const useQueryStore = defineStore("query", () => {
         context: options.context ? snapshotPluginWorkbenchContext(options.context) : undefined,
       },
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   function openPluginFilesystem(pluginId: string, providerId: string, options: { title?: string; connectionId?: string; rootUri?: string; currentUri?: string; forceNew?: boolean } = {}) {
@@ -3207,9 +3205,7 @@ export const useQueryStore = defineStore("query", () => {
         currentUri: options.currentUri,
       },
     };
-    tabs.value.push(tab);
-    activeTabId.value = id;
-    return id;
+    return registerOpenTab(tab);
   }
 
   async function openPluginConnection(connectionId: string) {

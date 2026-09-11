@@ -14,7 +14,23 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { HelpTooltip, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
-import type { ConnectionConfig, ConnectionTestResult, DatabaseConnectionInfo, DatabaseType, HttpTunnelConfig, IdentifierCase, JdbcDriverInfo, JdbcLocalBundleInfo, JdbcMavenBundleInfo, ProxyTunnelConfig, SshConfigHostEntry, SshTunnelConfig, TransportLayerConfig } from "@/types/database";
+import type {
+  ConnectionConfig,
+  ConnectionTestResult,
+  DatabaseConnectionInfo,
+  DatabaseType,
+  HttpTunnelConfig,
+  IdentifierCase,
+  InstalledPlugin,
+  JdbcDriverInfo,
+  JdbcLocalBundleInfo,
+  JdbcMavenBundleInfo,
+  PluginFormFieldValue,
+  ProxyTunnelConfig,
+  SshConfigHostEntry,
+  SshTunnelConfig,
+  TransportLayerConfig,
+} from "@/types/database";
 import { CONNECTION_PICKER_OPTIONS, CONNECTION_PROFILES, CONNECTION_PROFILE_ICONS, type ConnectionPickerOption, type ConnectionProfileCategory, type ConnectionProfileDefinition } from "@/types/generated/connectionProfiles";
 import type { InfluxDbExternalConfig, InfluxDbVersion } from "@/types/influxdb";
 import type { VictoriaMetricsExternalConfig } from "@/types/victoriametrics";
@@ -33,7 +49,11 @@ import { normalizeRedisKeyTemplates, redisKeyTemplatesToTextarea } from "@/lib/r
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
+import PluginConnectionFields from "@/components/plugins/PluginConnectionFields.vue";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
+import { buildPluginConnectionConfig, createFrontendPluginRegistry, pluginConnectionFormValues, pluginConnectionProviderIcon, pluginConnectionProviderOptionValue } from "@/lib/plugins/frontendPlugin";
+import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { applyMeilisearchBasePathToExternalConfig, applyParsedConnectionUrl, normalizeMongoConnectionString, parseConnectionUrl } from "@/lib/connection/connectionUrl";
 import { DEFAULT_QUERY_TIMEOUT_SECS, MAX_CONNECT_TIMEOUT_SECS, MAX_QUERY_TIMEOUT_SECS } from "@/lib/connection/timeoutLimits";
@@ -234,7 +254,7 @@ type LegacyConnectionConfig = ConnectionConfig & LegacyTransportFields;
 type ConnectionForm = Omit<ConnectionConfig, "id">;
 type ConnectionTestState = ConnectionTestResult & { ok: boolean; scope?: "connection" | "ssh" };
 
-const { t } = useI18n();
+const { t, locale: appLocale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
 const connectionNoteVisibilityDraft = reactive(createConnectionNoteVisibilityDraft(settingsStore.editorSettings.sidebarShowConnectionNotes));
@@ -250,6 +270,7 @@ const isDesktop = isTauriRuntime();
 const props = defineProps<{
   editConfig?: ConnectionConfig;
   prefillConfig?: ConnectionDeepLinkDraft | null;
+  pluginProvider?: PluginCenterFocus | null;
   initialTab?: ConfigTab;
 }>();
 
@@ -305,6 +326,9 @@ const connectionErrorDetail = ref("");
 const testResultCopied = ref(false);
 const connectionErrorCopied = ref(false);
 const editingId = ref<string | null>(null);
+const installedPlugins = ref<InstalledPlugin[]>([]);
+const pluginFormValues = ref<Record<string, PluginFormFieldValue>>({});
+const pluginLoadError = ref("");
 const draftTestConnectionId = ref(uuid());
 const showVisibleDatabasesDialog = ref(false);
 const isLoadingVisibleDatabases = ref(false);
@@ -1143,8 +1167,39 @@ function profileForConfig(config: ConnectionConfig) {
 }
 
 function selectedProfile() {
+  if (form.value.db_type === "plugin") {
+    return { type: "plugin" as DatabaseType, label: selectedPluginProvider.value?.contribution.label || form.value.driver_label || "Plugin", icon: "plugin", port: 0, user: "" };
+  }
   const profile = selectedType.value === "gbase" && (form.value.driver_profile === "gbase8a" || form.value.driver_profile === "gbase8s") ? form.value.driver_profile : selectedType.value;
   return driverProfiles[profile] ?? driverProfiles.mysql;
+}
+
+const isPluginConnection = computed(() => form.value.db_type === "plugin");
+const pluginConnectionProviders = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value).listConnectionProviders());
+const selectedPluginProvider = computed(() => pluginConnectionProviders.value.find((entry) => entry.plugin.manifest.id === form.value.plugin_id && entry.contribution.id === form.value.plugin_connection_provider));
+const selectedPluginIcon = computed(() => (selectedPluginProvider.value ? pluginConnectionProviderIcon(selectedPluginProvider.value) : undefined));
+
+async function loadPluginProvidersAndApply() {
+  const existing = props.editConfig?.db_type === "plugin" ? props.editConfig : undefined;
+  const target = props.pluginProvider ?? (existing?.plugin_id && existing.plugin_connection_provider ? { pluginId: existing.plugin_id, providerId: existing.plugin_connection_provider } : null);
+  if (!target?.pluginId || !target.providerId) return;
+  pluginLoadError.value = "";
+  try {
+    const plugins = await api.listPlugins();
+    if (!open.value) return;
+    installedPlugins.value = plugins;
+    const entry = pluginConnectionProviders.value.find((candidate) => candidate.plugin.manifest.id === target.pluginId && candidate.contribution.id === target.providerId);
+    if (!entry) throw new Error(t("connection.pluginProviderUnavailable"));
+    const values = pluginConnectionFormValues(entry.contribution, existing);
+    const config = buildPluginConnectionConfig(entry.plugin.manifest.id, entry.contribution, values, existing);
+    form.value = { ...defaultForm(), ...config };
+    pluginFormValues.value = values;
+    selectedType.value = pluginConnectionProviderOptionValue(target.pluginId, target.providerId);
+    dialogStep.value = "config";
+    configTab.value = "connection";
+  } catch (error) {
+    pluginLoadError.value = error instanceof Error ? error.message : String(error);
+  }
 }
 
 function mqExtraRecord(config?: Partial<MqAdminConfig>): Record<string, unknown> {
@@ -3449,6 +3504,10 @@ const connectionLabelSmallClass = `${connectionLabelClass} text-xs`;
 const connectionLabelTopClass = `${connectionLabelClass} mt-2`;
 const connectionLabelSmallPaddedClass = `${connectionLabelClass} pt-2 text-xs`;
 const hasRequiredConnectionTarget = computed(() => {
+  if (isPluginConnection.value) {
+    const provider = selectedPluginProvider.value?.contribution;
+    return !!provider && provider.fields.every((field) => !field.required || ((pluginFormValues.value[field.key] ?? field.default) !== undefined && (pluginFormValues.value[field.key] ?? field.default) !== ""));
+  }
   if (form.value.db_type === "mq") {
     if (mqSystemKind.value === "kafka") return mqKafkaConnectionSource.value === "zookeeper" ? !!mqKafkaZooKeeperServers.value.trim() : !!mqKafkaBootstrapServers.value.trim();
     if (mqSystemKind.value === "rocketmq") return !!mqRocketmqNamesrvAddr.value.trim();
@@ -3811,6 +3870,14 @@ function connectionConfigForSshTunnelTest(id: string): ConnectionConfig {
 }
 
 function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionConfig {
+  if (isPluginConnection.value) {
+    const entry = selectedPluginProvider.value;
+    if (!entry) throw new Error(pluginLoadError.value || t("connection.pluginProviderUnavailable"));
+    if (!hasRequiredConnectionTarget.value) throw new Error(t("connection.pluginRequiredField", { field: entry.contribution.label }));
+    const existing = props.editConfig?.db_type === "plugin" ? props.editConfig : undefined;
+    const config = buildPluginConnectionConfig(entry.plugin.manifest.id, entry.contribution, pluginFormValues.value, existing);
+    return { ...formValueForSubmit(), ...config, id, name: form.value.name.trim() || generatedName.trim() || config.name, note: form.value.note?.trim() || undefined };
+  }
   const config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   config.database_info = undefined;
   config.database = normalizeStoredConnectionDatabase(config.db_type, config.database);
@@ -5142,6 +5209,7 @@ watch(
       void loadAgentDrivers();
       void loadSshConfigHosts();
     }
+    void loadPluginProvidersAndApply();
     // Preload database names so the summary count is accurate right away.
     void nextTick(() => {
       if (canChooseVisibleDatabases.value && hasVisibleDatabaseFilter.value) {
@@ -5998,6 +6066,13 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="connection" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
+                <div v-if="isPluginConnection && selectedPluginProvider" class="col-span-full grid grid-cols-4 items-start gap-4">
+                  <span />
+                  <div class="col-span-3">
+                    <PluginConnectionFields v-model="pluginFormValues" :contribution="selectedPluginProvider.contribution" layout="connection-dialog" />
+                    <p v-if="pluginLoadError" class="mt-2 text-sm text-destructive">{{ pluginLoadError }}</p>
+                  </div>
+                </div>
                 <div v-if="!isJdbcConnection && form.db_type !== 'nacos' && form.db_type !== 'consul' && form.db_type !== 'mq'" class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.connectionUrlOptional") }}</Label>
                   <div class="col-span-3 flex items-center gap-1">
@@ -6025,7 +6100,8 @@ function openExternalUrl(url: string) {
                 <div class="grid grid-cols-4 items-center gap-4">
                   <Label :class="connectionLabelClass">{{ t("connection.type") }}</Label>
                   <button type="button" class="col-span-3 flex items-center gap-2 rounded-md border bg-muted/20 px-3 py-2 hover:bg-muted/40 cursor-pointer transition" @click="backToDatabasePicker()">
-                    <DatabaseIcon :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
+                    <PluginIcon v-if="isPluginConnection && selectedPluginProvider" :plugin-id="selectedPluginProvider.plugin.manifest.id" :icon="selectedPluginIcon" class="h-4 w-4 shrink-0" />
+                    <DatabaseIcon v-else :db-type="selectedDbIcon" class="h-4 w-4 shrink-0" />
                     <span class="min-w-0 flex-1 truncate text-sm text-left">{{ selectedProfile().label }}</span>
                     <Pencil class="h-3 w-3 text-muted-foreground" />
                   </button>

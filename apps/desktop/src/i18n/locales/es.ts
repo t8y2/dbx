@@ -7211,6 +7211,10 @@ export default withEnglishFallback({
     mcpQueryTimeoutSaveStatus_saving: "Guardando...",
     mcpQueryTimeoutSaveStatus_saved: "Guardado",
     mcpQueryTimeoutSaveStatus_failed: "Error al guardar",
+    supportInfoUserAgent: "User-Agent",
+    supportInfoDatabaseTypes: "Tipos de bases de datos",
+    supportInfoLocalDriverVersions: "Versiones de controladores locales",
+    supportInfoAiProviders: "Proveedores de IA",
   },
   driverStore: {
     jreDirRemoveFailed: "No se pudo eliminar el directorio JRE antiguo: {path} (error original: {error})",

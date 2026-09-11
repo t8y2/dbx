@@ -6935,6 +6935,10 @@ export default withEnglishFallback({
     mcpQueryTimeoutSaveStatus_saving: "저장 중...",
     mcpQueryTimeoutSaveStatus_saved: "저장됨",
     mcpQueryTimeoutSaveStatus_failed: "저장 실패",
+    supportInfoUserAgent: "User-Agent",
+    supportInfoDatabaseTypes: "데이터베이스 유형",
+    supportInfoLocalDriverVersions: "로컬 드라이버 버전",
+    supportInfoAiProviders: "AI 제공자",
   },
   driverStore: {
     jreDirRemoveFailed: "이전 JRE 디렉터리 제거 실패: {path} (원래 오류: {error})",

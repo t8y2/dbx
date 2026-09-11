@@ -6528,6 +6528,10 @@ export default withEnglishFallback({
     mcpQueryTimeoutSaveStatus_saving: "儲存中...",
     mcpQueryTimeoutSaveStatus_saved: "已儲存",
     mcpQueryTimeoutSaveStatus_failed: "儲存失敗",
+    supportInfoUserAgent: "User-Agent",
+    supportInfoDatabaseTypes: "資料庫類型",
+    supportInfoLocalDriverVersions: "本機驅動程式版本",
+    supportInfoAiProviders: "AI 供應商",
   },
   driverStore: {
     jreDirRemoveFailed: "無法刪除舊的 JRE 目錄：{path}（原始錯誤：{error}）",

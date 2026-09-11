@@ -7263,6 +7263,10 @@ export default withEnglishFallback({
     mcpQueryTimeoutSaveStatus_saving: "保存中...",
     mcpQueryTimeoutSaveStatus_saved: "保存済み",
     mcpQueryTimeoutSaveStatus_failed: "保存失敗",
+    supportInfoUserAgent: "User-Agent",
+    supportInfoDatabaseTypes: "データベースの種類",
+    supportInfoLocalDriverVersions: "ローカルドライバーのバージョン",
+    supportInfoAiProviders: "AIプロバイダー",
   },
   driverStore: {
     jreDirRemoveFailed: "古い JRE ディレクトリを削除できませんでした: {path}（元のエラー: {error}）",

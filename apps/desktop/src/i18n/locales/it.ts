@@ -7211,6 +7211,10 @@ export default withEnglishFallback({
     mcpQueryTimeoutSaveStatus_saving: "Salvataggio in corso...",
     mcpQueryTimeoutSaveStatus_saved: "Salvato",
     mcpQueryTimeoutSaveStatus_failed: "Salvataggio non riuscito",
+    supportInfoUserAgent: "User-Agent",
+    supportInfoDatabaseTypes: "Tipi di database",
+    supportInfoLocalDriverVersions: "Versioni dei driver locali",
+    supportInfoAiProviders: "Provider AI",
   },
   driverStore: {
     jreDirRemoveFailed: "Impossibile rimuovere la vecchia directory JRE: {path} (errore originale: {error})",

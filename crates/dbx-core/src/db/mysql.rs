@@ -3969,6 +3969,7 @@ where
                 comment: get_opt_str(row, "COLUMN_COMMENT")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
+                title: None,
                 numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
                 numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
                 character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
@@ -4025,6 +4026,7 @@ where
                 comment: get_opt_str(row, "Comment")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
+                title: None,
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,

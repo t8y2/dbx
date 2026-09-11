@@ -7,6 +7,7 @@
   "databend": "0.1.45",
   "databricks": "0.1.52",
   "db2": "0.1.58",
+  "maximo-db2": "0.1.0",
   "duckdb": "0.1.17",
   "exasol": "0.1.52",
   "firebird": "0.1.53",

@@ -360,6 +360,7 @@ pub async fn get_columns(client: &MeilisearchClient, index: &str) -> Result<Vec<
             is_unique: false,
             extra: None,
             comment: None,
+            title: None,
             numeric_precision: None,
             numeric_scale: None,
             character_maximum_length: None,

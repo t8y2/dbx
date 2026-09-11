@@ -13,6 +13,7 @@ public final class ColumnInfo {
     private Integer numeric_precision;
     private Integer numeric_scale;
     private Integer character_maximum_length;
+    private String title;
 
     public ColumnInfo() {
         this("", "", true, null, false);
@@ -86,6 +87,10 @@ public final class ColumnInfo {
         return character_maximum_length;
     }
 
+    public String getTitle() {
+        return title;
+    }
+
     public void setName(String name) {
         this.name = name;
     }
@@ -126,6 +131,10 @@ public final class ColumnInfo {
         this.character_maximum_length = character_maximum_length;
     }
 
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -140,7 +149,8 @@ public final class ColumnInfo {
             && Objects.equals(comment, that.comment)
             && Objects.equals(numeric_precision, that.numeric_precision)
             && Objects.equals(numeric_scale, that.numeric_scale)
-            && Objects.equals(character_maximum_length, that.character_maximum_length);
+            && Objects.equals(character_maximum_length, that.character_maximum_length)
+            && Objects.equals(title, that.title);
     }
 
     @Override
@@ -155,7 +165,8 @@ public final class ColumnInfo {
             comment,
             numeric_precision,
             numeric_scale,
-            character_maximum_length
+            character_maximum_length,
+            title
         );
     }
 
@@ -171,6 +182,7 @@ public final class ColumnInfo {
             + ", numeric_precision=" + numeric_precision
             + ", numeric_scale=" + numeric_scale
             + ", character_maximum_length=" + character_maximum_length
+            + ", title=" + title
             + ")";
     }
 }

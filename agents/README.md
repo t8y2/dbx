@@ -32,6 +32,7 @@ Each agent runs as a standalone process and communicates with DBX via stdin/stdo
 | trino | Trino (Presto) | Trino JDBC |
 | hive | Apache Hive | Native Go HS2 agent |
 | db2 | IBM DB2 | DB2 JDBC |
+| maximo-db2 | IBM Maximo (DB2) | DB2 JDBC |
 | informix | IBM Informix | Informix JDBC |
 | neo4j | Neo4j | Official Neo4j Go Driver native agent |
 | cassandra | Apache Cassandra 2.1+ | Apache cassandra-gocql-driver native agent |

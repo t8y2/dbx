@@ -39,6 +39,7 @@ JDBC_ARCHITECTURE_ALLOWLIST = {
     "access": "shared lifecycle with a test-only non-creating Access URL",
     "dameng": "shared lifecycle with protocol-safe driver loading and native explain access",
     "informix": "shared lifecycle with contextual connection error reporting",
+    "maximo-db2": "reuses the DB2 agent implementation and only enriches column metadata with Maximo MAXATTRIBUTE.TITLE",
 }
 APPROVED_JDBC_BASES = {
     "AbstractJdbcAgent",

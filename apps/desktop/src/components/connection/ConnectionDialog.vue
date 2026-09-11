@@ -752,6 +752,21 @@ const dremioConnectionUrls = ref<Record<DremioConnectionMode, string>>({
   "arrow-flight-sql": DREMIO_ARROW_FLIGHT_SQL_JDBC_URL,
   legacy: DREMIO_LEGACY_JDBC_URL,
 });
+// Maximo title language (connection-level): empty/base language unless the user
+// picks one of the languages enabled in the Maximo LANGUAGE table.
+const MAXIMO_BASE_LANGUAGE_VALUE = "__base__";
+type MaximoLanguageOption = { code: string; name: string };
+const DEFAULT_MAXIMO_LANGUAGE_OPTIONS: MaximoLanguageOption[] = [
+  { code: "EN", name: "English" },
+  { code: "ZH", name: "简体中文" },
+  { code: "JA", name: "日本語" },
+];
+const maximoTitleLanguage = ref<string>(MAXIMO_BASE_LANGUAGE_VALUE);
+const maximoLanguageOptions = ref<MaximoLanguageOption[]>([]);
+const maximoLanguageLoading = ref(false);
+const maximoLanguageError = ref("");
+const maximoLanguageLoadedFor = ref("");
+const isMaximoConnection = computed(() => form.value.driver_profile === "maximo-db2" || form.value.driver_profile === "maximo-oracle");
 const jdbcProductConnectionMode = ref("");
 const jdbcProductConnectionFields = ref<JdbcProductConnectionFieldsByMode>({});
 const activeJdbcProductProfile = computed(() => jdbcProductProfileForConfig(form.value));
@@ -2635,6 +2650,7 @@ watch(
       jdbcDriverPathsInput.value = (config.jdbc_driver_paths || []).join("\n");
       jdbcManualClasspathOpen.value = supportsNativeAgentJdbcDriverConfigType(config.db_type) || (config.jdbc_driver_paths || []).length > 0;
       customDriverName.value = isCustomCompatibleProfile() ? config.driver_label || "" : "";
+      hydrateMaximoTitleLanguage(config);
       dialogStep.value = "config";
       configTab.value = initialConfigTab();
       // Form/profile watchers normalize derived fields in this flush. Capture
@@ -2653,6 +2669,7 @@ watch(
       selectedTransportLayerId.value = null;
       selectedType.value = "mysql";
       customDriverName.value = "";
+      resetMaximoLanguageFields();
       resetMqFields();
       resetCassandraTlsFields(undefined);
       resetNacosFields();
@@ -4020,6 +4037,9 @@ function connectionConfigForSubmit(id: string, generatedName = ""): ConnectionCo
     setGaussdbIdentifierQuoteStyle(config, style);
     setGaussdbTargetServerType(config, targetServerType);
     setGaussdbCountQueryDop(config, countQueryDop);
+  } else if (isMaximoDriverProfile(config.driver_profile)) {
+    const maximoLanguage = maximoTitleLanguage.value === MAXIMO_BASE_LANGUAGE_VALUE ? "" : maximoTitleLanguage.value.trim();
+    config.external_config = maximoLanguage ? { maximoTitleLanguage: maximoLanguage } : undefined;
   } else if (!isDoltDriverProfile(config.driver_profile)) {
     config.external_config = undefined;
   }
@@ -4525,6 +4545,81 @@ async function preloadVisibleDatabaseNames() {
     isLoadingVisibleDatabases.value = false;
   }
 }
+
+function isMaximoDriverProfile(profile?: string): boolean {
+  return profile === "maximo-db2" || profile === "maximo-oracle";
+}
+
+function resetMaximoLanguageFields() {
+  maximoTitleLanguage.value = MAXIMO_BASE_LANGUAGE_VALUE;
+  maximoLanguageOptions.value = [];
+  maximoLanguageError.value = "";
+  maximoLanguageLoadedFor.value = "";
+  maximoLanguageLoading.value = false;
+}
+
+function hydrateMaximoTitleLanguage(config: ConnectionConfig) {
+  const external = externalConfigRecord(config.external_config);
+  const stored = external.maximoTitleLanguage ?? external.maximo_title_language;
+  maximoTitleLanguage.value = typeof stored === "string" && stored.trim() ? stored.trim() : MAXIMO_BASE_LANGUAGE_VALUE;
+  maximoLanguageOptions.value = [];
+  maximoLanguageError.value = "";
+  maximoLanguageLoadedFor.value = "";
+}
+
+/**
+ * Loads the Maximo title languages enabled in the target database (LANGUAGE table)
+ * through a short-lived draft connection, mirroring the visible-databases probe.
+ * Falls back to a small built-in list so saving still works when the probe fails.
+ */
+async function loadMaximoLanguages(force = false) {
+  if (!isMaximoConnection.value || maximoLanguageLoading.value) return;
+  if (!ensureConnectionHostResolvedFromUrl()) return;
+  const identity = `${form.value.host}|${form.value.port}|${form.value.database ?? ""}`;
+  if (!force && maximoLanguageOptions.value.length > 0 && maximoLanguageLoadedFor.value === identity) return;
+  maximoLanguageLoading.value = true;
+  maximoLanguageError.value = "";
+  const draftId = buildDraftVisibleDatabasesConnectionId(uuid());
+  try {
+    const draftConfig = {
+      ...connectionConfigForSubmit(draftId),
+      id: draftId,
+      one_time: true,
+    };
+    await api.connectDb(draftConfig);
+    const database = draftConfig.database ?? "";
+    const queryLanguages = (sql: string) => api.executeQuery(draftId, database, sql, undefined, undefined, { maxRows: 200 });
+    let result = await queryLanguages("SELECT MAXLANGCODE AS LANGCODE, LANGUAGENAME AS LANGNAME FROM MAXIMO.LANGUAGE WHERE ENABLED = 1").catch(() => undefined);
+    if (!result || (result.rows?.length ?? 0) === 0) {
+      const fallback = await queryLanguages("SELECT MAXLANGCODE AS LANGCODE, LANGUAGENAME AS LANGNAME FROM LANGUAGE WHERE ENABLED = 1").catch(() => undefined);
+      if (fallback && (fallback.rows?.length ?? 0) > 0) result = fallback;
+    }
+    const options: MaximoLanguageOption[] = [];
+    for (const row of result?.rows ?? []) {
+      const code = String(row?.[0] ?? "").trim();
+      if (!code) continue;
+      const name = String(row?.[1] ?? "").trim();
+      options.push({ code, name: name || code });
+    }
+    if (options.length === 0) throw new Error("empty language list");
+    maximoLanguageOptions.value = options;
+    maximoLanguageLoadedFor.value = identity;
+  } catch {
+    if (maximoLanguageOptions.value.length === 0) {
+      maximoLanguageOptions.value = [...DEFAULT_MAXIMO_LANGUAGE_OPTIONS];
+    }
+    maximoLanguageError.value = t("connection.maximoTitleLanguageLoadFailed");
+  } finally {
+    await api.disconnectDb(draftId).catch(() => undefined);
+    maximoLanguageLoading.value = false;
+  }
+}
+
+watch([configTab, () => form.value.driver_profile], () => {
+  if (configTab.value === "advanced" && isMaximoConnection.value) {
+    void loadMaximoLanguages();
+  }
+});
 
 async function openVisibleDatabasesPicker() {
   if (!ensureConnectionHostResolvedFromUrl()) return;
@@ -8274,6 +8369,36 @@ function openExternalUrl(url: string) {
 
             <TabsContent value="advanced" class="m-0 flex min-h-0 flex-1 flex-col overflow-hidden">
               <div class="connection-form-body grid min-h-0 flex-1 scroll-pb-6 gap-4 overflow-y-auto pt-4 pr-2 pb-6" :class="{ 'connection-form-body--nacos': form.db_type === 'nacos' }">
+                <div v-if="isMaximoConnection" class="grid grid-cols-4 items-center gap-4">
+                  <div class="flex items-center gap-1">
+                    <Label :class="connectionLabelSmallClass">{{ t("connection.maximoTitleLanguage") }}</Label>
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <CircleHelp class="h-3.5 w-3.5 cursor-help text-muted-foreground hover:text-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent side="top" align="center" class="max-w-[280px] text-xs leading-relaxed">
+                        {{ t("connection.maximoTitleLanguageHint") }}
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div class="col-span-3 flex items-center gap-2">
+                    <Select v-model="maximoTitleLanguage">
+                      <SelectTrigger class="h-9">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem :value="MAXIMO_BASE_LANGUAGE_VALUE">{{ t("connection.maximoTitleLanguageBase") }}</SelectItem>
+                        <SelectItem v-for="option in maximoLanguageOptions" :key="option.code" :value="option.code">{{ option.name }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button type="button" variant="outline" size="sm" class="h-9 shrink-0" :disabled="maximoLanguageLoading" @click="loadMaximoLanguages(true)">
+                      {{ t("connection.maximoTitleLanguageRefresh") }}
+                    </Button>
+                  </div>
+                  <div class="col-start-2 col-span-3 text-[11px] leading-4 text-muted-foreground">{{ t("connection.maximoTitleLanguageHint") }}</div>
+                  <div v-if="maximoLanguageError" class="col-start-2 col-span-3 text-xs text-destructive">{{ maximoLanguageError }}</div>
+                </div>
+
                 <div v-if="form.db_type === 'elasticsearch'" class="grid grid-cols-4 items-center gap-4">
                   <div class="flex items-center gap-1">
                     <Label :class="connectionLabelSmallClass">{{ t("connection.elasticsearchConnectivityCheckDisabled") }}</Label>

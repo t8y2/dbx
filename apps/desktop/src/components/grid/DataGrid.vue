@@ -716,6 +716,22 @@ const columnCommentMap = computed(() => {
   }
   return map;
 });
+// Business titles (e.g. Maximo MAXATTRIBUTE.TITLE) provided by the driver/agent.
+const columnTitleMap = computed(() => {
+  const map = new Map<string, string>();
+  if (props.tableMeta?.columns) {
+    for (const col of props.tableMeta.columns) {
+      if (col.title) map.set(col.name, col.title);
+    }
+    for (const col of props.tableMeta.columns) {
+      if (!col.title) continue;
+      const normalizedName = col.name.toLowerCase();
+      if (!map.has(normalizedName)) map.set(normalizedName, col.title);
+    }
+  }
+  return map;
+});
+const columnTitlesAvailable = computed(() => columnTitleMap.value.size > 0);
 const dataGridTopbarWidth = ref(0);
 const dataGridViewportWidth = ref(0);
 const dataGridTopbarOverflowCompact = ref(false);
@@ -768,6 +784,11 @@ function resolvedColumnComment(column: string, actualColIdx: number): string | u
 function headerColumnComment(column: string, actualColIdx: number): string {
   if (!showColumnCommentsInHeader.value) return "";
   return resolvedColumnComment(column, actualColIdx) ?? "";
+}
+
+function headerColumnTitle(column: string, actualColIdx: number): string {
+  if (!columnTitlesAvailable.value) return "";
+  return dataGridColumnCommentFor(columnTitleMap.value, column, props.sourceColumns?.[actualColIdx]) ?? "";
 }
 
 function headerColumnType(column: string, actualColIdx: number): string {
@@ -12065,6 +12086,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                     :tooltip-disabled="columnHeaderTooltipsDisabled"
                     :column-type="headerColumnType(col.name, col.actualColIdx)"
                     :column-comment="headerColumnComment(col.name, col.actualColIdx)"
+                    :column-title="headerColumnTitle(col.name, col.actualColIdx)"
+                    :show-title="columnTitlesAvailable"
                     :show-type-line="reserveColumnTypeLine"
                     :show-comment-line="reserveColumnCommentLine"
                     :tooltip-column-type="columnTypeMap.get(col.name)"

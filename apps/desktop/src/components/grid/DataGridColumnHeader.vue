@@ -16,6 +16,10 @@ const props = defineProps<{
   tooltipDisabled?: boolean;
   columnType?: string;
   columnComment?: string;
+  /** Business title (e.g. Maximo MAXATTRIBUTE.TITLE) to show instead of the field name. */
+  columnTitle?: string;
+  /** When true (and a title exists) the primary label shows the title instead of the field name. */
+  showTitle?: boolean;
   tooltipColumnType?: string;
   tooltipColumnComment?: string;
   columnNullability?: "nullable" | "required";
@@ -79,7 +83,7 @@ const emit = defineEmits<{
       <LightTooltip :text="name" side="bottom" :side-offset="4" :disabled="tooltipDisabled">
         <span data-column-tooltip-trigger class="flex min-w-0 flex-1 flex-col overflow-hidden">
           <span class="flex min-w-0 items-center gap-1 leading-4">
-            <span class="min-w-0 truncate">{{ name }}</span>
+            <span class="min-w-0 truncate" :title="showTitle && columnTitle ? name : undefined">{{ showTitle && columnTitle ? columnTitle : name }}</span>
           </span>
           <span v-if="showTypeLine" data-grid-header-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3" :class="[typeClass, { invisible: !columnType }]" :title="columnType || undefined" :aria-hidden="columnType ? undefined : true">{{ columnType }}</span>
           <span v-if="showCommentLine" data-grid-header-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground" :class="{ invisible: !columnComment }" :title="columnComment || undefined" :aria-hidden="columnComment ? undefined : true">{{

@@ -6,6 +6,12 @@ label: IBM DB2
 runtimeMode: agent
 mcpMode: bridge
 agentKey: db2
+driverProfiles:
+  - profile: maximo-db2
+    agentKey: maximo-db2
+    label: IBM Maximo (DB2)
+    storeVisible: true
+    storeOrder: 52
 driverStoreVisible: true
 driverStoreOrder: 24
 singleConnectionPool: false

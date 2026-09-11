@@ -188,6 +188,8 @@ pub struct ColumnInfo {
     pub is_unique: bool,
     pub extra: Option<String>,
     pub comment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub numeric_precision: Option<i32>,
     pub numeric_scale: Option<i32>,
     pub character_maximum_length: Option<i32>,

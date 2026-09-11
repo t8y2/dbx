@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import { useToast } from "@/composables/useToast";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
 import { buildMarketplacePluginListings, filterMarketplacePluginListings, type MarketplacePluginListing } from "@/lib/plugins/pluginMarketplace";
 import type { PluginCenterFocus } from "@/lib/plugins/pluginCenterNavigation";
@@ -27,6 +28,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   newConnection: [pluginId: string, providerId: string];
 }>();
+
+const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
+
+type TauriFileDropPayload = { type: "enter"; paths: string[]; position: { x: number; y: number } } | { type: "over"; position: { x: number; y: number } } | { type: "drop"; paths: string[]; position: { x: number; y: number } } | { type: "leave" };
 
 const { t, locale: appLocale } = useI18n();
 const { toast } = useToast();
@@ -46,7 +51,15 @@ const error = ref("");
 const selectedPluginId = ref("");
 const selectedContributionId = ref("");
 const selectedConnectionId = ref("");
-const allowUnsigned = ref(false);
+const allowUnsigned = ref(
+  ((): boolean => {
+    try {
+      return localStorage.getItem(PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  })(),
+);
 const trustedKeyId = ref("");
 const trustedPublicKey = ref("");
 const repositoryId = ref("");
@@ -55,6 +68,9 @@ const repositoryCatalogUrl = ref("");
 const marketplaceQuery = ref("");
 const marketplaceRepositoryId = ref("all");
 const webFileInput = ref<HTMLInputElement | null>(null);
+const panelRootRef = ref<HTMLElement | null>(null);
+const draggingPackage = ref(false);
+let webDragDepth = 0;
 
 const registry = computed(() => createFrontendPluginRegistry(installedPlugins.value, appLocale.value));
 const definitions = computed(() => registry.value.listPlugins());
@@ -312,6 +328,78 @@ async function installPlugin(source: string | File) {
   }
 }
 
+function isPluginPackagePath(path: string): boolean {
+  return /\.dbxp$/i.test(path);
+}
+
+function webDropPluginPackage(event: DragEvent): File | null {
+  const files = event.dataTransfer?.files;
+  if (!files) return null;
+  for (let i = 0; i < files.length; i++) {
+    if (isPluginPackagePath(files[i].name)) return files[i];
+  }
+  return null;
+}
+
+function onWebDragEnter(event: DragEvent) {
+  if (!webDropPluginPackage(event)) return;
+  event.preventDefault();
+  webDragDepth++;
+  draggingPackage.value = true;
+}
+
+function onWebDragOver(event: DragEvent) {
+  if (!webDropPluginPackage(event)) return;
+  event.preventDefault();
+}
+
+function onWebDragLeave() {
+  if (webDragDepth > 0 && --webDragDepth === 0) draggingPackage.value = false;
+}
+
+function onWebDrop(event: DragEvent) {
+  const claimed = draggingPackage.value;
+  webDragDepth = 0;
+  draggingPackage.value = false;
+  const file = webDropPluginPackage(event);
+  if (!file) {
+    if (claimed) event.preventDefault();
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  if (installing.value) return;
+  void installPlugin(file);
+}
+
+function dropInsidePanel(payload: Exclude<TauriFileDropPayload, { type: "leave" }>): boolean {
+  const root = panelRootRef.value;
+  if (!root) return false;
+  return physicalDropPositionInsideRect(payload.position, root.getBoundingClientRect(), window.devicePixelRatio);
+}
+
+function onTauriPluginDrop(event: Event) {
+  const routedEvent = event as CustomEvent<TauriFileDropPayload>;
+  const payload = routedEvent.detail;
+  if (!payload) return;
+  if (payload.type === "leave") {
+    draggingPackage.value = false;
+    return;
+  }
+  const inside = dropInsidePanel(payload);
+  if (payload.type === "enter" || payload.type === "over") {
+    const relevant = payload.type === "enter" ? inside && payload.paths.some(isPluginPackagePath) : inside;
+    if (relevant) routedEvent.preventDefault();
+    draggingPackage.value = relevant;
+    return;
+  }
+  draggingPackage.value = false;
+  const path = payload.paths.find(isPluginPackagePath);
+  if (!inside || !path || installing.value) return;
+  routedEvent.preventDefault();
+  void installPlugin(path);
+}
+
 async function rollbackSelectedPlugin() {
   if (!selectedPluginId.value || !window.confirm(t("pluginPlatform.rollbackConfirm"))) return;
   operating.value = true;
@@ -356,11 +444,24 @@ watch(
   },
   { deep: true },
 );
-onMounted(() => void refresh());
+watch(allowUnsigned, (value) => {
+  try {
+    localStorage.setItem(PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY, value ? "1" : "0");
+  } catch {
+    // storage unavailable (private mode); the flag stays session-only
+  }
+});
+onMounted(() => {
+  void refresh();
+  if (isTauriRuntime()) document.addEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
+});
+onBeforeUnmount(() => {
+  if (isTauriRuntime()) document.removeEventListener("dbx:tauri-file-drop", onTauriPluginDrop);
+});
 </script>
 
 <template>
-  <div class="plugin-center-view mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6">
+  <div ref="panelRootRef" class="plugin-center-view relative mx-auto flex h-full w-full max-w-6xl flex-col gap-4 overflow-hidden px-6 py-6" @dragenter="onWebDragEnter" @dragover="onWebDragOver" @dragleave="onWebDragLeave" @drop="onWebDrop">
     <input ref="webFileInput" type="file" accept=".dbxp" class="hidden" @change="handleWebPackage" />
     <div v-if="error" class="shrink-0 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">{{ error }}</div>
 
@@ -559,6 +660,7 @@ onMounted(() => void refresh());
             <div class="flex flex-wrap items-center gap-3">
               <Button variant="outline" size="sm" class="h-8 gap-1.5" :disabled="installing" @click="choosePluginPackage"><Loader2 v-if="installing" class="size-3.5 animate-spin" /><FileUp v-else class="size-3.5" />{{ t("pluginPlatform.installPackage") }}</Button>
               <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><ShieldCheck class="size-3.5 text-emerald-600 dark:text-emerald-400" />{{ t("pluginPlatform.signedPackagesVerifiedAutomatically") }}</div>
+              <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground"><FileUp class="size-3.5" />{{ t("pluginPlatform.dropInstallHint") }}</div>
             </div>
           </section>
 
@@ -592,7 +694,7 @@ onMounted(() => void refresh());
             </div>
           </section>
 
-          <details class="group rounded-xl border bg-muted/15">
+          <details class="group rounded-xl border bg-muted/15" open>
             <summary class="flex cursor-pointer list-none items-start gap-3 p-4 marker:content-none">
               <div class="rounded-md bg-muted p-2 text-muted-foreground"><Settings2 class="size-4" /></div>
               <div class="min-w-0 flex-1">
@@ -640,5 +742,10 @@ onMounted(() => void refresh());
         </div>
       </TabsContent>
     </Tabs>
+
+    <div v-if="draggingPackage" class="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-primary/60 bg-primary/5">
+      <FileUp class="size-8 text-primary" />
+      <div class="text-sm font-medium text-primary">{{ t("pluginPlatform.dropToInstall") }}</div>
+    </div>
   </div>
 </template>

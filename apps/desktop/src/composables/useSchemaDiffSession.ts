@@ -12,7 +12,7 @@ import { getSchemaDiffNextProgressStep, isSchemaDiffPostgresLike, shouldLoadSche
 import { schemaDiffRoutineObjectTypesIntersection } from "@/lib/database/databaseObjectCapabilities";
 import { convertToSchemaDiffObjects, databaseTypeToDialectKind, normalizeDialectKind, schemaDiffDeployTargetSchema, type SchemaDiffObject } from "@/lib/schema/schemaDiff";
 import { normalizeSchemaDiffCompareOptions, type SchemaDiffCompareOptions } from "@/types/schemaDiff";
-import type { DatabaseType, FunctionInfo } from "@/types/database";
+import type { DatabaseType, FunctionInfo, TableInfo } from "@/types/database";
 import type { SchemaDiffPreparation } from "@/lib/schema/schemaDiff";
 
 export interface SchemaDiffSessionProgress {
@@ -115,8 +115,8 @@ async function runSchemaDiffSession(session: SchemaDiffSession, dependencies: Sc
   try {
     publishProgress(session, { phase: "loading-table-lists" });
 
-    let sourceTables: string[] = [];
-    let targetTables: string[] = [];
+    let sourceTables: TableInfo[] = [];
+    let targetTables: TableInfo[] = [];
     let sourceDetails: Awaited<ReturnType<typeof loadSchemaDetails>> = [];
     let targetDetails: Awaited<ReturnType<typeof loadSchemaDetails>> = [];
 

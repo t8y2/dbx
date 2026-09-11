@@ -88,7 +88,7 @@ function onRowActivate(object: SchemaDiffObject) {
           <span v-if="row.targetLabel" :class="row.object.operationType === 'delete' ? 'text-red-500 line-through' : ''">{{ row.targetLabel }}</span>
           <span v-else class="text-muted-foreground">—</span>
         </div>
-        <div class="min-w-0 truncate tabular-nums" :title="hasStats(row.stats) ? t('diff.routineDiffStats', row.stats) : undefined">
+        <div class="min-w-0 truncate tabular-nums" :title="hasStats(row.stats) ? t('diff.routineDiffStats', { added: row.stats.added, removed: row.stats.removed, modified: row.stats.modified }) : undefined">
           <template v-if="hasStats(row.stats)">
             <span class="text-green-600 dark:text-green-400">+{{ row.stats.added }}</span>
             <span class="text-muted-foreground"> </span>

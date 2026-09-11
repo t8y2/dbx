@@ -4583,6 +4583,16 @@ export interface SqlFileRequest {
   database: string;
   filePath: string;
   continueOnError: boolean;
+  selectedTables?: SqlFileTable[];
+}
+
+export interface SqlFileTable {
+  database: string | null;
+  name: string;
+}
+
+export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
+  return invoke("inspect_sql_file_tables", { filePath });
 }
 
 export interface SqlFilePreview {

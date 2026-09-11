@@ -59,6 +59,8 @@ pub struct SqlFileRequest {
     pub database: String,
     pub file_path: String,
     pub continue_on_error: bool,
+    #[serde(default)]
+    pub selected_tables: Option<Vec<crate::sql_file_import::SqlFileTable>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

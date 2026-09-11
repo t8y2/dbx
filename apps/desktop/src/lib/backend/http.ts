@@ -121,6 +121,7 @@ import type {
   HistoryConnectionOption,
   SqlFileRequest,
   SqlFilePreview,
+  SqlFileTable,
   SqlFileProgress,
   TransferRequest,
   TransferProgress,
@@ -2250,6 +2251,10 @@ export async function previewSqlFile(fileOrPath: string | File): Promise<SqlFile
 
 export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return post("/api/sql-file/execute", { request });
+}
+
+export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
+  return post("/api/sql-file/tables", { filePath });
 }
 
 export async function executeSqlFiles(request: SqlFileRequest, filePaths: string[]): Promise<void> {

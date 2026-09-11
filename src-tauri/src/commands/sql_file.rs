@@ -31,6 +31,13 @@ struct SqlFileSummary {
 }
 
 #[tauri::command]
+pub async fn inspect_sql_file_tables(
+    file_path: String,
+) -> Result<Vec<dbx_core::sql_file_import::SqlFileTable>, String> {
+    dbx_core::sql_file_import::inspect_sql_file_tables(std::path::Path::new(&file_path)).await
+}
+
+#[tauri::command]
 pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;

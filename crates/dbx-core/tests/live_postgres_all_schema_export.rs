@@ -149,6 +149,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             database: target_database.clone(),
             file_path: export_path.display().to_string(),
             continue_on_error: false,
+            selected_tables: None,
         },
         &export_path,
         CancellationToken::new(),

@@ -384,6 +384,7 @@ export const previewSqlFile = forward("previewSqlFile");
 export const executeSqlFile = forward("executeSqlFile");
 export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
+export const inspectSqlFileTables = forward("inspectSqlFileTables");
 export const listenSqlFileProgress = forward("listenSqlFileProgress");
 export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
@@ -967,6 +968,7 @@ export type {
   SqlFileStatus,
   SqlFileRequest,
   SqlFilePreview,
+  SqlFileTable,
   SqlFileProgress,
   TransferRequest,
   TransferProgress,

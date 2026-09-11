@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,7 +23,8 @@ vi.mock("@/components/layout/QueryEditorSurface.vue", () => ({
   default: {
     name: "QueryEditorSurfaceStub",
     props: ["activeTab", "autoFocus"],
-    template: `<div data-test="query-editor">{{ activeTab.id }}</div>`,
+    data: () => ({ draft: "" }),
+    template: `<div data-test="query-editor">{{ activeTab.id }}<input data-test="query-editor-draft" v-model="draft" /></div>`,
   },
 }));
 
@@ -103,6 +104,53 @@ describe("EditorGroup mount contract", () => {
     const editor = host.querySelector<HTMLElement>('[data-test="query-editor"]');
     expect(editor).not.toBeNull();
     expect(editor?.textContent).toBe("tab-b");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("keeps the query editor instance across data preview round trips", async () => {
+    const store = useQueryStore();
+    const queryId = store.createTab("pg-1", "app", "Query 1", "query");
+    const dataId = store.createTab("pg-1", "app", "users", "data", "public");
+    const activeTabId = ref(queryId);
+    const root = defineComponent(
+      () => () =>
+        h(EditorGroup, {
+          groupId: "group-1",
+          tabIds: [queryId, dataId],
+          activeTabId: activeTabId.value,
+          activeTab: tab(queryId),
+          activeConnection: undefined,
+          executableSql: "SELECT 1",
+          activeOutputView: "result",
+          formatSqlRequest: null,
+          compressSqlRequest: null,
+          selectedSql: "",
+          cursorPos: 0,
+          blockDangerousRedisCommands: false,
+        }),
+    );
+
+    const host = createHost();
+    const app = createApp(root);
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    const draft = host.querySelector<HTMLInputElement>('[data-test="query-editor-draft"]')!;
+    draft.value = "undo history";
+    draft.dispatchEvent(new Event("input", { bubbles: true }));
+    await nextTick();
+
+    activeTabId.value = dataId;
+    await nextTick();
+    expect(host.querySelector('[data-test="query-editor-draft"]')).toBeNull();
+
+    activeTabId.value = queryId;
+    await nextTick();
+    expect(host.querySelector<HTMLInputElement>('[data-test="query-editor-draft"]')?.value).toBe("undo history");
 
     app.unmount();
     host.remove();

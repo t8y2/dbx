@@ -4480,6 +4480,9 @@ watch(
                           <Input
                             :model-value="postgresGeometrySridValue(column.dataType)"
                             :class="[structureMonoControlClass, 'w-20 shrink-0']"
+                            type="number"
+                            min="0"
+                            max="999999"
                             :placeholder="t('structureEditor.sridPlaceholder')"
                             :disabled="isColumnTypeDisabled(column)"
                             @update:model-value="(v: string | number) => updatePostgresGeometryColumn(column, postgresGeometryTypeValue(column.dataType), String(v))"

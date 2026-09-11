@@ -14,6 +14,8 @@
     "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
     "publisher": { "type": "string", "minLength": 1 },
     "description": { "type": "string" },
+    "source": { "type": "string", "pattern": "^https?://[^\\s]+$" },
+    "homepage": { "type": "string", "pattern": "^https?://[^\\s]+$" },
     "engines": {
       "type": "object",
       "additionalProperties": false,

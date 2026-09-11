@@ -144,6 +144,8 @@ Add the schema to a manifest for editor validation:
   "name": "Example",
   "icon": "assets/plugin.svg",
   "version": "1.0.0",
+  "source": "https://github.com/example/dbx-plugin",
+  "homepage": "https://example.com/dbx-plugin",
   "engines": {
     "dbx": ">=0.5.68",
     "host_api": "^1.0"

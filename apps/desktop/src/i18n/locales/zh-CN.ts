@@ -107,6 +107,8 @@ export default withEnglishFallback({
     unsupportedTarget: "暂不支持 {target}",
     installedVersion: "已安装 v{version}",
     licenseUnknown: "未声明许可证",
+    sourceRepository: "源码仓库",
+    pluginHomepage: "主页",
     marketplaceStatus: { install: "安装", installed: "已安装", update: "更新", unsupported: "不支持" },
     updateSuccess: "已将 {name} 更新到 {version}",
     noInstalledPlugins: "尚未安装插件",

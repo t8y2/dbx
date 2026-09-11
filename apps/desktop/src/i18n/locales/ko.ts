@@ -183,6 +183,8 @@ export default withEnglishFallback({
     unsupportedTarget: "{target}에서는 사용할 수 없음",
     installedVersion: "설치된 버전 v{version}",
     licenseUnknown: "라이선스 미지정",
+    sourceRepository: "소스 저장소",
+    pluginHomepage: "홈페이지",
     marketplaceStatus: {
       install: "설치",
       installed: "설치됨",

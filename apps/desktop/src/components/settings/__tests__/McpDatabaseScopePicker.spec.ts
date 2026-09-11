@@ -186,7 +186,6 @@ describe("McpDatabaseScopePicker", () => {
     expect(mocks.listDatabases).not.toHaveBeenCalled();
   });
 
-
   it("正常流程：选择 selected 后手工添加库名应 emit 携带 allowedDatabases", async () => {
     // 阶段一：初始无策略，点击“仅指定数据库”
     const first = mountHarness([]);

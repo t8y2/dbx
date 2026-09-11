@@ -1347,6 +1347,7 @@ impl AppState {
         app_version: impl Into<String>,
     ) -> Self {
         let data_dir = storage.data_dir().to_path_buf();
+        let app_version = app_version.into();
         Self {
             connections: Arc::new(RwLock::new(ConnectionPoolRegistry::new())),
             task_supervisor: TaskSupervisor::new(),
@@ -1359,8 +1360,8 @@ impl AppState {
             proxy_tunnels: ProxyTunnelManager::new(),
             http_tunnels: HttpTunnelManager::new(),
             storage,
-            plugins: PluginRegistry::new(plugin_dir.clone()),
-            plugin_host: PluginHost::new(PluginRegistry::new(plugin_dir)),
+            plugins: PluginRegistry::new_with_app_version(plugin_dir.clone(), app_version.clone()),
+            plugin_host: PluginHost::new(PluginRegistry::new_with_app_version(plugin_dir, app_version.clone())),
             agent_manager: crate::agent_manager::AgentManager::new_with_base_dir_and_app_version(
                 agent_dir,
                 app_version,

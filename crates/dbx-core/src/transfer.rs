@@ -6299,13 +6299,11 @@ pub fn should_transfer_schema_objects(
         // Do not enter the PostgreSQL-family schema-object path just because the
         // request also carries the selected table kind. This matters for
         // Kingbase, whose catalog is not a drop-in PostgreSQL catalog.
-        return objects.iter().any(|selection| {
-            selection.object_type != TransferObjectKind::Table && !selection.names.is_empty()
-        });
+        return objects
+            .iter()
+            .any(|selection| selection.object_type != TransferObjectKind::Table && !selection.names.is_empty());
     }
-    if matches!(source_db_type, DatabaseType::Kingbase)
-        || matches!(target_db_type, DatabaseType::Kingbase)
-    {
+    if matches!(source_db_type, DatabaseType::Kingbase) || matches!(target_db_type, DatabaseType::Kingbase) {
         // Kingbase V8 does not expose every PostgreSQL pg_catalog relation used
         // by the optional object scanner. Empty selection means the legacy
         // table-transfer request here, so avoid probing unsupported catalogs.

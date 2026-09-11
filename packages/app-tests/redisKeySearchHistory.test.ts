@@ -25,45 +25,43 @@ beforeEach(() => {
   });
 });
 
-test("remembers connection+db+mode scoped search history with newest entries first", () => {
-  const scope = { connectionId: "c1", db: 0, searchMode: "key" as const };
+test("remembers connection+db scoped search history with newest entries first", () => {
+  const scope = { connectionId: "c1", db: 0 };
 
-  rememberRedisKeySearchHistory(scope, "user:*");
-  rememberRedisKeySearchHistory(scope, "session:*");
-  rememberRedisKeySearchHistory(scope, "user:*");
+  rememberRedisKeySearchHistory(scope, "queue_update");
+  rememberRedisKeySearchHistory(scope, "insert");
+  rememberRedisKeySearchHistory(scope, "queue_update");
 
-  assert.deepEqual(loadRedisKeySearchHistory(scope), ["user:*", "session:*"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope), ["queue_update", "insert"]);
 });
 
 test("does not store empty or whitespace-only patterns", () => {
-  const scope = { connectionId: "c1", db: 0, searchMode: "key" as const };
+  const scope = { connectionId: "c1", db: 0 };
 
-  rememberRedisKeySearchHistory(scope, "user:*");
+  rememberRedisKeySearchHistory(scope, "queue_update");
   rememberRedisKeySearchHistory(scope, "");
   rememberRedisKeySearchHistory(scope, "   ");
 
-  assert.deepEqual(loadRedisKeySearchHistory(scope), ["user:*"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope), ["queue_update"]);
 });
 
-test("keeps key/value/all histories separate and isolates connections and databases", () => {
-  const keyScope = { connectionId: "c1", db: 0, searchMode: "key" as const };
-  const valueScope = { connectionId: "c1", db: 0, searchMode: "value" as const };
-  const otherDb = { connectionId: "c1", db: 1, searchMode: "key" as const };
-  const otherConnection = { connectionId: "c2", db: 0, searchMode: "key" as const };
+test("shares history across search modes and isolates connections and databases", () => {
+  const scope = { connectionId: "c1", db: 0 };
+  const otherDb = { connectionId: "c1", db: 1 };
+  const otherConnection = { connectionId: "c2", db: 0 };
 
-  rememberRedisKeySearchHistory(keyScope, "user:*");
-  rememberRedisKeySearchHistory(valueScope, "active");
+  rememberRedisKeySearchHistory(scope, "queue_update");
+  rememberRedisKeySearchHistory(scope, "insert");
   rememberRedisKeySearchHistory(otherDb, "cache:*");
   rememberRedisKeySearchHistory(otherConnection, "order:*");
 
-  assert.deepEqual(loadRedisKeySearchHistory(keyScope), ["user:*"]);
-  assert.deepEqual(loadRedisKeySearchHistory(valueScope), ["active"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope), ["insert", "queue_update"]);
   assert.deepEqual(loadRedisKeySearchHistory(otherDb), ["cache:*"]);
   assert.deepEqual(loadRedisKeySearchHistory(otherConnection), ["order:*"]);
 });
 
 test("keeps the newest 20 history entries", () => {
-  const scope = { connectionId: "c1", db: 0, searchMode: "key" as const };
+  const scope = { connectionId: "c1", db: 0 };
 
   for (let index = 1; index <= 21; index += 1) {
     rememberRedisKeySearchHistory(scope, `pattern ${index}`);
@@ -75,25 +73,46 @@ test("keeps the newest 20 history entries", () => {
   );
 });
 
-test("filters history by partial input", () => {
-  const scope = { connectionId: "c1", db: 0, searchMode: "key" as const };
+test("filters history by partial input when a query is provided", () => {
+  const scope = { connectionId: "c1", db: 0 };
 
-  rememberRedisKeySearchHistory(scope, "user:*");
-  rememberRedisKeySearchHistory(scope, "session:*");
-  rememberRedisKeySearchHistory(scope, "user:admin:*");
+  rememberRedisKeySearchHistory(scope, "queue_update");
+  rememberRedisKeySearchHistory(scope, "insert");
+  rememberRedisKeySearchHistory(scope, "queue_update:pending");
 
-  assert.deepEqual(loadRedisKeySearchHistory(scope, "user"), ["user:admin:*", "user:*"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope, "queue"), ["queue_update:pending", "queue_update"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope), ["queue_update:pending", "insert", "queue_update"]);
 });
 
 test("forgets a single pattern without clearing other scoped history", () => {
-  const scope = { connectionId: "c1", db: 0, searchMode: "key" as const };
-  const other = { connectionId: "c1", db: 0, searchMode: "value" as const };
+  const scope = { connectionId: "c1", db: 0 };
+  const other = { connectionId: "c1", db: 1 };
 
-  rememberRedisKeySearchHistory(scope, "user:*");
-  rememberRedisKeySearchHistory(scope, "session:*");
+  rememberRedisKeySearchHistory(scope, "queue_update");
+  rememberRedisKeySearchHistory(scope, "insert");
   rememberRedisKeySearchHistory(other, "active");
 
-  assert.deepEqual(forgetRedisKeySearchHistory(scope, "user:*"), ["session:*"]);
-  assert.deepEqual(loadRedisKeySearchHistory(scope), ["session:*"]);
+  assert.deepEqual(forgetRedisKeySearchHistory(scope, "queue_update"), ["insert"]);
+  assert.deepEqual(loadRedisKeySearchHistory(scope), ["insert"]);
   assert.deepEqual(loadRedisKeySearchHistory(other), ["active"]);
+});
+
+test("migrates legacy mode-scoped history into connection+db scope", () => {
+  const storage = new MemoryStorage();
+  Object.defineProperty(globalThis, "localStorage", {
+    value: storage,
+    configurable: true,
+  });
+  storage.setItem(
+    "dbx-redis-key-search-history",
+    JSON.stringify({
+      version: 1,
+      scopes: {
+        "c1\u00010\u0001key": ["queue_update"],
+        "c1\u00010\u0001value": ["insert"],
+      },
+    }),
+  );
+
+  assert.deepEqual(loadRedisKeySearchHistory({ connectionId: "c1", db: 0 }), ["queue_update", "insert"]);
 });

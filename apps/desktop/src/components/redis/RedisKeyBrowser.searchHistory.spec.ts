@@ -324,20 +324,24 @@ afterEach(() => {
   }
 });
 
+async function submitSearch(host: HTMLElement, pattern: string) {
+  const input = host.querySelector("[data-redis-search-input]") as HTMLInputElement;
+  input.value = pattern;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await settle();
+}
+
 describe("RedisKeyBrowser search history", () => {
   it("remembers a submitted pattern and fills the input when selected from history", async () => {
     const host = mountBrowser();
     await settle();
 
+    await submitSearch(host, "monitor:job:*");
+    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0 })).toEqual(["monitor:job:*"]);
+
     const input = host.querySelector("[data-redis-search-input]") as HTMLInputElement;
-    input.value = "monitor:job:*";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await settle();
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    await settle();
-
-    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" })).toEqual(["monitor:job:*"]);
-
     input.value = "";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     await settle();
@@ -355,9 +359,27 @@ describe("RedisKeyBrowser search history", () => {
     expect(host.querySelector("[data-redis-search-history-list]")).toBeNull();
   });
 
+  it("keeps earlier patterns after switching to another key search like queue_update then insert", async () => {
+    const host = mountBrowser();
+    await settle();
+
+    await submitSearch(host, "queue_update");
+    await submitSearch(host, "insert");
+
+    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0 })).toEqual(["insert", "queue_update"]);
+
+    // Input still holds the latest search; dropdown must still list earlier keys.
+    (host.querySelector("[data-redis-search-history-toggle]") as HTMLButtonElement).click();
+    await settle();
+
+    const text = host.querySelector("[data-redis-search-history-list]")?.textContent ?? "";
+    expect(text).toContain("insert");
+    expect(text).toContain("queue_update");
+  });
+
   it("forgets an individual history entry from the dropdown", async () => {
-    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" }, "cache:*");
-    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" }, "user:*");
+    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0 }, "cache:*");
+    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0 }, "user:*");
 
     const host = mountBrowser();
     await settle();
@@ -370,15 +392,15 @@ describe("RedisKeyBrowser search history", () => {
     forgetUser.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     await settle();
 
-    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" })).toEqual(["cache:*"]);
+    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0 })).toEqual(["cache:*"]);
     expect(host.querySelector("[data-redis-search-history-list]")?.textContent).toContain("cache:*");
     expect(host.querySelector("[data-redis-search-history-list]")?.textContent).not.toContain("user:*");
   });
 
   it("does not mix history across connectionId+db scopes", async () => {
-    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" }, "db0:*");
-    rememberRedisKeySearchHistory({ connectionId: "connection", db: 1, searchMode: "key" }, "db1:*");
-    rememberRedisKeySearchHistory({ connectionId: "other", db: 0, searchMode: "key" }, "other:*");
+    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0 }, "db0:*");
+    rememberRedisKeySearchHistory({ connectionId: "connection", db: 1 }, "db1:*");
+    rememberRedisKeySearchHistory({ connectionId: "other", db: 0 }, "other:*");
 
     const host = mountBrowser({ connectionId: "connection", db: 0 });
     await settle();
@@ -392,7 +414,7 @@ describe("RedisKeyBrowser search history", () => {
   });
 
   it("keeps history and key-template menus mutually exclusive", async () => {
-    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" }, "legacy:*");
+    rememberRedisKeySearchHistory({ connectionId: "connection", db: 0 }, "legacy:*");
 
     const host = mountBrowser();
     await settle();
@@ -420,7 +442,7 @@ describe("RedisKeyBrowser search history", () => {
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     await settle();
 
-    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" })).toEqual([]);
-    expect(forgetRedisKeySearchHistory({ connectionId: "connection", db: 0, searchMode: "key" }, "noop")).toEqual([]);
+    expect(loadRedisKeySearchHistory({ connectionId: "connection", db: 0 })).toEqual([]);
+    expect(forgetRedisKeySearchHistory({ connectionId: "connection", db: 0 }, "noop")).toEqual([]);
   });
 });

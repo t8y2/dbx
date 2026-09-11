@@ -2,13 +2,11 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 
 const STORAGE_KEY = "dbx-redis-key-search-history";
 const MAX_HISTORY_PER_SCOPE = 20;
-
-export type RedisKeySearchHistoryMode = "key" | "value" | "all";
+const LEGACY_SEARCH_MODES = ["key", "value", "all"] as const;
 
 export interface RedisKeySearchHistoryScope {
   connectionId?: string;
   db?: number;
-  searchMode?: RedisKeySearchHistoryMode;
 }
 
 interface StoredKeySearchHistory {
@@ -21,7 +19,7 @@ function normalizeSearchInput(value: string | undefined): string {
 }
 
 export function redisKeySearchHistoryScopeKey(scope: RedisKeySearchHistoryScope): string {
-  return [scope.connectionId ?? "", String(scope.db ?? ""), scope.searchMode ?? ""].join("\u0001");
+  return [scope.connectionId ?? "", String(scope.db ?? "")].join("\u0001");
 }
 
 function emptyHistory(): StoredKeySearchHistory {
@@ -44,10 +42,38 @@ function writeHistory(history: StoredKeySearchHistory) {
   safeLocalStorageSet(STORAGE_KEY, JSON.stringify(history));
 }
 
-export function loadRedisKeySearchHistory(scope: RedisKeySearchHistoryScope, query = ""): string[] {
+function mergeUniqueNewestFirst(entries: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const entry of entries) {
+    const normalized = normalizeSearchInput(entry);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(normalized);
+    if (merged.length >= MAX_HISTORY_PER_SCOPE) break;
+  }
+  return merged;
+}
+
+/** Resolve entries for a connection+db scope, migrating any legacy mode-scoped buckets. */
+function scopeEntries(history: StoredKeySearchHistory, scope: RedisKeySearchHistoryScope): string[] {
   const key = redisKeySearchHistoryScopeKey(scope);
+  const legacyKeys = LEGACY_SEARCH_MODES.map((mode) => `${key}\u0001${mode}`);
+  const hasLegacy = legacyKeys.some((legacyKey) => (history.scopes[legacyKey]?.length ?? 0) > 0);
+  if (!hasLegacy) return history.scopes[key] ?? [];
+
+  const merged = mergeUniqueNewestFirst([...(history.scopes[key] ?? []), ...legacyKeys.flatMap((legacyKey) => history.scopes[legacyKey] ?? [])]);
+  history.scopes[key] = merged;
+  for (const legacyKey of legacyKeys) delete history.scopes[legacyKey];
+  writeHistory(history);
+  return merged;
+}
+
+export function loadRedisKeySearchHistory(scope: RedisKeySearchHistoryScope, query = ""): string[] {
   const normalizedQuery = normalizeSearchInput(query).toLowerCase();
-  const entries = readHistory().scopes[key] ?? [];
+  const entries = scopeEntries(readHistory(), scope);
   if (!normalizedQuery) return entries.slice(0, MAX_HISTORY_PER_SCOPE);
   return entries.filter((entry) => entry.toLowerCase().includes(normalizedQuery)).slice(0, MAX_HISTORY_PER_SCOPE);
 }
@@ -58,8 +84,8 @@ export function rememberRedisKeySearchHistory(scope: RedisKeySearchHistoryScope,
 
   const history = readHistory();
   const key = redisKeySearchHistoryScopeKey(scope);
-  const previous = history.scopes[key] ?? [];
-  history.scopes[key] = [normalized, ...previous.filter((entry) => entry.toLowerCase() !== normalized.toLowerCase())].slice(0, MAX_HISTORY_PER_SCOPE);
+  const previous = scopeEntries(history, scope);
+  history.scopes[key] = mergeUniqueNewestFirst([normalized, ...previous]);
   writeHistory(history);
   return history.scopes[key];
 }
@@ -70,7 +96,8 @@ export function forgetRedisKeySearchHistory(scope: RedisKeySearchHistoryScope, v
 
   const history = readHistory();
   const key = redisKeySearchHistoryScopeKey(scope);
-  history.scopes[key] = (history.scopes[key] ?? []).filter((entry) => entry.toLowerCase() !== normalized.toLowerCase());
+  const previous = scopeEntries(history, scope);
+  history.scopes[key] = previous.filter((entry) => entry.toLowerCase() !== normalized.toLowerCase());
   if (history.scopes[key].length === 0) delete history.scopes[key];
   writeHistory(history);
   return loadRedisKeySearchHistory(scope);

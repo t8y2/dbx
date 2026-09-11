@@ -308,10 +308,9 @@ const keyTemplateActiveDescendant = computed(() => (keyTemplateMenuVisible.value
 const searchHistoryScope = computed<RedisKeySearchHistoryScope>(() => ({
   connectionId: props.connectionId,
   db: props.db,
-  searchMode: searchMode.value,
 }));
 const searchHistoryMenuVisible = computed(() => searchHistoryMenuOpen.value);
-const searchHistoryEmptyText = computed(() => (searchPattern.value.trim() ? t("redis.keySearchHistoryNoMatches") : t("redis.keySearchHistoryEmpty")));
+const searchHistoryEmptyText = computed(() => t("redis.keySearchHistoryEmpty"));
 const searchHistoryActiveDescendant = computed(() => (searchHistoryMenuVisible.value && searchHistorySelectedIndex.value >= 0 ? `${searchHistoryListboxId}-option-${searchHistorySelectedIndex.value}` : undefined));
 const searchComboboxExpanded = computed(() => keyTemplateMenuVisible.value || searchHistoryMenuVisible.value);
 const searchComboboxControls = computed(() => {
@@ -2290,7 +2289,9 @@ function dismissSearchHistoryMenu() {
 }
 
 function refreshSearchHistoryItems() {
-  searchHistoryItems.value = loadRedisKeySearchHistory(searchHistoryScope.value, searchPattern.value);
+  // ChevronDown shows the full connection+db history so earlier patterns stay
+  // visible after the user switches to another search (or key/value mode).
+  searchHistoryItems.value = loadRedisKeySearchHistory(searchHistoryScope.value);
   if (searchHistorySelectedIndex.value >= searchHistoryItems.value.length) {
     searchHistorySelectedIndex.value = searchHistoryItems.value.length > 0 ? searchHistoryItems.value.length - 1 : -1;
   }

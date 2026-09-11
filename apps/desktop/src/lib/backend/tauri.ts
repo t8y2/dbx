@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";
+import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   assertUpdateAllowsCommand(command);
@@ -371,6 +372,10 @@ export interface AppSupportInfo {
   osName: string;
   osVersion?: string | null;
   arch: string;
+  userAgent?: string;
+  databaseTypes?: string[];
+  localDriverVersions?: Array<{ dbType: string; version: string }>;
+  aiProviders?: string[];
 }
 
 export interface QueryPagination {
@@ -2559,7 +2564,8 @@ export async function getAppVersion(): Promise<string> {
 }
 
 export async function getAppSupportInfo(): Promise<AppSupportInfo> {
-  return invoke<AppSupportInfo>("get_app_support_info");
+  const info = await invoke<AppSupportInfo>("get_app_support_info");
+  return { ...info, userAgent: collectBrowserSupportInfo() };
 }
 
 // --- Redis ---

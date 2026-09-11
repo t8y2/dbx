@@ -245,6 +245,7 @@ import type {
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
@@ -4512,6 +4513,7 @@ export async function getAppSupportInfo(): Promise<AppSupportInfo> {
     osName: navigator.platform || "web",
     osVersion: null,
     arch: "",
+    userAgent: collectBrowserSupportInfo(),
   };
 }
 

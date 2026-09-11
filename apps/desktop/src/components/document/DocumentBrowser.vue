@@ -178,6 +178,7 @@ const viewMode = computed<ViewMode>({
 const filterInput = ref(restoredDocumentBrowserState?.filterInput ?? "");
 const sortInput = ref(restoredDocumentBrowserState?.sortInput ?? "");
 const localColumnFilters = ref<SerializedDataGridLocalColumnFilters>(restoredDocumentBrowserState?.localColumnFilters ?? {});
+const localColumnFilterColumns = ref<string[] | undefined>(restoredDocumentBrowserState?.localColumnFilterColumns);
 const filterInputRef = ref<HTMLTextAreaElement>();
 const sortInputRef = ref<HTMLTextAreaElement>();
 const dataGridRef = ref<InstanceType<typeof DataGrid>>();
@@ -321,6 +322,8 @@ function documentDataSignature(): string | undefined {
   }
 }
 
+const documentLocalColumnFilterRestoreKey = computed(() => documentDataSignature());
+
 let loadedDocumentDataSignature: string | undefined;
 
 function captureDocumentBrowserData(): DocumentBrowserDataSnapshot | undefined {
@@ -356,6 +359,7 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
     documentFilterRules: documentFilterRules.value,
     page: page.value,
     localColumnFilters: localColumnFilters.value,
+    localColumnFilterColumns: localColumnFilterColumns.value,
     // Any condition change drops the payload; only the unmount capture stores
     // rows, so a cached page can never outlive the conditions that produced it.
     data: options.includeData ? captureDocumentBrowserData() : undefined,
@@ -364,12 +368,22 @@ function persistDocumentBrowserState(options: { includeData?: boolean } = {}) {
 
 function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFilters) {
   localColumnFilters.value = Object.fromEntries(Object.entries(filters).map(([columnIndex, values]) => [columnIndex, [...values]]));
+  localColumnFilterColumns.value = Object.keys(filters).length > 0 ? [...gridResult.value.columns] : undefined;
   // Local value filters only change the client-side view. Keep the loaded rows
   // in the tab snapshot so returning to the tab does not trigger a reload.
   persistDocumentBrowserState({ includeData: true });
 }
 
-watch([filterInput, sortInput, appliedDocumentFilter, documentFilterRules, page], () => persistDocumentBrowserState(), { deep: true });
+watch(
+  [filterInput, sortInput, appliedDocumentFilter, page],
+  () => {
+    localColumnFilters.value = {};
+    localColumnFilterColumns.value = undefined;
+    persistDocumentBrowserState();
+  },
+  { deep: true },
+);
+watch(documentFilterRules, () => persistDocumentBrowserState(), { deep: true });
 
 // Seed the grid from the cached page so a tab switch costs no round trip
 // (#8679). The signature guard rejects a snapshot whose identity or conditions
@@ -2530,6 +2544,8 @@ defineExpose({ focusSearch });
       :column-layout-scope-key="documentColumnLayoutScopeKey"
       :view-state-key="props.stateKey"
       :view-generation="documentViewGeneration"
+      :local-column-filter-restore-key="documentLocalColumnFilterRestoreKey"
+      :local-column-filter-columns="localColumnFilterColumns"
       context="results"
       page-size-preference="table-open"
       :database-type="props.databaseType"

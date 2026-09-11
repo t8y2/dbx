@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::installer::{validate_key_id, PluginPackageExpectation};
+use super::manifest::{parse_host_network_permission, MAX_PLUGIN_NETWORK_ORIGINS};
 use super::{
     current_plugin_target, PluginInstallResult, PluginPackageInstaller, PluginTrustStore, MAX_PLUGIN_PACKAGE_BYTES,
     SUPPORTED_PLUGIN_PERMISSIONS,
@@ -511,10 +512,24 @@ fn validate_and_resolve_catalog(
         if permissions.len() != plugin.permissions.len() {
             return Err(format!("Plugin '{}' contains duplicate permissions", plugin.id));
         }
-        if let Some(permission) =
-            plugin.permissions.iter().find(|permission| !SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str()))
-        {
+        if let Some(permission) = plugin.permissions.iter().find(|permission| {
+            !SUPPORTED_PLUGIN_PERMISSIONS.contains(&permission.as_str())
+                && parse_host_network_permission(permission).is_none()
+        }) {
             return Err(format!("Plugin '{}' declares unsupported permission '{}'", plugin.id, permission));
+        }
+        let network_origins = plugin
+            .permissions
+            .iter()
+            .filter_map(|permission| parse_host_network_permission(permission))
+            .collect::<BTreeSet<_>>();
+        if network_origins.len() > MAX_PLUGIN_NETWORK_ORIGINS {
+            return Err(format!(
+                "Plugin '{}' declares {} network origins; at most {} are allowed",
+                plugin.id,
+                network_origins.len(),
+                MAX_PLUGIN_NETWORK_ORIGINS
+            ));
         }
         let latest = Version::parse(&plugin.latest_version)
             .map_err(|error| format!("Plugin '{}' has invalid latestVersion: {error}", plugin.id))?;
@@ -767,6 +782,29 @@ mod tests {
             plugin.versions[0].artifacts[0].url,
             "https://plugins.example.com/team-marketplace/dist/plugin.dbxp"
         );
+    }
+
+    #[test]
+    fn validates_declared_network_permissions_in_catalogs() {
+        let repository = custom_repository("team-marketplace");
+        let catalog_url = Url::parse(repository.catalog_url.as_deref().unwrap()).unwrap();
+
+        let mut valid_catalog = catalog(&repository.id);
+        valid_catalog.plugins[0].permissions.push("host.network:https://api.example.com".to_string());
+        validate_and_resolve_catalog(&mut valid_catalog, &repository, &catalog_url).unwrap();
+
+        valid_catalog.plugins[0].permissions.push("host.network:http://api.example.com".to_string());
+        assert!(validate_and_resolve_catalog(&mut valid_catalog, &repository, &catalog_url)
+            .unwrap_err()
+            .contains("unsupported permission"));
+
+        let mut too_many_origins_catalog = catalog(&repository.id);
+        too_many_origins_catalog.plugins[0].permissions = (0..=MAX_PLUGIN_NETWORK_ORIGINS)
+            .map(|index| format!("host.network:https://api{index}.example.com"))
+            .collect();
+        assert!(validate_and_resolve_catalog(&mut too_many_origins_catalog, &repository, &catalog_url)
+            .unwrap_err()
+            .contains("network origins"));
     }
 
     #[test]

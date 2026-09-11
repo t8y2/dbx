@@ -52,7 +52,9 @@ const selectedDatabases = computed(() => selectedPolicy.value?.allowedDatabases 
 const selectedDatabasePolicies = computed(() => selectedPolicy.value?.databasePolicies ?? []);
 const displayedDatabases = computed(() => {
   const query = search.value.trim().toLocaleLowerCase();
-  return (databasesByConnection.value[selectedConnectionId.value] ?? []).filter((database) => !query || database.toLocaleLowerCase().includes(query));
+  // 加载缓存是会话级的：把已持久化的库名并入列表，重开对话框后授权项仍完整可见。
+  const loaded = databasesByConnection.value[selectedConnectionId.value] ?? [];
+  return [...new Set([...selectedDatabases.value, ...loaded])].sort((left, right) => left.localeCompare(right)).filter((database) => !query || database.toLocaleLowerCase().includes(query));
 });
 const connectionPageCount = computed(() => Math.max(1, Math.ceil(scopedConnections.value.length / pageSize.value)));
 const databasePageCount = computed(() => Math.max(1, Math.ceil(displayedDatabases.value.length / pageSize.value)));
@@ -151,6 +153,8 @@ function databasePolicyMode(database: string): ExecutionMode | "inherit" {
 }
 
 function addManualDatabase() {
+  // busy 期间 updateSelectedPolicy 会被丢弃；提前拦截，避免库名进了本地列表却没进策略。
+  if (props.disabled || props.busy) return;
   const database = manualDatabase.value.trim();
   if (!database) return;
   const loaded = databasesByConnection.value[selectedConnectionId.value] ?? [];
@@ -322,8 +326,8 @@ watch(databasePageCount, () => setDatabasePage(databasePage.value));
           <p class="text-xs text-muted-foreground">{{ t("settings.mcpDatabaseScopeSelectedSummary", { count: selectedDatabases.length }) }}</p>
           <div class="flex gap-2">
             <div class="relative min-w-0 flex-1"><Search class="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" /><Input v-model="search" class="h-8 pl-8 text-xs" :placeholder="t('settings.mcpDatabaseSearchPlaceholder')" /></div>
-            <Input v-model="manualDatabase" class="h-8 w-40 text-xs" :placeholder="t('settings.mcpDatabaseManualPlaceholder')" @keydown.enter.prevent="addManualDatabase" />
-            <Button type="button" variant="outline" size="sm" :disabled="disabled || !manualDatabase.trim()" @click="addManualDatabase"><Plus class="h-3.5 w-3.5" /></Button>
+            <Input v-model="manualDatabase" class="h-8 w-40 text-xs" :placeholder="t('settings.mcpDatabaseManualPlaceholder')" :disabled="disabled || busy" @keydown.enter.prevent="addManualDatabase" />
+            <Button type="button" variant="outline" size="sm" :disabled="disabled || busy || !manualDatabase.trim()" @click="addManualDatabase"><Plus class="h-3.5 w-3.5" /></Button>
           </div>
           <p v-if="loadError" class="rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-xs text-destructive">{{ t("settings.mcpDatabaseLoadFailed", { error: loadError }) }}</p>
           <div v-if="displayedDatabases.length" class="rounded border">

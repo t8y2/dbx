@@ -1,6 +1,9 @@
 // @vitest-environment happy-dom
 // MCP 数据库范围选择器回归测试：
 // 加载资源列表前先 ensureConnected（修复未连接的 SQL 连接报 Connection not found）。
+// 1) 正常流程：选择“仅指定数据库”→ 手工添加库名 → emit 携带 allowedDatabases。
+// 2) busy/disabled 期间手工添加被整体拦截，库名不再进入本地列表（修复静默丢失）。
+// 3) 重开对话框后已持久化的 allowedDatabases 重新显示并勾选（修复不回显）。
 
 import { createApp, nextTick, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -181,5 +184,70 @@ describe("McpDatabaseScopePicker", () => {
     expect(second.root.textContent).toContain("settings.mcpDatabaseLoadFailed");
     expect(second.root.textContent).toContain("ORA-12170");
     expect(mocks.listDatabases).not.toHaveBeenCalled();
+  });
+
+
+  it("正常流程：选择 selected 后手工添加库名应 emit 携带 allowedDatabases", async () => {
+    // 阶段一：初始无策略，点击“仅指定数据库”
+    const first = mountHarness([]);
+    await nextTick();
+    clickScopeRadio(first.root, "selected");
+    await nextTick();
+    expect(first.emitted.policies.length).toBe(1);
+    expect(first.emitted.policies[0][0].databaseScope).toBe("selected");
+    first.app.unmount();
+    harness = null;
+
+    // 阶段二：模拟父组件 store 已回写 scope=selected，再手工添加库名
+    const second = mountHarness([emptyPolicy("oracle-1", "selected")]);
+    await nextTick();
+    await addManualDatabase(second.root, "mydb");
+
+    expect(second.emitted.policies.length).toBe(1);
+    const policy = second.emitted.policies[0][0];
+    expect(policy.databaseScope).toBe("selected");
+    expect(policy.allowedDatabases).toEqual(["mydb"]);
+  });
+
+  it("竞态场景：disabled 期间手工添加被整体拦截，库名不再进入本地列表", async () => {
+    const { emitted, root } = mountHarness([emptyPolicy("oracle-1", "selected")], true);
+    await nextTick();
+    await addManualDatabase(root, "mydb");
+
+    expect(emitted.policies.length).toBe(0);
+    expect(root.textContent).not.toContain("mydb");
+    // 手工输入框本身也应被禁用
+    expect(manualInput(root).hasAttribute("disabled")).toBe(true);
+  });
+
+  it("重开对话框场景：已持久化的 allowedDatabases 重新显示在列表中并处于勾选状态", async () => {
+    // 模拟：策略已保存 scope=selected + allowedDatabases=["SAVEDDB"]，加载缓存为空（新会话）
+    const policy: McpConnectionPolicy = { ...emptyPolicy("oracle-1", "selected"), allowedDatabases: ["SAVEDDB"] };
+    const { root } = mountHarness([policy]);
+    await nextTick();
+
+    expect(root.textContent).toContain("SAVEDDB");
+    expect(root.textContent).not.toContain("settings.mcpDatabaseEmptyHint");
+    const checkbox = Array.from(root.querySelectorAll('input[type="checkbox"]')).find((i) => i.value === "SAVEDDB" || i.closest("label")?.textContent?.includes("SAVEDDB"));
+    expect(checkbox?.checked).toBe(true);
+  });
+
+  it("加载列表与已持久化库名取并集：手工添加过但服务器上不存在的库名仍可见", async () => {
+    mocks.listDatabases.mockResolvedValue([{ name: "SERVER_DB" }]);
+    const first = mountHarness([]);
+    await nextTick();
+    clickScopeRadio(first.root, "selected");
+    await nextTick();
+    first.app.unmount();
+    harness = null;
+
+    const second = mountHarness([{ ...emptyPolicy("oracle-1", "selected"), allowedDatabases: ["MANUAL_DB"] }]);
+    await nextTick();
+    loadButton(second.root).click();
+    await new Promise((r) => setTimeout(r, 10));
+    await nextTick();
+
+    expect(second.root.textContent).toContain("SERVER_DB");
+    expect(second.root.textContent).toContain("MANUAL_DB");
   });
 });

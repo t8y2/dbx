@@ -4267,7 +4267,6 @@ export default withEnglishFallback({
     keySearchHistory: "搜尋紀錄",
     keySearchHistoryForget: "從紀錄中移除",
     keySearchHistoryEmpty: "暫無歷史紀錄",
-    keySearchHistoryNoMatches: "沒有符合的歷史紀錄",
   },
   mongo: {
     documents: "{count} 個文件",

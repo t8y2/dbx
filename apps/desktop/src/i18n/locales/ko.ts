@@ -4578,7 +4578,6 @@ export default withEnglishFallback({
     keySearchHistory: "검색 기록",
     keySearchHistoryForget: "기록에서 제거",
     keySearchHistoryEmpty: "검색 기록이 없습니다",
-    keySearchHistoryNoMatches: "일치하는 검색 기록이 없습니다",
   },
   mongo: {
     documents: "문서 {count}개",

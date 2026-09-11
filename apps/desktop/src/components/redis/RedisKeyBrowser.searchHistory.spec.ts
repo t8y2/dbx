@@ -288,7 +288,6 @@ function mountBrowser(overrides?: { connectionId?: string; db?: number; stateKey
             keySearchHistory: "Search history",
             keySearchHistoryForget: "Remove from history",
             keySearchHistoryEmpty: "No history yet",
-            keySearchHistoryNoMatches: "No matching history",
             keyTemplateSuggestions: "Key templates",
           },
         },

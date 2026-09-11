@@ -2633,6 +2633,8 @@ function focusSearch(): boolean {
 }
 
 function onSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
+
   if (searchHistoryMenuVisible.value) {
     if (event.key === "ArrowDown") {
       event.preventDefault();

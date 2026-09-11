@@ -4947,7 +4947,6 @@ export default withEnglishFallback({
     keySearchHistory: "Histórico de pesquisa",
     keySearchHistoryForget: "Remover do histórico",
     keySearchHistoryEmpty: "Nenhum histórico",
-    keySearchHistoryNoMatches: "Nenhum histórico correspondente",
   },
   mongo: {
     documents: "{count} documentos",

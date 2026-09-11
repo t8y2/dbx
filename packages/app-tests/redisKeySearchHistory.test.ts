@@ -96,23 +96,3 @@ test("forgets a single pattern without clearing other scoped history", () => {
   assert.deepEqual(loadRedisKeySearchHistory(scope), ["insert"]);
   assert.deepEqual(loadRedisKeySearchHistory(other), ["active"]);
 });
-
-test("migrates legacy mode-scoped history into connection+db scope", () => {
-  const storage = new MemoryStorage();
-  Object.defineProperty(globalThis, "localStorage", {
-    value: storage,
-    configurable: true,
-  });
-  storage.setItem(
-    "dbx-redis-key-search-history",
-    JSON.stringify({
-      version: 1,
-      scopes: {
-        "c1\u00010\u0001key": ["queue_update"],
-        "c1\u00010\u0001value": ["insert"],
-      },
-    }),
-  );
-
-  assert.deepEqual(loadRedisKeySearchHistory({ connectionId: "c1", db: 0 }), ["queue_update", "insert"]);
-});

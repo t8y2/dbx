@@ -4971,7 +4971,6 @@ export default withEnglishFallback({
     keySearchHistory: "搜索历史",
     keySearchHistoryForget: "从历史中移除",
     keySearchHistoryEmpty: "暂无历史记录",
-    keySearchHistoryNoMatches: "没有匹配的历史记录",
     fuzzyMatch: "模糊",
     fuzzyMatchTitle: "模糊匹配：自动按包含关系搜索 key",
     valueSearchPlaceholder: "按值内容搜索...",

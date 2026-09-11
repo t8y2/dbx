@@ -2,7 +2,6 @@ import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStor
 
 const STORAGE_KEY = "dbx-redis-key-search-history";
 const MAX_HISTORY_PER_SCOPE = 20;
-const LEGACY_SEARCH_MODES = ["key", "value", "all"] as const;
 
 export interface RedisKeySearchHistoryScope {
   connectionId?: string;
@@ -57,18 +56,9 @@ function mergeUniqueNewestFirst(entries: string[]): string[] {
   return merged;
 }
 
-/** Resolve entries for a connection+db scope, migrating any legacy mode-scoped buckets. */
+/** Resolve entries for a connection+db scope. */
 function scopeEntries(history: StoredKeySearchHistory, scope: RedisKeySearchHistoryScope): string[] {
-  const key = redisKeySearchHistoryScopeKey(scope);
-  const legacyKeys = LEGACY_SEARCH_MODES.map((mode) => `${key}\u0001${mode}`);
-  const hasLegacy = legacyKeys.some((legacyKey) => (history.scopes[legacyKey]?.length ?? 0) > 0);
-  if (!hasLegacy) return history.scopes[key] ?? [];
-
-  const merged = mergeUniqueNewestFirst([...(history.scopes[key] ?? []), ...legacyKeys.flatMap((legacyKey) => history.scopes[legacyKey] ?? [])]);
-  history.scopes[key] = merged;
-  for (const legacyKey of legacyKeys) delete history.scopes[legacyKey];
-  writeHistory(history);
-  return merged;
+  return history.scopes[redisKeySearchHistoryScopeKey(scope)] ?? [];
 }
 
 export function loadRedisKeySearchHistory(scope: RedisKeySearchHistoryScope, query = ""): string[] {

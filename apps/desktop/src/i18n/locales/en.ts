@@ -4987,7 +4987,6 @@ export default {
     keySearchHistory: "Search history",
     keySearchHistoryForget: "Remove from history",
     keySearchHistoryEmpty: "No history yet",
-    keySearchHistoryNoMatches: "No matching history",
     fuzzyMatch: "Fuzzy",
     fuzzyMatchTitle: "Fuzzy match: search keys by plain text contains",
     valueSearchPlaceholder: "value contains...",

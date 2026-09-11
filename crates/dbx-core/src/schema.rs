@@ -10470,7 +10470,10 @@ mod ddl_tests {
         );
 
         assert!(ddl.contains("CONSTRAINT \"pk_accounts\" PRIMARY KEY (id)"), "ddl: {ddl}");
-        assert!(ddl.contains("CONSTRAINT \"uq_accounts_code\" UNIQUE (code) DEFERRABLE INITIALLY DEFERRED"), "ddl: {ddl}");
+        assert!(
+            ddl.contains("CONSTRAINT \"uq_accounts_code\" UNIQUE (code) DEFERRABLE INITIALLY DEFERRED"),
+            "ddl: {ddl}"
+        );
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"pk_accounts\""), "ddl: {ddl}");
         assert!(!ddl.contains("CREATE UNIQUE INDEX \"uq_accounts_code\""), "ddl: {ddl}");
         assert!(ddl.contains("CREATE UNIQUE INDEX \"idx_accounts_display_name\""), "ddl: {ddl}");
@@ -11498,16 +11501,17 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
 /// duplicate every partition's `CREATE TABLE` (once from the parent's DDL,
 /// once from the caller's own loop over that same child relation).
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) = tokio::try_join!(
-        db::postgres::get_columns(pool, schema, table),
-        db::postgres::list_indexes(pool, schema, table),
-        db::postgres::list_foreign_keys(pool, schema, table),
-        db::postgres::list_constraints(pool, schema, table),
-        async { db::postgres::get_table_comment(pool, schema, table).await },
-        db::postgres::get_table_partition_info(pool, schema, table),
-        db::postgres::list_trigger_definitions(pool, schema, table),
-        db::postgres::list_check_constraints(pool, schema, table),
-    )?;
+    let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
+        tokio::try_join!(
+            db::postgres::get_columns(pool, schema, table),
+            db::postgres::list_indexes(pool, schema, table),
+            db::postgres::list_foreign_keys(pool, schema, table),
+            db::postgres::list_constraints(pool, schema, table),
+            async { db::postgres::get_table_comment(pool, schema, table).await },
+            db::postgres::get_table_partition_info(pool, schema, table),
+            db::postgres::list_trigger_definitions(pool, schema, table),
+            db::postgres::list_check_constraints(pool, schema, table),
+        )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
     } else {

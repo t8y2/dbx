@@ -109,15 +109,17 @@ class SqlServerLegacyAgentTest {
     void sqlServer2000ColumnCommentsUseLegacyExtendedPropertyFunction() {
         String sql = SqlServerLegacyAgent.sqlServer2000ColumnCommentsSql();
 
-        Assertions.assertTrue(sql.contains("JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid"));
+        Assertions.assertTrue(sql.contains("LEFT OUTER JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid"));
         Assertions.assertTrue(sql.contains("u.name = ? AND o.name = ?"));
-        Assertions.assertTrue(sql.contains("p.name = 'MS_Description'"));
-        Assertions.assertTrue(sql.contains("ORDER BY c.colid"));
+        Assertions.assertTrue(sql.contains("p.value AS column_comment"));
+        Assertions.assertTrue(sql.contains("p.name AS property_name"));
+        Assertions.assertTrue(sql.contains("ORDER BY c.colid, CASE WHEN p.name = 'MS_Description' THEN 0 ELSE 1 END"));
         Assertions.assertFalse(sql.contains("sys.extended_properties"));
 
         String functionSql = SqlServerLegacyAgent.sqlServer2000ColumnCommentsFunctionSql();
         Assertions.assertTrue(functionSql.contains("FROM ::fn_listextendedproperty"));
         Assertions.assertTrue(functionSql.contains("'MS_Description', 'user', ?, 'table', ?, 'column', default"));
+        Assertions.assertTrue(functionSql.contains("'MS_Description' AS property_name"));
     }
 
     @Test

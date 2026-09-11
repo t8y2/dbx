@@ -365,7 +365,11 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                     String column = resultSet.getString("column_name");
                     String comment = resultSet.getString("column_comment");
                     if (column != null && comment != null && !comment.trim().isEmpty()) {
-                        comments.put(column.trim().toLowerCase(Locale.ROOT), comment);
+                        String key = column.trim().toLowerCase(Locale.ROOT);
+                        String property = resultSet.getString("property_name");
+                        if (!comments.containsKey(key) || "MS_Description".equalsIgnoreCase(property)) {
+                            comments.put(key, comment);
+                        }
                     }
                 }
             }
@@ -396,16 +400,18 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String sqlServer2000ColumnCommentsSql() {
-        return "SELECT c.name AS column_name, CONVERT(nvarchar(4000), p.value) AS column_comment "
+        return "SELECT c.name AS column_name, p.value AS column_comment, p.name AS property_name "
             + "FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "
             + "JOIN syscolumns c ON c.id = o.id "
-            + "JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid "
+            + "LEFT OUTER JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid "
             + "WHERE u.name = ? AND o.name = ? AND o.xtype IN ('U', 'V') "
-            + "AND p.name = 'MS_Description' ORDER BY c.colid";
+            + "AND p.value IS NOT NULL "
+            + "ORDER BY c.colid, CASE WHEN p.name = 'MS_Description' THEN 0 ELSE 1 END";
     }
 
     static String sqlServer2000ColumnCommentsFunctionSql() {
-        return "SELECT objname AS column_name, CONVERT(nvarchar(4000), value) AS column_comment "
+        return "SELECT objname AS column_name, CONVERT(nvarchar(4000), value) AS column_comment, "
+            + "'MS_Description' AS property_name "
             + "FROM ::fn_listextendedproperty('MS_Description', 'user', ?, 'table', ?, 'column', default)";
     }
 

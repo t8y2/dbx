@@ -301,14 +301,6 @@ function mountBrowser(overrides?: { connectionId?: string; db?: number; stateKey
   return host;
 }
 
-function unmountBrowser(host: HTMLElement) {
-  const index = mountedApps.findIndex((mounted) => mounted.host === host);
-  expect(index).toBeGreaterThanOrEqual(0);
-  const [mounted] = mountedApps.splice(index, 1);
-  mounted!.unmount();
-  host.remove();
-}
-
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys: [], total_keys: 0 });

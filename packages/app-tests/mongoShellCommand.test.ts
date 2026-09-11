@@ -357,6 +357,29 @@ test("parseMongoFindCommand does not rewrite constructor text inside strings", (
   assert.deepEqual(JSON.parse(command.filter), { label: "new Date()", note: "ObjectId()" });
 });
 
+test('parseMongoCommand accepts db["name"] bracket collection accessors', () => {
+  const find = parseMongoFindCommand('db["orders-2024"].find({a: 1})');
+  assert.ok(find);
+  assert.equal(find.collection, "orders-2024");
+  assert.deepEqual(JSON.parse(find.filter), { a: 1 });
+
+  // Single quotes and a dotted name behave like db.<name>.
+  assert.equal(parseMongoFindCommand("db['audit.logs'].find({})")?.collection, "audit.logs");
+
+  assert.deepEqual(parseMongoWriteCommand('db["orders-2024"].updateOne({a: 1}, {$set: {b: 2}}, {upsert: true})'), {
+    kind: "update",
+    collection: "orders-2024",
+    filter: '{"a": 1}',
+    update: '{"$set": {"b": 2}}',
+    options: '{"upsert": true}',
+    many: false,
+  });
+
+  for (const source of ["db[].find({})", 'db["x"]find({})', 'db["x"]']) {
+    assert.equal(parseMongoCommand(source), null, source);
+  }
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);

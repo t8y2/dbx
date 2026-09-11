@@ -734,6 +734,21 @@ fn trim_mongo_outer_comments(mut source: &str) -> &str {
 }
 
 fn parse_collection_prefix(source: &str) -> Result<(String, usize), String> {
+    // db["orders-2024"] reaches names that are not valid identifiers, the same way the shell does.
+    if source.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("db[")) {
+        let close = matching_bracket(source, 2).ok_or("Invalid db[\"collection\"] accessor.")?;
+        let collection = parse_string_arg(source[3..close].trim())?;
+        if collection.is_empty() {
+            return Err("Invalid MongoDB collection name.".to_string());
+        }
+        let end = close + 1;
+        let suffix = &source[end..];
+        let trimmed = suffix.trim_start();
+        if !trimmed.starts_with('.') {
+            return Err("MongoDB collection method is required.".to_string());
+        }
+        return Ok((collection, end + suffix.len() - trimmed.len()));
+    }
     if !source.get(..3).is_some_and(|prefix| prefix.eq_ignore_ascii_case("db.")) {
         return Err("MongoDB command must start with db.<collection>.".to_string());
     }
@@ -1258,6 +1273,43 @@ fn matching_paren(source: &str, open: usize) -> Option<usize> {
     None
 }
 
+/// Offset of the `]` closing the bracket at `open`, ignoring brackets inside strings.
+fn matching_bracket(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote = None;
+    let mut escape = false;
+    let mut index = open;
+    while index < source.len() {
+        let ch = source[index..].chars().next()?;
+        if escape {
+            escape = false;
+            index += ch.len_utf8();
+            continue;
+        }
+        if quote.is_some() {
+            if ch == '\\' {
+                escape = true;
+            } else if Some(ch) == quote {
+                quote = None;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch == '[' {
+            depth += 1;
+        } else if ch == ']' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += ch.len_utf8();
+    }
+    None
+}
+
 fn split_top_level(source: &str) -> Vec<String> {
     if source.trim().is_empty() {
         return Vec::new();
@@ -1374,6 +1426,36 @@ mod tests {
 
         assert!(parse("db.items.find({}).explain('invalid')").unwrap_err().contains("verbosity"));
         assert!(parse("db.items.find({}).explain('executionStats').limit(1)").unwrap_err().contains("final"));
+    }
+
+    #[test]
+    fn parses_bracket_collection_accessor() {
+        assert_eq!(
+            parse(r#"db["orders-2024"].find({a: 1})"#).unwrap(),
+            MongoCommand::Find {
+                collection: "orders-2024".to_string(),
+                filter: r#"{"a":1}"#.to_string(),
+                projection: None,
+                sort: None,
+                collation: None,
+                skip: 0,
+                limit: 100,
+            }
+        );
+
+        // Single quotes, a dotted name, and a chained method all behave like db.<name>.
+        assert_eq!(
+            parse("db['audit.logs'].count()").unwrap(),
+            MongoCommand::Count { collection: "audit.logs".to_string(), filter: "{}".to_string(), accurate: false }
+        );
+        assert!(matches!(
+            parse(r#"db["orders-2024"].updateOne({a: 1}, {$set: {b: 2}}, {upsert: true})"#).unwrap(),
+            MongoCommand::Update { many: false, .. }
+        ));
+
+        for source in [r#"db[].find({})"#, r#"db[""].find({})"#, r#"db["x"]find({})"#, r#"db["x"]"#] {
+            assert!(parse(source).is_err(), "{source}");
+        }
     }
 
     #[test]

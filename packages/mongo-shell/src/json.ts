@@ -202,6 +202,11 @@ export function parseCollectionMethodTarget(source: string, method: string): { c
   if (getCollection) {
     return { collection: getCollection[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
   }
+  // db["orders-2024"] reaches names that are not valid identifiers, the same way the shell does.
+  const bracket = new RegExp(`^db\\s*\\[\\s*(["'])(.*?)\\1\\s*\\]\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
+  if (bracket) {
+    return { collection: bracket[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
+  }
   return null;
 }
 

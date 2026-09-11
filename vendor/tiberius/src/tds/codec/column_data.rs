@@ -797,6 +797,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn varchar_gb18030_does_not_sniff_a_utf8_bom() {
+        // EF BB BF is fully valid GB18030 data: EF BB and BF 61 form two
+        // two-byte sequences (锘縜) followed by ASCII "bc". The collation
+        // already names the encoding, so the lossy decoder must not let
+        // encoding_rs sniff those bytes as a UTF-8 BOM and return "abc".
+        let (text, had_errors) = Collation::new(0x804, 198)
+            .codec()
+            .unwrap()
+            .decode_lossy(b"\xef\xbb\xbfabc");
+        assert_eq!(text, "锘縜bc");
+        assert!(!had_errors, "the bytes are valid GB18030");
+
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"\xef\xbb\xbfabc"),
+        )
+        .await
+        .expect("BOM-like varchar bytes must decode as ordinary GB18030 data");
+
+        assert_eq!(decoded_string(value).as_deref(), Some("锘縜bc"));
+    }
+
+    #[tokio::test]
     async fn varchar_cp850_collation_decodes_french_text() {
         // SQL_1xCompat_CP850_CI_AS: LCID 0x409, sort ID 49. The DOS codepages
         // behind legacy SQL collations are not implemented by encoding_rs.

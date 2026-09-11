@@ -117,8 +117,11 @@ impl CollationCodec {
     /// Returns the decoded string and whether any byte had to be replaced.
     pub fn decode_lossy(&self, bytes: &[u8]) -> (String, bool) {
         match self {
+            // No BOM handling: the collation already names the encoding, so a
+            // leading byte sequence that looks like a UTF-8 BOM is ordinary
+            // data (the NVARCHAR path likewise keeps a U+FEFF character).
             CollationCodec::BuiltIn(encoding) => {
-                let (text, _, had_errors) = encoding.decode(bytes);
+                let (text, had_errors) = encoding.decode_without_bom_handling(bytes);
                 (text.into_owned(), had_errors)
             }
             // Single-byte codecs map every one of the 256 byte values, so they

@@ -759,6 +759,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn varchar_replaces_invalid_collation_bytes() {
+        // CP936/GB18030 (sort ID 198): 0x81 starts a two-byte sequence, and
+        // 0x40..0x7e is a valid trail byte, so 0x81 0x20 is invalid. A legacy
+        // varchar column can still hold those bytes when an application wrote
+        // them under a different codepage.
+        let value = decode_wire(
+            VarLenType::BigVarChar,
+            20,
+            Some(Collation::new(0x804, 198)),
+            &short_string_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable varchar bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("varchar row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
+    async fn text_replaces_invalid_collation_bytes() {
+        let value = decode_wire(
+            VarLenType::Text,
+            0,
+            Some(Collation::new(0x804, 198)),
+            &ntext_wire(b"ok\x81\x20ok"),
+        )
+        .await
+        .expect("undecodable text bytes must not fail the whole result set");
+
+        let decoded = decoded_string(value).expect("text row value");
+        assert!(decoded.starts_with("ok"), "readable bytes are preserved: {decoded:?}");
+        assert!(decoded.ends_with("ok"), "bytes after the bad sequence are preserved: {decoded:?}");
+        assert!(decoded.contains('\u{fffd}'), "the bad sequence is replaced: {decoded:?}");
+    }
+
+    #[tokio::test]
     async fn varchar_cp850_collation_decodes_french_text() {
         // SQL_1xCompat_CP850_CI_AS: LCID 0x409, sort ID 49. The DOS codepages
         // behind legacy SQL collations are not implemented by encoding_rs.

@@ -433,6 +433,7 @@ type ObjectBrowserScroller =
 // type loose because vue-virtual-scroller does not ship complete ref typings.
 const listScrollerRef = ref<ObjectBrowserScroller | null>(null);
 const gridScrollerRef = ref<ObjectBrowserScroller | null>(null);
+const objectHorizontalScrollLeft = ref(0);
 let viewportFrame = 0;
 let restoreViewportFrame = 0;
 
@@ -468,6 +469,7 @@ function onObjectsScroll() {
     viewportFrame = 0;
     const el = scrollerElement();
     if (!el) return;
+    objectHorizontalScrollLeft.value = el.scrollLeft;
     emitViewportChange(el.scrollTop);
   });
 }
@@ -3470,8 +3472,8 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     </div>
     <div v-else class="flex min-h-0 min-w-0 flex-1" :class="{ 'event-editor-layout': isEventEditor }">
       <div class="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-x-auto overflow-y-hidden">
-          <div class="grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px` }">
+        <div v-if="isListView" class="object-browser-table flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div class="object-browser-list-header grid h-7 shrink-0 items-center gap-3 border-b bg-muted/40 px-3 text-xs font-medium text-muted-foreground" :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px`, transform: `translateX(-${objectHorizontalScrollLeft}px)` }">
             <div v-if="showCheckboxColumn" class="relative flex min-w-0 items-center">
               <button class="flex h-6 w-6 items-center justify-center rounded-sm hover:bg-accent" type="button" :disabled="visibleSelectableRows.length === 0" @click="toggleVisibleTableSelection">
                 <CheckSquare v-if="allVisibleTablesSelected" class="h-3.5 w-3.5 text-primary" />
@@ -3565,7 +3567,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
               </div>
             </div>
           </div>
-          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 flex-1" :style="{ minWidth: `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
+          <RecycleScroller ref="listScrollerRef" class="object-browser-scroller min-h-0 min-w-0 flex-1" :style="{ '--object-browser-min-width': `${objectGridMinWidth}px` }" :items="filteredRows" :item-size="34" :buffer="600" :skip-hover="true" key-field="id">
             <template #default="{ item }">
               <CustomContextMenu :items="() => getObjectBrowserMenuItems(item)" v-slot="{ onContextMenu, isOpen }">
                 <div
@@ -3574,7 +3576,7 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
                     'bg-accent text-accent-foreground': isOpen || sourceRow?.id === item.id || sidePanelRow?.id === item.id || selectedTableIds.has(item.id),
                     'hover:bg-accent/40': !isOpen && sourceRow?.id !== item.id && sidePanelRow?.id !== item.id && !selectedTableIds.has(item.id),
                   }"
-                  :style="{ gridTemplateColumns, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 var(--primary)' : undefined }"
+                  :style="{ gridTemplateColumns, minWidth: `${objectGridMinWidth}px`, boxShadow: sidePanelRow?.id === item.id && !selectedTableIds.has(item.id) ? 'inset 3px 0 0 var(--primary)' : undefined }"
                   @click="onRowClick(item, $event)"
                   @contextmenu="onContextMenu"
                 >
@@ -4130,16 +4132,33 @@ function getObjectBrowserMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
 
 <style scoped>
 .object-browser-table {
+  overflow: hidden;
   scrollbar-width: thin;
+}
+
+.object-browser-list-header {
+  position: relative;
+  flex: 0 0 auto;
+  will-change: transform;
 }
 
 .object-browser-scroller {
   will-change: scroll-position;
   contain: content;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: auto;
+  scrollbar-width: thin;
 }
 
 .object-browser-scroller :deep(.vue-recycle-scroller__item-view) {
   contain: layout style paint;
+}
+
+.object-browser-scroller :deep(.vue-recycle-scroller__item-wrapper) {
+  overflow: visible;
+  min-width: var(--object-browser-min-width);
 }
 
 .object-browser-grid-wrapper {

@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
 import { buildMongoCompletionItems, getMongoCompletionContext, getMongoCompletionResultValidFor, inferMongoCompletionFields, shouldAutoOpenMongoCompletion } from "../../apps/desktop/src/lib/mongo/mongoCompletion.ts";
-import { ACCUMULATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
+import { ACCUMULATORS, EXPRESSION_OPERATORS, EXTENDED_JSON_VALUES, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, VALUE_SNIPPETS } from "../../apps/desktop/src/lib/mongo/mongoCompletionTables.ts";
 
 const collections = ["users", "user_events", "order-items", "audit.logs"];
 const fields = [
@@ -210,6 +210,49 @@ test("suggests query operators inside field value objects", () => {
     items.some((item) => item.label === "name"),
     false,
   );
+});
+
+test("suggests extended JSON wrappers in value positions", () => {
+  const apply = (text: string, label: string) => buildMongoCompletionItems(text, text.length, { fields }).find((item) => item.label === label)?.apply;
+
+  // A bare value gets the braces added; inside `{` the wrapper body is enough.
+  assert.equal(apply("db.users.find({ _id: $o", "$oid"), '{ $oid: "${id}" }');
+  assert.equal(apply("db.users.find({ _id: { $oi", "$oid"), '$oid: "${id}"');
+  assert.equal(apply("db.users.updateOne({}, { $set: { seen: $d", "$date"), '{ $date: "${date}" }');
+  assert.equal(apply("db.users.insertOne({ key: $u", "$uuid"), '{ $uuid: "${uuid}" }');
+
+  // Query operators stay available alongside the wrappers under a field.
+  const under = buildMongoCompletionItems("db.users.find({ _id: { $", "db.users.find({ _id: { $".length, { fields });
+  assert.ok(under.find((item) => item.label === "$gt"));
+  assert.ok(under.find((item) => item.label === "$oid"));
+
+  // The most common wrappers sort first at a bare `$`.
+  const bare = buildMongoCompletionItems("db.users.find({ _id: $", "db.users.find({ _id: $".length, { fields });
+  assert.deepEqual(
+    bare.slice(0, 2).map((item) => item.label),
+    ["$date", "$oid"],
+  );
+});
+
+test("treats $in, $nin and $all elements as values rather than sub-filters", () => {
+  const labels = (text: string) => buildMongoCompletionItems(text, text.length, { fields }).map((item) => item.label);
+
+  assert.ok(labels("db.users.find({ _id: { $in: [").includes("ObjectId"));
+  assert.ok(labels("db.users.find({ _id: { $in: [{ $o").includes("$oid"));
+  assert.equal(labels("db.users.find({ _id: { $in: [{ $o").includes("_id"), false);
+  assert.ok(labels("db.users.find({ tags: { $all: [").includes("ObjectId"));
+  assert.equal(labels('db.users.find({ _id: { $in: ["').length, 0);
+
+  // `$or` / `$and` arrays still hold sub-filters, so their objects complete fields.
+  assert.ok(labels("db.users.find({ $or: [{ ").includes("name"));
+  assert.equal(labels("db.users.find({ $or: [{ ").includes("$oid"), false);
+});
+
+test("offers the newer shell value constructors", () => {
+  const labels = buildMongoCompletionItems("db.users.find({ _id: ", "db.users.find({ _id: ".length, { fields }).map((item) => item.label);
+  for (const constructor of ["NumberInt", "NumberDecimal", "UUID", "BinData", "Timestamp", "MinKey", "MaxKey"]) {
+    assert.ok(labels.includes(constructor), constructor);
+  }
 });
 
 test("suggests query and update operators", () => {
@@ -454,7 +497,7 @@ test("ranks everyday operators above the long tail", () => {
 });
 
 test("snippet templates use placeholder syntax CodeMirror actually honours", () => {
-  const templates = [...QUERY_OPERATORS, ...UPDATE_OPERATORS, ...PUSH_MODIFIERS, ...PIPELINE_STAGES, ...ACCUMULATORS, ...EXPRESSION_OPERATORS, ...VALUE_SNIPPETS, ...Object.values(STAGE_OPTION_KEYS).flat()];
+  const templates = [...QUERY_OPERATORS, ...UPDATE_OPERATORS, ...PUSH_MODIFIERS, ...PIPELINE_STAGES, ...ACCUMULATORS, ...EXPRESSION_OPERATORS, ...VALUE_SNIPPETS, ...EXTENDED_JSON_VALUES, ...Object.values(STAGE_OPTION_KEYS).flat()];
   assert.ok(templates.length > 200);
 
   for (const { label, apply } of templates) {

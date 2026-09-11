@@ -7641,7 +7641,11 @@ where
                     request.source_catalog.as_deref(),
                 )
             };
-            let result = execute_on_pool(state, source_pool_key, &sql).await?;
+            // Cap the result at `batch_size` (not the 10k default row limit): the
+            // paging SELECT is already `LIMIT batch_size`, and the loop below treats a
+            // short page as the last page. Capping lower than `batch_size` would make a
+            // large batch look short and truncate the transfer early.
+            let result = execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?;
             if let Some(indexes) = keyset_indexes.as_deref() {
                 match advance_keyset_cursor(&mut keyset_cursor, &result.rows, indexes, table)? {
                     KeysetAdvance::Advanced => {}
@@ -8860,7 +8864,9 @@ where
                 };
                 let (sql, mysql_spatial_markers) =
                     mysql_spatial_transfer_select_sql(sql, &col_names, &col_types, source_db_type, target_db_type);
-                (execute_on_pool(state, source_pool_key, &sql).await?, mysql_spatial_markers)
+                // Cap the result at `batch_size` (not the 10k default row limit), so a
+                // large batch is never truncated into looking like a short final page.
+                (execute_on_pool_with_max_rows(state, source_pool_key, &sql, Some(batch_size)).await?, mysql_spatial_markers)
             };
             let has_more = result.has_more;
             let row_count = result.rows.len();

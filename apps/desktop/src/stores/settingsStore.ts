@@ -1032,7 +1032,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   columnWidthDensity: "standard",
   dataGridQuickEntry: false,
   dataGridFilterEditorView: "quick",
-  dataGridKeepFilterEditorExpanded: false,
+  dataGridKeepFilterEditorExpanded: true,
   dataGridTextFilterPanelHeight: DATA_GRID_TEXT_FILTER_PANEL_HEIGHT_DEFAULT,
   localFilterPopoverWidth: 360,
   dataGridRenderMode: "canvas",
@@ -1378,7 +1378,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const legacyTimeoutSettings = settings as Partial<EditorSettings> & { queryTimeoutSecs?: unknown; queryTimeoutInheritanceMigrationVersion?: unknown };
   const legacySidebarOpenDatabaseOnSingleClick = (settings as Partial<EditorSettings> & { sidebarOpenDatabaseOnSingleClick?: unknown }).sidebarOpenDatabaseOnSingleClick;
   const legacyDataGridAutoHideFilterBuilder = (settings as Partial<EditorSettings> & { dataGridAutoHideFilterBuilder?: unknown }).dataGridAutoHideFilterBuilder;
-  const hasDataGridKeepFilterEditorExpanded = Object.prototype.hasOwnProperty.call(settings, "dataGridKeepFilterEditorExpanded");
   const sqlSemanticDiagnosticsMode = normalizeSqlSemanticDiagnosticsMode(settings.sqlSemanticDiagnosticsMode, settings.sqlSemanticDiagnosticsEnabled);
   const savedExecuteModeDefaultVersion = settings.executeModeDefaultVersion;
   const executeModeDefaultVersion = typeof savedExecuteModeDefaultVersion === "number" && savedExecuteModeDefaultVersion >= EXECUTE_MODE_CURRENT_DEFAULT_VERSION ? savedExecuteModeDefaultVersion : EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
@@ -1490,7 +1489,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     columnWidthDensity: normalizeColumnWidthDensity(settings.columnWidthDensity),
     dataGridQuickEntry: settings.dataGridQuickEntry ?? DEFAULT_EDITOR_SETTINGS.dataGridQuickEntry,
     dataGridFilterEditorView: normalizeDataGridFilterEditorView(settings.dataGridFilterEditorView),
-    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : hasDataGridKeepFilterEditorExpanded ? false : legacyDataGridAutoHideFilterBuilder === false,
+    dataGridKeepFilterEditorExpanded: typeof settings.dataGridKeepFilterEditorExpanded === "boolean" ? settings.dataGridKeepFilterEditorExpanded : legacyDataGridAutoHideFilterBuilder === true ? false : true,
     dataGridTextFilterPanelHeight: normalizeDataGridTextFilterPanelHeight(settings.dataGridTextFilterPanelHeight),
     localFilterPopoverWidth: normalizeDrawerWidth(settings.localFilterPopoverWidth, 240, DEFAULT_EDITOR_SETTINGS.localFilterPopoverWidth),
     dataGridRenderMode: normalizeDataGridRenderMode(settings.dataGridRenderMode),

@@ -2246,6 +2246,7 @@ async fn do_execute_typed(
             .await
             .map(|result| truncate_result_with_max_rows(result, max_rows))
         }
+        PoolKind::PluginConnection(_) => Err("SQL execution is not supported for plugin connections".to_string()),
         PoolKind::HBase(_) => Err("SQL execution is not supported for HBase connections".to_string()),
         PoolKind::DynamoDb(client) => {
             let client = client.clone();
@@ -4022,7 +4023,8 @@ fn pool_kind_has_transactional_path(pool: &PoolKind) -> bool {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. } => false,
+        | PoolKind::ExternalDriver { .. }
+        | PoolKind::PluginConnection(_) => false,
         #[cfg(feature = "mq-admin")]
         PoolKind::Mqtt(_) => false,
     }
@@ -4276,34 +4278,6 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     // contract and rejects drivers that cannot provide it.
     // Clone the pool handle within the lock, then drop it before any async work.
     let path = { state.pool_handle(pool_key).await.as_ref().map(batch_transaction_path) };
-    let path = {
-        let conns = state.connections.read().await;
-        conns.get(pool_key).map(|p| match p {
-            PoolKind::Postgres(pg) => TxPath::Pg(pg.clone()),
-            PoolKind::Mysql(mp, _mode) => TxPath::Mysql(mp.clone(), false),
-            PoolKind::Sqlite(sq) => TxPath::Sqlite(sq.clone()),
-            PoolKind::CloudflareD1(client) => TxPath::CloudflareD1(client.clone()),
-            PoolKind::ClickHouse(_) | PoolKind::Rqlite(_) | PoolKind::Turso(_) | PoolKind::SqlServer(_) => {
-                TxPath::Explicit
-            }
-            PoolKind::Agent(client) => TxPath::Agent(client.clone()),
-            PoolKind::MessageQueue | PoolKind::Nacos | PoolKind::Consul(_) | PoolKind::HBase(_) => TxPath::None,
-            #[cfg(feature = "mq-admin")]
-            PoolKind::Mqtt(_) => TxPath::None,
-            PoolKind::DuckDbWorker(_)
-            | PoolKind::Redis(_)
-            | PoolKind::MongoDb(_)
-            | PoolKind::DynamoDb(_)
-            | PoolKind::Elasticsearch(_)
-            | PoolKind::Easysearch(_)
-            | PoolKind::Meilisearch(_)
-            | PoolKind::VectorDb(_)
-            | PoolKind::InfluxDb(_)
-            | PoolKind::InfluxDb3(_)
-            | PoolKind::VictoriaMetrics(_)
-            | PoolKind::ExternalDriver { .. } => TxPath::None,
-        })
-    };
 
     let result = match path {
         Some(BatchTransactionPath::Pg(pool)) => {
@@ -4420,7 +4394,8 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
         | PoolKind::InfluxDb(_)
         | PoolKind::InfluxDb3(_)
         | PoolKind::VictoriaMetrics(_)
-        | PoolKind::ExternalDriver { .. } => BatchTransactionPath::Unsupported,
+        | PoolKind::ExternalDriver { .. }
+        | PoolKind::PluginConnection(_) => BatchTransactionPath::Unsupported,
     }
 }
 

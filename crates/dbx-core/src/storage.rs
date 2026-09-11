@@ -3279,8 +3279,8 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_mq_auth_secrets_in_tx(tx, &config)?;
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
     persist_nacos_auth_secrets_in_tx(tx, &config)?;
-    persist_cassandra_tls_secrets_in_tx(tx, &config)
-    persist_nacos_auth_secrets_in_tx(tx, &config)
+    persist_cassandra_tls_secrets_in_tx(tx, &config)?;
+    Ok(())
 }
 
 fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
@@ -3742,8 +3742,6 @@ impl Storage {
                 || needs_mq_token_signing_rewrite
                 || needs_nacos_auth_rewrite
                 || needs_cassandra_tls_rewrite;
-            let needs_external_secret_rewrite =
-                needs_mq_auth_rewrite || needs_mq_token_signing_rewrite || needs_nacos_auth_rewrite;
             if needs_external_secret_rewrite {
                 let mut sanitized = config.clone().canonicalized();
                 scrub_mq_auth_secrets(&mut sanitized);
@@ -5304,7 +5302,6 @@ mod tests {
     use crate::connection_secrets::{
         CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
         MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
-        MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{

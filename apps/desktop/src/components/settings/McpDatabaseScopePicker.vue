@@ -6,12 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { listDatabases, mongoListDatabases, redisListDatabases } from "@/lib/backend/api";
+import { useConnectionStore } from "@/stores/connectionStore";
 import type { McpConnectionPolicy } from "@/stores/settingsStore";
 import type { ConnectionConfig } from "@/types/database";
 
 type DatabaseScope = McpConnectionPolicy["databaseScope"];
 type ExecutionMode = "read_only" | "safe_write" | "high_risk_write";
 const { t } = useI18n();
+const connectionStore = useConnectionStore();
 
 const PAGE_SIZE_OPTIONS = [6, 10, 20] as const;
 const DATABASE_SCOPES: DatabaseScope[] = ["all", "selected", "none"];
@@ -167,6 +169,9 @@ async function loadConnectionDatabases() {
   loadingConnectionId.value = connection.id;
   loadError.value = "";
   try {
+    // SQL 连接的 list_databases 只读后端现有连接池，从未在侧边栏连接过的连接
+    // 会报 "Connection not found"；与侧边栏流程一致，先确保连接建立。
+    await connectionStore.ensureConnected(connection.id, { activate: false });
     const databases = connection.db_type === "mongodb" ? await mongoListDatabases(connection.id) : connection.db_type === "redis" ? (await redisListDatabases(connection.id)).map((database) => String(database.db)) : (await listDatabases(connection.id)).map((database) => database.name);
     databasesByConnection.value = {
       ...databasesByConnection.value,

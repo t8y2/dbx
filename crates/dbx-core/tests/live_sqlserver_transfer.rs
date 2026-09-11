@@ -316,15 +316,8 @@ async fn live_sqlserver_transfer_overwrite_handles_existing_identity_target() {
     std::fs::create_dir_all(&dir).expect("create issue #8690 directory");
     let storage = Storage::open(&dir.join("storage.db")).await.expect("open issue #8690 storage");
     let state = Arc::new(AppState::new(storage));
-    state
-        .configs
-        .write()
-        .await
-        .insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
-    let pool_key = state
-        .get_or_create_pool(&connection_id, Some(&database))
-        .await
-        .expect("create SQL Server pool");
+    state.configs.write().await.insert(connection_id.clone(), live_sqlserver_config(&connection_id, &database));
+    let pool_key = state.get_or_create_pool(&connection_id, Some(&database)).await.expect("create SQL Server pool");
     let request = TransferRequest {
         transfer_id: format!("live-sqlserver-8690-transfer-{suffix}"),
         source_connection_id: connection_id.clone(),

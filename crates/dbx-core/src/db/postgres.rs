@@ -6867,6 +6867,44 @@ pub async fn execute_query_with_max_rows(
     }
 }
 
+/// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
+///
+/// Row-returning queries run under an *inactivity* budget: the clock is reset
+/// every time PostgreSQL actually delivers a row, so a large table that keeps
+/// streaming is never cancelled merely for exceeding the timeout in total. Only
+/// a genuine stall (no row for the whole timeout) is reported as a timeout.
+/// Statements that return no rows have no incremental progress to report, so
+/// they keep the plain wall-clock path.
+pub(crate) async fn execute_query_with_max_rows_progress(
+    pool: &Pool,
+    sql: &str,
+    max_rows: Option<usize>,
+    progress_clock: Arc<StreamProgressClock>,
+    timeout: Option<Duration>,
+) -> Result<QueryResult, String> {
+    if !postgres_statement_returns_rows(sql) {
+        // DDL/DML expose no incremental progress, so keep the original wall-clock
+        // budget: a hung write must still be bounded by the configured timeout.
+        return crate::query::wait_for_query_opt(None, timeout, execute_query_with_max_rows(pool, sql, max_rows)).await;
+    }
+
+    let start = Instant::now();
+    let row_limit = query_result_row_limit(max_rows);
+    let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
+    let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
+    let clock_for_select = progress_clock.clone();
+    await_stream_with_progress_timeout(
+        async move {
+            execute_select_query_with_progress(&client, sql, start, row_limit, Some(&clock_for_select), false).await
+        },
+        timeout,
+        progress_clock,
+        None,
+        timeout_error,
+    )
+    .await
+}
+
 pub async fn execute_query_with_max_rows_and_cancel(
     pool: &Pool,
     sql: &str,
@@ -11403,6 +11441,42 @@ mod tests {
         .await;
 
         assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DBX_LIVE_PG_TRANSFER_SOURCE_URL pointing at a disposable PostgreSQL"]
+    async fn live_postgres_progress_read_survives_a_total_duration_beyond_the_timeout() {
+        let Ok(url) = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL") else {
+            return;
+        };
+        let pool = connect(&url, Duration::from_secs(5)).await.unwrap();
+
+        // 20 rows produced ~50 ms apart: the statement streams for ~1 s in total,
+        // well beyond the 200 ms budget, while never stalling that long between
+        // rows — the exact shape a progress-aware transfer read has to survive.
+        // Each row carries >8 KB so PostgreSQL flushes it immediately instead of
+        // buffering the whole (tiny) result set and sending it in one packet.
+        let sql = "SELECT pg_sleep(0.05) IS NULL AS slept, repeat('x', 20000) AS payload, n \
+                   FROM generate_series(1, 20) AS n";
+
+        let progress_clock = Arc::new(StreamProgressClock::new());
+        let result =
+            execute_query_with_max_rows_progress(&pool, sql, None, progress_clock, Some(Duration::from_millis(200)))
+                .await;
+        assert!(result.is_ok(), "progress-aware read must survive a total duration beyond the timeout: {result:?}");
+        assert_eq!(result.unwrap().rows.len(), 20);
+
+        // Contrast: the same statement under a plain, never-reset wall-clock budget
+        // must time out, proving this test actually exercises the difference.
+        let wall_clock = await_stream_with_progress_timeout(
+            execute_query_with_max_rows(&pool, sql, None),
+            Some(Duration::from_millis(200)),
+            Arc::new(StreamProgressClock::new()),
+            None,
+            "Query timed out after 0 seconds".to_string(),
+        )
+        .await;
+        assert!(wall_clock.is_err(), "the wall-clock path must still time out");
     }
 
     #[tokio::test]

@@ -18,7 +18,7 @@ use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::object_source_sql::{build_executable_object_source_statements, EditableObjectSourceSqlInput};
 use crate::query::{
     agent_execute_query_params, is_dbx_query_timeout_error, pool_error_action, query_timeout_duration,
-    wait_for_query_opt, PoolErrorAction, QueryExecutionOptions, AGENT_PROTOCOL_MAX_ROWS,
+    wait_for_query_opt, PoolErrorAction, QueryExecutionOptions, StreamProgressClock, AGENT_PROTOCOL_MAX_ROWS,
 };
 use crate::sql::{split_sql_statements, split_sql_statements_for_database};
 use crate::sql_dialect::{
@@ -5453,24 +5453,47 @@ async fn execute_on_pool_once(
     let pool_handle = state.pool_handle(pool_key).await;
     let pool = pool_handle.as_ref().ok_or("Connection not found")?;
 
+    // Transfer reads run under the per-connection operation budget. Drivers that
+    // expose an incremental result stream (MySQL, PostgreSQL, SQLite, SQL Server)
+    // use a *progress-aware* budget: the configured query timeout is an inactivity
+    // window reset for every row the server delivers, so transferring a large
+    // table is no longer cancelled just for exceeding the timeout in total. Drivers
+    // whose protocol returns the whole result in one shot — ClickHouse, InfluxDB,
+    // the Agent/JDBC path, external drivers and the DuckDB sidecar worker — expose
+    // no incremental progress, so they keep the plain wall-clock timeout.
     let result = match pool {
         PoolKind::Mysql(p, mode) => {
             let p = p.clone();
             let bare = *mode == crate::connection::MysqlMode::Bare;
-            wait_for_query_opt(
-                None,
+            // Row-returning reads run under a progress-aware budget: the timeout
+            // resets for every row the server delivers, so a large table is no
+            // longer cancelled just for taking longer than the timeout overall.
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            db::mysql::execute_query_with_max_rows_progress(
+                &p,
+                sql,
+                bare,
+                max_rows,
+                Default::default(),
+                progress_clock,
                 query_timeout,
-                db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, Default::default()),
             )
             .await
         }
         PoolKind::Postgres(p) => {
             let p = p.clone();
-            wait_for_query_opt(None, query_timeout, db::postgres::execute_query_with_max_rows(&p, sql, max_rows)).await
+            // Row-returning reads — the paging SELECTs a transfer issues — run
+            // under the driver's progress-aware budget: the configured query
+            // timeout becomes an inactivity window reset by every row the server
+            // delivers, so a large table is no longer cancelled just for taking
+            // longer than the timeout in total.
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            db::postgres::execute_query_with_max_rows_progress(&p, sql, max_rows, progress_clock, query_timeout).await
         }
         PoolKind::Sqlite(p) => {
             let p = p.clone();
-            wait_for_query_opt(None, query_timeout, db::sqlite::execute_query_with_max_rows(&p, sql, max_rows)).await
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            db::sqlite::execute_query_with_max_rows_progress(&p, sql, max_rows, progress_clock, query_timeout).await
         }
         PoolKind::ClickHouse(client) => {
             let client = client.clone();
@@ -5500,10 +5523,16 @@ async fn execute_on_pool_once(
         PoolKind::SqlServer(client) => {
             let client = client.clone();
             let mut client = client.lock().await;
-            let result = wait_for_query_opt(
-                None,
+            // Row-returning reads use the driver's progress-aware budget (see the
+            // SQL Server driver): a long but steady stream is never cancelled just
+            // for exceeding the timeout in total.
+            let progress_clock = Arc::new(StreamProgressClock::new());
+            let result = db::sqlserver::execute_query_with_max_rows_progress(
+                &mut client,
+                sql,
+                max_rows,
+                progress_clock,
                 query_timeout,
-                db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows),
             )
             .await;
             drop(client);

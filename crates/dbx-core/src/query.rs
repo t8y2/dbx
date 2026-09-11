@@ -1470,15 +1470,33 @@ fn postgres_transaction_statement_error(
 pub(crate) struct StreamProgressClock {
     started_at: tokio::time::Instant,
     last_progress_ms: AtomicU64,
+    #[cfg(test)]
+    marked: std::sync::atomic::AtomicBool,
 }
 
 impl StreamProgressClock {
     pub(crate) fn new() -> Self {
-        Self { started_at: tokio::time::Instant::now(), last_progress_ms: AtomicU64::new(0) }
+        Self {
+            started_at: tokio::time::Instant::now(),
+            last_progress_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            marked: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub(crate) fn mark(&self) {
         self.last_progress_ms.store(self.started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
+        #[cfg(test)]
+        self.marked.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether any progress has been recorded yet. Test-only: production code
+    /// only needs the derived inactivity window. A row read within the first
+    /// millisecond records a zero timestamp, so this cannot be derived from
+    /// `last_progress_ms`.
+    #[cfg(test)]
+    pub(crate) fn marked(&self) -> bool {
+        self.marked.load(Ordering::Relaxed)
     }
 
     fn elapsed_since_progress(&self) -> Duration {

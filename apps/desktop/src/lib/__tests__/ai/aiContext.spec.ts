@@ -209,3 +209,36 @@ describe("AI schema selector visibility", () => {
     expect(resolveAiDatabaseTarget(queryTab("app", "public"), postgres)).toEqual({ database: "app", schema: "public" });
   });
 });
+
+describe("agent stream terminal errors", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.listTables.mockResolvedValue([]);
+  });
+
+  it("rejects when the backend reports a terminal error event", async () => {
+    const onEvent = vi.fn();
+    apiMock.aiAgentStream.mockImplementation(async (...args: unknown[]) => {
+      const emit = args[6] as (event: { type: "error"; message: string }) => void;
+      emit({ type: "error", message: "model request failed" });
+      return "done";
+    });
+    const context = await buildAiContext(queryTab("main"), sqliteConnection());
+
+    await expect(
+      runAgentStream(
+        {
+          config: aiConfig(),
+          action: "general",
+          mode: "agent",
+          instruction: "inspect users",
+          context,
+        },
+        [],
+        onEvent,
+        "session-error",
+      ),
+    ).rejects.toThrow("model request failed");
+    expect(onEvent).toHaveBeenCalledWith({ type: "error", message: "model request failed" });
+  });
+});

@@ -57,6 +57,10 @@ pub struct PluginManifest {
     pub publisher: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
     #[serde(default)]
     pub engines: PluginEngines,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -454,6 +454,8 @@ export interface PluginManifest {
   entrypoints?: PluginEntrypoints;
   protocol_version?: number;
   description?: string;
+  source?: string;
+  homepage?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
   contributions?: PluginContribution[];

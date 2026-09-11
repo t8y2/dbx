@@ -184,6 +184,8 @@ export default withEnglishFallback({
     unsupportedTarget: "{target} では利用できません",
     installedVersion: "インストール済み v{version}",
     licenseUnknown: "ライセンス未指定",
+    sourceRepository: "ソースリポジトリ",
+    pluginHomepage: "ホームページ",
     marketplaceStatus: { install: "インストール", installed: "インストール済み", update: "更新", unsupported: "非対応" },
     updateSuccess: "{name} を {version} に更新しました",
     noInstalledPlugins: "プラグインはまだありません",

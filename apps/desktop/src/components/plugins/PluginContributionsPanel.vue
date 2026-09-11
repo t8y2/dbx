@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,17 @@ const props = defineProps<{
 const emit = defineEmits<{
   newConnection: [pluginId: string, providerId: string];
 }>();
+
+// lucide no longer ships brand icons; mirror the inline glyph used in AppToolbar.
+const GithubIcon = {
+  render() {
+    return h("svg", { class: "size-3", viewBox: "0 0 24 24", fill: "currentColor" }, [
+      h("path", {
+        d: "M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12 24 5.37 18.627 0 12 0z",
+      }),
+    ]);
+  },
+};
 
 const PLUGIN_ALLOW_UNSIGNED_STORAGE_KEY = "dbx-plugin-allow-unsigned";
 
@@ -90,6 +101,19 @@ const filteredMarketplaceListings = computed(() => filterMarketplacePluginListin
 const catalogErrors = computed(() => catalogResults.value.filter((result) => result.error));
 const customRepositories = computed(() => repositories.value.filter((repository) => !repository.managed));
 const showCustomRepositoryTrustSettings = computed(() => customRepositories.value.length > 0 || trustedKeys.value.length > 0);
+
+function openExternal(url?: string) {
+  const target = url?.trim();
+  if (!target) return;
+  try {
+    const parsed = new URL(target);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+  } catch {
+    return;
+  }
+  if (isTauriRuntime()) void import("@tauri-apps/plugin-shell").then(({ open }) => open(target));
+  else window.open(target, "_blank", "noopener,noreferrer");
+}
 
 async function refresh(preferredPluginId = props.focusTarget?.pluginId || selectedPluginId.value) {
   loading.value = true;
@@ -510,7 +534,15 @@ onBeforeUnmount(() => {
                     <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
                     <Badge v-if="listing.verified" variant="secondary" class="h-5 gap-1 px-1.5 text-[10px]"><ShieldCheck class="size-3" />{{ t("pluginPlatform.verified") }}</Badge>
                   </div>
-                  <div class="mt-1 truncate text-[11px] text-muted-foreground">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</div>
+                  <div class="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+                    <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
+                    <button v-if="listing.plugin.source" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
+                      <GithubIcon />
+                    </button>
+                    <button v-if="listing.plugin.homepage" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
+                      <Globe class="size-3" />
+                    </button>
+                  </div>
                 </div>
                 <Badge variant="outline" class="h-5 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
               </div>
@@ -582,7 +614,29 @@ onBeforeUnmount(() => {
                   <div class="min-w-0">
                     <div class="text-sm font-medium">{{ selectedDefinition.plugin.manifest.name }}</div>
                     <div class="mt-1 text-xs leading-5 text-muted-foreground">{{ selectedDefinition.plugin.manifest.description }}</div>
-                    <div class="mt-1 font-mono text-[10px] text-muted-foreground">{{ selectedDefinition.plugin.manifest.id }}</div>
+                    <div class="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span class="font-mono text-[10px] text-muted-foreground">{{ selectedDefinition.plugin.manifest.id }}</span>
+                      <button
+                        v-if="selectedDefinition.plugin.manifest.source"
+                        type="button"
+                        class="rounded p-0.5 text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100"
+                        :title="t('pluginPlatform.sourceRepository')"
+                        :aria-label="t('pluginPlatform.sourceRepository')"
+                        @click="openExternal(selectedDefinition.plugin.manifest.source)"
+                      >
+                        <GithubIcon />
+                      </button>
+                      <button
+                        v-if="selectedDefinition.plugin.manifest.homepage"
+                        type="button"
+                        class="rounded p-0.5 text-muted-foreground opacity-70 transition-opacity hover:text-foreground hover:opacity-100"
+                        :title="t('pluginPlatform.pluginHomepage')"
+                        :aria-label="t('pluginPlatform.pluginHomepage')"
+                        @click="openExternal(selectedDefinition.plugin.manifest.homepage)"
+                      >
+                        <Globe class="size-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
                 <div class="flex gap-2">

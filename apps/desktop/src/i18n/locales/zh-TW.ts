@@ -184,6 +184,8 @@ export default withEnglishFallback({
     unsupportedTarget: "暫不支援 {target}",
     installedVersion: "已安裝 v{version}",
     licenseUnknown: "未指定授權條款",
+    sourceRepository: "原始碼倉庫",
+    pluginHomepage: "主頁",
     marketplaceStatus: { install: "安裝", installed: "已安裝", update: "更新", unsupported: "不支援" },
     updateSuccess: "已將 {name} 更新至 {version}",
     noInstalledPlugins: "尚未安裝外掛",

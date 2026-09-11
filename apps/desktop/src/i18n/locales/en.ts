@@ -182,6 +182,8 @@ export default {
     unsupportedTarget: "Not available for {target}",
     installedVersion: "Installed v{version}",
     licenseUnknown: "License not specified",
+    sourceRepository: "Source repository",
+    pluginHomepage: "Homepage",
     marketplaceStatus: {
       install: "Install",
       installed: "Installed",

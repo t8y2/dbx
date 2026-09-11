@@ -183,6 +183,8 @@ export default withEnglishFallback({
     unsupportedTarget: "Non disponibile per {target}",
     installedVersion: "Installato v{version}",
     licenseUnknown: "Licenza non specificata",
+    sourceRepository: "Repository del codice sorgente",
+    pluginHomepage: "Sito web",
     marketplaceStatus: { install: "Installa", installed: "Installato", update: "Aggiorna", unsupported: "Non supportato" },
     updateSuccess: "{name} aggiornato alla versione {version}",
     noInstalledPlugins: "Nessun plugin installato",

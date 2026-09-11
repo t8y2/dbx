@@ -184,6 +184,8 @@ export default withEnglishFallback({
     unsupportedTarget: "Indisponível para {target}",
     installedVersion: "Instalado v{version}",
     licenseUnknown: "Licença não informada",
+    sourceRepository: "Repositório do código-fonte",
+    pluginHomepage: "Página inicial",
     marketplaceStatus: { install: "Instalar", installed: "Instalado", update: "Atualizar", unsupported: "Não compatível" },
     updateSuccess: "{name} atualizado para {version}",
     noInstalledPlugins: "Nenhum plugin instalado",

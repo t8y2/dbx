@@ -999,6 +999,8 @@ fn reject_unknown_manifest_fields(manifest: &Value) -> Result<(), String> {
         "version",
         "publisher",
         "description",
+        "source",
+        "homepage",
         "engines",
         "permissions",
         "entrypoints",

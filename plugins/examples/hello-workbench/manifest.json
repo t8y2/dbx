@@ -7,6 +7,8 @@
   "version": "1.0.0",
   "publisher": "dbx",
   "description": "A complete DBX plugin example with a native sidecar, events, workbench UI, connection provider, and virtual filesystem provider.",
+  "source": "https://github.com/t8y2/dbx",
+  "homepage": "https://github.com/t8y2/dbx/tree/main/plugins/examples/hello-workbench",
   "engines": {
     "dbx": ">=0.5.68",
     "host_api": "^1.0"

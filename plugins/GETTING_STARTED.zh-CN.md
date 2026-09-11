@@ -9,6 +9,8 @@
 - Sidecar Protocol v1：可选原生后端与 DBX 通信的协议。
 - `.dbxp`：DBX 最终安装的插件包。
 
+插件可以在 `manifest.json` 中声明可选的 `source`（源码仓库）和 `homepage`（项目主页）。这两个字段会随插件包签名并在“已安装”页面本地显示，因此不依赖联网；市场目录可以重复这些字段用于展示未安装插件。
+
 正式文档和仓库提交流程参考 [`docs/content/docs/plugin-development.cn.mdx`](../docs/content/docs/plugin-development.cn.mdx)。完整协议和贡献点参考 [`README.md`](./README.md)，底层发布流程参考 [`RELEASING.md`](./RELEASING.md)。
 
 ## 先说结论：SDK 不需要“启动”

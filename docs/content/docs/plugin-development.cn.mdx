@@ -43,6 +43,14 @@ my-plugin/
 - `.dbxp` 是安装包，不是源码仓库。
 - 前端插件可以发布一个 `universal` 包；包含原生 Sidecar 的插件需要按操作系统和 CPU 架构分别构建。
 
+## Workbench 上下文契约
+
+Workbench 上下文跨越 DBX 与插件边界时是 JSON 数据快照。宿主会递归移除 Vue 响应式包装并发送独立副本，因此插件不能依赖 Vue ref、Proxy、DOM 节点、函数、组件实例或凭据。
+
+上下文可以包含 `null`、布尔值、有限数字、字符串、数组和普通对象。对象中的 `undefined` 字段会省略，数组中的 `undefined` 会转换为 `null`。Date、Map、Set、Symbol、BigInt、非有限数字、循环引用和自定义 class 实例会被拒绝并返回错误。上下文 UTF-8 编码后的大小上限为 2 MiB。
+
+连接 Provider 使用 `binding: "config"` 的字段会保存到 `external_config`；使用 `binding: "secret"` 的字段会保存到 Secret Store。插件连接的 `external_config` 会在新建、编辑、保存和重新连接流程中保留。
+
 ## 创建插件
 
 直接安装预编译 CLI，不需要 Rust，也不需要克隆 DBX 源码：

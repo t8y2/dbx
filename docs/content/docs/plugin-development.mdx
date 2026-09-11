@@ -43,6 +43,14 @@ my-plugin/
 - `.dbxp` is an installable artifact, not the source repository.
 - Frontend-only plugins can publish one `universal` package. Native sidecars require packages for each operating-system and CPU target.
 
+## Workbench Context Contract
+
+Workbench context is a JSON data snapshot across the DBX/plugin boundary. The host recursively removes Vue reactivity and sends an independent copy, so plugins must not expect Vue refs, proxies, DOM nodes, functions, component instances, or credentials.
+
+Context may contain `null`, booleans, finite numbers, strings, arrays, and plain objects. Undefined object properties are omitted and undefined array entries become `null`. Dates, Maps, Sets, symbols, bigints, non-finite numbers, circular references, and custom class instances are rejected with an error. The UTF-8 encoded context is limited to 2 MiB.
+
+Connection provider fields using `binding: "config"` are persisted in `external_config`; fields using `binding: "secret"` are persisted in the Secret Store. Plugin connection configuration keeps `external_config` through create, edit, save, and reconnect flows.
+
 ## Create a Plugin
 
 Install the precompiled CLI without Rust or a DBX source checkout:

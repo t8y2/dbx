@@ -80,6 +80,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "Çevirmə önizləməsi",
+    description: "Cari dəyəri baxmaq və ya köçürmək üçün çevirir. İlkin dəyər və redaktə qaralaması dəyişmir.",
+    format: "Çevirmə",
+    unit: "Zaman damğasının vahidi",
+    timezone: "Saat qurşağı",
+    pattern: "Tarix formatı",
+    fromBase: "Mənbə say sistemi",
+    toBase: "Hədəf say sistemi",
+    convert: "Çevir",
+    result: "Nəticə",
+    copy: "Nəticəni köçür",
+    radixHint: "Yalnız tam ədədlər. 0x, 0o və ya 0b prefiksi olmadan rəqəmlər daxil edin; işarə istifadə oluna bilər.",
+    urlHint: "URL komponentləri UTF-8 ilə kodlanır və ya dekodlaşdırılır. Dekodlaşdırma + işarəsini boşluğa çevirmir.",
+    kinds: {
+      timestamp: "Zaman damğası → tarix/saat",
+      json: "JSON formatla",
+      jsonCompact: "JSON sıxlaşdır",
+      xml: "XML formatla",
+      base64Encode: "Mətn → Base64 (UTF-8)",
+      base64Decode: "Base64 → mətn (UTF-8)",
+      urlEncode: "URL komponentini kodla",
+      urlDecode: "URL komponentini dekodlaşdır",
+      radix: "Tam ədədin say sistemini çevir",
+    },
+    units: {
+      auto: "Avtomatik (10/13 rəqəm)",
+      seconds: "Saniyə",
+      milliseconds: "Millisaniyə",
+    },
+    errors: {
+      nullSource: "NULL çevriləcək mətn ehtiva etmir.",
+      incomplete: "Tam dəyər hələ yüklənməyib. Gözləyin və ya xana təfərrüatlarını yenidən açın.",
+      unsafeNumber: "Bu ədəd dəqiq təqdim edilə bilmir. Dəqiqliyi qorumaq üçün onu mətn kimi sorğulayın.",
+      tooLarge: "Çevirmə həddi aşılıb: giriş {maxInput} simvol, çıxış {maxOutput} simvol və ya tam ədəd girişi {maxRadixDigits} simvol.",
+      invalid: "Çevirmək mümkün deyil. Giriş formatını və çevirmə seçimlərini yoxlayın.",
+      invalidTimestamp: "Dəstəklənən tarix aralığında tam ədəd zaman damğası daxil edin.",
+      ambiguousUnit: "Vahidi müəyyən etmək mümkün deyil. Saniyə və ya millisaniyə seçin.",
+      invalidInteger: "Mənbə say sisteminə uyğun tam ədədi prefikssiz daxil edin.",
+      invalidBase64: "Etibarlı UTF-8 mətni olan standart doldurmalı Base64 daxil edin.",
+    },
+  },
   customType: {
     kinds: {
       base: "Əsas",

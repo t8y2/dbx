@@ -83,6 +83,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "Prévia da conversão",
+    description: "Converte o valor atual para visualizar ou copiar. O valor original e o rascunho permanecem inalterados.",
+    format: "Conversão",
+    unit: "Unidade do timestamp",
+    timezone: "Fuso horário",
+    pattern: "Formato de data",
+    fromBase: "Base de origem",
+    toBase: "Base de destino",
+    convert: "Converter",
+    result: "Resultado",
+    copy: "Copiar resultado",
+    radixHint: "Somente inteiros. Insira dígitos sem os prefixos 0x, 0o ou 0b; um sinal opcional é permitido.",
+    urlHint: "Codificação de componentes URL em UTF-8. A decodificação preserva + como sinal de adição.",
+    kinds: {
+      timestamp: "Timestamp → data/hora",
+      json: "Formatar JSON",
+      jsonCompact: "Compactar JSON",
+      xml: "Formatar XML",
+      base64Encode: "Texto → Base64 (UTF-8)",
+      base64Decode: "Base64 → texto (UTF-8)",
+      urlEncode: "Codificar componente URL",
+      urlDecode: "Decodificar componente URL",
+      radix: "Conversão de base de inteiros",
+    },
+    units: {
+      auto: "Automática (10/13 dígitos)",
+      seconds: "Segundos",
+      milliseconds: "Milissegundos",
+    },
+    errors: {
+      nullSource: "NULL não contém texto para converter.",
+      incomplete: "O valor completo ainda não foi carregado. Aguarde ou reabra os detalhes da célula.",
+      unsafeNumber: "Este número não pode ser representado com precisão. Consulte-o como texto para preservá-la.",
+      tooLarge: "Limite de conversão excedido: {maxInput} caracteres de entrada, {maxOutput} de saída ou {maxRadixDigits} para inteiros.",
+      invalid: "Não foi possível converter. Verifique o formato de entrada e as opções.",
+      invalidTimestamp: "Insira um timestamp inteiro dentro do intervalo de datas compatível.",
+      ambiguousUnit: "Não foi possível determinar a unidade. Selecione segundos ou milissegundos.",
+      invalidInteger: "Insira um inteiro válido para a base de origem, sem prefixo.",
+      invalidBase64: "Insira Base64 padrão com preenchimento contendo texto UTF-8 válido.",
+    },
+  },
   customType: {
     kinds: {
       base: "Base",

@@ -82,6 +82,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "轉換預覽",
+    description: "將目前內容轉換後檢視或複製，不改變原值和編輯草稿。",
+    format: "轉換方式",
+    unit: "時間戳記單位",
+    timezone: "時區",
+    pattern: "日期格式",
+    fromBase: "原進位",
+    toBase: "目標進位",
+    convert: "轉換",
+    result: "轉換結果",
+    copy: "複製結果",
+    radixHint: "僅支援整數，請勿輸入 0x、0o 或 0b 前綴，可使用正負號。",
+    urlHint: "按 URL 元件進行 UTF-8 編解碼，解碼時保留加號，不將其替換為空格。",
+    kinds: {
+      timestamp: "時間戳記 → 日期時間",
+      json: "JSON 格式化",
+      jsonCompact: "JSON 壓縮",
+      xml: "XML 格式化",
+      base64Encode: "文字 → Base64（UTF-8）",
+      base64Decode: "Base64 → 文字（UTF-8）",
+      urlEncode: "URL 元件編碼",
+      urlDecode: "URL 元件解碼",
+      radix: "整數進位轉換",
+    },
+    units: {
+      auto: "自動（10/13 位）",
+      seconds: "秒",
+      milliseconds: "毫秒",
+    },
+    errors: {
+      nullSource: "NULL 沒有可轉換的文字。",
+      incomplete: "完整值尚未載入，請等待載入完成或重新開啟儲存格詳細資料。",
+      unsafeNumber: "該數值無法安全表示，請以文字形式查詢以保留精確度。",
+      tooLarge: "超過轉換限制：輸入 {maxInput} 字元、輸出 {maxOutput} 字元，整數輸入 {maxRadixDigits} 字元。",
+      invalid: "無法轉換，請檢查輸入格式和轉換選項。",
+      invalidTimestamp: "請輸入有效日期範圍內的整數時間戳記。",
+      ambiguousUnit: "無法確定時間戳記單位，請手動選擇秒或毫秒。",
+      invalidInteger: "請輸入符合原進位的整數，不要包含進位前綴。",
+      invalidBase64: "請輸入帶標準填補的 Base64，且解碼內容必須為有效 UTF-8 文字。",
+    },
+  },
   redisGrouping,
   customType: {
     kinds: {

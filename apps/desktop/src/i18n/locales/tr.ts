@@ -82,6 +82,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "Dönüştürme önizlemesi",
+    description: "Geçerli değeri görüntülemek veya kopyalamak için dönüştürür. Özgün değer ve düzenleme taslağı değişmez.",
+    format: "Dönüştürme",
+    unit: "Zaman damgası birimi",
+    timezone: "Saat dilimi",
+    pattern: "Tarih biçimi",
+    fromBase: "Kaynak taban",
+    toBase: "Hedef taban",
+    convert: "Dönüştür",
+    result: "Sonuç",
+    copy: "Sonucu kopyala",
+    radixHint: "Yalnızca tam sayılar. 0x, 0o veya 0b öneki olmadan rakam girin; isteğe bağlı işaret kullanılabilir.",
+    urlHint: "URL bileşenleri UTF-8 ile kodlanır veya çözülür. Çözme işlemi + işaretini boşluğa dönüştürmez.",
+    kinds: {
+      timestamp: "Zaman damgası → tarih/saat",
+      json: "JSON biçimlendir",
+      jsonCompact: "JSON sıkıştır",
+      xml: "XML biçimlendir",
+      base64Encode: "Metin → Base64 (UTF-8)",
+      base64Decode: "Base64 → metin (UTF-8)",
+      urlEncode: "URL bileşenini kodla",
+      urlDecode: "URL bileşeninin kodunu çöz",
+      radix: "Tam sayı taban dönüşümü",
+    },
+    units: {
+      auto: "Otomatik (10/13 hane)",
+      seconds: "Saniye",
+      milliseconds: "Milisaniye",
+    },
+    errors: {
+      nullSource: "NULL dönüştürülebilecek metin içermez.",
+      incomplete: "Değerin tamamı henüz yüklenmedi. Bekleyin veya hücre ayrıntılarını yeniden açın.",
+      unsafeNumber: "Bu sayı güvenli biçimde temsil edilemiyor. Hassasiyeti korumak için metin olarak sorgulayın.",
+      tooLarge: "Dönüştürme sınırı aşıldı: girdi {maxInput} karakter, çıktı {maxOutput} karakter veya tam sayı girdisi {maxRadixDigits} karakter.",
+      invalid: "Dönüştürülemiyor. Girdi biçimini ve dönüştürme seçeneklerini kontrol edin.",
+      invalidTimestamp: "Desteklenen tarih aralığında bir tam sayı zaman damgası girin.",
+      ambiguousUnit: "Birim belirlenemiyor. Saniye veya milisaniyeyi seçin.",
+      invalidInteger: "Kaynak tabana uygun bir tam sayıyı öneksiz girin.",
+      invalidBase64: "Geçerli UTF-8 metni içeren standart dolgulu Base64 girin.",
+    },
+  },
   customType: {
     kinds: {
       base: "Temel",

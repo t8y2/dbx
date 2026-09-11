@@ -5,6 +5,48 @@ import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "转换预览",
+    description: "将当前内容转换后查看或复制，不改变原值和编辑草稿。",
+    format: "转换方式",
+    unit: "时间戳单位",
+    timezone: "时区",
+    pattern: "日期格式",
+    fromBase: "原进制",
+    toBase: "目标进制",
+    convert: "转换",
+    result: "转换结果",
+    copy: "复制结果",
+    radixHint: "仅支持整数，请勿输入 0x、0o 或 0b 前缀，可使用正负号。",
+    urlHint: "按 URL 组件进行 UTF-8 编解码，解码时保留加号，不将其替换为空格。",
+    kinds: {
+      timestamp: "时间戳 → 日期时间",
+      json: "JSON 格式化",
+      jsonCompact: "JSON 压缩",
+      xml: "XML 格式化",
+      base64Encode: "文本 → Base64（UTF-8）",
+      base64Decode: "Base64 → 文本（UTF-8）",
+      urlEncode: "URL 组件编码",
+      urlDecode: "URL 组件解码",
+      radix: "整数进制转换",
+    },
+    units: {
+      auto: "自动（10/13 位）",
+      seconds: "秒",
+      milliseconds: "毫秒",
+    },
+    errors: {
+      nullSource: "NULL 没有可转换的文本。",
+      incomplete: "完整值尚未加载，请等待加载完成或重新打开单元格详情。",
+      unsafeNumber: "该数值无法安全表示，请以文本形式查询以保留精度。",
+      tooLarge: "超过转换限制：输入 {maxInput} 字符、输出 {maxOutput} 字符，整数输入 {maxRadixDigits} 字符。",
+      invalid: "无法转换，请检查输入格式和转换选项。",
+      invalidTimestamp: "请输入有效日期范围内的整数时间戳。",
+      ambiguousUnit: "无法确定时间戳单位，请手动选择秒或毫秒。",
+      invalidInteger: "请输入符合原进制的整数，不要包含进制前缀。",
+      invalidBase64: "请输入带标准填充的 Base64，且解码内容必须为有效 UTF-8 文本。",
+    },
+  },
   redisGrouping,
   customType: {
     kinds: {

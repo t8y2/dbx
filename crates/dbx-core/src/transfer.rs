@@ -1341,7 +1341,12 @@ fn is_postgres_compat_transfer(source_db: &DatabaseType, target_db: &DatabaseTyp
 fn is_postgres_transfer_dialect(db_type: &DatabaseType) -> bool {
     // KingbaseES supports the PostgreSQL DDL, type, and ON CONFLICT paths used by transfer;
     // other PG-wire databases stay opt-in until their transfer behavior is verified.
-    matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase)
+    // openGauss runs the native PostgreSQL wire protocol pool and its server-side
+    // pg_get_tabledef() DDL contains multiple statements per table, so it needs the
+    // same statement-splitting create-table path (verified against openGauss 6.0.3).
+    // openGauss has no ON CONFLICT support, so upsert routing still excludes it
+    // (see uses_mysql_style_upsert).
+    matches!(db_type, DatabaseType::Postgres | DatabaseType::Kingbase | DatabaseType::OpenGauss)
 }
 
 fn transfer_table_needs_inline_postgres_schema_ensure(
@@ -3795,6 +3800,17 @@ pub fn generate_upsert_typed(
     )
 }
 
+/// Upsert targets that take the MySQL-style `INSERT ... ON DUPLICATE KEY UPDATE
+/// ... VALUES(col)` arm. openGauss belongs here instead of the PostgreSQL
+/// `ON CONFLICT` arm: its INSERT grammar has no `ON CONFLICT` clause, but it
+/// does support `ON DUPLICATE KEY UPDATE` with `VALUES(column_name)` references
+/// (openGauss SQL Reference, INSERT — docs.opengauss.org, 5.1.0). Identifier
+/// quoting inside the arm still follows `db_type`, so openGauss keeps
+/// double-quoted PostgreSQL-style names.
+fn uses_mysql_style_upsert(db_type: &DatabaseType) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::OpenGauss)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn generate_upsert_typed_for_transfer(
     columns: &[String],
@@ -3830,8 +3846,10 @@ fn generate_upsert_typed_for_transfer(
     }
 
     match db_type {
+        // openGauss has no ON CONFLICT support; it is routed to the
+        // ON DUPLICATE KEY UPDATE arm below instead (uses_mysql_style_upsert).
         db_type
-            if is_postgres_transfer_dialect(db_type)
+            if (is_postgres_transfer_dialect(db_type) && !matches!(db_type, DatabaseType::OpenGauss))
                 || matches!(db_type, DatabaseType::Sqlite | DatabaseType::CloudflareD1 | DatabaseType::DuckDb) =>
         {
             let pk_list = pk_columns
@@ -3861,7 +3879,7 @@ fn generate_upsert_typed_for_transfer(
             }
             sql
         }
-        DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks => {
+        db_type if uses_mysql_style_upsert(db_type) => {
             let mut sql = format!("INSERT INTO {full_table} ({col_list}) VALUES\n{}", value_rows.join(",\n"));
             if non_pk_columns.is_empty() {
                 sql.push_str("\nON DUPLICATE KEY UPDATE ");
@@ -5255,7 +5273,10 @@ fn transfer_ddl_statements(sql: &str, db_type: &DatabaseType) -> Vec<String> {
             statements
                 .into_iter()
                 .map(|statement| strip_inline_foreign_key_constraint_lines(&statement))
-                .filter(|statement| !is_postgres_post_table_index_statement(statement))
+                .filter(|statement| {
+                    !is_postgres_post_table_index_statement(statement)
+                        && !is_postgres_post_table_foreign_key_alter_statement(statement)
+                })
                 .collect()
         }
     } else if matches!(db_type, DatabaseType::Dameng) {
@@ -5313,6 +5334,24 @@ fn is_postgres_post_table_index_statement(statement: &str) -> bool {
     normalized.starts_with("CREATE INDEX ")
         || normalized.starts_with("CREATE UNIQUE INDEX ")
         || normalized.starts_with("COMMENT ON INDEX ")
+}
+
+/// Standalone `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY` statements are
+/// dropped from reused PostgreSQL-dialect DDL, mirroring how inline FK lines are
+/// stripped from `CREATE TABLE`: openGauss's `pg_get_tabledef()` emits one ALTER
+/// per foreign key, which would run at create time — failing when the referenced
+/// table does not exist yet — and then collide with the same-named constraint
+/// re-added from source metadata by `restore_postgres_table_schema_objects`
+/// (`duplicate_object` 42710). Foreign keys must come from the restore phase
+/// alone. Non-FK ALTERs (`ADD CONSTRAINT ... CHECK`, `SET (...)`, ...) are kept.
+fn is_postgres_post_table_foreign_key_alter_statement(statement: &str) -> bool {
+    // Mask string literals and comments first so a CHECK expression or comment
+    // that merely mentions "foreign key" cannot match.
+    let (code, _) = protect_sql_literals(statement, true);
+    let normalized = code.trim_start().to_ascii_uppercase();
+    normalized.starts_with("ALTER TABLE ")
+        && normalized.contains(" ADD CONSTRAINT ")
+        && normalized.contains(" FOREIGN KEY ")
 }
 
 pub async fn execute_on_pool_with_max_rows(
@@ -12063,6 +12102,74 @@ mod tests {
     }
 
     #[test]
+    fn opengauss_transfer_ddl_splits_reused_multi_statement_table_ddl() {
+        // openGauss reuses the source table DDL verbatim via pg_get_tabledef(), which
+        // emits several statements per table. Without the PostgreSQL dialect path the
+        // whole DDL runs as one prepared statement and fails with "cannot insert
+        // multiple commands into a prepared statement".
+        let ddl = "SET search_path = public;\n\
+                   CREATE TABLE \"public\".\"items\" (\"id\" integer);\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS 'items';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::OpenGauss);
+
+        assert_eq!(
+            statements,
+            vec![
+                "SET search_path = public".to_string(),
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer)".to_string(),
+                "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn opengauss_transfer_ddl_skips_reused_foreign_key_alter_statements() {
+        // openGauss's pg_get_tabledef() emits one `ALTER TABLE ... ADD CONSTRAINT
+        // ... FOREIGN KEY` per foreign key. Keeping them would run the FK at create
+        // time (referenced tables may not exist yet) and then duplicate the named
+        // constraint re-added by restore_postgres_table_schema_objects (42710).
+        let ddl = "SET search_path = public;\n\
+                   CREATE TABLE \"public\".\"items\" (\"id\" integer, \"order_id\" integer);\n\
+                   ALTER TABLE \"public\".\"items\" ADD CONSTRAINT \"items_order_id_fkey\" FOREIGN KEY (\"order_id\") REFERENCES \"public\".\"orders\" (\"id\") ON DELETE CASCADE;\n\
+                   CREATE INDEX \"items_order_id_idx\" ON \"public\".\"items\" (\"order_id\");\n\
+                   COMMENT ON TABLE \"public\".\"items\" IS 'items';";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::OpenGauss);
+
+        assert_eq!(
+            statements,
+            vec![
+                "SET search_path = public".to_string(),
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer, \"order_id\" integer)".to_string(),
+                "COMMENT ON TABLE \"public\".\"items\" IS 'items'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn postgres_transfer_ddl_keeps_non_foreign_key_alter_statements() {
+        // Only FK-ADD ALTERs are deferred; CHECK/SET ALTERs and literals that merely
+        // mention "foreign key" must survive the filter.
+        let ddl = "CREATE TABLE \"public\".\"items\" (\"id\" integer, \"amount\" integer, \"note\" text);\n\
+                   ALTER TABLE \"public\".\"items\" ADD CONSTRAINT \"items_amount_check\" CHECK (amount > 0);\n\
+                   ALTER TABLE \"public\".\"items\" ADD CONSTRAINT \"items_note_check\" CHECK (note <> 'foreign key (demo)');\n\
+                   ALTER TABLE \"public\".\"items\" SET (autovacuum_enabled = false);";
+
+        let statements = transfer_ddl_statements(ddl, &DatabaseType::Postgres);
+
+        assert_eq!(
+            statements,
+            vec![
+                "CREATE TABLE \"public\".\"items\" (\"id\" integer, \"amount\" integer, \"note\" text)".to_string(),
+                "ALTER TABLE \"public\".\"items\" ADD CONSTRAINT \"items_amount_check\" CHECK (amount > 0)".to_string(),
+                "ALTER TABLE \"public\".\"items\" ADD CONSTRAINT \"items_note_check\" CHECK (note <> 'foreign key (demo)')".to_string(),
+                "ALTER TABLE \"public\".\"items\" SET (autovacuum_enabled = false)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn dameng_transfer_ddl_splits_reused_table_comments() {
         let ddl = "CREATE TABLE \"APP\".\"ITEMS\" (\n\
                      \"ID\" INTEGER,\n\
@@ -15258,6 +15365,44 @@ SELECT 1 FROM dual"#
         );
 
         assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""), "sql: {sql}");
+    }
+
+    #[test]
+    fn opengauss_upsert_uses_on_duplicate_key_update() {
+        // openGauss has no `ON CONFLICT` support; its INSERT grammar provides the
+        // MySQL-style `ON DUPLICATE KEY UPDATE` with VALUES(col) references
+        // (openGauss SQL Reference, INSERT — docs.opengauss.org, 5.1.0).
+        let sql = generate_upsert_typed(
+            &[String::from("id"), String::from("name")],
+            &[Some(String::from("integer")), Some(String::from("text"))],
+            &[vec![json!(1), json!("updated")]],
+            "items",
+            "public",
+            &DatabaseType::OpenGauss,
+            &[String::from("id")],
+            None,
+        );
+
+        assert!(sql.starts_with("INSERT INTO \"public\".\"items\" (\"id\", \"name\") VALUES"), "sql: {sql}");
+        assert!(sql.contains("ON DUPLICATE KEY UPDATE \"name\" = VALUES(\"name\")"), "sql: {sql}");
+        assert!(!sql.contains("ON CONFLICT"), "sql: {sql}");
+    }
+
+    #[test]
+    fn opengauss_upsert_primary_key_only_updates_nothing() {
+        let sql = generate_upsert_typed(
+            &[String::from("id")],
+            &[Some(String::from("integer"))],
+            &[vec![json!(1)]],
+            "items",
+            "public",
+            &DatabaseType::OpenGauss,
+            &[String::from("id")],
+            None,
+        );
+
+        assert!(sql.contains("ON DUPLICATE KEY UPDATE \"id\" = \"id\""), "sql: {sql}");
+        assert!(!sql.contains("ON CONFLICT"), "sql: {sql}");
     }
 
     #[test]

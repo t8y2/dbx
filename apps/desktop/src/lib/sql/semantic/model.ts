@@ -34,6 +34,14 @@ interface ParseState {
   tokens: SqlSemanticToken[];
   statement: SqlSemanticStatement;
   cteSources: SqlSemanticRowSource[];
+  expandGroupedSources?: boolean;
+  groupedSourceScopes?: SqlSemanticGroupedSourceScope[];
+}
+
+export interface SqlSemanticGroupedSourceScope {
+  span: SqlSemanticSpan;
+  depth: number;
+  sources: SqlSemanticRowSource[];
 }
 
 interface QuerySourceRange {
@@ -437,6 +445,25 @@ function parseRowSource(state: ParseState, target: number, introducer: string, s
   return parseTableFunctionSource(state, target, introducer, sourceIndex) ?? parseTableSource(state, target, introducer, sourceIndex);
 }
 
+function parseRowSourceList(state: ParseState, target: number, introducer: string, sourceIndex: number): { sources: SqlSemanticRowSource[]; nextIndex: number } | null {
+  const open = state.tokens[target];
+  if (state.expandGroupedSources && open?.text === "(" && open.depth < 128) {
+    const close = findMatchingParenToken(state.tokens, target);
+    const first = state.tokens[target + 1];
+    const isQuery = first?.kind === "word" && (first.normalized === "select" || first.normalized === "with");
+    if (close >= 0 && !isQuery) {
+      // An unaliased parenthesized join is transparent to the surrounding query scope.
+      // A SELECT body or an explicitly aliased group must retain its own boundary.
+      const from: SqlSemanticToken = { ...open, kind: "word", text: "from", normalized: "from", depth: open.depth + 1 };
+      const sources = parseRowSourcesAtDepth({ ...state, tokens: [from, ...state.tokens.slice(target + 1, close)] }, from.depth, sourceIndex);
+      if (!aliasAfter(state.tokens, close + 1, state.dialect).alias) return { sources, nextIndex: close + 1 };
+      state.groupedSourceScopes?.push({ span: { start: open.span.end, end: state.tokens[close].span.start }, depth: from.depth, sources });
+    }
+  }
+  const parsed = parseRowSource(state, target, introducer, sourceIndex);
+  return parsed ? { sources: [parsed.source], nextIndex: parsed.nextIndex } : null;
+}
+
 function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIndexOffset = 0): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let inSelectFromClause = false;
@@ -449,9 +476,9 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       else if (inSelectFromClause && FROM_CLAUSE_BOUNDARIES.has(item.normalized)) inSelectFromClause = false;
     }
     if (inSelectFromClause && item.text === ",") {
-      const parsed = parseRowSource(state, index + 1, "from", sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, index + 1, "from", sourceIndexOffset + sources.length);
       if (parsed) {
-        sources.push(parsed.source);
+        sources.push(...parsed.sources);
         index = parsed.nextIndex - 1;
       }
       continue;
@@ -465,9 +492,9 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
     while (JOIN_MODIFIERS.has(state.tokens[target]?.normalized ?? "")) target += 1;
     target = sqlServerMaintenanceTableTarget(state.tokens, target, normalized, state.dialect);
     for (;;) {
-      const parsed = parseRowSource(state, target, normalized, sourceIndexOffset + sources.length);
+      const parsed = parseRowSourceList(state, target, normalized, sourceIndexOffset + sources.length);
       if (!parsed) break;
-      sources.push(parsed.source);
+      sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
 
       const separator = state.tokens[parsed.nextIndex];
@@ -476,6 +503,17 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
     }
   }
   return dedupeSources(sources);
+}
+
+/** Parse declarations in one query block without merging outer or sibling sources. */
+export function sqlSemanticQueryBlockSources(tokens: SqlSemanticToken[], options: SqlSemanticBuildOptions = {}, groupedSourceScopes?: SqlSemanticGroupedSourceScope[]): SqlSemanticRowSource[] {
+  if (!tokens.length) return [];
+  const statement: SqlSemanticStatement = {
+    kind: statementKind(tokens),
+    span: { start: tokens[0].span.start, end: tokens[tokens.length - 1].span.end },
+    text: "",
+  };
+  return parseRowSourcesAtDepth({ dialect: sqlSemanticDialectFor(options), tokens, statement, cteSources: [], expandGroupedSources: true, groupedSourceScopes }, tokens[0].depth);
 }
 
 function querySourceRanges(tokens: readonly SqlSemanticToken[], cursor: number): QuerySourceRange[] {

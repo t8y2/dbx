@@ -83,6 +83,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "変換プレビュー",
+    description: "現在の値を変換して表示またはコピーします。元の値と編集中の内容は変更されません。",
+    format: "変換方法",
+    unit: "タイムスタンプの単位",
+    timezone: "タイムゾーン",
+    pattern: "日付形式",
+    fromBase: "変換元の基数",
+    toBase: "変換先の基数",
+    convert: "変換",
+    result: "変換結果",
+    copy: "結果をコピー",
+    radixHint: "整数のみ対応します。0x、0o、0b 接頭辞は不要です。正負の符号を使用できます。",
+    urlHint: "URL コンポーネントを UTF-8 でエンコード・デコードします。デコード時に + は空白に変換されません。",
+    kinds: {
+      timestamp: "タイムスタンプ → 日時",
+      json: "JSON 整形",
+      jsonCompact: "JSON 圧縮",
+      xml: "XML 整形",
+      base64Encode: "テキスト → Base64（UTF-8）",
+      base64Decode: "Base64 → テキスト（UTF-8）",
+      urlEncode: "URL コンポーネントのエンコード",
+      urlDecode: "URL コンポーネントのデコード",
+      radix: "整数の基数変換",
+    },
+    units: {
+      auto: "自動（10/13 桁）",
+      seconds: "秒",
+      milliseconds: "ミリ秒",
+    },
+    errors: {
+      nullSource: "NULL には変換できるテキストがありません。",
+      incomplete: "値全体がまだ読み込まれていません。読み込みを待つか、セルの詳細を開き直してください。",
+      unsafeNumber: "この数値は安全に表現できません。精度を保つためテキストとして取得してください。",
+      tooLarge: "変換上限を超えました。入力 {maxInput} 文字、出力 {maxOutput} 文字、整数入力 {maxRadixDigits} 文字です。",
+      invalid: "変換できません。入力形式と変換オプションを確認してください。",
+      invalidTimestamp: "対応する日付範囲内の整数タイムスタンプを入力してください。",
+      ambiguousUnit: "単位を判定できません。秒またはミリ秒を選択してください。",
+      invalidInteger: "選択した基数に対応する整数を、接頭辞なしで入力してください。",
+      invalidBase64: "有効な UTF-8 テキストを含む、標準のパディング付き Base64 を入力してください。",
+    },
+  },
   customType: {
     kinds: {
       base: "基本型",

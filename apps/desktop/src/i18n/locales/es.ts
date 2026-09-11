@@ -83,6 +83,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "Vista previa de conversión",
+    description: "Convierte el valor actual para verlo o copiarlo. El valor original y el borrador no cambian.",
+    format: "Conversión",
+    unit: "Unidad de la marca de tiempo",
+    timezone: "Zona horaria",
+    pattern: "Formato de fecha",
+    fromBase: "Base de origen",
+    toBase: "Base de destino",
+    convert: "Convertir",
+    result: "Resultado",
+    copy: "Copiar resultado",
+    radixHint: "Solo enteros. Introduce dígitos sin los prefijos 0x, 0o o 0b; se admite un signo opcional.",
+    urlHint: "Codificación de componentes URL en UTF-8. La decodificación conserva + como signo más.",
+    kinds: {
+      timestamp: "Marca de tiempo → fecha/hora",
+      json: "Formatear JSON",
+      jsonCompact: "Compactar JSON",
+      xml: "Formatear XML",
+      base64Encode: "Texto → Base64 (UTF-8)",
+      base64Decode: "Base64 → texto (UTF-8)",
+      urlEncode: "Codificar componente URL",
+      urlDecode: "Decodificar componente URL",
+      radix: "Conversión de base de enteros",
+    },
+    units: {
+      auto: "Automática (10/13 dígitos)",
+      seconds: "Segundos",
+      milliseconds: "Milisegundos",
+    },
+    errors: {
+      nullSource: "NULL no contiene texto para convertir.",
+      incomplete: "El valor completo aún no se ha cargado. Espera o vuelve a abrir los detalles de la celda.",
+      unsafeNumber: "Este número no se puede representar con precisión. Consúltalo como texto para conservarla.",
+      tooLarge: "Límite de conversión superado: {maxInput} caracteres de entrada, {maxOutput} de salida o {maxRadixDigits} para enteros.",
+      invalid: "No se puede convertir. Revisa el formato de entrada y las opciones.",
+      invalidTimestamp: "Introduce una marca de tiempo entera dentro del intervalo de fechas admitido.",
+      ambiguousUnit: "No se puede determinar la unidad. Selecciona segundos o milisegundos.",
+      invalidInteger: "Introduce un entero válido para la base de origen, sin prefijo.",
+      invalidBase64: "Introduce Base64 estándar con relleno que contenga texto UTF-8 válido.",
+    },
+  },
   customType: {
     kinds: {
       base: "Base",

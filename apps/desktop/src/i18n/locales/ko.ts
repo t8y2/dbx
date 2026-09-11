@@ -82,6 +82,48 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  cellTransform: {
+    title: "변환 미리보기",
+    description: "현재 값을 변환하여 보거나 복사합니다. 원래 값과 편집 초안은 변경되지 않습니다.",
+    format: "변환 방식",
+    unit: "타임스탬프 단위",
+    timezone: "시간대",
+    pattern: "날짜 형식",
+    fromBase: "원본 진법",
+    toBase: "대상 진법",
+    convert: "변환",
+    result: "변환 결과",
+    copy: "결과 복사",
+    radixHint: "정수만 지원합니다. 0x, 0o, 0b 접두사 없이 입력하세요. 부호는 사용할 수 있습니다.",
+    urlHint: "URL 구성 요소를 UTF-8로 인코딩하거나 디코딩합니다. 디코딩 시 +를 공백으로 바꾸지 않습니다.",
+    kinds: {
+      timestamp: "타임스탬프 → 날짜/시간",
+      json: "JSON 서식 지정",
+      jsonCompact: "JSON 압축",
+      xml: "XML 서식 지정",
+      base64Encode: "텍스트 → Base64(UTF-8)",
+      base64Decode: "Base64 → 텍스트(UTF-8)",
+      urlEncode: "URL 구성 요소 인코딩",
+      urlDecode: "URL 구성 요소 디코딩",
+      radix: "정수 진법 변환",
+    },
+    units: {
+      auto: "자동(10/13자리)",
+      seconds: "초",
+      milliseconds: "밀리초",
+    },
+    errors: {
+      nullSource: "NULL에는 변환할 텍스트가 없습니다.",
+      incomplete: "전체 값을 아직 불러오지 못했습니다. 기다리거나 셀 상세 정보를 다시 여세요.",
+      unsafeNumber: "이 숫자는 안전하게 표현할 수 없습니다. 정밀도를 유지하려면 텍스트로 조회하세요.",
+      tooLarge: "변환 한도 초과: 입력 {maxInput}자, 출력 {maxOutput}자, 정수 입력 {maxRadixDigits}자입니다.",
+      invalid: "변환할 수 없습니다. 입력 형식과 변환 옵션을 확인하세요.",
+      invalidTimestamp: "지원하는 날짜 범위 내의 정수 타임스탬프를 입력하세요.",
+      ambiguousUnit: "단위를 확인할 수 없습니다. 초 또는 밀리초를 선택하세요.",
+      invalidInteger: "선택한 원본 진법에 맞는 정수를 접두사 없이 입력하세요.",
+      invalidBase64: "유효한 UTF-8 텍스트를 포함하는 표준 패딩 Base64를 입력하세요.",
+    },
+  },
   customType: {
     kinds: {
       base: "기본형",

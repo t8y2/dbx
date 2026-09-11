@@ -80,6 +80,48 @@ const consul = {
 };
 
 export default {
+  cellTransform: {
+    title: "Convert preview",
+    description: "Convert the current value for viewing or copying. The source value and editor draft stay unchanged.",
+    format: "Conversion",
+    unit: "Timestamp unit",
+    timezone: "Time zone",
+    pattern: "Date format",
+    fromBase: "Source base",
+    toBase: "Target base",
+    convert: "Convert",
+    result: "Result",
+    copy: "Copy result",
+    radixHint: "Integers only. Enter digits without a 0x, 0o or 0b prefix; an optional sign is supported.",
+    urlHint: "URL component encoding (UTF-8). Decoding preserves + as a literal plus sign.",
+    kinds: {
+      timestamp: "Timestamp → date/time",
+      json: "Format JSON",
+      jsonCompact: "Compact JSON",
+      xml: "Format XML",
+      base64Encode: "Text → Base64 (UTF-8)",
+      base64Decode: "Base64 → text (UTF-8)",
+      urlEncode: "URL component encode",
+      urlDecode: "URL component decode",
+      radix: "Integer base conversion",
+    },
+    units: {
+      auto: "Auto (10/13 digits)",
+      seconds: "Seconds",
+      milliseconds: "Milliseconds",
+    },
+    errors: {
+      nullSource: "NULL has no text to convert.",
+      incomplete: "The full value has not loaded. Wait for it to load or reopen the cell details.",
+      unsafeNumber: "This numeric value cannot be represented safely. Retrieve it as text to preserve precision.",
+      tooLarge: "Conversion limit exceeded: {maxInput} input characters, {maxOutput} output characters, or {maxRadixDigits} integer characters.",
+      invalid: "Unable to convert. Check the input format and conversion options.",
+      invalidTimestamp: "Enter an integer timestamp within the supported date range.",
+      ambiguousUnit: "Cannot determine the timestamp unit. Select seconds or milliseconds explicitly.",
+      invalidInteger: "Enter an integer with digits valid for the selected source base, without a base prefix.",
+      invalidBase64: "Enter standard padded Base64 containing valid UTF-8 text.",
+    },
+  },
   redisGrouping,
   customType: {
     kinds: {

@@ -34,6 +34,8 @@ let nextId = 0;
 let ws: WebSocket | null = null;
 const connected = ref(false);
 const connecting = ref(false);
+let connectAttempt = 0;
+let disposed = false;
 
 const messagesContainer = ref<HTMLElement | null>(null);
 
@@ -62,10 +64,15 @@ function addMessage(channel: string, pattern: string | null, payload: string) {
 
 // Connect WebSocket
 async function connect() {
-  if (ws && ws.readyState === WebSocket.OPEN) return;
+  if (disposed || connecting.value || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) return;
+  const attempt = ++connectAttempt;
   connecting.value = true;
   try {
     const socket = await api.redisPubSubConnect(props.connectionId);
+    if (disposed || attempt !== connectAttempt) {
+      socket.close();
+      return;
+    }
     ws = socket;
 
     socket.onopen = () => {
@@ -107,14 +114,17 @@ async function connect() {
       connected.value = false;
       connecting.value = false;
       ws = null;
+      socket.close();
     };
   } catch (e) {
+    if (attempt !== connectAttempt || disposed) return;
     connecting.value = false;
     toast(t("redis.pubsubWsConnectFailed", { error: e instanceof Error ? e.message : String(e) }), 5000);
   }
 }
 
 function disconnect() {
+  connectAttempt += 1;
   const socket = ws;
   ws = null;
   connected.value = false;
@@ -175,6 +185,7 @@ function clearMessages() {
 }
 
 onBeforeUnmount(() => {
+  disposed = true;
   disconnect();
 });
 </script>

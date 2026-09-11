@@ -3,14 +3,6 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "vitest";
 
-/**
- * Data tabs render a single active pane (`ContentArea` keyed by `activeTab.id`,
- * no KeepAlive), so returning to a tab remounts the grid from scratch. Scroll was
- * always snapshotted, but the restore gate threw away scroll-only snapshots — the
- * exact read-only-browse case — because it assumed a KeepAlive activate path that
- * does not exist. The gate now also honours snapshots written by a tab switch
- * (#8524) while a reloaded or re-executed result still starts at row 1 (#7341).
- */
 function readSource(relativePath: string): string {
   return readFileSync(path.resolve(relativePath), "utf8");
 }
@@ -20,11 +12,7 @@ function editorSource(): string {
 }
 
 test("the restore gate honours a tab-switch scroll snapshot", () => {
-  assert.match(
-    editorSource(),
-    /pendingScrollRestore = snapshotHasEditState \|\| cached\.scrollFromTabSwitch === true \? cached\.scroll : undefined;/,
-    "the scroll-only gate must accept snapshots carrying tab-switch provenance",
-  );
+  assert.match(editorSource(), /pendingScrollRestore = snapshotHasEditState \|\| cached\.scrollFromTabSwitch === true \? cached\.scroll : undefined;/, "the scroll-only gate must accept snapshots carrying tab-switch provenance");
 });
 
 test("the tab-switch listener only claims its own tab", () => {
@@ -51,10 +39,9 @@ test("an explicit scroll-to-top intent drops the provenance", () => {
   assert.match(source, /pendingScrollRestore = undefined;\s*\n\s*clearTabSwitchScrollProvenance\(\);/);
 });
 
-test("data tab panes stay un-cached so the fix cannot be masked by KeepAlive", () => {
-  // Introducing KeepAlive here would retain every grid instance in memory; the
-  // snapshot path is the deliberate alternative. Pin that decision.
-  for (const file of ["apps/desktop/src/components/layout/EditorGroup.vue", "apps/desktop/src/components/layout/ContentArea.vue"]) {
-    assert.doesNotMatch(readSource(file), /<KeepAlive|<keep-alive/, `${file} must not wrap tab panes in KeepAlive`);
-  }
+test("data tab panes bound hot surface caching without adding nested caches", () => {
+  const editorGroup = readSource("apps/desktop/src/components/layout/EditorGroup.vue");
+  assert.match(editorGroup, /const HOT_TAB_SURFACE_CACHE_SIZE = 3;/);
+  assert.match(editorGroup, /<KeepAlive\b[^>]*:max="HOT_TAB_SURFACE_CACHE_SIZE"/);
+  assert.doesNotMatch(readSource("apps/desktop/src/components/layout/ContentArea.vue"), /<KeepAlive|<keep-alive/);
 });

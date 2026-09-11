@@ -19,6 +19,8 @@ export interface DataGridCellDetail {
   displayValue: string;
   displayValuePreview: string;
   isValuePreviewTruncated: boolean;
+  /** True only while the backend value is incomplete, not when the UI clips its preview. */
+  isSourceTruncated?: boolean;
   imagePreviewUrl: string | null;
   length: number;
   isNull?: boolean;
@@ -119,6 +121,7 @@ export function buildDataGridCellDetail(options: BuildDataGridCellDetailOptions)
     rawValuePreview,
     displayValue,
     displayValuePreview,
+    isSourceTruncated: options.isValuePreviewTruncated === true,
     isValuePreviewTruncated: options.isValuePreviewTruncated === true || rawValuePreview.length < rawValue.length || displayValuePreview.length < displayValue.length,
     imagePreviewUrl: cellImagePreviewUrl(value, type, {
       binary: options.includeBinaryImagePreview !== false,

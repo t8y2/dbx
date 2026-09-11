@@ -76,6 +76,7 @@ vi.mock("@/components/ui/label", async () => ({ Label: (await import("./vueHostH
 vi.mock("@/components/ui/LightDropdown.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightDropdown") }));
 vi.mock("@/components/ui/LightTooltip.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("LightTooltip") }));
 vi.mock("@/components/grid/TemporalCellEditor.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("TemporalCellEditor") }));
+vi.mock("@/components/grid/DataGridValueTransform.vue", async () => ({ default: (await import("./vueHostHarness")).createPassthroughStub("DataGridValueTransform") }));
 vi.mock("@/composables/useCellDetailEditor", () => ({ useCellDetailEditor: () => mocks.editor }));
 vi.mock("@/composables/useTheme", () => ({ useTheme: () => ({ isDark: { value: false }, themePalette: { value: {} } }) }));
 vi.mock("@/stores/settingsStore", () => ({ useSettingsStore: () => ({ editorSettings: { cellDetailJsonFormatted: true, theme: "default", fontSize: 13, fontFamily: "monospace" }, updateEditorSettings: mocks.updateSettings }) }));
@@ -1686,7 +1687,7 @@ describe("cell detail surfaces", () => {
   it("snapshots comparison values before opening and suppresses modal-induced blur commits", () => {
     expect(dataGridCellDetailEditSource).toContain("detailValueDiffSnapshot.value = snapshot;");
     expect(dataGridCellDetailEditSource).toContain("detailValueDiffOpen.value = true;");
-    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value) commitValueEditorEdit();");
+    expect(dataGridSource).toContain("if (!detailValueDiffOpen.value && !detailTransformOpen.value) commitValueEditorEdit();");
     expect(dataGridSource).toContain(':disabled="!canCompareDetailJson" @mousedown.prevent @click="openDetailJsonCompare"');
     expect(dataGridSource).toContain('v-model:open="detailValueDiffOpen" :snapshot="detailValueDiffSnapshot"');
   });

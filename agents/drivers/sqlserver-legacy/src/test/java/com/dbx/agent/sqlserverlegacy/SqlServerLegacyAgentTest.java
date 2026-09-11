@@ -109,11 +109,15 @@ class SqlServerLegacyAgentTest {
     void sqlServer2000ColumnCommentsUseLegacyExtendedPropertyFunction() {
         String sql = SqlServerLegacyAgent.sqlServer2000ColumnCommentsSql();
 
-        Assertions.assertTrue(sql.contains("FROM ::fn_listextendedproperty"));
-        Assertions.assertTrue(sql.contains("'MS_Description', 'user', ?, 'table', ?, 'column', default"));
-        Assertions.assertTrue(sql.contains("objname AS column_name"));
-        Assertions.assertTrue(sql.contains("CONVERT(nvarchar(4000), value) AS column_comment"));
+        Assertions.assertTrue(sql.contains("JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid"));
+        Assertions.assertTrue(sql.contains("u.name = ? AND o.name = ?"));
+        Assertions.assertTrue(sql.contains("p.name = 'MS_Description'"));
+        Assertions.assertTrue(sql.contains("ORDER BY c.colid"));
         Assertions.assertFalse(sql.contains("sys.extended_properties"));
+
+        String functionSql = SqlServerLegacyAgent.sqlServer2000ColumnCommentsFunctionSql();
+        Assertions.assertTrue(functionSql.contains("FROM ::fn_listextendedproperty"));
+        Assertions.assertTrue(functionSql.contains("'MS_Description', 'user', ?, 'table', ?, 'column', default"));
     }
 
     @Test
@@ -135,6 +139,11 @@ class SqlServerLegacyAgentTest {
         Assertions.assertEquals("JDBC remark", untouched.getComment());
         Assertions.assertTrue(id.getIs_primary_key());
         Assertions.assertEquals("getdate()", untouched.getColumn_default());
+
+        comments.clear();
+        comments.put("name", "Case-insensitive match");
+        SqlServerLegacyAgent.mergeSqlServer2000ColumnComments(columns, comments);
+        Assertions.assertEquals("Case-insensitive match", name.getComment());
     }
 
     @Test

@@ -344,8 +344,20 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     private Map<String, String> readSqlServer2000ColumnComments(String schema, String table) throws SQLException {
+        try {
+            return readColumnCommentsFromQuery(sqlServer2000ColumnCommentsSql(), schema, table);
+        } catch (SQLException error) {
+            System.err.println(
+                "[sqlserver-legacy] SQL Server 2000 direct column comments query failed; trying compatibility function: "
+                    + error.getMessage()
+            );
+            return readColumnCommentsFromQuery(sqlServer2000ColumnCommentsFunctionSql(), schema, table);
+        }
+    }
+
+    private Map<String, String> readColumnCommentsFromQuery(String sql, String schema, String table) throws SQLException {
         Map<String, String> comments = new LinkedHashMap<>();
-        try (PreparedStatement statement = requireConnection().prepareStatement(sqlServer2000ColumnCommentsSql())) {
+        try (PreparedStatement statement = requireConnection().prepareStatement(sql)) {
             statement.setString(1, schema);
             statement.setString(2, table);
             try (ResultSet resultSet = statement.executeQuery()) {
@@ -353,7 +365,7 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
                     String column = resultSet.getString("column_name");
                     String comment = resultSet.getString("column_comment");
                     if (column != null && comment != null && !comment.trim().isEmpty()) {
-                        comments.put(column, comment);
+                        comments.put(column.trim().toLowerCase(Locale.ROOT), comment);
                     }
                 }
             }
@@ -368,8 +380,14 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
         if (comments.isEmpty()) {
             return columns;
         }
+        Map<String, String> normalizedComments = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : comments.entrySet()) {
+            if (entry.getKey() != null) {
+                normalizedComments.put(entry.getKey().trim().toLowerCase(Locale.ROOT), entry.getValue());
+            }
+        }
         for (ColumnInfo column : columns) {
-            String comment = comments.get(column.getName());
+            String comment = normalizedComments.get(column.getName().trim().toLowerCase(Locale.ROOT));
             if (comment != null) {
                 column.setComment(comment);
             }
@@ -378,6 +396,15 @@ public final class SqlServerLegacyAgent extends ConfiguredJdbcAgent {
     }
 
     static String sqlServer2000ColumnCommentsSql() {
+        return "SELECT c.name AS column_name, CONVERT(nvarchar(4000), p.value) AS column_comment "
+            + "FROM sysobjects o JOIN sysusers u ON o.uid = u.uid "
+            + "JOIN syscolumns c ON c.id = o.id "
+            + "JOIN sysproperties p ON p.id = o.id AND p.smallid = c.colid "
+            + "WHERE u.name = ? AND o.name = ? AND o.xtype IN ('U', 'V') "
+            + "AND p.name = 'MS_Description' ORDER BY c.colid";
+    }
+
+    static String sqlServer2000ColumnCommentsFunctionSql() {
         return "SELECT objname AS column_name, CONVERT(nvarchar(4000), value) AS column_comment "
             + "FROM ::fn_listextendedproperty('MS_Description', 'user', ?, 'table', ?, 'column', default)";
     }

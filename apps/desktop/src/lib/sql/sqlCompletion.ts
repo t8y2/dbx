@@ -18,6 +18,7 @@ import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identif
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
+import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -1131,6 +1132,8 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   "cloudflare-d1": CLOUDFLARE_D1_FUNCTION_SIGNATURES,
   sqlserver: SQLSERVER_FUNCTION_SIGNATURES,
   manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
+  doris: DORIS_FUNCTION_SIGNATURES,
+  starrocks: DORIS_FUNCTION_SIGNATURES,
 };
 
 const MYSQL_FUNCTION_APPLY_TEMPLATES = new Map<string, string>([
@@ -5039,6 +5042,14 @@ function activeFunctionSignatures(databaseType?: DatabaseType): Map<string, stri
   return signatures;
 }
 
+function activeFunctionDescriptions(databaseType?: DatabaseType): Map<string, string> {
+  const descriptions = new Map<string, string>();
+  if (databaseType === "doris" || databaseType === "starrocks") {
+    for (const [name, description] of DORIS_FUNCTION_DOCS) descriptions.set(name, description);
+  }
+  return descriptions;
+}
+
 function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean): string {
   if (omitOpeningParen) return definition.name;
   const signature = definition.signatures[definition.preferredSignature ?? 0];
@@ -5089,7 +5100,7 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
     items.push({
       label: functionName,
       type: "function" as const,
-      detail: functionDescriptions.get(name) ?? "function",
+      detail: activeFunctionDescriptions(databaseType).get(name) ?? functionDescriptions.get(name) ?? "function",
       apply: mysqlApply ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(mysqlApply.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
       boost: computeBoost(name, prefix) + 300,
     });

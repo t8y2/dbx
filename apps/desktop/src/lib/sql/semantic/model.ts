@@ -464,6 +464,42 @@ function parseRowSourceList(state: ParseState, target: number, introducer: strin
   return parsed ? { sources: [parsed.source], nextIndex: parsed.nextIndex } : null;
 }
 
+function parseDorisLateralView(state: ParseState, index: number, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
+  if (state.dialect.id !== "doris" || state.tokens[index]?.normalized !== "lateral" || state.tokens[index + 1]?.normalized !== "view") return null;
+  const functionName = readQualifiedName(state.tokens, index + 2, state.dialect);
+  if (!functionName || state.tokens[functionName.nextIndex]?.text !== "(") return null;
+  const close = findMatchingParenToken(state.tokens, functionName.nextIndex);
+  if (close < 0) return null;
+  let aliasIndex = close + 1;
+  if (state.tokens[aliasIndex]?.normalized === "as") aliasIndex += 1;
+  const alias = state.tokens[aliasIndex];
+  if (!alias || alias.kind !== "word") return null;
+  let columnIndex = aliasIndex + 1;
+  if (state.tokens[columnIndex]?.normalized === "as") columnIndex += 1;
+  const columns: string[] = [];
+  while (state.tokens[columnIndex]?.kind === "word") {
+    columns.push(state.tokens[columnIndex].text);
+    columnIndex += 1;
+    if (state.tokens[columnIndex]?.text !== ",") break;
+    columnIndex += 1;
+  }
+  const endToken = state.tokens[Math.max(aliasIndex, columnIndex - 1)] ?? alias;
+  const name = alias.text;
+  return {
+    source: {
+      id: `table-function:${sourceIndex}:${name}`,
+      kind: "table_function",
+      name,
+      alias: name,
+      qualifierParts: [name],
+      qualifiedName: functionName.qualifiedName,
+      sourceSpan: { start: state.tokens[index].span.start, end: endToken.span.end },
+      columns: columns.length ? columns : undefined,
+    },
+    nextIndex: columnIndex,
+  };
+}
+
 function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIndexOffset = 0): SqlSemanticRowSource[] {
   const sources: SqlSemanticRowSource[] = [];
   let inSelectFromClause = false;
@@ -496,6 +532,13 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       if (!parsed) break;
       sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
+
+      let lateral = parseDorisLateralView(state, parsed.nextIndex, sourceIndexOffset + sources.length);
+      while (lateral) {
+        sources.push(lateral.source);
+        index = lateral.nextIndex - 1;
+        lateral = parseDorisLateralView(state, lateral.nextIndex, sourceIndexOffset + sources.length);
+      }
 
       const separator = state.tokens[parsed.nextIndex];
       if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;

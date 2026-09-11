@@ -1604,6 +1604,7 @@ pub fn run() {
             }));
             let state = Arc::new(state);
             app.manage(state.clone());
+            commands::plugins::install_plugin_event_bridge(app.handle(), state.clone());
             let mcp_http_server = Arc::new(commands::mcp_http_server::McpHttpServerState::new(data_dir.clone()));
             app.manage(mcp_http_server.clone());
             let mcp_http_state = state.clone();

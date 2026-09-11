@@ -380,6 +380,53 @@ test('parseMongoCommand accepts db["name"] bracket collection accessors', () => 
   }
 });
 
+test("parseMongoFindCommand rewrites UUID, BinData, Timestamp and MinKey/MaxKey", () => {
+  const command = parseMongoFindCommand(`db.c.find({
+    u: UUID("3b241101-e2bb-4255-8caf-4136c566a962"),
+    b: BinData(128, "AQID"),
+    t: Timestamp(1735689600, 7),
+    lo: MinKey,
+    hi: MaxKey(),
+    range: {$gt: MinKey(), $lt: MaxKey},
+    list: [MinKey, MaxKey]
+  })`);
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), {
+    u: { $uuid: "3b241101-e2bb-4255-8caf-4136c566a962" },
+    b: { $binary: { base64: "AQID", subType: "80" } },
+    t: { $timestamp: { t: 1735689600, i: 7 } },
+    lo: { $minKey: 1 },
+    hi: { $maxKey: 1 },
+    range: { $gt: { $minKey: 1 }, $lt: { $maxKey: 1 } },
+    list: [{ $minKey: 1 }, { $maxKey: 1 }],
+  });
+
+  const generated = JSON.parse(parseMongoFindCommand("db.c.find({u: UUID()})")!.filter).u.$uuid;
+  assert.match(generated, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+});
+
+test("parseMongoFindCommand leaves MinKey/MaxKey alone outside value positions", () => {
+  const command = parseMongoFindCommand('db.c.find({MinKey: 1, MaxKey: 2, label: "MinKey", nested: {MaxKey: true}})');
+  assert.ok(command);
+  assert.deepEqual(JSON.parse(command.filter), { MinKey: 1, MaxKey: 2, label: "MinKey", nested: { MaxKey: true } });
+});
+
+test("parseMongoFindCommand rejects malformed UUID, BinData, Timestamp and MinKey/MaxKey", () => {
+  for (const source of [
+    'db.c.find({b: BinData(256, "x")})',
+    "db.c.find({b: BinData(0)})",
+    'db.c.find({b: BinData("00", "x")})',
+    "db.c.find({t: Timestamp(1)})",
+    "db.c.find({t: Timestamp(-1, 0)})",
+    "db.c.find({t: Timestamp(4294967296, 0)})",
+    "db.c.find({u: UUID(1)})",
+    "db.c.find({a: MinKey(1)})",
+    'db.c.find({a: MaxKey("x")})',
+  ]) {
+    assert.equal(parseMongoFindCommand(source), null, source);
+  }
+});
+
 test("parseMongoFindCommand accepts single-quoted string values and unquoted sort keys", () => {
   const command = parseMongoFindCommand("db.products.find({category: 'Electronics'}).sort({price: -1}).limit(2)");
   assert.ok(command);

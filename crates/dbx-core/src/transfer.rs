@@ -5969,7 +5969,7 @@ const POSTGRES_OWNED_SEQUENCES_SQL: &str = "SELECT c.relname, \
              JOIN pg_depend d ON d.classid = 'pg_class'::regclass \
                AND d.objid = c.oid \
                AND d.refclassid = 'pg_class'::regclass \
-               AND d.deptype IN ('a', 'i') \
+               AND d.deptype = 'a' \
              JOIN pg_class t ON t.oid = d.refobjid \
              JOIN pg_namespace tn ON tn.oid = t.relnamespace AND tn.nspname = n.nspname \
              JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid \
@@ -11428,11 +11428,11 @@ mod tests {
         fn postgres_owned_sequence_queries_support_pre_ten_catalogs() {
             assert!(!POSTGRES_OWNED_SEQUENCES_SQL.contains("pg_sequence"));
             assert!(!POSTGRES_SEQUENCE_SNAPSHOTS_SQL.contains("pg_sequence"));
-            for sql in [POSTGRES_OWNED_SEQUENCES_SQL, POSTGRES_SEQUENCE_SNAPSHOTS_SQL] {
-                assert!(sql.contains("c.relkind = 'S'"));
-                assert!(sql.contains("pg_depend"));
-                assert!(sql.contains("d.deptype IN ('a', 'i')"));
-            }
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("c.relkind = 'S'"));
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("pg_depend"));
+            assert!(POSTGRES_OWNED_SEQUENCES_SQL.contains("d.deptype = 'a'"));
+            assert!(!POSTGRES_OWNED_SEQUENCES_SQL.contains("d.deptype IN ('a', 'i')"));
+            assert!(POSTGRES_SEQUENCE_SNAPSHOTS_SQL.contains("d.deptype IN ('a', 'i')"));
         }
 
         #[test]

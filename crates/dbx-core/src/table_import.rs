@@ -4016,10 +4016,12 @@ fn has_numeric_leading_zero(value: &str) -> bool {
 }
 
 fn is_likely_date(value: &str) -> bool {
+    let value = crate::temporal_format::strip_csv_force_text_wrapper(value);
     ["%Y-%m-%d", "%Y/%m/%d"].iter().any(|format| NaiveDate::parse_from_str(value, format).is_ok())
 }
 
 fn is_likely_timestamp(value: &str) -> bool {
+    let value = crate::temporal_format::strip_csv_force_text_wrapper(value);
     if DateTime::parse_from_rfc3339(value).is_ok() {
         return true;
     }
@@ -9481,6 +9483,10 @@ mod tests {
         assert_eq!(xlsx_cell_value(&duration_cell), serde_json::json!("60:00:00"));
         assert_eq!(infer_value_type(&date_value), Some(ImportInferredType::Timestamp));
         assert_eq!(infer_value_type(&time_value), Some(ImportInferredType::Decimal));
+        assert_eq!(
+            infer_value_type(&serde_json::json!("=\"2026-06-24 02:00:07\"")),
+            Some(ImportInferredType::Timestamp)
+        );
     }
 
     #[test]

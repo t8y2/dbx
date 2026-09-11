@@ -1,3 +1,18 @@
+<script lang="ts">
+// Replay guard for the toolbar format/compress requests. The ids are global
+// monotonic counters shared by every tab, and ContentArea delivers them by
+// gating the inactive tab's prop back to `undefined`; returning to the tab
+// re-arms the same stale id on the reused editor instance (a replay, not a new
+// command). The cursors live at module scope — not in `<script setup>` — so
+// they also survive an editor unmount/remount (data-page switches), letting a
+// freshly mounted editor consume the stale id instead of replaying it. The
+// check is strictly monotonic (`>`), not `!==`: because ids are shared across
+// tabs, a lower id is always an already-handled request from an active tab
+// (delivery is same-tick), never a pending undelivered one.
+let lastHandledFormatRequestId = 0;
+let lastHandledCompressRequestId = 0;
+</script>
+
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
 import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
@@ -6909,15 +6924,21 @@ watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) =
 
 watch(
   () => props.formatRequestId,
-  (val, oldVal) => {
-    if (val && val !== oldVal) formatCurrentSql();
+  (val) => {
+    if (val && val > lastHandledFormatRequestId) {
+      lastHandledFormatRequestId = val;
+      formatCurrentSql();
+    }
   },
 );
 
 watch(
   () => props.compressRequestId,
-  (val, oldVal) => {
-    if (val && val !== oldVal) compressCurrentSql();
+  (val) => {
+    if (val && val > lastHandledCompressRequestId) {
+      lastHandledCompressRequestId = val;
+      compressCurrentSql();
+    }
   },
 );
 

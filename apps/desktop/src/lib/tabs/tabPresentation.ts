@@ -161,7 +161,7 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   }
   if (tab.mode === "objects") {
     if (isEventObjectBrowserTab(tab)) {
-      const eventTitle = tab.objectBrowser?.eventName || t("objects.events");
+      const eventTitle = tab.objectBrowser?.eventName || t("tree.events");
       if (compact) return eventTitle;
       return `${eventTitle}@${database}`;
     }
@@ -486,7 +486,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "consul-overview") return t("consul.ui.overview");
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "databases") return t("tabs.databases");
-  if (isEventObjectBrowserTab(tab)) return t("objects.events");
+  if (isEventObjectBrowserTab(tab)) return t("tree.events");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");

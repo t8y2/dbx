@@ -7,8 +7,10 @@ import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { createApp, nextTick, reactive } from "vue";
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import type { ConnectionConfig } from "@/types/database";
 
 vi.mock("@/components/ui/tooltip", () => ({
   Tooltip: { name: "TooltipStub", template: `<div><slot /></div>` },
@@ -156,9 +158,6 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain('isClassicLayout.value ? "classic-tab-layout" : "separated-tab-layout"');
     expect(source).toContain(':data-placement="settingsStore.editorSettings.tabPlacement"');
     expect(source).toContain(':data-group-mode="settingsStore.editorSettings.tabGroupMode"');
-    expect(source).toContain('<span v-if="isVerticalLayout" class="tab-group-marker" aria-hidden="true" />');
-    expect(source).toContain("tab-group-chevron--collapsed");
-    expect(source).toContain('<DatabaseIcon :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon" aria-hidden="true" />');
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header");
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\) \.tab-group-header-content\s*\{[^}]*height:\s*100%;[^}]*border-radius:\s*0;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar\.classic-tab-layout:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-group-mode="none"\] \.app-tab-pill\s*\{[^}]*border-right-width:\s*0\.5px;/s);
@@ -179,8 +178,6 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
-    expect(sharedStyles).toMatch(/\.tab-group-chevron\s*\{[^}]*width:\s*0\.875rem;[^}]*height:\s*0\.875rem;[^}]*transition:[\s\S]*transform 180ms cubic-bezier\(0\.2, 0\.8, 0\.2, 1\)/s);
-    expect(sharedStyles).toMatch(/\.tab-group-chevron--collapsed\s*\{[^}]*transform:\s*rotate\(-90deg\);/s);
     expect(sharedStyles).toContain("row-gap: 0.375rem;");
     expect(sharedStyles).toContain(".app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry:has(.tab-group-tab)");
     expect(sharedStyles).toContain('[data-group-mode="none"] .tab-section--horizontal');
@@ -532,10 +529,78 @@ describe("EditorGroupTabBar group behavior", () => {
     host.remove();
   });
 
-  it("keeps Redis logical databases in one database group", () => {
-    expect(source).toContain('if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis")');
-    expect(source).toContain('return JSON.stringify([tab.connectionId, tab.catalog || "", "redis"]);');
-    expect(source).toContain('if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") return tabConnectionLabel(tab);');
+  it("keeps Redis logical databases in one database group", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "redis-1", name: "Redis Cache", db_type: "redis", driver_profile: "redis", host: "127.0.0.1", port: 6379, color: "" } as ConnectionConfig];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "database";
+    const db0 = store.createTab("redis-1", "0", "Redis 0", "redis");
+    const db1 = store.createTab("redis-1", "1", "Redis 1", "redis");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), db0, pinia);
+    await settle();
+
+    // db0 and db1 are logical databases of one connection, so a single header
+    // labeled by the connection owns both pills instead of one cluster per db.
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    expect(headers.map((header) => header.title)).toEqual(["Redis Cache"]);
+    const groupIds = new Set(Array.from(host.querySelectorAll("[data-tab-group-id]"), (entry) => entry.getAttribute("data-tab-group-id")));
+    expect(groupIds.size).toBe(1);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(2);
+    expect(host.querySelector(`[data-tab-id="${db0}"]`)?.textContent).toContain("db0");
+    expect(host.querySelector(`[data-tab-id="${db1}"]`)?.textContent).toContain("db1");
+
+    // Collapsing the cluster folds both logical databases into one count badge.
+    headers[0]!.click();
+    await settle();
+    expect(host.querySelector(".tab-group-count")?.textContent).toBe("2");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("sizes the header chevron and rotates it only while the cluster is collapsed", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const tabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), tabId, pinia);
+    const styles = document.createElement("style");
+    styles.textContent = `html { font-size: 16px; }\n${sharedStyles}`;
+    document.head.appendChild(styles);
+
+    try {
+      await settle();
+      const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
+      // Horizontal headers lead with the database glyph; the rail marker stays vertical-only.
+      expect(header.querySelector(".tab-group-database-icon")).not.toBeNull();
+      expect(header.querySelector(".tab-group-marker")).toBeNull();
+      const chevron = header.querySelector<HTMLElement>(".tab-group-chevron")!;
+      expect(getComputedStyle(chevron).width).toBe("14px");
+      expect(getComputedStyle(chevron).height).toBe("14px");
+      expect(getComputedStyle(chevron).transition).toContain("transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(true);
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(-90deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(false);
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      // The rail marker appears only under a vertical placement.
+      settings.editorSettings.tabPlacement = "left";
+      await settle();
+      expect(host.querySelector(".tab-group-header .tab-group-marker")).not.toBeNull();
+    } finally {
+      app.unmount();
+      host.remove();
+      styles.remove();
+    }
   });
 
   it("exposes the drag-back hit-test anchor and highlights itself as the detached drop target", async () => {

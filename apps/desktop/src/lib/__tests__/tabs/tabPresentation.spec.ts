@@ -29,7 +29,7 @@ const translations: Record<string, string> = {
   "tabs.tooltipDatabase": "Database:",
   "tabs.tooltipTable": "Table:",
   "tabs.tooltipTableComment": "Table Comment:",
-  "objects.events": "Events",
+  "tree.events": "Events",
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
 };

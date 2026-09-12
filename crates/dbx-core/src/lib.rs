@@ -58,6 +58,7 @@ pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;
 pub mod mongo_shell;
+pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 #[cfg(feature = "mq-admin")]

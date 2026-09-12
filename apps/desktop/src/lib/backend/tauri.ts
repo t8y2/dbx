@@ -4900,6 +4900,190 @@ export async function releaseTableImportSource(_sourceRef: string): Promise<bool
   return false;
 }
 
+export type MongoImportFormat = "csv" | "json" | "ndjson";
+export type MongoImportTypeMode = "string" | "auto" | "extendedJson";
+export type MongoImportInferredType = "boolean" | "integer" | "decimal" | "date" | "object" | "array" | "string";
+export type MongoImportStatus = "running" | "done" | "error" | "cancelled";
+export type MongoImportPhase = "preparing" | "parsing" | "writing" | "done";
+export type MongoExportFormat = "csv" | "ndjson";
+export type MongoExportStatus = "running" | "done" | "error" | "cancelled";
+
+export interface MongoImportIssue {
+  code: string;
+  message: string;
+  row?: number | null;
+  column?: string | null;
+  value?: string | null;
+  batch?: number | null;
+  retryable?: boolean;
+}
+
+export interface MongoImportParseOptions {
+  encoding?: TableImportTextEncoding | null;
+  delimiter?: string | null;
+  hasHeader?: boolean | null;
+  trim?: boolean | null;
+  emptyAsNull?: boolean | null;
+  typeMode?: MongoImportTypeMode | null;
+  recognizeObjectIdHex?: boolean | null;
+  skipErrorRows?: boolean | null;
+}
+
+export interface MongoImportPreviewRequest {
+  filePath: string;
+  sourceRef?: string | null;
+  format: MongoImportFormat;
+  parseOptions?: MongoImportParseOptions;
+  previewLimit?: number | null;
+}
+
+export interface MongoImportColumn {
+  name: string;
+  inferredType: MongoImportInferredType;
+  sampleValues?: unknown[];
+}
+
+export interface MongoImportPreview {
+  sourceRef?: string | null;
+  format: MongoImportFormat;
+  detectedEncoding?: TableImportTextEncoding | null;
+  fileName: string;
+  filePath: string;
+  sizeBytes: number;
+  columns: MongoImportColumn[];
+  rows: Record<string, unknown>[];
+  rowNumbers?: number[];
+  warnings: MongoImportIssue[];
+  errors: MongoImportIssue[];
+  estimatedRows?: number | null;
+  estimatedRowsExact: boolean;
+}
+
+export interface MongoImportRequest {
+  importId: string;
+  connectionId: string;
+  database: string;
+  collection: string;
+  filePath: string;
+  sourceRef?: string | null;
+  format: MongoImportFormat;
+  parseOptions?: MongoImportParseOptions;
+  batchSize: number;
+  executionId?: string | null;
+}
+
+export interface MongoImportProgress {
+  importId: string;
+  phase: MongoImportPhase;
+  status: MongoImportStatus;
+  rowsRead: number;
+  rowsInserted: number;
+  rowsFailed: number;
+  batchesCommitted: number;
+  totalRows?: number | null;
+  errorRows?: MongoImportIssue[];
+  errorMessage?: string | null;
+  elapsedMs: number;
+}
+
+export interface MongoImportSummary {
+  importId: string;
+  rowsInserted: number;
+  rowsFailed: number;
+  batchesCommitted: number;
+  elapsedMs: number;
+}
+
+export interface MongoExportRequest {
+  exportId: string;
+  connectionId: string;
+  database: string;
+  collection: string;
+  filter?: string | null;
+  sort?: string | null;
+  projection?: string | null;
+  collation?: string | null;
+  format: MongoExportFormat;
+  includeHeader?: boolean;
+  filePath: string;
+  executionId?: string | null;
+}
+
+export interface MongoExportProgress {
+  exportId: string;
+  status: MongoExportStatus;
+  documentsRead: number;
+  bytesWritten: number;
+  totalDocuments?: number | null;
+  errorMessage?: string | null;
+  elapsedMs: number;
+}
+
+export interface MongoExportSummary {
+  exportId: string;
+  documentsExported: number;
+  filePath: string;
+  elapsedMs: number;
+}
+
+export async function previewMongodbImportFile(filePathOrRequest: string | File | MongoImportPreviewRequest, options: Partial<MongoImportPreviewRequest> = {}): Promise<MongoImportPreview> {
+  if (typeof filePathOrRequest !== "string" && !("filePath" in filePathOrRequest)) {
+    throw new Error("previewMongodbImportFile in desktop mode requires a file path, not a File object");
+  }
+  const request: MongoImportPreviewRequest = typeof filePathOrRequest === "string" ? { format: options.format ?? "csv", ...options, filePath: filePathOrRequest } : filePathOrRequest;
+  return invoke("preview_mongodb_import_file", { request });
+}
+
+export async function importMongodbFile(request: MongoImportRequest, onProgress: (progress: MongoImportProgress) => void): Promise<MongoImportSummary> {
+  const unlisten: UnlistenFn = await listen<MongoImportProgress>("mongo-import-progress", (event) => {
+    if (event.payload.importId === request.importId) {
+      onProgress(event.payload);
+      if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+        unlisten();
+      }
+    }
+  });
+  try {
+    const summary = await invoke<MongoImportSummary>("import_mongodb_file", { request });
+    unlisten();
+    return summary;
+  } catch (e) {
+    unlisten();
+    throw e instanceof BackendErrorException ? e : new BackendErrorException(e);
+  }
+}
+
+export async function cancelMongodbImport(importId: string): Promise<boolean> {
+  return invoke("cancel_mongodb_import", { importId });
+}
+
+export async function releaseMongodbImportSource(_sourceRef: string): Promise<boolean> {
+  return false;
+}
+
+export async function exportMongodbQuery(request: MongoExportRequest, onProgress: (progress: MongoExportProgress) => void): Promise<MongoExportSummary> {
+  const unlisten: UnlistenFn = await listen<MongoExportProgress>("mongo-export-progress", (event) => {
+    if (event.payload.exportId === request.exportId) {
+      onProgress(event.payload);
+      if (event.payload.status === "done" || event.payload.status === "error" || event.payload.status === "cancelled") {
+        unlisten();
+      }
+    }
+  });
+  try {
+    const summary = await invoke<MongoExportSummary>("export_mongodb_query", { request });
+    unlisten();
+    return summary;
+  } catch (e) {
+    unlisten();
+    throw e instanceof BackendErrorException ? e : new BackendErrorException(e);
+  }
+}
+
+export async function cancelMongodbExport(exportId: string): Promise<boolean> {
+  return invoke("cancel_mongodb_export", { exportId });
+}
+
 // --- Database Export ---
 export interface DatabaseExportRequest {
   exportId: string;

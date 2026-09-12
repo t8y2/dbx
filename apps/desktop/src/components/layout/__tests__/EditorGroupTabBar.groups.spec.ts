@@ -61,17 +61,9 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(source).toContain('type="color"');
   });
 
-  it("exposes placement, grouping, and sorting preferences from the group context menu", () => {
-    const preferences = sourceBetween("function getTabPreferenceMenuItems", "function getTabGroupMenuItems");
+  it("keeps placement, grouping, and sorting out of the group context menu", () => {
     const groupMenu = sourceBetween("function getTabGroupMenuItems", "function openTabGroupContextMenu");
-    expect(preferences).toContain('label: t("settings.tabPlacement")');
-    expect(preferences).toContain("action: () => updateTabPlacement(item.value)");
-    expect(preferences).toContain('label: t("settings.tabGroup")');
-    expect(preferences).toContain("action: () => updateTabGroupMode(item.value)");
-    expect(preferences).toContain('label: t("settings.tabSort")');
-    expect(preferences).toContain("action: () => updateTabSortMode(item.value)");
-    expect(preferences.match(/checked: item\.value === settingsStore\.editorSettings\./g)).toHaveLength(3);
-    expect(groupMenu).toContain("...getTabPreferenceMenuItems()");
+    expect(groupMenu).not.toContain("getTabPreferenceMenuItems");
   });
 
   it("exposes preferences and the group close from each tab context menu", () => {
@@ -80,7 +72,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(menuStart).toBeGreaterThanOrEqual(0);
     expect(menuEnd).toBeGreaterThan(menuStart);
     const menu = source.slice(menuStart, menuEnd);
-    expect(menu).toContain("...getTabPreferenceMenuItems()");
+    expect(menu).not.toContain("getTabPreferenceMenuItems");
     expect(menu).toContain("action: () => closeTabGroup(tab)");
     expect(menu).toContain('visible: settingsStore.editorSettings.tabGroupMode !== "none"');
   });
@@ -89,7 +81,7 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     // D1 (amended): closing a cluster is destructive and stays bar-local —
     // scoped to this pane's tabs (props.tabs), still within the trigger's
     // pinned section. Profile edits (rename/color/reset) keep global reach.
-    const closeGroup = sourceBetween("function tabsInSemanticGroup", "function getTabPreferenceMenuItems");
+    const closeGroup = sourceBetween("function tabsInSemanticGroup", "function getTabGroupMenuItems");
     expect(closeGroup).toContain("props.tabs.filter((item) => item.pinned === tab.pinned && tabGroupKey(item) === groupKey)");
     expect(closeGroup).toContain("queryStore.closeTabsByIds(tabsToClose, finalActiveTabId)");
   });
@@ -572,9 +564,9 @@ describe("EditorGroupTabBar group behavior", () => {
     try {
       await settle();
       const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
-      // Horizontal headers lead with the database glyph; the rail marker stays vertical-only.
+      // Group headers consistently expose the placement marker.
       expect(header.querySelector(".tab-group-database-icon")).not.toBeNull();
-      expect(header.querySelector(".tab-group-marker")).toBeNull();
+      expect(header.querySelector(".tab-group-marker")).not.toBeNull();
       const chevron = header.querySelector<HTMLElement>(".tab-group-chevron")!;
       expect(getComputedStyle(chevron).width).toBe("14px");
       expect(getComputedStyle(chevron).height).toBe("14px");

@@ -16,6 +16,7 @@ const apiMock = vi.hoisted(() => ({
   getColumns: vi.fn(),
   getTableDdl: vi.fn(),
   startTableExport: vi.fn(),
+  exportMongodbQuery: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => apiMock);
@@ -120,6 +121,41 @@ describe("useSidebarTreeExportRuntime", () => {
 
     expect(apiMock.executeQuery).toHaveBeenCalledOnce();
     expect(toastMock).toHaveBeenCalledWith("导出失败：上一个 DuckDB 查询仍在停止中，请稍后重试。", 5000);
+  });
+
+  it("exports a mongo collection through the save-file path without a setup dialog", async () => {
+    apiMock.exportMongodbQuery.mockImplementation(async (_request, onProgress) => {
+      onProgress({ exportId: "export-1", status: "done", documentsRead: 3, bytesWritten: 12, elapsedMs: 4 });
+      return { exportId: "export-1", documentsExported: 3, filePath: "orders.ndjson", elapsedMs: 4 };
+    });
+    const activeNode = shallowRef({ id: "col-1", type: "mongo-collection", label: "orders", connectionId: "conn-1", database: "shop", children: [] } as TreeNode);
+    const connectionStore = {
+      ensureConnected: vi.fn(),
+      getConfig: vi.fn(() => ({ db_type: "mongodb" })),
+      treeNodes: [],
+      selectedTreeNodeIds: [],
+    };
+    const runtime = useSidebarTreeExportRuntime({
+      activeNode,
+      connectionStore: connectionStore as never,
+      settingsStore: exportSettings() as never,
+      acceptedSelectionIds: () => null,
+    });
+
+    await runtime.exportMongoCollection("ndjson");
+
+    expect(connectionStore.ensureConnected).toHaveBeenCalledWith("conn-1");
+    expect(apiMock.exportMongodbQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connectionId: "conn-1",
+        database: "shop",
+        collection: "orders",
+        format: "ndjson",
+        filePath: "orders.ndjson",
+      }),
+      expect.any(Function),
+    );
+    expect(toastMock).toHaveBeenCalledWith("grid.exported");
   });
 
   it("loads and joins every selected DDL in tree order", async () => {

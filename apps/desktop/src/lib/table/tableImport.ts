@@ -35,6 +35,14 @@ export interface TableImportProgressLike {
 
 export type TableImportWizardStep = "source" | "options" | "mapping" | "review" | "execution";
 
+export const TABLE_IMPORT_ENCODING_OPTIONS: ReadonlyArray<{ value: TableImportTextEncoding; labelKey: string }> = [
+  { value: "auto", labelKey: "tableImport.encodingAuto" },
+  { value: "utf8", labelKey: "tableImport.encodingUtf8" },
+  { value: "gbk", labelKey: "tableImport.encodingGbk" },
+  { value: "utf16Le", labelKey: "tableImport.encodingUtf16Le" },
+  { value: "utf16Be", labelKey: "tableImport.encodingUtf16Be" },
+];
+
 export const TABLE_IMPORT_WIZARD_STEPS: TableImportWizardStep[] = ["source", "options", "mapping", "review", "execution"];
 
 export function formatTableImportElapsed(ms: number): string {

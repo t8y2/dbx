@@ -363,8 +363,8 @@ describe("AppTabBar group navigation portal", () => {
     expect(bar.style.width).toBe("320px");
     navigation.collapsed = true;
     await settle();
-    expect(rail.style.width).toBe("3.5rem");
-    expect(bar.style.width).toBe("3.5rem");
+    expect(rail.style.width).toBe("var(--collapsed-tab-rail-width)");
+    expect(bar.style.width).toBe("100%");
     expect(element(rail, "[data-main-tab-bar]")).toBe(bar);
     navigation.collapsed = false;
     await settle();

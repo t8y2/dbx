@@ -475,11 +475,36 @@
 }
 
 .tab-group-marker {
-  width: 0.4rem;
-  height: 0.4rem;
+  width: 0.22rem;
+  height: 1rem;
   flex: none;
   border-radius: 9999px;
   background: var(--tab-group-color);
+}
+
+.tab-organization-button {
+  display: inline-flex;
+  height: 1.75rem;
+  width: 1.75rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  margin-block: 0.25rem;
+  margin-inline: 0.25rem;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  color: var(--muted-foreground);
+}
+.tab-organization-button:hover {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.tab-organization-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 
 .tab-group-chevron {
@@ -542,6 +567,35 @@
   font-size: 0.6875rem;
   font-weight: 650;
   line-height: 1;
+}
+
+/* Modern split bars use h-7 (1.75rem) pills. Keep the group header on that
+ * exact baseline; the surrounding 2.5rem strip supplies the outer breathing
+ * room. Wrapped rows opt out and use their intrinsic row height below. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header {
+  height: 1.75rem;
+  align-self: center;
+}
+
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header-content {
+  height: 1.75rem;
+}
+
+/* The modern top/bottom bar joins the group header and its pills into one
+ * continuous horizontal rail. Rounded pseudo-elements at the seam create a
+ * visible bump (the “turn” between the two pieces), so keep that rail flat. */
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after,
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-tab::after {
+  border-radius: 0;
+}
+
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-header::after {
+  bottom: 0;
+}
+
+.app-tab-bar.separated-tab-layout:not(.vertical-tab-layout):not(:has(.wrap-mode))[data-placement="bottom"] .tab-group-header::after {
+  top: 0;
+  bottom: auto;
 }
 
 /* Wrapped rows must use their own content height. In particular, avoid
@@ -811,6 +865,9 @@
 
 .app-tab-bar:not(.vertical-tab-layout):not(:has(.wrap-mode)) .tab-group-entry--collapsing {
   pointer-events: none;
+  /* The keyframe already owns the collapse. Without this, removing the
+   * class at the end starts the base max-width transition a second time. */
+  transition: none;
   animation: tab-group-collapse 140ms ease forwards;
 }
 
@@ -1017,15 +1074,52 @@
   box-shadow: 0 0 0 1px var(--background);
 }
 
+/* Both portal hosts size from the badges actually rendered, including search
+ * filtering and multiple editor groups. All bars fill the same host width. */
+[data-workspace-tab-navigation],
+[data-special-page-navigation] {
+  --collapsed-tab-rail-width: 3.5rem;
+}
+
+[data-workspace-tab-navigation]:has(.vertical-tab-layout--collapsed .tab-group-count),
+[data-special-page-navigation]:has(.vertical-tab-layout--collapsed .tab-group-count) {
+  --collapsed-tab-rail-width: 4.5rem;
+}
+
 .vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header {
-  width: 2.5rem !important;
+  width: 100% !important;
   height: 1.75rem;
-  margin: 0.35rem auto 0.1rem;
+  margin: 0.35rem 0 0.1rem;
 }
 
 .vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header-content {
   justify-content: center;
-  padding: 0;
+  padding-inline: 0.55rem;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header-content:has(.tab-group-count) {
+  justify-content: space-between;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-label,
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-pin {
+  display: none;
+}
+
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-count {
+  position: static;
+  z-index: auto;
+  margin-inline-start: auto;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding-inline: 0.2rem;
+  transform: none;
+  box-shadow: none;
+}
+
+/* Reserve a separate slot for the count in the compact group header. */
+.vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-header:has(.tab-group-count) .tab-group-database-icon {
+  display: none;
 }
 
 .vertical-tab-layout.vertical-tab-layout--collapsed .tab-group-tab {
@@ -1072,12 +1166,6 @@
 
 .vertical-tab-layout .tab-group-header--active {
   color: var(--tab-group-color);
-}
-
-.vertical-tab-layout .tab-group-marker {
-  width: 0.22rem;
-  height: 1rem;
-  border-radius: 9999px;
 }
 
 .vertical-tab-layout .tab-group-header:not(.tab-group-header--collapsed)::after {

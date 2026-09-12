@@ -132,6 +132,14 @@ import type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  MongoImportPreviewRequest,
+  MongoImportPreview,
+  MongoImportRequest,
+  MongoImportProgress,
+  MongoImportSummary,
+  MongoExportRequest,
+  MongoExportProgress,
+  MongoExportSummary,
   DatabaseBackupSnapshot,
   DatabaseExportRequest,
   ExportProgress,
@@ -2467,6 +2475,122 @@ export async function cancelTableImport(importId: string): Promise<boolean> {
 export async function releaseTableImportSource(sourceRef: string): Promise<boolean> {
   const result = await post<{ released: boolean }>("/api/import/source/release", { sourceRef });
   return result.released;
+}
+
+export async function previewMongodbImportFile(fileOrPath: string | File | MongoImportPreviewRequest, options: Partial<MongoImportPreviewRequest> = {}): Promise<MongoImportPreview> {
+  if (typeof fileOrPath === "object" && !(fileOrPath instanceof File)) {
+    throw new Error("previewMongodbImportFile in web mode requires a File object for upload previews");
+  }
+  if (typeof fileOrPath === "string") {
+    if (!options.sourceRef) {
+      throw new Error("previewMongodbImportFile in web mode requires a File object for new uploads");
+    }
+    const res = await fetch(apiUrl("/api/mongo/import/preview-source"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceRef: options.sourceRef,
+        format: options.format,
+        parseOptions: options.parseOptions,
+        previewLimit: options.previewLimit,
+      }),
+    });
+    if (!res.ok) throw await backendResponseError(res);
+    return res.json();
+  }
+  const formData = new FormData();
+  formData.append("file", fileOrPath);
+  if (options.format) formData.append("format", options.format);
+  if (options.parseOptions) formData.append("parseOptions", JSON.stringify(options.parseOptions));
+  if (options.previewLimit != null) formData.append("previewLimit", String(options.previewLimit));
+  const res = await fetch(apiUrl("/api/mongo/import/preview"), {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return res.json();
+}
+
+export async function importMongodbFile(request: MongoImportRequest, onProgress: (progress: MongoImportProgress) => void): Promise<MongoImportSummary> {
+  const res = await fetch(apiUrl("/api/mongo/import/execute"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(apiUrl(`/api/mongo/import/progress/${request.importId}`));
+    es.onmessage = (e) => {
+      const progress: MongoImportProgress = JSON.parse(e.data);
+      onProgress(progress);
+      if (progress.status === "done") {
+        es.close();
+        resolve({
+          importId: progress.importId,
+          rowsInserted: progress.rowsInserted,
+          rowsFailed: progress.rowsFailed,
+          batchesCommitted: progress.batchesCommitted,
+          elapsedMs: progress.elapsedMs,
+        });
+      } else if (progress.status === "error" || progress.status === "cancelled") {
+        es.close();
+        reject(new Error(progress.errorMessage || "MongoDB import failed"));
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      reject(new Error("MongoDB import SSE connection failed"));
+    };
+  });
+}
+
+export async function cancelMongodbImport(importId: string): Promise<boolean> {
+  return post("/api/mongo/import/cancel", { importId });
+}
+
+export async function releaseMongodbImportSource(sourceRef: string): Promise<boolean> {
+  const result = await post<{ released: boolean }>("/api/mongo/import/source/release", { sourceRef });
+  return result.released;
+}
+
+export async function exportMongodbQuery(request: MongoExportRequest, onProgress: (progress: MongoExportProgress) => void): Promise<MongoExportSummary> {
+  const res = await fetch(apiUrl("/api/mongo/export"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request }),
+  });
+  if (!res.ok) throw await backendResponseError(res);
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(apiUrl(`/api/mongo/export/progress/${request.exportId}`));
+    es.onmessage = (e) => {
+      const progress: MongoExportProgress = JSON.parse(e.data);
+      onProgress(progress);
+      if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
+        es.close();
+        if (progress.status === "done") {
+          const a = document.createElement("a");
+          a.href = apiUrl(`/api/mongo/export/download/${request.exportId}`);
+          a.click();
+          resolve({
+            exportId: progress.exportId,
+            documentsExported: progress.documentsRead,
+            filePath: request.filePath,
+            elapsedMs: progress.elapsedMs,
+          });
+        } else {
+          reject(new Error(progress.errorMessage || "MongoDB export failed"));
+        }
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      reject(new Error("MongoDB export SSE connection failed"));
+    };
+  });
+}
+
+export async function cancelMongodbExport(exportId: string): Promise<boolean> {
+  return post("/api/mongo/export/cancel", { exportId });
 }
 
 // ---------------------------------------------------------------------------

@@ -458,6 +458,12 @@ export const previewTableImportFile = forward("previewTableImportFile");
 export const importTableFile = forward("importTableFile");
 export const cancelTableImport = forward("cancelTableImport");
 export const releaseTableImportSource = forward("releaseTableImportSource");
+export const previewMongodbImportFile = forward("previewMongodbImportFile");
+export const importMongodbFile = forward("importMongodbFile");
+export const cancelMongodbImport = forward("cancelMongodbImport");
+export const releaseMongodbImportSource = forward("releaseMongodbImportSource");
+export const exportMongodbQuery = forward("exportMongodbQuery");
+export const cancelMongodbExport = forward("cancelMongodbExport");
 
 // Database Export
 export const beginDatabaseBackupSnapshot = forward("beginDatabaseBackupSnapshot");
@@ -995,6 +1001,19 @@ export type {
   TableImportRequest,
   TableImportSummary,
   TableImportProgress,
+  MongoImportFormat,
+  MongoImportTypeMode,
+  MongoImportIssue,
+  MongoImportParseOptions,
+  MongoImportPreviewRequest,
+  MongoImportPreview,
+  MongoImportRequest,
+  MongoImportProgress,
+  MongoImportSummary,
+  MongoExportFormat,
+  MongoExportRequest,
+  MongoExportProgress,
+  MongoExportSummary,
   DatabaseExportRequest,
   ExportProgress,
   TableExportProgress,

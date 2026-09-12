@@ -28,6 +28,9 @@ agents/drivers/etcd-go/etcd-go
 agents/drivers/etcd2-go/etcd2-go
 plugins/jdbc/.gradle/
 plugins/jdbc/build/
+# Java IDE compilation output (keep the launcher scripts in bin/ tracked).
+plugins/jdbc/bin/main/
+plugins/jdbc/bin/test/
 plugins/jdbc/dist/
 docs/.next/
 docs/out/

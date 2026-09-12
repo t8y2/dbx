@@ -391,21 +391,22 @@ watch(
   { flush: "post" },
 );
 
-const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData, exportDataXlsx, exportStructure, saveStructurePreview, selectTextareaContent } = useSidebarTreeExportRuntime({
+const { copyStructureAs, copyStructureDocText, copyStructurePreview, exportData, exportDataXlsx, exportMongoCollection, exportStructure, saveStructurePreview, selectTextareaContent } = useSidebarTreeExportRuntime({
   activeNode,
   connectionStore,
   settingsStore,
   acceptedSelectionIds: () => acceptedSelectionIds,
 });
 
-const { openAllDatabasesExport, openDataCompare, openDatabaseExport, openDatabaseSearch, openDiagram, openDocs, openFieldLineage, openScheduledBackups, openSchemaDiff, openSchemaDiffForRoutine, openSqlFileExecution, openStructureEditor, openTableImport, openTransfer } = useSidebarTreeToolRuntime({
-  activeNode,
-  connectionStore,
-  queryStore,
-  settingsStore,
-  tableChildObjectName: tableChildDropObjectName,
-  acceptedSelectionIds: () => acceptedSelectionIds,
-});
+const { openAllDatabasesExport, openDataCompare, openDatabaseExport, openDatabaseSearch, openDiagram, openDocs, openFieldLineage, openMongoImport, openScheduledBackups, openSchemaDiff, openSchemaDiffForRoutine, openSqlFileExecution, openStructureEditor, openTableImport, openTransfer } =
+  useSidebarTreeToolRuntime({
+    activeNode,
+    connectionStore,
+    queryStore,
+    settingsStore,
+    tableChildObjectName: tableChildDropObjectName,
+    acceptedSelectionIds: () => acceptedSelectionIds,
+  });
 
 const emit = defineEmits<{
   "rename-started": [];
@@ -5934,6 +5935,15 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     if (canCloneMongoCollection.value) {
       items.push({ label: t("contextMenu.cloneCollection"), action: openCloneMongoCollectionDialog, icon: CopyPlus });
     }
+    items.push({ label: t("contextMenu.importData"), action: openMongoImport, icon: Download });
+    items.push({
+      label: t("contextMenu.exportData"),
+      icon: Upload,
+      children: [
+        { label: "CSV", action: () => void exportMongoCollection("csv") },
+        { label: "NDJSON", action: () => void exportMongoCollection("ndjson") },
+      ],
+    });
     if (canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
       items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });

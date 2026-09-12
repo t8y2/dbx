@@ -96,6 +96,7 @@ import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/st
 import { useToast } from "@/composables/useToast";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import JsonEditNode from "./JsonEditNode.vue";
+
 import type { EditNode } from "@/types/editor";
 import type { ColumnInfo, DatabaseType, QueryResult, QueryTab } from "@/types/database";
 import type { CustomSaveHandler } from "@/composables/useDataGridEditor";
@@ -2226,6 +2227,15 @@ function focusSearch(): boolean {
   if (!isNew.value && selectedIdx.value === null) return false;
   return documentJsonEditorRef.value?.openSearch() ?? false;
 }
+
+watch(
+  () => connectionStore.mongoImportCompleted,
+  (completed) => {
+    if (!completed) return;
+    if (completed.connectionId !== props.connectionId || completed.database !== props.database || completed.collection !== props.collection) return;
+    void refreshDocuments();
+  },
+);
 
 watch([viewMode, isEditing, selectedIdx], ([mode, editing, index]) => {
   if (mode === "document" && !editing && index !== null) return;

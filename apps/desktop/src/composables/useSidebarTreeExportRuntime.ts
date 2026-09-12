@@ -270,21 +270,32 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return typeof selected === "string" ? selected : null;
   }
 
-  async function resolveTableExportOutputPath(target: SidebarTableExportTarget, format: string, outputDirectory?: string): Promise<string | null> {
-    const fileName = `${target.fileNameBase ?? target.tableName}.${format}`;
+  function exportFilterName(format: string): string {
+    if (format === "csv") return "CSV";
+    if (format === "json") return "JSON";
+    if (format === "ndjson") return "NDJSON";
+    if (format === "xlsx") return "Excel";
+    return "SQL";
+  }
+
+  async function resolveExportOutputPath(fileNameBase: string, format: string, outputDirectory?: string): Promise<string | null> {
+    const fileName = `${fileNameBase}.${format}`;
     if (outputDirectory !== undefined) {
       return outputDirectory ? joinExportFilePath(outputDirectory, fileName) : fileName;
     }
     if (isTauriRuntime()) {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const filterName = format === "csv" ? "CSV" : format === "json" ? "JSON" : format === "xlsx" ? "Excel" : "SQL";
       const path = await save({
         defaultPath: fileName,
-        filters: [{ name: filterName, extensions: [format] }],
+        filters: [{ name: exportFilterName(format), extensions: [format] }],
       });
       return path ? String(path) : null;
     }
     return fileName;
+  }
+
+  async function resolveTableExportOutputPath(target: SidebarTableExportTarget, format: string, outputDirectory?: string): Promise<string | null> {
+    return resolveExportOutputPath(target.fileNameBase ?? target.tableName, format, outputDirectory);
   }
 
   async function exportDataLegacyForTarget(target: SidebarTableExportTarget, outputDirectory?: string, suppressDoneToast = false) {
@@ -461,6 +472,49 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     return pickTableExportDirectory();
   }
 
+  async function exportMongoCollection(format: "csv" | "ndjson") {
+    const node = activeNode.value;
+    if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return;
+    const outputPath = await resolveExportOutputPath(node.label, format);
+    if (!outputPath) return;
+    let task: ExportTask | null = null;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      task = addExportTask(node.label, format, outputPath);
+      const currentTask = task;
+      await api.exportMongodbQuery(
+        {
+          exportId: currentTask.exportId,
+          connectionId: node.connectionId,
+          database: node.database,
+          collection: node.label,
+          format,
+          includeHeader: true,
+          filePath: outputPath,
+        },
+        (progress) => {
+          currentTask.rowsExported = progress.documentsRead;
+          currentTask.totalRows = progress.totalDocuments ?? null;
+          if (progress.status === "running") currentTask.status = "Writing";
+          else if (progress.status === "done") {
+            currentTask.status = "Done";
+            currentTask.finishedAt = Date.now();
+          } else if (progress.status === "error") {
+            currentTask.status = "Error";
+            currentTask.errorMessage = progress.errorMessage ?? null;
+          } else if (progress.status === "cancelled") currentTask.status = "Cancelled";
+        },
+      );
+      toast(t("grid.exported"));
+    } catch (error: unknown) {
+      if (task) {
+        task.status = "Error";
+        task.errorMessage = error instanceof Error ? error.message : String(error);
+      }
+      toast(t("grid.exportFailed", { message: translateBackendError(t, error) }), 5000);
+    }
+  }
+
   async function exportData(format: "csv" | "json" | "sql") {
     const targets = currentTableExportTargets();
     if (!targets.length) return;
@@ -531,6 +585,7 @@ export function useSidebarTreeExportRuntime(options: SidebarTreeExportRuntimeOpt
     copyStructurePreview,
     exportData,
     exportDataXlsx,
+    exportMongoCollection,
     exportStructure,
     saveStructurePreview,
     selectTextareaContent,

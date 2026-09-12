@@ -123,7 +123,7 @@ provide(GROUP_TAB_BAR_PORTAL, {
   },
 });
 const tabNavigationStyle = computed(() => {
-  const width = props.tabBarCollapsed ? "3.5rem" : `${props.tabBarWidth ?? 240}px`;
+  const width = props.tabBarCollapsed ? "var(--collapsed-tab-rail-width)" : `${props.tabBarWidth ?? 240}px`;
   return { width, flex: `0 0 ${width}` };
 });
 function setTabBarTarget(groupId: string, element: unknown) {

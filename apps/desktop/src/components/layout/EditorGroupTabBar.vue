@@ -30,7 +30,37 @@ const TAB_DRAG_HORIZONTAL_THRESHOLD = 24;
 import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { ArrowDown, ArrowDownUp, ArrowRight, ChevronDown, ChevronsDownUp, ChevronsLeft, ChevronsRight, ChevronsUpDown, Copy, ListFilter, Maximize2, Minimize2, Package, PanelTop, Pencil, Pin, RotateCcw, RotateCw, Search, Settings, X } from "@lucide/vue";
+import {
+  ArrowDown,
+  ArrowDownAZ,
+  ArrowRight,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsLeft,
+  ChevronsRight,
+  ChevronsUpDown,
+  Clock3,
+  Copy,
+  Database,
+  ListFilter,
+  ListOrdered,
+  Maximize2,
+  Minimize2,
+  Package,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  PanelTop,
+  Pencil,
+  Pin,
+  RotateCcw,
+  RotateCw,
+  Search,
+  Server,
+  Settings,
+  Ungroup,
+  X,
+} from "@lucide/vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -134,7 +164,9 @@ const isWrapLayout = computed(() => !isVerticalLayout.value && settingsStore.edi
 const isTabBarCollapsed = computed(() => isVerticalLayout.value && !!props.tabBarCollapsed);
 const tabBarStyle = computed<CSSProperties | undefined>(() => {
   if (!isVerticalLayout.value) return undefined;
-  if (props.tabBarCollapsed) return { width: "3.5rem", flex: "0 0 3.5rem" };
+  if (props.tabBarCollapsed) {
+    return { width: "100%", flex: "0 0 100%" };
+  }
   const width = props.tabBarWidth ?? 240;
   return { width: `${width}px`, flex: `0 0 ${width}px` };
 });
@@ -725,36 +757,19 @@ function closeTabGroup(tab: QueryTab) {
   queryStore.closeTabsByIds(tabsToClose, finalActiveTabId);
 }
 
-function getTabPreferenceMenuItems(): ContextMenuItem[] {
-  return [
-    {
-      label: t("settings.tabPlacement"),
-      icon: PanelTop,
-      children: tabPlacementItems.value.map((item) => ({
-        label: item.label,
-        checked: item.value === settingsStore.editorSettings.tabPlacement,
-        action: () => updateTabPlacement(item.value),
-      })),
-    },
-    {
-      label: t("settings.tabGroup"),
-      icon: ListFilter,
-      children: tabGroupItems.value.map((item) => ({
-        label: item.label,
-        checked: item.value === settingsStore.editorSettings.tabGroupMode,
-        action: () => updateTabGroupMode(item.value),
-      })),
-    },
-    {
-      label: t("settings.tabSort"),
-      icon: ArrowDownUp,
-      children: tabSortItems.value.map((item) => ({
-        label: item.label,
-        checked: item.value === settingsStore.editorSettings.tabSortMode,
-        action: () => updateTabSortMode(item.value),
-      })),
-    },
-  ];
+const tabOrganizationItems = computed(() => [
+  ...tabPlacementItems.value.map((item, index) => ({ ...item, value: `placement:${item.value}`, icon: { top: PanelTop, bottom: PanelBottom, left: PanelLeft, right: PanelRight }[item.value], groupLabel: index === 0 ? t("settings.tabPlacement") : undefined })),
+  ...tabGroupItems.value.map((item, index) => ({ ...item, value: `group:${item.value}`, icon: { none: Ungroup, "database-type": Database, database: Database, connection: Server }[item.value], separatorBefore: index === 0, groupLabel: index === 0 ? t("settings.tabGroup") : undefined })),
+  ...tabSortItems.value.map((item, index) => ({ ...item, value: `sort:${item.value}`, icon: { manual: ListOrdered, "created-asc": Clock3, "title-asc": ArrowDownAZ }[item.value], separatorBefore: index === 0, groupLabel: index === 0 ? t("settings.tabSort") : undefined })),
+]);
+const selectedTabOrganizationItems = computed(() => [`placement:${settingsStore.editorSettings.tabPlacement}`, `group:${settingsStore.editorSettings.tabGroupMode}`, `sort:${settingsStore.editorSettings.tabSortMode}`]);
+
+function selectTabOrganizationItem(value: string) {
+  const [section, option] = value.split(":");
+  if (!option) return;
+  if (section === "placement") updateTabPlacement(option);
+  else if (section === "group") updateTabGroupMode(option);
+  else if (section === "sort") updateTabSortMode(option);
 }
 
 function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
@@ -784,8 +799,6 @@ function getTabGroupMenuItems(tab: QueryTab): ContextMenuItem[] {
       icon: ChevronsUpDown,
       visible: settingsStore.editorSettings.tabGroupMode !== "none",
     },
-    { label: "", separator: true },
-    ...getTabPreferenceMenuItems(),
     { label: "", separator: true },
     {
       label: t("contextMenu.closeTabGroup"),
@@ -1084,8 +1097,6 @@ function getTabMenuItems(tab: QueryTab): ContextMenuItem[] {
       visible: !!activeTabSidebarTarget(tab),
       onLocate: () => emit("locate-tab", tab),
     }),
-    { label: "", separator: true },
-    ...getTabPreferenceMenuItems(),
     { label: "", separator: true },
     createPinTabMenuItem({
       label: tab.pinned ? t("contextMenu.unpinTab") : t("contextMenu.pinTab"),
@@ -1402,33 +1413,58 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
     :data-group-mode="settingsStore.editorSettings.tabGroupMode"
     :data-placement="settingsStore.editorSettings.tabPlacement"
   >
-    <!-- Compact vertical toolbar: search, grouping preference, collapse. -->
+    <!-- Compact vertical toolbar: search, tab organization, collapse. -->
     <div v-if="isVerticalLayout" class="flex h-9 shrink-0 items-center gap-0.5 border-b p-1" :class="isTabBarCollapsed ? 'justify-center' : ''">
       <div v-if="!isTabBarCollapsed" class="relative min-w-0 flex-1">
         <Search class="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input v-model="tabSearchQuery" type="search" :placeholder="t('tabs.searchOpenTabs')" class="h-7 w-full pl-7 text-sm" />
       </div>
-      <div v-if="!isTabBarCollapsed" class="flex shrink-0 items-center gap-0">
-        <LightDropdown
-          :model-value="settingsStore.editorSettings.tabGroupMode"
-          :items="tabGroupItems"
-          :aria-label="t('settings.tabGroup')"
-          :trigger-title="t('settings.tabGroup')"
-          :trigger-icon="ListFilter"
-          :trigger-class="verticalTabToolbarButtonClass"
-          :show-trigger-label="false"
-          :show-chevron="false"
-          check-position="right"
-          :match-trigger-width="false"
-          align="end"
-          @update:model-value="updateTabGroupMode"
-        />
-      </div>
+      <LightDropdown
+        v-if="!isTabBarCollapsed"
+        model-value=""
+        :items="tabOrganizationItems"
+        :selected-values="selectedTabOrganizationItems"
+        :aria-label="t('settings.tabOrganization')"
+        :trigger-title="t('settings.tabOrganization')"
+        :trigger-icon="ListFilter"
+        :trigger-class="verticalTabToolbarButtonClass"
+        trigger-icon-class="h-4 w-4"
+        item-icon-class="h-3.5 w-3.5"
+        content-class="w-max min-w-0"
+        selected-item-class="bg-primary/10 text-primary"
+        selected-check-class="text-primary"
+        :show-trigger-label="false"
+        :show-chevron="false"
+        :close-on-select="false"
+        :match-trigger-width="false"
+        align="end"
+        @update:model-value="selectTabOrganizationItem"
+      />
       <button type="button" :class="verticalTabToolbarButtonClass" :title="tabBarCollapseLabel" :aria-label="tabBarCollapseLabel" :aria-expanded="!isTabBarCollapsed" @click="emit('toggle-collapse')">
         <component :is="tabBarCollapseIcon" class="h-4 w-4" />
       </button>
     </div>
     <div class="relative flex w-full min-w-0 shrink-0 overflow-hidden" :class="[isVerticalLayout ? ['min-h-0 flex-1 flex-col items-stretch'] : isClassicLayout ? 'h-9 items-stretch' : 'h-10 items-center px-2', { 'has-tab-overflow-control': showOverflowControl }]">
+      <LightDropdown
+        v-if="!isVerticalLayout"
+        model-value=""
+        :items="tabOrganizationItems"
+        :selected-values="selectedTabOrganizationItems"
+        :aria-label="t('settings.tabOrganization')"
+        :trigger-title="t('settings.tabOrganization')"
+        :trigger-icon="ListFilter"
+        trigger-class="tab-organization-button"
+        trigger-icon-class="h-4 w-4"
+        item-icon-class="h-3.5 w-3.5"
+        content-class="w-max min-w-0"
+        selected-item-class="bg-primary/10 text-primary"
+        selected-check-class="text-primary"
+        :show-trigger-label="false"
+        :show-chevron="false"
+        :close-on-select="false"
+        :match-trigger-width="false"
+        @update:model-value="selectTabOrganizationItem"
+      />
       <div class="app-tab-strip relative h-full min-w-0 flex-1 overflow-hidden">
         <div v-if="showOverflowControl && !hasHorizontalFixedRows" class="app-tab-scrollbar" :class="{ 'app-tab-scrollbar--dragging': isScrollbarDragging }" @pointerdown="startScrollbarDrag">
           <div class="app-tab-scrollbar__thumb" :style="tabScrollbarThumbStyle" />
@@ -1482,7 +1518,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
                     >
                       <span class="tab-group-header-content">
-                        <span v-if="isVerticalLayout" class="tab-group-marker" aria-hidden="true" />
+                        <span class="tab-group-marker" aria-hidden="true" />
                         <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
                         <ChevronDown class="tab-group-chevron" :class="{ 'tab-group-chevron--collapsed': isTabGroupCollapsed(entry.tab) }" aria-hidden="true" />
                         <DatabaseIcon :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon" aria-hidden="true" />

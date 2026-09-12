@@ -27,7 +27,17 @@ vi.mock("@/composables/useMqMutationGuard", () => ({
 }));
 
 vi.mock("@/components/editor/DangerConfirmDialog.vue", () => ({
-  default: { template: "<div />" },
+  default: {
+    props: ["open", "title", "confirmLabel", "loading", "closeOnConfirm"],
+    emits: ["update:open", "confirm"],
+    template: `
+      <div v-if="open" role="dialog" :aria-label="title">
+        <slot name="options" />
+        <button :disabled="loading" @click="$emit('update:open', false)">dangerDialog.cancel</button>
+        <button :disabled="loading" @click="closeOnConfirm !== false && $emit('update:open', false); $emit('confirm')">{{ confirmLabel }}</button>
+      </div>
+    `,
+  },
 }));
 
 vi.mock("@/components/mq/rocketmq/RocketMqConsumerGroupDialogs.vue", () => ({
@@ -66,10 +76,12 @@ function buttonWithExactText(container: ParentNode, text: string): HTMLButtonEle
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function mountPanel(overrides: Record<string, unknown> = {}) {
@@ -82,6 +94,7 @@ async function mountPanel(overrides: Record<string, unknown> = {}) {
     namespace: "default",
     mqSystemKind: "kafka",
     supportsResetCursor: true,
+    supportsClearBacklog: true,
     supportsPeekMessages: true,
     ...overrides,
   });
@@ -202,6 +215,89 @@ describe("SubscriptionsPanel message peek", () => {
 
     expect(panel.textContent).toContain("payments message");
     expect(panel.textContent).not.toContain("orders message");
+  });
+});
+
+describe("SubscriptionsPanel clear backlog", () => {
+  async function openClearBacklog(panel: HTMLDivElement) {
+    buttonWithExactText(panel, "mqSubscriptions.clearBacklog").click();
+    await flushUi();
+    const dialog = panel.querySelector('[role="dialog"][aria-label="mqSubscriptions.clearBacklog"]');
+    expect(dialog).not.toBeNull();
+    return dialog!;
+  }
+
+  it("keeps a failed clear backlog open with the error in the dialog, not the panel", async () => {
+    backend.mqClearBacklog.mockRejectedValueOnce(new Error("Cannot clear an active consumer group"));
+    const panel = await mountPanel();
+    const dialog = await openClearBacklog(panel);
+
+    buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").click();
+    await vi.waitFor(() => expect(dialog.querySelector(".form-error")?.textContent).toContain("Cannot clear an active consumer group"));
+
+    expect(backend.mqClearBacklog).toHaveBeenCalledExactlyOnceWith("mq-1", { tenant: "_kafka", namespace: "default", topic: "events", persistent: true, partitioned: false }, "orders-consumer");
+    expect(dialog.isConnected).toBe(true);
+    expect(buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").disabled).toBe(false);
+    expect(panel.querySelector(".panel-error")).toBeNull();
+    expect(panel.querySelector(".subscriptions-table")?.textContent).toContain("orders-consumer");
+    expect(backend.mqListSubscriptions).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the previous error when the dialog is closed and reopened", async () => {
+    backend.mqClearBacklog.mockRejectedValueOnce(new Error("Previous clear backlog failed"));
+    const panel = await mountPanel();
+    const dialog = await openClearBacklog(panel);
+    buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("Previous clear backlog failed"));
+
+    buttonWithExactText(dialog, "dangerDialog.cancel").click();
+    await flushUi();
+    expect(dialog.isConnected).toBe(false);
+
+    const reopenedDialog = await openClearBacklog(panel);
+    expect(reopenedDialog.querySelector(".form-error")).toBeNull();
+    expect(panel.textContent).not.toContain("Previous clear backlog failed");
+    expect(panel.querySelector(".panel-error")).toBeNull();
+  });
+
+  it.each(["success", "failure"])("clears the previous error while retrying and handles retry %s", async (outcome) => {
+    const retry = deferred<void>();
+    backend.mqClearBacklog.mockRejectedValueOnce(new Error("First attempt failed")).mockReturnValueOnce(retry.promise);
+    const panel = await mountPanel();
+    const dialog = await openClearBacklog(panel);
+    buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").click();
+    await vi.waitFor(() => expect(dialog.textContent).toContain("First attempt failed"));
+
+    buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").click();
+    await vi.waitFor(() => expect(backend.mqClearBacklog).toHaveBeenCalledTimes(2));
+    expect(dialog.querySelector(".form-error")).toBeNull();
+    expect(dialog.isConnected).toBe(true);
+    expect(buttonWithExactText(dialog, "mqSubscriptions.clearBacklog").disabled).toBe(true);
+
+    if (outcome === "success") {
+      backend.mqListSubscriptions.mockResolvedValue([{ ...subscription("orders-consumer", "shared"), msgBacklog: 123 }]);
+      retry.resolve();
+      await vi.waitFor(() => {
+        expect(dialog.isConnected).toBe(false);
+        expect(backend.mqListSubscriptions).toHaveBeenCalledTimes(2);
+        expect(panel.querySelector(".subscriptions-table")?.textContent).toContain("123");
+      });
+    } else {
+      retry.reject(new Error("Retry failed"));
+      await vi.waitFor(() => expect(dialog.querySelector(".form-error")?.textContent).toContain("Retry failed"));
+      expect(dialog.isConnected).toBe(true);
+      expect(dialog.textContent).not.toContain("First attempt failed");
+      expect(backend.mqListSubscriptions).toHaveBeenCalledTimes(1);
+    }
+    expect(panel.querySelector(".panel-error")).toBeNull();
+  });
+
+  it("keeps subscription list loading failures in the panel", async () => {
+    backend.mqListSubscriptions.mockRejectedValueOnce(new Error("Subscription list failed"));
+    const panel = await mountPanel();
+
+    await vi.waitFor(() => expect(panel.querySelector(".panel-error")?.textContent).toContain("Subscription list failed"));
+    expect(panel.querySelector('[role="dialog"]')).toBeNull();
   });
 });
 

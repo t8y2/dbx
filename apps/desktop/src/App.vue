@@ -271,6 +271,7 @@ async function initializeUpdatePreparation() {
           dialogs.showTransferDialog,
           dialogs.showSqlFileDialog,
           dialogs.showTableImportDialog,
+          dialogs.showMongoImportDialog,
           dialogs.showTableDataGenerateDialog,
           dialogs.showDatabaseExportDialog,
           dialogs.showSchemaDiffDialog,
@@ -1175,16 +1176,23 @@ function setGlobalUiScale(scale: number) {
   settingsStore.updateEditorSettings({ uiScale: scale });
 }
 
+function showUiScaleToast() {
+  toast(`${Math.round(settingsStore.editorSettings.uiScale * 100)}%`, 1500);
+}
+
 function zoomInUi() {
   setGlobalUiScale(settingsStore.editorSettings.uiScale + 0.1);
+  showUiScaleToast();
 }
 
 function zoomOutUi() {
   setGlobalUiScale(settingsStore.editorSettings.uiScale - 0.1);
+  showUiScaleToast();
 }
 
 function resetUiZoom() {
   setGlobalUiScale(1);
+  showUiScaleToast();
 }
 
 function applyUiFontFamily(fontFamily: string) {

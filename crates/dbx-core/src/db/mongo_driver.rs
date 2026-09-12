@@ -2504,11 +2504,137 @@ fn json_update_to_modifications(value: &serde_json::Value) -> Result<UpdateModif
     }
 }
 
-fn json_object_to_document_extended_json(value: &serde_json::Value) -> Result<Document, String> {
+pub fn json_object_to_document_extended_json(value: &serde_json::Value) -> Result<Document, String> {
     match Bson::try_from(value.clone()).map_err(|e| e.to_string())? {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
     }
+}
+
+pub fn document_to_canonical_extended_json(document: &Document) -> serde_json::Value {
+    Bson::Document(document.clone()).into_canonical_extjson()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MongoBulkWriteError {
+    pub message: String,
+    pub index: Option<usize>,
+    pub code: Option<i32>,
+    pub retryable: bool,
+}
+
+/// What actually happened to a submitted batch. A batch can partly succeed, so the count of
+/// inserted documents and the per-document rejections are reported together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MongoInsertOutcome {
+    pub inserted: u64,
+    /// One entry per document the server rejected, `index` pointing into the submitted batch.
+    pub errors: Vec<MongoBulkWriteError>,
+}
+
+pub async fn insert_bson_documents(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    documents: Vec<Document>,
+) -> Result<MongoInsertOutcome, MongoBulkWriteError> {
+    if documents.is_empty() {
+        return Ok(MongoInsertOutcome::default());
+    }
+    let total = documents.len() as u64;
+    let col = client.database(database).collection::<Document>(collection);
+    // Unordered: one rejected document must not abandon the rest of the batch, and the server
+    // then reports every rejection instead of stopping at the first.
+    match col.insert_many(documents).ordered(false).await {
+        Ok(result) => Ok(MongoInsertOutcome { inserted: result.inserted_ids.len() as u64, errors: Vec::new() }),
+        Err(error) => {
+            let errors = insert_write_errors(&error);
+            if errors.is_empty() {
+                // No per-document detail means the whole batch failed (network, auth, …).
+                return Err(map_insert_many_error(error));
+            }
+            Ok(MongoInsertOutcome { inserted: total.saturating_sub(errors.len() as u64), errors })
+        }
+    }
+}
+
+/// Per-document rejections, sorted by batch index. Empty when the failure was not per-document.
+fn insert_write_errors(error: &mongodb::error::Error) -> Vec<MongoBulkWriteError> {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    let mut errors = match error.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(write_error)) => {
+            vec![write_error_entry(None, write_error.code, &write_error.message)]
+        }
+        ErrorKind::InsertMany(failure) => failure
+            .write_errors
+            .iter()
+            .flatten()
+            .map(|error| write_error_entry(Some(error.index), error.code, &error.message))
+            .collect(),
+        ErrorKind::BulkWrite(failure) => failure
+            .write_errors
+            .iter()
+            .map(|(index, error)| write_error_entry(Some(*index), error.code, &error.message))
+            .collect(),
+        _ => Vec::new(),
+    };
+    errors.sort_by_key(|error| error.index.unwrap_or(0));
+    errors
+}
+
+fn write_error_entry(index: Option<usize>, code: i32, message: &str) -> MongoBulkWriteError {
+    MongoBulkWriteError {
+        message: message.to_string(),
+        index,
+        code: Some(code),
+        retryable: is_retryable_mongo_write_code(code),
+    }
+}
+
+fn map_insert_many_error(error: mongodb::error::Error) -> MongoBulkWriteError {
+    use mongodb::error::ErrorKind;
+    match error.kind.as_ref() {
+        ErrorKind::Io(_) | ErrorKind::ConnectionPoolCleared { .. } | ErrorKind::ServerSelection { .. } => {
+            MongoBulkWriteError { message: error.to_string(), index: None, code: None, retryable: true }
+        }
+        _ => MongoBulkWriteError { message: error.to_string(), index: None, code: None, retryable: false },
+    }
+}
+
+fn is_retryable_mongo_write_code(code: i32) -> bool {
+    !matches!(code, 11000 | 11001 | 12582)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn for_each_find_document(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    batch_size: u32,
+    mut on_document: impl FnMut(Document) -> Result<(), String>,
+) -> Result<(), String> {
+    let col = client.database(database).collection::<Document>(collection);
+    let filter_doc = parse_optional_filter_document(filter)?.unwrap_or_default();
+    let mut find = col.find(filter_doc).batch_size(batch_size);
+    if let Some(projection) = parse_optional_json_document(projection, "projection")? {
+        find = find.projection(projection);
+    }
+    if let Some(sort) = parse_optional_json_document(sort, "sort")? {
+        find = find.sort(sort);
+    }
+    if let Some(collation) = parse_find_collation(collation)? {
+        find = find.collation(collation);
+    }
+    let mut cursor = find.await.map_err(|error| error.to_string())?;
+    while cursor.advance().await.map_err(|error| error.to_string())? {
+        let document = cursor.deserialize_current().map_err(|error| error.to_string())?;
+        on_document(document)?;
+    }
+    Ok(())
 }
 
 fn json_object_to_document_preserving_existing(

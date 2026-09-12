@@ -941,6 +941,21 @@ async fn main() {
         .route("/mongo/find-one-and-update", post(routes::mongo::find_one_and_update))
         .route("/mongo/find-one-and-replace", post(routes::mongo::find_one_and_replace))
         .route("/mongo/find-one-and-delete", post(routes::mongo::find_one_and_delete))
+        .route(
+            "/mongo/import/preview",
+            post(routes::mongodb_import_export::preview_import).layer(DefaultBodyLimit::max(
+                routes::table_import::import_request_body_limit_for_upload(web_body_limit_bytes()),
+            )),
+        )
+        .route("/mongo/import/preview-source", post(routes::mongodb_import_export::preview_uploaded_import))
+        .route("/mongo/import/source/release", post(routes::mongodb_import_export::release_import_source))
+        .route("/mongo/import/execute", post(routes::mongodb_import_export::execute_import))
+        .route("/mongo/import/progress/{importId}", get(routes::mongodb_import_export::import_progress))
+        .route("/mongo/import/cancel", post(routes::mongodb_import_export::cancel_import))
+        .route("/mongo/export", post(routes::mongodb_import_export::start_export))
+        .route("/mongo/export/progress/{exportId}", get(routes::mongodb_import_export::export_progress))
+        .route("/mongo/export/download/{exportId}", get(routes::mongodb_import_export::export_download))
+        .route("/mongo/export/cancel", post(routes::mongodb_import_export::cancel_export))
         // History
         .route("/history", get(routes::history::load_history).delete(routes::history::clear_history))
         .route("/history/save", post(routes::history::save_history))

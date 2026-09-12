@@ -55,7 +55,7 @@ const layoutClass = computed(() => {
 });
 const navigationStyle = computed<CSSProperties>(() => {
   if (!isVerticalLayout.value) return { maxHeight: "50%" };
-  const width = props.tabBarCollapsed ? "3.5rem" : `${props.tabBarWidth ?? 240}px`;
+  const width = props.tabBarCollapsed ? "var(--collapsed-tab-rail-width)" : `${props.tabBarWidth ?? 240}px`;
   return { width, flex: `0 0 ${width}` };
 });
 function setTabBarTarget(groupId: string, element: unknown) {

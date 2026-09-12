@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     visit_relations_mut, Ident, ObjectName, ObjectNamePart, ObjectType, Statement, TableFactor, VisitMut, VisitorMut,
 };
-use sqlparser::dialect::{GenericDialect, PostgreSqlDialect};
+use sqlparser::dialect::{GenericDialect, MsSqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -857,6 +857,9 @@ fn sql_for_execution_context_with_identifier_quote(
     };
     match db_type {
         Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
+        Some(DatabaseType::SqlServer) => {
+            qualify_sqlserver_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string())
+        }
         Some(DatabaseType::Kingbase) => {
             qualify_kingbase_unqualified_relations(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
         }
@@ -888,6 +891,33 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
+fn qualify_sqlserver_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
+    let dialect = MsSqlDialect {};
+    let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+    if statements.is_empty() {
+        return None;
+    }
+
+    let mut changed = false;
+    for statement in &mut statements {
+        if !statement_uses_schema_context(statement) {
+            continue;
+        }
+        let cte_names = statement_cte_names(statement);
+        let mut qualifier = SchemaRelationQualifier {
+            schema,
+            identifier_quote: '[',
+            cte_names: &cte_names,
+            parameterized_table_depth: 0,
+            changed: false,
+        };
+        let _ = statement.visit(&mut qualifier);
+        changed |= qualifier.changed;
+    }
+
+    changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
+}
+
 fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_quote: Option<&str>) -> Option<String> {
     let dialect = PostgreSqlDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
@@ -901,7 +931,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
             continue;
         }
         let cte_names = statement_cte_names(statement);
-        let mut qualifier = KingbaseRelationQualifier {
+        let mut qualifier = SchemaRelationQualifier {
             schema,
             identifier_quote: identifier_quote_char(identifier_quote),
             cte_names: &cte_names,
@@ -915,7 +945,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
     changed.then(|| statements.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))
 }
 
-struct KingbaseRelationQualifier<'a> {
+struct SchemaRelationQualifier<'a> {
     schema: &'a str,
     identifier_quote: char,
     cte_names: &'a HashSet<String>,
@@ -923,7 +953,7 @@ struct KingbaseRelationQualifier<'a> {
     changed: bool,
 }
 
-impl VisitorMut for KingbaseRelationQualifier<'_> {
+impl VisitorMut for SchemaRelationQualifier<'_> {
     type Break = ();
 
     fn pre_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
@@ -982,6 +1012,9 @@ fn qualify_unqualified_relation_name_with_quote(
     if cte_names.contains(&table.value.to_ascii_uppercase()) {
         return false;
     }
+    if table.value.starts_with('@') || table.value.starts_with('#') {
+        return false;
+    }
 
     let table = table.clone();
     name.0 = vec![
@@ -1027,7 +1060,7 @@ fn collect_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<St
 }
 
 fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool {
-    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase))
+    matches!(db_type, Some(DatabaseType::Iris | DatabaseType::Kingbase | DatabaseType::SqlServer))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -2006,6 +2039,7 @@ async fn do_execute_typed(
             let client = client.clone();
             let max_rows = options.max_rows;
             let execution_mode = options.execution_mode;
+            let sql = sql_for_execution_context_with_identifier_quote(pool_db_type, sql, schema, Some("["));
             let (mut client, lock_wait_ms) =
                 match lock_shared_client_with_wait(&client, cancel_token.clone(), None).await {
                     Ok(value) => value,
@@ -2014,10 +2048,10 @@ async fn do_execute_typed(
             let execution = async {
                 if execution_mode == QueryExecutionMode::Simple {
                     let mut results =
-                        db::sqlserver::execute_simple_batch_with_max_rows(&mut client, sql, max_rows).await?;
+                        db::sqlserver::execute_simple_batch_with_max_rows(&mut client, &sql, max_rows).await?;
                     Ok(results.remove(0))
                 } else {
-                    db::sqlserver::execute_query_with_max_rows(&mut client, sql, max_rows).await
+                    db::sqlserver::execute_query_with_max_rows(&mut client, &sql, max_rows).await
                 }
             };
             let result = wait_for_query_opt(cancel_token, query_timeout, execution)
@@ -3012,7 +3046,7 @@ pub async fn execute_multi_core_with_options_for_client_and_progress_typed(
     }
 
     if is_sqlserver {
-        return execute_multi_sqlserver(state, &pool_key, sql, cancel_token, options).await.map_err(Into::into);
+        return execute_multi_sqlserver(state, &pool_key, sql, schema, cancel_token, options).await.map_err(Into::into);
     }
 
     let is_http_sqlite = {
@@ -3651,6 +3685,7 @@ async fn execute_multi_sqlserver(
     state: &AppState,
     pool_key: &str,
     sql: &str,
+    schema: Option<&str>,
     cancel_token: Option<CancellationToken>,
     options: QueryExecutionOptions,
 ) -> Result<Vec<ExecuteMultiResult>, String> {
@@ -3704,11 +3739,14 @@ async fn execute_multi_sqlserver(
             break;
         }
 
+        let execution_sql =
+            sql_for_execution_context_with_identifier_quote(Some(DatabaseType::SqlServer), batch, schema, Some("["));
         let execution = async {
             if execution_mode == QueryExecutionMode::Simple {
-                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_simple_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows)
+                    .await
             } else {
-                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, batch, max_rows).await
+                db::sqlserver::execute_batch_with_max_rows_metadata(&mut client_guard, &execution_sql, max_rows).await
             }
         };
         let result = wait_for_result_opt(cancel_token.clone(), query_timeout, execution).await;
@@ -9466,6 +9504,55 @@ for line in sys.stdin:
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Postgres), "SELECT * FROM events", Some("APP")),
             "SELECT * FROM events"
+        );
+    }
+
+    #[test]
+    fn sqlserver_execution_context_qualifies_unqualified_dml_tables() {
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::SqlServer), "SELECT TOP 1 * FROM products", Some("core")),
+            "SELECT TOP 1 * FROM [core].products"
+        );
+
+        let qualified_join = sql_for_execution_context(
+            Some(DatabaseType::SqlServer),
+            "SELECT p.id FROM products p JOIN customers c ON c.id = p.customer_id",
+            Some("sales"),
+        );
+        assert!(qualified_join.contains("FROM [sales].products p"), "{qualified_join}");
+        assert!(qualified_join.contains("JOIN [sales].customers c"), "{qualified_join}");
+
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "UPDATE products SET status = 'done' WHERE id IN (SELECT product_id FROM audit_products)",
+                Some("core")
+            ),
+            "UPDATE [core].products SET status = 'done' WHERE id IN (SELECT product_id FROM [core].audit_products)"
+        );
+    }
+
+    #[test]
+    fn sqlserver_execution_context_preserves_ctes_qualified_tables_and_temp_tables() {
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "WITH recent AS (SELECT * FROM products) SELECT * FROM recent",
+                Some("core")
+            ),
+            "WITH recent AS (SELECT * FROM [core].products) SELECT * FROM recent"
+        );
+        assert_eq!(
+            sql_for_execution_context(
+                Some(DatabaseType::SqlServer),
+                "SELECT * FROM [archive].products UNION ALL SELECT * FROM #staged_products",
+                Some("core")
+            ),
+            "SELECT * FROM [archive].products UNION ALL SELECT * FROM #staged_products"
+        );
+        assert_eq!(
+            sql_for_execution_context(Some(DatabaseType::SqlServer), "CREATE TABLE products (id INT)", Some("core")),
+            "CREATE TABLE products (id INT)"
         );
     }
 

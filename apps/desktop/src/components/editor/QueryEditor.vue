@@ -7450,6 +7450,7 @@ defineExpose({
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar) {
   width: 5px;
+  height: 5px;
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-track) {

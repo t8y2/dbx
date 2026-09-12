@@ -527,6 +527,8 @@ export interface ColumnInfo {
   is_unique?: boolean;
   extra: string | null;
   comment?: string | null;
+  /** Business title (e.g. Maximo MAXATTRIBUTE.TITLE) supplied by the driver/agent. */
+  title?: string | null;
   numeric_precision?: number | null;
   numeric_scale?: number | null;
   character_maximum_length?: number | null;

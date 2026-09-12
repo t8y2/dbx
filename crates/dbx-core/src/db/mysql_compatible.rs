@@ -206,6 +206,7 @@ pub async fn get_columns_show_from(
                 comment: get_opt_str(row, "Comment")
                     .map(|s| fix_potential_double_encoding(&s))
                     .filter(|s| !s.is_empty()),
+                title: None,
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,

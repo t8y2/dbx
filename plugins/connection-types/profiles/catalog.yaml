@@ -502,6 +502,14 @@ profiles:
     user: db2inst1
     category: sql
     pickerLabel: DB2
+  - id: maximo-db2
+    dbType: db2
+    label: IBM Maximo (DB2)
+    icon: db2
+    port: 50000
+    user: db2inst1
+    category: sql
+    pickerLabel: IBM Maximo (DB2)
   - id: informix
     dbType: informix
     label: Informix

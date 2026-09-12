@@ -24,6 +24,7 @@ public final class ConnectParams {
     private String informix_server;
     private String sessionRole;
     private String driver_profile;
+    private String maximo_title_language;
 
     public ConnectParams() {
         this("", 0, "", "", "", "", "", false, "", Collections.emptyList());
@@ -218,6 +219,14 @@ public final class ConnectParams {
         this.driver_profile = driver_profile;
     }
 
+    public String getMaximo_title_language() {
+        return maximo_title_language;
+    }
+
+    public void setMaximo_title_language(String maximo_title_language) {
+        this.maximo_title_language = maximo_title_language;
+    }
+
     @Override
     public boolean equals(Object other) {
         if (this == other) return true;
@@ -241,13 +250,14 @@ public final class ConnectParams {
             && Objects.equals(gbase_server, that.gbase_server)
             && Objects.equals(informix_server, that.informix_server)
             && Objects.equals(sessionRole, that.sessionRole)
-            && Objects.equals(driver_profile, that.driver_profile);
+            && Objects.equals(driver_profile, that.driver_profile)
+            && Objects.equals(maximo_title_language, that.maximo_title_language);
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(host, port, database, username, password, url_params, connection_string,
-            port_explicit, mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server, sessionRole, driver_profile);
+            port_explicit, mysql_compat_mode, jdbc_driver_class, jdbc_driver_paths, ssl, ca_cert_path, client_cert_path, client_key_path, gbase_server, informix_server, sessionRole, driver_profile, maximo_title_language);
     }
 
     @Override
@@ -271,6 +281,7 @@ public final class ConnectParams {
             + ", informix_server=" + informix_server
             + ", sessionRole=" + sessionRole
             + ", driver_profile=" + driver_profile
+            + ", maximo_title_language=" + maximo_title_language
             + ")";
     }
 }

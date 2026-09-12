@@ -42,6 +42,15 @@ public abstract class AbstractJdbcAgent extends BaseDatabaseAgent {
         return identifierQuote;
     }
 
+    /**
+     * Exposes the connection parameters recorded during {@link #connect(ConnectParams)} so
+     * subclasses (e.g. the Maximo agent) can read specialization options such as the
+     * requested column title language. Returns null before a successful connect.
+     */
+    protected final ConnectParams currentConnectParams() {
+        return connectParams;
+    }
+
     @Override
     public final void connect(ConnectParams params) {
         uncheckedVoid(() -> {

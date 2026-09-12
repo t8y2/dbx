@@ -119,6 +119,17 @@ pub fn agent_connect_params_with_role(
     };
     let (agent_host, agent_port) = if is_h2_file_connection(config) { ("", 0) } else { (host, port) };
 
+    // Connection-level Maximo option: which language to use for column titles
+    // (MAXATTRIBUTE base language when empty, otherwise L_MAXATTRIBUTE.LANGCODE).
+    let maximo_title_language = config
+        .external_config
+        .as_ref()
+        .and_then(|value| value.get("maximoTitleLanguage").or_else(|| value.get("maximo_title_language")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
     let mut params = serde_json::json!({
         "host": agent_host,
         "port": agent_port,
@@ -147,6 +158,7 @@ pub fn agent_connect_params_with_role(
         "driver_profile": config.driver_profile.as_deref().unwrap_or(""),
         "sessionRole": session_role.as_str(),
         "database_type": config.db_type,
+        "maximo_title_language": maximo_title_language,
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(

@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-public final class Db2Agent extends AbstractJdbcAgent {
+public class Db2Agent extends AbstractJdbcAgent {
     private static final Set<String> NUMERIC_PRECISION_TYPES = Set.of(
         "DECIMAL", "NUMERIC", "INTEGER", "SMALLINT", "BIGINT", "REAL", "DOUBLE", "FLOAT"
     );

@@ -5,7 +5,7 @@ def driverModules = [
     'access', 'dameng', 'goldendb', 'databend', 'databricks', 'saphana',
     'teradata', 'vertica', 'firebird', 'exasol', 'oceanbase-oracle', 'gbase8a', 'gbase8s',
     'bigquery', 'kylin', 'ignite', 'ignite3', 'spanner', 'sundb', 'h2', 'h2-legacy', 'snowflake', 'trino', 'spark',
-    'db2', 'informix', 'mongodb', 'highgo', 'uxdb', 'yashandb', 'oscar',
+    'db2', 'maximo-db2', 'informix', 'mongodb', 'highgo', 'uxdb', 'yashandb', 'oscar',
     'iris', 'cache', 'kafka', 'sqlserver-legacy'
 ]
 

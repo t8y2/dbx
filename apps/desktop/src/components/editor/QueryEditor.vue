@@ -282,6 +282,7 @@ const viewportEmitTask = createDeferredEditorTask(() => {
 let viewportRestoreFrame: number | null = null;
 let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
 let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
+let tabSwitchStateCaptured = false;
 const executionViewportOwnership = createQueryEditorExecutionViewportOwnership();
 let latestSelection: { anchor: number; head: number } | undefined = props.initialSelection;
 let contextMenuDoc: Text | null = null;
@@ -680,6 +681,7 @@ const EDITOR_SCROLLBAR_POINTER_GUTTER_PX = 18;
 const EDITOR_SELECTION_DRAG_THRESHOLD_PX = 6;
 const tableNavigationHoverClass = "query-editor--table-navigation-hover";
 const DBX_VIM_SAVE_EVENT = "dbx-vim-save";
+const BEFORE_TAB_SWITCH_EVENT = "dbx:before-tab-switch";
 
 function editorThemeAppearance() {
   return editorThemeAppearanceFor(isDark.value ? "dark" : "light", themePalette.value, themePalette.value === "custom" ? activeCustomUiColors.value : undefined);
@@ -6790,6 +6792,7 @@ onMounted(async () => {
     contextMenuPointerCleanup = null;
   };
 
+  restoreEditorSelection(props.initialSelection, !props.initialViewport);
   restoreEditorViewport();
   syncContextMenuState(view.value);
   emit("previewChangesAvailable", !!previewContextSql.value);
@@ -6874,8 +6877,10 @@ function activateTabDocument(prevTabId: string | undefined, tabId: string | unde
   const currentView = view.value;
   if (!currentView) return;
   // Flush the outgoing document before props and restored scroll positions
-  // become the new tab's state. The event carries its original owner.
-  flushEditorViewport();
+  // become the new tab's state. The event carries its original owner. A
+  // before-tab-switch capture already flushed this editor while it was still
+  // visible, so avoid reading the reset scroll position during the transition.
+  if (!tabSwitchStateCaptured) flushEditorViewport();
   viewportOwnerTabId = tabId;
   latestViewport = props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 };
   lastEmittedViewport = undefined;
@@ -6896,7 +6901,7 @@ function activateTabDocument(prevTabId: string | undefined, tabId: string | unde
     // document keeps whatever scroll offset the dispatch left behind (#8374).
     // A brand-new tab has no saved state, so reset it instead of falling back
     // to the previous tab's latest position (#8378).
-    restoreEditorSelection(props.initialSelection ?? { anchor: 0, head: 0 });
+    restoreEditorSelection(props.initialSelection ?? { anchor: 0, head: 0 }, !props.initialViewport);
     restoreEditorViewport(props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 });
     clearScheduledPreviewContextRefresh();
     syncContextMenuState(currentView);
@@ -6921,7 +6926,7 @@ function activateTabDocument(prevTabId: string | undefined, tabId: string | unde
   }
   searchPanelRef.value?.scheduleDocumentSearchUpdate();
   invalidateSemanticDiagnosticsForDocumentChange();
-  restoreEditorSelection();
+  restoreEditorSelection(undefined, !props.initialViewport);
   restoreEditorViewport();
   clearScheduledPreviewContextRefresh();
   syncContextMenuState(currentView);
@@ -6944,6 +6949,31 @@ watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) =
     scheduleSemanticDiagnostics();
   }
 });
+
+watch(
+  () => props.initialViewport,
+  (viewport, previousViewport) => {
+    if (!view.value || !viewport || previousViewport) return;
+    // Saved SQL content can hydrate after the editor has already mounted. In
+    // that case the initial prop was undefined and the mount-time restore had
+    // nothing to apply.
+    latestViewport = { ...viewport };
+    lastEmittedViewport = { ...viewport };
+    restoreEditorViewport(viewport);
+  },
+  { deep: true },
+);
+
+watch(
+  () => props.initialSelection,
+  (selection, previousSelection) => {
+    if (!view.value || !selection || previousSelection) return;
+    // Keep the cursor and viewport in sync when a saved SQL tab hydrates after
+    // the editor component has already been mounted.
+    restoreEditorSelection(selection, !props.initialViewport);
+  },
+  { deep: true },
+);
 
 watch(
   () => props.formatRequestId,
@@ -7181,9 +7211,16 @@ watch(
 function pauseQueryEditorBackgroundWork() {
   finishBatchColumnSelectionDrag(false);
   cancelBatchColumnSelectionRefresh();
-  flushEditorViewport();
-  flushEditorSelection();
-  emit("editorStateFlushed");
+  const stateWasCapturedBeforeTabSwitch = tabSwitchStateCaptured;
+  tabSwitchStateCaptured = false;
+  // A KeepAlive-evicted editor can be unmounted after it was already
+  // deactivated. Its DOM scroll position has been reset by then, so flushing
+  // that inactive view would overwrite the saved viewport with zero.
+  if (editorIsActive && !stateWasCapturedBeforeTabSwitch) {
+    flushEditorViewport();
+    flushEditorSelection();
+    emit("editorStateFlushed");
+  }
   clearTableNavigationHover();
   clearPendingCompletionEnter();
   clearPendingCompletionTab();
@@ -7196,12 +7233,23 @@ function pauseQueryEditorBackgroundWork() {
   unregisterTableReferenceDropListener();
 }
 
+function captureEditorStateBeforeTabSwitch(event: Event) {
+  const fromTabId = (event as CustomEvent<{ fromTabId?: string }>).detail?.fromTabId;
+  if (!view.value || !fromTabId || fromTabId !== props.tabId) return;
+  // Capture while the outgoing editor is still visible. Once KeepAlive starts
+  // deactivating the surface, WebKit can report a reset scrollTop of zero.
+  flushEditorViewport();
+  flushEditorSelection();
+  emit("editorStateFlushed");
+  tabSwitchStateCaptured = true;
+}
+
 function resumeQueryEditorBackgroundWork() {
   editorIsActive = true;
   registerTableReferenceDropListener();
   scheduleSemanticDiagnostics();
   if (view.value) schedulePreviewContextRefresh(view.value);
-  restoreEditorSelection();
+  restoreEditorSelection(undefined, !props.initialViewport);
   restoreEditorFocus();
   restoreEditorViewport();
 }
@@ -7209,6 +7257,11 @@ function resumeQueryEditorBackgroundWork() {
 onActivated(resumeQueryEditorBackgroundWork);
 
 onDeactivated(pauseQueryEditorBackgroundWork);
+
+onMounted(() => {
+  if (typeof window === "undefined") return;
+  window.addEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
+});
 
 onBeforeUnmount(() => {
   pauseQueryEditorBackgroundWork();
@@ -7222,6 +7275,7 @@ onBeforeUnmount(() => {
   view.value?.scrollDOM.removeEventListener("scroll", scheduleEditorViewportEmit);
   window.removeEventListener("keyup", clearTableNavigationHoverOnModifierRelease);
   window.removeEventListener("blur", clearTableNavigationHover);
+  window.removeEventListener(BEFORE_TAB_SWITCH_EVENT, captureEditorStateBeforeTabSwitch);
   contextMenuPointerCleanup?.();
   postCompositionKeyGuardCleanup?.();
   postCompositionKeyGuardCleanup = null;
@@ -7265,10 +7319,10 @@ function flushEditorSelection() {
   if (latestSelection) emitEditorSelection(latestSelection);
 }
 
-function restoreEditorSelection(selection = props.initialSelection ?? latestSelection) {
+function restoreEditorSelection(selection = props.initialSelection ?? latestSelection, scrollIntoView = false) {
   const normalizedSelection = normalizedEditorSelection(selection, props.modelValue.length);
   if (!view.value || !normalizedSelection) return;
-  view.value.dispatch({ selection: normalizedSelection });
+  view.value.dispatch({ selection: normalizedSelection, scrollIntoView });
 }
 
 function restoreEditorFocus() {
@@ -7321,7 +7375,7 @@ function restoreEditorViewport(viewport = props.initialViewport ?? latestViewpor
     const restoreNextFrame = () => {
       restoreScroll();
       attempts += 1;
-      if (attempts >= 8) {
+      if (attempts >= 32) {
         viewportRestoreFrame = null;
         return;
       }

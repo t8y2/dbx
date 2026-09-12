@@ -21,6 +21,7 @@ export const contentSurfaceEventNames = [
   "editorCursorChange",
   "editorViewportChange",
   "editorSelectionStateChange",
+  "editorStateFlushed",
   "formatError",
   "reload",
   "paginate",

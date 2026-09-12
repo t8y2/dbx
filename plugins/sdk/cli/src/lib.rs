@@ -1073,14 +1073,19 @@ fn build_go_backend(
             &work_file,
             format!(
                 "go 1.22\n\nuse (\n\t{}\n\t{}\n)\n",
-                serde_json::to_string(&backend_directory.to_string_lossy()).map_err(|error| error.to_string())?,
-                serde_json::to_string(&sdk.to_string_lossy()).map_err(|error| error.to_string())?
+                go_workspace_module_path(&backend_directory)?,
+                go_workspace_module_path(&sdk)?
             ),
         )
         .map_err(|error| error.to_string())?;
         command.env("GOWORK", work_file);
     }
     run_command(&mut command, "Go backend build")
+}
+
+fn go_workspace_module_path(path: &Path) -> Result<String, String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    serde_json::to_string(&normalized).map_err(|error| error.to_string())
 }
 
 fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
@@ -1483,13 +1488,21 @@ fn keygen_usage() -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{
         color_enabled_with, create_project, generate_signing_key_file, package_manifest, package_project,
         resolve_create_options, run_cli, styled, title_from_slug, validate_semver, BackendConfig, CreateInputs,
         CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
+
+    #[test]
+    fn normalizes_windows_paths_in_go_workspace_files() {
+        assert_eq!(
+            super::go_workspace_module_path(Path::new(r"D:\a\dbx-plugin\backend")).unwrap(),
+            r#""D:/a/dbx-plugin/backend""#
+        );
+    }
 
     #[test]
     fn rejects_development_data_in_package_inputs() {

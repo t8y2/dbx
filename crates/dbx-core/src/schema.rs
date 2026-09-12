@@ -10653,6 +10653,68 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_partition_ddl_preserves_local_unique_without_local_primary_key() {
+        let indexes = vec![db::IndexInfo {
+            name: "events_2026_code_key".to_string(),
+            columns: vec!["code".to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: true,
+        }];
+        let constraints = vec![db::ConstraintInfo {
+            name: "events_2026_code_key".to_string(),
+            constraint_type: "UNIQUE".to_string(),
+            definition: "UNIQUE (code)".to_string(),
+            columns: vec!["code".to_string()],
+            ref_schema: None,
+            ref_table: None,
+            ref_columns: Vec::new(),
+            match_type: None,
+            on_update: None,
+            on_delete: None,
+            deferrable: false,
+            initially_deferred: false,
+            enabled: true,
+            valid: true,
+        }];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some("events".to_string()),
+            bound: Some("DEFAULT".to_string()),
+            ..Default::default()
+        };
+        let partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects {
+            unique_constraints: BTreeSet::from(["events_2026_code_key".to_string()]),
+            indexes: BTreeSet::from(["events_2026_code_key".to_string()]),
+            ..Default::default()
+        };
+
+        let ddl = render_postgres_table_ddl_with_constraints_and_partition_info(
+            "public",
+            "events_2026",
+            &[column("code", "text")],
+            &indexes,
+            &[],
+            &constraints,
+            &[],
+            None,
+            &partition_info,
+            &partition_local_objects,
+        );
+
+        assert!(ddl.contains("CONSTRAINT \"events_2026_code_key\" UNIQUE (code)"), "ddl: {ddl}");
+        assert!(!ddl.contains("CREATE UNIQUE INDEX"), "ddl: {ddl}");
+    }
+
+    #[test]
     fn postgres_partition_ddl_skips_inherited_constraints_and_indexes() {
         let mut id = column("id", "integer");
         id.is_primary_key = true;
@@ -12381,6 +12443,9 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
     }
     if !is_partition || partition_local_objects.has_primary_key {
         for constraint in unique_constraints {
+            if is_partition && !partition_local_objects.unique_constraints.contains(&constraint.name) {
+                continue;
+            }
             definition_lines.push(format!(
                 "  CONSTRAINT {} {}",
                 pg_ident(&constraint.name),

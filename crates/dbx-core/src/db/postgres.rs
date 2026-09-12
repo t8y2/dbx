@@ -109,6 +109,7 @@ pub enum PostgresColumnDefaultState {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PostgresTablePartitionLocalObjects {
     pub has_primary_key: bool,
+    pub unique_constraints: BTreeSet<String>,
     pub foreign_keys: BTreeSet<String>,
     pub indexes: BTreeSet<String>,
     /// CHECK constraints with a local definition on this partition, as
@@ -3662,6 +3663,9 @@ fn apply_partition_local_object_row(
 ) {
     match object_kind {
         "constraint" if object_type == "p" => entry.has_primary_key = true,
+        "constraint" if object_type == "u" && !object_name.is_empty() => {
+            entry.unique_constraints.insert(object_name);
+        }
         "constraint" if object_type == "f" && !object_name.is_empty() => {
             entry.foreign_keys.insert(object_name);
         }
@@ -4400,7 +4404,7 @@ fn postgres_table_partition_local_objects_for_relations_query_tiers() -> [&'stat
 fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
     "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
      FROM pg_catalog.pg_constraint con \
-     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
      UNION ALL \
      SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
@@ -4439,7 +4443,7 @@ fn postgres_table_partition_local_objects_for_relations_sql() -> &'static str {
 fn postgres_table_partition_local_objects_for_relations_compat_sql() -> &'static str {
     "SELECT con.conrelid::bigint AS relid, 'constraint'::text AS object_kind, con.conname AS object_name, con.contype::text AS object_type \
      FROM pg_catalog.pg_constraint con \
-     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','f') \
+     WHERE con.conrelid = ANY($1::bigint[]) AND con.contype IN ('p','u','f') \
      UNION ALL \
      SELECT con.conrelid::bigint, 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \
      FROM pg_catalog.pg_constraint con \
@@ -4827,7 +4831,7 @@ fn postgres_table_partition_local_objects_sql() -> &'static str {
      FROM pg_catalog.pg_constraint con \
      JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     WHERE n.nspname = $1 AND c.relname = $2 AND con.contype IN ('p','f') \
+     WHERE n.nspname = $1 AND c.relname = $2 AND con.contype IN ('p','u','f') \
        AND COALESCE(NULLIF(pg_catalog.row_to_json(con)->>'conparentid', '')::oid, 0) = 0 \
      UNION ALL \
      SELECT 'check'::text AS object_kind, con.conname AS object_name, NULL::text AS object_type \

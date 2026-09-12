@@ -1007,6 +1007,8 @@ async function toggle(requestId = beginNavigationRequest()) {
       await connectionStore.loadDorisCatalogDatabases(node, treeLoadSearchOptions);
     } else if (node.type === "schema" && node.connectionId && hasTreeNodeDatabaseContext(node) && schemaNodeHasLoadableName(effectiveDatabaseTypeForConnection(connectionStore.getConfig(node.connectionId)), node.schema)) {
       await connectionStore.loadTables(node.connectionId, node.database, node.schema, treeLoadSearchOptions);
+    } else if (node.type === "oracle-db-links") {
+      await connectionStore.loadTreeNodeChildren(node, treeLoadSearchOptions);
     } else if (node.type === "linked-server-root" && node.connectionId) {
       await connectionStore.loadSqlServerLinkedServers(node.connectionId, treeLoadSearchOptions);
     } else if (node.type === "linked-server" && node.connectionId) {

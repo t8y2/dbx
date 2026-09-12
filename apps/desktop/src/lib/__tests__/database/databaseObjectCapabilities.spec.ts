@@ -44,7 +44,7 @@ describe("databaseObjectCapabilities", () => {
   it("exposes Oracle sequences through the existing grouped object path", () => {
     const oracleObjects = sidebarObjectKindsForDatabase("oracle");
 
-    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "DB_LINK", "PACKAGE", "PACKAGE_BODY"]);
+    expect(oracleObjects).toEqual(["TABLE", "VIEW", "MATERIALIZED_VIEW", "PROCEDURE", "FUNCTION", "SEQUENCE", "SYNONYM", "PACKAGE", "PACKAGE_BODY"]);
     expect(databaseObjectCapabilities("oracle").sourceReadable).toContain("SEQUENCE");
     expect(
       buildObjectGroupPlaceholderNodes({

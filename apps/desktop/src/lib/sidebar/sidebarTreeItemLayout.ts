@@ -9,6 +9,7 @@ const leafTypes: Set<TreeNodeType> = new Set([
   "procedure",
   "function",
   "synonym",
+  "oracle-db-link",
   "package",
   "package-body",
   "type-body",

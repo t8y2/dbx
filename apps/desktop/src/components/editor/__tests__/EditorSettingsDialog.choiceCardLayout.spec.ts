@@ -128,8 +128,8 @@ describe("EditorSettingsDialog choice card containment", () => {
     }
   });
 
-  it("restores large icon theme choices below the debug log controls", () => {
-    expect(sourceIndexForKey("iconTheme")).toBeGreaterThan(sourceIndexForKey("debugLoggingEnabled"));
+  it("keeps large icon theme choices in appearance and debug logs in About", () => {
+    expect(sourceIndexForKey("iconTheme")).toBeLessThan(sourceIndexForKey("debugLoggingEnabled"));
     expect(templateSource).toContain("data-icon-theme-settings");
     for (const key of ["iconThemeDefault", "iconThemeBlack"] as const) {
       const block = buttonBlockForKey(key);

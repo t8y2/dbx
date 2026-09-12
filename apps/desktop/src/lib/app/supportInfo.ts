@@ -70,7 +70,8 @@ export function buildAppSupportInfoRows(info: AppSupportInfo, labels: AppSupport
 
 export function formatAppSupportInfoForClipboard(info: AppSupportInfo, labels: AppSupportInfoLabels): string {
   const rows = buildAppSupportInfoRows(info, labels).map((row) => `${row.label}: ${row.value}`);
-  const extraRows: Array<[string, string | null | undefined]> = [[labels.userAgent, info.userAgent]];
+  const extraRows: Array<[string, string | null | undefined]> = [];
+  if (info.userAgent?.trim()) extraRows.push([labels.userAgent, info.userAgent]);
   if (info.databaseTypes?.length) extraRows.push([labels.databaseTypes, info.databaseTypes.join(", ")]);
   if (info.localDriverVersions?.length) {
     extraRows.push([labels.localDriverVersions, info.localDriverVersions.map((driver) => `${driver.dbType} ${driver.version}`).join(", ")]);

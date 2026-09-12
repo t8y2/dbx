@@ -6146,10 +6146,7 @@ onMounted(async () => {
           }
 
           const sql = this.cachedSql;
-          const shouldPrewarmFullDocument =
-            this.cachedWindows.length === 0 &&
-            this.prewarmedDoc !== doc &&
-            sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
+          const shouldPrewarmFullDocument = this.cachedWindows.length === 0 && this.prewarmedDoc !== doc && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
           const windows: Array<{
             from: number;
             to: number;

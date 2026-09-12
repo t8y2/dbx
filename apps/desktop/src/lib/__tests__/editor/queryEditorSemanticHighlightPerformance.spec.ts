@@ -31,7 +31,7 @@ describe("QueryEditor semantic highlighting while scrolling", () => {
 
   it("never exposes undefined decorations and prewarms the full document only once per document", () => {
     expect(queryEditorSource).toContain("this.decorations = Decoration.none;");
-    expect(queryEditorSource).toContain("private prewarmedDoc: import(\"@codemirror/state\").Text | null = null;");
+    expect(queryEditorSource).toContain('private prewarmedDoc: import("@codemirror/state").Text | null = null;');
     expect(queryEditorSource).toContain("const shouldPrewarmFullDocument =");
     expect(queryEditorSource).toContain("if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;");
   });

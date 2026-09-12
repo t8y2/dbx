@@ -145,8 +145,16 @@ function mongoDocumentGridEscapedString(value: unknown): string | undefined {
 
 /** Returns the text presented in a collection-grid editor, when customized. */
 export function mongoDocumentGridEditorText(value: unknown): string | undefined {
-  if (value === MONGO_DOCUMENT_GRID_NULL) return "NULL";
+  // An existing BSON null is represented as NULL in the grid, but editing it
+  // starts with an empty input. The private marker must never be user-facing.
+  if (value === MONGO_DOCUMENT_GRID_NULL) return "";
   return mongoDocumentGridEscapedString(value);
+}
+
+/** Returns the text used when copying a collection-grid cell. */
+export function mongoDocumentGridClipboardText(value: unknown): string | undefined {
+  if (value === MONGO_DOCUMENT_GRID_NULL) return "NULL";
+  return mongoDocumentGridEditorText(value);
 }
 
 /** Returns the custom display text required by collection-grid BSON values. */

@@ -7450,6 +7450,10 @@ defineExpose({
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar) {
   width: 5px;
+  /* Matching height keeps the horizontal scrollbar as slim as the vertical
+     one; leaving it unset renders a default-thickness bar that permanently
+     reserves editor space. */
+  height: 5px;
 }
 
 [data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-track) {

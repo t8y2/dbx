@@ -3591,6 +3591,7 @@ export default withEnglishFallback({
     sequences: "序列",
     schedulerJobs: "定时作业",
     synonyms: "同义词",
+    databaseLinks: "数据库链接",
     packages: "包",
     types: "类型",
     gridfs: "GridFS",

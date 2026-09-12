@@ -944,6 +944,7 @@ export type TreeNodeType =
   | "group-types"
   | "group-sequences"
   | "group-synonyms"
+  | "group-db-links"
   | "group-jobs"
   | "group-packages"
   | "group-partitions"

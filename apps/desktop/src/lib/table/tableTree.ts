@@ -703,6 +703,7 @@ function simpleObjectNodeType(objectType: DatabaseObjectTreeKind): TreeNodeType 
   if (objectType === "EVENT") return "event";
   if (objectType === "SEQUENCE") return "sequence";
   if (objectType === "SYNONYM") return "synonym";
+  if (objectType === "DB_LINK") return "table";
   if (objectType === "PACKAGE_BODY") return "package-body";
   if (objectType === "PACKAGE") return "package";
   if (objectType === "TYPE_BODY") return "type-body";
@@ -774,6 +775,7 @@ const groupDefs: Array<{
     nodeType: "group-synonyms",
     childType: "synonym",
   },
+  { key: "__db_links", label: "tree.databaseLinks", objectTypes: ["DB_LINK"], nodeType: "group-db-links", childType: "table" },
   {
     key: "__jobs",
     label: "tree.schedulerJobs",
@@ -797,7 +799,22 @@ const groupDefs: Array<{
   },
 ];
 
-const objectGroupNodeTypes = new Set<TreeNodeType>(["group-tables", "group-dolt-system-tables", "group-views", "group-materialized-views", "group-procedures", "group-functions", "group-triggers", "group-events", "group-sequences", "group-synonyms", "group-jobs", "group-packages", "group-types"]);
+const objectGroupNodeTypes = new Set<TreeNodeType>([
+  "group-tables",
+  "group-dolt-system-tables",
+  "group-views",
+  "group-materialized-views",
+  "group-procedures",
+  "group-functions",
+  "group-triggers",
+  "group-events",
+  "group-sequences",
+  "group-synonyms",
+  "group-db-links",
+  "group-jobs",
+  "group-packages",
+  "group-types",
+]);
 
 export function buildObjectGroupPlaceholderNodes({
   nodeId,

@@ -2251,10 +2251,14 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   const beforeCursor = sql.slice(statementSpan.start, cursor);
 
   const trailingIdentifier = parseTrailingIdentifierContext(beforeCursor, options.databaseType);
-  const prefix = trailingIdentifier?.prefix ?? "";
-  const qualifier = trailingIdentifier?.qualifier;
-  const qualifierParts = trailingIdentifier?.qualifierParts;
-  const bareStart = trailingIdentifier?.start ?? beforeCursor.length;
+  // Oracle database links use `table@link`; after the at-sign the completion
+  // target is the link name itself. Treat this as a table completion trigger
+  // while retaining the replacement range for the link suffix.
+  const oracleLinkSuffix = options.databaseType === "oracle" ? /@([A-Za-z_][\w$#]*)?$/.exec(beforeCursor) : null;
+  const prefix = oracleLinkSuffix ? (oracleLinkSuffix[1] ?? "") : (trailingIdentifier?.prefix ?? "");
+  const qualifier = oracleLinkSuffix ? undefined : trailingIdentifier?.qualifier;
+  const qualifierParts = oracleLinkSuffix ? undefined : trailingIdentifier?.qualifierParts;
+  const bareStart = oracleLinkSuffix ? beforeCursor.length - prefix.length : (trailingIdentifier?.start ?? beforeCursor.length);
   const beforeToken = beforeCursor.slice(0, Math.max(0, bareStart)).trimEnd();
   const lastWord = /([A-Za-z_][\w$]*)$/.exec(beforeToken)?.[1]?.toLowerCase() ?? "";
 
@@ -2291,8 +2295,8 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
   // identical arguments three times, which was cheap when it was regex-based but now runs a full
   // tokenizeSqlSemantic pass, so the duplicate work is worth avoiding.
   const inTableListContext = isInTableListContext(beforeToken, options.databaseType);
-  const afterTableTrigger = isTableTriggerKeyword(lastWord, options) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
-  const exclusiveTableSuggestions = EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const afterTableTrigger = !!oracleLinkSuffix || isTableTriggerKeyword(lastWord, options) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
+  const exclusiveTableSuggestions = !!oracleLinkSuffix || EXCLUSIVE_TABLE_TRIGGER_KEYWORDS.has(lastWord) || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext;
   const tableAliasAfterCursor = hasTableAliasAfterCursor(sql, cursor);
   const autoAliasTableCompletions = (lastWord === "from" || lastWord === "join" || (JOIN_MODIFIERS.has(lastWord) && isFollowedByJoin(beforeToken)) || inTableListContext) && !tableAliasAfterCursor;
   const exclusiveColumnSuggestions = !!qualifier && !exclusiveTableSuggestions && !insertInfo;

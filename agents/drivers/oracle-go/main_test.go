@@ -2096,10 +2096,10 @@ func TestOracleCompletionTablesQuerySearchesAcrossSchemasWithPriority(t *testing
 	if strings.Contains(sqlText, "WHERE UPPER(OBJECT_NAME) LIKE UPPER(:1) ESCAPE '\\' AND OWNER =") {
 		t.Fatalf("global completion must not restrict results to one owner: %s", query.SQL)
 	}
-	if !strings.Contains(sqlText, "WHEN OWNER = :3 THEN 0") || !strings.Contains(sqlText, "WHERE ROWNUM <= :5") {
+	if !strings.Contains(sqlText, "WHEN OWNER = :4 THEN 0") || !strings.Contains(sqlText, "WHERE ROWNUM <= :6") {
 		t.Fatalf("completion should prioritize the current schema and use Oracle 11g rownum limiting: %s", query.SQL)
 	}
-	if len(query.Args) != 5 || query.Args[0] != `dept\_d%` || query.Args[1] != `dept\_d%` || query.Args[2] != "APP" || query.Args[3] != "dept_d" || query.Args[4] != 201 {
+	if len(query.Args) != 6 || query.Args[0] != `dept\_d%` || query.Args[1] != `dept\_d%` || query.Args[2] != `dept\_d%` || query.Args[3] != "APP" || query.Args[4] != "dept_d" || query.Args[5] != 201 {
 		t.Fatalf("unexpected completion args: %#v", query.Args)
 	}
 }
@@ -2128,7 +2128,7 @@ func TestOracleCompletionTablesQueryScopesExplicitSchema(t *testing.T) {
 	if !strings.Contains(strings.ToUpper(query.SQL), "AND O.OWNER = :2") || !strings.Contains(strings.ToUpper(query.SQL), "AND S.OWNER = :4") {
 		t.Fatalf("explicit schema completion should restrict owner: %s", query.SQL)
 	}
-	if len(query.Args) != 7 || query.Args[1] != "HR" || query.Args[3] != "HR" || query.Args[4] != "APP" {
+	if len(query.Args) != 9 || query.Args[1] != "HR" || query.Args[3] != "HR" || query.Args[5] != "HR" || query.Args[6] != "APP" {
 		t.Fatalf("unexpected scoped completion args: %#v", query.Args)
 	}
 }

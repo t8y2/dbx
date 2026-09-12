@@ -2344,13 +2344,6 @@ func oracleCompletionTablesQuery(request completionAssistantRequest, preferredSc
 		args = append(args, owner)
 		synonymOwnerPredicate = fmt.Sprintf(" AND s.OWNER = :%d", len(args))
 	}
-	args = append(args, preferredSchema)
-	preferredParam := len(args)
-	args = append(args, strings.TrimSpace(request.Mask))
-	exactParam := len(args)
-	args = append(args, limit)
-	limitParam := len(args)
-
 	baseSQL := fmt.Sprintf(`SELECT o.OWNER,
        o.OBJECT_NAME,
        o.OBJECT_TYPE,
@@ -2368,6 +2361,31 @@ func oracleCompletionTablesQuery(request completionAssistantRequest, preferredSc
   FROM ALL_SYNONYMS s
 	WHERE s.DB_LINK IS NULL
 	    AND %s%s`, strings.Join(objectTypes, ","), objectNamePredicate, objectOwnerPredicate, synonymNamePredicate, synonymOwnerPredicate)
+	// Database links are valid Oracle table-name suffixes (for example
+	// `orders@REPORTING`). Include visible links in the same lightweight
+	// completion stream so the editor can offer them after `@`.
+	if len(objectTypes) > 0 {
+		linkArgs := len(args) + 1
+		args = append(args, pattern)
+		linkNamePredicate := oracleCompletionNamePredicate("l.DB_LINK", linkArgs, request.CaseSensitive)
+		linkOwnerPredicate := ""
+		if owner != "" {
+			args = append(args, owner)
+			linkOwnerPredicate = fmt.Sprintf(" AND l.OWNER = :%d", len(args))
+		}
+		baseSQL += fmt.Sprintf(`
+	UNION ALL
+	SELECT l.OWNER, l.DB_LINK, 'DATABASE LINK',
+	       CAST(NULL AS VARCHAR2(128)), CAST(NULL AS VARCHAR2(128))
+	  FROM ALL_DB_LINKS l
+		 WHERE %s%s`, linkNamePredicate, linkOwnerPredicate)
+	}
+	args = append(args, preferredSchema)
+	preferredParam := len(args)
+	args = append(args, strings.TrimSpace(request.Mask))
+	exactParam := len(args)
+	args = append(args, limit)
+	limitParam := len(args)
 	unionSQL := fmt.Sprintf("SELECT OWNER, OBJECT_NAME, OBJECT_TYPE, TARGET_OWNER, TARGET_NAME\nFROM (\n%s\n)", baseSQL)
 	orderedSQL := oracleCompletionOrderedSQL(unionSQL, "OBJECT_NAME", "OBJECT_TYPE", preferredParam, exactParam)
 	return oracleMetadataListQuery{

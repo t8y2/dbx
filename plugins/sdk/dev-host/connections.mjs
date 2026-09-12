@@ -27,7 +27,7 @@ export function validateRecord(manifest, record, required = true) {
     if (f.type === "number" ? typeof value !== "number" || !Number.isFinite(value) : f.type === "boolean" ? typeof value !== "boolean" : typeof value !== "string") {
       throw new Error(`Invalid field type: ${f.key}`);
     }
-    if (f.type === "select" && !f.options?.some((option) => option.value === value)) throw new Error(`Invalid option: ${f.key}`);
+    if (["select", "radio"].includes(f.type) && !f.options?.some((option) => option.value === value)) throw new Error(`Invalid option: ${f.key}`);
     if (binding(f) === "port" && (!Number.isInteger(value) || value < 0 || value > 65535)) throw new Error("Port must be between 0 and 65535");
     Object.defineProperty(values, f.key, { enumerable: true, configurable: true, writable: true, value });
   }

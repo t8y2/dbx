@@ -16,6 +16,16 @@ const contribution: PluginConnectionProviderContribution = {
   fields: [
     { key: "host", label: "Host", type: "text", required: true, placeholder: "localhost" },
     { key: "password", label: "Password", type: "password" },
+    {
+      key: "protocol",
+      label: "Protocol",
+      type: "radio",
+      default: "https",
+      options: [
+        { label: "HTTPS", value: "https" },
+        { label: "HTTP", value: "http" },
+      ],
+    },
   ],
 };
 
@@ -87,5 +97,17 @@ describe("PluginConnectionFields", () => {
     expect(root?.textContent).not.toContain("Example connection");
     expect(fieldRow?.classList.contains("grid-cols-4")).toBe(true);
     expect(document.querySelector(".rounded-lg.border")).toBeNull();
+  });
+
+  it("renders radio fields and emits the selected option", async () => {
+    const state = await mountFields();
+    const radios = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='radio']"));
+
+    expect(radios).toHaveLength(2);
+    expect(radios[0]?.checked).toBe(true);
+    radios[1]?.click();
+    await nextTick();
+
+    expect(state.values.protocol).toBe("http");
   });
 });

@@ -28,3 +28,7 @@ export function sortPluginFilesystemEntries(entries: readonly PluginFilesystemEn
     return left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: "base" });
   });
 }
+
+export function uniquePluginFilesystemEntries(entries: readonly PluginFilesystemEntry[]): PluginFilesystemEntry[] {
+  return [...new Map(entries.map((entry) => [entry.uri, entry])).values()];
+}

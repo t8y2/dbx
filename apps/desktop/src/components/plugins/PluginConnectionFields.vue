@@ -98,6 +98,12 @@ function defaultValueFor(field: PluginFormField): PluginFormFieldValue {
             </SelectItem>
           </SelectContent>
         </Select>
+        <div v-else-if="field.type === 'radio'" :id="fieldId(field)" class="flex min-h-9 flex-wrap items-center gap-x-4 gap-y-2" role="radiogroup" :aria-label="field.label">
+          <label v-for="option in field.options || []" :key="option.value" class="inline-flex cursor-pointer items-center gap-2 text-sm">
+            <input type="radio" :name="fieldId(field)" :value="option.value" :checked="String(fieldValue(field) ?? '') === option.value" class="size-4 accent-primary" @change="updateField(field, option.value)" />
+            <span>{{ option.label }}</span>
+          </label>
+        </div>
         <div v-else-if="field.type === 'boolean'" class="flex h-9 items-center">
           <Switch :id="fieldId(field)" :model-value="Boolean(fieldValue(field))" size="sm" @update:model-value="updateBooleanField(field, $event)" />
         </div>

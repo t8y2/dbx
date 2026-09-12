@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pluginFilesystemParentUri, pluginFilesystemRootUri, sortPluginFilesystemEntries } from "./pluginFilesystem";
+import { pluginFilesystemParentUri, pluginFilesystemRootUri, sortPluginFilesystemEntries, uniquePluginFilesystemEntries } from "./pluginFilesystem";
 
 describe("plugin filesystem navigation", () => {
   it("derives a default root from the first declared scheme", () => {
@@ -20,5 +20,18 @@ describe("plugin filesystem navigation", () => {
       { name: "file2.txt", uri: "sample:/file2.txt", kind: "file" },
     ]);
     expect(sorted.map((entry) => entry.name)).toEqual(["folder", "file2.txt", "file10.txt"]);
+  });
+
+  it("removes duplicate entries by URI while preserving the latest metadata", () => {
+    expect(
+      uniquePluginFilesystemEntries([
+        { name: "object.txt", uri: "s3:/object.txt", kind: "file", size: 1 },
+        { name: "object.txt", uri: "s3:/object.txt", kind: "file", size: 2 },
+        { name: "other.txt", uri: "s3:/other.txt", kind: "file" },
+      ]),
+    ).toEqual([
+      { name: "object.txt", uri: "s3:/object.txt", kind: "file", size: 2 },
+      { name: "other.txt", uri: "s3:/other.txt", kind: "file" },
+    ]);
   });
 });

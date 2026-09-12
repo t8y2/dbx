@@ -528,6 +528,7 @@ fn validate_plugin_field_type(field: &PluginFormFieldDefinition, value: &serde_j
         PluginFormFieldType::Text
         | PluginFormFieldType::Password
         | PluginFormFieldType::Select
+        | PluginFormFieldType::Radio
         | PluginFormFieldType::Textarea => value.is_string(),
         PluginFormFieldType::Number => value.is_number(),
         PluginFormFieldType::Boolean => value.is_boolean(),

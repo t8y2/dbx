@@ -25,6 +25,17 @@ function pageId(value = "legacy") {
   if (typeof value !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(value)) throw new Error("Invalid page ID");
   return value;
 }
+function localDocumentAssetPath(url, entry) {
+  if (typeof url !== "string" || /^(?:data|blob|https?):/i.test(url) || url.startsWith("//") || url.startsWith("#")) return undefined;
+  try {
+    const parsed = new URL(url, `http://dbx-plugin.local/${entry}`);
+    if (parsed.origin !== "http://dbx-plugin.local") return undefined;
+    const path = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+    return path || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function createMockHost(options) {
   const diagnostics = options.diagnostics || new Diagnostics();
@@ -146,6 +157,23 @@ export async function createMockHost(options) {
     frames.set(frame.id, frame);
     return expose(frame);
   }
+  async function frameDocument(html, channel) {
+    const urls = new Set();
+    for (const match of html.matchAll(/<script\b[^>]*?\bsrc\s*=\s*(["'])([^"']+)\1[^>]*>/gi)) urls.add(match[2]);
+    for (const match of html.matchAll(/<link\b([^>]*)>/gi)) {
+      if (!/\brel\s*=\s*(["'])[^"']*\bstylesheet\b[^"']*\1/i.test(match[1])) continue;
+      const href = match[1].match(/\bhref\s*=\s*(["'])([^"']+)\1/i);
+      if (href) urls.add(href[2]);
+    }
+    const assets = new Map();
+    await Promise.all(
+      [...urls].map(async (url) => {
+        const path = localDocumentAssetPath(url, entry);
+        if (path) assets.set(url, await readAsset(uiRoot, path));
+      }),
+    );
+    return sandboxDocument(html, channel, assets);
+  }
   function expose(frame) {
     const { session: _session, page: _page, ...safe } = frame;
     return structuredClone(safe);
@@ -199,7 +227,7 @@ export async function createMockHost(options) {
       const f = frameFor(session, p.frameId);
       const asset = await readAsset(uiRoot, entry);
       f.channel = randomUUID();
-      return { ...expose(f), html: sandboxDocument(Buffer.from(asset.dataBase64, "base64").toString("utf8"), f.channel) };
+      return { ...expose(f), html: await frameDocument(Buffer.from(asset.dataBase64, "base64").toString("utf8"), f.channel) };
     }
     return serialize(async () => {
       switch (route) {

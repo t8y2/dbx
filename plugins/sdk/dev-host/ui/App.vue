@@ -415,6 +415,12 @@ onBeforeUnmount(() => {
             <select v-if="field.type === 'select'" v-model="draft.values[field.key]" class="select select-sm mt-1 w-full" :aria-label="field.label" :required="field.required" :disabled="busy">
               <option v-for="option in field.options" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
+            <div v-else-if="field.type === 'radio'" class="mt-2 flex flex-wrap gap-x-4 gap-y-2" role="radiogroup" :aria-label="field.label">
+              <label v-for="option in field.options" :key="option.value" class="flex items-center gap-2">
+                <input v-model="draft.values[field.key]" type="radio" :name="field.key" :value="option.value" :disabled="busy" />
+                <span>{{ option.label }}</span>
+              </label>
+            </div>
             <input v-else-if="field.type === 'boolean'" v-model="draft.values[field.key]" type="checkbox" class="checkbox checkbox-sm ml-2" :aria-label="field.label" :disabled="busy" />
             <textarea v-else-if="field.type === 'textarea'" v-model="draft.values[field.key]" class="textarea mt-1 w-full" :aria-label="field.label" :required="field.required" :disabled="busy" />
             <input v-else-if="field.type === 'number'" v-model.number="draft.values[field.key]" type="number" class="input input-sm mt-1 w-full" :aria-label="field.label" :required="field.required" :disabled="busy" />

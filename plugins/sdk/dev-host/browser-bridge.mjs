@@ -120,9 +120,25 @@ function installBridge(channel) {
   });
 }
 
-export function sandboxDocument(html, channel) {
+export function sandboxDocument(html, channel, assets = new Map()) {
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; media-src data: blob:; connect-src 'none';">`;
   const bootstrap = `<script>(${installBridge.toString()})(${JSON.stringify(channel)});</script>`;
-  if (/<head\b[^>]*>/i.test(html)) return html.replace(/<head\b[^>]*>/i, (match) => match + csp + bootstrap);
-  return `<!doctype html><html><head>${csp}${bootstrap}</head><body>${html}</body></html>`;
+  const inlineAsset = (url) => {
+    const asset = assets.get(url);
+    if (!asset) return undefined;
+    return Buffer.from(asset.dataBase64, "base64").toString("utf8");
+  };
+  const withInlineScripts = html.replace(/<script\b([^>]*?)\bsrc\s*=\s*(["'])([^"']+)\2([^>]*)>\s*<\/script>/gi, (match, before, _quote, url, after) => {
+    const content = inlineAsset(url);
+    return content === undefined ? match : `<script${before}${after}>${content.replace(/<\/script/gi, "<\\/script")}</script>`;
+  });
+  const withInlineStyles = withInlineScripts.replace(/<link\b([^>]*)>/gi, (match, attributes) => {
+    if (!/\brel\s*=\s*(["'])[^"']*\bstylesheet\b[^"']*\1/i.test(attributes)) return match;
+    const href = attributes.match(/\bhref\s*=\s*(["'])([^"']+)\1/i);
+    if (!href) return match;
+    const content = inlineAsset(href[2]);
+    return content === undefined ? match : `<style>${content.replace(/<\/style/gi, "<\\/style")}</style>`;
+  });
+  if (/<head\b[^>]*>/i.test(withInlineStyles)) return withInlineStyles.replace(/<head\b[^>]*>/i, (match) => match + csp + bootstrap);
+  return `<!doctype html><html><head>${csp}${bootstrap}</head><body>${withInlineStyles}</body></html>`;
 }

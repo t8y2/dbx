@@ -264,7 +264,7 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
-export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "textarea";
+export type PluginFormFieldType = "text" | "password" | "number" | "boolean" | "select" | "radio" | "textarea";
 export type PluginFormFieldBinding = "config" | "secret" | "name" | "host" | "port" | "username" | "password" | "database";
 
 export type PluginFormFieldValue = string | number | boolean | undefined;

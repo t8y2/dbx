@@ -71,6 +71,45 @@ function createBridge() {
   );
 }
 
+function localUiAssetPath(source: string): string | undefined {
+  const trimmed = source.trim();
+  if (!trimmed || /^(?:blob:|data:|https?:|\/\/)/i.test(trimmed)) return undefined;
+  try {
+    const resolved = new URL(trimmed, "https://dbx-plugin.invalid/");
+    if (resolved.origin !== "https://dbx-plugin.invalid") return undefined;
+    const path = decodeURIComponent(resolved.pathname).replace(/^\/+/, "");
+    if (!path || path.split("/").some((segment) => segment === "..")) return undefined;
+    return path;
+  } catch {
+    return undefined;
+  }
+}
+
+async function inlineLocalUiAssets(html: string, pluginId: string): Promise<string> {
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
+  for (const resource of resources) {
+    const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
+    const path = source ? localUiAssetPath(source) : undefined;
+    if (!path) continue;
+    const asset = await api.readPluginUiAsset(pluginId, path);
+    const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
+    if (resource.tagName === "SCRIPT") {
+      const script = document.createElement("script");
+      for (const attribute of [...resource.attributes]) {
+        if (attribute.name !== "src") script.setAttribute(attribute.name, attribute.value);
+      }
+      script.textContent = content;
+      resource.replaceWith(script);
+    } else {
+      const style = document.createElement("style");
+      style.textContent = content;
+      resource.replaceWith(style);
+    }
+  }
+  return document.documentElement.outerHTML;
+}
+
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   bridge = undefined;
@@ -81,7 +120,9 @@ async function loadWorkbench() {
     const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
     if (disposed || generation !== loadGeneration) return;
     const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    source.value = pluginSandboxDocument(new TextDecoder().decode(bytes), props.plugin.manifest.permissions);
+    const html = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
+    if (disposed || generation !== loadGeneration) return;
+    source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions);
     await nextTick();
     if (disposed || generation !== loadGeneration) return;
     createBridge();

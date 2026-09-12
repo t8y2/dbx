@@ -37,6 +37,35 @@ const manifest = {
   ],
 };
 const values = { name: "Example connection", endpoint: "test-endpoint", count: 7, enabled: true, password: "test-password" };
+
+test("radio fields accept only declared options", () => {
+  const radioManifest = {
+    ...manifest,
+    contributions: manifest.contributions.map((contribution) =>
+      contribution.id === "example.connection"
+        ? {
+            ...contribution,
+            fields: [
+              ...contribution.fields,
+              {
+                key: "protocol",
+                type: "radio",
+                binding: "config",
+                default: "https",
+                options: [
+                  { label: "HTTPS", value: "https" },
+                  { label: "HTTP", value: "http" },
+                ],
+              },
+            ],
+          }
+        : contribution,
+    ),
+  };
+  const valid = validateRecord(radioManifest, { providerId: "example.connection", values: { ...values, protocol: "http" } });
+  assert.equal(valid.values.protocol, "http");
+  assert.throws(() => validateRecord(radioManifest, { providerId: "example.connection", values: { ...values, protocol: "ftp" } }), /Invalid option: protocol/);
+});
 test("lifecycle failures do not report success or discard a live connection", async (t) => {
   const { host, request } = await fixture(t);
   const original = host.sidecar.request.bind(host.sidecar);
@@ -269,6 +298,19 @@ test("a frontend-only workbench opens without a connection or sidecar", async (t
   assert.equal(rpc.status, 400);
   assert.match(rpc.error.message, /no backend/);
   assert.equal((await request("frames/close", { id: f.id })).status, 200);
+});
+test("srcdoc workbench documents inline local Vite scripts and styles", async (t) => {
+  const { root, request } = await fixture(t, true);
+  await mkdir(join(root, "ui/assets"));
+  await writeFile(join(root, "ui/assets/app.js"), "document.body.dataset.loaded = 'yes';");
+  await writeFile(join(root, "ui/assets/app.css"), "body { color: red; }");
+  await writeFile(join(root, "ui/index.html"), '<html><head><link rel="stylesheet" href="/assets/app.css"></head><body><script type="module" src="/assets/app.js"></script></body></html>');
+  const opened = await request("workbenches/open", { contributionId: "example.main" });
+  const document = (await request("frame-document", { frameId: opened.value.frame.id })).value;
+  assert.match(document.html, /document\.body\.dataset\.loaded/);
+  assert.match(document.html, /body \{ color: red; \}/);
+  assert.doesNotMatch(document.html, /src="\/assets\/app\.js"/);
+  assert.doesNotMatch(document.html, /href="\/assets\/app\.css"/);
 });
 test("save, reload, iframe isolation, generic RPC and close lifecycle", async (t) => {
   const { root, host, request } = await fixture(t);

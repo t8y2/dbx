@@ -381,24 +381,57 @@ impl PluginPackageInstaller {
         std::fs::create_dir_all(&versions_dir).map_err(|error| error.to_string())?;
         std::fs::create_dir_all(&activations_dir).map_err(|error| error.to_string())?;
         let version_dir = versions_dir.join(version.to_string());
-        if version_dir.exists() {
+        if version_dir.exists() && !matches!(policy, PluginInstallPolicy::LocalDevelopment) {
             return Err(format!("Plugin '{}' version {} is already installed", manifest.id, version));
         }
         let current = read_latest_activation(&container_dir)?;
-        let previous_version = current.as_ref().map(|record| record.version.clone());
-        std::fs::rename(&package_dir, &version_dir)
-            .map_err(|error| format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version))?;
+        let version_string = version.to_string();
+        let previous_version = current.as_ref().and_then(|record| {
+            if record.version == version_string {
+                record.previous_version.clone()
+            } else {
+                Some(record.version.clone())
+            }
+        });
+        let replaced_version_dir = if version_dir.exists() {
+            let mut backup = versions_dir.join(format!(".{version_string}.replaced"));
+            let mut suffix = 0u32;
+            while backup.exists() {
+                suffix = suffix.saturating_add(1);
+                backup = versions_dir.join(format!(".{version_string}.replaced-{suffix}"));
+            }
+            std::fs::rename(&version_dir, &backup).map_err(|error| {
+                format!("Failed to prepare plugin '{}' version {} replacement: {error}", manifest.id, version)
+            })?;
+            Some(backup)
+        } else {
+            None
+        };
+        if let Err(error) = std::fs::rename(&package_dir, &version_dir) {
+            if let Some(backup) = &replaced_version_dir {
+                let _ = std::fs::rename(backup, &version_dir);
+            }
+            return Err(format!("Failed to store plugin '{}' version {}: {error}", manifest.id, version));
+        }
 
         let activation = PluginActivationRecord {
             sequence: current.as_ref().map_or(1, |record| record.sequence.saturating_add(1)),
-            version: version.to_string(),
+            version: version_string,
             previous_version: previous_version.clone(),
             package_sha256: package_sha256.clone(),
             activated_at: Utc::now().to_rfc3339(),
         };
         if let Err(error) = write_activation_record(&container_dir, &activation) {
             let _ = std::fs::remove_dir_all(&version_dir);
+            if let Some(backup) = &replaced_version_dir {
+                let _ = std::fs::rename(backup, &version_dir);
+            }
             return Err(error);
+        }
+        if let Some(backup) = replaced_version_dir {
+            if let Err(error) = std::fs::remove_dir_all(backup) {
+                log::warn!("Failed to remove replaced plugin version backup: {error}");
+            }
         }
         if let Err(error) = prune_plugin_history(&container_dir, &activation) {
             log::warn!("Failed to prune plugin '{}' install history: {error}", manifest.id);
@@ -953,6 +986,22 @@ mod tests {
         let rollback = installer.rollback("sample.hello").unwrap();
         assert_eq!(rollback.previous_version, "1.0.0");
         assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+    }
+
+    #[test]
+    fn local_development_reinstalls_same_version_without_creating_a_self_rollback() {
+        let root = tempfile::tempdir().unwrap();
+        let installer =
+            PluginPackageInstaller::with_trust_store(root.path().to_path_buf(), "0.5.67", PluginTrustStore::default());
+        let package = package("1.0.0", None, false);
+
+        installer.install_bytes(&package, PluginInstallPolicy::LocalDevelopment).unwrap();
+        let reinstalled = installer.install_bytes(&package, PluginInstallPolicy::LocalDevelopment).unwrap();
+
+        assert_eq!(reinstalled.previous_version, None);
+        let registry = PluginRegistry::new_with_app_version(root.path().to_path_buf(), "0.5.67");
+        assert_eq!(registry.find_plugin("sample.hello").unwrap().unwrap().manifest.version, "1.0.0");
+        assert_eq!(std::fs::read_dir(root.path().join("sample.hello").join(VERSIONS_DIR)).unwrap().count(), 1);
     }
 
     #[test]

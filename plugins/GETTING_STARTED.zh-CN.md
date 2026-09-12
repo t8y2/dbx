@@ -71,11 +71,12 @@ CLI 在交互式终端中默认显示彩色输出。设置 `NO_COLOR=1` 可以�
 
 ## 2. 选择插件模板
 
-`dbx-plugin create` 提供三种模板：
+`dbx-plugin create` 提供四种模板：
 
 | 模板 | 组成 | 产物 | 适用场景 |
 | --- | --- | --- | --- |
 | `frontend` | 沙箱前端，无原生后端 | 一个 `universal.dbxp` | 纯 UI、信息面板、调用 Host API 的轻量工具 |
+| `svelte` | Svelte + Vite 沙箱前端，无原生后端 | 一个 `universal.dbxp` | 使用 Svelte 编写的自定义工作台 |
 | `rust` | 沙箱前端 + Rust Sidecar | 每个平台一个 `.dbxp` | SSH、终端、复杂协议、系统能力、高性能任务 |
 | `go` | 沙箱前端 + Go Sidecar | 每个平台一个 `.dbxp` | 已有 Go 生态、网络服务、协议客户端 |
 
@@ -87,6 +88,9 @@ CLI 在交互式终端中默认显示彩色输出。设置 `NO_COLOR=1` 可以�
 
 ```bash
 dbx-plugin create ~/Desktop/dbx-plugin-demo --template frontend
+
+# 使用 Svelte + Vite 工作台模板
+dbx-plugin create ~/Desktop/dbx-plugin-svelte --template svelte
 ```
 
 也可以一次性传入全部参数：
@@ -233,6 +237,8 @@ dist/
 5. 点击“安装 `.dbxp`”，选择 `dist/` 中的文件。
 6. 安装完成后切换到“已安装”，打开插件提供的工作台或其他入口。
 
+本地开发包允许用相同版本重新安装，DBX 会替换当前开发版本并重启对应插件运行时；正式签名包仍不允许覆盖同版本。
+
 测试结束后建议关闭“允许安装未签名开发包”。该开关只影响手动本地安装，不会放宽官方插件商店的签名校验。
 
 ## 7. 需要原生后端时
@@ -368,6 +374,9 @@ dbx-plugin keygen --help
 
 # 创建纯前端插件
 dbx-plugin create my-plugin --template frontend
+
+# 创建 Svelte + Vite 插件
+dbx-plugin create my-svelte-plugin --template svelte
 
 # 创建 Rust 插件
 dbx-plugin create my-plugin --template rust

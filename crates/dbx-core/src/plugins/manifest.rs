@@ -268,6 +268,7 @@ pub enum PluginFormFieldType {
     Number,
     Boolean,
     Select,
+    Radio,
     Textarea,
 }
 
@@ -967,23 +968,23 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             errors,
         );
 
-        if field.field_type == PluginFormFieldType::Select {
+        if matches!(field.field_type, PluginFormFieldType::Select | PluginFormFieldType::Radio) {
             if field.options.is_empty() {
                 errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} select options cannot be empty"
+                    "Contribution at index {contribution_index} field {field_index} choice options cannot be empty"
                 ));
             }
             let mut seen_values = HashSet::new();
             for option in &field.options {
                 if option.label.trim().is_empty() || !seen_values.insert(&option.value) {
                     errors.push(format!(
-                        "Contribution at index {contribution_index} field {field_index} has invalid or duplicate select options"
+                        "Contribution at index {contribution_index} field {field_index} has invalid or duplicate choice options"
                     ));
                 }
             }
         } else if !field.options.is_empty() {
             errors.push(format!(
-                "Contribution at index {contribution_index} field {field_index} only supports options for select fields"
+                "Contribution at index {contribution_index} field {field_index} only supports options for select or radio fields"
             ));
         }
 
@@ -1007,6 +1008,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
             PluginFormFieldType::Text
                 | PluginFormFieldType::Password
                 | PluginFormFieldType::Select
+                | PluginFormFieldType::Radio
                 | PluginFormFieldType::Textarea
         ) {
             errors.push(format!(
@@ -1019,6 +1021,7 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
                 PluginFormFieldType::Text
                 | PluginFormFieldType::Password
                 | PluginFormFieldType::Select
+                | PluginFormFieldType::Radio
                 | PluginFormFieldType::Textarea => default.is_string(),
                 PluginFormFieldType::Number => default.is_number(),
                 PluginFormFieldType::Boolean => default.is_boolean(),
@@ -1028,11 +1031,11 @@ fn validate_form_fields(fields: &[PluginFormFieldDefinition], contribution_index
                     "Contribution at index {contribution_index} field {field_index} has an invalid default value"
                 ));
             }
-            if field.field_type == PluginFormFieldType::Select
+            if matches!(field.field_type, PluginFormFieldType::Select | PluginFormFieldType::Radio)
                 && default.as_str().is_some_and(|default| !field.options.iter().any(|option| option.value == default))
             {
                 errors.push(format!(
-                    "Contribution at index {contribution_index} field {field_index} select default is not declared in options"
+                    "Contribution at index {contribution_index} field {field_index} choice default is not declared in options"
                 ));
             }
         }
@@ -1175,6 +1178,21 @@ mod tests {
             "entrypoints": {
                 "backend": { "executable": "bin/example" }
             },
+            "contributions": [{
+                "type": "connection-provider",
+                "id": "io.dbx.example.connection",
+                "database_type": "example",
+                "fields": [{
+                    "key": "protocol",
+                    "label": "Protocol",
+                    "type": "radio",
+                    "default": "https",
+                    "options": [
+                        { "label": "HTTPS", "value": "https" },
+                        { "label": "HTTP", "value": "http" }
+                    ]
+                }]
+            }],
             "permissions": ["host.events"]
         }))
         .unwrap();

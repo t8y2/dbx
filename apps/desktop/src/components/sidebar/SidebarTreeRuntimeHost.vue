@@ -1641,15 +1641,14 @@ async function openObjectBrowser(eventReadOnly = false, openEventEditor: boolean
     const eventCreateRequestId = openEventEditor === "create" && node.type === "group-events" ? ++mysqlEventCreateRequestSeq : undefined;
     const objectFilter = node.type === "event" || node.type === "group-events" ? "events" : undefined;
 
-    if (hasTreeNodeDatabaseContext(node)) {
-      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
-      return;
-    }
-
     const connection = connectionStore.getConfig(node.connectionId);
     if (!connection) return;
     if (connection.db_type === "plugin") {
       await queryStore.openPluginConnection(node.connectionId);
+      return;
+    }
+    if (hasTreeNodeDatabaseContext(node)) {
+      queryStore.openObjectBrowser(node.connectionId, node.database, node.schema, node.catalog, eventName, eventReadOnly, objectFilter, eventCreateRequestId);
       return;
     }
     const options = await getDatabaseOptions(node.connectionId);

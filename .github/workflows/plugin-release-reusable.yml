@@ -213,4 +213,6 @@ jobs:
             echo "No .dbxp packages were downloaded" >&2
             exit 1
           fi
-          gh release upload "$RELEASE_TAG" "${packages[@]}" release-assets/release-candidates.json --clobber
+          gh release upload "$RELEASE_TAG" "${packages[@]}" release-assets/release-candidates.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

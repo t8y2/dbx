@@ -1069,23 +1069,18 @@ fn build_go_backend(
         }
         fs::create_dir_all(build_directory).map_err(|error| error.to_string())?;
         let work_file = build_directory.join("go.work");
-        fs::write(
-            &work_file,
-            format!(
-                "go 1.22\n\nuse (\n\t{}\n\t{}\n)\n",
-                go_workspace_module_path(&backend_directory)?,
-                go_workspace_module_path(&sdk)?
-            ),
-        )
-        .map_err(|error| error.to_string())?;
+        let mut workspace_command = Command::new("go");
+        workspace_command
+            .current_dir(build_directory)
+            .arg("work")
+            .arg("init")
+            .arg("--go=1.22")
+            .arg(&backend_directory)
+            .arg(&sdk);
+        run_command(&mut workspace_command, "Go workspace initialization")?;
         command.env("GOWORK", work_file);
     }
     run_command(&mut command, "Go backend build")
-}
-
-fn go_workspace_module_path(path: &Path) -> Result<String, String> {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    serde_json::to_string(&normalized).map_err(|error| error.to_string())
 }
 
 fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
@@ -1488,21 +1483,13 @@ fn keygen_usage() -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use super::{
         color_enabled_with, create_project, generate_signing_key_file, package_manifest, package_project,
         resolve_create_options, run_cli, styled, title_from_slug, validate_semver, BackendConfig, CreateInputs,
         CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
-
-    #[test]
-    fn normalizes_windows_paths_in_go_workspace_files() {
-        assert_eq!(
-            super::go_workspace_module_path(Path::new(r"D:\a\dbx-plugin\backend")).unwrap(),
-            r#""D:/a/dbx-plugin/backend""#
-        );
-    }
 
     #[test]
     fn rejects_development_data_in_package_inputs() {

@@ -2230,7 +2230,24 @@ const appSupportInfoLabels = computed<AppSupportInfoLabels>(() => ({
   aiProviders: t("settings.supportInfoAiProviders"),
   unknown: t("settings.supportInfoUnknown"),
 }));
-const appSupportInfoRows = computed(() => (appSupportInfo.value ? buildAppSupportInfoRows(appSupportInfo.value, appSupportInfoLabels.value) : []));
+const appSupportInfoRows = computed(() => {
+  if (!appSupportInfo.value) return [];
+  const info = appSupportInfo.value;
+  return buildAppSupportInfoRows(info, appSupportInfoLabels.value).map((row) => {
+    const details: string[] = [];
+    if (row.key === "appVersion") {
+      if (info.databaseTypes?.length) details.push(`${appSupportInfoLabels.value.databaseTypes}: ${info.databaseTypes.join(", ")}`);
+      if (info.localDriverVersions?.length) {
+        details.push(`${appSupportInfoLabels.value.localDriverVersions}: ${info.localDriverVersions.map((driver) => `${driver.dbType} ${driver.version}`).join(", ")}`);
+      }
+    }
+    if (row.key === "operatingSystem") {
+      if (info.userAgent?.trim()) details.push(`${appSupportInfoLabels.value.userAgent}: ${info.userAgent.trim()}`);
+      if (info.aiProviders?.length) details.push(`${appSupportInfoLabels.value.aiProviders}: ${info.aiProviders.join(", ")}`);
+    }
+    return { ...row, tooltip: details.join("\n") };
+  });
+});
 const settingsCategoryNav = computed<{ value: SettingsCategory; label: string }[]>(() => [
   { value: "appearance", label: t("settings.appearanceTab") },
   { value: "editor", label: t("settings.editorTab") },
@@ -9291,16 +9308,25 @@ LIMIT 100;</pre
                     </Button>
                   </div>
                 </div>
-                <div v-if="appSupportInfoRows.length" class="mt-4 grid gap-3 sm:grid-cols-4">
-                  <div v-for="row in appSupportInfoRows" :key="row.key" class="min-w-0 rounded-md bg-muted/30 px-3 py-2">
-                    <div class="text-xs font-medium text-muted-foreground">
-                      {{ row.label }}
-                    </div>
-                    <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">
-                      {{ row.value }}
-                    </div>
+                <TooltipProvider v-if="appSupportInfoRows.length">
+                  <div class="mt-4 grid gap-3 sm:grid-cols-4">
+                    <Tooltip v-for="row in appSupportInfoRows" :key="row.key">
+                      <TooltipTrigger as-child>
+                        <div class="min-w-0 rounded-md bg-muted/30 px-3 py-2" :class="row.tooltip ? 'cursor-help' : ''">
+                          <div class="text-xs font-medium text-muted-foreground">
+                            {{ row.label }}
+                          </div>
+                          <div class="mt-1 min-w-0 select-text break-words font-mono text-xs text-foreground">
+                            {{ row.value }}
+                          </div>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent v-if="row.tooltip" class="max-w-[520px] whitespace-pre-line break-words text-xs leading-relaxed" side="top" align="start" :side-offset="8">
+                        {{ row.tooltip }}
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
-                </div>
+                </TooltipProvider>
                 <p v-else class="mt-4 text-sm text-muted-foreground">
                   {{ t("settings.supportInfoLoading") }}
                 </p>

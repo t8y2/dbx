@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
+import { Check, ChevronRight, CircleAlert, Download, ExternalLink, FileUp, FolderTree, Globe, LayoutGrid, List, Loader2, PackageCheck, Pencil, Plus, RefreshCw, RotateCcw, Search, Settings2, ShieldCheck, Store, Trash2 } from "@lucide/vue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -78,6 +78,7 @@ const repositoryName = ref("");
 const repositoryCatalogUrl = ref("");
 const marketplaceQuery = ref("");
 const marketplaceRepositoryId = ref("all");
+const marketplaceViewMode = ref<"grid" | "list">("grid");
 const webFileInput = ref<HTMLInputElement | null>(null);
 const panelRootRef = ref<HTMLElement | null>(null);
 const draggingPackage = ref(false);
@@ -498,18 +499,43 @@ onBeforeUnmount(() => {
 
       <TabsContent value="marketplace" class="m-0 min-h-0 flex-1 overflow-y-auto">
         <div class="flex min-h-full w-full flex-col gap-4 pb-2">
-          <div class="grid w-full gap-2 rounded-lg border bg-muted/10 p-3 md:grid-cols-[minmax(220px,1fr)_220px]">
+          <div class="flex w-full flex-col gap-2 rounded-xl border bg-card/70 p-3 sm:flex-row sm:items-center">
             <div class="relative">
               <Search class="pointer-events-none absolute left-2.5 top-2.5 size-3.5 text-muted-foreground" />
-              <Input v-model="marketplaceQuery" class="h-8 pl-8 text-xs" :placeholder="t('pluginPlatform.searchMarketplace')" />
+              <Input v-model="marketplaceQuery" class="h-8 min-w-0 pl-8 text-xs sm:w-[min(100%,28rem)]" :placeholder="t('pluginPlatform.searchMarketplace')" />
             </div>
-            <Select v-model="marketplaceRepositoryId">
-              <SelectTrigger class="h-8 text-xs"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">{{ t("pluginPlatform.allRepositories") }}</SelectItem>
-                <SelectItem v-for="repository in repositories.filter((entry) => entry.enabled)" :key="repository.id" :value="repository.id">{{ repository.name }}</SelectItem>
-              </SelectContent>
-            </Select>
+            <div class="flex min-w-0 items-center gap-2 sm:ml-auto">
+              <Select v-model="marketplaceRepositoryId">
+                <SelectTrigger class="h-8 min-w-0 flex-1 text-xs sm:w-52 sm:flex-none"><SelectValue :placeholder="t('pluginPlatform.allRepositories')" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{{ t("pluginPlatform.allRepositories") }}</SelectItem>
+                  <SelectItem v-for="repository in repositories.filter((entry) => entry.enabled)" :key="repository.id" :value="repository.id">{{ repository.name }}</SelectItem>
+                </SelectContent>
+              </Select>
+              <div class="flex shrink-0 items-center rounded-md border bg-muted/20 p-0.5">
+                <button
+                  type="button"
+                  class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                  :class="marketplaceViewMode === 'grid' ? 'bg-background text-foreground shadow-sm' : ''"
+                  :aria-label="t('structure.viewGrid')"
+                  :aria-pressed="marketplaceViewMode === 'grid'"
+                  @click="marketplaceViewMode = 'grid'"
+                >
+                  <LayoutGrid class="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  class="inline-flex size-7 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                  :class="marketplaceViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : ''"
+                  :aria-label="t('structure.viewList')"
+                  :aria-pressed="marketplaceViewMode === 'list'"
+                  @click="marketplaceViewMode = 'list'"
+                >
+                  <List class="size-3.5" />
+                </button>
+              </div>
+              <Button variant="ghost" size="icon-sm" class="shrink-0" :disabled="marketplaceLoading" :title="t('common.refresh')" :aria-label="t('common.refresh')" @click="refreshMarketplace"><RefreshCw class="size-3.5" :class="marketplaceLoading ? 'animate-spin' : ''" /></Button>
+            </div>
           </div>
 
           <div v-for="result in catalogErrors" :key="result.repository.id" class="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
@@ -525,10 +551,10 @@ onBeforeUnmount(() => {
             <div class="mt-3 text-sm font-medium">{{ t("pluginPlatform.noMarketplacePlugins") }}</div>
             <div class="mt-1 text-xs text-muted-foreground">{{ t("pluginPlatform.noMarketplacePluginsDescription") }}</div>
           </div>
-          <div v-else class="grid w-full grid-cols-[repeat(auto-fit,minmax(min(100%,320px),1fr))] gap-3">
-            <article v-for="listing in filteredMarketplaceListings" :key="listing.key" class="flex min-h-44 flex-col rounded-xl border bg-card p-4 shadow-sm transition-colors hover:border-primary/30">
+          <div v-else-if="marketplaceViewMode === 'grid'" class="grid w-full grid-cols-1 gap-3 md:grid-cols-3">
+            <article v-for="listing in filteredMarketplaceListings" :key="listing.key" class="group flex min-w-0 min-h-48 flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
               <div class="flex items-start gap-3">
-                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 rounded-xl border bg-background p-2" />
+                <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-11 rounded-xl border bg-background p-1.5" />
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-1.5">
                     <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
@@ -548,6 +574,7 @@ onBeforeUnmount(() => {
               </div>
               <p class="mt-3 line-clamp-3 text-xs leading-5 text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
               <div class="mt-3 flex flex-wrap gap-1.5">
+                <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
                 <Badge v-if="listing.plugin.permissions.length" variant="outline" class="h-5 px-1.5 text-[10px]">{{ t("pluginPlatform.permissionsCount", { count: listing.plugin.permissions.length }) }}</Badge>
               </div>
               <div class="mt-auto flex items-end justify-between gap-3 pt-4">
@@ -556,10 +583,10 @@ onBeforeUnmount(() => {
                   <span v-else-if="listing.installed">{{ t("pluginPlatform.installedVersion", { version: listing.installed.manifest.version }) }}</span>
                   <span v-else>{{ listing.plugin.license || t("pluginPlatform.licenseUnknown") }}</span>
                 </div>
-                <Button
-                  size="sm"
-                  :variant="listing.status === 'installed' || listing.status === 'unsupported' ? 'outline' : 'default'"
-                  class="h-8 gap-1.5"
+                <button
+                  type="button"
+                  class="inline-flex h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                  :class="listing.status === 'installed' || listing.status === 'unsupported' ? 'cursor-default text-gray-600 dark:text-gray-400' : 'text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700'"
                   :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
                   @click="installMarketplaceListing(listing)"
                 >
@@ -569,8 +596,47 @@ onBeforeUnmount(() => {
                   <RefreshCw v-else-if="listing.status === 'update'" class="size-3.5" />
                   <Download v-else class="size-3.5" />
                   {{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}
-                </Button>
+                </button>
               </div>
+            </article>
+          </div>
+          <div v-else class="flex w-full flex-col gap-2">
+            <article v-for="listing in filteredMarketplaceListings" :key="listing.key" class="flex items-center gap-3 rounded-xl border bg-card p-3 transition-colors hover:border-primary/40">
+              <PluginIcon :plugin-id="listing.plugin.id" :icon="listing.plugin.icon" class="size-10 rounded-lg border bg-background p-1.5" />
+              <div class="min-w-0 flex-1">
+                <div class="flex min-w-0 items-center gap-2">
+                  <span class="truncate text-sm font-semibold">{{ listing.name }}</span>
+                  <Badge v-if="listing.verified" variant="secondary" class="hidden h-5 shrink-0 gap-1 px-1.5 text-[10px] sm:inline-flex"><ShieldCheck class="size-3" />{{ t("pluginPlatform.verified") }}</Badge>
+                  <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">v{{ listing.plugin.latestVersion }}</Badge>
+                </div>
+                <div class="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
+                  <span class="truncate">{{ listing.plugin.publisher }} · {{ listing.repository.name }}</span>
+                  <button v-if="listing.plugin.source" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.sourceRepository')" :aria-label="t('pluginPlatform.sourceRepository')" @click.stop="openExternal(listing.plugin.source)">
+                    <GithubIcon />
+                  </button>
+                  <button v-if="listing.plugin.homepage" type="button" class="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100" :title="t('pluginPlatform.pluginHomepage')" :aria-label="t('pluginPlatform.pluginHomepage')" @click.stop="openExternal(listing.plugin.homepage)">
+                    <Globe class="size-3" />
+                  </button>
+                </div>
+                <p class="mt-1 truncate text-xs text-muted-foreground">{{ listing.description || t("pluginPlatform.noDescription") }}</p>
+              </div>
+              <div class="hidden max-w-52 shrink-0 gap-1.5 lg:flex">
+                <Badge v-for="tag in listing.plugin.tags.slice(0, 3)" :key="tag" variant="outline" class="h-5 px-1.5 text-[10px]">{{ tag }}</Badge>
+              </div>
+              <button
+                type="button"
+                class="inline-flex h-7 shrink-0 items-center justify-center gap-1.5 rounded-full border-0 bg-gray-100 px-4 py-1 text-xs font-semibold transition-colors disabled:opacity-50 dark:bg-gray-800"
+                :class="listing.status === 'installed' || listing.status === 'unsupported' ? 'cursor-default text-gray-600 dark:text-gray-400' : 'text-blue-600 hover:bg-gray-200 dark:text-blue-400 dark:hover:bg-gray-700'"
+                :disabled="listing.status === 'installed' || listing.status === 'unsupported' || !!marketplaceInstallingKey"
+                @click="installMarketplaceListing(listing)"
+              >
+                <Loader2 v-if="marketplaceInstallingKey === listing.key" class="size-3.5 animate-spin" />
+                <Check v-else-if="listing.status === 'installed'" class="size-3.5" />
+                <CircleAlert v-else-if="listing.status === 'unsupported'" class="size-3.5" />
+                <RefreshCw v-else-if="listing.status === 'update'" class="size-3.5" />
+                <Download v-else class="size-3.5" />
+                <span class="hidden sm:inline">{{ t(`pluginPlatform.marketplaceStatus.${listing.status}`) }}</span>
+              </button>
             </article>
           </div>
         </div>

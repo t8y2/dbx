@@ -1,6 +1,6 @@
 # dbx-plugin CLI
 
-Creates and packages DBX plugins as frontend-only universal bundles or full-stack projects with Rust or Go sidecars.
+Creates and packages DBX plugins as frontend-only universal bundles or full-stack projects with Rust or Go sidecars. The CLI also includes a Svelte + Vite workbench starter.
 
 For a complete Chinese walkthrough covering installation, templates, local DBX testing, signing, and publishing, see [`../../GETTING_STARTED.zh-CN.md`](../../GETTING_STARTED.zh-CN.md).
 
@@ -29,9 +29,10 @@ Optional `[dev]` `ui_build` and `ui_watch` argument arrays configure UI builds. 
 
 ## Project templates
 
-`dbx-plugin create` offers three templates:
+`dbx-plugin create` offers four templates:
 
 - `frontend` — sandboxed workbench UI with no native backend; produces one `universal` package.
+- `svelte` — Svelte + Vite sandboxed workbench UI with no native backend; produces one `universal` package.
 - `rust` — sandboxed workbench UI plus a Rust sidecar; produces one package per native target.
 - `go` — sandboxed workbench UI plus a Go sidecar; produces one package per native target.
 
@@ -50,7 +51,7 @@ dbx-plugin create my-plugin \
   --yes
 ```
 
-`--backend none|rust|go` is an alias for template selection. `--language rust|go` remains available as a compatibility alias for native projects.
+`--backend none|svelte|rust|go` is an alias for template selection. `--language rust|go` remains available as a compatibility alias for native projects.
 
 Generated frontend-only projects contain:
 

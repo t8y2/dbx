@@ -108,6 +108,7 @@ impl BackendLanguage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectTemplate {
     Frontend,
+    Svelte,
     Rust,
     Go,
 }
@@ -116,9 +117,10 @@ impl ProjectTemplate {
     fn parse(value: &str) -> Result<Self, String> {
         match value.trim().to_ascii_lowercase().as_str() {
             "frontend" | "frontend-only" | "ui" | "none" => Ok(Self::Frontend),
+            "svelte" => Ok(Self::Svelte),
             "rust" => Ok(Self::Rust),
             "go" | "golang" => Ok(Self::Go),
-            _ => Err("Plugin template must be 'frontend', 'rust', or 'go'".to_string()),
+            _ => Err("Plugin template must be 'frontend', 'svelte', 'rust', or 'go'".to_string()),
         }
     }
 
@@ -132,6 +134,7 @@ impl ProjectTemplate {
     fn as_str(self) -> &'static str {
         match self {
             Self::Frontend => "frontend",
+            Self::Svelte => "svelte",
             Self::Rust => "rust",
             Self::Go => "go",
         }
@@ -140,6 +143,7 @@ impl ProjectTemplate {
     fn label(self) -> &'static str {
         match self {
             Self::Frontend => "Frontend only (universal)",
+            Self::Svelte => "Svelte + Vite (universal)",
             Self::Rust => "Rust + frontend",
             Self::Go => "Go + frontend",
         }
@@ -147,7 +151,7 @@ impl ProjectTemplate {
 
     fn backend_language(self) -> Option<BackendLanguage> {
         match self {
-            Self::Frontend => None,
+            Self::Frontend | Self::Svelte => None,
             Self::Rust => Some(BackendLanguage::Rust),
             Self::Go => Some(BackendLanguage::Go),
         }
@@ -215,9 +219,17 @@ struct PackageConfig {
 struct ManifestIdentity {
     manifest_version: u32,
     id: String,
+    name: String,
     version: String,
+    publisher: String,
+    engines: ManifestEngines,
     #[serde(default)]
     entrypoints: ManifestEntrypoints,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestEngines {
+    host_api: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -264,6 +276,22 @@ const FRONTEND_TEMPLATES: &[TemplateFile] = &[
     TemplateFile { path: "manifest.json", content: include_str!("../templates/frontend/manifest.json") },
     TemplateFile { path: "README.md", content: include_str!("../templates/frontend/README.md") },
     TemplateFile { path: "ui/index.html", content: include_str!("../templates/frontend/ui/index.html") },
+    TemplateFile {
+        path: ".github/workflows/plugin-release.yml",
+        content: include_str!("../templates/frontend/github/plugin-release.yml"),
+    },
+];
+
+const SVELTE_TEMPLATES: &[TemplateFile] = &[
+    TemplateFile { path: "dbx-plugin.toml", content: include_str!("../templates/svelte/dbx-plugin.toml") },
+    TemplateFile { path: "manifest.json", content: include_str!("../templates/svelte/manifest.json") },
+    TemplateFile { path: "README.md", content: include_str!("../templates/svelte/README.md") },
+    TemplateFile { path: "package.json", content: include_str!("../templates/svelte/package.json") },
+    TemplateFile { path: "svelte.config.js", content: include_str!("../templates/svelte/svelte.config.js") },
+    TemplateFile { path: "vite.config.js", content: include_str!("../templates/svelte/vite.config.js") },
+    TemplateFile { path: "src/main.js", content: include_str!("../templates/svelte/src/main.js") },
+    TemplateFile { path: "src/App.svelte", content: include_str!("../templates/svelte/src/App.svelte") },
+    TemplateFile { path: "index.html", content: include_str!("../templates/svelte/index.html") },
     TemplateFile {
         path: ".github/workflows/plugin-release.yml",
         content: include_str!("../templates/frontend/github/plugin-release.yml"),
@@ -532,7 +560,7 @@ fn resolve_create_options<R: BufRead, W: Write>(
         None if interactive => prompt_project_template(reader, writer)?,
         None => ProjectTemplate::Frontend,
     };
-    if template == ProjectTemplate::Frontend && inputs.sdk_root.is_some() {
+    if matches!(template, ProjectTemplate::Frontend | ProjectTemplate::Svelte) && inputs.sdk_root.is_some() {
         return Err("--sdk-root requires the Rust or Go plugin template".to_string());
     }
     let plugin_id = resolve_string(
@@ -691,9 +719,11 @@ fn prompt_project_template<R: BufRead, W: Write>(reader: &mut R, writer: &mut W)
         writeln!(writer, "{}", styled_stdout("Plugin template:", ANSI_PROMPT)).map_err(|error| error.to_string())?;
         writeln!(writer, "  {}) Frontend only (universal package)", styled_stdout("1", ANSI_ACCENT))
             .map_err(|error| error.to_string())?;
-        writeln!(writer, "  {}) Rust + frontend", styled_stdout("2", ANSI_ACCENT))
+        writeln!(writer, "  {}) Svelte + Vite (universal package)", styled_stdout("2", ANSI_ACCENT))
             .map_err(|error| error.to_string())?;
-        writeln!(writer, "  {}) Go + frontend", styled_stdout("3", ANSI_ACCENT)).map_err(|error| error.to_string())?;
+        writeln!(writer, "  {}) Rust + frontend", styled_stdout("3", ANSI_ACCENT))
+            .map_err(|error| error.to_string())?;
+        writeln!(writer, "  {}) Go + frontend", styled_stdout("4", ANSI_ACCENT)).map_err(|error| error.to_string())?;
         write!(writer, "{} {} ", styled_stdout("Choose", ANSI_PROMPT), styled_stdout("(1):", ANSI_MUTED))
             .map_err(|error| error.to_string())?;
         writer.flush().map_err(|error| error.to_string())?;
@@ -703,9 +733,10 @@ fn prompt_project_template<R: BufRead, W: Write>(reader: &mut R, writer: &mut W)
         }
         match answer.trim().to_ascii_lowercase().as_str() {
             "" | "1" | "frontend" | "frontend-only" | "ui" | "none" => return Ok(ProjectTemplate::Frontend),
-            "2" | "rust" => return Ok(ProjectTemplate::Rust),
-            "3" | "go" | "golang" => return Ok(ProjectTemplate::Go),
-            _ => writeln!(writer, "{} choose 1/Frontend, 2/Rust, or 3/Go", styled_stdout("Invalid:", ANSI_WARNING))
+            "2" | "svelte" => return Ok(ProjectTemplate::Svelte),
+            "3" | "rust" => return Ok(ProjectTemplate::Rust),
+            "4" | "go" | "golang" => return Ok(ProjectTemplate::Go),
+            _ => writeln!(writer, "{} choose 1/Frontend, 2/Svelte, 3/Rust, or 4/Go", styled_stdout("Invalid:", ANSI_WARNING))
                 .map_err(|error| error.to_string())?,
         }
     }
@@ -766,7 +797,7 @@ pub fn create_project(options: &CreateOptions) -> Result<(), String> {
     let method_prefix = slug.replace('_', "-");
     let sdk_root = options.sdk_root.as_ref().map(|path| canonical_directory(path)).transpose()?;
     let (rust_dependency, go_replace) = match options.template {
-        ProjectTemplate::Frontend => (String::new(), String::new()),
+        ProjectTemplate::Frontend | ProjectTemplate::Svelte => (String::new(), String::new()),
         ProjectTemplate::Rust => (rust_sdk_dependency(sdk_root.as_deref())?, String::new()),
         ProjectTemplate::Go => (String::new(), go_sdk_replace(sdk_root.as_deref())?),
     };
@@ -789,6 +820,7 @@ pub fn create_project(options: &CreateOptions) -> Result<(), String> {
     let mut templates = SHARED_TEMPLATES.iter().collect::<Vec<_>>();
     match options.template {
         ProjectTemplate::Frontend => templates.extend(FRONTEND_TEMPLATES),
+        ProjectTemplate::Svelte => templates.extend(SVELTE_TEMPLATES),
         ProjectTemplate::Rust => {
             templates.extend(NATIVE_TEMPLATES);
             templates.extend(RUST_TEMPLATES);
@@ -852,8 +884,9 @@ pub fn package_project(options: &PackageOptions) -> Result<(PathBuf, PathBuf), S
     let manifest_raw = fs::read(&manifest_path).map_err(|error| format!("Failed to read manifest.json: {error}"))?;
     let manifest_value: Value =
         serde_json::from_slice(&manifest_raw).map_err(|error| format!("Invalid manifest.json: {error}"))?;
-    let manifest: ManifestIdentity =
-        serde_json::from_value(manifest_value.clone()).map_err(|error| format!("Invalid manifest.json: {error}"))?;
+    reject_unknown_manifest_fields(&manifest_value)?;
+    let manifest: ManifestIdentity = serde_json::from_value(manifest_value.clone())
+        .map_err(|error| format!("Invalid manifest.json identity: {error}"))?;
     if manifest.manifest_version != 1 {
         return Err(format!(
             "Unsupported manifest.json version {}; dbx-plugin packages require version 1",
@@ -861,7 +894,10 @@ pub fn package_project(options: &PackageOptions) -> Result<(PathBuf, PathBuf), S
         ));
     }
     validate_identifier(&manifest.id, "manifest plugin id")?;
+    validate_display_text(&manifest.name, "manifest name")?;
     validate_semver(&manifest.version)?;
+    validate_display_text(&manifest.publisher, "manifest publisher")?;
+    validate_display_text(&manifest.engines.host_api, "manifest engines.host_api")?;
     if manifest.entrypoints.backend.is_some() != config.backend.is_some() {
         return Err("dbx-plugin.toml and manifest.json must either both declare a backend or both omit it".to_string());
     }
@@ -886,6 +922,7 @@ pub fn package_project(options: &PackageOptions) -> Result<(PathBuf, PathBuf), S
         None => project.join("dist"),
     };
     fs::create_dir_all(&output_directory).map_err(|error| error.to_string())?;
+    validate_manifest_assets(&project, &manifest_value, &config.package.include)?;
     let stage = CleanupDirectory::prepare(output_directory.join(format!(".stage-{}-{target}", manifest.id)))?;
 
     if let (Some(backend), Some(language)) = (&config.backend, language) {
@@ -1014,6 +1051,43 @@ fn reject_unknown_manifest_fields(manifest: &Value) -> Result<(), String> {
     } else {
         Err(format!("manifest.json contains unknown top-level field(s): {}", unknown.join(", ")))
     }
+}
+
+fn validate_manifest_assets(project: &Path, manifest: &Value, includes: &[PathBuf]) -> Result<(), String> {
+    if let Some(icon) = manifest.get("icon") {
+        let icon = icon.as_str().ok_or("manifest.json icon must be a string")?;
+        validate_packaged_asset(project, includes, icon, "manifest icon")?;
+    }
+
+    let Some(entrypoints) = manifest.get("entrypoints") else {
+        return Ok(());
+    };
+    let entrypoints = entrypoints.as_object().ok_or("manifest.json entrypoints must be an object")?;
+    let Some(ui) = entrypoints.get("ui") else {
+        return Ok(());
+    };
+    let ui = ui.as_object().ok_or("manifest.json entrypoints.ui must be an object")?;
+    let entry = ui.get("entry").and_then(Value::as_str).ok_or("manifest.json entrypoints.ui.entry must be a string")?;
+    validate_relative_path(Path::new(entry), "manifest UI entry")?;
+    let root = ui.get("root").and_then(Value::as_str).unwrap_or("ui");
+    validate_relative_path(Path::new(root), "manifest UI root")?;
+    if !Path::new(entry).starts_with(root) {
+        return Err(format!("manifest UI entry '{entry}' must be inside root '{root}'"));
+    }
+    validate_packaged_asset(project, includes, entry, "manifest UI entry")
+}
+
+fn validate_packaged_asset(project: &Path, includes: &[PathBuf], value: &str, label: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    validate_relative_path(path, label)?;
+    let source = project.join(path);
+    if !source.is_file() {
+        return Err(format!("{label} '{value}' does not exist at {}", source.display()));
+    }
+    if !includes.iter().any(|include| path == include || path.starts_with(include)) {
+        return Err(format!("{label} '{value}' is not covered by [package].include"));
+    }
+    Ok(())
 }
 
 fn build_rust_backend(
@@ -1237,7 +1311,7 @@ fn validate_create_options(options: &CreateOptions) -> Result<(), String> {
     validate_semver(&options.version)?;
     validate_display_text(&options.name, "plugin name")?;
     validate_display_text(&options.description, "plugin description")?;
-    if options.template == ProjectTemplate::Frontend && options.sdk_root.is_some() {
+    if matches!(options.template, ProjectTemplate::Frontend | ProjectTemplate::Svelte) && options.sdk_root.is_some() {
         return Err("SDK root is only supported by Rust or Go plugin templates".to_string());
     }
     Ok(())
@@ -1410,7 +1484,7 @@ fn print_usage() {
     println!("\n{}", styled_stdout("Usage:", ANSI_PROMPT));
     println!("  dbx-plugin <command> [options]");
     println!("\n{}", styled_stdout("Commands:", ANSI_PROMPT));
-    println!("  {}     Create a frontend-only, Rust, or Go plugin project", styled_stdout("create", ANSI_SUCCESS));
+    println!("  {}     Create a frontend-only, Svelte, Rust, or Go plugin project", styled_stdout("create", ANSI_SUCCESS));
     println!("  {}    Build a .dbxp package and artifact metadata", styled_stdout("package", ANSI_SUCCESS));
     println!(
         "  {}        Run a plugin in the local browser development host (Node.js 22+)",
@@ -1431,11 +1505,12 @@ fn print_create_help() {
     println!("\n{}\n  {}", styled_stdout("Usage:", ANSI_PROMPT), create_usage());
     println!("\n{}", styled_stdout("Templates:", ANSI_PROMPT));
     println!("  {}   Sandboxed UI only; packages once as universal", styled_stdout("frontend", ANSI_SUCCESS));
+    println!("  {}      Svelte + Vite UI; packages once as universal", styled_stdout("svelte", ANSI_SUCCESS));
     println!("  {}       Sandboxed UI plus a Rust sidecar", styled_stdout("rust", ANSI_SUCCESS));
     println!("  {}         Sandboxed UI plus a Go sidecar", styled_stdout("go", ANSI_SUCCESS));
     println!("\n{}", styled_stdout("Options:", ANSI_PROMPT));
-    println!("  -t, --template TYPE       frontend, rust, or go (default: frontend)");
-    println!("      --backend TYPE        Alias accepting none, rust, or go");
+    println!("  -t, --template TYPE       frontend, svelte, rust, or go (default: frontend)");
+    println!("      --backend TYPE        Alias accepting none, svelte, rust, or go");
     println!("  -l, --language LANGUAGE   Compatibility alias for rust or go");
     println!("      --id ID               Reverse-domain plugin ID");
     println!("      --name NAME           Display name");
@@ -1504,8 +1579,8 @@ mod tests {
 
     use super::{
         color_enabled_with, create_project, generate_signing_key_file, package_manifest, package_project,
-        resolve_create_options, run_cli, styled, title_from_slug, validate_semver, BackendConfig, CreateInputs,
-        CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
+        resolve_create_options, run_cli, styled, title_from_slug, validate_manifest_assets, validate_semver,
+        BackendConfig, CreateInputs, CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
 
     #[test]
@@ -1657,6 +1732,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_manifest_assets_missing_from_package_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("ui")).unwrap();
+        std::fs::write(root.path().join("ui/index.html"), "<!doctype html>").unwrap();
+        let manifest = serde_json::json!({
+            "entrypoints": { "ui": { "root": "ui", "entry": "ui/index.html" } }
+        });
+
+        let error = validate_manifest_assets(root.path(), &manifest, &[PathBuf::from("assets")]).unwrap_err();
+        assert!(error.contains("not covered by [package].include"));
+    }
+
+    #[test]
     fn package_validation_and_failures_leave_no_temporary_directories() {
         let root = tempfile::tempdir().unwrap();
         let mismatch = root.path().join("mismatch");
@@ -1717,7 +1805,7 @@ mod tests {
     fn creates_frontend_rust_and_go_projects() {
         let root = tempfile::tempdir().unwrap();
         let sdk_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        for template in [ProjectTemplate::Frontend, ProjectTemplate::Rust, ProjectTemplate::Go] {
+        for template in [ProjectTemplate::Frontend, ProjectTemplate::Svelte, ProjectTemplate::Rust, ProjectTemplate::Go] {
             let directory = root.path().join(template.as_str());
             create_project(&CreateOptions {
                 directory: directory.clone(),
@@ -1727,13 +1815,13 @@ mod tests {
                 publisher: "example".to_string(),
                 description: "Generated plugin".to_string(),
                 version: "1.2.3".to_string(),
-                sdk_root: (template != ProjectTemplate::Frontend).then(|| sdk_root.clone()),
+                sdk_root: matches!(template, ProjectTemplate::Rust | ProjectTemplate::Go).then(|| sdk_root.clone()),
                 force: false,
             })
             .unwrap();
 
             assert!(directory.join("manifest.json").is_file());
-            assert!(directory.join("ui/index.html").is_file());
+            assert!(directory.join(if template == ProjectTemplate::Svelte { "index.html" } else { "ui/index.html" }).is_file());
             assert!(directory.join(".github/workflows/plugin-release.yml").is_file());
             let readme = std::fs::read_to_string(directory.join("README.md")).unwrap();
             assert!(readme.contains("Plugin submission Issue"));
@@ -1758,6 +1846,15 @@ mod tests {
                     assert!(manifest["entrypoints"].get("backend").is_none());
                     assert!(config.get("backend").is_none());
                     assert!(!directory.join("backend").exists());
+                    assert!(workflow.contains("\"target\":\"universal\""));
+                }
+                ProjectTemplate::Svelte => {
+                    assert!(manifest["entrypoints"].get("backend").is_none());
+                    assert!(config.get("backend").is_none());
+                    assert!(directory.join("src/App.svelte").is_file());
+                    assert!(directory.join("package.json").is_file());
+                    assert!(directory.join("svelte.config.js").is_file());
+                    assert!(directory.join("index.html").is_file());
                     assert!(workflow.contains("\"target\":\"universal\""));
                 }
                 ProjectTemplate::Rust => {
@@ -1814,7 +1911,7 @@ mod tests {
     fn interactive_wizard_reprompts_invalid_values() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("wizard-plugin");
-        let input = format!("{}\n4\n3\nInvalid ID\ncom.acme.wizard\n\n\n\n1\n1.2.3\nmaybe\ny\n", directory.display());
+        let input = format!("{}\n5\n4\nInvalid ID\ncom.acme.wizard\n\n\n\n1\n1.2.3\nmaybe\ny\n", directory.display());
         let mut reader = Cursor::new(input.into_bytes());
         let mut output = Vec::new();
         let options = resolve_create_options(CreateInputs::default(), true, &mut reader, &mut output).unwrap().unwrap();
@@ -1827,7 +1924,7 @@ mod tests {
         assert_eq!(options.description, "Wizard Plugin for DBX.");
         assert_eq!(options.version, "1.2.3");
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Invalid: choose 1/Frontend, 2/Rust, or 3/Go"));
+        assert!(output.contains("Invalid: choose 1/Frontend, 2/Svelte, 3/Rust, or 4/Go"));
         assert!(output.contains("Invalid: plugin id must use lowercase letters"));
         assert!(output.contains("Invalid: Version must be valid SemVer"));
         assert!(output.contains("DBX Store signs approved official releases"));

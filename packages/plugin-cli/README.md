@@ -13,10 +13,11 @@ Or run it without a global installation:
 npx @dbx-app/plugin-cli create my-plugin
 ```
 
-The package selects a precompiled binary for macOS, Linux, or Windows and bundles the matching Rust and Go DBX plugin SDK sources. Frontend-only plugins require only Node.js. Rust and Go are needed only when the plugin itself has a Rust or Go backend.
+The package selects a precompiled binary for macOS, Linux, or Windows and bundles the matching Rust and Go DBX plugin SDK sources. Frontend-only plugins, including the Svelte template, require only Node.js. Rust and Go are needed only when the plugin itself has a Rust or Go backend.
 
 ```bash
 dbx-plugin create my-plugin --template frontend
+dbx-plugin create my-svelte-plugin --template svelte
 dbx-plugin create my-rust-plugin --template rust
 dbx-plugin create my-go-plugin --template go
 dbx-plugin package my-plugin

@@ -45,7 +45,7 @@ on:
         type: string
       plugin-cli-version:
         description: Published @dbx-app/plugin-cli version used to package the plugin
-        default: "0.1.0"
+        default: "0.1.1"
         required: false
         type: string
       install-plugin-cli:

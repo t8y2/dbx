@@ -2017,7 +2017,6 @@ const columnAligns = computed<("left" | "right")[]>(() => {
 });
 
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
-  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const value = item.data[actualColIdx];
   const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
   return dataGridCellTextClass({
@@ -2036,7 +2035,6 @@ function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColI
 }
 
 function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {
-  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const item = displayItems.value[recordIndex];
   if (!item) return "text-foreground";
   const value = item.data[actualColIdx];

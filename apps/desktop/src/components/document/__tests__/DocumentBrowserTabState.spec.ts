@@ -399,6 +399,27 @@ describe("DocumentBrowser tab state (tab switch persistence)", () => {
     expect(dataGrid.localColumnFilterColumns).toBeUndefined();
   });
 
+  it("clears mongodb local column filters when the page size changes mid-session", async () => {
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+    dataGrid.localFiltersChange!({ "1": ["str:OpenGate"] });
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({ "1": ["str:OpenGate"] });
+
+    // Page stays at 0 for a page-size change, so only the pageSize input invalidates the snapshot.
+    await dataGrid.paginate!(0, 10);
+    await flushUi();
+    expect(dataGrid.localColumnFilters).toEqual({});
+
+    app!.unmount();
+    app = null;
+    root!.replaceChildren();
+    await flushUi();
+    await mountBrowser({ stateKey: "tab-local-filters-page-size" });
+
+    expect(dataGrid.localColumnFilters).toEqual({});
+    expect(dataGrid.localColumnFilterColumns).toBeUndefined();
+  });
+
   it("still forces a real reload from the refresh button after a restore", async () => {
     await mountBrowser({ stateKey: "tab-refresh" });
     app!.unmount();

@@ -374,8 +374,13 @@ function handleLocalColumnFiltersChange(filters: SerializedDataGridLocalColumnFi
   persistDocumentBrowserState({ includeData: true });
 }
 
+// Keep these sources in lockstep with documentDataSignature(): every input that
+// invalidates held rows (including pageSize and the infinite-scroll setting, which
+// can change mid-session at page 0 without moving `page`) must also drop the
+// local-filter snapshot, or a tab switch would replay filters the user watched
+// DataGrid clear on its own restore-key change.
 watch(
-  [filterInput, sortInput, appliedDocumentFilter, page],
+  [filterInput, sortInput, appliedDocumentFilter, page, pageSize, () => settingsStore.editorSettings.infiniteScroll],
   () => {
     localColumnFilters.value = {};
     localColumnFilterColumns.value = undefined;

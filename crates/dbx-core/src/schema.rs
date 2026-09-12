@@ -12441,17 +12441,11 @@ fn render_postgres_table_ddl_with_constraints_and_partition_info(
             }
         }
     }
-    if !is_partition || partition_local_objects.has_primary_key {
-        for constraint in unique_constraints {
-            if is_partition && !partition_local_objects.unique_constraints.contains(&constraint.name) {
-                continue;
-            }
-            definition_lines.push(format!(
-                "  CONSTRAINT {} {}",
-                pg_ident(&constraint.name),
-                constraint.definition.trim()
-            ));
+    for constraint in unique_constraints {
+        if is_partition && !partition_local_objects.unique_constraints.contains(&constraint.name) {
+            continue;
         }
+        definition_lines.push(format!("  CONSTRAINT {} {}", pg_ident(&constraint.name), constraint.definition.trim()));
     }
     for fk_group in group_foreign_keys_by_name(fkeys) {
         let Some(first_fk) = fk_group.first() else {

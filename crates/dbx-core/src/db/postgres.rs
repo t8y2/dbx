@@ -4082,7 +4082,7 @@ async fn list_indexes_for_relations_with_sql(
             key_is_expression,
             column_opclasses: key_opclasses,
             key_options,
-            constraint_backed: false,
+            constraint_backed: pg_row_try_bool(row, 13).unwrap_or(false),
         });
     }
     Ok(result)
@@ -4109,8 +4109,8 @@ fn postgres_indexes_for_relations_sql() -> &'static str {
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
-             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
-             , EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid) AS constraint_backed \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -4166,7 +4166,8 @@ fn postgres_indexes_for_relations_compat_sql() -> &'static str {
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS key_is_expression, \
-             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7692,7 +7693,8 @@ const POSTGRES_INDEXES_SQL: &str = "SELECT i.relname AS index_name, \
              ix.indkey AS indkey, \
              obj_description(i.oid, 'pg_class') AS index_comment, \
              array_agg(a.attname IS NULL ORDER BY k.n) AS key_is_expression, \
-             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options \
+             array_agg(ix.indoption[(k.n - 1)::int] ORDER BY k.n) FILTER (WHERE k.n <= ix.indnkeyatts) AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -7747,8 +7749,8 @@ const POSTGRES_INDEXES_COMPAT_SQL: &str = "SELECT i.relname AS index_name, \
                 AND a.attnum > 0 \
                ORDER BY pos.n \
              ) AS key_is_expression, \
-             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options \
-             , EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid) AS constraint_backed \
+             string_to_array(ix.indoption::text, ' ')::smallint[] AS key_options, \
+             EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.oid) AS constraint_backed \
              FROM pg_index ix \
              JOIN pg_class t ON t.oid = ix.indrelid \
              JOIN pg_class i ON i.oid = ix.indexrelid \
@@ -11675,7 +11677,7 @@ mod tests {
         assert!(info_compat_sql.contains("c.relkind IN ('r','p','f')"));
         assert!(info_compat_sql.contains("LIMIT 1"));
         assert!(local_objects_sql.contains("row_to_json(con)->>'conparentid'"));
-        assert!(local_objects_sql.contains("con.contype IN ('p','f')"));
+        assert!(local_objects_sql.contains("con.contype IN ('p','u','f')"));
         assert!(local_objects_sql.contains("i.inhrelid = idx.oid"));
         assert!(local_objects_sql.contains("con.contype = 'c' AND con.conislocal"));
         assert!(!local_objects_sql.contains("con.coninhcount = 0"));
@@ -13052,6 +13054,8 @@ mod tests {
             postgres_indexes_for_relations_compat_sql(),
         ] {
             assert!(sql.contains("ix.indisunique AND ix.indisvalid"));
+            assert!(sql.contains("AS constraint_backed"));
+            assert!(sql.contains("con.conindid = i.oid"));
         }
     }
 

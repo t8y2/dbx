@@ -16,7 +16,7 @@ export function oracleDatabaseLinkCompletionItems(links: readonly OracleDatabase
   // Oracle resolves object@link against the login user's private links plus
   // PUBLIC links; CURRENT_SCHEMA never enables or disables either, and the
   // link query already restricts owners to SESSION_USER and PUBLIC.
-  return links
+  return [...links]
     .sort((a, b) => Number(a.owner === "PUBLIC") - Number(b.owner === "PUBLIC"))
     .filter((link) => {
       const key = link.name.toUpperCase();

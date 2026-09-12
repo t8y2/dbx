@@ -58,17 +58,20 @@ describe("QueryEditor execution routing", () => {
     expect(contentAreaSource).toContain("function captureQueryEditorExecutionSnapshot()");
     expect(contentAreaSource).toContain("queryEditorRef.value?.captureExecutionSnapshot();");
     expect(appSource).toContain("const pendingToolbarExecutionSnapshot = ref<SqlExecutionSnapshot & { tabId?: string }>();");
-    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = snapshot ? { ...snapshot, tabId: activeTab.value?.id } : undefined;");
-    expect(appSource).toContain('if (source === "pointer")');
+    expect(appSource).toContain("contentAreaRef.value?.captureQueryEditorExecutionSnapshot?.(tabId)");
+    expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = snapshot ? { ...snapshot, tabId } : undefined;");
+    expect(appSource).toContain('if (source === "pointer" && snapshot && snapshot.tabId === targetTabId)');
     expect(appSource).toContain("pendingToolbarExecutionSnapshot.value = undefined;");
-    expect(appSource).toContain("void tryExecute(snapshot, { tabId: snapshot.tabId ?? activeTab.value?.id });");
+    expect(appSource).toContain("void tryExecute(snapshot, { tabId: targetTabId });");
     expect(appSource).toContain('@execute="(tabId: string, override?: SqlExecutionOverride) => tryExecute(override, { tabId })"');
+    expect(appSource).toContain("async function resolveActiveExecutableSql(snapshot?: SqlExecutionSnapshot, executionTab?: QueryTab)");
+    expect(appSource).toContain("const connection = connectionStore.getConfig(tab.connectionId) ?? activeConnection.value;");
     // Per-group toolbars call back into App-owned orchestration via injection.
     expect(appSource).toContain("provide(EDITOR_TOOLBAR_ACTIONS, {");
     expect(appSource).toContain("captureExecutionSnapshot: captureActiveEditorExecutionSnapshot,");
     expect(appSource).toContain("toolbarExecute: requestActiveEditorExecute,");
-    expect(editorGroupSource).toContain('@execute-pointer-down="toolbar.captureExecutionSnapshot()"');
-    expect(editorGroupSource).toContain('@toolbar-execute="toolbar.toolbarExecute($event)"');
+    expect(editorGroupSource).toContain('@execute-pointer-down="toolbar.captureExecutionSnapshot(activeTab.id)"');
+    expect(editorGroupSource).toContain('@toolbar-execute="toolbar.toolbarExecute($event, activeTab.id)"');
     expect(editorToolbarSource).toContain("function onExecutePointerDown(event: MouseEvent)");
     expect(editorToolbarSource).toContain('emit("toolbarExecute", event.detail > 0 ? "pointer" : "keyboard")');
     expect(editorToolbarSource).not.toContain('emit("execute", event.detail > 0 ? "pointer" : "keyboard")');

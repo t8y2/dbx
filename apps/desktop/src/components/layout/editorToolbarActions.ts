@@ -24,8 +24,8 @@ export interface EditorToolbarActions {
   /** Highlights the database selector of the tab that needs a database choice. */
   databaseRequiredSignalFor(tabId: string): number;
   /** Captures the acting editor's execution snapshot before a toolbar click. */
-  captureExecutionSnapshot(): void;
-  toolbarExecute(source: "pointer" | "keyboard"): void;
+  captureExecutionSnapshot(tabId: string): void;
+  toolbarExecute(source: "pointer" | "keyboard", tabId: string): void;
   cancelExecution(tabId: string): void;
   explain(tabId: string): void;
   formatSql(tabId: string): void;

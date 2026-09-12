@@ -1074,7 +1074,6 @@ fn build_go_backend(
             .current_dir(build_directory)
             .arg("work")
             .arg("init")
-            .arg("--go=1.22")
             .arg(&backend_directory)
             .arg(&sdk);
         run_command(&mut workspace_command, "Go workspace initialization")?;

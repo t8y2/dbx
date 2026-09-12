@@ -6089,6 +6089,7 @@ onMounted(async () => {
           if (this.currentView.dom.isConnected) this.currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
         }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
         private cachedDoc: import("@codemirror/state").Text | null = null;
+        private prewarmedDoc: import("@codemirror/state").Text | null = null;
         private cachedSql = "";
         private cachedDialectId = "";
         private cachedDatabaseType: DatabaseType | undefined;
@@ -6099,6 +6100,7 @@ onMounted(async () => {
         }> = [];
 
         constructor(private currentView: import("@codemirror/view").EditorView) {
+          this.decorations = Decoration.none;
           this.decorations = this.buildDecorations(currentView);
         }
 
@@ -6144,13 +6146,17 @@ onMounted(async () => {
           }
 
           const sql = this.cachedSql;
+          const shouldPrewarmFullDocument =
+            this.cachedWindows.length === 0 &&
+            this.prewarmedDoc !== doc &&
+            sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH;
           const windows: Array<{
             from: number;
             to: number;
             spans: Array<{ start: number; end: number }>;
           }> = [];
           const pendingWindows: Array<{ from: number; to: number }> = [];
-          const rangesToHighlight = this.cachedWindows.length === 0 && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
+          const rangesToHighlight = shouldPrewarmFullDocument ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
           for (const visibleRange of rangesToHighlight) {
             const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
             if (cached) {
@@ -6174,6 +6180,7 @@ onMounted(async () => {
             const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
             const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
             if (!tree) return this.decorations;
+            if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
             for (const window of pendingWindows) {
               const entry = {
                 ...window,

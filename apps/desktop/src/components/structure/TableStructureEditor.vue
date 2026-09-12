@@ -1181,6 +1181,7 @@ function isManticoreJsonColumn(column: EditableStructureColumn): boolean {
 
 let sqlPreviewRequestId = 0;
 let structureLoadRequestId = 0;
+let structureMetadataRevalidationId = 0;
 let tableCommentLoadRequestId = 0;
 let tableCommentLoadPromise: Promise<void> | null = null;
 let tableOwnerLoadRequestId = 0;
@@ -2085,6 +2086,9 @@ async function loadStructure(
   secondaryMetadataErrors.value = {};
   let secondaryMetadataScheduled = false;
   let loadedSuccessfully = false;
+  let columnsServedFromCache = false;
+  let commentServedFromCache = false;
+  let appliedColumnsSignature: string | undefined;
   try {
     await store.ensureConnected(connectionId);
 
@@ -2102,7 +2106,13 @@ async function loadStructure(
             .then((status) => ({ known: true, status }))
             .catch(() => ({ known: false, status: { isPartitionedParent: false, isPartition: false } }))
         : Promise.resolve({ known: true, status: { isPartitionedParent: false, isPartition: false } });
-    const columnsPromise = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value) : Promise.resolve(undefined);
+    const columnsLoad = effectiveScope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: forceMetadata }) : undefined;
+    const columnsPromise = columnsLoad
+      ? columnsLoad.then((result) => {
+          columnsServedFromCache = result.cacheStatus !== "remote";
+          return result.value;
+        })
+      : Promise.resolve(undefined);
     const indexesPromise = effectiveScope.indexes
       ? tableMetadataCapabilities.value.indexes
         ? loadObjectMetadataFacet(metadataRequest, "indexes", () => api.listIndexes(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
@@ -2123,7 +2133,13 @@ async function loadStructure(
         ? loadObjectMetadataFacet(metadataRequest, "triggers", () => api.listTriggers(connectionId, database, schema, tableName, catalog), { force: forceMetadata }).then((result) => result.value)
         : Promise.resolve([])
       : Promise.resolve(undefined);
-    const tableCommentPromise = effectiveScope.tableComment && structureCapabilities.value.comment ? loadCachedTableComment(metadataRequest, forceMetadata).then((result) => result.value) : Promise.resolve(undefined);
+    const tableCommentLoad = effectiveScope.tableComment && structureCapabilities.value.comment ? loadCachedTableComment(metadataRequest, forceMetadata) : undefined;
+    const tableCommentPromise = tableCommentLoad
+      ? tableCommentLoad.then((result) => {
+          commentServedFromCache = result.cacheStatus !== "remote";
+          return result.value;
+        })
+      : Promise.resolve(undefined);
 
     let nextColumns = await columnsPromise;
     if (nextColumns) {
@@ -2144,6 +2160,7 @@ async function loadStructure(
       const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
       const hydratedColumnDrafts = supportsCharacterLengthUnits.value && options.characterLengthUnitsAfterSave ? restoreCharacterLengthUnitsAfterSave(databaseType.value, nextColumnDrafts, options.characterLengthUnitsAfterSave) : nextColumnDrafts;
       columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      appliedColumnsSignature = JSON.stringify(nextColumns);
       loadedMetadataFacets.add("columns");
       if (!options.preserveDraft) clearColumnSelection();
     }
@@ -2227,6 +2244,14 @@ async function loadStructure(
       await secondaryMetadataPromise;
     }
     loadedSuccessfully = true;
+    // Cache-served structure metadata can be stale when another session rebuilt
+    // the table (#8816): the cache is only invalidated by in-app mutations.
+    // Revalidate in the background. Manticore columns are re-derived from the
+    // DDL locally, so leave those to the explicit refresh.
+    const manticoreDerivesColumnsFromDdl = databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl;
+    if (!forceMetadata && !manticoreDerivesColumnsFromDdl && (columnsServedFromCache || commentServedFromCache)) {
+      void revalidateCachedStructureMetadata(requestId, { columns: columnsServedFromCache, tableComment: commentServedFromCache }, appliedColumnsSignature);
+    }
   } catch (e: any) {
     if (showErrors) {
       errorMessage.value = e?.message || String(e);
@@ -2241,6 +2266,51 @@ async function loadStructure(
     if (!options.preserveDraft && loadedSuccessfully && requestId === structureLoadRequestId) {
       markDraftHydratedAndSync();
     }
+  }
+}
+
+/** Re-fetch structure facets that were served from the metadata cache and apply
+ * them while the drafts they feed are still clean: reopening the editor after
+ * another session rebuilt the table must not keep showing the old columns
+ * (#8816). User edits stay untouched and remain refreshable from the toolbar. */
+async function revalidateCachedStructureMetadata(loadRequestId: number, scope: { columns: boolean; tableComment: boolean }, appliedColumnsSignature: string | undefined) {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const catalog = props.catalog;
+  const schema = metadataSchema.value;
+  const tableName = props.tableName;
+  if (!connectionId || !database || !tableName) return;
+  const revalidationId = ++structureMetadataRevalidationId;
+  const metadataRequest = { connectionId, database, schema, tableName, catalog };
+  try {
+    // Force alone only clears this facet's own key; the web backend keeps its
+    // own backend-columns/backend-comment entries under the same table prefix
+    // and would serve them to the forced re-fetch. Drop the whole table scope
+    // first, the same thing an explicit "Refresh Structure" does.
+    await invalidateObjectMetadataCache({ connectionId, database, schema, tableName });
+    const [columnsLoad, commentLoad] = await Promise.all([
+      scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: true }) : Promise.resolve(undefined),
+      scope.tableComment ? loadCachedTableComment(metadataRequest, true) : Promise.resolve(undefined),
+    ]);
+    // A newer load or revalidation supersedes this one.
+    if (revalidationId !== structureMetadataRevalidationId || loadRequestId !== structureLoadRequestId) return;
+
+    let applied = false;
+    const nextColumns = columnsLoad?.value;
+    if (nextColumns && !captureStructureRefreshScope().columns && JSON.stringify(nextColumns) !== appliedColumnsSignature) {
+      columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+      scheduleSqlPreviewRefresh();
+      applied = true;
+    }
+    const nextComment = commentLoad?.value;
+    if (nextComment !== undefined && tableComment.value === originalTableComment.value && nextComment !== originalTableComment.value) {
+      originalTableComment.value = nextComment;
+      tableComment.value = nextComment;
+      applied = true;
+    }
+    if (applied) syncDraftToParent();
+  } catch (e) {
+    console.warn("[DBX][structure-editor:metadata-revalidation-failed]", e);
   }
 }
 

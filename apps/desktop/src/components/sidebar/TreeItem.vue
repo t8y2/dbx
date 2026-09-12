@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineAsyncComponent, ref, computed, inject, shallowRef, watch, onBeforeUnmount } from "vue";
+import { ref, computed, inject, shallowRef, watch, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
 import {
   Database,
@@ -39,7 +39,7 @@ import {
   CircleX,
   RefreshCw,
 } from "@lucide/vue";
-const OracleDatabaseLinksDialog = defineAsyncComponent(() => import("@/components/objects/OracleDatabaseLinksDialog.vue"));
+import OracleDatabaseLinksDialog from "@/components/objects/OracleDatabaseLinksDialog.vue";
 const showDatabaseLinks = ref(false);
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";

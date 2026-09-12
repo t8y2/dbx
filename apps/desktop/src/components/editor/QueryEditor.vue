@@ -4709,7 +4709,7 @@ async function provideSqlCompletions(context: CompletionContext) {
       return {
         from: databaseLinkContext.from,
         to: databaseLinkContext.to,
-        options: oracleDatabaseLinkCompletionItems(links, databaseLinkContext.prefix, props.schema).map((item) => ({
+        options: oracleDatabaseLinkCompletionItems(links, databaseLinkContext.prefix).map((item) => ({
           ...item,
           apply(editor: EditorViewType, _completion: unknown, from: number, to: number) {
             markCompletionAccepted({ label: item.label, type: "text", boost: 0 });

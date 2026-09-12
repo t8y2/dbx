@@ -1725,7 +1725,7 @@ mod tests {
             let workflow = std::fs::read_to_string(directory.join(".github/workflows/plugin-release.yml")).unwrap();
             assert!(!workflow.contains("signing-key-id"));
             assert!(!workflow.contains("DBX_PLUGIN_SIGNING_KEY"));
-            assert!(workflow.contains("plugin-cli-version: 0.1.0"));
+            assert!(workflow.contains("plugin-cli-version: 0.1.1"));
             assert!(!workflow.contains("sdk-ref:"));
 
             match template {

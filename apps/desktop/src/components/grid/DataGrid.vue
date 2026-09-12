@@ -3947,6 +3947,11 @@ function isIoTDBTimestampColumn(columnIndex: number): boolean {
 }
 
 function inlineCellEditorText(value: CellValue, columnIndex: number): string {
+  // Keyboard-driven cell edits must match the double-click path: the Mongo
+  // collection grid's internal null sentinel (and escaped strings) must not
+  // leak into the editor as raw text (#8812).
+  const documentGridText = props.mongoCollectionGrid ? mongoDocumentGridEditorText(value) : undefined;
+  if (documentGridText !== undefined) return documentGridText;
   const columnInfo = tableColumnForGridColumn(columnIndex) ?? resultColumnInfoForGridColumn(columnIndex);
   const columnType = props.result.column_types?.[columnIndex] ?? columnInfo?.data_type;
   return (

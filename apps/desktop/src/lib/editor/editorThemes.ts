@@ -629,6 +629,12 @@ const FUNCTION_ICON: LucideIconNode = [
   ["path", { d: "M4 4v7a4 4 0 0 0 4 4h12" }],
 ];
 
+const DATABASE_LINK_ICON: LucideIconNode = [
+  ["path", { d: "M9 17H7A5 5 0 0 1 7 7h2" }],
+  ["path", { d: "M15 7h2a5 5 0 0 1 0 10h-2" }],
+  ["path", { d: "M8 12h8" }],
+];
+
 const SCHEMA_ICON: LucideIconNode = [["path", { d: "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2v11z" }]];
 
 function encodeSvgIcon(iconNode: LucideIconNode): string {
@@ -1063,6 +1069,10 @@ export function buildSqlCompletionThemeRules(): CodeMirrorStyleSpec {
     ".cm-completionIcon-function": {
       color: colorMixValue("var(--emerald-500, #10b981)", "color-mix(in oklch, var(--emerald-500, #10b981) 92%, var(--popover-foreground))"),
       ...lucideCompletionIconMask(FUNCTION_ICON),
+    },
+    ".cm-completionIcon-namespace": {
+      color: colorMixValue("var(--sky-500, #0ea5e9)", "color-mix(in oklch, var(--sky-500, #0ea5e9) 92%, var(--popover-foreground))"),
+      ...lucideCompletionIconMask(DATABASE_LINK_ICON),
     },
     ".cm-completionIcon-schema": {
       color: colorMixValue("var(--amber-500, #f59e0b)", "color-mix(in oklch, var(--amber-500, #f59e0b) 92%, var(--popover-foreground))"),

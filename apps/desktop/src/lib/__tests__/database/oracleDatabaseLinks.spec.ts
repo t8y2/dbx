@@ -16,6 +16,12 @@ describe("Oracle database links", () => {
   it("deduplicates public links shadowed by a private link and never inserts owner qualification", () => {
     expect(items([{ ...privateLink, owner: "PUBLIC" }, privateLink], "remote.")).toEqual([{ label: privateLink.name, apply: privateLink.name, type: "namespace", detail: "APP · REMOTE_USER · //localhost:1521/XE" }]);
   });
+  it("hides a private link outside its schema and keeps the public fallback", () => {
+    const publicLink = { ...privateLink, owner: "PUBLIC" };
+    expect(items([privateLink, publicLink], "", "OTHER")).toEqual(items([publicLink], ""));
+    expect(items([privateLink], "", "OTHER")).toEqual([]);
+    expect(items([privateLink], "", "APP")).toHaveLength(1);
+  });
   it("uses the login user's visibility independently of current schema", () => {
     expect(ORACLE_DATABASE_LINKS_SQL).toContain("SESSION_USER");
     expect(ORACLE_DATABASE_LINKS_SQL).toContain("'PUBLIC'");

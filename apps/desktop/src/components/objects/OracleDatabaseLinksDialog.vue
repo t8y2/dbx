@@ -13,6 +13,7 @@ const emit = defineEmits<{ "update:open": [boolean]; changed: [] }>();
 const { t } = useI18n();
 const store = useConnectionStore();
 const links = ref<OracleDatabaseLink[]>([]);
+const sessionUser = ref("");
 const selected = ref<OracleDatabaseLink>();
 const search = ref("");
 const busy = ref(false);
@@ -45,7 +46,9 @@ async function reload() {
   error.value = "";
   try {
     const result = await store.listOracleDatabaseLinks(props.connectionId, props.database);
+    const identity = await api.executeQuery(props.connectionId, props.database, "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL", undefined, undefined, { maxRows: 1, timeoutSecs: 15 });
     if (requested !== revision) return;
+    sessionUser.value = String(identity.rows[0]?.[0] || "");
     links.value = result;
     selected.value = result.find((link) => link.name === (selected.value?.name || props.name) && link.owner === (selected.value?.owner || props.owner));
   } catch (e) {
@@ -67,7 +70,8 @@ function begin(next: "create" | "alter" | "drop") {
   }
 }
 async function execute(sql: string) {
-  return executeWithProductionSqlGuard({ connection: store.getConfig(props.connectionId), database: props.database, sql, source: t("tree.databaseLinks"), execute: () => api.executeQuery(props.connectionId, props.database, sql, undefined, undefined, { maxRows: 1, timeoutSecs: 15 }) });
+  if (!sessionUser.value) throw new Error("Unable to determine the Oracle session user");
+  return executeWithProductionSqlGuard({ connection: store.getConfig(props.connectionId), database: props.database, sql, source: t("tree.databaseLinks"), execute: () => api.executeQuery(props.connectionId, props.database, sql, sessionUser.value, undefined, { maxRows: 1, timeoutSecs: 15 }) });
 }
 async function save() {
   if (busy.value) return;

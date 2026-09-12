@@ -4706,7 +4706,21 @@ async function provideSqlCompletions(context: CompletionContext) {
       if (!hasDatabase) return null;
       const links = await connectionStore.listOracleDatabaseLinks(props.connectionId, props.database!);
       if (epoch !== completionEpoch) return null;
-      return { from: databaseLinkContext.from, to: databaseLinkContext.to, options: oracleDatabaseLinkCompletionItems(links, databaseLinkContext.prefix), validFor: /^[A-Za-z0-9_$#.]*$/ };
+      return {
+        from: databaseLinkContext.from,
+        to: databaseLinkContext.to,
+        options: oracleDatabaseLinkCompletionItems(links, databaseLinkContext.prefix, props.schema).map((item) => ({
+          ...item,
+          apply(editor: EditorViewType, _completion: unknown, from: number, to: number) {
+            markCompletionAccepted({ label: item.label, type: "text", boost: 0 });
+            // Keep the entire link suffix intact and use the normal completion
+            // transaction so accepting a link does not immediately reopen the menu.
+            if (codeMirrorInsertCompletionText) editor.dispatch(codeMirrorInsertCompletionText(editor.state, item.apply, from, to));
+            else editor.dispatch({ changes: { from, to, insert: item.apply }, selection: { anchor: from + item.apply.length } });
+          },
+        })),
+        validFor: /^[A-Za-z0-9_$#.]*$/,
+      };
     }
 
     if (sequenceLiteralContext) {

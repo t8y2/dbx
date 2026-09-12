@@ -11,9 +11,12 @@ export function oracleDatabaseLinkCompletionContext(sql: string, cursor: number,
   return { prefix, from: cursor - prefix.length, to: cursor + (/^[A-Za-z0-9_$#.]*/.exec(sql.slice(cursor))?.[0].length ?? 0) };
 }
 
-export function oracleDatabaseLinkCompletionItems(links: readonly OracleDatabaseLink[], prefix: string) {
+export function oracleDatabaseLinkCompletionItems(links: readonly OracleDatabaseLink[], prefix: string, currentSchema?: string) {
   const seen = new Set<string>();
-  return [...links]
+  // Oracle resolves a private link in the current schema, while another user's
+  // private link cannot be used just by switching CURRENT_SCHEMA.
+  return links
+    .filter((link) => link.owner === "PUBLIC" || !currentSchema || link.owner === currentSchema)
     .sort((a, b) => Number(a.owner === "PUBLIC") - Number(b.owner === "PUBLIC"))
     .filter((link) => {
       const key = link.name.toUpperCase();

@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Plugin CLI version to publish, for example 0.1.0"
+        description: "Plugin CLI version to publish, for example 0.1.1"
         required: true
-        default: "0.1.0"
+        default: "0.1.1"
       npm-tag:
         description: "npm distribution tag"
         required: true

@@ -1,6 +1,6 @@
 {
   "name": "@dbx-app/plugin-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Create and package DBX plugins without compiling the DBX plugin CLI",
   "keywords": [
     "cli",
@@ -34,12 +34,12 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "optionalDependencies": {
-    "@dbx-app/plugin-cli-darwin-arm64": "0.1.0",
-    "@dbx-app/plugin-cli-darwin-x64": "0.1.0",
-    "@dbx-app/plugin-cli-linux-arm64-gnu": "0.1.0",
-    "@dbx-app/plugin-cli-linux-x64-gnu": "0.1.0",
-    "@dbx-app/plugin-cli-win32-arm64": "0.1.0",
-    "@dbx-app/plugin-cli-win32-x64": "0.1.0"
+    "@dbx-app/plugin-cli-darwin-arm64": "0.1.1",
+    "@dbx-app/plugin-cli-darwin-x64": "0.1.1",
+    "@dbx-app/plugin-cli-linux-arm64-gnu": "0.1.1",
+    "@dbx-app/plugin-cli-linux-x64-gnu": "0.1.1",
+    "@dbx-app/plugin-cli-win32-arm64": "0.1.1",
+    "@dbx-app/plugin-cli-win32-x64": "0.1.1"
   },
   "engines": {
     "node": ">=18.18.0"

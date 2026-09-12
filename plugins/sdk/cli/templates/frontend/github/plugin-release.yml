@@ -15,5 +15,5 @@ jobs:
       package-command: dbx-plugin package .
       package-path: dist/*.dbxp
       metadata-path: dist/*.artifact.json
-      plugin-cli-version: 0.1.0
+      plugin-cli-version: 0.1.1
       build-matrix: '{"include":[{"runner":"ubuntu-24.04","target":"universal"}]}'

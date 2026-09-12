@@ -176,6 +176,11 @@ export function sqlReferenceAnalysisDialectFor(options: { databaseType?: Databas
 
 export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; dialect?: "mysql" | "postgres" | "sqlserver" | "clickhouse" | "doris" }): SqlSemanticDialectAdapter {
   if (options.databaseType === "clickhouse") return SQL_SEMANTIC_DIALECTS.clickhouse;
+  // Doris/StarRocks connections ride the editor's MySQL fallback dialect (codeMirrorSqlDialect maps
+  // them to "mysql"), so the explicit-dialect branch below would otherwise mask the doris adapter
+  // (LATERAL VIEW modeling, etc.) on the real editor path. Like clickhouse, they win on
+  // databaseType regardless of the passed dialect.
+  if (options.databaseType === "doris" || options.databaseType === "starrocks") return SQL_SEMANTIC_DIALECTS.doris;
   if (options.dialect && SQL_SEMANTIC_DIALECTS[options.dialect]) return SQL_SEMANTIC_DIALECTS[options.dialect];
   switch (options.databaseType) {
     case "postgres":
@@ -187,9 +192,6 @@ export function sqlSemanticDialectFor(options: { databaseType?: DatabaseType; di
       return SQL_SEMANTIC_DIALECTS.postgres;
     case "mysql":
       return SQL_SEMANTIC_DIALECTS.mysql;
-    case "doris":
-    case "starrocks":
-      return SQL_SEMANTIC_DIALECTS.doris;
     case "sqlserver":
       return SQL_SEMANTIC_DIALECTS.sqlserver;
     case "sqlite":

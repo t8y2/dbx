@@ -128,7 +128,7 @@ export function tokenizeSqlSemantic(input: string, dialectId = "mysql", options?
       continue;
     }
 
-    if (ch === "#" && dialectId === "mysql") {
+    if (ch === "#" && (dialectId === "mysql" || dialectId === "doris")) {
       index += 1;
       while (index < input.length && input[index] !== "\n" && input[index] !== "\r") index += 1;
       tokens.push(token("comment", input.slice(start, index), start, index, depth));

@@ -466,7 +466,11 @@ function parseRowSourceList(state: ParseState, target: number, introducer: strin
 
 function parseDorisLateralView(state: ParseState, index: number, sourceIndex: number): { source: SqlSemanticRowSource; nextIndex: number } | null {
   if (state.dialect.id !== "doris" || state.tokens[index]?.normalized !== "lateral" || state.tokens[index + 1]?.normalized !== "view") return null;
-  const functionName = readQualifiedName(state.tokens, index + 2, state.dialect);
+  // Doris's `LATERAL VIEW [OUTER] fn(...) alias AS col` -- skip the optional OUTER marker so the
+  // OUTER form models the same function columns as the plain form.
+  let functionIndex = index + 2;
+  if (state.tokens[functionIndex]?.normalized === "outer") functionIndex += 1;
+  const functionName = readQualifiedName(state.tokens, functionIndex, state.dialect);
   if (!functionName || state.tokens[functionName.nextIndex]?.text !== "(") return null;
   const close = findMatchingParenToken(state.tokens, functionName.nextIndex);
   if (close < 0) return null;
@@ -492,7 +496,7 @@ function parseDorisLateralView(state: ParseState, index: number, sourceIndex: nu
       name,
       alias: name,
       qualifierParts: [name],
-      qualifiedName: functionName.qualifiedName,
+      qualifiedName: functionName.name,
       sourceSpan: { start: state.tokens[index].span.start, end: endToken.span.end },
       columns: columns.length ? columns : undefined,
     },
@@ -533,16 +537,20 @@ function parseRowSourcesAtDepth(state: ParseState, sourceDepth: number, sourceIn
       sources.push(...parsed.sources);
       index = parsed.nextIndex - 1;
 
-      let lateral = parseDorisLateralView(state, parsed.nextIndex, sourceIndexOffset + sources.length);
+      // Track the position past any LATERAL VIEW clauses so the FROM-list separator check sees
+      // the real comma after them (parsed.nextIndex points at the first "lateral" token itself).
+      let afterSources = parsed.nextIndex;
+      let lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
       while (lateral) {
         sources.push(lateral.source);
         index = lateral.nextIndex - 1;
-        lateral = parseDorisLateralView(state, lateral.nextIndex, sourceIndexOffset + sources.length);
+        afterSources = lateral.nextIndex;
+        lateral = parseDorisLateralView(state, afterSources, sourceIndexOffset + sources.length);
       }
 
-      const separator = state.tokens[parsed.nextIndex];
+      const separator = state.tokens[afterSources];
       if (normalized !== "from" || separator?.text !== "," || separator.depth !== sourceDepth) break;
-      target = parsed.nextIndex + 1;
+      target = afterSources + 1;
     }
   }
   return dedupeSources(sources);

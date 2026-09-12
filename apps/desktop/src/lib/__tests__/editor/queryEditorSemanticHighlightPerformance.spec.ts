@@ -29,6 +29,15 @@ describe("QueryEditor semantic highlighting while scrolling", () => {
     expect(queryEditorSource).toContain("refreshSqlSemanticHighlightEffect.of(null)");
   });
 
+  it("keeps existing highlights while the parser catches up instead of wiping them", () => {
+    // An incomplete Lezer parse must not clear table-name decorations: the
+    // deferred refresh retries, so a freshly mounted editor (tab switch) also
+    // recovers even without a later viewport change.
+    expect(queryEditorSource).toContain('decorations: import("@codemirror/view").DecorationSet = Decoration.set([]);');
+    expect(queryEditorSource).toContain("this.scheduleRefresh(currentView);");
+    expect(queryEditorSource).toContain("return this.decorations;");
+  });
+
   it("keeps preview and diagnostics on the shared statement-range cache", () => {
     expect(queryEditorSource).toContain("executableStatementRangeCache = executableStatementRangeCacheForDoc");
     expect(queryEditorSource).toContain('props.databaseType === "sqlserver" ? undefined : executableStatementRangeCache?.ranges');

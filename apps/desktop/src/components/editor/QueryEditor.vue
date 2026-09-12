@@ -6083,7 +6083,7 @@ onMounted(async () => {
     createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
     ViewPlugin.fromClass(
       class {
-        decorations: import("@codemirror/view").DecorationSet;
+        decorations: import("@codemirror/view").DecorationSet = Decoration.set([]);
         private refreshTask = createDeferredEditorTask(() => {
           if (this.currentView.dom.isConnected) this.currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
         }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
@@ -6170,7 +6170,16 @@ onMounted(async () => {
 
           if (pendingWindows.length > 0) {
             const tree = ensureSyntaxTree(currentView.state, Math.max(...pendingWindows.map((window) => window.to)), 25);
-            if (!tree) return Decoration.set([]);
+            if (!tree) {
+              // The Lezer parse has not reached the pending windows yet (long
+              // documents). Keep the decorations that are still valid and let
+              // the deferred refresh rebuild them once parsing catches up —
+              // returning an empty set here wiped table-name colors after
+              // scrolling stopped or when a freshly mounted editor (tab
+              // switch) had no later viewport change to trigger a rebuild.
+              this.scheduleRefresh(currentView);
+              return this.decorations;
+            }
             for (const window of pendingWindows) {
               const entry = {
                 ...window,

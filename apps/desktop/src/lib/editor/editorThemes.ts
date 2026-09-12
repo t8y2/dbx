@@ -31,7 +31,10 @@ export function createRunStatementButtonDom(ariaLabel = "Execute statement"): HT
 export function sqlSemanticHighlightTheme(EditorView: typeof import("@codemirror/view").EditorView): Extension {
   return EditorView.theme({
     ".cm-sql-table-name, .cm-sql-table-name *": {
-      color: `var(${SQL_TABLE_COLOR_CSS_VAR}) !important`,
+      // Built-in CodeMirror themes do not define the editor-specific table color
+      // variable. Keep semantic table names visible there as well, while custom
+      // and IDE themes continue to use their configured table color.
+      color: `var(${SQL_TABLE_COLOR_CSS_VAR}, #b4530b) !important`,
     },
   });
 }

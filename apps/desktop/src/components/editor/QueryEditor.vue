@@ -6077,6 +6077,7 @@ onMounted(async () => {
     queryEditorLineCommentToken(props.databaseType) === "//" ? shellLineCommentHighlightPlugin : [],
   ];
   const MAX_SQL_SEMANTIC_HIGHLIGHT_WINDOWS = 32;
+  const MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH = 128_000;
   const SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100;
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
   buildSqlSemanticHighlightExtension = () => [
@@ -6149,7 +6150,8 @@ onMounted(async () => {
             spans: Array<{ start: number; end: number }>;
           }> = [];
           const pendingWindows: Array<{ from: number; to: number }> = [];
-          for (const visibleRange of currentView.visibleRanges) {
+          const rangesToHighlight = this.cachedWindows.length === 0 && sql.length <= MAX_FULL_DOCUMENT_SQL_SEMANTIC_HIGHLIGHT_LENGTH ? [{ from: 0, to: sql.length }] : currentView.visibleRanges;
+          for (const visibleRange of rangesToHighlight) {
             const cached = this.cachedWindows.find((candidate) => candidate.from <= visibleRange.from && candidate.to >= visibleRange.to);
             if (cached) {
               if (!windows.includes(cached)) windows.push(cached);
@@ -6169,8 +6171,9 @@ onMounted(async () => {
           }
 
           if (pendingWindows.length > 0) {
-            const tree = ensureSyntaxTree(currentView.state, Math.max(...pendingWindows.map((window) => window.to)), 25);
-            if (!tree) return Decoration.set([]);
+            const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
+            const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
+            if (!tree) return this.decorations;
             for (const window of pendingWindows) {
               const entry = {
                 ...window,

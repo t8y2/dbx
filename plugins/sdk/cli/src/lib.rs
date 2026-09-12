@@ -1061,25 +1061,42 @@ fn build_go_backend(
         return Err(format!("Go backend is missing {}/go.mod", backend_directory.display()));
     }
     let mut command = Command::new("go");
-    command.current_dir(&backend_directory).arg("build").arg("-trimpath").arg("-o").arg(staged_executable).arg(".");
+    command.current_dir(&backend_directory).arg("build").arg("-trimpath");
     if let Some(sdk_root) = sdk_root_from_environment()? {
         let sdk = sdk_root.join("plugins/sdk/go/dbx-plugin-sdk");
         if !sdk.join("go.mod").is_file() {
             return Err(format!("Go plugin SDK was not found at {}", sdk.display()));
         }
         fs::create_dir_all(build_directory).map_err(|error| error.to_string())?;
-        let work_file = build_directory.join("go.work");
-        let mut workspace_command = Command::new("go");
-        workspace_command
-            .current_dir(build_directory)
-            .arg("work")
-            .arg("init")
-            .arg(&backend_directory)
-            .arg(&sdk);
-        run_command(&mut workspace_command, "Go workspace initialization")?;
-        command.env("GOWORK", work_file);
+        let mod_file = build_directory.join("dbx-plugin.mod");
+        fs::copy(backend_directory.join("go.mod"), &mod_file).map_err(|error| error.to_string())?;
+        if backend_directory.join("go.sum").is_file() {
+            fs::copy(backend_directory.join("go.sum"), build_directory.join("dbx-plugin.sum"))
+                .map_err(|error| error.to_string())?;
+        }
+        let sdk_module = go_module_path(&sdk.join("go.mod"))?;
+        let mut mod_command = Command::new("go");
+        mod_command
+            .current_dir(&backend_directory)
+            .arg("mod")
+            .arg("edit")
+            .arg("-modfile")
+            .arg(&mod_file)
+            .arg(format!("-replace={sdk_module}={}", sdk.display()));
+        run_command(&mut mod_command, "Go module configuration")?;
+        command.arg("-modfile").arg(mod_file).env("GOWORK", "off");
     }
+    command.arg("-o").arg(staged_executable).arg(".");
     run_command(&mut command, "Go backend build")
+}
+
+fn go_module_path(path: &Path) -> Result<String, String> {
+    let contents = fs::read_to_string(path).map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("module ").map(str::trim).filter(|module| !module.is_empty()))
+        .map(str::to_string)
+        .ok_or_else(|| format!("{} is missing a module directive", path.display()))
 }
 
 fn run_command(command: &mut Command, label: &str) -> Result<(), String> {
@@ -1481,6 +1498,7 @@ fn keygen_usage() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
 
@@ -1489,6 +1507,14 @@ mod tests {
         resolve_create_options, run_cli, styled, title_from_slug, validate_semver, BackendConfig, CreateInputs,
         CreateOptions, PackageOptions, ProjectTemplate, ANSI_ACCENT,
     };
+
+    #[test]
+    fn reads_go_module_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let module_file = root.path().join("go.mod");
+        fs::write(&module_file, "module example.com/plugin\n\ngo 1.22\n").unwrap();
+        assert_eq!(super::go_module_path(&module_file).unwrap(), "example.com/plugin");
+    }
 
     #[test]
     fn rejects_development_data_in_package_inputs() {

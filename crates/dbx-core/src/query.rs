@@ -880,8 +880,9 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
             continue;
         }
         let cte_names = statement_cte_names(statement);
+        let table_aliases = statement_table_aliases(statement);
         let _ = visit_relations_mut(statement, |name| {
-            if qualify_unqualified_relation_name(name, schema, &cte_names) {
+            if qualify_unqualified_relation_name(name, schema, &cte_names, &table_aliases) {
                 changed = true;
             }
             ControlFlow::<()>::Continue(())
@@ -904,10 +905,12 @@ fn qualify_sqlserver_unqualified_dml(sql: &str, schema: &str) -> Option<String> 
             continue;
         }
         let cte_names = statement_cte_names(statement);
+        let table_aliases = statement_table_aliases(statement);
         let mut qualifier = SchemaRelationQualifier {
             schema,
             identifier_quote: '[',
             cte_names: &cte_names,
+            table_aliases: &table_aliases,
             parameterized_table_depth: 0,
             changed: false,
         };
@@ -931,10 +934,12 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
             continue;
         }
         let cte_names = statement_cte_names(statement);
+        let table_aliases = statement_table_aliases(statement);
         let mut qualifier = SchemaRelationQualifier {
             schema,
             identifier_quote: identifier_quote_char(identifier_quote),
             cte_names: &cte_names,
+            table_aliases: &table_aliases,
             parameterized_table_depth: 0,
             changed: false,
         };
@@ -949,6 +954,7 @@ struct SchemaRelationQualifier<'a> {
     schema: &'a str,
     identifier_quote: char,
     cte_names: &'a HashSet<String>,
+    table_aliases: &'a HashSet<String>,
     parameterized_table_depth: usize,
     changed: bool,
 }
@@ -976,6 +982,7 @@ impl VisitorMut for SchemaRelationQualifier<'_> {
                 relation,
                 self.schema,
                 self.cte_names,
+                self.table_aliases,
                 self.identifier_quote,
             )
         {
@@ -996,20 +1003,27 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
     )
 }
 
-fn qualify_unqualified_relation_name(name: &mut ObjectName, schema: &str, cte_names: &HashSet<String>) -> bool {
-    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, '"')
+fn qualify_unqualified_relation_name(
+    name: &mut ObjectName,
+    schema: &str,
+    cte_names: &HashSet<String>,
+    table_aliases: &HashSet<String>,
+) -> bool {
+    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, table_aliases, '"')
 }
 
 fn qualify_unqualified_relation_name_with_quote(
     name: &mut ObjectName,
     schema: &str,
     cte_names: &HashSet<String>,
+    table_aliases: &HashSet<String>,
     identifier_quote: char,
 ) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
     };
-    if cte_names.contains(&table.value.to_ascii_uppercase()) {
+    let upper_name = table.value.to_ascii_uppercase();
+    if cte_names.contains(&upper_name) || table_aliases.contains(&upper_name) {
         return false;
     }
     if table.value.starts_with('@') || table.value.starts_with('#') {
@@ -1057,6 +1071,30 @@ fn collect_query_cte_names(query: &sqlparser::ast::Query, names: &mut HashSet<St
             collect_query_cte_names(&cte.query, names);
         }
     }
+}
+
+struct TableAliasCollector<'a> {
+    names: &'a mut HashSet<String>,
+}
+
+impl VisitorMut for TableAliasCollector<'_> {
+    type Break = ();
+
+    fn post_visit_table_factor(&mut self, table_factor: &mut TableFactor) -> ControlFlow<Self::Break> {
+        if let TableFactor::Table { alias: Some(alias), .. } = table_factor {
+            self.names.insert(alias.name.value.to_ascii_uppercase());
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// FROM-clause aliases resolve to their table, so a single-part relation that
+/// matches one must never be schema-qualified (e.g. `UPDATE p ... FROM products p`).
+fn statement_table_aliases(statement: &mut Statement) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut collector = TableAliasCollector { names: &mut names };
+    let _ = statement.visit(&mut collector);
+    names
 }
 
 fn qualifies_unqualified_agent_relations(db_type: Option<DatabaseType>) -> bool {
@@ -9530,6 +9568,20 @@ for line in sys.stdin:
             ),
             "UPDATE [core].products SET status = 'done' WHERE id IN (SELECT product_id FROM [core].audit_products)"
         );
+    }
+
+    #[test]
+    fn sqlserver_execution_context_skips_update_target_aliases() {
+        let qualified = sql_for_execution_context(
+            Some(DatabaseType::SqlServer),
+            "UPDATE p SET p.status = 'done' FROM products p JOIN customers c ON c.id = p.customer_id",
+            Some("core"),
+        );
+        assert!(qualified.starts_with("UPDATE p SET"), "{qualified}");
+        assert!(qualified.contains("FROM [core].products p"), "{qualified}");
+        assert!(qualified.contains("JOIN [core].customers c ON c.id = p.customer_id"), "{qualified}");
+        assert!(!qualified.contains("UPDATE [core].p"), "{qualified}");
+        assert!(!qualified.contains("[core].c ON"), "{qualified}");
     }
 
     #[test]

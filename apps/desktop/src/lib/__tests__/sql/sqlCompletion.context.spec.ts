@@ -1344,3 +1344,41 @@ describe("originForSqlCompletionProvider", () => {
     expect(originForSqlCompletionProvider("explicit", false)).toBe("explicit");
   });
 });
+
+describe("select alias visibility", () => {
+  it("prioritizes SELECT aliases inside HAVING for MySQL", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("cnt");
+  });
+
+  it("prioritizes SELECT aliases inside ORDER BY even with later clauses", () => {
+    const sql = "SELECT SUM(price) AS total FROM orders ORDER BY total LIMIT 10";
+    const cursor = sql.indexOf("total", sql.indexOf("ORDER BY")) + "total".length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("total");
+  });
+
+  it("does not prioritize SELECT aliases inside WHERE", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE uid > ";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql", dialect: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(false);
+    expect(context.selectAliases).toEqual([]);
+  });
+
+  it("offers HAVING alias completion items", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cn";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      dialect: "mysql",
+      tables: [{ name: "orders", type: "table" }],
+      columnsByTable: new Map([["orders", [{ name: "g" } as never]]]),
+    });
+
+    expect(items.some((item) => item.label === "cnt")).toBe(true);
+  });
+});

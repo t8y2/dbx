@@ -2018,14 +2018,14 @@ const columnAligns = computed<("left" | "right")[]>(() => {
 
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
   const value = item.data[actualColIdx];
-  const isGridNull = value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL);
-  if (isGridNull) return "text-muted-foreground italic";
+  const isMongoDocumentNull = props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL;
+  if (isMongoDocumentNull) return "text-muted-foreground italic";
   if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
   return dataGridCellTextClass({
     colorizeTypes: colorizeDataGridCellTypes.value,
     typeKind: allColumnTypeVisualKinds.value[actualColIdx] ?? "unknown",
-    isNull: isGridNull,
+    isNull: value === null,
     isDraft: item.isDraft && value === null,
     isEditing: editingCell.value?.rowId === item.id && editingCell.value.col === actualColIdx,
     isControl: checkbox,
@@ -2041,13 +2041,13 @@ function transposeCellTextColorClass(recordIndex: number, actualColIdx: number):
   const item = displayItems.value[recordIndex];
   if (!item) return "text-foreground";
   const value = item.data[actualColIdx];
-  const isGridNull = value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL);
-  if (isGridNull) return "text-muted-foreground italic";
+  const isMongoDocumentNull = props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL;
+  if (isMongoDocumentNull) return "text-muted-foreground italic";
   if (!colorizeDataGridCellTypes.value) return "text-foreground";
   return dataGridCellTextClass({
     colorizeTypes: colorizeDataGridCellTypes.value,
     typeKind: allColumnTypeVisualKinds.value[actualColIdx] ?? "unknown",
-    isNull: isGridNull,
+    isNull: value === null,
     isDraft: item.isDraft && value === null,
     isEditing: editingCell.value?.rowId === item.id && editingCell.value.col === actualColIdx,
     isControl: booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null,

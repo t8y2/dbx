@@ -103,9 +103,10 @@ describe("data grid cell text visual priority", () => {
     expect(dataGridSource).toContain("'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':");
   });
 
-  it("returns before reading cell state when type colors are disabled", () => {
-    expect(dataGridSource).toContain('function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";\n  const value = item.data[actualColIdx];');
-    expect(dataGridSource).toContain('function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";\n  const item = displayItems.value[recordIndex];');
+  it("keeps Mongo BSON null muted when type colors are disabled", () => {
+    const mongoNullPriority = 'const isMongoDocumentNull = props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL;\n  if (isMongoDocumentNull) return "text-muted-foreground italic";\n  if (!colorizeDataGridCellTypes.value) return "text-foreground";';
+
+    expect(dataGridSource.split(mongoNullPriority)).toHaveLength(3);
   });
 
   it("places data-grid type selectors in the components layer", () => {

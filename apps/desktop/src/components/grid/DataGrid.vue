@@ -99,7 +99,7 @@ import type { BuildSingleColumnAlterSqlOptions } from "@/lib/table/tableStructur
 import { buildTableSelectSql, qualifyTableReferencesInSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
-import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue } from "@/lib/mongo/mongoDocumentValues";
+import { MONGO_DOCUMENT_GRID_NULL, mongoDocumentGridClipboardText, mongoDocumentGridDisplayText, mongoDocumentGridEditorText, mongoDocumentGridExternalValue, mongoDocumentGridInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { compactHeaderColumnType, formatMetadataColumnTypeLabel, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
 import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import { DATA_GRID_TYPE_COLOR_KEYS, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
@@ -2017,8 +2017,10 @@ const columnAligns = computed<("left" | "right")[]>(() => {
 });
 
 function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
-  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const value = item.data[actualColIdx];
+  const isMongoDocumentNull = props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL;
+  if (isMongoDocumentNull) return "text-muted-foreground italic";
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
   return dataGridCellTextClass({
     colorizeTypes: colorizeDataGridCellTypes.value,
@@ -2036,10 +2038,12 @@ function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColI
 }
 
 function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {
-  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   const item = displayItems.value[recordIndex];
   if (!item) return "text-foreground";
   const value = item.data[actualColIdx];
+  const isMongoDocumentNull = props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL;
+  if (isMongoDocumentNull) return "text-muted-foreground italic";
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
   return dataGridCellTextClass({
     colorizeTypes: colorizeDataGridCellTypes.value,
     typeKind: allColumnTypeVisualKinds.value[actualColIdx] ?? "unknown",
@@ -3947,6 +3951,10 @@ function isIoTDBTimestampColumn(columnIndex: number): boolean {
 }
 
 function inlineCellEditorText(value: CellValue, columnIndex: number): string {
+  if (props.mongoCollectionGrid) {
+    const documentGridText = mongoDocumentGridEditorText(value);
+    if (documentGridText !== undefined) return documentGridText;
+  }
   const columnInfo = tableColumnForGridColumn(columnIndex) ?? resultColumnInfoForGridColumn(columnIndex);
   const columnType = props.result.column_types?.[columnIndex] ?? columnInfo?.data_type;
   return (
@@ -7073,6 +7081,7 @@ function drawCanvasGrid() {
     searchMatchKeys: searchMatchSet.value,
     currentSearchMatch: currentSearchMatch.value,
     formatCell: (value, columnIndex, row) => formatCellCached(visibleLargeValuePreviewValue(row, columnIndex, value), columnIndex, largeValueOriginalBytes(row, columnIndex)),
+    isNullValue: (value) => value === null || (props.mongoCollectionGrid === true && value === MONGO_DOCUMENT_GRID_NULL),
     newRowCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
@@ -7395,7 +7404,7 @@ const {
   columnComments: visibleColumnComments,
   allColumnComments,
   displayValue: formatCellCached,
-  cellClipboardText: (value) => (props.mongoCollectionGrid ? mongoDocumentGridEditorText(value) : undefined),
+  cellClipboardText: (value) => (props.mongoCollectionGrid ? mongoDocumentGridClipboardText(value) : undefined),
   externalCellValue: (value) => (props.mongoCollectionGrid ? mongoDocumentGridExternalValue(value) : value),
   mongoDocuments: computed(() => props.result.mongo_copy_documents ?? props.result.mongo_documents),
   spatialColumns: computed(() => props.result.spatial_columns),
@@ -8933,7 +8942,7 @@ async function onGridKeydown(event: KeyboardEvent) {
 
 function detailClipboardText(detail: DataGridCellDetail): string {
   if (props.mongoCollectionGrid) {
-    const documentGridText = mongoDocumentGridEditorText(detail.value);
+    const documentGridText = mongoDocumentGridClipboardText(detail.value);
     if (documentGridText !== undefined) return documentGridText;
   }
   if (detail.value === null) return "";

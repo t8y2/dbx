@@ -55,6 +55,7 @@ pub mod victoriametrics_driver;
 pub mod wkb;
 
 use reqwest::ClientBuilder;
+use reqwest::{Certificate, Identity};
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
@@ -129,6 +130,44 @@ pub fn connection_timeout() -> Duration {
 
 pub fn http_client_builder(timeout: Duration) -> ClientBuilder {
     reqwest::Client::builder().connect_timeout(timeout).no_proxy()
+}
+
+/// Augments an HTTP client builder with custom TLS material for drivers that
+/// need to trust a non-system CA or present a client certificate (mTLS).
+///
+/// * `ca_cert_path` adds an extra root certificate (PEM) alongside the system
+///   roots, so self-signed server certificates are trusted.
+/// * `client_cert_path` + `client_key_path` (required together) are concatenated
+///   into a single PEM identity, as expected by reqwest's rustls backend.
+///
+/// Missing or unreadable files are ignored so a misconfigured path degrades to
+/// the system-default trust store rather than failing the whole client build.
+pub(crate) fn apply_tls_certificates(
+    mut builder: ClientBuilder,
+    ca_cert_path: Option<&str>,
+    client_cert_path: Option<&str>,
+    client_key_path: Option<&str>,
+) -> ClientBuilder {
+    if let Some(ca) = ca_cert_path.filter(|path| !path.is_empty()) {
+        if let Ok(contents) = std::fs::read(ca) {
+            if let Ok(certificate) = Certificate::from_pem(&contents) {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+    }
+    if let (Some(cert_path), Some(key_path)) = (
+        client_cert_path.filter(|path| !path.is_empty()),
+        client_key_path.filter(|path| !path.is_empty()),
+    ) {
+        if let (Ok(cert_pem), Ok(key_pem)) = (std::fs::read(cert_path), std::fs::read(key_path)) {
+            let mut identity_pem = cert_pem;
+            identity_pem.extend_from_slice(&key_pem);
+            if let Ok(identity) = Identity::from_pem(&identity_pem) {
+                builder = builder.identity(identity);
+            }
+        }
+    }
+    builder
 }
 
 pub(crate) const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -292,5 +331,77 @@ mod tests {
         .unwrap();
 
         assert_eq!(json_value_for_js(value), expected);
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::{apply_tls_certificates, http_client_builder};
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::Duration;
+
+    /// Generates a throwaway CA + client certificate/key (PEM) via openssl and
+    /// returns their paths. If openssl is unavailable the files stay empty, which
+    /// exercises the graceful-degradation path rather than failing the build.
+    fn gen_certs(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let ca_key = dir.join("ca.key");
+        let ca_pem = dir.join("ca.pem");
+        let csr = dir.join("client.csr");
+        let client_key = dir.join("client.key");
+        let client_crt = dir.join("client.crt");
+        let _ = Command::new("openssl")
+            .args([
+                "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", ca_key.to_str().unwrap(),
+                "-out", ca_pem.to_str().unwrap(),
+                "-days", "1", "-subj", "/CN=dbx-test-ca",
+            ])
+            .output();
+        let _ = Command::new("openssl")
+            .args([
+                "req", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", client_key.to_str().unwrap(),
+                "-out", csr.to_str().unwrap(),
+                "-subj", "/CN=dbx-test-client",
+            ])
+            .output();
+        let _ = Command::new("openssl")
+            .args([
+                "x509", "-req",
+                "-in", csr.to_str().unwrap(),
+                "-CA", ca_pem.to_str().unwrap(),
+                "-CAkey", ca_key.to_str().unwrap(),
+                "-CAcreateserial", "-out", client_crt.to_str().unwrap(),
+                "-days", "1",
+            ])
+            .output();
+        (ca_pem, client_crt, client_key)
+    }
+
+    #[test]
+    fn apply_tls_certificates_builds_with_ca_and_client_cert() {
+        let dir = std::env::temp_dir().join(format!("dbx-tls-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ca, client_crt, client_key) = gen_certs(&dir);
+
+        let builder = apply_tls_certificates(
+            http_client_builder(Duration::from_secs(5)),
+            ca.to_str(),
+            client_crt.to_str(),
+            client_key.to_str(),
+        );
+        assert!(builder.build().is_ok(), "client should build with CA + client cert");
+
+        // Missing/absent paths must not break the build.
+        let builder2 = apply_tls_certificates(
+            http_client_builder(Duration::from_secs(5)),
+            Some("/nonexistent/ca.pem"),
+            None,
+            None,
+        );
+        assert!(builder2.build().is_ok(), "missing CA path must degrade gracefully");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

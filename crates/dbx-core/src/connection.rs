@@ -2468,6 +2468,9 @@ impl AppState {
                     db_config.url_params.as_deref(),
                     db_config.external_config.as_ref(),
                     connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
                 );
                 db::elasticsearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Elasticsearch(client)
@@ -2481,6 +2484,9 @@ impl AppState {
                     db_config.url_params.as_deref(),
                     db_config.external_config.as_ref(),
                     connect_timeout,
+                    Some(db_config.ca_cert_path.as_str()),
+                    Some(db_config.client_cert_path.as_str()),
+                    Some(db_config.client_key_path.as_str()),
                 );
                 db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
                 PoolKind::Easysearch(client)

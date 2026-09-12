@@ -2288,21 +2288,24 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
     // and would serve them to the forced re-fetch. Drop the whole table scope
     // first, the same thing an explicit "Refresh Structure" does.
     await invalidateObjectMetadataCache({ connectionId, database, schema, tableName });
-    const [columnsLoad, commentLoad] = await Promise.all([
-      scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: true }) : Promise.resolve(undefined),
-      scope.tableComment ? loadCachedTableComment(metadataRequest, true) : Promise.resolve(undefined),
-    ]);
+    const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: true }) : Promise.resolve(undefined);
+    const commentPromise = scope.tableComment ? loadCachedTableComment(metadataRequest, true) : Promise.resolve(undefined);
+    // allSettled so a failing comment re-fetch cannot swallow a valid columns
+    // fix (and vice versa); each failure is logged on its own.
+    const [columnsResult, commentResult] = await Promise.allSettled([columnsPromise, commentPromise] as const);
     // A newer load or revalidation supersedes this one.
     if (revalidationId !== structureMetadataRevalidationId || loadRequestId !== structureLoadRequestId) return;
+    if (columnsResult.status === "rejected") console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
+    if (commentResult.status === "rejected") console.warn("[DBX][structure-editor:comment-metadata-revalidation-failed]", commentResult.reason);
 
     let applied = false;
-    const nextColumns = columnsLoad?.value;
+    const nextColumns = columnsResult.status === "fulfilled" ? columnsResult.value?.value : undefined;
     if (nextColumns && !captureStructureRefreshScope().columns && JSON.stringify(nextColumns) !== appliedColumnsSignature) {
       columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
       scheduleSqlPreviewRefresh();
       applied = true;
     }
-    const nextComment = commentLoad?.value;
+    const nextComment = commentResult.status === "fulfilled" ? commentResult.value?.value : undefined;
     if (nextComment !== undefined && tableComment.value === originalTableComment.value && nextComment !== originalTableComment.value) {
       originalTableComment.value = nextComment;
       tableComment.value = nextComment;

@@ -381,4 +381,26 @@ describe("TableStructureEditor metadata revalidation (#8816)", () => {
     expect(renamedInput?.value).toBe("renamed_id");
     expect(root.textContent).not.toContain("email");
   });
+
+  it("applies fresh columns even when the comment revalidation fails", async () => {
+    let columnsCalls = 0;
+    mocks.loadObjectMetadataFacet.mockImplementation((_request: unknown, facet: string, _loader?: unknown, options?: { force?: boolean }) => {
+      if (facet === "columns") {
+        columnsCalls += 1;
+        return Promise.resolve(columnsCalls === 1 ? { value: initialColumns, cacheStatus: "memory" } : { value: rebuiltColumns, cacheStatus: "remote" });
+      }
+      if (facet === "comment") {
+        // Cache-served first so the file comment is part of the revalidation.
+        if (options?.force) return Promise.reject(new Error("comment unavailable"));
+        return Promise.resolve({ value: "", cacheStatus: "memory" });
+      }
+      return Promise.resolve({ value: [], cacheStatus: "remote" });
+    });
+
+    const root = await mountStructureEditor();
+
+    await vi.waitFor(() => expect(columnsFacetCalls().length).toBe(2), { timeout: 3000 });
+    await settle();
+    expect(root.textContent).toContain("email");
+  });
 });

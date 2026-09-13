@@ -87,6 +87,7 @@ impl EsClient {
             None,
             None,
         )
+        .expect("failed to build Elasticsearch HTTP client")
     }
 
     fn new_with_mode(
@@ -102,20 +103,21 @@ impl EsClient {
         ca_cert_path: Option<&str>,
         client_cert_path: Option<&str>,
         client_key_path: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let base_url = url.trim_end_matches('/').to_string();
         let auth = match (username, password) {
             (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
             _ => None,
         };
         let mut builder = http_client_builder(timeout).danger_accept_invalid_certs(accept_invalid_certs);
-        builder = apply_tls_certificates(builder, ca_cert_path, client_cert_path, client_key_path);
+        builder = apply_tls_certificates(builder, ca_cert_path, client_cert_path, client_key_path)?;
         if let Some(addrs) = elasticsearch_localhost_resolve_addrs(&base_url, connectivity_check_disabled) {
             builder = builder.resolve_to_addrs("localhost", &addrs);
         }
-        let http = builder.build().unwrap_or_else(|_| HttpClient::new());
+        let http =
+            builder.build().map_err(|error| format!("Failed to initialize Elasticsearch HTTP client: {error}"))?;
         let fallback_base_urls = elasticsearch_base_url_fallbacks(&base_url);
-        Self {
+        Ok(Self {
             http,
             base_url,
             fallback_base_urls,
@@ -125,7 +127,7 @@ impl EsClient {
             connectivity_check_disabled,
             index_grouping,
             pit_search_supported: Arc::new(AtomicBool::new(true)),
-        }
+        })
     }
 
     pub fn from_config(
@@ -139,7 +141,7 @@ impl EsClient {
         ca_cert_path: Option<&str>,
         client_cert_path: Option<&str>,
         client_key_path: Option<&str>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let kibana_base_path = elasticsearch_kibana_base_path(external_config);
         let transport_mode = if kibana_base_path.is_some() {
             ElasticsearchTransportMode::KibanaProxy
@@ -3552,7 +3554,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
         let response = client.get("/_cluster/health").send().await.unwrap();
 
@@ -3573,7 +3576,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:9200");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:9200"]);
@@ -3611,7 +3615,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
         assert_eq!(client.connectivity_check_path, "/pro-logs-*/_search");
     }
 
@@ -3647,7 +3652,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(2)).await.unwrap();
         server.await.unwrap();
     }
@@ -3666,7 +3672,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
 
         assert_eq!(client.base_url, "https://localhost:5601/kibana/s/analytics");
         assert_eq!(client.fallback_base_urls, vec!["https://127.0.0.1:5601/kibana/s/analytics"]);
@@ -5177,7 +5184,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
         let result =
             super::execute_rest_query(&client, "DELETE /missing/_doc/1?refresh=true\n{\"reason\":\"cleanup\"}")
                 .await
@@ -5533,7 +5541,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch test client");
         super::test_connection(&mut client, Duration::from_secs(20)).await.unwrap();
 
         let index = format!("dbx-kibana-proxy-{}", uuid::Uuid::new_v4().simple());
@@ -5662,7 +5671,8 @@ mod tests {
             Some(&ca_cert_path),
             None,
             None,
-        );
+        )
+        .expect("failed to build Elasticsearch TLS client");
         super::test_connection(&mut client, timeout)
             .await
             .expect("Elasticsearch TLS connection with custom CA should succeed");

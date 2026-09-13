@@ -23,8 +23,8 @@ impl EasysearchClient {
         ca_cert_path: Option<&str>,
         client_cert_path: Option<&str>,
         client_key_path: Option<&str>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             inner: EsClient::from_config(
                 url,
                 username,
@@ -36,8 +36,8 @@ impl EasysearchClient {
                 ca_cert_path,
                 client_cert_path,
                 client_key_path,
-            ),
-        }
+            )?,
+        })
     }
 }
 

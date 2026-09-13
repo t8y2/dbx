@@ -135,39 +135,56 @@ pub fn http_client_builder(timeout: Duration) -> ClientBuilder {
 /// Augments an HTTP client builder with custom TLS material for drivers that
 /// need to trust a non-system CA or present a client certificate (mTLS).
 ///
-/// * `ca_cert_path` adds an extra root certificate (PEM) alongside the system
-///   roots, so self-signed server certificates are trusted.
+/// * `ca_cert_path` adds an extra root certificate (PEM bundle) alongside the
+///   system roots, so self-signed server certificates are trusted.
 /// * `client_cert_path` + `client_key_path` (required together) are concatenated
 ///   into a single PEM identity, as expected by reqwest's rustls backend.
 ///
-/// Missing or unreadable files are ignored so a misconfigured path degrades to
-/// the system-default trust store rather than failing the whole client build.
+/// Returns the augmented builder, or a descriptive error if a configured
+/// certificate/key file cannot be read or parsed. Callers surface that error
+/// instead of silently falling back to the system trust store, so a typo in a
+/// cert path fails the connection loudly rather than being ignored.
 pub(crate) fn apply_tls_certificates(
     mut builder: ClientBuilder,
     ca_cert_path: Option<&str>,
     client_cert_path: Option<&str>,
     client_key_path: Option<&str>,
-) -> ClientBuilder {
+) -> Result<ClientBuilder, String> {
+    // The desktop build unifies reqwest with both `default-tls` and `rustls-tls`,
+    // and `TlsBackend` defaults to native-tls there, which rejects the PEM identity
+    // below with `incompatible TLS identity type`. Pin rustls like the Consul and
+    // etcd-metrics clients so custom CA roots and PEM client identities work in
+    // every target.
+    builder = builder.use_rustls_tls();
     if let Some(ca) = ca_cert_path.filter(|path| !path.is_empty()) {
-        if let Ok(contents) = std::fs::read(ca) {
-            if let Ok(certificate) = Certificate::from_pem(&contents) {
-                builder = builder.add_root_certificate(certificate);
-            }
+        let contents = std::fs::read(ca)
+            .map_err(|error| format!("Failed to read Elasticsearch CA certificate at {ca}: {error}"))?;
+        let certificates = Certificate::from_pem_bundle(&contents)
+            .map_err(|error| format!("Failed to parse Elasticsearch CA certificate at {ca}: {error}"))?;
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
         }
     }
-    if let (Some(cert_path), Some(key_path)) = (
-        client_cert_path.filter(|path| !path.is_empty()),
-        client_key_path.filter(|path| !path.is_empty()),
-    ) {
-        if let (Ok(cert_pem), Ok(key_pem)) = (std::fs::read(cert_path), std::fs::read(key_path)) {
-            let mut identity_pem = cert_pem;
-            identity_pem.extend_from_slice(&key_pem);
-            if let Ok(identity) = Identity::from_pem(&identity_pem) {
-                builder = builder.identity(identity);
-            }
+    if let (Some(cert_path), Some(key_path)) =
+        (client_cert_path.filter(|path| !path.is_empty()), client_key_path.filter(|path| !path.is_empty()))
+    {
+        let mut pem = std::fs::read(cert_path)
+            .map_err(|error| format!("Failed to read Elasticsearch client certificate at {cert_path}: {error}"))?;
+        // reqwest's rustls backend concatenates the cert and key as two PEM
+        // blocks; ensure they are newline-separated so parsing succeeds even
+        // when the cert file does not end with a trailing newline.
+        if !pem.ends_with(b"\n") {
+            pem.push(b'\n');
         }
+        pem.extend(
+            std::fs::read(key_path)
+                .map_err(|error| format!("Failed to read Elasticsearch client key at {key_path}: {error}"))?,
+        );
+        let identity = Identity::from_pem(&pem)
+            .map_err(|error| format!("Failed to parse Elasticsearch client identity: {error}"))?;
+        builder = builder.identity(identity);
     }
-    builder
+    Ok(builder)
 }
 
 pub(crate) const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -343,7 +360,7 @@ mod tls_tests {
 
     /// Generates a throwaway CA + client certificate/key (PEM) via openssl and
     /// returns their paths. If openssl is unavailable the files stay empty, which
-    /// exercises the graceful-degradation path rather than failing the build.
+    /// makes `apply_tls_certificates` surface a read error instead of degrading.
     fn gen_certs(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
         let ca_key = dir.join("ca.key");
         let ca_pem = dir.join("ca.pem");
@@ -352,28 +369,50 @@ mod tls_tests {
         let client_crt = dir.join("client.crt");
         let _ = Command::new("openssl")
             .args([
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                "-keyout", ca_key.to_str().unwrap(),
-                "-out", ca_pem.to_str().unwrap(),
-                "-days", "1", "-subj", "/CN=dbx-test-ca",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                ca_key.to_str().unwrap(),
+                "-out",
+                ca_pem.to_str().unwrap(),
+                "-days",
+                "1",
+                "-subj",
+                "/CN=dbx-test-ca",
             ])
             .output();
         let _ = Command::new("openssl")
             .args([
-                "req", "-newkey", "rsa:2048", "-nodes",
-                "-keyout", client_key.to_str().unwrap(),
-                "-out", csr.to_str().unwrap(),
-                "-subj", "/CN=dbx-test-client",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                client_key.to_str().unwrap(),
+                "-out",
+                csr.to_str().unwrap(),
+                "-subj",
+                "/CN=dbx-test-client",
             ])
             .output();
         let _ = Command::new("openssl")
             .args([
-                "x509", "-req",
-                "-in", csr.to_str().unwrap(),
-                "-CA", ca_pem.to_str().unwrap(),
-                "-CAkey", ca_key.to_str().unwrap(),
-                "-CAcreateserial", "-out", client_crt.to_str().unwrap(),
-                "-days", "1",
+                "x509",
+                "-req",
+                "-in",
+                csr.to_str().unwrap(),
+                "-CA",
+                ca_pem.to_str().unwrap(),
+                "-CAkey",
+                ca_key.to_str().unwrap(),
+                "-CAcreateserial",
+                "-out",
+                client_crt.to_str().unwrap(),
+                "-days",
+                "1",
             ])
             .output();
         (ca_pem, client_crt, client_key)
@@ -391,16 +430,18 @@ mod tls_tests {
             client_crt.to_str(),
             client_key.to_str(),
         );
-        assert!(builder.build().is_ok(), "client should build with CA + client cert");
+        assert!(builder.is_ok(), "client should build with CA + client cert");
+        assert!(builder.unwrap().build().is_ok(), "built client should be usable with CA + client cert");
 
-        // Missing/absent paths must not break the build.
-        let builder2 = apply_tls_certificates(
+        // A misconfigured CA path must now surface a descriptive error instead of
+        // silently degrading to the system trust store.
+        let missing = apply_tls_certificates(
             http_client_builder(Duration::from_secs(5)),
             Some("/nonexistent/ca.pem"),
             None,
             None,
         );
-        assert!(builder2.build().is_ok(), "missing CA path must degrade gracefully");
+        assert!(missing.is_err(), "missing CA path must surface a read error");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -100,6 +100,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install plugin development host dependencies
+        run: npm ci --prefix plugins/sdk/dev-host
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.97.1
 

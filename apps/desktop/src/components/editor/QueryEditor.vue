@@ -6202,7 +6202,16 @@ onMounted(async () => {
           if (pendingWindows.length > 0) {
             const requestedTo = Math.max(...pendingWindows.map((window) => window.to));
             const tree = ensureSyntaxTree(currentView.state, requestedTo, requestedTo === sql.length ? 250 : 25);
-            if (!tree) return this.decorations;
+            if (!tree) {
+              // The Lezer parse has not reached the pending windows yet (long
+              // documents). Keep the decorations that are still valid and let
+              // the deferred refresh rebuild them once parsing catches up —
+              // returning an empty set here wiped table-name colors after
+              // scrolling stopped or when a freshly mounted editor (tab
+              // switch) had no later viewport change to trigger a rebuild.
+              this.scheduleRefresh(currentView);
+              return this.decorations;
+            }
             if (shouldPrewarmFullDocument) this.prewarmedDoc = doc;
             for (const window of pendingWindows) {
               const entry = {

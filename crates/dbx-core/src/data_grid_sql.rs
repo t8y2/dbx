@@ -2331,9 +2331,9 @@ pub(crate) fn format_grid_sql_literal_with_identifier_quote(
     }
     let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
         literal_text.replace('\\', "\\\\").replace('\'', "\\'")
-    } else if is_sqlite_literal_database(database_type) {
-        // SQLite-family engines do not treat backslash as a string-literal
-        // escape character, so only the quote delimiter needs escaping.
+    } else if is_sqlite_literal_database(database_type) || database_type == Some(DatabaseType::Dameng) {
+        // These engines keep backslashes literal in ordinary string literals,
+        // so only the quote delimiter needs escaping.
         literal_text.replace('\'', "''")
     } else {
         literal_text.replace('\\', "\\\\").replace('\'', "''")
@@ -7361,6 +7361,40 @@ mod tests {
             );
             assert_eq!(format_grid_sql_literal(&json!("it's"), Some(database_type), None), "'it''s'");
         }
+    }
+
+    #[test]
+    fn dameng_data_grid_writes_do_not_double_escape_backslashes() {
+        assert_eq!(format_grid_sql_literal(&json!(r"\n"), Some(DatabaseType::Dameng), None), r"'\n'");
+        assert_eq!(format_grid_sql_literal(&json!(r"line\n's"), Some(DatabaseType::Dameng), None), r"'line\n''s'");
+
+        let result = prepare_data_grid_save(DataGridSaveStatementOptions {
+            database_type: Some(DatabaseType::Dameng),
+            identifier_quote: None,
+            table_meta: DataGridTableMeta {
+                catalog: None,
+                database: None,
+                schema: Some("DBX_TEST".to_string()),
+                table_name: "DBX_NEWLINE_REPRO".to_string(),
+                primary_keys: vec!["ID".to_string()],
+                columns: Some(vec![column("ID", "INT", false, None), column("VAL", "VARCHAR(100)", true, None)]),
+            },
+            columns: vec!["ID".to_string(), "VAL".to_string()],
+            source_columns: None,
+            rows: vec![vec![json!(1), json!("old")]],
+            dirty_rows: vec![(0, vec![(1, json!(r"line\n's"))])],
+            deleted_rows: vec![],
+            new_rows: vec![vec![json!(2), json!(r"\n")]],
+        });
+
+        assert_eq!(result.validation_error, None);
+        assert_eq!(
+            result.statements,
+            vec![
+                r#"UPDATE "DBX_TEST"."DBX_NEWLINE_REPRO" SET "VAL" = 'line\n''s' WHERE "ID" = 1;"#,
+                r#"INSERT INTO "DBX_TEST"."DBX_NEWLINE_REPRO" ("ID", "VAL") VALUES (2, '\n');"#,
+            ]
+        );
     }
 
     #[test]

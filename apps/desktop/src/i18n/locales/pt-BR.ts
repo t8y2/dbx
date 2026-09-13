@@ -1525,6 +1525,7 @@ export default withEnglishFallback({
       export: "Exportar",
       exportQueryResultTo: "Exportar conjunto de resultados da consulta atual para {format}",
       copySelection: "Copiar seleção",
+      copySelectionAsRichText: "Copiar como texto formatado",
       screenshotSelection: "Capturar código selecionado",
       commentSelection: "Comentar seleção",
       blockCommentSelection: "Comentário de bloco na seleção",

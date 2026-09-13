@@ -15,7 +15,7 @@ let lastHandledCompressRequestId = 0;
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
-import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
+import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, Highlighter, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { Completion, CompletionContext } from "@codemirror/autocomplete";
 import { Transaction, StateEffect } from "@codemirror/state";
@@ -132,6 +132,7 @@ import {
 } from "@/lib/editor/queryEditorTableDrop";
 import { isPointOverElementRoot } from "@/lib/editor/tableReferenceDragFeedback";
 import type { SqlHighlighter } from "@/lib/sql/sqlHighlighter";
+import { copySqlAsRichText } from "@/lib/sql/sqlRichText";
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticColors, editorThemeAppearanceFor, loadEditorTheme, editorFontTheme, shellLineCommentTheme, sqlCompletionTheme, sqlSemanticHighlightTheme } from "@/lib/editor/editorThemes";
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } from "@/lib/editor/queryEditorSqlShortcut";
@@ -1614,6 +1615,18 @@ async function copySelectedSqlFromContextMenu() {
   }
 }
 
+// 富文本复制：写入 text/html + text/plain，粘贴到邮件/Word/IM 时保留语法高亮。
+async function copySelectedSqlAsRichTextFromContextMenu() {
+  if (!canCopySelectedSql.value) return;
+  try {
+    await copySqlAsRichText(selectedSql.value);
+    toast(t("grid.copied"));
+    focusEditor();
+  } catch (e: any) {
+    toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000);
+  }
+}
+
 async function cutSelectedSqlFromContextMenu() {
   if (!canCopySelectedSql.value) return;
   const currentView = view.value;
@@ -2043,6 +2056,12 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
       disabled: !canCopySelectedSql.value,
       icon: Copy,
       shortcut: "Mod+C",
+    },
+    {
+      label: t("editor.contextMenu.copySelectionAsRichText"),
+      action: copySelectedSqlAsRichTextFromContextMenu,
+      disabled: !canCopySelectedSql.value,
+      icon: Highlighter,
     },
     {
       label: t("editor.contextMenu.screenshotSelection"),

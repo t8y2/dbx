@@ -1524,6 +1524,7 @@ export default withEnglishFallback({
       export: "匯出",
       exportQueryResultTo: "匯出目前查詢結果集到 {format}",
       copySelection: "複製選取內容",
+      copySelectionAsRichText: "複製為豐富文字",
       screenshotSelection: "截圖選中程式碼",
       commentSelection: "註解選取內容",
       blockCommentSelection: "區塊註解選取內容",

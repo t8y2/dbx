@@ -1446,6 +1446,7 @@ export default withEnglishFallback({
       export: "Dışa Aktar",
       exportQueryResultTo: "Geçerli sorgu sonucunu {format} olarak dışa aktar",
       copySelection: "Seçimi kopyala",
+      copySelectionAsRichText: "Zengin metin olarak kopyala",
       screenshotSelection: "Seçili Kodun Ekran Görüntüsü",
       commentSelection: "Seçimi yorum satırı yap",
       blockCommentSelection: "Seçimi blok yorum yap",

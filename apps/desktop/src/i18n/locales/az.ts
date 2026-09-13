@@ -1444,6 +1444,7 @@ export default withEnglishFallback({
       export: "İxrac et",
       exportQueryResultTo: "Cari sorğunun nəticəsini {format} formatına ixrac et",
       copySelection: "Seçimi kopyala",
+      copySelectionAsRichText: "Zəngin mətn kimi kopyala",
       screenshotSelection: "Seçilmiş kodun ekran görüntüsünü çək",
       commentSelection: "Seçimi şərhə çevir",
       blockCommentSelection: "Seçimi blok şərhinə çevir",

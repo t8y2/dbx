@@ -1476,6 +1476,7 @@ export default withEnglishFallback({
       export: "导出",
       exportQueryResultTo: "导出当前查询结果集到 {format}",
       copySelection: "复制选中内容",
+      copySelectionAsRichText: "复制为富文本",
       screenshotSelection: "截图选中代码",
       commentSelection: "注释选中内容",
       blockCommentSelection: "块注释选中内容",

@@ -1444,6 +1444,7 @@ export default withEnglishFallback({
       export: "내보내기",
       exportQueryResultTo: "현재 쿼리 결과를 {format}(으)로 내보내기",
       copySelection: "선택 영역 복사",
+      copySelectionAsRichText: "서식 있는 텍스트로 복사",
       screenshotSelection: "선택한 코드 스크린샷",
       commentSelection: "선택 항목 주석 처리",
       blockCommentSelection: "선택 항목 블록 주석 처리",

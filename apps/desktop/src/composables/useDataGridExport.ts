@@ -11,7 +11,7 @@ import { useExportTracker } from "@/composables/useExportTracker";
 import { clipboardCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { binaryCellClipboardText } from "@/lib/dataGrid/binaryCellDownload";
 import { tryStartExclusiveActivation, type ActionActivationGuard } from "@/lib/connection/actionActivation";
-import { copyToClipboard } from "@/lib/common/clipboard";
+import { clipboardLineEndings, copyToClipboard } from "@/lib/common/clipboard";
 import { clearDataGridClipboardCopy, rememberDataGridClipboardCopy } from "@/lib/dataGrid/dataGridClipboard";
 import { buildDataGridCopyInsertStatement, type DataGridCopyInsertMode, type DataGridTableMeta } from "@/lib/dataGrid/dataGridSql";
 import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
@@ -236,7 +236,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     clearDataGridClipboardCopy();
     try {
       await copyToClipboard(text);
-      if (copiedRows) rememberDataGridClipboardCopy(text, copiedRows, copiedHeader);
+      // Remember the text as it now sits on the clipboard, so a paste back into
+      // the grid still matches and keeps its null-cell metadata.
+      if (copiedRows) rememberDataGridClipboardCopy(clipboardLineEndings(text), copiedRows, copiedHeader);
       toast(t("grid.copied"));
       return true;
     } catch (e: any) {

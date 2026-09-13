@@ -13,6 +13,7 @@ import { createContentSurfaceEventForwarders } from "@/lib/tabs/contentSurfaceEv
 import { isPreviewTab } from "@/lib/tabs/tabPresentation";
 import { resolveExecutableSql } from "@/lib/sql/sqlExecutionTarget";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { usesOracleStickyTransactionState } from "@/lib/database/databaseFeatureSupport";
 import { GROUP_TAB_BAR_PORTAL } from "./groupTabBarPortal";
 import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps, QueryEditorSurfaceHandle, StatementRange } from "./querySurfaces";
 import type { QueryTab } from "@/types/database";
@@ -105,7 +106,7 @@ const groupTabs = computed(() => {
 const activeTab = computed(() => groupTabs.value.find((tab) => tab.id === props.activeTabId) ?? groupTabs.value[0] ?? null);
 const activeConnection = computed(() => (activeTab.value ? connectionStore.getConfig(activeTab.value.connectionId) : undefined));
 const showGroupToolbar = computed(() => activeTab.value?.mode === "query" && !isPreviewTab(activeTab.value));
-const isGroupOracleManualTransaction = computed(() => effectiveDatabaseTypeForConnection(activeConnection.value) === "oracle" && (activeTab.value?.autoCommit ?? true) === false);
+const isGroupOracleManualTransaction = computed(() => usesOracleStickyTransactionState(effectiveDatabaseTypeForConnection(activeConnection.value)) && (activeTab.value?.autoCommit ?? true) === false);
 // Each group previews the executable SQL of its own active tab (selection
 // stored on the tab), not the focused tab's global selection.
 // tabPlacement drives each pane's own bar position: the strip sits above,

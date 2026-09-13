@@ -1870,6 +1870,65 @@ class JdbcConnectionPoolingTest {
     }
 
     @Test
+    void interactiveTransactionPinsConnectionUntilCommit() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction");
+            query(server, requestIds, "transaction", "CREATE TABLE ITEMS (ID INT)", null);
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            query(server, requestIds, "transaction", "INSERT INTO ITEMS VALUES (1)", null);
+
+            openSession(server, requestIds, "observer");
+            JsonObject beforeCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(0, beforeCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction")
+            ));
+            JsonObject afterCommit = query(server, requestIds, "observer", "SELECT COUNT(*) FROM ITEMS", null);
+            assertEquals(1, afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsInt());
+        }
+    }
+
+    @Test
+    void interactiveTransactionRestoresSchemaBeforeReturningConnection() {
+        AtomicInteger physicalOpens = new AtomicInteger();
+        AtomicInteger requestIds = new AtomicInteger();
+        String url = h2Url("manual_transaction_schema");
+        try (MultiSessionJsonRpcServer server = server(url, physicalOpens, 2)) {
+            openSession(server, requestIds, "transaction-schema");
+            query(server, requestIds, "transaction-schema", "CREATE SCHEMA IF NOT EXISTS APP", null);
+
+            JsonObject beginParams = sessionParams("transaction-schema");
+            beginParams.addProperty("schema", "APP");
+            result(request(server, requestIds, AgentProtocol.METHOD_BEGIN_MANUAL_TRANSACTION, beginParams));
+            JsonObject inTransaction = query(server, requestIds, "transaction-schema", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("APP", inTransaction.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
+
+            result(request(
+                server,
+                requestIds,
+                AgentProtocol.METHOD_COMMIT_MANUAL_TRANSACTION,
+                sessionParams("transaction-schema")
+            ));
+            openSession(server, requestIds, "schema-observer");
+            JsonObject afterCommit = query(server, requestIds, "schema-observer", "SELECT CURRENT_SCHEMA", null);
+            assertEquals("PUBLIC", afterCommit.getAsJsonArray("rows").get(0).getAsJsonArray().get(0).getAsString());
+        }
+    }
+
+    @Test
     void affinityDetectionCoversCommonSessionStateStatements() {
         assertTrue(JdbcConnectionAffinity.requiresSessionAffinity("SET search_path TO app"));
         assertTrue(JdbcConnectionAffinity.requiresSessionAffinity("-- comment\nUSE sales"));

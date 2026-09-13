@@ -223,6 +223,16 @@ export async function createMockHost(options) {
   }
   async function api(session, route, p) {
     if (route === "/api/bridge") return bridge(session, p);
+    if (route === "/api/icon") {
+      const contribution = p.contributionId === undefined ? undefined : manifest.contributions?.find((item) => item.id === p.contributionId);
+      if (p.contributionId !== undefined && !contribution) throw new Error("Unknown icon contribution");
+      const icon = contribution?.icon || manifest.icon;
+      if (!icon) return null;
+      if (typeof icon !== "string" || /[:\\\0]/.test(icon) || icon.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("Invalid plugin icon path");
+      const asset = await readAsset(project, icon);
+      if (!asset.contentType.startsWith("image/")) throw new Error("Plugin icon is not an image");
+      return asset;
+    }
     if (route === "/api/frame-document") {
       const f = frameFor(session, p.frameId);
       const asset = await readAsset(uiRoot, entry);
@@ -340,6 +350,7 @@ export async function createMockHost(options) {
         "/api/bridge",
         "/api/frame-document",
         "/api/workbenches/open",
+        "/api/icon",
         "/api/connections/edit",
         "/api/connections/save",
         "/api/connections/test",

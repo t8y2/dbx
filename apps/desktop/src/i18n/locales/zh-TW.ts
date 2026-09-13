@@ -1387,6 +1387,7 @@ export default withEnglishFallback({
     mqttClientCertPath: "用戶端憑證路徑",
     mqttClientKeyPath: "用戶端私鑰路徑",
     mqttNoLocal: "禁止本機轉送",
+    clientCertHint: "要求 mTLS 時，用戶端憑證和私密金鑰必須一起填寫。",
   },
   editor: {
     duckdbDraining: "上一筆 DuckDB 查詢仍在停止，請稍後重試。",

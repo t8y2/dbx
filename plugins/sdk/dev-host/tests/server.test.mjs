@@ -168,10 +168,11 @@ test("refresh cleanup does not disconnect a connection still used by another pag
   assert.equal(closed.value.connections[0].connected, false);
 });
 async function fixture(t, frontend = false, overrides = {}) {
+  const { pluginManifest = manifest, ...hostOverrides } = overrides;
   const root = await mkdtemp(join(tmpdir(), "dbx-mock-test-"));
   await mkdir(join(root, "ui"));
   await writeFile(join(root, "ui/index.html"), "<html><head></head><body>Test</body></html>");
-  const actual = frontend ? { ...manifest, entrypoints: { ui: manifest.entrypoints.ui }, contributions: manifest.contributions.filter((c) => c.type === "workbench") } : manifest;
+  const actual = frontend ? { ...pluginManifest, entrypoints: { ui: pluginManifest.entrypoints.ui }, contributions: pluginManifest.contributions.filter((c) => c.type === "workbench") } : pluginManifest;
   await writeFile(join(root, "manifest.json"), JSON.stringify(actual));
   const host = await createMockHost({
     project: root,
@@ -186,7 +187,7 @@ async function fixture(t, frontend = false, overrides = {}) {
     buildBackend: async () => {
       throw new Error("Intentional build failure");
     },
-    ...overrides,
+    ...hostOverrides,
   });
   t.after(async () => {
     await host.close();
@@ -373,6 +374,69 @@ test("asset reader rejects traversal and symlinks outside the UI root", async (t
   await assert.rejects(readAsset(join(root, "ui"), "../secret"), /outside/);
   await assert.rejects(readAsset(join(root, "ui"), "link"), /outside/);
   assert.equal(Buffer.from((await readAsset(join(root, "ui"), "index.html")).dataBase64, "base64").toString(), await readFile(join(root, "ui/index.html"), "utf8"));
+});
+
+test("icons use contribution overrides and plugin fallback from the project root", async (t) => {
+  const pluginManifest = {
+    ...manifest,
+    icon: "assets/plugin.svg",
+    contributions: [...manifest.contributions.map((contribution) => ({ ...contribution, icon: `assets/${contribution.type}.svg` })), { type: "workbench", id: "example.fallback", label: "Fallback" }],
+  };
+  const { root, request } = await fixture(t, false, { pluginManifest });
+  await mkdir(join(root, "assets"));
+  for (const name of ["plugin", "connection-provider", "workbench"]) {
+    await writeFile(join(root, `assets/${name}.svg`), `<svg xmlns="http://www.w3.org/2000/svg" aria-label="${name}"/>`);
+  }
+  for (const [contributionId, name] of [
+    [undefined, "plugin"],
+    ["example.connection", "connection-provider"],
+    ["example.main", "workbench"],
+    ["example.fallback", "plugin"],
+  ]) {
+    const result = await request("icon", { contributionId, path: "manifest.json" });
+    assert.equal(result.status, 200);
+    assert.equal(result.value.contentType, "image/svg+xml");
+    assert.equal(Buffer.from(result.value.dataBase64, "base64").toString(), await readFile(join(root, `assets/${name}.svg`), "utf8"));
+  }
+});
+
+test("icons retain browser session protection and reject unknown contributions", async (t) => {
+  const { request } = await fixture(t);
+  assert.equal((await request("icon", {}, { Origin: "https://evil.example" })).status, 403);
+  assert.equal((await request("icon", {}, { "X-Mock-Csrf": "wrong" })).status, 403);
+  assert.equal((await request("icon", {}, { Cookie: "" })).status, 403);
+  assert.equal((await request("icon", { contributionId: "missing" })).status, 400);
+});
+
+test("plugins without icons return null without preventing workbench startup", async (t) => {
+  const { request } = await fixture(t, true);
+  assert.deepEqual(await request("icon"), { status: 200, value: null });
+  assert.deepEqual(await request("icon", { contributionId: "example.main" }), { status: 200, value: null });
+  assert.equal((await request("workbenches/open", { contributionId: "example.main" })).status, 200);
+});
+
+test("icon reads reject unsafe paths, missing files, non-images, symlink escapes and oversized files", async (t) => {
+  const paths = ["../outside.svg", "/outside.svg", "assets/../manifest.json", "assets\\icon.svg", "https://example.com/icon.svg", "data:image/svg+xml;base64,PHN2Zy8+", "assets/missing.svg", "manifest.json", "assets/link.svg", "assets/large.svg"];
+  const pluginManifest = {
+    ...manifest,
+    contributions: paths.map((icon, index) => ({ type: "workbench", id: `example.icon-${index}`, label: "Icon", icon })),
+  };
+  const { root, request, host } = await fixture(t, true, { pluginManifest });
+  const outside = await mkdtemp(join(tmpdir(), "dbx-icon-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await mkdir(join(root, "assets"));
+  await writeFile(join(outside, "private.svg"), "private-icon-content");
+  await symlink(join(outside, "private.svg"), join(root, "assets/link.svg"));
+  await writeFile(join(root, "assets/large.svg"), Buffer.alloc(8 * 1024 * 1024 + 1));
+  for (const contribution of pluginManifest.contributions) {
+    const result = await request("icon", { contributionId: contribution.id });
+    assert.equal(result.status, 400, contribution.icon);
+    assert.equal(result.value, undefined);
+    assert.ok(!JSON.stringify(result).includes(root));
+    assert.ok(!JSON.stringify(result).includes("private-icon-content"));
+  }
+  assert.equal(host.sidecar.state, "frontend");
+  assert.equal((await request("workbenches/open", { contributionId: "example.icon-0" })).status, 200);
 });
 
 test("UI root overrides and port collision fallback work without changing the plugin manifest", async (t) => {

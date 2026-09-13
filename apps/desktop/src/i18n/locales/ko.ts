@@ -831,6 +831,7 @@ export default withEnglishFallback({
     etcdClientCertPlaceholder: "/path/to/client.crt",
     etcdClientKeyPlaceholder: "/path/to/client.key",
     etcdClientCertHint: "etcd가 mTLS를 요구할 때 클라이언트 인증서와 개인 키를 함께 제공해야 합니다.",
+    clientCertHint: "mTLS가 요구되는 경우 클라이언트 인증서와 개인 키를 함께 입력해야 합니다.",
     etcdClientCertBrowse: "클라이언트 인증서 선택",
     etcdClientKeyBrowse: "클라이언트 개인 키 선택",
     etcdClientCertPairRequired: "클라이언트 인증서와 개인 키를 함께 제공해야 합니다.",

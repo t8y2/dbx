@@ -97,7 +97,7 @@ func TestConnectionConfiguration(t *testing.T) {
 			}
 		})
 	}
-	if !hasTLSOptions(connectionConfig{CACertPath: "/tmp/ca.pem"}) {
+	if !tlsOptionsPresent(connectionConfig{CACertPath: "/tmp/ca.pem"}) {
 		t.Fatal("TLS path was not detected")
 	}
 	for input, expected := range map[string]int{"": 16, "bad": 16, "0": 1, "32": 32, "100": 64} {
@@ -113,7 +113,9 @@ func TestConnectionValidationHappensBeforeNetwork(t *testing.T) {
 		config  connectionConfig
 		message string
 	}{
-		{"tls", connectionConfig{SSL: true}, "ZooKeeper TLS is not supported"},
+		{"tls client cert without key", connectionConfig{ClientCertPath: "/tmp/client.crt"}, "client key (client_key_path) is required"},
+		{"tls client key without cert", connectionConfig{ClientKeyPath: "/tmp/client.key"}, "client certificate (client_cert_path) is required"},
+		{"tls missing CA file", connectionConfig{CACertPath: "/tmp/missing-ca.pem"}, "load ZooKeeper CA certificate"},
 		{"auth", connectionConfig{AuthScheme: "sasl"}, `Unsupported auth_scheme "sasl"`},
 		{"sasl username", connectionConfig{AuthScheme: saslDigestAuthScheme, Password: "secret"}, `username is required when auth_scheme = "sasl_digest"`},
 		{"sasl password", connectionConfig{AuthScheme: saslDigestAuthScheme, Username: "user"}, `password is required when auth_scheme = "sasl_digest"`},

@@ -1,5 +1,5 @@
 import type { TableInfo, TreeNode, TreeNodeType } from "@/types/database";
-import { createSidebarLabelMatcher, type SidebarLabelMatcher, type SidebarSearchMatcherOptions } from "@/lib/sidebar/sidebarSearch";
+import { createSidebarLabelMatcher, matchSidebarLabel, type SidebarLabelMatcher, type SidebarSearchMatcherOptions } from "@/lib/sidebar/sidebarSearch";
 import { buildTableTreeNodes } from "@/lib/table/tableTree";
 
 const preserveMatchedSubtreeTypes = new Set(["connection", "database", "schema", "table", "view", "mongo-db", "mongo-collection"]);
@@ -72,6 +72,31 @@ export function reuseLiveSidebarTreeNodes(indexedNodes: TreeNode[], liveNodes: r
   return indexedNodes.map((node) => liveNodesById.get(node.id) ?? node);
 }
 
+const localTableSearchParentTypes = new Set<TreeNodeType>(["database", "schema", "linked-server-schema", "group-tables"]);
+const localTableSearchChildTypes = new Set<TreeNodeType>(["table", "view", "materialized_view"]);
+
+export function filterLocallySearchedTables(nodes: TreeNode[], options: { enabled: boolean; queries: Readonly<Record<string, string>>; indexedResults: Readonly<Record<string, TableInfo[] | null>> }): TreeNode[] {
+  return nodes.map((node) => {
+    const children = node.children ? filterLocallySearchedTables(node.children, options) : undefined;
+    const query = options.enabled && localTableSearchParentTypes.has(node.type) ? options.queries[node.id]?.trim() : "";
+    if (!query || !children) return children === node.children ? node : { ...node, children };
+
+    const indexed = options.indexedResults[node.id];
+    // matchSidebarLabel compares case-insensitively internally and needs the
+    // ORIGINAL label (and entry name) so camelCase boundaries stay detectable.
+    const matchingChildren =
+      indexed === null
+        ? children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query))
+        : indexed
+          ? reuseLiveSidebarTreeNodes(
+              buildSidebarIndexedTableNodes({ parentNodeId: node.id, nodeType: node.type, connectionId: node.connectionId || "", database: node.database || "", schema: node.schema, catalog: node.catalog, entries: indexed.filter((entry) => !!matchSidebarLabel(entry.name, query)) }),
+              children,
+            )
+          : children.filter((child) => localTableSearchChildTypes.has(child.type) && !!matchSidebarLabel(child.label, query));
+    return { ...node, children: matchingChildren };
+  });
+}
+
 export interface SidebarRegexIndexScope {
   parentNodeId: string;
   connectionId: string;
@@ -132,7 +157,7 @@ export function findNodePathByIdentity(nodes: readonly TreeNode[], id: string, i
   return undefined;
 }
 
-function indexedTableChildren(scope: SidebarRegexIndexScope): TreeNode[] {
+export function buildSidebarIndexedTableNodes(scope: SidebarRegexIndexScope): TreeNode[] {
   // Reuse the regular table-node builder so index hits share live-node id
   // rules, normalized object types, name sorting, catalog/schema fields, and
   // partition parent/child nesting instead of hand-rolled node literals.
@@ -143,6 +168,10 @@ function indexedTableChildren(scope: SidebarRegexIndexScope): TreeNode[] {
     schema: scope.schema,
     catalog: scope.catalog,
     tables: scope.entries,
+    // Grouped object lists include the schema in each child id; simple table
+    // lists do not. Search must use the same id because persisted pin keys
+    // include it, even when an index hit has not been loaded into the live tree.
+    includeSchemaInId: scope.nodeType === "group-tables",
   });
 }
 
@@ -160,7 +189,7 @@ function syntheticRegexParent(scope: SidebarRegexIndexScope): TreeNode {
     ...(snapshot?.linkedCatalog ? { linkedCatalog: snapshot.linkedCatalog } : {}),
     ...(snapshot?.linkedSchema ? { linkedSchema: snapshot.linkedSchema } : {}),
     isExpanded: true,
-    children: indexedTableChildren(scope),
+    children: buildSidebarIndexedTableNodes(scope),
   };
 }
 

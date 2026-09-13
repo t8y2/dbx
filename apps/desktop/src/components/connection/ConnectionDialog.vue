@@ -8073,7 +8073,7 @@ function openExternalUrl(url: string) {
                         </Tooltip>
                       </div>
                       <p class="text-[11px] leading-4 text-muted-foreground">
-                        {{ t("connection.etcdClientCertHint") }}
+                        {{ t("connection.clientCertHint") }}
                       </p>
                     </div>
                   </div>

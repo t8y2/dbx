@@ -725,6 +725,7 @@ export default {
     etcdClientCertPlaceholder: "/path/to/client.crt",
     etcdClientKeyPlaceholder: "/path/to/client.key",
     etcdClientCertHint: "Client certificate and private key must be provided together when etcd requires mTLS.",
+    clientCertHint: "Client certificate and private key must be provided together when mutual TLS (mTLS) is required.",
     etcdClientCertBrowse: "Choose client certificate",
     etcdClientKeyBrowse: "Choose client private key",
     etcdClientCertPairRequired: "Client certificate and private key must be provided together.",

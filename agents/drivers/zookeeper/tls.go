@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -65,6 +64,10 @@ func buildZooKeeperTLSConfig(config connectionConfig) (*tls.Config, error) {
 	case keyPath != "":
 		return nil, errors.New("client certificate (client_cert_path) is required when a client key is provided")
 	}
+	// insecure_skip_verify is exposed only as a connection URL parameter
+	// (e.g. ?insecure_skip_verify=true). It defaults to off, so callers that
+	// don't set it get full certificate-chain verification. Only enable it for
+	// trusted or test-only clusters, since it disables that verification.
 	if paramBool(connectionURLParams(config), "insecure_skip_verify") {
 		tlsConfig.InsecureSkipVerify = true
 	}
@@ -85,36 +88,18 @@ func tlsOptionsPresent(config connectionConfig) bool {
 }
 
 // loadCACertPool reads a PEM-encoded trust store (one or more CERTIFICATE
-// blocks) and returns an x509.CertPool built from it. System roots are used as
-// a fallback when the file is empty.
+// blocks) and returns an x509.CertPool built from it. It uses
+// x509.CertPool.AppendCertsFromPEM (the same helper etcd-go relies on) so a
+// single call parses every CERTIFICATE block in the file, including CA-chain
+// bundles, without a manual decode loop.
 func loadCACertPool(path string) (*x509.CertPool, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	pool := x509.NewCertPool()
-	var certificates []*x509.Certificate
-	rest := contents
-	for len(rest) > 0 {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		certificate, parseErr := x509.ParseCertificate(block.Bytes)
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		certificates = append(certificates, certificate)
-	}
-	if len(certificates) == 0 {
+	if !pool.AppendCertsFromPEM(contents) {
 		return nil, errors.New("PEM CA file contains no CERTIFICATE blocks")
-	}
-	for _, certificate := range certificates {
-		pool.AddCert(certificate)
 	}
 	return pool, nil
 }

@@ -1191,6 +1191,7 @@ export default withEnglishFallback({
     sshTotpCancelled: "일회용 코드 입력이 취소되었습니다",
     mqttSearchPayloadPlaceholder: "메시지 Payload 검색...",
     mqttNoMatchingMessages: "현재 Payload 필터 조건과 일치하는 로드된 메시지가 없습니다.",
+    clientCertHint: "mTLS가 요구되는 경우 클라이언트 인증서와 개인 키를 함께 입력해야 합니다.",
   },
   editor: {
     duckdbDraining: "이전 DuckDB 쿼리가 아직 중지 중입니다. 잠시 후 다시 시도해 주세요.",

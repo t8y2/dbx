@@ -1282,6 +1282,7 @@ export default withEnglishFallback({
     mqttNoLocal: "Proibir encaminhamento local",
     doltShowSystemTables: "Exibir tabelas internas do Dolt",
     doltShowSystemTablesHint: "Exibir as tabelas de controle de versão internas do Dolt na lista de tabelas da conexão atual.",
+    clientCertHint: "Quando o mTLS for exigido, o certificado do cliente e a chave privada devem ser preenchidos juntos.",
   },
   editor: {
     duckdbDraining: "A consulta anterior do DuckDB ainda está sendo interrompida. Tente novamente em breve.",

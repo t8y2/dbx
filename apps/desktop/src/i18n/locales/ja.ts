@@ -1302,6 +1302,7 @@ export default withEnglishFallback({
     mqttNoLocal: "ローカル転送禁止",
     doltShowSystemTables: "Dolt 組み込みテーブルを表示",
     doltShowSystemTablesHint: "現在の接続のテーブルリストに Dolt 組み込みのバージョン管理テーブルを表示します。",
+    clientCertHint: "mTLS が要求される場合、クライアント証明書と秘密鍵は一緒に入力する必要があります。",
   },
   editor: {
     duckdbDraining: "前回の DuckDB クエリはまだ停止処理中です。しばらくしてから再試行してください。",

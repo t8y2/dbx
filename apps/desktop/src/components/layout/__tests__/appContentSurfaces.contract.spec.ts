@@ -10,19 +10,19 @@ const appSource = readFileSync(new URL("../../../App.vue", import.meta.url), "ut
 // assertions pin the sibling order so a future merge cannot re-introduce it.
 describe("App main content surface structure", () => {
   it("hides only the editor workspace via the surface guard, never the special pages", () => {
-    const guard = 'v-show="!driverStoreActive && !settingsStore.settingsPageActive"';
+    const guard = 'v-show="!driverStoreActive && !settingsStore.settingsPageActive && !dataViewActive"';
     // The empty-state slot shares the query surface's visibility guard.
     expect(appSource.split(guard).length - 1).toBe(1);
 
     // Source order: special surfaces first, then the guarded editor wrapper.
-    const markers = ["<DriverStorePage", "<EditorSettingsPage", guard, "<SqlEditorWorkspace", "<WelcomeScreen"];
+    const markers = ["<DriverStorePage", "<DataViewPage", "<EditorSettingsPage", guard, "<SqlEditorWorkspace", "<WelcomeScreen"];
     const indices = markers.map((marker) => appSource.indexOf(marker));
     expect(indices.every((index) => index >= 0)).toBe(true);
     expect([...indices].sort((a, b) => a - b)).toEqual(indices);
   });
 
   it("keeps navigation independent from the workspace welcome content", () => {
-    expect(appSource).toContain(':show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"');
+    expect(appSource).toContain(':show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen || dataViewTabOpen"');
     expect(appSource).toContain(':active-tab="activeTab ?? undefined"');
     expect(appSource).toMatch(/<template #empty>\s*<WelcomeScreen/);
     expect(appSource).not.toContain('v-if="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"');

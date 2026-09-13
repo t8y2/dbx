@@ -20,6 +20,7 @@ use crate::connection_secrets::{
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
     NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
 };
+use crate::data_view::{DataView, DataViewQuery, DataViewSummary, DataViewVariable};
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
     HistoryConnectionFilter, HistoryConnectionOption, HistoryCursor, HistoryDatabaseFilter, HistoryEntry,
@@ -62,6 +63,7 @@ const USER_DATA_TABLES: &[&str] = &[
     "ai_configs",
     "state_store",
     "prompt_templates",
+    "data_views",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -864,6 +866,17 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
         content TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+    )",
+    "CREATE TABLE IF NOT EXISTS data_views (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        description TEXT,
+        default_display_mode TEXT NOT NULL DEFAULT 'table',
+        queries_json TEXT NOT NULL DEFAULT '[]',
+        variables_json TEXT NOT NULL DEFAULT '[]',
+        owner_id TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -4225,6 +4238,133 @@ impl Storage {
         let id = id.to_string();
         self.with_conn(move |conn| {
             conn.execute("DELETE FROM saved_sql_files WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
+        })
+        .await
+    }
+}
+
+// Data views
+
+impl Storage {
+    pub async fn list_data_views(&self) -> Result<Vec<DataViewSummary>, String> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, description, default_display_mode, queries_json, owner_id, created_at, updated_at \
+                     FROM data_views ORDER BY updated_at DESC, name COLLATE NOCASE",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    let queries_json: String = row.get(4)?;
+                    let query_count = serde_json::from_str::<Vec<serde_json::Value>>(&queries_json)
+                        .map(|q| q.len() as i64)
+                        .unwrap_or(0);
+                    Ok(DataViewSummary {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        default_display_mode: row.get(3)?,
+                        query_count,
+                        owner_id: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    pub async fn load_data_view(&self, id: &str) -> Result<Option<DataView>, String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, description, default_display_mode, queries_json, variables_json, owner_id, created_at, updated_at \
+                     FROM data_views WHERE id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            match stmt.query_row([id], |row| {
+                let queries_json: String = row.get(4)?;
+                let variables_json: String = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    queries_json,
+                    variables_json,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            }) {
+                Ok((id, name, description, default_display_mode, queries_json, variables_json, owner_id, created_at, updated_at)) => {
+                    let queries: Vec<DataViewQuery> = serde_json::from_str(&queries_json).map_err(|e| e.to_string())?;
+                    let variables: Vec<DataViewVariable> =
+                        serde_json::from_str(&variables_json).map_err(|e| e.to_string())?;
+                    Ok(Some(DataView {
+                        id,
+                        name,
+                        description,
+                        default_display_mode,
+                        queries,
+                        variables,
+                        owner_id,
+                        created_at,
+                        updated_at,
+                    }))
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(err) => Err(err.to_string()),
+            }
+        })
+        .await
+    }
+
+    pub async fn save_data_view(&self, view: &DataView) -> Result<(), String> {
+        let view = view.clone();
+        let queries_json = serde_json::to_string(&view.queries).map_err(|e| e.to_string())?;
+        let variables_json = serde_json::to_string(&view.variables).map_err(|e| e.to_string())?;
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO data_views \
+                 (id, name, description, default_display_mode, queries_json, variables_json, owner_id, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET \
+                 name = excluded.name, \
+                 description = excluded.description, \
+                 default_display_mode = excluded.default_display_mode, \
+                 queries_json = excluded.queries_json, \
+                 variables_json = excluded.variables_json, \
+                 owner_id = excluded.owner_id, \
+                 updated_at = excluded.updated_at",
+                params![
+                    view.id,
+                    view.name,
+                    view.description,
+                    view.default_display_mode,
+                    queries_json,
+                    variables_json,
+                    view.owner_id,
+                    view.created_at,
+                    view.updated_at
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn delete_data_view(&self, id: &str) -> Result<(), String> {
+        let id = id.to_string();
+        self.with_conn(move |conn| {
+            conn.execute("DELETE FROM data_views WHERE id = ?1", [id]).map(|_| ()).map_err(|e| e.to_string())
         })
         .await
     }

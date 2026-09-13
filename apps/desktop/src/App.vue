@@ -14,6 +14,8 @@ import { EDITOR_TOOLBAR_ACTIONS } from "@/components/layout/editorToolbarActions
 import AppDialogs from "@/components/layout/AppDialogs.vue";
 import DetachedTabHeader from "@/components/layout/DetachedTabHeader.vue";
 import WelcomeScreen from "@/components/layout/WelcomeScreen.vue";
+import DataViewSharePage from "@/components/dataView/DataViewSharePage.vue";
+import { parseDataViewShareLocation } from "@/lib/dataView/dataViewShareLink";
 import type { ConfigTab } from "@/components/connection/ConnectionDialog.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
@@ -156,6 +158,7 @@ const SqlLibraryPanel = defineAsyncComponent(() => import("@/components/layout/S
 const SqlFilePanel = defineAsyncComponent(() => import("@/components/layout/SqlFilePanel.vue"));
 const DriverStorePage = defineAsyncComponent(() => import("@/components/config/DriverStoreDialog.vue"));
 const EditorSettingsPage = defineAsyncComponent(() => import("@/components/editor/EditorSettingsDialog.vue"));
+const DataViewPage = defineAsyncComponent(() => import("@/components/dataView/DataViewPage.vue"));
 const UpdateDialog = defineAsyncComponent(() => import("@/components/layout/UpdateDialog.vue"));
 const CloseActionPromptDialog = defineAsyncComponent(() => import("@/components/layout/CloseActionPromptDialog.vue"));
 const AiRunsClosePromptDialog = defineAsyncComponent(() => import("@/components/layout/AiRunsClosePromptDialog.vue"));
@@ -303,6 +306,9 @@ const { mcpUpdateAvailable, refreshMcpUpdateStatus, handleMcpStatusChanged } = u
   updateNotificationsEnabled: () => settingsStore.editorSettings.updateNotificationsEnabled,
 });
 const drawDesktopWindowFrame = shouldDrawDesktopWindowFrame(isMacOS(), isDesktop, isWindows());
+// Non-null only when the current URL is a shared data-view page; renders the
+// minimal viewer instead of the full workspace chrome.
+const dataViewShareId = parseDataViewShareLocation();
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 let updateCheckTimer: ReturnType<typeof setInterval> | undefined;
 const needsAuth = ref(!isDesktop);
@@ -316,6 +322,29 @@ const settingsPageTabOpen = ref(false);
 const settingsInitialTab = ref("appearance");
 const settingsInitialSection = ref<string | undefined>(undefined);
 const settingsNavigationRequestId = ref(0);
+const dataViewTabOpen = ref(false);
+interface DataViewOpenRequest {
+  id: string;
+  mode: "editor" | "runner";
+  token: number;
+}
+const dataViewOpenRequest = ref<DataViewOpenRequest | null>(null);
+function openDataViewPage() {
+  dataViewTabOpen.value = true;
+  activateMainContentSurface("dataView");
+}
+
+function openDataViewEditor(viewId: string) {
+  dataViewTabOpen.value = true;
+  dataViewOpenRequest.value = { id: viewId, mode: "editor", token: Date.now() };
+  activateMainContentSurface("dataView");
+}
+
+function closeDataViewPage() {
+  dataViewTabOpen.value = false;
+  dataViewOpenRequest.value = null;
+  activateMainContentSurface("query");
+}
 const settingsAiConfigDraft = ref<AiConfigDeepLinkDraft | null>(null);
 const settingsAiConfigRequestId = ref(0);
 const showQueryEditorDdlDialog = ref(false);
@@ -323,8 +352,10 @@ const showQueryEditorObjectSourceDialog = ref(false);
 const driverStoreTabOpen = ref(false);
 const driverStoreActive = ref(false);
 const driverStoreActiveTab = ref<"agent" | "jdbc" | "storage" | "runtime">("agent");
-const settingsReturnSurface = ref<"query" | "driverStore" | "welcome">("welcome");
+const dataViewActive = ref(false);
+const settingsReturnSurface = ref<"query" | "driverStore" | "dataView" | "welcome">("welcome");
 const showDriverStore = computed(() => driverStoreTabOpen.value && driverStoreActive.value);
+const showDataView = computed(() => dataViewTabOpen.value && dataViewActive.value);
 const showSettingsPage = computed(() => Boolean(settingsPageTabOpen.value && settingsStore.settingsPageActive));
 const showQuickOpen = ref(false);
 const showTabSwitcher = ref(false);
@@ -863,7 +894,7 @@ const specialPageTabs = computed(() => ({
   driverStoreActive: driverStoreActive.value,
   driverUpdateCount: toolbarAgentDriverUpdateCount.value,
 }));
-provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || settingsStore.settingsPageActive))));
+provide(GROUP_TAB_BAR_PORTAL, createGroupTabBarPortal(computed(() => !isDetachedWindowContext && (driverStoreActive.value || settingsStore.settingsPageActive || dataViewActive.value))));
 provide(EDITOR_TOOLBAR_ACTIONS, {
   explainMode,
   blockDangerousRedisCommands,
@@ -892,6 +923,7 @@ provide(EDITOR_TOOLBAR_ACTIONS, {
   closeSettingsPage,
   activateDriverStore: () => openDriverStorePage(),
   closeDriverStore: closeDriverStorePage,
+  openDataView: openDataViewEditor,
 });
 
 // Upstream "preview changes" entry: dormant until the group toolbar wires the
@@ -1005,16 +1037,17 @@ function openSettings(initialTab = "appearance", initialSection?: string) {
   settingsInitialSection.value = initialSection;
   settingsNavigationRequestId.value += 1;
   if (!settingsStore.settingsPageActive) {
-    settingsReturnSurface.value = showDriverStore.value ? "driverStore" : activeTab.value ? "query" : "welcome";
+    settingsReturnSurface.value = showDriverStore.value ? "driverStore" : showDataView.value ? "dataView" : activeTab.value ? "query" : "welcome";
   }
   activateSettingsPage();
 }
 
-type MainContentSurface = "query" | "settings" | "driverStore";
+type MainContentSurface = "query" | "settings" | "driverStore" | "dataView";
 
 function activateMainContentSurface(surface: MainContentSurface) {
   settingsStore.settingsPageActive = surface === "settings";
   driverStoreActive.value = surface === "driverStore";
+  dataViewActive.value = surface === "dataView";
 }
 
 watch(
@@ -1049,6 +1082,10 @@ function closeSettingsPage() {
   settingsPageTabOpen.value = false;
   if (settingsReturnSurface.value === "driverStore" && driverStoreTabOpen.value) {
     activateMainContentSurface("driverStore");
+    return;
+  }
+  if (settingsReturnSurface.value === "dataView" && dataViewTabOpen.value) {
+    activateMainContentSurface("dataView");
     return;
   }
   activateMainContentSurface("query");
@@ -3191,6 +3228,8 @@ async function handleKeydown(e: KeyboardEvent) {
       closeSettingsPage();
     } else if (showDriverStore.value) {
       closeDriverStorePage();
+    } else if (showDataView.value) {
+      closeDataViewPage();
     } else if (queryStore.activeTabId) {
       if (await queryStore.clearQueryResults(queryStore.activeTabId)) return;
       queryStore.closeTab(queryStore.activeTabId);
@@ -3503,7 +3542,8 @@ onUnmounted(() => {
 
 <template>
   <LoginPage v-if="setupRequired || (needsAuth && !authenticated)" :setup-mode="setupRequired" @authenticated="onLoginSuccess" />
-  <div v-show="!setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
+  <DataViewSharePage v-else-if="dataViewShareId" :view-id="dataViewShareId" />
+  <div v-show="!dataViewShareId && !setupRequired && (!needsAuth || authenticated)" class="fixed inset-0 h-screen w-screen overflow-hidden">
     <div v-if="appBackgroundActive && appBackgroundObjectUrl" data-app-background class="pointer-events-none fixed inset-0 -z-10 overflow-hidden">
       <div class="h-full w-full" :style="appBackgroundImageStyle"></div>
     </div>
@@ -3550,6 +3590,7 @@ onUnmounted(() => {
           @open-sql-file="dialogs.showSqlFileDialog.value = true"
           @open-schema-diff="dialogs.showSchemaDiffDialog.value = true"
           @open-data-compare="dialogs.showDataCompareDialog.value = true"
+          @open-data-view="openDataViewPage"
         />
 
         <div :class="isDetachedWindowContext ? 'flex-1 flex min-h-0' : isClassicLayout ? 'app-layout-classic flex-1 flex min-h-0' : 'app-panel-gutter flex-1 flex min-h-0 gap-1 p-1'">
@@ -3574,6 +3615,8 @@ onUnmounted(() => {
                 ref="appTabBarRef"
                 :driver-store-open="driverStoreTabOpen"
                 :driver-store-active="driverStoreActive"
+                :data-view-open="dataViewTabOpen"
+                :data-view-active="dataViewActive"
                 :settings-page-open="settingsPageTabOpen"
                 :settings-page-active="settingsStore.settingsPageActive"
                 :agent-driver-update-count="toolbarAgentDriverUpdateCount"
@@ -3582,9 +3625,11 @@ onUnmounted(() => {
                 :tab-bar-width="tabBarWidth"
                 :tab-bar-collapsed="tabBarCollapsed"
                 @activate-driver-store="openDriverStorePage"
+                @activate-data-view="openDataViewPage"
                 @activate-settings-page="activateSettingsPage"
                 @activate-tab="activateQueryTab"
                 @close-driver-store="closeDriverStorePage"
+                @close-data-view="closeDataViewPage"
                 @close-settings-page="closeSettingsPage"
                 @save-tab="handleSaveTab"
                 @discard-tab-close="handleDiscardPendingTabClose"
@@ -3594,6 +3639,7 @@ onUnmounted(() => {
                 @detach-tab="detachTab"
               >
                 <DriverStorePage v-if="driverStoreTabOpen" v-show="driverStoreActive" v-model:active-tab="driverStoreActiveTab" class="flex-1 min-h-0" :update-notifications-enabled="updateNotificationsEnabled" :focus-target="driverStoreFocus" @update-count-change="updateAgentDriverUpdateCount" />
+                <DataViewPage v-if="dataViewTabOpen" v-show="dataViewActive" class="flex-1 min-h-0" :open-request="dataViewOpenRequest" />
                 <EditorSettingsPage
                   v-if="settingsPageTabOpen"
                   v-show="settingsStore.settingsPageActive"
@@ -3635,7 +3681,7 @@ onUnmounted(() => {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
-              <div v-show="!driverStoreActive && !settingsStore.settingsPageActive" class="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div v-show="!driverStoreActive && !settingsStore.settingsPageActive && !dataViewActive" class="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div class="flex flex-col flex-1 min-h-0">
                   <SqlEditorWorkspace
                     ref="contentAreaRef"
@@ -3644,7 +3690,7 @@ onUnmounted(() => {
                     @start-resize="startTabBarResize"
                     @toggle-collapse="toggleTabBarCollapsed"
                     :active-tab="activeTab ?? undefined"
-                    :show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen"
+                    :show-tab-navigation="queryStore.tabs.length > 0 || settingsPageTabOpen || driverStoreTabOpen || dataViewTabOpen"
                     :active-connection="activeConnection"
                     :tab-bar-width="tabBarWidth"
                     :tab-bar-collapsed="tabBarCollapsed"
@@ -3753,6 +3799,7 @@ onUnmounted(() => {
                     @structure-editor-close="(tabId: string) => queryStore.closeTab(tabId)"
                     @open-settings="openSettings"
                     @open-connection-settings="openConnectionSettings"
+                    @open-data-view="openDataViewEditor"
                   >
                     <template #empty>
                       <WelcomeScreen

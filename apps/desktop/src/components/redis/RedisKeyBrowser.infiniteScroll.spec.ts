@@ -9,6 +9,10 @@ import { REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 
 const grouping = ref<RedisKeyGrouping>();
 vi.mock("@/lib/redis/redisKeyViewScheduler", () => ({ createRedisKeyViewYield: () => () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())) }));
+import { defaultRedisKeyGrouping, type RedisKeyGrouping } from "@/lib/redis/redisKeyGrouping";
+
+const grouping = ref<RedisKeyGrouping>();
+vi.mock("@/lib/redis/redisKeyViewScheduler", () => ({ createRedisKeyViewYield: () => () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())) }));
 
 const mocks = vi.hoisted(() => ({
   scrollerInitialSnapshot: vi.fn(),

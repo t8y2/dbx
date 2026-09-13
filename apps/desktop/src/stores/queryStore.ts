@@ -1058,6 +1058,7 @@ export const useQueryStore = defineStore("query", () => {
   function registerOpenTab(tab: QueryTab, options: { activate?: boolean; insertAfterTabId?: string } = {}): string {
     assertUpdateAllowsInteraction();
     initializeResultAutoSave(tab);
+    assertUpdateAllowsInteraction();
     const anchorIndex = options.insertAfterTabId ? tabs.value.findIndex((item) => item.id === options.insertAfterTabId) : -1;
     if (anchorIndex >= 0) {
       tabs.value.splice(anchorIndex + 1, 0, tab);

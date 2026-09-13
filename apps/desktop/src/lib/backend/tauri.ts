@@ -78,6 +78,7 @@ import type {
 import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
+import type { DataView, DataViewSummary, DataViewParamValue, ExecuteDataViewResponse, ExecuteDataViewOptions } from "@/types/dataView";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
 import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
@@ -2424,6 +2425,34 @@ export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
   return invoke("delete_saved_sql_file", { id });
+}
+
+export async function listDataViews(): Promise<DataViewSummary[]> {
+  return invoke("list_data_views");
+}
+
+export async function loadDataView(id: string): Promise<DataView | null> {
+  return invoke("load_data_view", { id });
+}
+
+export async function saveDataView(view: DataView): Promise<DataView> {
+  return invoke("save_data_view", { view });
+}
+
+export async function deleteDataView(id: string): Promise<void> {
+  return invoke("delete_data_view", { id });
+}
+
+export async function executeDataView(id: string, variables: Record<string, DataViewParamValue>, options: ExecuteDataViewOptions = {}): Promise<ExecuteDataViewResponse> {
+  return invoke("execute_data_view_query", {
+    id,
+    variables,
+    maxRows: options.maxRows,
+    timeoutSecs: options.timeoutSecs,
+    clientSessionId: options.clientSessionId,
+    queryIds: options.queryIds,
+    allowMutations: options.allowMutations,
+  });
 }
 
 export async function savedSqlStorageDir(): Promise<string> {

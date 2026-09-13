@@ -973,6 +973,10 @@ async fn main() {
         )
         .route("/saved-sql/folders", post(routes::saved_sql::save_saved_sql_folder))
         .route("/saved-sql/folders/{id}", delete(routes::saved_sql::delete_saved_sql_folder))
+        // Data views
+        .route("/data-views", get(routes::data_view::list_data_views).post(routes::data_view::save_data_view))
+        .route("/data-views/{id}", get(routes::data_view::load_data_view).delete(routes::data_view::delete_data_view))
+        .route("/data-views/{id}/execute", post(routes::data_view::execute_data_view))
         // AI
         .route("/ai/config", post(routes::ai::save_ai_config).get(routes::ai::load_ai_config))
         .route("/ai/provider-config", post(routes::ai::save_ai_provider_config))

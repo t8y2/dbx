@@ -6,11 +6,17 @@ function normalizeBasePath(value: string | undefined): string {
   return withLeadingSlash.replace(/\/+$/, "");
 }
 
+// Matches a trailing "/login" and/or "/data-view/{id}" segment so the
+// runtime base-path inference below doesn't mistake those app routes for a
+// reverse-proxy deployment prefix (e.g. `/data-view/{id}` must resolve API
+// calls to `/api/...`, not `/data-view/{id}/api/...`).
+const TRAILING_APP_ROUTE_RE = /\/(?:data-view\/[^/]+\/)?login\/?$|\/data-view\/[^/]+\/?$/;
+
 function inferredRuntimeBasePath(pathname: string): string {
   const normalized = pathname.replace(/\/+$/, "");
-  if (!normalized || normalized === "/login") return "";
-  if (normalized.endsWith("/login")) return normalized.slice(0, -"/login".length);
-  return normalized;
+  if (!normalized) return "";
+  const match = normalized.match(TRAILING_APP_ROUTE_RE);
+  return match ? normalized.slice(0, match.index) : normalized;
 }
 
 export function dbxWebBasePath(pathname = globalThis.location?.pathname ?? "", buildBase = import.meta.env.BASE_URL): string {

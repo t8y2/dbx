@@ -51,6 +51,7 @@ import {
   WandSparkles,
   Camera,
   AlertTriangle,
+  LayoutDashboard,
 } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -580,6 +581,7 @@ const emit = defineEmits<{
   "update:orderByInput": [value: string];
   "local-column-filters-change": [value: Record<string, string[]>];
   changeQueryTimeout: [connectionId: string];
+  addToDataView: [sql: string];
 }>();
 
 const autoRefresh = useDataGridAutoRefresh({
@@ -13333,16 +13335,26 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
         </template>
       </div>
 
-      <Tooltip v-if="sqlOneLiner">
-        <TooltipTrigger as-child>
-          <span class="min-w-0 max-w-full justify-self-center truncate opacity-60 cursor-pointer hover:opacity-100" @click="copyUserFacingSql">
-            {{ sqlOneLiner }}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent side="top" class="max-w-md">
-          <pre class="text-xs font-mono whitespace-pre-wrap">{{ userFacingSql }}</pre>
-        </TooltipContent>
-      </Tooltip>
+      <div v-if="sqlOneLiner" class="flex min-w-0 items-center justify-center gap-1">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <span class="min-w-0 max-w-full truncate opacity-60 cursor-pointer hover:opacity-100" @click="copyUserFacingSql">
+              {{ sqlOneLiner }}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="top" class="max-w-md">
+            <pre class="text-xs font-mono whitespace-pre-wrap">{{ userFacingSql }}</pre>
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip v-if="props.context === 'table-data'">
+          <TooltipTrigger as-child>
+            <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground" :aria-label="t('dataView.addToDataView')" @click="emit('addToDataView', userFacingSql)">
+              <LayoutDashboard class="h-3 w-3" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{{ t("dataView.addToDataView") }}</TooltipContent>
+        </Tooltip>
+      </div>
       <span v-else class="min-w-0" />
 
       <DataGridPagination

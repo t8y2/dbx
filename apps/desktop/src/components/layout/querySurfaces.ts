@@ -100,4 +100,5 @@ export interface ContentAreaSurfaceEmits {
   openConnectionSettings: [connectionId: string, initialTab: "advanced"];
   toggleZenMode: [];
   toggleResultsPane: [];
+  openDataView: [viewId: string];
 }

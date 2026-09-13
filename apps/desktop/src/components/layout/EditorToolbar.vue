@@ -11,6 +11,10 @@ import TruncatedTextTooltip from "@/components/ui/TruncatedTextTooltip.vue";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import ConnectionTreeSelect from "@/components/connection/ConnectionTreeSelect.vue";
 import ProductionContextBadge from "@/components/common/ProductionContextBadge.vue";
+import AddToDataViewDialog from "@/components/dataView/AddToDataViewDialog.vue";
+import { LayoutDashboard } from "@lucide/vue";
+import type { AddQueryInput } from "@/stores/dataViewStore";
+import { executableStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { catalogDatabaseOptionsKey, databaseAfterCatalogChange, normalizedQueryTabCatalog, queryCatalogSelectorVisible, selectedQueryCatalogName, useDatabaseOptions } from "@/composables/useDatabaseOptions";
@@ -75,6 +79,8 @@ const emit = defineEmits<{
   commit: [];
   rollback: [];
   dismissTxnRolledBack: [];
+  /** A query was added to a data view; the parent should navigate there to edit it. */
+  openDataView: [viewId: string];
 }>();
 
 const { t } = useI18n();
@@ -205,6 +211,26 @@ const saveTooltip = computed(() => {
   if (props.activeTab.objectSource) return t("objects.saveSource");
   if (props.activeTab.externalSqlPath) return t("toolbar.saveSqlFile");
   return t("toolbar.saveSql");
+});
+
+const addToDataViewOpen = ref(false);
+/** Splits the tab into one entry per statement block when it contains more than one; otherwise a single entry for the whole/selected SQL. */
+const addToDataViewQueries = computed<AddQueryInput[]>(() => {
+  const base = {
+    connectionId: props.activeConnection?.id ?? props.activeTab.connectionId,
+    database: props.activeTab.database,
+    catalog: props.activeTab.catalog ?? null,
+    schema: props.activeTab.schema ?? null,
+  };
+  const ranges = executableStatementRanges(props.activeTab.sql, props.activeConnection?.db_type).filter((range) => range.sql.trim().length > 0);
+  if (ranges.length > 1) {
+    return ranges.map((range, index) => ({
+      ...base,
+      title: `${props.activeTab.title} #${index + 1}`,
+      sqlTemplate: range.sql.trim(),
+    }));
+  }
+  return [{ ...base, title: props.activeTab.title, sqlTemplate: props.executableSql || props.activeTab.sql }];
 });
 const executeShortcutDisplay = computed(() => formatShortcutDisplay(settingsStore.editorSettings.shortcuts.executeSql));
 const executeShortcutTooltip = computed(() => t("toolbar.executeShortcut", { shortcut: executeShortcutDisplay.value }));
@@ -537,6 +563,14 @@ async function changeCatalog(selectedCatalog: string) {
       </Tooltip>
       <Tooltip v-if="showOpenSqlButton">
         <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-6 w-6 text-indigo-600 hover:bg-indigo-500/10 hover:text-indigo-700 dark:text-indigo-300 dark:hover:text-indigo-200" :disabled="!activeTab.sql.trim()" @click="addToDataViewOpen = true">
+            <LayoutDashboard class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ t("dataView.addToDataView") }}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-6 w-6 text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300 dark:hover:text-sky-200" @click="emit('openSql')">
             <FolderOpen class="h-3.5 w-3.5" />
           </Button>
@@ -830,6 +864,7 @@ async function changeCatalog(selectedCatalog: string) {
       <X class="h-3 w-3" />
     </Button>
   </div>
+  <AddToDataViewDialog v-model:open="addToDataViewOpen" :queries="addToDataViewQueries" @saved="(view) => emit('openDataView', view.id)" />
 </template>
 
 <style scoped>

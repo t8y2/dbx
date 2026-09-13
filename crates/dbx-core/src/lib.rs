@@ -36,6 +36,8 @@ pub mod csv_export;
 pub mod data_compare;
 pub mod data_grid_extractors;
 pub mod data_grid_sql;
+pub mod data_view;
+pub mod data_view_params;
 pub mod database_capabilities;
 pub mod database_export;
 pub mod database_manifest;

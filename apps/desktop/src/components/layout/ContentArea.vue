@@ -68,6 +68,9 @@ import DataGridFontFamilyControl from "@/components/grid/DataGridFontFamilyContr
 import DataGridColumnLayoutPopover from "@/components/grid/DataGridColumnLayoutPopover.vue";
 import type { DataGridColumnLayoutHandle } from "@/components/grid/dataGridColumnLayoutPopover";
 import type { ColumnInfo } from "@/components/editor/ColumnInfoPanel.vue";
+import AddToDataViewDialog from "@/components/dataView/AddToDataViewDialog.vue";
+import type { AddQueryInput } from "@/stores/dataViewStore";
+import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 let dataGridComponentPromise: Promise<typeof import("@/components/grid/DataGrid.vue")> | undefined;
 function loadDataGridComponent() {
   if (!dataGridComponentPromise) {
@@ -127,7 +130,6 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import type { ContentAreaSurfaceEmits, ContentAreaSurfaceProps } from "@/components/layout/querySurfaces";
 import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore, type DataGridSearchMode, type ResultRunDisplayMode } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
@@ -333,6 +335,21 @@ const activeVectorConnection = computed(() => connectionStore.getConfig(props.ac
 const activeDataTabExecutionDatabase = computed(() => dataTabExecutionDatabase(props.activeConnection, props.activeTab.database, activeDataTabTableMeta.value?.catalog));
 const activeProductionContext = computed(() => productionContextForDatabase(props.activeConnection, props.activeTab.database));
 const productionWatermarkText = computed(() => (locale.value.startsWith("zh") ? "生产环境" : "PROD"));
+
+const addToDataViewOpen = ref(false);
+const addToDataViewQuery = ref<AddQueryInput | null>(null);
+function onAddToDataViewFromGrid(sql: string) {
+  const tableMeta = activeDataTabTableMeta.value;
+  addToDataViewQuery.value = {
+    title: tableMeta?.tableName || props.activeTab.title,
+    connectionId: props.activeTab.connectionId,
+    database: props.activeTab.database,
+    catalog: tableMeta?.catalog ?? null,
+    schema: props.activeTab.schema ?? null,
+    sqlTemplate: sql,
+  };
+  addToDataViewOpen.value = true;
+}
 const productionSessionDetail = computed(() => {
   if (!activeProductionContext.value.active) return "";
   if (activeProductionContext.value.reason === "connection") return t("production.connection");
@@ -2315,6 +2332,7 @@ defineExpose({
           @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', activeTab.id, offset, limit, whereInput, orderBy)"
           @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', activeTab.id, column, columnIndex, direction, whereInput, mode)"
           @change-query-timeout="(connectionId: string) => emit('openConnectionSettings', connectionId, 'advanced')"
+          @add-to-data-view="onAddToDataViewFromGrid"
         >
           <template v-if="activeTab.result && isQueryExecutionErrorResult(activeTab.result)" #error-actions="{ errorMessage }">
             <QueryErrorActions
@@ -2609,6 +2627,8 @@ defineExpose({
     <template v-else-if="activeTab.mode === 'dameng-roles' && activeConnection">
       <DamengRoleAdmin :key="activeTab.id" :connection="activeConnection" />
     </template>
+
+    <AddToDataViewDialog v-if="addToDataViewQuery" v-model:open="addToDataViewOpen" :queries="[addToDataViewQuery]" @saved="(view) => emit('openDataView', view.id)" />
   </div>
 </template>
 

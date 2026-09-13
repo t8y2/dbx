@@ -99,3 +99,4 @@ dbx-devtest-connections.json
 
 # Real database integration credentials (see docs/TEST_ENVIRONMENTS.md)
 /docs/TEST_ENVIRONMENTS.md
+.codegraph

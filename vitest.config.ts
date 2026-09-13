@@ -13,6 +13,7 @@ export default defineConfig({
   test: {
     include: ["packages/app-tests/*.test.ts", "apps/desktop/src/**/*.spec.ts", "docs/lib/*.test.ts"],
     globalSetup: "packages/test-globals.ts",
+    setupFiles: ["apps/desktop/vitest.setup.ts"],
     // Many specs dynamically import the large store modules (connectionStore,
     // queryStore) inside test bodies; when several workers pay that first
     // import at once, CPU contention can stall a worker's event loop past the

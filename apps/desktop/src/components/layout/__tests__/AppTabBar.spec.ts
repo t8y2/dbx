@@ -19,7 +19,7 @@ describe("AppTabBar shared group navigation", () => {
   });
 
   it("retains targets while hiding inactive special content and follows all placements", () => {
-    expect(tabBarSource).toContain('v-show="driverStoreActive || settingsPageActive"');
+    expect(tabBarSource).toContain('v-show="driverStoreActive || settingsPageActive || dataViewActive"');
     expect(tabBarSource).toContain("data-special-page-navigation");
     expect(tabBarSource).toContain("data-special-page-content");
     expect(tabBarSource).toContain("<slot />");

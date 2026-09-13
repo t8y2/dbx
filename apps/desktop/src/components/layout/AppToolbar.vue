@@ -2,7 +2,7 @@
 import { computed, ref, onMounted, onBeforeUnmount, h, nextTick, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
-import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree } from "@lucide/vue";
+import { ChevronsRight, DatabaseZap, FilePlus2, Moon, Sun, SunMoon, History, Bot, ArrowLeftRight, FileCode, BookMarked, GitCompareArrows, TableProperties, Settings, CloudDownload, Package, FileDown, FolderTree, LayoutDashboard } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
@@ -69,6 +69,7 @@ const emit = defineEmits<{
   "open-sql-file": [];
   "open-schema-diff": [];
   "open-data-compare": [];
+  "open-data-view": [];
 }>();
 
 const { t } = useI18n();
@@ -504,6 +505,13 @@ const collapsedItems = computed(() => {
       disabled: false,
     });
   }
+  items.push({
+    value: "data-view",
+    label: t("dataView.title"),
+    icon: LayoutDashboard,
+    action: () => emit("open-data-view"),
+    disabled: false,
+  });
   // Always include moreItems (may contain hidden left-side items + overflowed right items)
   if (moreItems.value.length > 0) {
     items.push(...moreItems.value);
@@ -570,6 +578,11 @@ const toolbarStyle = computed(() => {
         <span :class="toolbarTextLabelClass">{{ t("toolbar.driverManager") }}</span>
         <!-- 小圆点仅提示"有可更新驱动"，具体数量交给对话框内标签页红点展示，避免工具栏长期挂红数字。 -->
         <span v-if="agentDriverUpdateCount > 0" class="ml-0.5 inline-block h-2 w-2 rounded-full bg-red-500" :aria-label="t('toolbar.updatableDriverCount')" :title="t('toolbar.updatableDriverCount')" />
+      </Button>
+
+      <Button variant="ghost" size="sm" :class="toolbarTextButtonClass" @click="emit('open-data-view')">
+        <LayoutDashboard class="h-3.5 w-3.5" />
+        <span :class="toolbarTextLabelClass">{{ t("dataView.title") }}</span>
       </Button>
 
       <LightDropdown

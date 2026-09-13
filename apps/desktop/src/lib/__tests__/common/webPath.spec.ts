@@ -32,6 +32,15 @@ describe("webPath", () => {
     expect(dbxWebBasePath("/tools/dbx/", "./")).toBe("/tools/dbx");
   });
 
+  it("does not mistake the data-view share route for a deployment base path", () => {
+    expect(dbxWebBasePath("/data-view/abc-123", "./")).toBe("");
+    expect(apiUrl("/auth/login", dbxWebBasePath("/data-view/abc-123", "./"))).toBe("/api/auth/login");
+    expect(dbxWebBasePath("/data-view/abc-123/login", "./")).toBe("");
+    expect(apiUrl("/auth/login", dbxWebBasePath("/data-view/abc-123/login", "./"))).toBe("/api/auth/login");
+    expect(dbxWebBasePath("/tools/dbx/data-view/abc-123", "./")).toBe("/tools/dbx");
+    expect(dbxWebBasePath("/tools/dbx/data-view/abc-123/login", "./")).toBe("/tools/dbx");
+  });
+
   it("builds websocket URLs with the configured base path", () => {
     expect(apiWebSocketUrl("/redis/session/123", "/dbx", { protocol: "https:", host: "example.test" })).toBe("wss://example.test/dbx/api/redis/session/123");
   });

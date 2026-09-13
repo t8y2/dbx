@@ -5,7 +5,7 @@ import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
 import { onClickOutside } from "@vueuse/core";
 import { DynamicScroller, DynamicScrollerItem, RecycleScroller } from "vue-virtual-scroller";
-import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive } from "@lucide/vue";
+import { Check, ChevronDown, Copy, ClipboardCopy, Eye, Trash2, Save, RefreshCw, Plus, Loader2, Pencil, WrapText, ArrowUp, ArrowDown, ArrowUpDown, Search, X, FileArchive, LayoutDashboard } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,8 @@ import DateTimePicker from "@/components/ui/date-time-picker/DateTimePicker.vue"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import AddToDataViewDialog from "@/components/dataView/AddToDataViewDialog.vue";
+import type { AddQueryInput } from "@/stores/dataViewStore";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
 import JsonTree from "@/components/common/JsonTree.vue";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
@@ -440,6 +442,42 @@ async function toggleZsetSort() {
 }
 
 const redisKind = computed(() => data.value?.data.kind ?? "unknown");
+
+/** Quotes a key token for a raw command string, matching the backend's own command tokenizer (`\`/`"` escaping). */
+function redisCommandKeyToken(key: string): string {
+  return /[\s"']/.test(key) ? `"${key.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : key;
+}
+
+function buildRedisKeyCommand(kind: string, keyRaw: string): string {
+  const key = redisCommandKeyToken(keyRaw);
+  switch (kind) {
+    case "hash":
+      return `HGETALL ${key}`;
+    case "list":
+      return `LRANGE ${key} 0 -1`;
+    case "set":
+      return `SMEMBERS ${key}`;
+    case "zset":
+      return `ZRANGE ${key} 0 -1 WITHSCORES`;
+    case "stream":
+      return `XRANGE ${key} - +`;
+    case "json":
+      return `JSON.GET ${key}`;
+    default:
+      return `GET ${key}`;
+  }
+}
+
+const addToDataViewOpen = ref(false);
+const addToDataViewQuery = computed<AddQueryInput>(() => ({
+  title: props.keyDisplay,
+  connectionId: props.connectionId,
+  database: String(props.db),
+  catalog: null,
+  schema: null,
+  sqlTemplate: buildRedisKeyCommand(redisKind.value, props.keyRaw),
+}));
+
 const isStringLikeKind = computed(() => redisKind.value === "string");
 const stringBlob = computed<RedisBlob | null>(() => {
   const value = data.value;
@@ -2778,6 +2816,7 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :disabled="isStringValueTruncated" :title="isStringValueTruncated ? t('redis.largeStringPreviewActionUnavailable') : t('redis.copyInsertStatement')" :aria-label="t('redis.copyInsertStatement')" @click="copyInsertStatement"
             ><ClipboardCopy class="h-3.5 w-3.5"
           /></Button>
+          <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('dataView.addToDataView')" :aria-label="t('dataView.addToDataView')" @click="addToDataViewOpen = true"><LayoutDashboard class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('redis.renameKey')" :aria-label="t('redis.renameKey')" @click="openRenameKeyDialog"><Pencil class="h-3.5 w-3.5" /></Button>
           <Button variant="ghost" size="icon" class="h-7 w-7 shrink-0 text-destructive" @click="requestDeleteKey"><Trash2 class="h-3.5 w-3.5" /></Button>
         </div>
@@ -3540,6 +3579,8 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <AddToDataViewDialog v-if="addToDataViewOpen" v-model:open="addToDataViewOpen" :queries="[addToDataViewQuery]" />
 
     <Dialog :open="showHashFieldTtlDialog" @update:open="handleHashFieldTtlOpenChange">
       <DialogContent class="w-[calc(100vw-2rem)] sm:max-w-[460px]">

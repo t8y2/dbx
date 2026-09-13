@@ -209,6 +209,7 @@ const groupExecutableSql = computed(() => {
         @change-schema="(schema: string | undefined) => activeTab && toolbar.changeSchema(activeTab.id, schema)"
         @set-default-database="activeTab && toolbar.setDefaultDatabase(activeTab.id)"
         @clear-default-database="activeTab && toolbar.clearDefaultDatabase(activeTab.id)"
+        @open-data-view="toolbar.openDataView($event)"
       />
       <div class="relative flex-1 min-h-0">
         <KeepAlive v-if="activeTab" :max="HOT_TAB_SURFACE_CACHE_SIZE">

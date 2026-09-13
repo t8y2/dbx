@@ -49,6 +49,7 @@ export interface EditorToolbarActions {
   closeSettingsPage(): void;
   activateDriverStore(): void;
   closeDriverStore(): void;
+  openDataView(viewId: string): void;
 }
 
 export const EDITOR_TOOLBAR_ACTIONS: InjectionKey<EditorToolbarActions> = Symbol("dbx:editor-toolbar-actions");
@@ -93,5 +94,6 @@ export function createNoopEditorToolbarActions(): EditorToolbarActions {
     closeSettingsPage: noop,
     activateDriverStore: noop,
     closeDriverStore: noop,
+    openDataView: noop,
   };
 }

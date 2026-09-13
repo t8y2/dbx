@@ -56,6 +56,12 @@ describe("openTabsPersistence originalSql round-trip", () => {
     expect(restored.originalSql).toBeUndefined();
   });
 
+  it("keeps clean saved SQL tabs eligible for file hydration", () => {
+    const [restored] = roundTrip([queryTab({ savedSqlId: "saved", sql: "SELECT 1", originalSql: "SELECT 1" })]);
+    expect(restored.sql).toBe("");
+    expect(restored.originalSql).toBeUndefined();
+  });
+
   it("preserves read-only source intent without adding editable source metadata", () => {
     const [restored] = roundTrip([queryTab({ sourceView: true, sql: "CREATE SEQUENCE seq_users" })]);
     expect(restored.sourceView).toBe(true);

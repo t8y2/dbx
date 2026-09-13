@@ -18,6 +18,8 @@ import { formatSqlInsert, formatTsv } from "@/lib/export/exportFormats";
 import { showSqlInsertModeDialog, type SqlExportOptions, type SqlInsertMode } from "@/lib/export/sqlInsertMode";
 import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
 import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { summarizeExportRows } from "@/lib/export/exportDiagnostics";
+import { appendDebugLog, appendNativeProcessMemoryLog, getBrowserMemorySnapshot, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
 import { uuid } from "@/lib/common/utils";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { expandNestedJsonStringsForCopy } from "@/lib/common/jsonCopyValue";
@@ -636,11 +638,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const data: CopyInsertData | null =
       hasRowSelection.value || !hasCellSelection.value
         ? {
-            columns: columns.value,
-            sourceColumns: sourceColumns.value,
-            columnTypes: columnTypes.value?.map((type) => type ?? undefined),
-            rows: insertEligibleRows(),
-          }
+          columns: columns.value,
+          sourceColumns: sourceColumns.value,
+          columnTypes: columnTypes.value?.map((type) => type ?? undefined),
+          rows: insertEligibleRows(),
+        }
         : selectionInsertData();
     if (!data) return undefined;
     await yieldToMainThread();
@@ -1301,13 +1303,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const columnComments = format === "xlsx" ? buildXlsxHeaderOverrides(allColumns.value, allXlsxColumnComments.value, headerMode) : undefined;
     const request = baseRequest
       ? {
-          ...baseRequest,
-          csvQuoteMode: useSettingsStore().editorSettings.csvQuoteMode,
-          dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
-          numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
-          columnComments,
-          autoFilter: format === "xlsx" ? autoFilter : undefined,
-        }
+        ...baseRequest,
+        csvQuoteMode: useSettingsStore().editorSettings.csvQuoteMode,
+        dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined,
+        numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true,
+        columnComments,
+        autoFilter: format === "xlsx" ? autoFilter : undefined,
+      }
       : undefined;
     if (!request) throw new Error("Unable to build query result export request");
 
@@ -1410,18 +1412,16 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         },
         true,
       );
-      const selectedSqlExportOptions = (await showSqlInsertModeDialog({ allowSplit: rowIds === undefined && context.value === "table-data" })) as SqlExportOptions | SqlInsertMode | null;
-      if (selectedSqlExportOptions === null) {
+      const insertMode = await showSqlInsertModeDialog();
+      if (insertMode === null) {
         logExportStage("cancelled", { stage: "insert-mode-dialog" });
         return;
       }
-      const sqlExportOptions = typeof selectedSqlExportOptions === "string" ? { insertMode: selectedSqlExportOptions } : selectedSqlExportOptions;
-      const insertMode = sqlExportOptions.insertMode;
-      logExportStage("mode-selected", { insertMode, splitMaxMb: sqlExportOptions.splitMaxMb });
+      logExportStage("mode-selected", { insertMode });
       try {
         // Step 1: table-data context — existing backend table export
         logExportStage("backend-export-start");
-        const handledByBackend = await exportFullTableDataViaBackend("sql", rowIds, "name", true, sqlExportOptions);
+        const handledByBackend = await exportFullTableDataViaBackend("sql", rowIds, "name", true, insertMode);
         logExportStage("backend-export-finished", { handledByBackend });
         if (handledByBackend) {
           logExportStage("done", { path: "backend" });
@@ -1429,6 +1429,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         }
 
         // Step 2: query-result context — NEW backend streaming with background task
+        logExportStage("query-backend-export-start");
+        const handledQueryByBackend = await exportQueryResultSqlViaBackend(rowIds, insertMode);
+        logExportStage("query-backend-export-finished", { handledByBackend: handledQueryByBackend });
+        if (handledQueryByBackend) {
+          logExportStage("done", { path: "query-backend" });
+          return;
+        }
         logExportStage("query-backend-export-start");
         const handledQueryByBackend = await exportQueryResultSqlViaBackend(rowIds, insertMode);
         logExportStage("query-backend-export-finished", { handledByBackend: handledQueryByBackend });
@@ -1450,7 +1457,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         );
 
         logExportStage("row-remap-start");
+        logExportStage(
+          "result-ready",
+          {
+            columns: result.columns.length,
+            rows: result.rows.length,
+            values: isDebugLoggingEnabled() ? summarizeExportRows(result.rows) : undefined,
+          },
+          true,
+        );
+
+        logExportStage("row-remap-start");
         const exportData = sqlInsertExportData(result);
+        logExportStage("row-remap-done", {
+          columns: exportData.columns.length,
+          rows: exportData.rows.length,
+          values: isDebugLoggingEnabled() ? summarizeExportRows(exportData.rows) : undefined,
+        });
+
+        logExportStage("sql-build-start");
         logExportStage("row-remap-done", {
           columns: exportData.columns.length,
           rows: exportData.rows.length,
@@ -1480,9 +1505,23 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         logExportStage("save-start", { contentChars: content.length }, true);
         await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql", { exportId, operation: "sql-insert-all" });
         logExportStage("done", { contentChars: content.length });
+        logExportStage(
+          "sql-build-done",
+          {
+            sqlChars: content.length,
+          },
+          true,
+        );
+        logExportStage("save-start", { contentChars: content.length }, true);
+        await saveTextFile(content, exportFileName(tableMeta.value?.tableName || "export", "sql", { preferFallback: true }), "SQL", "sql", { exportId, operation: "sql-insert-all" });
+        logExportStage("done", { contentChars: content.length });
         toast(t("grid.exported"));
       } catch (e: any) {
         toast(t("grid.exportFailed", { message: translateBackendError(t, e) }), 5000);
+        logExportStage("error", {
+          errorName: e?.name || typeof e,
+          errorMessage: e?.message || String(e),
+        });
         logExportStage("error", {
           errorName: e?.name || typeof e,
           errorMessage: e?.message || String(e),

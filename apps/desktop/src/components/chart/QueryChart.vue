@@ -18,15 +18,32 @@ use([CanvasRenderer, LineChart, BarChart, PieChart, GridComponent, TooltipCompon
 
 const props = defineProps<{
   result: QueryResult;
+  /** Chart type shown before the viewer clicks a different one. */
+  defaultChartType?: ChartType;
+  /** Column name used for the X axis before the viewer picks a different one. */
+  defaultXColumn?: string;
+  /** Column names used for the Y axis before the viewer picks different ones. */
+  defaultYColumns?: string[];
+}>();
+
+const emit = defineEmits<{
+  "update:chartType": [type: ChartType];
+  "update:xColumn": [column: string];
+  "update:yColumns": [columns: string[]];
 }>();
 
 const { t } = useI18n();
 const { isDark } = useTheme();
 
 type ChartType = "line" | "bar" | "pie";
-const chartType = ref<ChartType>("bar");
+const chartType = ref<ChartType>(props.defaultChartType ?? "bar");
 const xColumnIndex = ref(0);
 const yColumnIndexes = ref<number[]>([]);
+
+function setChartType(next: ChartType) {
+  chartType.value = next;
+  emit("update:chartType", next);
+}
 
 const numericColumnIndexes = computed(() => chartableColumnIndexes(props.result));
 
@@ -38,6 +55,7 @@ const xColumnValue = computed({
     const index = Number(value);
     if (Number.isInteger(index) && index >= 0 && index < props.result.columns.length) {
       xColumnIndex.value = index;
+      emit("update:xColumn", props.result.columns[index]);
     }
   },
 });
@@ -53,9 +71,13 @@ watch(
   () => {
     const cols = props.result.columns;
     const numCols = numericColumnIndexes.value;
-    xColumnIndex.value = cols.findIndex((_, index) => !numCols.includes(index));
+
+    const defaultXIndex = props.defaultXColumn ? cols.indexOf(props.defaultXColumn) : -1;
+    xColumnIndex.value = defaultXIndex >= 0 ? defaultXIndex : cols.findIndex((_, index) => !numCols.includes(index));
     if (xColumnIndex.value < 0) xColumnIndex.value = cols.length > 0 ? 0 : -1;
-    yColumnIndexes.value = numCols.length > 0 ? [numCols[0]] : [];
+
+    const defaultYIndices = (props.defaultYColumns ?? []).map((name) => cols.indexOf(name)).filter((index) => index >= 0 && numCols.includes(index));
+    yColumnIndexes.value = defaultYIndices.length > 0 ? defaultYIndices : numCols.length > 0 ? [numCols[0]] : [];
   },
   { immediate: true },
 );
@@ -66,7 +88,13 @@ function setYColumn(index: number, selected: boolean | "indeterminate") {
     yColumnIndexes.value = [...yColumnIndexes.value, index];
   } else if (selected !== true && isSelected) {
     yColumnIndexes.value = yColumnIndexes.value.filter((selected) => selected !== index);
+  } else {
+    return;
   }
+  emit(
+    "update:yColumns",
+    yColumnIndexes.value.map((i) => props.result.columns[i]),
+  );
 }
 
 const chartOption = computed(() => {
@@ -135,7 +163,7 @@ const hasData = computed(() => props.result.rows.length > 0 && numericColumnInde
         <div class="flex items-center gap-1.5">
           <span class="text-muted-foreground">{{ t("chart.type") }}</span>
           <div class="flex gap-0.5">
-            <Button v-for="ct in ['bar', 'line', 'pie'] as ChartType[]" :key="ct" size="sm" :variant="chartType === ct ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" @click="chartType = ct">
+            <Button v-for="ct in ['bar', 'line', 'pie'] as ChartType[]" :key="ct" size="sm" :variant="chartType === ct ? 'secondary' : 'ghost'" class="h-6 px-2 text-xs" @click="setChartType(ct)">
               {{ t(`chart.${ct}`) }}
             </Button>
           </div>

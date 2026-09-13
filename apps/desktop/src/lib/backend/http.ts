@@ -52,6 +52,7 @@ import type { DetachedTabHandoff } from "@/lib/app/detachedTabHandoff";
 import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import { BackendErrorException, type BackendError } from "@/lib/backend/errorUtils";
 import { decodeMeilisearchDocumentPage, decodeMeilisearchSearchResult, type MeilisearchDocumentPage, type MeilisearchDocumentPageWire, type MeilisearchSearchResult, type MeilisearchSearchWireResult } from "@/lib/backend/meilisearchTransport";
+import type { DataView, DataViewSummary, DataViewParamValue, ExecuteDataViewResponse, ExecuteDataViewOptions } from "@/types/dataView";
 import type { CreatedKey, EnqueuedTaskSummary, KeyCreateInput, KeyListItem, KeyPage, KeyUpdateInput, MeilisearchSystemOverview, MeilisearchTask, TaskListInput, TaskPage, TaskSelector } from "@/types/meilisearchManagement";
 import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, SchemaSyncSqlPlan, SelectedSchemaDiffInput, GenerateSchemaSyncPlanOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schema/schemaDiff";
@@ -763,6 +764,33 @@ export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile
 
 export async function deleteSavedSqlFile(id: string): Promise<void> {
   return del(`/api/saved-sql/${encodeURIComponent(id)}`);
+}
+
+export async function listDataViews(): Promise<DataViewSummary[]> {
+  return get("/api/data-views");
+}
+
+export async function loadDataView(id: string): Promise<DataView | null> {
+  return get(`/api/data-views/${encodeURIComponent(id)}`);
+}
+
+export async function saveDataView(view: DataView): Promise<DataView> {
+  return post("/api/data-views", view);
+}
+
+export async function deleteDataView(id: string): Promise<void> {
+  return del(`/api/data-views/${encodeURIComponent(id)}`);
+}
+
+export async function executeDataView(id: string, variables: Record<string, DataViewParamValue>, options: ExecuteDataViewOptions = {}): Promise<ExecuteDataViewResponse> {
+  return post(`/api/data-views/${encodeURIComponent(id)}/execute`, {
+    variables,
+    maxRows: options.maxRows,
+    timeoutSecs: options.timeoutSecs,
+    clientSessionId: options.clientSessionId,
+    queryIds: options.queryIds,
+    allowMutations: options.allowMutations,
+  });
 }
 
 export async function savedSqlStorageDir(): Promise<string> {

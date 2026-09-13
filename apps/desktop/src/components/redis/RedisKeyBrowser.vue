@@ -71,6 +71,7 @@ import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
 import { createRedisKeyViewYield } from "@/lib/redis/redisKeyViewScheduler";
 import { restoreRedisKeyBrowserState, saveRedisKeyBrowserState } from "@/lib/tabs/redisKeyBrowserStateCache";
+import { createRedisKeyViewYield } from "@/lib/redis/redisKeyViewScheduler";
 
 const { t, locale } = useI18n();
 const { toast } = useToast();

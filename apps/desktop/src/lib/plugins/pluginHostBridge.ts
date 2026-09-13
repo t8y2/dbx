@@ -28,6 +28,7 @@ export interface PluginHostBridgeApi {
   readAsset(pluginId: string, path: string): Promise<PluginUiAssetPayload>;
   openWorkbench?(pluginId: string, contributionId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
+  closeTab?(): Promise<void> | void;
 }
 
 interface PluginRequestMessage {
@@ -66,6 +67,10 @@ export class PluginHostBridge {
     if (event.data.source !== PLUGIN_MESSAGE_SOURCE || event.data.version !== BRIDGE_VERSION) return false;
     if (event.data.type === "ready") {
       this.sendInit();
+      return true;
+    }
+    if (event.data.type === "shortcut" && event.data.shortcut === "closeTab") {
+      void this.api.closeTab?.();
       return true;
     }
     if (event.data.type !== "request" || !validRequestMessage(event.data)) return false;
@@ -397,6 +402,13 @@ function pluginSdkSource(): string {
         dispatchEvent(new CustomEvent('dbx-plugin-binary', { detail: payload }));
       }
     });
+    addEventListener('keydown', (event) => {
+      const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+      if (key !== 'w' || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'shortcut', shortcut: 'closeTab' }, '*');
+    }, true);
     parent.postMessage({ source: '${PLUGIN_MESSAGE_SOURCE}', version: ${BRIDGE_VERSION}, type: 'ready' }, '*');
   })();`;
 }

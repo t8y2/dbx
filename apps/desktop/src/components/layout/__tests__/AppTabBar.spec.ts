@@ -84,7 +84,8 @@ describe("Group strip special page tabs", () => {
     expect(groupTabBarSource).toContain("return !specialPageActive.value && tab.id === props.activeTabId;");
     expect(groupTabBarSource).toContain("specialPageTabClass(!!specialPageTabs?.settingsActive)");
     expect(groupTabBarSource).toContain("specialPageTabClass(!!specialPageTabs?.driverStoreActive)");
-    expect(groupTabBarSource).toContain('return active ? { boxShadow: "inset 0 -2px 0 var(--ring)" } : undefined;');
+    expect(groupTabBarSource).toContain("if (!active) return undefined;");
+    expect(groupTabBarSource).toContain('return { "--app-tab-background": activeBackground, boxShadow: "inset 0 -2px 0 color-mix(in srgb, var(--foreground) 72%, transparent)" };');
     expect(groupTabBarSource).toContain('import "./appTabBar.css"');
     expect(groupTabBarSource).toContain("dirty-tab-marker");
     expect(groupTabBarSource).toContain("dirtyTabTitleStyle");

@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/composables/useToast";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import * as api from "@/lib/backend/api";
+import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { physicalDropPositionInsideRect } from "@/lib/ai/aiAttachments";
 import { createFrontendPluginRegistry, pluginConnectionProviderIcon } from "@/lib/plugins/frontendPlugin";
@@ -297,7 +298,7 @@ async function openFilesystem(pluginId: string, providerId: string, label: strin
   try {
     if (connection) await connectionStore.ensureConnected(connection.id);
     queryStore.openPluginFilesystem(pluginId, providerId, {
-      title: connection ? `${connection.name} · ${label}` : label,
+      title: connection?.name || label,
       connectionId: connection?.id,
       rootUri,
     });
@@ -309,7 +310,7 @@ async function openFilesystem(pluginId: string, providerId: string, label: strin
 function openWorkbench(pluginId: string, contributionId: string, label: string) {
   const connection = selectedConnection.value;
   queryStore.openPluginWorkbench(pluginId, contributionId, {
-    title: connection ? `${connection.name} · ${label}` : label,
+    title: connection?.name || label,
     connectionId: connection?.id,
     context: connection
       ? {
@@ -343,6 +344,7 @@ async function installPlugin(source: string | File) {
   try {
     const result = await api.installPluginPackage(source, allowUnsigned.value);
     toast(t("pluginPlatform.installSuccess", { name: result.plugin.manifest.name, version: result.plugin.manifest.version }));
+    clearPluginIconCache();
     installedPlugins.value = await api.listPlugins();
     selectPlugin(result.plugin.manifest.id);
     activeSection.value = "installed";
@@ -431,6 +433,7 @@ async function rollbackSelectedPlugin() {
   try {
     const result = await api.rollbackPlugin(selectedPluginId.value);
     toast(t("pluginPlatform.rollbackSuccess", { version: result.plugin.manifest.version }));
+    clearPluginIconCache();
     installedPlugins.value = await api.listPlugins();
     selectPlugin(result.plugin.manifest.id);
   } catch (cause) {
@@ -446,6 +449,7 @@ async function uninstallSelectedPlugin() {
   operating.value = true;
   try {
     installedPlugins.value = await api.uninstallPlugin(definition.plugin.manifest.id);
+    clearPluginIconCache();
     toast(t("pluginPlatform.uninstallSuccess", { name: definition.plugin.manifest.name }));
     selectFirstProvider();
   } catch (cause) {

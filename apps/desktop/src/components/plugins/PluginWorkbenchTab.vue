@@ -19,6 +19,9 @@ const props = defineProps<{
 }>();
 
 const { t, locale: appLocale } = useI18n();
+const emit = defineEmits<{
+  closeTab: [];
+}>();
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
 const plugins = ref<InstalledPlugin[]>([]);
@@ -102,6 +105,6 @@ defineExpose({ refresh });
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error || t("pluginPlatform.workbenchUnavailableFallback") }}</span>
     </div>
-    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="context" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" />
+    <PluginWorkbenchHost v-else class="min-h-0 flex-1" :plugin="entry.plugin" :contribution="entry.contribution" :context="context" @open-workbench="openWorkbench" @open-filesystem="openFilesystem" @close-tab="emit('closeTab')" />
   </div>
 </template>

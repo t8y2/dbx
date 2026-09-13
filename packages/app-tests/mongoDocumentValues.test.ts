@@ -11,6 +11,7 @@ import {
   MONGO_DOCUMENT_GRID_NULL,
   mongoDocumentDisplayValue,
   mongoDocumentGridDisplayText,
+  mongoDocumentGridClipboardText,
   mongoDocumentGridEditorText,
   mongoDocumentGridExternalValue,
   mongoDocumentGridInputValue,
@@ -401,6 +402,13 @@ test("escapes Mongo collection-grid values reserved for BSON null state", () => 
   assert.deepEqual(buildMongoUpdateDocument(new Map([[1, gridValue as string]]), columns, { _id: "1", value: reservedString }), {
     $set: { value: reservedString },
   });
+});
+
+test("keeps BSON null empty in editors while preserving a copy marker", () => {
+  assert.equal(mongoDocumentGridEditorText(MONGO_DOCUMENT_GRID_NULL), "");
+  assert.equal(mongoDocumentGridClipboardText(MONGO_DOCUMENT_GRID_NULL), "NULL");
+  assert.equal(mongoDocumentGridEditorText("NULL"), undefined);
+  assert.equal(mongoDocumentGridClipboardText("NULL"), undefined);
 });
 
 test("restores internal Mongo collection-grid values for external output", () => {

@@ -291,9 +291,30 @@ describe("PluginHostBridge", () => {
     expect(document).toContain("window.dbxPlugin");
     expect(document).toContain("get locale() { return locale; }");
     expect(document).toContain("openFilesystem");
+    expect(document).toContain("shortcut: 'closeTab'");
     expect(document).toContain("connect-src 'none'");
     expect(document).toContain(".dbx-btn");
     expect(document).toContain("var(--color-background");
+  });
+
+  it("forwards the plugin close-tab shortcut to the host", () => {
+    const target = { postMessage: vi.fn() } as unknown as Window;
+    const closeTab = vi.fn();
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      closeTab,
+    });
+
+    expect(
+      bridge.handleWindowMessage({
+        source: target,
+        data: { source: "dbx-plugin", version: 1, type: "shortcut", shortcut: "closeTab" },
+      } as MessageEvent),
+    ).toBe(true);
+    expect(closeTab).toHaveBeenCalledOnce();
   });
 
   it("opens connect-src only for declared host.network origins", () => {

@@ -61,6 +61,8 @@ import QueryLoadingState from "@/components/common/QueryLoadingState.vue";
 import QueryErrorActions from "@/components/common/QueryErrorActions.vue";
 import QueryMessagesView from "@/components/layout/QueryMessagesView.vue";
 import QueryResultToolbarActions from "@/components/layout/QueryResultToolbarActions.vue";
+import PluginFilesystemTab from "@/components/plugins/PluginFilesystemTab.vue";
+import PluginWorkbenchTab from "@/components/plugins/PluginWorkbenchTab.vue";
 import ResultSetNavigator from "@/components/layout/ResultSetNavigator.vue";
 import QueryResultViewSwitcher from "@/components/layout/QueryResultViewSwitcher.vue";
 import DataGridCopyFormatControl from "@/components/grid/DataGridCopyFormatControl.vue";
@@ -123,8 +125,6 @@ const XuguServerDashboard = defineAsyncComponent(() => import("@/components/admi
 const DamengJobAdmin = defineAsyncComponent(() => import("@/components/admin/DamengJobAdmin.vue"));
 const DamengUserAdmin = defineAsyncComponent(() => import("@/components/admin/DamengUserAdmin.vue"));
 const DamengRoleAdmin = defineAsyncComponent(() => import("@/components/admin/DamengRoleAdmin.vue"));
-const PluginWorkbenchTab = defineAsyncComponent(() => import("@/components/plugins/PluginWorkbenchTab.vue"));
-const PluginFilesystemTab = defineAsyncComponent(() => import("@/components/plugins/PluginFilesystemTab.vue"));
 const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explain/ExplainPlanViewer.vue"));
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
@@ -2540,8 +2540,16 @@ defineExpose({
     </template>
 
     <template v-else-if="activeTab.mode === 'plugin-workbench' && activeTab.pluginWorkbench">
-      <div class="min-w-0 flex-1 min-h-0">
-        <PluginWorkbenchTab ref="pluginWorkbenchRef" :key="activeTab.id" :plugin-id="activeTab.pluginWorkbench.pluginId" :contribution-id="activeTab.pluginWorkbench.contributionId" :connection-id="activeTab.connectionId || undefined" :context="activeTab.pluginWorkbench.context" />
+      <div class="min-w-0 flex-1 min-h-0 bg-background">
+        <PluginWorkbenchTab
+          ref="pluginWorkbenchRef"
+          :key="activeTab.id"
+          :plugin-id="activeTab.pluginWorkbench.pluginId"
+          :contribution-id="activeTab.pluginWorkbench.contributionId"
+          :connection-id="activeTab.connectionId || undefined"
+          :context="activeTab.pluginWorkbench.context"
+          @close-tab="emit('closeTab', activeTab.id)"
+        />
       </div>
     </template>
     <template v-else-if="activeTab.mode === 'plugin-filesystem' && activeTab.pluginFilesystem">

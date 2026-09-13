@@ -428,6 +428,8 @@ pub struct PluginFilesystemProviderContribution {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
     pub capabilities: Vec<PluginFilesystemCapability>,
     #[serde(default)]
     pub root_uri: Option<String>,
@@ -875,6 +877,12 @@ fn validate_contributions(
             }
             PluginContribution::FilesystemProvider(provider) => {
                 validate_required_text(&provider.label, &format!("Filesystem provider '{id}' label"), errors);
+                validate_declared_icon(
+                    plugin_dir,
+                    &format!("Filesystem provider '{id}' icon"),
+                    provider.icon.as_deref(),
+                    errors,
+                );
                 if valid_identifier(id) {
                     filesystem_provider_ids.insert(id.to_string());
                 }
@@ -1514,6 +1522,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let executable = dir.path().join("plugin");
         std::fs::write(&executable, "binary").unwrap();
+        std::fs::write(dir.path().join("icon.svg"), "<svg />").unwrap();
         let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
             "manifest_version": 1,
             "id": "io.dbx.files",
@@ -1535,6 +1544,7 @@ mod tests {
                     "type": "filesystem-provider",
                     "id": "files.provider",
                     "label": "Files",
+                    "icon": "icon.svg",
                     "schemes": ["files"],
                     "root_uri": "files:/",
                     "capabilities": ["read"]
@@ -1550,6 +1560,7 @@ mod tests {
             manifest.filesystem_provider("files.provider").unwrap().unwrap().root_uri.as_deref(),
             Some("files:/")
         );
+        assert_eq!(manifest.filesystem_provider("files.provider").unwrap().unwrap().icon.as_deref(), Some("icon.svg"));
         assert_eq!(
             manifest.connection_provider("files.connection").unwrap().unwrap().filesystem_provider.as_deref(),
             Some("files.provider")

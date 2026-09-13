@@ -80,6 +80,7 @@ export interface DrawCanvasDataGridOptions {
   searchMatchKeys: ReadonlySet<number>;
   currentSearchMatch: CanvasSearchMatch | null;
   formatCell: (value: CellValue, columnIndex: number, row: CanvasDataGridRow) => string;
+  isNullValue?: (value: CellValue) => boolean;
   columnIsBoolean?: (columnIndex: number) => boolean;
   newRowCellPlaceholder?: (row: CanvasDataGridRow, columnIndex: number) => string | null;
   isRowActive: (rowIndex: number) => boolean;
@@ -345,6 +346,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     searchMatchKeys,
     currentSearchMatch,
     formatCell,
+    isNullValue,
     newRowCellPlaceholder,
     isRowActive,
     rowCellsUseSelectionVisual,
@@ -558,6 +560,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       ctx.rect(clippedX, y, Math.min(cellPaintWidth, width - clippedX), CANVAS_DATA_GRID_ROW_HEIGHT);
       ctx.clip();
       const value = item.data[actualColIdx];
+      const isNullCell = isNullValue?.(value) ?? value === null;
       const isBooleanCell = columnIsBoolean?.(actualColIdx) === true && isBooleanCellValue(value);
       const isRightAlign = columnAligns?.[visibleColIdx] === "right";
       const isEditingThisCell = editingCell?.rowId === item.id && editingCell.col === actualColIdx;
@@ -567,7 +570,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const textRole = resolveDataGridCellTextRole({
         colorizeTypes: colorizeDataTypes,
         typeKind,
-        isNull: value === null,
+        isNull: isNullCell,
         isDraft: item.isDraft && value === null,
         isEditing: isEditingThisCell,
         isControl: shouldRenderBooleanCheckbox,
@@ -580,8 +583,8 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
       const cellTextColor = textRole === "muted" ? theme.mutedForeground : textRole === "type" ? dataGridTypeForeground(theme, typeKind) : theme.foreground;
       ctx.textAlign = isBooleanNullCell ? "center" : isRightAlign ? "right" : "left";
       ctx.fillStyle = cellTextColor;
-      ctx.font = value === null ? italicFont : tabularFont;
-      setCanvasNumericVariant(ctx, value === null ? "normal" : "tabular-nums");
+      ctx.font = isNullCell ? italicFont : tabularFont;
+      setCanvasNumericVariant(ctx, isNullCell ? "normal" : "tabular-nums");
       const reservedWidth = rightAlignedActionCell?.rowIndex === item.displayIndex && rightAlignedActionCell.visibleColIdx === visibleColIdx ? rightAlignedActionCell.reservedWidth : 0;
       const { textAnchorX, maxWidth: cellMaxWidth } = resolveCanvasCellTextLayout({ drawX, colWidth, dpr: scaleX, isRightAlign, reservedWidth });
       if (shouldRenderBooleanCheckbox) {

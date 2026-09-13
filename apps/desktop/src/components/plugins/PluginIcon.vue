@@ -2,10 +2,12 @@
 import { onBeforeUnmount, ref, watch } from "vue";
 import { PlugZap } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
+import { resolvePluginIcon } from "@/lib/plugins/pluginIconResolver";
 
 const props = defineProps<{
   pluginId: string;
   icon?: string;
+  contributionId?: string;
 }>();
 
 const objectUrl = ref("");
@@ -26,21 +28,26 @@ function showFallback() {
 }
 
 watch(
-  () => [props.pluginId, props.icon] as const,
-  async ([pluginId, icon]) => {
+  () => [props.pluginId, props.icon, props.contributionId] as const,
+  async ([pluginId, icon, contributionId]) => {
     const sequence = ++requestSequence;
     clearObjectUrl();
-    if (!pluginId || !icon) {
+    if (!pluginId) {
       failed.value = true;
       return;
     }
     failed.value = false;
-    if (/^https?:\/\//i.test(icon)) {
-      objectUrl.value = icon;
+    const resolvedIcon = icon || (await resolvePluginIcon(pluginId, contributionId).catch(() => undefined));
+    if (sequence !== requestSequence || !resolvedIcon) {
+      if (sequence === requestSequence) failed.value = true;
+      return;
+    }
+    if (/^https?:\/\//i.test(resolvedIcon)) {
+      objectUrl.value = resolvedIcon;
       return;
     }
     try {
-      const asset = await api.readPluginAsset(pluginId, icon);
+      const asset = await api.readPluginAsset(pluginId, resolvedIcon);
       if (!asset.contentType.startsWith("image/")) throw new Error("Plugin icon is not an image");
       const binary = atob(asset.dataBase64);
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));

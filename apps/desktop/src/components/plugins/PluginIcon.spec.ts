@@ -3,29 +3,38 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, nextTick, type App } from "vue";
 import PluginIcon from "./PluginIcon.vue";
+import { clearPluginIconCache } from "@/lib/plugins/pluginIconResolver";
 
-const { readPluginAssetMock } = vi.hoisted(() => ({
+const { listPluginsMock, readPluginAssetMock } = vi.hoisted(() => ({
+  listPluginsMock: vi.fn(),
   readPluginAssetMock: vi.fn(),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
+  listPlugins: listPluginsMock,
   readPluginAsset: readPluginAssetMock,
 }));
 
 const mountedApps: App[] = [];
 
-async function mountIcon(icon?: string) {
+async function mountIcon(icon?: string, contributionId?: string) {
   const container = document.createElement("div");
   document.body.appendChild(container);
-  const app = createApp(PluginIcon, { pluginId: "example.plugin", icon });
+  const app = createApp(PluginIcon, { pluginId: "example.plugin", icon, contributionId });
   app.mount(container);
   mountedApps.push(app);
   await Promise.resolve();
+  await nextTick();
+  await Promise.resolve();
+  await nextTick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
   await nextTick();
   return container;
 }
 
 beforeEach(() => {
+  clearPluginIconCache();
+  listPluginsMock.mockResolvedValue([]);
   readPluginAssetMock.mockReset();
   vi.stubGlobal("URL", {
     ...URL,
@@ -71,5 +80,41 @@ describe("PluginIcon", () => {
 
     expect(readPluginAssetMock).not.toHaveBeenCalled();
     expect(container.querySelector("img")?.getAttribute("src")).toBe("https://plugins.example.com/icon.svg");
+  });
+
+  it("resolves a contribution icon when the caller does not provide a path", async () => {
+    listPluginsMock.mockResolvedValue([
+      {
+        manifest: {
+          id: "example.plugin",
+          icon: "assets/plugin.svg",
+          contributions: [{ type: "workbench", id: "example.workbench", label: "Example", icon: "assets/workbench.svg" }],
+        },
+      },
+    ]);
+    readPluginAssetMock.mockResolvedValue({ contentType: "image/svg+xml", dataBase64: "PHN2Zy8+", etag: "icon" });
+
+    const container = await mountIcon(undefined, "example.workbench");
+
+    expect(readPluginAssetMock).toHaveBeenCalledWith("example.plugin", "assets/workbench.svg");
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:plugin-icon");
+  });
+
+  it("resolves a filesystem provider icon", async () => {
+    listPluginsMock.mockResolvedValue([
+      {
+        manifest: {
+          id: "example.plugin",
+          icon: "assets/plugin.svg",
+          contributions: [{ type: "filesystem-provider", id: "example.files", label: "Example files", schemes: ["example"], icon: "assets/files.svg" }],
+        },
+      },
+    ]);
+    readPluginAssetMock.mockResolvedValue({ contentType: "image/svg+xml", dataBase64: "PHN2Zy8+", etag: "icon" });
+
+    const container = await mountIcon(undefined, "example.files");
+
+    expect(readPluginAssetMock).toHaveBeenCalledWith("example.plugin", "assets/files.svg");
+    expect(container.querySelector("img")?.getAttribute("src")).toBe("blob:plugin-icon");
   });
 });

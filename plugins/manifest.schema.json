@@ -258,6 +258,7 @@
         "id": { "$ref": "#/$defs/identifier" },
         "label": { "type": "string", "minLength": 1 },
         "description": { "type": "string" },
+        "icon": { "$ref": "#/$defs/assetPath" },
         "schemes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
         "root_uri": { "type": "string", "minLength": 2, "maxLength": 4096, "pattern": "^[a-z0-9._-]+:.+$" },
         "capabilities": {

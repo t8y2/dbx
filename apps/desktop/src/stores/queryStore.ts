@@ -3222,7 +3222,7 @@ export const useQueryStore = defineStore("query", () => {
     await connectionStore.ensureConnected(connectionId);
     if (workbench) {
       return openPluginWorkbench(pluginId, workbench.contribution.id, {
-        title: `${connection.name} · ${workbench.contribution.label}`,
+        title: connection.name,
         connectionId,
         context: {
           connectionId,
@@ -3235,7 +3235,7 @@ export const useQueryStore = defineStore("query", () => {
     const filesystem = filesystemProviderId ? registry.listFilesystemProviders().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === filesystemProviderId) : undefined;
     if (!filesystem) throw new Error(`Plugin connection provider '${pluginId}/${providerId}' does not declare a workbench or filesystem provider`);
     return openPluginFilesystem(pluginId, filesystem.contribution.id, {
-      title: `${connection.name} · ${filesystem.contribution.label}`,
+      title: connection.name,
       connectionId,
       rootUri: filesystem.contribution.root_uri,
     });
@@ -4261,10 +4261,14 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.oracleTxnPossiblyDirty !== undefined) tab.oracleTxnPossiblyDirty = false;
   }
 
-  function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean }) {
+  function rollbackTabTransaction(tab: QueryTab, options?: { resetAutoCommit?: boolean; resetAutoCommitDbType?: string }) {
     if (tab.txnSessionId) void rollbackTransaction(tab.id);
     if (options?.resetAutoCommit) {
-      const dbType = useConnectionStore().getConfig(tab.connectionId)?.db_type;
+      // Callers switching a tab to another connection pass the target db type
+      // explicitly: the tab still carries the previous connectionId at reset
+      // time, and unbound file/saved-SQL tabs have none at all (which would
+      // force auto-commit even when the default mode is manual, #8863).
+      const dbType = options.resetAutoCommitDbType ?? useConnectionStore().getConfig(tab.connectionId)?.db_type;
       tab.autoCommit = defaultAutoCommitForDbTypeWithSetting(dbType);
     }
     clearOracleTxnPossiblyDirty(tab);
@@ -4608,7 +4612,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateConnection(id: string, connectionId: string, database = "", options: UpdateExecutionTargetOptions = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab || tab.connectionId === connectionId) return;
-    rollbackTabTransaction(tab, { resetAutoCommit: true });
+    rollbackTabTransaction(tab, { resetAutoCommit: true, resetAutoCommitDbType: useConnectionStore().getConfig(connectionId)?.db_type });
     void closeResultSession(tab);
     void closeClientConnectionSession(tab);
     tab.connectionId = connectionId;

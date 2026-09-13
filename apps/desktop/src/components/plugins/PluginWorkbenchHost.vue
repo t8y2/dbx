@@ -21,6 +21,7 @@ const emit = defineEmits<{
   error: [message: string];
   openWorkbench: [pluginId: string, contributionId: string, context?: PluginWorkbenchContext];
   openFilesystem: [pluginId: string, providerId: string, context?: PluginWorkbenchContext];
+  closeTab: [];
 }>();
 
 const { t, locale: appLocale } = useI18n();
@@ -65,6 +66,7 @@ function createBridge() {
       readAsset: api.readPluginUiAsset,
       openWorkbench: async (pluginId, contributionId, context) => emit("openWorkbench", pluginId, contributionId, context),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
+      closeTab: () => emit("closeTab"),
     },
     appLocale.value,
     currentBridgeTheme(),
@@ -130,8 +132,7 @@ async function loadWorkbench() {
     if (disposed || generation !== loadGeneration) return;
     error.value = cause instanceof Error ? cause.message : String(cause);
     emit("error", error.value);
-  } finally {
-    if (!disposed && generation === loadGeneration) loading.value = false;
+    loading.value = false;
   }
 }
 
@@ -142,6 +143,7 @@ function onMessage(event: MessageEvent) {
 function onFrameLoad() {
   bridge?.sendInit();
   emit("ready");
+  loading.value = false;
 }
 
 onMounted(async () => {
@@ -183,14 +185,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="relative flex size-full min-h-40 overflow-hidden bg-background">
-    <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-background/80 text-sm text-muted-foreground backdrop-blur-sm">
-      <Loader2 class="mr-2 size-4 animate-spin" />
-      {{ t("pluginPlatform.loadingTitle", { title }) }}
-    </div>
-    <div v-else-if="error" class="m-auto flex max-w-lg items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
+    <div v-if="error" class="m-auto flex max-w-lg items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">
       <AlertTriangle class="mt-0.5 size-4 shrink-0" />
       <span>{{ error }}</span>
     </div>
-    <iframe v-else ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+    <iframe v-else-if="source" ref="iframe" :title="title" :srcdoc="source" sandbox="allow-scripts" referrerpolicy="no-referrer" class="size-full border-0 bg-transparent" @load="onFrameLoad" />
+    <div v-if="loading && !error" class="absolute inset-0 z-10 flex items-center justify-center bg-background/80 text-sm text-muted-foreground backdrop-blur-sm">
+      <Loader2 class="mr-2 size-4 animate-spin" />
+      {{ t("pluginPlatform.loadingTitle", { title }) }}
+    </div>
   </div>
 </template>

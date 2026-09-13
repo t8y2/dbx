@@ -102,6 +102,10 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
       return next;
     });
   }
+  function enableOnlyRule(id: string) {
+    if (!rules.value.some((rule) => rule.id === id)) return;
+    rules.value = rules.value.map((rule) => ({ ...rule, disabled: rule.id !== id }));
+  }
   function moveRule(id: string, targetIndex: number) {
     rules.value = moveDataGridStructuredFilterRule(rules.value, id, targetIndex);
   }
@@ -132,5 +136,5 @@ export function useDataGridFilterBuilder(options: UseDataGridFilterBuilderOption
     },
   );
 
-  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, moveRule, reset, buildWhere, apply };
+  return { rules, open, columnSearch, appliedWhereInput, filteredColumns, activeCount, defaultRule, ensureRule, addRule, removeRule, updateRule, enableOnlyRule, moveRule, reset, buildWhere, apply };
 }

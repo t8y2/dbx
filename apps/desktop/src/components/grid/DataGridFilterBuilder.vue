@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { Check, Eye, EyeOff, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
+import { Check, Eye, EyeOff, Focus, GripVertical, Plus, Search, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +32,8 @@ const props = withDefaults(
     modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
     columnSearch: string;
     disabled?: boolean;
+    showApplyOnly?: boolean;
+    applyOnlyBusy?: boolean;
     showHeader?: boolean;
     showFooter?: boolean;
     layout?: "popover" | "panel" | "text";
@@ -41,6 +43,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   add: [];
   apply: [];
+  applyOnly: [id: string];
   reset: [];
   clear: [];
   remove: [id: string];
@@ -707,6 +710,9 @@ function blurValueRule(id: string) {
             {{ t("grid.filterBuilderValueShortcutHint") }}
           </div>
           <div class="flex items-center gap-0.5" :class="props.layout === 'text' ? 'col-start-6 row-start-1' : usesExpandedLayout(rule.mode) ? 'col-start-5 row-start-1 row-span-2' : 'col-start-5 row-start-1'">
+            <Button v-if="props.showApplyOnly" variant="ghost" size="icon" class="h-7 w-7" :disabled="props.disabled || props.applyOnlyBusy" :title="t('grid.filterBuilderApplyOnly')" :aria-label="t('grid.filterBuilderApplyOnly')" @click="emit('applyOnly', rule.id)"
+              ><Focus class="h-3.5 w-3.5" />
+            </Button>
             <template v-if="props.layout === 'text'">
               <Button variant="ghost" size="icon" class="h-6 w-6" :aria-label="t('grid.filterBuilderAddRule')" @click="emit('add')"><Plus class="h-3.5 w-3.5" /></Button>
               <Button variant="ghost" size="icon" class="h-6 w-6" :disabled="props.rules.length === 1" @click="emit('remove', rule.id)"><X class="h-3.5 w-3.5" /></Button>

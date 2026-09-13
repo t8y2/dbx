@@ -94,7 +94,9 @@ export function tableDataCopyColumnOptions(databaseType: DatabaseType | undefine
 function isWritableTableDataCopyColumn(databaseType: DatabaseType | undefined, column: ColumnInfo): boolean {
   const extra = (column.extra ?? "").toLowerCase();
   if (databaseType === "mysql") {
-    return !extra.includes("generated");
+    // DEFAULT_GENERATED marks a writable expression default, not a generated column.
+    // Accept both raw EXTRA metadata and the backend's expanded generation clause.
+    return !/\b(?:virtual|stored|persistent)\s+generated\b|\bgenerated\s+always\s+as\s*\(/.test(extra);
   }
   if (databaseType === "postgres") {
     return !extra.includes("generated always as (");

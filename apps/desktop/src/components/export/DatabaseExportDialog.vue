@@ -68,6 +68,10 @@ const includeObjects = ref(true);
 const includeCreateDatabase = ref(false);
 const dropTableIfExists = ref(false);
 const omitAutoIncrement = ref(false);
+const splitSqlOutput = ref(false);
+const splitSqlPartMaxMb = ref(100);
+const MIN_SPLIT_SQL_PART_MB = 1;
+const MAX_SPLIT_SQL_PART_MB = 4096;
 // `AUTO_INCREMENT` stripping is a MySQL-only DDL transform (backend gates on
 // db_type == mysql, which also covers MariaDB / TiDB / OceanBase-MySQL-mode).
 const isMysqlFamily = computed(() => store.getConfig(connectionId.value)?.db_type === "mysql");
@@ -159,6 +163,12 @@ function sanitizeFileName(value: string): string {
 function joinExportPath(directory: string, fileName: string): string {
   const separator = directory.includes("\\") ? "\\" : "/";
   return `${directory.replace(/[\\/]+$/, "")}${separator}${fileName}`;
+}
+
+function normalizedSplitSqlPartMaxMb(): number {
+  const value = Number(splitSqlPartMaxMb.value);
+  if (!Number.isFinite(value)) return 100;
+  return Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(value)));
 }
 
 // Lenient exports write per-object failures into the SQL file as `-- ERROR`
@@ -329,8 +339,8 @@ async function startExport() {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const safeName = sanitizeFileName(database.value || "database");
       const path = await save({
-        defaultPath: `${safeName}.sql`,
-        filters: [{ name: "SQL", extensions: ["sql"] }],
+        defaultPath: `${safeName}.${splitSqlOutput.value ? "zip" : "sql"}`,
+        filters: [{ name: splitSqlOutput.value ? "ZIP" : "SQL", extensions: [splitSqlOutput.value ? "zip" : "sql"] }],
       });
       if (!path) return;
       filePath = path;
@@ -392,6 +402,7 @@ async function startExport() {
           omitAutoIncrement: omitAutoIncrement.value,
           snapshotSessionId,
           batchSize: 1000,
+          splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
         };
         return runDatabaseExportUntilTerminal(request, (progress) => {
           exportProgress.value = { ...progress };
@@ -508,7 +519,7 @@ async function startAllDatabasesExport() {
       batchDatabaseIndex.value = index + 1;
       const currentExportId = `${batchId}-${index + 1}`;
       activeDatabaseExportId.value = currentExportId;
-      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.sql`) : `__web_export_${currentExportId}.sql`;
+      const filePath = isTauriRuntime() ? joinExportPath(directoryPath, `${sanitizeFileName(item.fileStem)}.${splitSqlOutput.value ? "zip" : "sql"}`) : `__web_export_${currentExportId}.${splitSqlOutput.value ? "zip" : "sql"}`;
       let currentDatabaseRowsExported = 0;
 
       const terminal = await runWithDatabaseBackupSnapshot(
@@ -533,6 +544,7 @@ async function startAllDatabasesExport() {
               omitAutoIncrement: omitAutoIncrement.value,
               snapshotSessionId,
               batchSize: 1000,
+              splitMaxMb: splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
             },
             (progress) => {
               const nextRowsExported = Math.max(0, progress.rowsExported);
@@ -651,6 +663,8 @@ function resetState() {
   includeCreateDatabase.value = false;
   dropTableIfExists.value = false;
   omitAutoIncrement.value = false;
+  splitSqlOutput.value = false;
+  splitSqlPartMaxMb.value = 100;
   isExporting.value = false;
   exportProgress.value = null;
   exportDone.value = false;
@@ -938,6 +952,27 @@ watch(
               <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
               {{ t("databaseExport.includeObjects") }}
             </div>
+            <div class="flex items-center justify-between gap-2 text-xs">
+              <button type="button" class="flex min-w-0 items-center gap-2 text-left" @click="splitSqlOutput = !splitSqlOutput">
+                <CheckSquare v-if="splitSqlOutput" class="w-3.5 h-3.5 text-primary shrink-0" />
+                <Square v-else class="w-3.5 h-3.5 text-muted-foreground/40 shrink-0" />
+                <span>{{ t("databaseExport.splitSqlOutput") }}</span>
+              </button>
+              <Input
+                v-if="splitSqlOutput"
+                v-model.number="splitSqlPartMaxMb"
+                type="number"
+                inputmode="numeric"
+                :min="MIN_SPLIT_SQL_PART_MB"
+                :max="MAX_SPLIT_SQL_PART_MB"
+                class="h-7 w-24 text-xs"
+                :aria-label="t('databaseExport.splitSqlPartMaxMb')"
+                @blur="splitSqlPartMaxMb = normalizedSplitSqlPartMaxMb()"
+              />
+            </div>
+            <p v-if="splitSqlOutput" class="pl-5 text-[11px] text-muted-foreground">
+              {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
+            </p>
           </div>
         </div>
 

@@ -25,6 +25,18 @@ import java.util.Set;
 
 class Gbase8sAgentTest {
     @Test
+    void mapsMysqlCompatExtendedColumnTypes() {
+        Assertions.assertEquals("BIGINT UNSIGNED", Gbase8sAgent.mapColType(66));
+        Assertions.assertEquals("TINYINT", Gbase8sAgent.mapColType(67));
+        Assertions.assertEquals("MEDIUMINT", Gbase8sAgent.mapColType(68));
+        Assertions.assertEquals("BIT", Gbase8sAgent.mapColType(69));
+        // Nullable flag bits above the base type must not change the mapping.
+        Assertions.assertEquals("BIGINT UNSIGNED", Gbase8sAgent.mapColType(66 + 256));
+        Assertions.assertEquals("BIGINT", Gbase8sAgent.mapColType(43));
+        Assertions.assertEquals("UNKNOWN(99)", Gbase8sAgent.mapColType(99));
+    }
+
+    @Test
     void declaresGbase8sProfile() {
         Gbase8sAgent agent = new Gbase8sAgent();
 

@@ -1470,3 +1470,63 @@ export function buildStructureTargetLabel(connectionName: string | undefined, da
   if (tableName) parts.push(tableName);
   return parts.filter(Boolean).join(" / ");
 }
+
+/** PostGIS `geometry(...)`/`geography(...)` typmod accepts these geometry sub-type
+ * names (case-insensitive). An empty value means "no sub-type constraint". */
+export const POSTGRES_GEOMETRY_TYPES: readonly string[] = ["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon", "GeometryCollection", "CircularString", "CompoundCurve", "CurvePolygon", "MultiCurve", "MultiSurface", "PolyhedralSurface", "TIN", "Triangle"];
+
+const POSTGRES_SPATIAL_TYPES = new Set(["geometry", "geography"]);
+const POSTGRES_LIKE_DATABASES = new Set<DatabaseType | undefined>(["postgres", "gaussdb", "kwdb", "opengauss", "highgo", "uxdb", "vastbase", "kingbase"]);
+
+/** Whether a column is a PostGIS `geometry`/`geography` on a PostgreSQL-family
+ * database — the case where the structure editor shows dedicated geometry-type
+ * and SRID controls instead of the generic length input. */
+export function isPostgresGeometryDataType(dbType: DatabaseType | undefined, rawDataType: string): boolean {
+  if (!POSTGRES_LIKE_DATABASES.has(dbType)) return false;
+  const { baseType } = splitDataType(rawDataType);
+  return POSTGRES_SPATIAL_TYPES.has(baseType.trim().toLowerCase());
+}
+
+/** Geometry sub-type parsed from `geometry(Point,4326)` → `"Point"`. Returns empty
+ * for bare `geometry` (no typmod) and for `geometry(GEOMETRY,srid)` — the latter is
+ * PostGIS's storage form of "any sub-type" (what a blank sub-type + SRID compiles to),
+ * normalized back to empty to match the user-facing "leave blank" intent. This keeps
+ * the clear (X) button visually emptying the field instead of showing "GEOMETRY".
+ * `geometry(,4326)` is invalid and never produced. */
+export function postgresGeometryTypeValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  const geomType = splitPostgresGeometryParams(params).geomType;
+  return geomType.toLowerCase() === "geometry" ? "" : geomType;
+}
+
+/** SRID parsed from `geometry(Point,4326)` → `"4326"`. Empty when unspecified. */
+export function postgresGeometrySridValue(rawDataType: string): string {
+  const { params } = splitDataType(rawDataType);
+  return splitPostgresGeometryParams(params).srid;
+}
+
+function splitPostgresGeometryParams(params: string): { geomType: string; srid: string } {
+  const trimmed = params.trim();
+  if (!trimmed) return { geomType: "", srid: "" };
+  const commaIndex = trimmed.indexOf(",");
+  if (commaIndex === -1) return { geomType: trimmed, srid: "" };
+  return { geomType: trimmed.slice(0, commaIndex).trim(), srid: trimmed.slice(commaIndex + 1).trim() };
+}
+
+/** Reassemble a PostGIS spatial type string from its parts.
+ *
+ * - both empty → bare `geometry` (no typmod)
+ * - sub-type only → `geometry(Point)`
+ * - SRID only   → `geometry(GEOMETRY,4326)` (PostGIS rejects `geometry(,4326)` (syntax error at `,`) and `geometry(4326)` ("Invalid geometry type modifier"); `GEOMETRY` is a valid sub-type token meaning any geometry, so it is the canonical way to constrain SRID only)
+ * - both        → `geometry(Point,4326)`
+ */
+export function combinePostgresGeometryType(baseType: string, geomType: string, srid: string): string {
+  const type = baseType.trim();
+  const geom = geomType.trim();
+  const sridValue = srid.trim();
+  if (!type) return "";
+  if (!geom && !sridValue) return type;
+  if (!geom) return `${type}(GEOMETRY,${sridValue})`; // PostGIS rejects geometry(,4326) and geometry(4326); GEOMETRY = any sub-type, constrains SRID only
+  if (!sridValue) return `${type}(${geom})`;
+  return `${type}(${geom},${sridValue})`;
+}

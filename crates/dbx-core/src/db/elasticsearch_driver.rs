@@ -3,7 +3,7 @@ use regex::Regex;
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -489,6 +489,17 @@ fn format_reqwest_error(err: &reqwest::Error) -> String {
     parts.join(": ")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElasticsearchIndexEntry {
+    pub name: String,
+    pub aliases: Vec<String>,
+}
+
+struct ListedIndexNames {
+    indices: Vec<String>,
+    index_aliases: BTreeMap<String, Vec<String>>,
+}
+
 #[derive(Deserialize)]
 struct CatIndex {
     index: String,
@@ -499,6 +510,8 @@ struct ResolveIndexResponse {
     #[serde(default)]
     indices: Vec<ResolveNamed>,
     #[serde(default)]
+    aliases: Vec<ResolveAlias>,
+    #[serde(default)]
     data_streams: Vec<ResolveNamed>,
 }
 
@@ -507,20 +520,87 @@ struct ResolveNamed {
     name: String,
 }
 
+#[derive(Deserialize)]
+struct ResolveAlias {
+    name: String,
+    #[serde(default)]
+    indices: Vec<String>,
+}
+
 /// 去掉 ES 内部索引（以 `.` 开头），排序并去重后返回可见索引名。
 fn normalize_index_names(names: impl Iterator<Item = String>) -> Vec<String> {
-    let mut names: Vec<String> = names.filter(|name| !name.starts_with('.')).collect();
+    let mut names: Vec<String> = names.filter(|name| !name.starts_with('.') && !name.is_empty()).collect();
     names.sort();
     names.dedup();
     names
 }
 
 pub async fn list_indices(client: &EsClient) -> Result<Vec<String>, String> {
-    let names = list_raw_index_names(client).await?;
+    let names = list_raw_indices(client, false).await?.indices;
     Ok(group_index_names(names, client.index_grouping.as_ref()))
 }
 
-async fn list_raw_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+pub async fn list_indices_with_aliases(client: &EsClient) -> Result<Vec<ElasticsearchIndexEntry>, String> {
+    let listed = list_raw_indices(client, true).await?;
+    Ok(merge_index_entries(listed.indices, &listed.index_aliases, client.index_grouping.as_ref()))
+}
+
+fn merge_index_entries(
+    indices: Vec<String>,
+    index_aliases: &BTreeMap<String, Vec<String>>,
+    grouping: Option<&Regex>,
+) -> Vec<ElasticsearchIndexEntry> {
+    let Some(re) = grouping else {
+        return indices
+            .into_iter()
+            .map(|name| {
+                let aliases = index_aliases.get(&name).into_iter().flatten().cloned();
+                elasticsearch_index_entry(name, aliases)
+            })
+            .collect();
+    };
+
+    let mut buckets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in indices {
+        let key = re.replace(&name, "${1}*").into_owned();
+        buckets.entry(key).or_default().push(name);
+    }
+    buckets
+        .into_iter()
+        .map(|(name, members)| {
+            let aliases = members.iter().flat_map(|member| index_aliases.get(member).into_iter().flatten().cloned());
+            elasticsearch_index_entry(name, aliases)
+        })
+        .collect()
+}
+
+fn elasticsearch_index_entry(name: String, aliases: impl IntoIterator<Item = String>) -> ElasticsearchIndexEntry {
+    let aliases = normalize_alias_names(aliases, &name);
+    ElasticsearchIndexEntry { name, aliases }
+}
+
+fn normalize_alias_names(aliases: impl IntoIterator<Item = String>, index_name: &str) -> Vec<String> {
+    let mut aliases: Vec<String> = aliases
+        .into_iter()
+        .filter(|alias| !alias.is_empty() && !alias.starts_with('.') && alias != index_name)
+        .collect();
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn index_aliases_from_pairs(pairs: impl Iterator<Item = (String, String)>) -> BTreeMap<String, Vec<String>> {
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (index, alias) in pairs {
+        if index.is_empty() || alias.is_empty() || alias.starts_with('.') {
+            continue;
+        }
+        map.entry(index).or_default().insert(alias);
+    }
+    map.into_iter().map(|(index, aliases)| (index, aliases.into_iter().collect())).collect()
+}
+
+async fn list_raw_indices(client: &EsClient, include_aliases: bool) -> Result<ListedIndexNames, String> {
     // 主路径 `_cat/indices` 需要集群级 `monitor` 权限。仅有索引级权限的账号
     // （例如日志采集用户）会在这里拿到 401/403，此时降级到索引级元数据端点。
     let resp = client
@@ -531,7 +611,10 @@ async fn list_raw_index_names(client: &EsClient) -> Result<Vec<String>, String> 
     let status = client.response_status(&resp);
     if status.is_success() {
         let indices: Vec<CatIndex> = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-        return Ok(normalize_index_names(indices.into_iter().map(|i| i.index)));
+        return Ok(ListedIndexNames {
+            indices: normalize_index_names(indices.into_iter().map(|i| i.index)),
+            index_aliases: if include_aliases { alias_map_or_empty(client).await } else { BTreeMap::new() },
+        });
     }
     if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
         return list_indices_via_metadata(client).await;
@@ -543,18 +626,24 @@ async fn list_raw_index_names(client: &EsClient) -> Result<Vec<String>, String> 
 /// 集群 `monitor` 不可用时的降级：`_resolve/index` 与 `_alias` 属于
 /// `indices:admin/*` 动作，`view_index_metadata`/`read` 索引权限即可访问，
 /// 且 ES 安全层会把结果过滤为当前账号可见的索引。
-async fn list_indices_via_metadata(client: &EsClient) -> Result<Vec<String>, String> {
-    // 优先 `_resolve/index`：同时覆盖普通索引与数据流（data stream）。
-    if let Some(names) = resolve_index_names(client).await? {
-        return Ok(names);
+async fn list_indices_via_metadata(client: &EsClient) -> Result<ListedIndexNames, String> {
+    // 优先 `_resolve/index`：同时覆盖普通索引、数据流（data stream）和别名。
+    if let Some(listed) = resolve_index_entries(client).await? {
+        return Ok(listed);
     }
-    // 再退回 `_alias`：以对象 key 形式返回具体索引名。
-    alias_index_names(client).await
+    alias_endpoint_entries(client).await
 }
 
-/// 通过 `GET /_resolve/index/*` 列举索引。该端点缺权限时返回 `Ok(None)`，
+async fn alias_map_or_empty(client: &EsClient) -> BTreeMap<String, Vec<String>> {
+    match alias_endpoint_entries(client).await {
+        Ok(listed) => listed.index_aliases,
+        Err(_) => BTreeMap::new(),
+    }
+}
+
+/// 通过 `GET /_resolve/index/*` 列举索引与别名。该端点缺权限时返回 `Ok(None)`，
 /// 以便继续尝试 `_alias`；其它错误如实上抛。
-async fn resolve_index_names(client: &EsClient) -> Result<Option<Vec<String>>, String> {
+async fn resolve_index_entries(client: &EsClient) -> Result<Option<ListedIndexNames>, String> {
     let resp =
         client.get("/_resolve/index/*").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     let status = client.response_status(&resp);
@@ -566,12 +655,17 @@ async fn resolve_index_names(client: &EsClient) -> Result<Option<Vec<String>>, S
         return Err(format!("Elasticsearch error: {body}"));
     }
     let body: ResolveIndexResponse = resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    let names = body.indices.into_iter().chain(body.data_streams).map(|item| item.name);
-    Ok(Some(normalize_index_names(names)))
+    let indices = body.indices.into_iter().chain(body.data_streams).map(|item| item.name);
+    let index_aliases = index_aliases_from_pairs(
+        body.aliases
+            .into_iter()
+            .flat_map(|alias| alias.indices.into_iter().map(move |index| (index, alias.name.clone()))),
+    );
+    Ok(Some(ListedIndexNames { indices: normalize_index_names(indices), index_aliases }))
 }
 
-/// 通过 `GET /_alias` 列举索引（对象 key 即索引名）。
-async fn alias_index_names(client: &EsClient) -> Result<Vec<String>, String> {
+/// 通过 `GET /_alias` 列举索引（对象 key）和嵌套别名。
+async fn alias_endpoint_entries(client: &EsClient) -> Result<ListedIndexNames, String> {
     let resp = client.get("/_alias").send().await.map_err(|e| format!("Elasticsearch request failed: {e}"))?;
     if !client.response_status(&resp).is_success() {
         let body = resp.text().await.unwrap_or_default();
@@ -579,7 +673,18 @@ async fn alias_index_names(client: &EsClient) -> Result<Vec<String>, String> {
     }
     let body: serde_json::Map<String, Value> =
         resp.json().await.map_err(|e| format!("Elasticsearch parse error: {e}"))?;
-    Ok(normalize_index_names(body.into_iter().map(|(name, _)| name)))
+    let mut indices = Vec::new();
+    let mut pairs = Vec::new();
+    for (index, value) in body {
+        if let Some(alias_map) = value.get("aliases").and_then(Value::as_object) {
+            pairs.extend(alias_map.keys().cloned().map(|alias| (index.clone(), alias)));
+        }
+        indices.push(index);
+    }
+    Ok(ListedIndexNames {
+        indices: normalize_index_names(indices.into_iter()),
+        index_aliases: index_aliases_from_pairs(pairs.into_iter()),
+    })
 }
 
 pub async fn get_columns(client: &EsClient, index: &str) -> Result<Vec<crate::db::ColumnInfo>, String> {
@@ -3020,8 +3125,8 @@ fn parse_aggregations(aggs: &serde_json::Map<String, serde_json::Value>) -> (Vec
 mod tests {
     use super::{
         build_count_documents_body, build_find_documents_body, elasticsearch_accept_invalid_certs,
-        elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, normalize_index_names,
-        redact_elasticsearch_url, EsClient, SearchResponse,
+        elasticsearch_base_url_fallbacks, elasticsearch_index_grouping, group_index_names, merge_index_entries,
+        normalize_index_names, redact_elasticsearch_url, ElasticsearchIndexEntry, EsClient, SearchResponse,
     };
     use serde_json::json;
     use std::time::Duration;
@@ -3168,6 +3273,159 @@ mod tests {
             out,
             vec!["catalog".to_string(), "svc@alpha*".to_string(), "svc@beta*".to_string(), "svc_err*".to_string(),]
         );
+    }
+
+    fn entry(name: &str, aliases: &[&str]) -> ElasticsearchIndexEntry {
+        ElasticsearchIndexEntry {
+            name: name.to_string(),
+            aliases: aliases.iter().map(|alias| alias.to_string()).collect(),
+        }
+    }
+
+    fn alias_map(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(index, aliases)| (index.to_string(), aliases.iter().map(|alias| alias.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_index_entries_attaches_aliases_to_the_same_index_row() {
+        let entries = merge_index_entries(
+            vec!["orders".to_string(), "users".to_string()],
+            &alias_map(&[("orders", &["orders-write", "orders"]), ("users", &[".hidden"])]),
+            None,
+        );
+        assert_eq!(entries, vec![entry("orders", &["orders-write"]), entry("users", &[])]);
+    }
+
+    #[test]
+    fn merge_index_entries_collects_grouped_index_aliases_onto_the_pattern_row() {
+        let cfg = serde_json::json!({ "indexGroupingPattern": r"[-_.@]\d{4}[-_.]?\d{2}[-_.]?\d{2}.*$" });
+        let re = elasticsearch_index_grouping(Some(&cfg));
+        let entries = merge_index_entries(
+            vec!["logs-2026.08.06".to_string(), "logs-2026.08.07".to_string()],
+            &alias_map(&[("logs-2026.08.06", &["logs"]), ("logs-2026.08.07", &["logs", "logs-write"])]),
+            re.as_ref(),
+        );
+        assert_eq!(entries, vec![entry("logs*", &["logs", "logs-write"])]);
+    }
+
+    async fn write_json_http_response(socket: &mut tokio::net::TcpStream, status: u16, body: &str) {
+        use tokio::io::AsyncWriteExt;
+
+        let reason = match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            _ => "Error",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    async fn serve_elasticsearch_json_routes(
+        listener: tokio::net::TcpListener,
+        routes: Vec<(&'static str, u16, &'static str)>,
+    ) {
+        for _ in 0..routes.len() {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            let (status, body) = routes
+                .iter()
+                .find(|(prefix, _, _)| {
+                    let encoded = prefix.replace('*', "%2A");
+                    request.starts_with(&format!("GET {prefix}")) || request.starts_with(&format!("GET {encoded}"))
+                })
+                .map(|(_, status, body)| (*status, *body))
+                .unwrap_or((404, "{}"));
+            write_json_http_response(&mut socket, status, body).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn list_indices_lists_aliases_from_existing_alias_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 200, r#"[{"index":"orders"},{"index":".security"}]"#),
+                (
+                    "/_alias",
+                    200,
+                    r#"{"orders":{"aliases":{"orders-write":{},".kibana":{}}},"hidden":{"aliases":{"orders-write":{}}}}"#,
+                ),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &["orders-write"])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_keeps_indices_when_alias_endpoint_is_forbidden() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![("/_cat/indices", 200, r#"[{"index":"orders"}]"#), ("/_alias", 403, r#"{"error":"forbidden"}"#)],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &[])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_reads_aliases_from_resolve_index_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 403, r#"{"error":"forbidden"}"#),
+                (
+                    "/_resolve/index/*",
+                    200,
+                    r#"{"indices":[{"name":"orders"}],"aliases":[{"name":"orders-write","indices":["orders"]}],"data_streams":[{"name":"logs"}]}"#,
+                ),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("logs", &[]), entry("orders", &["orders-write"])]);
+    }
+
+    #[tokio::test]
+    async fn list_indices_reads_nested_aliases_from_alias_endpoint_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_elasticsearch_json_routes(
+            listener,
+            vec![
+                ("/_cat/indices", 403, r#"{"error":"forbidden"}"#),
+                ("/_resolve/index/*", 403, r#"{"error":"forbidden"}"#),
+                ("/_alias", 200, r#"{"orders":{"aliases":{"orders-write":{}}},"users":{"aliases":{}}}"#),
+            ],
+        ));
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(2));
+        let entries = super::list_indices_with_aliases(&client).await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(entries, vec![entry("orders", &["orders-write"]), entry("users", &[])]);
     }
 
     #[test]

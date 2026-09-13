@@ -38,6 +38,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import TabExecutionStatus from "@/components/layout/TabExecutionStatus.vue";
 import TabModeIcon from "@/components/layout/TabModeIcon.vue";
 import ReadOnlySessionControl from "@/components/connection/ReadOnlySessionControl.vue";
@@ -51,7 +52,7 @@ import { hexToRgba } from "@/lib/common/color";
 import { copyToClipboard } from "@/lib/common/clipboard";
 import { parseTabDragPayload, serializeTabDragPayload } from "@/lib/tabs/tabDrag";
 import { createCloseAllTabMenuItem, createCloseLeftTabMenuItem, createCloseOtherTabMenuItem, createCloseRightTabMenuItem, createCloseTabMenuItem, createLocateTabMenuItem, createPinTabMenuItem, createRenameDuplicateTabItems } from "@/lib/tabs/tabMenu";
-import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
+import { connectionColor, dirtyTabTitleStyle, tabColorStyle as sharedTabColorStyle, tabDatabaseIconType, tabDisplayTitle, tabIconClass, tabTooltipLines } from "@/lib/tabs/tabPresentation";
 import { activeTabSidebarTarget } from "@/lib/sidebar/sidebarActiveTabTarget";
 import "./appTabBar.css";
 import type { QueryTab } from "@/types/database";
@@ -338,6 +339,9 @@ function updateTabPlacement(value: string) {
 
 function databaseTabGroupKey(tab: QueryTab) {
   const database = tab.database || "";
+  if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") {
+    return JSON.stringify([tab.connectionId, tab.catalog || "", "redis"]);
+  }
   // A connection-level tab has no database scope, so its catalog cannot split the group.
   return JSON.stringify([tab.connectionId, database ? tab.catalog || "" : "", database]);
 }
@@ -371,6 +375,7 @@ function tabConnectionTargetLabel(tab: QueryTab) {
 }
 
 function databaseTabGroupBaseLabel(tab: QueryTab) {
+  if (connectionStore.getConfig(tab.connectionId)?.db_type === "redis") return tabConnectionLabel(tab);
   if (!tab.database) return tabConnectionLabel(tab);
   return [tab.database, ...(tab.catalog ? [tab.catalog] : [])].join(" · ");
 }
@@ -425,6 +430,7 @@ const collapsingTabGroups = ref<Set<string>>(new Set());
 const tabGroupCollapseTimers = new Map<string, number>();
 const TAB_GROUP_COLLAPSE_MS = 140;
 const pendingTabScrollRestore = ref<{ fixed: number; regular: number } | null>(null);
+const pendingExpandedTabGroupReveal = ref<string | null>(null);
 const tabGroupPalette = ["#2563eb", "#d97706", "#7c3aed", "#059669", "#dc2626", "#0891b2", "#db2777", "#475569"];
 const tabGroupEditorOpen = ref(false);
 const editingTabGroupKey = ref("");
@@ -493,6 +499,29 @@ function restoreTabScrollPosition(position: { fixed: number; regular: number }) 
   if (regularTabsRowRef.value) regularTabsRowRef.value.scrollLeft = position.regular;
 }
 
+function revealExpandedTabGroupStartIfHidden(groupId: string) {
+  if (pendingExpandedTabGroupReveal.value !== groupId) return;
+  pendingExpandedTabGroupReveal.value = null;
+  if (isWrapLayout.value || isVerticalLayout.value) return;
+
+  const entries = Array.from(tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]") ?? []).filter((entry) => entry.dataset.tabGroupId === groupId && !entry.classList.contains("tab-group-entry--collapsed"));
+  const pills = entries.map((entry) => entry.querySelector<HTMLElement>(".tab-group-tab")).filter((pill): pill is HTMLElement => !!pill);
+  const firstPill = pills[0];
+  if (!firstPill) return;
+
+  const scrollContainer = hasHorizontalFixedRows.value ? firstPill.closest<HTMLElement>(".tab-section--horizontal") : tabsContainerRef.value;
+  if (!scrollContainer) return;
+  const viewport = scrollContainer.getBoundingClientRect();
+  const firstRect = firstPill.getBoundingClientRect();
+  const viewportPadding = 4;
+  const scrollRight = firstRect.right - (viewport.right - viewportPadding);
+  const scrollLeft = firstRect.left - (viewport.left + viewportPadding);
+  const scrollDelta = scrollRight > 0 ? scrollRight : scrollLeft < 0 ? scrollLeft : 0;
+  if (scrollDelta === 0) return;
+
+  scrollContainer.scrollBy({ left: scrollDelta, behavior: tabScrollBehavior.value });
+}
+
 function captureExpandedTabGroupWidths(groupIds: Set<string>) {
   if (isWrapLayout.value || isVerticalLayout.value) return;
   tabsContainerRef.value?.querySelectorAll<HTMLElement>(".tab-group-entry[data-tab-group-id]").forEach((entry) => {
@@ -552,6 +581,8 @@ function handleTabGroupTransitionEnd(event: TransitionEvent) {
   const entry = event.currentTarget as HTMLElement;
   if (!entry.classList.contains("tab-group-entry--collapsed")) {
     entry.style.removeProperty("--tab-group-entry-expanded-width");
+    const groupId = entry.dataset.tabGroupId;
+    if (groupId) revealExpandedTabGroupStartIfHidden(groupId);
   }
   refreshHorizontalTabOverflow();
 }
@@ -564,11 +595,13 @@ function toggleTabGroup(tab: QueryTab) {
   }
   const next = new Set(collapsedTabGroups.value);
   if (next.has(groupId)) {
+    pendingExpandedTabGroupReveal.value = !isWrapLayout.value && !isVerticalLayout.value ? groupId : null;
     next.delete(groupId);
     collapsedTabGroups.value = next;
     nextTick(refreshHorizontalTabOverflow);
     return;
   }
+  if (pendingExpandedTabGroupReveal.value === groupId) pendingExpandedTabGroupReveal.value = null;
   beginTabGroupCollapse(new Set([groupId]));
 }
 
@@ -1449,9 +1482,10 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                       @contextmenu="openTabGroupContextMenu($event, onContextMenu)"
                     >
                       <span class="tab-group-header-content">
-                        <span class="tab-group-marker" aria-hidden="true" />
+                        <span v-if="isVerticalLayout" class="tab-group-marker" aria-hidden="true" />
                         <Pin v-if="entry.pinned" class="tab-group-pin" aria-hidden="true" />
-                        <ChevronDown class="tab-group-chevron" :class="isTabGroupCollapsed(entry.tab) ? '-rotate-90' : ''" aria-hidden="true" />
+                        <ChevronDown class="tab-group-chevron" :class="{ 'tab-group-chevron--collapsed': isTabGroupCollapsed(entry.tab) }" aria-hidden="true" />
+                        <DatabaseIcon :db-type="tabDatabaseIconType(entry.tab)" class="tab-group-database-icon" aria-hidden="true" />
                         <span class="tab-group-label">{{ tabGroupLabel(entry.tab) }}</span>
                         <span v-if="isTabGroupCollapsed(entry.tab)" class="tab-group-count">{{ entry.count }}</span>
                       </span>
@@ -1635,7 +1669,7 @@ watch([() => props.specialPageTabs?.settingsActive, () => props.specialPageTabs?
                   "
                 >
                   <TabExecutionStatus :tab="tab">
-                    <TabModeIcon :tab="tab" class="h-3.5 w-3.5 shrink-0" />
+                    <TabModeIcon :tab="tab" class="h-3.5 w-3.5 shrink-0" :class="tabIconClass(tab)" />
                   </TabExecutionStatus>
                   <span class="inline-flex min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
                     <span v-if="isDirtyTab(tab)" aria-hidden="true" class="dirty-tab-marker">*</span>

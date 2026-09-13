@@ -124,6 +124,10 @@ Each schedule has a retention count. Older runs beyond the limit are pruned from
 
 ## Restore Drills
 
+For MySQL-compatible connections, restore individual tables from a single `.sql` or `.sql.gz` backup. Expand a backup's file list, click **Restore**, then choose **Selected tables** under **Restore scope**. Once the full file has been scanned, search and select the tables to restore. Tables do not need to exist in the destination, and identically named tables in different source databases are listed separately.
+
+Selected-table mode restores table structure, indexes, and data, excluding views, routines, triggers, and events. Database context in the dump still applies; tables without an explicit database use the destination chosen in the dialog. Existing foreign keys or triggers can affect the restore. Choose **All contents** for a complete restore. Statements whose scope cannot be determined cause selective restore to fail before execution.
+
 Generated `.sql` files can be imported through [SQL File Execution](/en/docs/sql-file). Regularly verify in an isolated environment that:
 
 - The complete file can be read and executed

@@ -2112,9 +2112,9 @@ async function exportData(row: ObjectBrowserRow, format: "csv" | "json" | "sql")
     await exportDataLegacy(row, format);
     return;
   }
-  const insertMode = format === "sql" ? await showSqlInsertModeDialog() : undefined;
-  if (format === "sql" && insertMode === null) return;
-  await exportTableData(row, format, undefined, "name", true, insertMode ?? "batch");
+  const sqlExportOptions = format === "sql" ? await showSqlInsertModeDialog({ allowSplit: true }) : undefined;
+  if (format === "sql" && sqlExportOptions === null) return;
+  await exportTableData(row, format, undefined, "name", true, sqlExportOptions?.insertMode ?? "batch", sqlExportOptions?.splitMaxMb);
 }
 
 function showObjectBrowserXlsxHeaderDialog(hasComments: boolean): Promise<XlsxExportOptions | null> {
@@ -2157,17 +2157,18 @@ async function exportDataXlsx(row: ObjectBrowserRow) {
   await exportTableData(row, "xlsx", columnInfos, exportOptions.headerMode, exportOptions.autoFilter);
 }
 
-async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode: SqlInsertMode = "batch") {
+async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "sql", columnInfos?: ColumnInfo[], headerMode: XlsxHeaderMode = "name", autoFilter = true, insertMode: SqlInsertMode = "batch", splitMaxMb?: number) {
   const schema = row.schema || selectedSchema.value;
+  const splitSqlOutput = format === "sql" && splitMaxMb !== undefined;
 
   // Save dialog first
   let filePath = "";
-  const defaultName = `${row.name}.${format}`;
+  const defaultName = `${row.name}.${splitSqlOutput ? "zip" : format}`;
 
   if (isTauriRuntime()) {
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
-      const filter = format === "csv" ? { name: "CSV", extensions: ["csv"] } : format === "xlsx" ? { name: "Excel", extensions: ["xlsx"] } : { name: "SQL", extensions: ["sql"] };
+      const filter = format === "csv" ? { name: "CSV", extensions: ["csv"] } : format === "xlsx" ? { name: "Excel", extensions: ["xlsx"] } : splitSqlOutput ? { name: "ZIP", extensions: ["zip"] } : { name: "SQL", extensions: ["sql"] };
       const path = await save({
         defaultPath: defaultName,
         filters: [filter],
@@ -2180,7 +2181,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
     }
   } else {
     const webExportId = generateDatabaseExportId();
-    filePath = `__web_export_${webExportId}.${format}`;
+    filePath = `__web_export_${webExportId}.${splitSqlOutput ? "zip" : format}`;
   }
 
   let task: ExportTask | null = null;
@@ -2231,7 +2232,7 @@ async function exportTableData(row: ObjectBrowserRow, format: "csv" | "xlsx" | "
       tableName: row.name,
       filePath,
       format,
-      ...(format === "sql" ? { insertMode } : {}),
+      ...(format === "sql" ? { insertMode, splitMaxMb } : {}),
       csvQuoteMode: settingsStore.editorSettings.csvQuoteMode,
       columns,
       columnComments: format === "xlsx" ? columnComments : undefined,

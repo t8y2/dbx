@@ -72,8 +72,8 @@ test("table data copy uses only writable columns for first-class databases", () 
     postgresOverridingSystemValue: true,
     sqlserverIdentityInsert: false,
   });
-  assert.deepEqual(tableDataCopyColumnOptions("mysql", [{ ...columns[0], extra: "auto_increment" }, { ...columns[1] }, { ...columns[2], extra: "STORED GENERATED" }]), {
-    columns: ["id", "name"],
+  assert.deepEqual(tableDataCopyColumnOptions("mysql", [{ ...columns[0], extra: "auto_increment" }, { ...columns[1] }, { ...columns[2], extra: "STORED GENERATED" }, column("expr_default", "DEFAULT_GENERATED"), column("expr_default_on_update", "DEFAULT_GENERATED on update CURRENT_TIMESTAMP"), column("virtual_full_name", "VIRTUAL GENERATED"), column("stored_full_name", "GENERATED ALWAYS AS (concat(first_name, ' ', last_name)) STORED")]), {
+    columns: ["id", "name", "expr_default", "expr_default_on_update"],
     postgresOverridingSystemValue: false,
     sqlserverIdentityInsert: false,
   });

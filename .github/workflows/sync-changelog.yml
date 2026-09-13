@@ -97,9 +97,15 @@ jobs:
             --overwrite-existing
 
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          aws s3 cp "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" r2-latest.json --endpoint-url "$ENDPOINT"
-          jq --arg notes "$NOTES" '.notes = $notes' r2-latest.json > r2-latest.json.tmp
-          mv r2-latest.json.tmp r2-latest.json
+          # Derive the R2 manifest from the GitHub release latest.json (notes already
+          # injected above) instead of re-reading the R2 copy, so every sync also
+          # heals a stale or partial R2 manifest.
+          jq --arg tag "$TAG" '
+            (.platforms[]?.url?) |= (
+              sub("https://github\\.com/t8y2/dbx/releases/download/" + $tag + "/"; "https://dl.dbxio.com/releases/latest/")
+              + "?v=" + $tag
+            )
+          ' updater-assets/latest.json > r2-latest.json
           aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/${TAG}/latest.json" \
             --endpoint-url "$ENDPOINT" --content-type application/json --cache-control no-cache
           aws s3 cp r2-latest.json "s3://${R2_BUCKET_NAME}/releases/latest/latest.json" \

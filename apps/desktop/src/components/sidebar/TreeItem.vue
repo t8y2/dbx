@@ -90,6 +90,7 @@ import { focusSidebarRenameInput } from "@/lib/sidebar/sidebarRenameFocus";
 import { ensureSqlExtension, stripSqlExtension } from "@/lib/savedSql/savedSqlFileName";
 import { savedSqlErrorMessage } from "@/lib/savedSql/savedSqlErrors";
 import { useSavedSqlStore } from "@/stores/savedSqlStore";
+import { elasticsearchIndexAliasLabel } from "@/lib/sidebar/elasticsearchIndexActions";
 import { isXuguPublicSynonymTreeNode, isXuguSchedulerJobTreeNode, xuguSchemaDisplayName } from "@/lib/sidebar/xuguPublicSynonyms";
 import { xuguDatafileDetailRows, xuguTablespaceDetailRows } from "@/lib/sidebar/xuguTablespaces";
 // --- Drag and Drop ---
@@ -442,6 +443,7 @@ function treeNodeSecondaryValue(node: TreeNode): string | undefined {
   if (node.type === "type" && node.customTypeKind) return t(`customType.kinds.${node.customTypeKind}`);
   if (node.type === "type-member") return (node.meta as CustomTypeTreeMemberMeta | undefined)?.displayValue;
   if (node.type === "datafile") return node.xuguDatafilePath;
+  if (node.type === "elasticsearch-index") return elasticsearchIndexAliasLabel(node);
   return undefined;
 }
 
@@ -603,6 +605,16 @@ const detailTooltip = computed(() => {
       multiline: row.multiline,
     }));
     return rows.length ? { rows } : null;
+  }
+  if (node.type === "elasticsearch-index") {
+    const aliases = elasticsearchIndexAliasLabel(node);
+    if (!aliases) return null;
+    return {
+      rows: [
+        { label: t("objects.name"), value: visibleLabel(node) },
+        { label: t("tree.elasticsearchAlias"), value: aliases },
+      ],
+    };
   }
   const comment = node.type === "column" && node.meta && "comment" in node.meta ? (node.meta as ColumnInfo).comment : node.comment;
   if (!comment || (node.type !== "schema" && node.type !== "table" && node.type !== "view" && node.type !== "column")) return null;
@@ -1567,7 +1579,10 @@ function onKeydown(event: KeyboardEvent) {
               ]"
               >{{ visibleLabel(node) }}</span
             >
-            <span v-if="treeNodeSecondaryValue(node)" class="min-w-0 max-w-[55%] shrink truncate text-xs text-muted-foreground" :title="treeNodeSecondaryValue(node)">{{ treeNodeSecondaryValue(node) }}</span>
+            <span v-if="treeNodeSecondaryValue(node)" class="flex min-w-0 max-w-[55%] shrink items-center gap-1 text-xs text-muted-foreground" :title="node.type === 'elasticsearch-index' ? undefined : treeNodeSecondaryValue(node)">
+              <Link2 v-if="node.type === 'elasticsearch-index'" class="h-3 w-3 shrink-0 text-sky-400" />
+              <span class="min-w-0 truncate">{{ treeNodeSecondaryValue(node) }}</span>
+            </span>
             <button
               v-if="canDragPinnedOrder()"
               type="button"
@@ -1590,8 +1605,14 @@ function onKeydown(event: KeyboardEvent) {
                   node.type === 'group-materialized-views' ||
                   node.type === 'group-procedures' ||
                   node.type === 'group-functions' ||
+                  node.type === 'group-columns' ||
+                  node.type === 'group-indexes' ||
+                  node.type === 'group-fkeys' ||
                   node.type === 'group-triggers' ||
                   node.type === 'group-events' ||
+                  node.type === 'group-constraints' ||
+                  node.type === 'group-table-partitions' ||
+                  node.type === 'group-table-subpartitions' ||
                   node.type === 'group-sequences' ||
                   node.type === 'group-synonyms' ||
                   node.type === 'group-jobs' ||

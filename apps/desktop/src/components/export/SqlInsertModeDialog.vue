@@ -3,22 +3,36 @@ import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import type { SqlInsertMode } from "@/lib/export/sqlInsertMode";
+import type { SqlExportOptions, SqlInsertMode } from "@/lib/export/sqlInsertMode";
 
 const { t } = useI18n();
 const open = defineModel<boolean>("open", { default: false });
+const props = defineProps<{ allowSplit?: boolean }>();
 const selected = ref<SqlInsertMode>("batch");
+const splitSqlOutput = ref(false);
+const splitSqlPartMaxMb = ref(100);
+const MIN_SPLIT_SQL_PART_MB = 1;
+const MAX_SPLIT_SQL_PART_MB = 4096;
 let outcomeEmitted = false;
 
 const emit = defineEmits<{
-  confirm: [mode: SqlInsertMode];
+  confirm: [options: SqlExportOptions];
   cancel: [];
 }>();
+
+function normalizedSplitSqlPartMaxMb(): number {
+  const value = Number(splitSqlPartMaxMb.value);
+  if (!Number.isFinite(value)) return 100;
+  return Math.min(MAX_SPLIT_SQL_PART_MB, Math.max(MIN_SPLIT_SQL_PART_MB, Math.round(value)));
+}
 
 function onConfirm() {
   outcomeEmitted = true;
   open.value = false;
-  emit("confirm", selected.value);
+  emit("confirm", {
+    insertMode: selected.value,
+    splitMaxMb: props.allowSplit && splitSqlOutput.value ? normalizedSplitSqlPartMaxMb() : undefined,
+  });
 }
 
 function onCancel() {
@@ -55,6 +69,19 @@ function onOpenChange(value: boolean) {
             <span class="mt-1 block text-xs text-muted-foreground">{{ t("grid.sqlInsertModeSingleDescription") }}</span>
           </span>
         </label>
+        <div v-if="props.allowSplit" class="space-y-2 rounded-md border p-3">
+          <label class="flex cursor-pointer items-center gap-2 text-sm">
+            <input v-model="splitSqlOutput" type="checkbox" class="h-4 w-4" data-sql-split-output />
+            {{ t("databaseExport.splitSqlOutput") }}
+          </label>
+          <div v-if="splitSqlOutput" class="flex items-center justify-between gap-3 pl-6">
+            <span class="text-xs text-muted-foreground">{{ t("databaseExport.splitSqlPartMaxMb") }}</span>
+            <input v-model.number="splitSqlPartMaxMb" type="number" :min="MIN_SPLIT_SQL_PART_MB" :max="MAX_SPLIT_SQL_PART_MB" class="h-8 w-24 rounded-md border bg-background px-2 text-sm" data-sql-split-max-mb />
+          </div>
+          <p v-if="splitSqlOutput" class="pl-6 text-xs text-muted-foreground">
+            {{ t("databaseExport.splitSqlOutputDescription", { min: MIN_SPLIT_SQL_PART_MB, max: MAX_SPLIT_SQL_PART_MB }) }}
+          </p>
+        </div>
       </div>
       <DialogFooter>
         <Button variant="outline" @click="onCancel">{{ t("common.cancel") }}</Button>

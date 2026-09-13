@@ -239,6 +239,26 @@ jobs:
             --clobber
           ls -lh assets/
 
+      - name: Validate latest.json completeness
+        run: |
+          LATEST_JSON="assets/latest.json"
+          if [ ! -f "$LATEST_JSON" ]; then
+            echo "::error::latest.json not found in release assets; refusing to sync an incomplete manifest to R2"
+            exit 1
+          fi
+          MISSING=""
+          for p in darwin-aarch64 darwin-x86_64 windows-x86_64 windows-aarch64 linux-x86_64 linux-aarch64; do
+            if ! jq -e --arg p "$p" '.platforms[$p] != null' "$LATEST_JSON" >/dev/null; then
+              MISSING="${MISSING} ${p}"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::latest.json is missing updater platforms:${MISSING}. Release builds may still be uploading assets; dispatch again after all release jobs finish."
+            exit 1
+          fi
+          echo "Platform manifest complete:"
+          jq -r '.platforms | keys[]' "$LATEST_JSON"
+
       - name: Rewrite latest.json download URLs to R2 CDN
         run: |
           TAG="${{ steps.version.outputs.tag }}"

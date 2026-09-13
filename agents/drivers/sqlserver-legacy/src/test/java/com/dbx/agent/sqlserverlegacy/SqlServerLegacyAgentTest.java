@@ -1,12 +1,27 @@
 package com.dbx.agent.sqlserverlegacy;
 
 import com.dbx.agent.ConnectParams;
+import com.dbx.agent.ColumnInfo;
+import com.dbx.agent.test.TestSupport;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.security.Security;
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 class SqlServerLegacyAgentTest {
     @Test
@@ -102,6 +117,101 @@ class SqlServerLegacyAgentTest {
     }
 
     @Test
+    void sqlServer2000ColumnCommentsEnrichJdbcColumnRemarks() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, sqlServer2000CommentConnection(
+            Arrays.asList(
+                Arrays.asList("ID", "Primary identifier", "MS_Description"),
+                Arrays.asList("NAME", "Custom label", "CUSTOM_PROP"),
+                Arrays.asList("NAME", "Display name", "MS_Description")
+            ),
+            null,
+            null
+        ));
+        setSqlServer2000Mode(agent, true);
+
+        List<ColumnInfo> columns = agent.getColumns("dbo", "USERS");
+
+        Assertions.assertEquals(List.of("ID", "NAME", "CREATED_AT"), columns.stream().map(ColumnInfo::getName).toList());
+        Assertions.assertEquals("Primary identifier", columns.get(0).getComment());
+        // MS_Description outranks other extended properties on the same column.
+        Assertions.assertEquals("Display name", columns.get(1).getComment());
+        // Columns without an extended property keep their JDBC remark untouched.
+        Assertions.assertEquals("JDBC remark", columns.get(2).getComment());
+        Assertions.assertTrue(columns.get(0).getIs_nullable());
+        Assertions.assertFalse(columns.get(2).getIs_nullable());
+        Assertions.assertEquals("getdate()", columns.get(2).getColumn_default());
+    }
+
+    @Test
+    void sqlServer2000ColumnCommentsFallBackToCompatibilityFunction() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, sqlServer2000CommentConnection(
+            null,
+            Arrays.asList(
+                Arrays.asList("NAME", "Display name from extended property", "MS_Description")
+            ),
+            null
+        ));
+        setSqlServer2000Mode(agent, true);
+
+        List<ColumnInfo> columns = agent.getColumns("dbo", "USERS");
+
+        // The sysproperties query is unavailable on this legacy catalog, so the
+        // fn_listextendedproperty compatibility function supplies the comment.
+        Assertions.assertEquals("Display name from extended property", columns.get(1).getComment());
+        Assertions.assertNull(columns.get(0).getComment());
+        Assertions.assertEquals("JDBC remark", columns.get(2).getComment());
+    }
+
+    @Test
+    void sqlServer2000ColumnCommentsFailSoftWhenCatalogThrowsRuntimeError() {
+        SqlServerLegacyAgent agent = new SqlServerLegacyAgent();
+        TestSupport.setPrivateConnection(agent, sqlServer2000CommentConnection(
+            null,
+            null,
+            new IllegalStateException("legacy catalog proxy failed")
+        ));
+        setSqlServer2000Mode(agent, true);
+
+        // Comments are optional enrichment: a runtime failure inside the legacy
+        // catalog must degrade to comment-less columns instead of failing the
+        // whole column listing.
+        List<ColumnInfo> columns = agent.getColumns("dbo", "USERS");
+
+        Assertions.assertEquals(List.of("ID", "NAME", "CREATED_AT"), columns.stream().map(ColumnInfo::getName).toList());
+        Assertions.assertNull(columns.get(0).getComment());
+        Assertions.assertNull(columns.get(1).getComment());
+        Assertions.assertEquals("JDBC remark", columns.get(2).getComment());
+    }
+
+    @Test
+    void sqlServer2000ColumnCommentsMergeWithoutDiscardingJdbcMetadata() {
+        ColumnInfo id = new ColumnInfo("ID", "int", false, null, true);
+        ColumnInfo name = new ColumnInfo("NAME", "varchar", true, null, false);
+        ColumnInfo untouched = new ColumnInfo("CREATED_AT", "datetime", false, "getdate()", false);
+        untouched.setComment("JDBC remark");
+        List<ColumnInfo> columns = List.of(id, name, untouched);
+        Map<String, String> comments = new LinkedHashMap<>();
+        comments.put("ID", "Primary identifier");
+        comments.put("NAME", "Display name");
+
+        List<ColumnInfo> merged = SqlServerLegacyAgent.mergeSqlServer2000ColumnComments(columns, comments);
+
+        Assertions.assertSame(columns, merged);
+        Assertions.assertEquals("Primary identifier", id.getComment());
+        Assertions.assertEquals("Display name", name.getComment());
+        Assertions.assertEquals("JDBC remark", untouched.getComment());
+        Assertions.assertTrue(id.getIs_primary_key());
+        Assertions.assertEquals("getdate()", untouched.getColumn_default());
+
+        comments.clear();
+        comments.put("name", "Case-insensitive match");
+        SqlServerLegacyAgent.mergeSqlServer2000ColumnComments(columns, comments);
+        Assertions.assertEquals("Case-insensitive match", name.getComment());
+    }
+
+    @Test
     void constructorRelaxesLegacyTlsPolicyBeforeDriverLoading() {
         String key = "jdk.tls.disabledAlgorithms";
         String original = Security.getProperty(key);
@@ -129,6 +239,11 @@ class SqlServerLegacyAgentTest {
     @Test
     void usesSelectOneForLegacyConnectionValidation() {
         Assertions.assertEquals("SELECT 1", new SqlServerLegacyAgent().connectionValidationQuery());
+    }
+
+    @Test
+    void doesNotShareJdbcConnectionsAcrossLegacyAgentSessions() {
+        Assertions.assertFalse(new SqlServerLegacyAgent().supportsConnectionPooling());
     }
 
     @Test
@@ -319,5 +434,173 @@ class SqlServerLegacyAgentTest {
             baseDdl,
             SqlServerLegacyAgent.appendTableCommentDdl(baseDdl, "dbo", "Users", "   ")
         );
+    }
+
+    /**
+     * A connection shaped like a jTDS SQL Server 2000 session: the driver's own
+     * JDBC metadata still reports the table columns, while column comments are
+     * served by the legacy sysproperties catalog or, when that query fails, by
+     * the fn_listextendedproperty compatibility function. Comment rows carry
+     * (column_name, column_comment, property_name).
+     */
+    private static Connection sqlServer2000CommentConnection(
+        List<List<Object>> primaryCommentRows,
+        List<List<Object>> fallbackCommentRows,
+        RuntimeException runtimeError
+    ) {
+        DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (method, args) -> {
+            if ("getColumns".equals(method.getName())) {
+                return metadataResultSet(Arrays.asList(
+                    Arrays.asList("ID", "int", 1, null, null),
+                    Arrays.asList("NAME", "varchar", 1, null, null),
+                    Arrays.asList("CREATED_AT", "datetime", 0, "getdate()", "JDBC remark")
+                ), JDBC_COLUMN_LABELS);
+            }
+            if ("getPrimaryKeys".equals(method.getName())) {
+                return metadataResultSet(List.of(), JDBC_COLUMN_LABELS);
+            }
+            return defaultValue(method.getReturnType());
+        });
+        return proxy(Connection.class, (method, args) -> {
+            String name = method.getName();
+            if ("getMetaData".equals(name)) {
+                return metadata;
+            }
+            if ("prepareStatement".equals(name)) {
+                String sql = (String) args[0];
+                if (runtimeError != null) {
+                    return failingStatement(runtimeError);
+                }
+                if (sql.toUpperCase(Locale.ROOT).contains("SYSPROPERTIES")) {
+                    return primaryCommentRows == null
+                        ? failingStatement(new SQLException("sysproperties catalog unavailable"))
+                        : commentStatement(primaryCommentRows);
+                }
+                return commentStatement(fallbackCommentRows == null ? List.of() : fallbackCommentRows);
+            }
+            if ("close".equals(name) || "isClosed".equals(name)) {
+                return "isClosed".equals(name) ? Boolean.FALSE : null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement commentStatement(List<List<Object>> rows) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                return metadataResultSet(rows, COMMENT_LABELS);
+            }
+            if ("close".equals(method.getName()) || "setMaxRows".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static PreparedStatement failingStatement(Throwable error) {
+        return proxy(PreparedStatement.class, (method, args) -> {
+            if ("executeQuery".equals(method.getName())) {
+                throw error;
+            }
+            if ("close".equals(method.getName()) || "setMaxRows".equals(method.getName())) {
+                return null;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static final Map<String, Integer> JDBC_COLUMN_LABELS = Map.of(
+        "COLUMN_NAME", 0,
+        "TYPE_NAME", 1,
+        "NULLABLE", 2,
+        "COLUMN_DEF", 3,
+        "REMARKS", 4
+    );
+
+    private static final Map<String, Integer> COMMENT_LABELS = Map.of(
+        "COLUMN_NAME", 0,
+        "COLUMN_COMMENT", 1,
+        "PROPERTY_NAME", 2
+    );
+
+    private static ResultSet metadataResultSet(List<List<Object>> rows, Map<String, Integer> labels) {
+        int[] index = {-1};
+        return proxy(ResultSet.class, (method, args) -> {
+            String name = method.getName();
+            if ("next".equals(name)) {
+                index[0] += 1;
+                return index[0] < rows.size();
+            }
+            if ("close".equals(name)) {
+                return null;
+            }
+            if ("getString".equals(name) || "getInt".equals(name) || "getObject".equals(name)) {
+                Integer position = args[0] instanceof String label ? labels.get(label.toUpperCase(Locale.ROOT)) : null;
+                Object value = position == null || index[0] < 0 || index[0] >= rows.size()
+                    ? null
+                    : rows.get(index[0]).get(position);
+                if ("getString".equals(name)) {
+                    return value == null ? null : value.toString();
+                }
+                if ("getInt".equals(name)) {
+                    return value instanceof Number number ? number.intValue() : 0;
+                }
+                return value;
+            }
+            return defaultValue(method.getReturnType());
+        });
+    }
+
+    private static void setSqlServer2000Mode(SqlServerLegacyAgent agent, boolean value) {
+        try {
+            Field field = SqlServerLegacyAgent.class.getDeclaredField("sqlServer2000Mode");
+            field.setAccessible(true);
+            field.set(agent, value);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Unable to set SQL Server 2000 mode", e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T proxy(Class<T> type, MethodHandler handler) {
+        InvocationHandler invocationHandler = new InvocationHandler() {
+            @Override
+            public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                return handler.handle(method, args);
+            }
+        };
+        return (T) Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, invocationHandler);
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (Boolean.TYPE.equals(type)) {
+            return false;
+        }
+        if (Byte.TYPE.equals(type)) {
+            return (byte) 0;
+        }
+        if (Short.TYPE.equals(type)) {
+            return (short) 0;
+        }
+        if (Integer.TYPE.equals(type)) {
+            return 0;
+        }
+        if (Long.TYPE.equals(type)) {
+            return 0L;
+        }
+        if (Float.TYPE.equals(type)) {
+            return 0f;
+        }
+        if (Double.TYPE.equals(type)) {
+            return 0.0d;
+        }
+        if (Character.TYPE.equals(type)) {
+            return '\0';
+        }
+        return null;
+    }
+
+    private interface MethodHandler {
+        Object handle(Method method, Object[] args) throws Throwable;
     }
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -126,11 +126,19 @@ pub struct DatabaseExportRequest {
     #[serde(default)]
     pub snapshot_session_id: Option<String>,
     pub batch_size: usize,
+    /// When set, the export is packaged as a `.zip` archive containing
+    /// multiple `part-N.sql` entries (plus a `manifest.json`), each capped
+    /// at this many megabytes, instead of one unbounded `.sql`/`.sql.gz`
+    /// file. Mutually exclusive with `output_compression` -- a zip archive
+    /// is its own compressed container.
+    #[serde(default)]
+    pub split_max_mb: Option<u32>,
 }
 
 enum DatabaseExportWriter {
     Plain(BufWriter<std::fs::File>),
     Gzip(Box<GzEncoder<BufWriter<std::fs::File>>>),
+    SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
 }
 
 impl Write for DatabaseExportWriter {
@@ -138,6 +146,7 @@ impl Write for DatabaseExportWriter {
         match self {
             Self::Plain(writer) => writer.write(buffer),
             Self::Gzip(writer) => writer.write(buffer),
+            Self::SplitZip(writer) => writer.write(buffer),
         }
     }
 
@@ -145,17 +154,23 @@ impl Write for DatabaseExportWriter {
         match self {
             Self::Plain(writer) => writer.flush(),
             Self::Gzip(writer) => writer.flush(),
+            Self::SplitZip(writer) => writer.flush(),
         }
     }
 }
 
 impl DatabaseExportWriter {
-    fn finish(self) -> Result<(), String> {
+    fn finish(self, source_file_name: &str) -> Result<(), String> {
         match self {
-            Self::Plain(mut writer) => writer.flush(),
-            Self::Gzip(writer) => writer.finish().and_then(|mut output| output.flush()),
+            Self::Plain(mut writer) => {
+                writer.flush().map_err(|error| format!("Failed to finalize export file: {error}"))
+            }
+            Self::Gzip(writer) => writer
+                .finish()
+                .and_then(|mut output| output.flush())
+                .map_err(|error| format!("Failed to finalize export file: {error}")),
+            Self::SplitZip(writer) => writer.finish(source_file_name),
         }
-        .map_err(|error| format!("Failed to finalize export file: {error}"))
     }
 }
 
@@ -2574,6 +2589,15 @@ fn export_destination_parent_dir(file_path: &str) -> Option<&std::path::Path> {
     (!parent.as_os_str().is_empty()).then_some(parent)
 }
 
+/// Name recorded inside `manifest.json` as the logical "source file" the
+/// split parts represent, e.g. `mydb.zip` -> `mydb.sql`. When splitting is
+/// disabled this is unused (the writer variant never calls it).
+fn export_source_file_name(file_path: &str) -> String {
+    let path = std::path::Path::new(file_path);
+    let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("export");
+    format!("{stem}.sql")
+}
+
 async fn create_database_export_writer(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
@@ -2581,6 +2605,32 @@ async fn create_database_export_writer(
     let mut expected_destination_identity = None;
     if let Some(parent) = export_destination_parent_dir(&request.file_path) {
         expected_destination_identity = ensure_export_destination_dir(state, parent).await?;
+    }
+    if let Some(max_mb) = request.split_max_mb {
+        let zip_path = std::path::Path::new(&request.file_path);
+        let stem = zip_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("export");
+        let writer = crate::export_split_zip::SplitZipExportWriter::create_with_overwrite(
+            zip_path,
+            max_mb,
+            stem,
+            "sql",
+            request.prevent_overwrite,
+        )?;
+        let opened_destination_identity =
+            std::fs::File::open(&request.file_path).ok().as_ref().and_then(export_destination_identity_for_file);
+        if export_destination_identity_mismatch(
+            expected_destination_identity.as_ref(),
+            opened_destination_identity.as_ref(),
+        ) {
+            let _ = std::fs::remove_file(&request.file_path);
+            return Err(format!(
+                "Backup destination for {} changed while opening the output file -- the directory now \
+                 resolves to a different filesystem than the one just verified. If a removable or network \
+                 drive was disconnected and reconnected, retry the backup.",
+                request.file_path
+            ));
+        }
+        return Ok(DatabaseExportWriter::SplitZip(Box::new(writer)));
     }
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -2636,6 +2686,21 @@ fn postgres_create_schema_sql(schema: &str) -> String {
     format!("CREATE SCHEMA IF NOT EXISTS {};", quote_identifier(schema, &DatabaseType::Postgres))
 }
 
+// Copy one line at a time so a `SplitZipExportWriter` can only rotate between
+// complete SQL statements; `std::io::copy` would feed it arbitrary 8KB chunks.
+fn combine_schema_sql_export<W: Write>(source: &mut dyn BufRead, destination: &mut W) -> std::io::Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes_read = source.read_until(b'\n', &mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+        destination.write_all(&line)?;
+    }
+    Ok(())
+}
+
 async fn export_postgres_all_schemas_sql_core(
     state: &Arc<crate::connection::AppState>,
     request: &DatabaseExportRequest,
@@ -2670,6 +2735,7 @@ async fn export_postgres_all_schemas_sql_core(
             schema_request.schema = schema_name.clone();
             schema_request.file_path = temp_dir.path().join(format!("schema-{schema_index}.sql")).display().to_string();
             schema_request.output_compression = DatabaseExportOutputCompression::None;
+            schema_request.split_max_mb = None;
 
             let terminal = Arc::new(std::sync::Mutex::new(None::<ExportProgress>));
             let terminal_for_callback = terminal.clone();
@@ -2730,10 +2796,11 @@ async fn export_postgres_all_schemas_sql_core(
             let mut source = std::io::BufReader::new(
                 std::fs::File::open(path).map_err(|e| format!("Failed to read temporary schema export: {e}"))?,
             );
-            std::io::copy(&mut source, &mut file).map_err(|e| format!("Failed to combine schema export: {e}"))?;
+            combine_schema_sql_export(&mut source, &mut file)
+                .map_err(|e| format!("Failed to combine schema export: {e}"))?;
             writeln!(file).map_err(|e| format!("Failed to write file: {e}"))?;
         }
-        file.finish()?;
+        file.finish(&export_source_file_name(&request.file_path))?;
         on_progress(ExportProgress {
             export_id: request.export_id.clone(),
             current_object: request.database.clone(),
@@ -3695,7 +3762,7 @@ async fn export_database_sql_core_inner(
         writeln!(file, "SET FOREIGN_KEY_CHECKS = 1;").map_err(|e| format!("Failed to write file: {e}"))?;
     }
 
-    file.finish()?;
+    file.finish(&export_source_file_name(&request.file_path))?;
 
     // Emit Done progress
     on_progress(ExportProgress {
@@ -3758,7 +3825,7 @@ fn build_database_export_object_source_sql(
 #[cfg(test)]
 mod tests {
     use super::{
-        await_export_operation, await_export_stream_operation, clear_export_cancelled,
+        await_export_operation, await_export_stream_operation, clear_export_cancelled, combine_schema_sql_export,
         concurrent_metadata_prefetch_allowed, database_export_metadata_prefetch_concurrency,
         emit_database_export_cancelled, postgres_create_schema_sql, postgres_export_schema_names, set_export_cancelled,
         snapshot_batch_cancelled, ExportStatus, EXPORT_CANCELLED_ERROR,
@@ -3978,6 +4045,7 @@ mod tests {
             output_compression: Default::default(),
             snapshot_session_id: None,
             batch_size: 1000,
+            split_max_mb: None,
         }
     }
 
@@ -3991,7 +4059,7 @@ mod tests {
             flate2::Compression::default(),
         )));
         writer.write_all(b"SELECT 1;\n").unwrap();
-        writer.finish().unwrap();
+        writer.finish("backup.sql").unwrap();
 
         let mut output = String::new();
         flate2::read::GzDecoder::new(std::fs::File::open(path).unwrap()).read_to_string(&mut output).unwrap();
@@ -5469,6 +5537,136 @@ mod tests {
             std::fs::read_to_string(path).unwrap(),
             "INSERT INTO `orders` (`id`, `quantity`, `created_at`) VALUES (7, 2, '2026-07-30 08:00:00');\n\n"
         );
+    }
+
+    #[test]
+    fn split_zip_export_writer_splits_across_insert_batches_into_valid_sql() {
+        let directory = tempfile::tempdir().unwrap();
+        let zip_path = directory.path().join("orders.zip");
+        let mut writer = crate::export_split_zip::SplitZipExportWriter::create(
+            &zip_path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "orders",
+            "sql",
+        )
+        .unwrap();
+
+        // Each call is one full INSERT batch statement, exactly like the real
+        // write_database_export_rows call sites -- the writer must only cut
+        // between these calls, never inside one.
+        let long_value = "x".repeat(200_000);
+        for row_index in 0..20 {
+            write_database_export_rows(
+                &mut writer,
+                &[vec![json!(row_index), json!(long_value.clone())]],
+                &["id".to_string(), "payload".to_string()],
+                &[Some("bigint".to_string()), Some("text".to_string())],
+                &[None, None],
+                "orders",
+                "shop",
+                &DatabaseType::Postgres,
+            )
+            .unwrap();
+        }
+        writer.finish("orders.sql").unwrap();
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sql_parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if !entry.name().ends_with(".sql") {
+                continue;
+            }
+            let mut contents = String::new();
+            entry.read_to_string(&mut contents).unwrap();
+            sql_parts.push((entry.name().to_string(), contents));
+        }
+        sql_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(
+            sql_parts.len() > 1,
+            "expected the large export to be split into multiple parts, got {}",
+            sql_parts.len()
+        );
+        for (name, contents) in &sql_parts {
+            assert!(!contents.is_empty(), "{name} must not be empty");
+            // Every non-blank line must be a syntactically complete INSERT
+            // statement -- proof that no cut landed inside one.
+            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                assert!(
+                    line.trim_start().starts_with("INSERT INTO") && line.trim_end().ends_with(';'),
+                    "{name} has a malformed line from a mid-statement cut: {line}"
+                );
+            }
+        }
+        // Reassembling every part in order must reproduce all 20 rows.
+        let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
+        assert_eq!(combined.matches("INSERT INTO").count(), 20);
+    }
+
+    #[test]
+    fn all_schemas_combine_keeps_split_part_boundaries_statement_safe() {
+        // Mirror of the per-schema temporary files that
+        // `export_postgres_all_schemas_sql_core` combines: whole SQL
+        // statements, one per line, each newline-terminated.
+        let directory = tempfile::tempdir().unwrap();
+        let schema_path = directory.path().join("schema-0.sql");
+        let long_value = "x".repeat(200_000);
+        let mut schema_sql = String::new();
+        for row_index in 0..20 {
+            schema_sql.push_str(&format!("INSERT INTO orders VALUES ({row_index}, '{long_value}');\n"));
+        }
+        std::fs::write(&schema_path, &schema_sql).unwrap();
+
+        let zip_path = directory.path().join("combined.zip");
+        let mut writer = crate::export_split_zip::SplitZipExportWriter::create(
+            &zip_path,
+            crate::export_split_zip::MIN_SPLIT_PART_MAX_MB,
+            "combined",
+            "sql",
+        )
+        .unwrap();
+        let mut source = std::io::BufReader::new(std::fs::File::open(&schema_path).unwrap());
+        combine_schema_sql_export(&mut source, &mut writer).unwrap();
+        writer.finish("combined.sql").unwrap();
+
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sql_parts = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if !entry.name().ends_with(".sql") {
+                continue;
+            }
+            let mut contents = String::new();
+            entry.read_to_string(&mut contents).unwrap();
+            sql_parts.push((entry.name().to_string(), contents));
+        }
+        sql_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(
+            sql_parts.len() > 1,
+            "expected the combined export to be split into multiple parts, got {}",
+            sql_parts.len()
+        );
+        for (name, contents) in &sql_parts {
+            assert!(!contents.is_empty(), "{name} must not be empty");
+            // Every non-blank line must be a complete statement -- proof that
+            // the copy never cut inside one.
+            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                assert!(
+                    line.trim_start().starts_with("INSERT INTO") && line.trim_end().ends_with(';'),
+                    "{name} has a malformed line from a mid-statement cut"
+                );
+            }
+        }
+        // Reassembling the parts in order must reproduce the temporary file
+        // byte for byte: the line-by-line copy adds, drops, and alters
+        // nothing, including the trailing newline.
+        let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
+        assert_eq!(combined, schema_sql);
+        assert_eq!(combined.matches("INSERT INTO").count(), 20);
     }
 
     #[test]

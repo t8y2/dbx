@@ -1948,3 +1948,234 @@ async fn live_mysql_transfer_drop_target_retains_backup_on_failure() {
     setup_pool.disconnect().await.unwrap();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+#[ignore = "requires disposable MySQL 8 endpoints via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_keyset_pagination_copies_every_row() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_connection_id = format!("live-mysql-keyset-src-{suffix}");
+    let target_connection_id = format!("live-mysql-keyset-dst-{suffix}");
+    let source_database = format!("dbx_keyset_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_keyset_dst_{}", &suffix[..12]);
+    let source_config = live_mysql_config(&source_connection_id);
+    let target_config = live_mysql_config(&target_connection_id);
+    let source_setup_pool = mysql::connect(&mysql_url(&source_config), Duration::from_secs(10)).await.unwrap();
+    let target_setup_pool = mysql::connect(&mysql_url(&target_config), Duration::from_secs(10)).await.unwrap();
+
+    mysql::execute_query(
+        &source_setup_pool,
+        &format!(
+            "CREATE DATABASE `{source_database}` CHARACTER SET utf8mb4; \
+             CREATE TABLE `{source_database}`.`big` (id BIGINT NOT NULL, name VARCHAR(64) NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB; \
+             INSERT INTO `{source_database}`.`big` (id, name) \
+             WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < 25) \
+             SELECT n, CONCAT('row-', n) FROM seq"
+        ),
+        true,
+    )
+    .await
+    .unwrap();
+    mysql::execute_query(
+        &target_setup_pool,
+        &format!("CREATE DATABASE `{target_database}` CHARACTER SET utf8mb4"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let task_tmp = std::path::PathBuf::from(
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
+    );
+    let dir = task_tmp.join(format!("live-mysql-keyset-transfer-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    state.configs.write().await.insert(source_connection_id.clone(), source_config);
+    state.configs.write().await.insert(target_connection_id.clone(), target_config);
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
+
+    let request = TransferRequest {
+        transfer_id: format!("live-mysql-keyset-{suffix}"),
+        source_connection_id,
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id,
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 3,
+    };
+
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &DatabaseType::Mysql,
+        &DatabaseType::Mysql,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 25, "keyset pagination must copy every row");
+
+    let rows = mysql::execute_query(
+        &target_setup_pool,
+        &format!("SELECT id FROM `{target_database}`.`big` ORDER BY id"),
+        false,
+    )
+    .await
+    .unwrap();
+    let collected: Vec<i64> = rows
+        .rows
+        .iter()
+        .map(|row| {
+            let value = &row[0];
+            value.as_i64().or_else(|| value.as_str().and_then(|s| s.parse().ok())).unwrap()
+        })
+        .collect();
+    assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
+
+    let source_cleanup =
+        mysql::execute_query(&source_setup_pool, &format!("DROP DATABASE `{source_database}`"), false).await;
+    let target_cleanup =
+        mysql::execute_query(&target_setup_pool, &format!("DROP DATABASE `{target_database}`"), false).await;
+    source_setup_pool.disconnect().await.unwrap();
+    target_setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    source_cleanup.unwrap();
+    target_cleanup.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires disposable MySQL 8 endpoints via DBX_LIVE_MYSQL_TRANSFER_* variables"]
+async fn live_mysql_progress_read_survives_total_duration_beyond_timeout() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_connection_id = format!("live-mysql-progress-src-{suffix}");
+    let target_connection_id = format!("live-mysql-progress-dst-{suffix}");
+    let source_database = format!("dbx_progress_src_{}", &suffix[..12]);
+    let target_database = format!("dbx_progress_dst_{}", &suffix[..12]);
+    let source_config = live_mysql_config(&source_connection_id);
+    let target_config = live_mysql_config(&target_connection_id);
+    let source_setup_pool = mysql::connect(&mysql_url(&source_config), Duration::from_secs(10)).await.unwrap();
+    let target_setup_pool = mysql::connect(&mysql_url(&target_config), Duration::from_secs(10)).await.unwrap();
+
+    // The transfer spans several pages whose total duration far exceeds the 1s
+    // budget. With the timeout treated as an inactivity window, a steady stream must
+    // never be cancelled just for taking longer than the timeout in total.
+    mysql::execute_query(
+        &source_setup_pool,
+        &format!(
+            "SET SESSION cte_max_recursion_depth = 100000; \
+             CREATE DATABASE `{source_database}` CHARACTER SET utf8mb4; \
+             CREATE TABLE `{source_database}`.`big` (id BIGINT NOT NULL, name VARCHAR(200) NOT NULL, PRIMARY KEY (id)) ENGINE=InnoDB; \
+             INSERT INTO `{source_database}`.`big` (id, name) \
+             WITH RECURSIVE seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < 50000) \
+             SELECT n, REPEAT('x', 200) FROM seq"
+        ),
+        true,
+    )
+    .await
+    .unwrap();
+    mysql::execute_query(
+        &target_setup_pool,
+        &format!("CREATE DATABASE `{target_database}` CHARACTER SET utf8mb4"),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let task_tmp = std::path::PathBuf::from(
+        std::env::var("DBX_LIVE_MYSQL_TRANSFER_TMP_DIR")
+            .unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().to_string()),
+    );
+    let dir = task_tmp.join(format!("live-mysql-progress-transfer-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    // The read runs under the source's query timeout; keep it at 1s so the test only
+    // passes when the transfer treats it as an inactivity budget, not a wall clock.
+    let mut source_config_short = source_config.clone();
+    source_config_short.query_timeout_secs = 1;
+    state.configs.write().await.insert(source_connection_id.clone(), source_config_short);
+    state.configs.write().await.insert(target_connection_id.clone(), target_config);
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_database)).await.unwrap();
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_database)).await.unwrap();
+
+    let request = TransferRequest {
+        transfer_id: format!("live-mysql-progress-{suffix}"),
+        source_connection_id,
+        source_database: source_database.clone(),
+        source_schema: source_database.clone(),
+        source_catalog: None,
+        target_connection_id,
+        target_database: target_database.clone(),
+        target_schema: target_database.clone(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10000,
+    };
+
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &DatabaseType::Mysql,
+        &DatabaseType::Mysql,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 50000, "the whole table must be transferred across multiple pages without timing out");
+
+    let count =
+        mysql::execute_query(&target_setup_pool, &format!("SELECT COUNT(*) FROM `{target_database}`.`big`"), false)
+            .await
+            .unwrap();
+    let count_value = &count.rows[0][0];
+    let count_num = count_value.as_i64().or_else(|| count_value.as_str().and_then(|s| s.parse().ok())).unwrap();
+    assert_eq!(count_num, 50000, "no row may be dropped or duplicated");
+
+    let source_cleanup =
+        mysql::execute_query(&source_setup_pool, &format!("DROP DATABASE `{source_database}`"), false).await;
+    let target_cleanup =
+        mysql::execute_query(&target_setup_pool, &format!("DROP DATABASE `{target_database}`"), false).await;
+    source_setup_pool.disconnect().await.unwrap();
+    target_setup_pool.disconnect().await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+    source_cleanup.unwrap();
+    target_cleanup.unwrap();
+}

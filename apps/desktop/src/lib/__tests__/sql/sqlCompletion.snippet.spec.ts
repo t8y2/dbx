@@ -128,6 +128,62 @@ describe("buildSnippetItems", () => {
     expect(items.findIndex((item) => item.label === "SELECT" && item.type === "keyword")).toBeGreaterThan(0);
   });
 
+  it("keeps an exact custom snippet first when matching columns are preferred", () => {
+    const sql = "SELECT * FROM users WHERE cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [{ name: "users", type: "table" }],
+      columnsByTable: new Map([["users", [{ name: "country_code", table: "users" }]]]),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(
+      expect.objectContaining({
+        label: "count zero",
+        filterText: "cc",
+        type: "snippet",
+        apply: "count(0)",
+        exactMatch: true,
+      }),
+    );
+  });
+
+  it("keeps an exact custom snippet ahead of an exact table alias", () => {
+    const sql = "SELECT * FROM country_codes cc WHERE cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [{ name: "country_codes", type: "table" }],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "count zero", type: "snippet", exactMatch: true }));
+  });
+
+  it("offers custom snippets in preferred SQL value contexts", () => {
+    const sql = "SELECT DATEADD(cc";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      snippets: [{ id: "custom-count", label: "count zero", prefix: "cc", body: "count(0)" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "sqlserver",
+    });
+
+    expect(items[0]).toEqual(expect.objectContaining({ label: "count zero", type: "snippet", apply: "count(0)", exactMatch: true }));
+  });
+
+  it("keeps an exact database routine ahead of its generic function", () => {
+    const sql = "SELECT COUNT";
+    const items = buildSqlCompletionItems(sql, sql.length, {
+      objects: [{ name: "COUNT", type: "function", signature: "value" }],
+      tables: [],
+      columnsByTable: new Map(),
+      databaseType: "mysql",
+    });
+
+    expect(items.find((item) => item.label === "COUNT")?.apply).toBe("`COUNT`(${1:value})");
+  });
+
   it("keeps the real keyword first after typing past a snippet prefix", () => {
     const items = buildSqlCompletionItems("sele", 4, {
       snippets: [{ id: "custom-sel", label: "select all rows", prefix: "sel", body: "SELECT *\nFROM table;" }],

@@ -678,6 +678,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn progress_read_marks_the_inactivity_clock_for_a_multi_row_select() {
+        let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
+        execute_query(&pool, "CREATE TABLE progress_probe (id INTEGER PRIMARY KEY)").await.expect("create table");
+        for id in 1..=5 {
+            execute_query(&pool, &format!("INSERT INTO progress_probe (id) VALUES ({id})")).await.expect("insert row");
+        }
+
+        let progress_clock = std::sync::Arc::new(crate::query::StreamProgressClock::new());
+        assert!(!progress_clock.marked(), "a fresh clock must not report progress");
+
+        let result = execute_query_with_max_rows_progress(
+            &pool,
+            "SELECT id FROM progress_probe ORDER BY id",
+            None,
+            progress_clock.clone(),
+            Some(std::time::Duration::from_secs(30)),
+        )
+        .await
+        .expect("progress read");
+
+        assert_eq!(result.rows.len(), 5);
+        assert!(progress_clock.marked(), "streamed rows must record progress so the inactivity budget resets");
+    }
+
+    #[tokio::test]
     async fn sqlite_dml_returning_preserves_result_rows() {
         let pool = connect_path(":memory:").await.expect("connect in-memory SQLite");
         execute_query(&pool, "CREATE TABLE dml_returning (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
@@ -2830,12 +2855,53 @@ pub async fn execute_query_with_max_rows(
         return worker.query(&sql, max_rows).await;
     }
     let pool = pool.clone();
-    tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows))
+    tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows, None))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize>) -> Result<QueryResult, String> {
+/// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
+///
+/// The clock is marked for every row the statement produces, so a caller wrapping
+/// this in an inactivity budget only times out on a genuine stall, not on a long
+/// but steady read. The SQLite worker (sidecar) path keeps the plain call: its RPC
+/// returns the whole result at once and exposes no incremental progress.
+pub(crate) async fn execute_query_with_max_rows_progress(
+    pool: &SqliteHandle,
+    sql: &str,
+    max_rows: Option<usize>,
+    progress_clock: std::sync::Arc<crate::query::StreamProgressClock>,
+    timeout: Option<std::time::Duration>,
+) -> Result<QueryResult, String> {
+    let sql = normalize_sqlite_sql(sql);
+    if let Some(worker) = pool.worker() {
+        // The sidecar worker returns the whole result in one RPC and exposes no
+        // incremental progress, so keep the original wall-clock budget.
+        return crate::query::wait_for_query_opt(None, timeout, worker.query(&sql, max_rows)).await;
+    }
+    let pool = pool.clone();
+    let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
+    let clock_for_query = progress_clock.clone();
+    crate::query::await_stream_with_progress_timeout(
+        async move {
+            tokio::task::spawn_blocking(move || execute_query_blocking(&pool, &sql, max_rows, Some(&clock_for_query)))
+                .await
+                .map_err(|e| e.to_string())?
+        },
+        timeout,
+        progress_clock,
+        None,
+        timeout_error,
+    )
+    .await
+}
+
+fn execute_query_blocking(
+    pool: &SqliteHandle,
+    sql: &str,
+    max_rows: Option<usize>,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
+) -> Result<QueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
@@ -2849,6 +2915,9 @@ fn execute_query_blocking(pool: &SqliteHandle, sql: &str, max_rows: Option<usize
             let mut result_rows = Vec::new();
 
             while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                if let Some(progress_clock) = progress_clock {
+                    progress_clock.mark();
+                }
                 let mut values = Vec::with_capacity(columns.len());
                 for i in 0..columns.len() {
                     values.push(value_ref_to_json(

@@ -1562,4 +1562,5 @@ export interface CollectionInfo {
   milvusSchema?: MilvusCollectionSchema;
   kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
+  aliases?: string[];
 }

@@ -1,4 +1,4 @@
-import type { DatabaseType } from "@/types/database";
+import type { DatabaseType, TreeNode } from "@/types/database";
 import type { ElasticsearchDeleteByQueryResult } from "@/lib/backend/tauri";
 
 /**
@@ -8,6 +8,11 @@ import type { ElasticsearchDeleteByQueryResult } from "@/lib/backend/tauri";
  */
 export function isElasticsearchProtocolIndex(nodeType: string, dbType: DatabaseType | undefined): boolean {
   return nodeType === "elasticsearch-index" && (dbType === "elasticsearch" || dbType === "easysearch");
+}
+
+export function elasticsearchIndexAliasLabel(node: Pick<TreeNode, "searchAliases">): string | undefined {
+  const aliases = node.searchAliases?.filter((alias) => alias.trim()) ?? [];
+  return aliases.length ? aliases.join(", ") : undefined;
 }
 
 /**

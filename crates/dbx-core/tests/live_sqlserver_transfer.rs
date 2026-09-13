@@ -283,3 +283,355 @@ async fn live_sqlserver_transfer_rebuild_releases_constraint_and_index_names() {
     cleanup.expect("drop rebuild databases");
     test_result.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_keyset_pagination_copies_every_row() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_db = format!("dbx_keyset_src_{}", &suffix[..12]);
+    let target_db = format!("dbx_keyset_dst_{}", &suffix[..12]);
+    let source_connection_id = format!("live-sqlserver-keyset-src-{suffix}");
+    let target_connection_id = format!("live-sqlserver-keyset-dst-{suffix}");
+
+    let mut master = sqlserver_connect("master").await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{source_db}]; CREATE DATABASE [{target_db}];"),
+    )
+    .await
+    .expect("create keyset databases");
+
+    let mut source_client = sqlserver_connect(&source_db).await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut source_client,
+        "CREATE TABLE dbo.big (id INT NOT NULL CONSTRAINT PK_big PRIMARY KEY, name NVARCHAR(64) NOT NULL); \
+         ;WITH seq AS (SELECT 1 n UNION ALL SELECT n + 1 FROM seq WHERE n < 25) \
+         INSERT INTO dbo.big (id, name) \
+         SELECT n, CONCAT('row-', n) FROM seq OPTION (MAXRECURSION 0);",
+    )
+    .await
+    .expect("create source table");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-keyset-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create keyset directory");
+    let storage = Storage::open(&dir.join("storage.db")).await.expect("open keyset storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.clone(), live_sqlserver_config(&source_connection_id, &source_db));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.clone(), live_sqlserver_config(&target_connection_id, &target_db));
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_db)).await.expect("source pool");
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
+
+    let request = TransferRequest {
+        transfer_id: format!("live-sqlserver-keyset-{suffix}"),
+        source_connection_id: source_connection_id.clone(),
+        source_database: source_db.clone(),
+        source_schema: "dbo".to_string(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.clone(),
+        target_database: target_db.clone(),
+        target_schema: "dbo".to_string(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 3,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            "big",
+            0,
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            &source_pool_key,
+            &target_pool_key,
+            &HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 25, "keyset pagination must copy every row");
+
+        let mut target_client = sqlserver_connect(&target_db).await;
+        let rows = dbx_core::db::sqlserver::execute_query(&mut target_client, "SELECT id FROM dbo.big ORDER BY id")
+            .await
+            .expect("read target ids");
+        let collected: Vec<i64> = rows.rows.iter().map(|row| row[0].as_i64().unwrap()).collect();
+        assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!(
+            "ALTER DATABASE [{source_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{source_db}]; \
+             ALTER DATABASE [{target_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{target_db}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("drop keyset databases");
+    test_result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_progress_read_survives_total_duration_beyond_timeout() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_db = format!("dbx_progress_src_{}", &suffix[..12]);
+    let target_db = format!("dbx_progress_dst_{}", &suffix[..12]);
+    let source_connection_id = format!("live-sqlserver-progress-src-{suffix}");
+    let target_connection_id = format!("live-sqlserver-progress-dst-{suffix}");
+
+    let mut master = sqlserver_connect("master").await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{source_db}]; CREATE DATABASE [{target_db}];"),
+    )
+    .await
+    .expect("create progress databases");
+
+    // The transfer spans several pages whose total duration far exceeds the 1s
+    // budget. With the timeout treated as an inactivity window, a steady stream must
+    // never be cancelled just for taking longer than the timeout in total. Generate
+    // the rows with a non-recursive cross join so the fixture itself stays fast.
+    let mut source_client = sqlserver_connect(&source_db).await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut source_client,
+        "CREATE TABLE dbo.big (id INT NOT NULL CONSTRAINT PK_big PRIMARY KEY, name NVARCHAR(64) NOT NULL); \
+         INSERT INTO dbo.big (id, name) \
+         SELECT t.n, REPLICATE('x', 64) \
+         FROM ( \
+             SELECT a.n + b.n * 10 + c.n * 100 + d.n * 1000 + e.n * 10000 + 1 AS n \
+             FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) a(n) \
+             CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) b(n) \
+             CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) c(n) \
+             CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) d(n) \
+             CROSS JOIN (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)) e(n) \
+         ) t WHERE t.n <= 20000;",
+    )
+    .await
+    .expect("create source table");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-progress-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create progress directory");
+    let storage = Storage::open(&dir.join("storage.db")).await.expect("open progress storage");
+    let state = Arc::new(AppState::new(storage));
+    // The read runs under the source's query timeout; keep it at 1s so the test only
+    // passes when the transfer treats it as an inactivity budget, not a wall clock.
+    let mut source_config = live_sqlserver_config(&source_connection_id, &source_db);
+    source_config.query_timeout_secs = 1;
+    state.configs.write().await.insert(source_connection_id.clone(), source_config);
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.clone(), live_sqlserver_config(&target_connection_id, &target_db));
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_db)).await.expect("source pool");
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
+
+    let request = TransferRequest {
+        transfer_id: format!("live-sqlserver-progress-{suffix}"),
+        source_connection_id: source_connection_id.clone(),
+        source_database: source_db.clone(),
+        source_schema: "dbo".to_string(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.clone(),
+        target_database: target_db.clone(),
+        target_schema: "dbo".to_string(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10000,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            "big",
+            0,
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            &source_pool_key,
+            &target_pool_key,
+            &HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 20000, "the whole table must be transferred across multiple pages without timing out");
+
+        let mut target_client = sqlserver_connect(&target_db).await;
+        let count = dbx_core::db::sqlserver::execute_query(&mut target_client, "SELECT COUNT(*) FROM dbo.big")
+            .await
+            .expect("count target rows");
+        assert_eq!(count.rows[0][0].as_i64(), Some(20000), "no row may be dropped or duplicated");
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!(
+            "ALTER DATABASE [{source_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{source_db}]; \
+             ALTER DATABASE [{target_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{target_db}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("drop progress databases");
+    test_result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DBX_LIVE_SQLSERVER_HOST/PORT/USER/PASSWORD pointing at SQL Server"]
+async fn live_sqlserver_keyset_uniqueidentifier_datetime2_composite_key() {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_db = format!("dbx_typed_src_{}", &suffix[..12]);
+    let target_db = format!("dbx_typed_dst_{}", &suffix[..12]);
+    let source_connection_id = format!("live-sqlserver-typed-src-{suffix}");
+    let target_connection_id = format!("live-sqlserver-typed-dst-{suffix}");
+
+    let mut master = sqlserver_connect("master").await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!("CREATE DATABASE [{source_db}]; CREATE DATABASE [{target_db}];"),
+    )
+    .await
+    .expect("create typed databases");
+
+    let mut source_client = sqlserver_connect(&source_db).await;
+    dbx_core::db::sqlserver::execute_batch(
+        &mut source_client,
+        "CREATE TABLE dbo.typed_key ( \
+             uid UNIQUEIDENTIFIER NOT NULL, \
+             ts DATETIME2(3) NOT NULL, \
+             name NVARCHAR(32) NOT NULL, \
+             CONSTRAINT PK_typed_key PRIMARY KEY (uid, ts) \
+         ); \
+         INSERT INTO dbo.typed_key (uid, ts, name) VALUES \
+             ('00000000-0000-0000-0000-000000000001', '2024-01-01 00:00:00.000', N'a'), \
+             ('00000000-0000-0000-0000-000000000002', '2024-01-02 00:00:00.000', N'b'), \
+             ('00000000-0000-0000-0000-000000000003', '2024-01-03 00:00:00.000', N'c'), \
+             ('00000000-0000-0000-0000-000000000004', '2024-01-04 00:00:00.000', N'd'), \
+             ('00000000-0000-0000-0000-000000000005', '2024-01-05 00:00:00.000', N'e'), \
+             ('00000000-0000-0000-0000-000000000006', '2024-01-06 00:00:00.000', N'f'), \
+             ('00000000-0000-0000-0000-000000000007', '2024-01-07 00:00:00.000', N'g'), \
+             ('00000000-0000-0000-0000-000000000008', '2024-01-08 00:00:00.000', N'h');",
+    )
+    .await
+    .expect("create source typed table");
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-sqlserver-typed-{suffix}"));
+    std::fs::create_dir_all(&dir).expect("create typed directory");
+    let storage = Storage::open(&dir.join("storage.db")).await.expect("open typed storage");
+    let state = Arc::new(AppState::new(storage));
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.clone(), live_sqlserver_config(&source_connection_id, &source_db));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.clone(), live_sqlserver_config(&target_connection_id, &target_db));
+    let source_pool_key = state.get_or_create_pool(&source_connection_id, Some(&source_db)).await.expect("source pool");
+    let target_pool_key = state.get_or_create_pool(&target_connection_id, Some(&target_db)).await.expect("target pool");
+
+    let request = TransferRequest {
+        transfer_id: format!("live-sqlserver-typed-{suffix}"),
+        source_connection_id: source_connection_id.clone(),
+        source_database: source_db.clone(),
+        source_schema: "dbo".to_string(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.clone(),
+        target_database: target_db.clone(),
+        target_schema: "dbo".to_string(),
+        target_catalog: None,
+        tables: vec!["typed_key".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 3,
+    };
+
+    let test_result = async {
+        let transferred = transfer_table(
+            &state,
+            &request,
+            "typed_key",
+            0,
+            &DatabaseType::SqlServer,
+            &DatabaseType::SqlServer,
+            &source_pool_key,
+            &target_pool_key,
+            &HashMap::new(),
+            &mut Vec::new(),
+            None,
+            |_| {},
+        )
+        .await?;
+        assert_eq!(transferred, 8, "keyset pagination must copy every typed row");
+
+        let mut target_client = sqlserver_connect(&target_db).await;
+        let rows = dbx_core::db::sqlserver::execute_query(
+            &mut target_client,
+            "SELECT LOWER(CAST(uid AS VARCHAR(36))) FROM dbo.typed_key ORDER BY uid",
+        )
+        .await
+        .expect("read target uids");
+        let collected: Vec<String> = rows.rows.iter().map(|row| row[0].as_str().unwrap().to_string()).collect();
+        let expected: Vec<String> = (1..=8).map(|i| format!("00000000-0000-0000-0000-{i:012}")).collect();
+        assert_eq!(collected, expected, "uniqueidentifier + datetime2 keyset cursor must round-trip every row");
+        Ok::<_, String>(())
+    }
+    .await;
+
+    let cleanup = dbx_core::db::sqlserver::execute_batch(
+        &mut master,
+        &format!(
+            "ALTER DATABASE [{source_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{source_db}]; \
+             ALTER DATABASE [{target_db}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [{target_db}];"
+        ),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(dir);
+    cleanup.expect("drop typed databases");
+    test_result.unwrap();
+}

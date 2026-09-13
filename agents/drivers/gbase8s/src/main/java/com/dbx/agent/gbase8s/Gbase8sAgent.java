@@ -620,6 +620,12 @@ public final class Gbase8sAgent extends ConfiguredJdbcAgent {
             case 41 -> "BOOLEAN";
             case 43, 52 -> "BIGINT";
             case 44, 53 -> "BIGSERIAL";
+            // MySQL-compat extended types (SQLMODE=mysql); codes match the
+            // 3.6.5+ driver's IfxBigIntUnsigned/IfxTinyInt/IfxMediumInt/IfxBit.
+            case 66 -> "BIGINT UNSIGNED";
+            case 67 -> "TINYINT";
+            case 68 -> "MEDIUMINT";
+            case 69 -> "BIT";
             default -> "UNKNOWN(" + baseColType(coltype) + ")";
         };
     }

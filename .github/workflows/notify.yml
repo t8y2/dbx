@@ -77,20 +77,22 @@ jobs:
           elif event in ("pull_request", "pull_request_target"):
               title = os.environ["PR_TITLE"]
               url = os.environ["PR_URL"]
-              if action == "opened":
+              # if action == "opened":
+              #     user = os.environ["PR_USER"]
+              #     msg = "\n".join([
+              #         "🔀 新 Pull Request",
+              #         f"标题: {title}",
+              #         f"提交者: {user}",
+              #         f"链接: {url}",
+              #     ])
+              if action == "closed" and os.environ.get("PR_MERGED") == "true":
                   user = os.environ["PR_USER"]
-                  msg = "\n".join([
-                      "🔀 新 Pull Request",
-                      f"标题: {title}",
-                      f"提交者: {user}",
-                      f"链接: {url}",
-                  ])
-              elif action == "closed" and os.environ.get("PR_MERGED") == "true":
-                  user = os.environ.get("PR_MERGED_BY", "unknown")
+                  merged_by = os.environ.get("PR_MERGED_BY", "unknown")
                   msg = "\n".join([
                       "✅ PR 已合并",
                       f"标题: {title}",
-                      f"合并者: {user}",
+                      f"提交者: {user}",
+                      f"合并者: {merged_by}",
                       f"链接: {url}",
                   ])
 

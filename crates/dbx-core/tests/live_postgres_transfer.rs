@@ -1783,3 +1783,324 @@ async fn live_postgres_transfer_rebuild_rejects_target_only_view_before_any_rena
         "preflight rejection must preserve both selected tables and the target-only view's result"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_keyset_pagination_copies_every_row() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_keyset_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_keyset_{}", &suffix[..8]);
+
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{source_schema}\""),
+            format!("CREATE TABLE \"{source_schema}\".\"big\" (\"id\" bigint PRIMARY KEY, \"name\" text NOT NULL)"),
+            format!("INSERT INTO \"{source_schema}\".\"big\" SELECT g, 'row-' || g FROM generate_series(1, 25) g"),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(&target_pool, &[format!("CREATE SCHEMA \"{target_schema}\"")]).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-pg-keyset-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    let source_connection_id = "live-pg-keyset-source";
+    let target_connection_id = "live-pg-keyset-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.to_string(), postgres_test_config(source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let request = TransferRequest {
+        transfer_id: format!("live-pg-keyset-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 3,
+    };
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 25, "keyset pagination must copy every row");
+
+    let rows = postgres::execute_query(
+        &target_pool,
+        &format!("SELECT \"id\" FROM \"{target_schema}\".\"big\" ORDER BY \"id\""),
+    )
+    .await
+    .unwrap();
+    let collected: Vec<i64> = rows.rows.iter().map(|row| row[0].as_i64().unwrap()).collect();
+    assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
+
+    postgres::execute_batch(&source_pool, &[format!("DROP SCHEMA \"{source_schema}\" CASCADE")]).await.unwrap();
+    postgres::execute_batch(&target_pool, &[format!("DROP SCHEMA \"{target_schema}\" CASCADE")]).await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_progress_read_survives_total_duration_beyond_timeout() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_progress_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_progress_{}", &suffix[..8]);
+
+    // The transfer spans several pages whose total duration far exceeds the 1s
+    // budget. With the timeout treated as an inactivity window, a steady stream must
+    // never be cancelled just for taking longer than the timeout in total.
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{source_schema}\""),
+            format!("CREATE TABLE \"{source_schema}\".\"big\" (\"id\" bigint PRIMARY KEY, \"name\" text NOT NULL)"),
+            format!(
+                "INSERT INTO \"{source_schema}\".\"big\" SELECT g, repeat('x', 200) FROM generate_series(1, 50000) g"
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(&target_pool, &[format!("CREATE SCHEMA \"{target_schema}\"")]).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-pg-progress-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    let source_connection_id = "live-pg-progress-source";
+    let target_connection_id = "live-pg-progress-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
+    // The read runs under the source's query timeout; keep it at 1s so the test only
+    // passes when the transfer treats it as an inactivity budget, not a wall clock.
+    let mut source_config = postgres_test_config(source_connection_id, &source_database);
+    source_config.query_timeout_secs = 1;
+    state.configs.write().await.insert(source_connection_id.to_string(), source_config);
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let request = TransferRequest {
+        transfer_id: format!("live-pg-progress-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 10000,
+    };
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 50000, "the whole table must be transferred across multiple pages without timing out");
+
+    let count = postgres::execute_query(&target_pool, &format!("SELECT count(*) FROM \"{target_schema}\".\"big\""))
+        .await
+        .unwrap();
+    assert_eq!(count.rows[0][0].as_i64(), Some(50000), "no row may be dropped or duplicated");
+
+    postgres::execute_batch(&source_pool, &[format!("DROP SCHEMA \"{source_schema}\" CASCADE")]).await.unwrap();
+    postgres::execute_batch(&target_pool, &[format!("DROP SCHEMA \"{target_schema}\" CASCADE")]).await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL URLs via DBX_LIVE_PG_TRANSFER_SOURCE_URL and DBX_LIVE_PG_TRANSFER_TARGET_URL"]
+async fn live_postgres_keyset_large_batch_copies_every_row() {
+    let source_url = std::env::var("DBX_LIVE_PG_TRANSFER_SOURCE_URL").expect("DBX_LIVE_PG_TRANSFER_SOURCE_URL");
+    let target_url = std::env::var("DBX_LIVE_PG_TRANSFER_TARGET_URL").unwrap_or_else(|_| source_url.clone());
+    let source_pool = postgres::connect(&source_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let target_pool = postgres::connect(&target_url, std::time::Duration::from_secs(5)).await.unwrap();
+    let source_database = query_scalar(&source_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+    let target_database = query_scalar(&target_pool, "SELECT current_database()").await.as_str().unwrap().to_string();
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let source_schema = format!("dbx_src_largebatch_{}", &suffix[..8]);
+    let target_schema = format!("dbx_dst_largebatch_{}", &suffix[..8]);
+
+    // A batch larger than the 10k default row limit must not be truncated: the read
+    // must return every row, so the paging loop does not mistake a short page for the
+    // last page and stop early.
+    postgres::execute_batch(
+        &source_pool,
+        &[
+            format!("CREATE SCHEMA \"{source_schema}\""),
+            format!("CREATE TABLE \"{source_schema}\".\"big\" (\"id\" bigint PRIMARY KEY, \"name\" text NOT NULL)"),
+            format!("INSERT INTO \"{source_schema}\".\"big\" SELECT g, 'row-' || g FROM generate_series(1, 50000) g"),
+        ],
+    )
+    .await
+    .unwrap();
+    postgres::execute_batch(&target_pool, &[format!("CREATE SCHEMA \"{target_schema}\"")]).await.unwrap();
+
+    let dir = std::env::temp_dir().join(format!("dbx-live-pg-largebatch-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new(storage));
+    let source_connection_id = "live-pg-largebatch-source";
+    let target_connection_id = "live-pg-largebatch-target";
+    let source_pool_key = format!("{source_connection_id}:{source_database}");
+    let target_pool_key = format!("{target_connection_id}:{target_database}");
+    state
+        .update_connection_pools(|connections| {
+            connections.insert(source_pool_key.clone(), PoolKind::Postgres(source_pool.clone()));
+            connections.insert(target_pool_key.clone(), PoolKind::Postgres(target_pool.clone()));
+        })
+        .await;
+    state
+        .configs
+        .write()
+        .await
+        .insert(source_connection_id.to_string(), postgres_test_config(source_connection_id, &source_database));
+    state
+        .configs
+        .write()
+        .await
+        .insert(target_connection_id.to_string(), postgres_test_config(target_connection_id, &target_database));
+
+    let request = TransferRequest {
+        transfer_id: format!("live-pg-largebatch-{suffix}"),
+        source_connection_id: source_connection_id.to_string(),
+        source_database: source_database.clone(),
+        source_schema: source_schema.clone(),
+        source_catalog: None,
+        target_connection_id: target_connection_id.to_string(),
+        target_database: target_database.clone(),
+        target_schema: target_schema.clone(),
+        target_catalog: None,
+        tables: vec!["big".to_string()],
+        create_table: true,
+        drop_target_before_create: false,
+        drop_target_confirmed: false,
+        content: TransferContent::default(),
+        objects: Vec::new(),
+        mode: TransferMode::Append,
+        target_table_name_case: TransferTableNameCase::Preserve,
+        quote_target_column_names: true,
+        ownership_policy: TransferOwnershipPolicy::Preserve,
+        batch_size: 50000,
+    };
+    let source_db_type = get_db_type(&state, source_connection_id).await.unwrap();
+    let target_db_type = get_db_type(&state, target_connection_id).await.unwrap();
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &source_db_type,
+        &target_db_type,
+        &source_pool_key,
+        &target_pool_key,
+        &std::collections::HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 50000, "a batch larger than the default row limit must not truncate the transfer");
+
+    let count = postgres::execute_query(&target_pool, &format!("SELECT count(*) FROM \"{target_schema}\".\"big\""))
+        .await
+        .unwrap();
+    assert_eq!(count.rows[0][0].as_i64(), Some(50000), "no row may be dropped");
+
+    postgres::execute_batch(&source_pool, &[format!("DROP SCHEMA \"{source_schema}\" CASCADE")]).await.unwrap();
+    postgres::execute_batch(&target_pool, &[format!("DROP SCHEMA \"{target_schema}\" CASCADE")]).await.unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -45,13 +45,17 @@ describe("connectionStore Elasticsearch open/expand", () => {
   });
 
   it("openElasticsearchConnectionTree only ensures connectivity, does not expand or list indices", async () => {
-    const elasticsearchListIndices = vi.fn().mockResolvedValue(["orders", "users"]);
+    const documentListCollections = vi.fn().mockResolvedValue([
+      { name: "orders", id: "orders", kind: "index" },
+      { name: "users", id: "users", kind: "index" },
+    ]);
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
-      elasticsearchListIndices,
+      documentListCollections,
+      elasticsearchListIndices: vi.fn(),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -66,7 +70,7 @@ describe("connectionStore Elasticsearch open/expand", () => {
 
     await store.openElasticsearchConnectionTree("es-1");
 
-    expect(elasticsearchListIndices).not.toHaveBeenCalled();
+    expect(documentListCollections).not.toHaveBeenCalled();
     const node = store.treeNodes.find((n) => n.id === "es-1");
     // openElasticsearchConnectionTree does NOT expand the node
     expect(node?.isExpanded).toBe(false);
@@ -74,13 +78,17 @@ describe("connectionStore Elasticsearch open/expand", () => {
   });
 
   it("refreshTreeNode lists indices", async () => {
-    const elasticsearchListIndices = vi.fn().mockResolvedValue(["orders", "users"]);
+    const documentListCollections = vi.fn().mockResolvedValue([
+      { name: "orders", id: "orders", kind: "index" },
+      { name: "users", id: "users", kind: "index" },
+    ]);
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
-      elasticsearchListIndices,
+      documentListCollections,
+      elasticsearchListIndices: vi.fn(),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -96,7 +104,7 @@ describe("connectionStore Elasticsearch open/expand", () => {
 
     await store.refreshTreeNode(node);
 
-    expect(elasticsearchListIndices).toHaveBeenCalledWith("es-1");
+    expect(documentListCollections).toHaveBeenCalledWith("es-1", "default");
     expect(
       node.children
         ?.filter((c) => c.type === "elasticsearch-index")
@@ -106,13 +114,17 @@ describe("connectionStore Elasticsearch open/expand", () => {
   });
 
   it("loadElasticsearchIndices lists indices and expands", async () => {
-    const elasticsearchListIndices = vi.fn().mockResolvedValue(["orders", "users"]);
+    const documentListCollections = vi.fn().mockResolvedValue([
+      { name: "orders", id: "orders", kind: "index" },
+      { name: "users", id: "users", kind: "index" },
+    ]);
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
-      elasticsearchListIndices,
+      documentListCollections,
+      elasticsearchListIndices: vi.fn(),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -127,7 +139,7 @@ describe("connectionStore Elasticsearch open/expand", () => {
 
     await store.loadElasticsearchIndices("es-1");
 
-    expect(elasticsearchListIndices).toHaveBeenCalledWith("es-1");
+    expect(documentListCollections).toHaveBeenCalledWith("es-1", "default");
     const node = store.treeNodes.find((n) => n.id === "es-1");
     expect(
       node?.children
@@ -138,13 +150,17 @@ describe("connectionStore Elasticsearch open/expand", () => {
   });
 
   it("loads Easysearch indices through the Elasticsearch-compatible tree", async () => {
-    const elasticsearchListIndices = vi.fn().mockResolvedValue(["orders", "users"]);
+    const documentListCollections = vi.fn().mockResolvedValue([
+      { name: "orders", id: "orders", kind: "index" },
+      { name: "users", id: "users", kind: "index" },
+    ]);
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
-      elasticsearchListIndices,
+      documentListCollections,
+      elasticsearchListIndices: vi.fn(),
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
       loadSchemaCache: vi.fn().mockResolvedValue(null),
       saveSchemaCache: vi.fn().mockResolvedValue(undefined),
@@ -159,16 +175,56 @@ describe("connectionStore Elasticsearch open/expand", () => {
 
     await store.loadElasticsearchIndices("easysearch-1");
 
-    expect(elasticsearchListIndices).toHaveBeenCalledWith("easysearch-1");
+    expect(documentListCollections).toHaveBeenCalledWith("easysearch-1", "default");
     expect(
       store.treeNodes
         .find((node) => node.id === "easysearch-1")
-        ?.children?.map((node) => node.label)
+        ?.children?.filter((node) => node.type === "elasticsearch-index")
+        .map((node) => node.label)
         .sort(),
     ).toEqual(["orders", "users"]);
   });
 
+  it("keeps aliases on the same index row instead of adding a second node", async () => {
+    const documentListCollections = vi.fn().mockResolvedValue([
+      { name: "orders", id: "orders", aliases: ["orders-write"] },
+      { name: "users", id: "users", aliases: [] },
+    ]);
+    const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth,
+      documentListCollections,
+      elasticsearchListIndices: vi.fn(),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.addEphemeralConnection(esConnection());
+    seedConnectionNode(store);
+
+    await store.loadElasticsearchIndices("es-1");
+
+    const nodes = store.treeNodes.find((node) => node.id === "es-1")?.children?.filter((node) => node.type === "elasticsearch-index");
+    expect(
+      nodes?.map((node) => ({
+        label: node.label,
+        searchAliases: node.searchAliases,
+      })),
+    ).toEqual([
+      { label: "orders", searchAliases: ["orders-write"] },
+      { label: "users", searchAliases: undefined },
+    ]);
+  });
+
   it("uses the shared Meilisearch index-list method for the Meilisearch tree", async () => {
+    const documentListCollections = vi.fn().mockResolvedValue([{ name: "wrong-index", id: "wrong-index", kind: "index" }]);
     const elasticsearchListIndices = vi.fn().mockResolvedValue(["wrong-index"]);
     const meilisearchListIndexes = vi.fn().mockResolvedValue(["movies", "books"]);
     const checkConnectionHealth = vi.fn().mockResolvedValue(undefined);
@@ -176,6 +232,7 @@ describe("connectionStore Elasticsearch open/expand", () => {
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
       checkConnectionHealth,
+      documentListCollections,
       elasticsearchListIndices,
       meilisearchListIndexes,
       deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
@@ -193,6 +250,7 @@ describe("connectionStore Elasticsearch open/expand", () => {
     await store.loadElasticsearchIndices("meili-1");
 
     expect(meilisearchListIndexes).toHaveBeenCalledWith("meili-1");
+    expect(documentListCollections).not.toHaveBeenCalled();
     expect(elasticsearchListIndices).not.toHaveBeenCalled();
     expect(
       store.treeNodes

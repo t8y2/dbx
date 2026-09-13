@@ -712,6 +712,7 @@ async fn collect_first_result_limited(
     result_offset: usize,
     sql: &str,
     query: &SqlServerUnsafeTypeQuery,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
 ) -> Result<QueryResult, String> {
     let row_limit = query_result_row_limit(max_rows);
     let mut remaining_offset = result_offset;
@@ -724,6 +725,9 @@ async fn collect_first_result_limited(
     let mut truncated = false;
 
     while let Some(item) = stream.try_next().await.map_err(|e| e.to_string())? {
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         match item {
             QueryItem::Metadata(metadata) if metadata.result_index() == 0 => {
                 columns = columns_from_metadata(&metadata);
@@ -3161,6 +3165,52 @@ pub async fn execute_query_with_max_rows(
     sql: &str,
     max_rows: Option<usize>,
 ) -> Result<QueryResult, String> {
+    execute_query_with_max_rows_inner(client, sql, max_rows, None).await
+}
+
+/// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
+///
+/// Row-returning statements run under an inactivity budget: the clock is reset for
+/// every streamed item, so a large table that keeps arriving is never cancelled
+/// merely for exceeding the timeout in total — only a genuine stall is. Statements
+/// without a result stream expose no incremental progress and keep the plain path.
+pub(crate) async fn execute_query_with_max_rows_progress(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+    progress_clock: std::sync::Arc<crate::query::StreamProgressClock>,
+    timeout: Option<std::time::Duration>,
+) -> Result<QueryResult, String> {
+    let returns_rows = starts_with_executable_sql_keyword(sql, &["SELECT", "EXEC", "WITH", "TABLE"])
+        || sqlserver_dml_output_returns_rows(sql);
+    if !returns_rows {
+        // DDL/DML expose no incremental progress, so keep the original wall-clock
+        // budget: a hung write must still be bounded by the configured timeout.
+        return crate::query::wait_for_query_opt(
+            None,
+            timeout,
+            execute_query_with_max_rows_inner(client, sql, max_rows, None),
+        )
+        .await;
+    }
+    let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
+    let clock_for_query = progress_clock.clone();
+    crate::query::await_stream_with_progress_timeout(
+        execute_query_with_max_rows_inner(client, sql, max_rows, Some(&clock_for_query)),
+        timeout,
+        progress_clock,
+        None,
+        timeout_error,
+    )
+    .await
+}
+
+async fn execute_query_with_max_rows_inner(
+    client: &mut SqlServerClient,
+    sql: &str,
+    max_rows: Option<usize>,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
+) -> Result<QueryResult, String> {
     let start = Instant::now();
     let result_offset = crate::query_result_sql::sqlserver_result_offset(sql);
 
@@ -3175,8 +3225,16 @@ pub async fn execute_query_with_max_rows(
         };
         let (result, messages) = capture_sqlserver_messages(async {
             let stream = sqlserver_driver_result(client.query(query.sql.as_str(), &[])).await?;
-            sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query))
-                .await
+            sqlserver_driver_result(collect_first_result_limited(
+                stream,
+                start,
+                max_rows,
+                result_offset,
+                sql,
+                &query,
+                progress_clock,
+            ))
+            .await
         })
         .await;
         let mut result = query_result_with_server_messages(result?, messages);
@@ -3264,6 +3322,7 @@ pub(crate) async fn execute_batch_with_max_rows_metadata(
                         result_offset,
                         sql,
                         &query,
+                        None,
                     ))
                     .await
                 })
@@ -3358,7 +3417,8 @@ async fn execute_simple_batch_first_result_with_max_rows(
     let (result, messages) = capture_sqlserver_messages(async {
         let stream = sqlserver_driver_result(client.simple_query(sql)).await?;
         let query = SqlServerUnsafeTypeQuery::plain(sql);
-        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query)).await
+        sqlserver_driver_result(collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None))
+            .await
     })
     .await;
     let mut result = query_result_with_server_messages(result?, messages);
@@ -4327,9 +4387,8 @@ mod tests {
 
         let first_result = source.split("async fn execute_simple_batch_first_result_with_max_rows").nth(1).unwrap();
         let first_result = first_result.split("fn strip_dbx_sqlserver_row_number_column").next().unwrap();
-        assert!(
-            first_result.contains("collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query)")
-        );
+        assert!(first_result
+            .contains("collect_first_result_limited(stream, start, max_rows, result_offset, sql, &query, None)"));
         assert!(!first_result.contains("collect_result_sets_limited"));
     }
 

@@ -6,14 +6,19 @@ identified by the checksum
 upstream release tag points to commit
 `0e2897a276166503ba78fe3e1cee501e9a034021`.
 
-DBX changes only SQL Server Unicode column-data decoding:
+DBX changes only SQL Server column-data decoding:
 
 - NCHAR, NVARCHAR, and NTEXT row values replace unpaired UTF-16 surrogates with
   U+FFFD, matching the Microsoft JDBC driver's observable behavior.
+- CHAR, VARCHAR, and TEXT row values under a non-Unicode collation decode
+  lossily: byte sequences that are invalid in the column's collation become
+  U+FFFD instead of failing the whole result set, following the JDBC driver's
+  REPLACE policy. The lossy decoder does no BOM handling, so bytes that merely
+  look like a UTF-8 BOM (e.g. under GB18030) stay ordinary collation data.
 - Odd byte lengths remain protocol errors, including an explicit NTEXT guard
   that prevents truncating a trailing byte and desynchronizing the TDS stream.
-- Metadata, environment tokens, other protocol strings, and non-Unicode
-  codepage decoding retain upstream's strict behavior.
+- Metadata, environment tokens, and other protocol strings retain upstream's
+  strict behavior.
 
 The regression tests in `src/tds/codec/column_data.rs` exercise the decoder
 with raw TDS value frames. The upstream integration fixtures are omitted from

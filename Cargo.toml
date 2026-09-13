@@ -37,7 +37,9 @@ postgres-protocol = { git = "https://github.com/t8y2/tokio-postgres-gaussdb.git"
 # rustls dangerous-mode connections to legacy certificates. Remove after upstream support lands.
 mysql_async = { git = "https://github.com/zipg/mysql_async.git", rev = "4a9e60a62f5a48e35ef9ccc9fc8277d5012b19dd" }
 # Preserve readable SQL Server result sets when a row contains an unpaired
-# UTF-16 surrogate. Remove after the behavior is available in upstream tiberius.
+# UTF-16 surrogate, or varchar/text bytes that are invalid in the column's
+# collation (replaced with U+FFFD, no BOM sniffing). Remove after the behavior
+# is available in upstream tiberius.
 tiberius = { path = "vendor/tiberius" }
 
 [profile.release]

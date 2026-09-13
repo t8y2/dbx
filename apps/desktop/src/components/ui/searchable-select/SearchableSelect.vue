@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import type { HTMLAttributes } from "vue";
 import { Check, ChevronDown, Search, X } from "@lucide/vue";
+import { useI18n } from "vue-i18n";
 import { Button } from "@/components/ui/button";
 import type { ButtonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -76,6 +77,7 @@ const helpPanel = ref<{ element?: HTMLElement }>();
 const highlightIndex = ref(-1);
 const activeHelpOption = ref<string>();
 const helpPanelOffsetTop = ref(0);
+const { t } = useI18n();
 
 const selectedLabel = computed(() => {
   if (!props.modelValue && !props.options.includes("")) return props.placeholder;
@@ -241,12 +243,29 @@ function handleKeydown(event: KeyboardEvent) {
 <template>
   <Popover v-model:open="open">
     <PopoverTrigger as-child>
-      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn(triggerBaseClass, triggerClass)">
+      <!--
+        Keep the trigger Button as the outermost element: triggerClass carries the layout
+        utilities consumers depend on (flex-1 / min-w-0 / max-w-* / w-full / h-*), and any
+        wrapper element would become the flex item and swallow them. The clearable overlay
+        therefore anchors to this button (relative) instead of a wrapper. The overlay is a
+        span (not the svg itself) because the Button base sets [&_svg]:pointer-events-none,
+        which is also why the old in-trigger @pointerdown.stop never fired; @click.stop
+        keeps Reka's bubble-phase trigger onClick (onOpenToggle) from opening the dropdown.
+      -->
+      <Button type="button" :variant="triggerVariant" :disabled="disabled" :title="selectedLabel" :class="cn('relative', triggerBaseClass, triggerClass)">
         <slot name="trigger-label" :value="modelValue" :label="selectedLabel" :loading="loading">
           <span class="truncate">{{ loading ? loadingText : selectedLabel }}</span>
         </slot>
-        <X v-if="clearable && !disabled && modelValue" :class="cn('shrink-0 opacity-60 hover:opacity-100', triggerIconClass)" @pointerdown.stop.prevent="emit('update:modelValue', '')" />
-        <ChevronDown v-else :class="cn('shrink-0 opacity-60', triggerIconClass)" />
+        <ChevronDown :class="cn('shrink-0 opacity-60', clearable && !disabled && modelValue && 'invisible', triggerIconClass)" />
+        <span
+          v-if="clearable && !disabled && modelValue"
+          class="absolute right-2 top-1/2 z-10 -translate-y-1/2 flex cursor-pointer items-center justify-center opacity-60 hover:opacity-100"
+          :aria-label="t('common.clear')"
+          :title="t('common.clear')"
+          @click.stop.prevent="emit('update:modelValue', '')"
+        >
+          <X :class="triggerIconClass" />
+        </span>
       </Button>
     </PopoverTrigger>
     <PopoverContent :align="SEARCHABLE_SELECT_HELP_PANEL_ALIGN" :class="cn('w-auto max-w-[calc(100vw-1rem)] border-0 bg-transparent p-0 shadow-none ring-0', contentClass)" :style="contentStyle">

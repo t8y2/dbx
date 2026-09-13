@@ -72,11 +72,18 @@ function queryTitle(tab: QueryTab): string | undefined {
   return undefined;
 }
 
+export function isEventObjectBrowserTab(tab: QueryTab): boolean {
+  return tab.mode === "objects" && (tab.objectBrowser?.initialObjectFilter === "events" || tab.objectBrowser?.eventName !== undefined || tab.objectBrowser?.eventCreateRequestId !== undefined);
+}
+
 export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
   const database = databaseDisplayNameForTab(tab.connectionId, tab.database, t);
   const settingsStore = useSettingsStore();
   const compact = settingsStore.editorSettings.compactTabTitle;
   if (isPreviewTab(tab)) return tab.title;
+  if (useConnectionStore().getConfig(tab.connectionId)?.db_type === "redis") {
+    return tab.database ? database : connectionDisplayName(tab.connectionId);
+  }
   if (tab.mode === "data" && tab.tableMeta?.tableName) {
     if (compact) return tab.tableMeta.tableName;
     const suffix = tab.tableMeta.schema && tab.tableMeta.schema !== tab.database ? `@${database}.${tab.tableMeta.schema}` : `@${database}`;
@@ -153,6 +160,11 @@ export function tabDisplayTitle(tab: QueryTab, t: Translate): string {
     return `${t("tabs.databases")}@${connectionDisplayName(tab.connectionId)}`;
   }
   if (tab.mode === "objects") {
+    if (isEventObjectBrowserTab(tab)) {
+      const eventTitle = tab.objectBrowser?.eventName || t("tree.events");
+      if (compact) return eventTitle;
+      return `${eventTitle}@${database}`;
+    }
     const schema = tab.objectBrowser?.schema;
     const objectScope = tab.catalog ? `${tab.catalog}.${database}` : database;
     if (compact) return schema || objectScope;
@@ -474,6 +486,7 @@ export function tabModeLabel(tab: QueryTab, t: Translate): string {
   if (tab.mode === "consul-overview") return t("consul.ui.overview");
   if (tab.mode === "nacos") return "Nacos";
   if (tab.mode === "databases") return t("tabs.databases");
+  if (isEventObjectBrowserTab(tab)) return t("tree.events");
   if (tab.mode === "objects") return t("tabs.objects");
   if (tab.mode === "users") return t("tabs.users");
   if (tab.mode === "dolt-version-control") return t("doltVersionControl.title");
@@ -496,6 +509,7 @@ export function tabDatabaseIconType(tab: QueryTab): string {
 }
 
 export function tabIconClass(tab: QueryTab): string {
+  const connection = useConnectionStore().getConfig(tab.connectionId);
   if (tab.externalSqlFileMissing) return "text-amber-600 dark:text-amber-400";
   if (tab.mode === "mq") return "";
   if (tab.objectSource?.objectType === "VIEW") return "text-purple-500";
@@ -505,11 +519,22 @@ export function tabIconClass(tab: QueryTab): string {
   if (tab.objectSource?.objectType === "TRIGGER") return "text-orange-300";
   if (tab.objectSource?.objectType === "EVENT" || tab.objectSource?.objectType === "JOB") return "text-orange-400";
   if (tab.objectSource?.objectType === "SEQUENCE") return "text-emerald-500";
+  if (tab.objectSource?.objectType === "SYNONYM") return "text-sky-500";
+  if (tab.objectSource?.objectType === "PACKAGE") return "text-cyan-500";
+  if (tab.objectSource?.objectType === "PACKAGE_BODY") return "text-cyan-400";
+  if (tab.objectSource?.objectType === "TYPE") return "text-violet-500";
+  if (tab.objectSource?.objectType === "TYPE_BODY") return "text-violet-400";
+  if (isEventObjectBrowserTab(tab)) return "text-orange-400";
+  if (tab.mode === "users") return "text-primary";
   if (tab.mode === "redis") return "text-red-400";
   if (tab.mode === "data" && tab.tableMeta?.tableType?.toUpperCase() === "VIEW") return "text-purple-500";
   if (tab.mode === "data" && tab.tableMeta?.tableType?.toUpperCase() === "MATERIALIZED_VIEW") return "text-indigo-500";
   if (tab.mode === "databases" || tab.mode === "objects") return "text-amber-500 dark:text-amber-400";
-  if (tab.mode === "data" || tab.mode === "mongo" || tab.mode === "vector" || tab.mode === "hbase" || tab.mode === "structure") return "text-emerald-600 dark:text-emerald-400";
+  if (tab.mode === "data" && connection?.db_type === "dynamodb") return "text-amber-500";
+  if (tab.mode === "data" || tab.mode === "hbase") return "text-green-500";
+  if (tab.mode === "mongo") return "text-green-400";
+  if (tab.mode === "vector") return "text-cyan-400";
+  if (tab.mode === "structure") return "text-blue-500";
   return "text-blue-600 dark:text-blue-400";
 }
 

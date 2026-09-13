@@ -149,6 +149,68 @@ describe("connectionStore Xugu table child metadata", () => {
     expect(subpartitions.isExpanded).toBe(true);
   });
 
+  it("records exact counts for every successfully loaded table metadata group", async () => {
+    const getColumns = vi.fn().mockResolvedValue([
+      { name: "ORDER_ID", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: true, extra: null },
+      { name: "CUSTOMER_ID", data_type: "INT", is_nullable: false, column_default: null, is_primary_key: false, extra: null },
+    ]);
+    const listIndexes = vi.fn().mockResolvedValue([{ name: "IDX_CUSTOMER", columns: ["CUSTOMER_ID"], unique: false }]);
+    const listForeignKeys = vi.fn().mockResolvedValue([{ name: "FK_CUSTOMER", column: "CUSTOMER_ID", ref_table: "CUSTOMERS", ref_column: "ID" }]);
+    const listTriggers = vi.fn().mockResolvedValue([{ name: "TR_AUDIT", timing: "BEFORE", event: "INSERT" }]);
+    const listConstraints = vi.fn().mockResolvedValue([{ name: "PK_SHOP_ORDERS", constraint_type: "PRIMARY KEY", valid: true }]);
+    const listPartitions = vi.fn().mockResolvedValue([]);
+    const listSubpartitions = vi.fn().mockResolvedValue([]);
+    const { store, tableId } = await setup("xugu", {
+      getColumns,
+      listIndexes,
+      listForeignKeys,
+      listTriggers,
+      listConstraints,
+      listPartitions,
+      listSubpartitions,
+    });
+
+    expect(getColumns).not.toHaveBeenCalled();
+    expect(listIndexes).not.toHaveBeenCalled();
+    expect(listForeignKeys).not.toHaveBeenCalled();
+    expect(listTriggers).not.toHaveBeenCalled();
+    expect(listConstraints).not.toHaveBeenCalled();
+    expect(listPartitions).not.toHaveBeenCalled();
+    expect(listSubpartitions).not.toHaveBeenCalled();
+
+    const groupTypes = ["group-columns", "group-indexes", "group-fkeys", "group-triggers", "group-constraints", "group-table-partitions", "group-table-subpartitions"] as const;
+    for (const groupType of groupTypes) {
+      const group = findNode(store.treeNodes, tableId)?.children?.find((node) => node.type === groupType);
+      if (!group) throw new Error(`Missing ${groupType}`);
+      await store.loadTreeNodeChildren(group);
+    }
+
+    expect(findNode(store.treeNodes, tableId)?.children?.map((node) => [node.type, node.objectCount])).toEqual([
+      ["group-columns", 2],
+      ["group-constraints", 1],
+      ["group-fkeys", 1],
+      ["group-triggers", 1],
+      ["group-indexes", 1],
+      ["group-table-partitions", 0],
+      ["group-table-subpartitions", 0],
+    ]);
+  });
+
+  it("counts the normalized foreign key nodes for a composite foreign key", async () => {
+    const listForeignKeys = vi.fn().mockResolvedValue([
+      { name: "FK_ORDER_CUSTOMER", column: "CUSTOMER_TENANT_ID", ref_table: "CUSTOMERS", ref_column: "TENANT_ID" },
+      { name: "FK_ORDER_CUSTOMER", column: "CUSTOMER_ID", ref_table: "CUSTOMERS", ref_column: "ID" },
+    ]);
+    const { config, store, tableId } = await setup("mysql", { listForeignKeys });
+    const foreignKeys = findNode(store.treeNodes, `${tableId}:__fkeys`)!;
+
+    await store.loadTreeNodeChildren(foreignKeys);
+
+    expect(listForeignKeys).toHaveBeenCalledWith(config.id, "SHOP_DEMO", "SYSDBA", "SHOP_ORDERS", undefined);
+    expect(foreignKeys.children).toHaveLength(1);
+    expect(foreignKeys.objectCount).toBe(1);
+  });
+
   it("keeps a rejected Xugu metadata group collapsed and clears its loading state", async () => {
     const listPartitions = vi.fn().mockRejectedValue(new Error("metadata denied"));
     const { store, tableId } = await setup("xugu", { listPartitions });
@@ -159,6 +221,7 @@ describe("connectionStore Xugu table child metadata", () => {
     expect(partitions.isLoading).toBe(false);
     expect(partitions.isExpanded).toBe(false);
     expect(partitions.children).toEqual([]);
+    expect(partitions.objectCount).toBeUndefined();
   });
 
   it("shows Xugu trigger level and status without changing other database labels", async () => {

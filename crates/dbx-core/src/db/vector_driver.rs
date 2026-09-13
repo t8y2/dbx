@@ -62,6 +62,8 @@ pub struct CollectionInfo {
     pub milvus_schema: Option<MilvusCollectionSchema>,
     pub kind: Option<String>,
     pub bucket_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

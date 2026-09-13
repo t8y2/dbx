@@ -241,6 +241,42 @@ describe("SubscriptionsPanel Kafka absolute offset reset", () => {
     expect(backend.mqResetCursor).toHaveBeenCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "orders-consumer", { kind: "partitionOffset", partition: 1, offset: 42 });
   });
 
+  it.each([false, true])("refreshes after a closed reset succeeds without closing a new dialog (reopen: %s)", async (reopen) => {
+    const reset = deferred<void>();
+    backend.mqResetCursor.mockReturnValueOnce(reset.promise);
+    const panel = await mountPanel();
+    await openAbsoluteReset(panel);
+    buttonWithExactText(panel, "mqSubscriptions.reset").click();
+    await vi.waitFor(() => expect(backend.mqResetCursor).toHaveBeenCalledTimes(1));
+
+    buttonWithExactText(panel, "mqSubscriptions.cancel").click();
+    await flushUi();
+    if (reopen) await openAbsoluteReset(panel);
+    backend.mqListSubscriptions.mockResolvedValue([{ ...subscription("orders-consumer", "NORMAL"), msgBacklog: 123 }]);
+    reset.resolve();
+
+    await vi.waitFor(() => {
+      expect(backend.mqListSubscriptions).toHaveBeenCalledTimes(2);
+      expect(panel.querySelector(".subscriptions-table")?.textContent).toContain("123");
+    });
+    expect(panel.querySelector('input[value="partitionOffset"]') !== null).toBe(reopen);
+    expect(panel.querySelector(".form-error")).toBeNull();
+  });
+
+  it("does not refresh after a reset succeeds on an unmounted panel", async () => {
+    const reset = deferred<void>();
+    backend.mqResetCursor.mockReturnValueOnce(reset.promise);
+    const panel = await mountPanel();
+    await openAbsoluteReset(panel);
+    buttonWithExactText(panel, "mqSubscriptions.reset").click();
+    await vi.waitFor(() => expect(backend.mqResetCursor).toHaveBeenCalledTimes(1));
+    app!.unmount();
+    app = null;
+    reset.resolve();
+    await flushUi();
+    expect(backend.mqListSubscriptions).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["partition", "-1"],
     ["partition", "1.5"],

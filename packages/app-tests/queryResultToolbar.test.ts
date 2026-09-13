@@ -4,6 +4,7 @@ import { test } from "vitest";
 import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 
 const contentAreaPath = "apps/desktop/src/components/layout/ContentArea.vue";
+const resultSetNavigatorPath = "apps/desktop/src/components/layout/ResultSetNavigator.vue";
 const appPath = "apps/desktop/src/App.vue";
 const dataGridPath = "apps/desktop/src/components/grid/DataGrid.vue";
 const dataGridExportMenuPath = "apps/desktop/src/components/grid/DataGridExportMenu.vue";
@@ -66,7 +67,7 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   const contentArea = source(contentAreaPath);
   const runScrollerStart = contentArea.indexOf('ref="resultTabsScrollerRef"');
   const listSelectorStart = contentArea.indexOf('<div v-else-if="showResultRunSelector"', runScrollerStart);
-  const fixedResultSetStart = contentArea.indexOf("data-result-set-tabs-region", listSelectorStart);
+  const fixedResultSetStart = contentArea.indexOf("<ResultSetNavigator", listSelectorStart);
 
   assert.match(contentArea, /showResultRunTabs = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "tabs"\)/);
   assert.match(contentArea, /showResultRunSelector = computed\(\(\) => resultRuns\.value\.length > 0 && resultRunDisplayMode\.value === "list"\)/);
@@ -85,6 +86,7 @@ test("ContentArea exposes retained result runs as switchable tabs or a compact l
   assert.ok(runScrollerStart >= 0);
   assert.ok(listSelectorStart > runScrollerStart);
   assert.ok(fixedResultSetStart > listSelectorStart);
+  assert.match(source(resultSetNavigatorPath), /data-result-set-tabs-region/);
   assert.doesNotMatch(contentArea.slice(runScrollerStart, listSelectorStart), /visibleResultItems/);
   assert.match(contentArea, /resultAutoSave \? 'bg-primary\/10 text-primary[\s\S]*: 'text-muted-foreground hover:bg-accent hover:text-foreground'/);
   assert.doesNotMatch(contentArea, /queryResultAutoRefresh|QUERY_RESULT_AUTO_REFRESH|nextResultToolbarLayout/);

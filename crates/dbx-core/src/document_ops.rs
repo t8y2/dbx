@@ -47,6 +47,21 @@ fn sort_names(mut names: Vec<String>) -> Vec<String> {
     names
 }
 
+fn elasticsearch_collection_infos(
+    mut entries: Vec<elasticsearch_driver::ElasticsearchIndexEntry>,
+) -> Vec<CollectionInfo> {
+    entries.sort_by(|left, right| cmp_names(&left.name, &right.name));
+    entries
+        .into_iter()
+        .map(|entry| CollectionInfo {
+            name: entry.name.clone(),
+            id: entry.name,
+            aliases: entry.aliases,
+            ..Default::default()
+        })
+        .collect()
+}
+
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
     state.get_or_create_pool(connection_id, None).await.map(|_| ())
 }
@@ -270,12 +285,10 @@ pub async fn list_collections_core(
                 .collect())
         }
         PoolKind::Elasticsearch(client) => {
-            let names = sort_names(elasticsearch_driver::list_indices(client).await?);
-            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
+            Ok(elasticsearch_collection_infos(elasticsearch_driver::list_indices_with_aliases(client).await?))
         }
         PoolKind::Easysearch(client) => {
-            let names = sort_names(easysearch_driver::list_indices(client).await?);
-            Ok(names.into_iter().map(|n| CollectionInfo { name: n.clone(), id: n, ..Default::default() }).collect())
+            Ok(elasticsearch_collection_infos(easysearch_driver::list_indices_with_aliases(client).await?))
         }
         PoolKind::Meilisearch(client) => {
             let names = sort_names(crate::db::meilisearch_driver::list_indexes(client).await?);

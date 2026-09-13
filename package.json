@@ -1,6 +1,6 @@
 {
   "name": "dbx",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -121,7 +121,7 @@
     "@oxfmt/binding-darwin-arm64": "0.53.0",
     "@oxlint/binding-darwin-arm64": "1.68.0",
     "@tailwindcss/vite": "^4.3.0",
-    "@tauri-apps/cli": "^2.11.2",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/leaflet": "^1.9.21",
     "@types/node": "^25.9.1",
     "@types/splitpanes": "^2.2.6",

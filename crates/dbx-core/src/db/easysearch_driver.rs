@@ -44,6 +44,12 @@ pub async fn list_indices(client: &EasysearchClient) -> Result<Vec<String>, Stri
     elasticsearch_driver::list_indices(&client.inner).await.map_err(easysearch_error)
 }
 
+pub async fn list_indices_with_aliases(
+    client: &EasysearchClient,
+) -> Result<Vec<elasticsearch_driver::ElasticsearchIndexEntry>, String> {
+    elasticsearch_driver::list_indices_with_aliases(&client.inner).await.map_err(easysearch_error)
+}
+
 pub async fn get_columns(client: &EasysearchClient, index: &str) -> Result<Vec<ColumnInfo>, String> {
     elasticsearch_driver::get_columns(&client.inner, index).await.map_err(easysearch_error)
 }

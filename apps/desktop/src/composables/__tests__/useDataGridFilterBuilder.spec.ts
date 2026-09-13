@@ -42,6 +42,29 @@ describe("useDataGridFilterBuilder", () => {
     expect(await builder.apply()).toBe("(id = '1') OR (name = 'Alice')");
   });
 
+  it("applies only a previously disabled rule while retaining the other conditions", async () => {
+    const builder = useDataGridFilterBuilder({
+      columns: ["id", "method"],
+      isComplete: () => true,
+      buildCondition: async (rule) => `${rule.columnName} = '${rule.rawValue}'`,
+    });
+    builder.rules.value = [
+      { id: "id-rule", columnName: "id", mode: "equals", rawValue: "1", rawEndValue: "", conjunction: "AND" },
+      { id: "method-rule", columnName: "method", mode: "equals", rawValue: "POST", rawEndValue: "", conjunction: "OR", disabled: true },
+    ];
+    const originalRules = builder.rules.value.map((rule) => ({ ...rule }));
+    builder.enableOnlyRule("method-rule");
+    expect(await builder.buildWhere()).toBe("method = 'POST'");
+    expect(builder.activeCount.value).toBe(1);
+    expect(builder.rules.value).toEqual(originalRules.map((rule) => ({ ...rule, disabled: rule.id !== "method-rule" })));
+
+    builder.enableOnlyRule("missing");
+    builder.enableOnlyRule("method-rule");
+    expect(await builder.buildWhere()).toBe("method = 'POST'");
+    builder.updateRule("id-rule", { disabled: false });
+    expect(await builder.buildWhere()).toBe("(id = '1') OR (method = 'POST')");
+  });
+
   it("groups conditions in rule order", () => {
     const rule = (id: string, conjunction: "AND" | "OR"): DataGridStructuredFilterRule => ({ id, columnName: id, mode: "equals", rawValue: id, rawEndValue: "", conjunction });
     expect(

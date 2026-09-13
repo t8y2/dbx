@@ -105,6 +105,7 @@ async fn live_mysql_database_export_table_order_is_not_alphabetical_when_fk_reor
         output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
+        split_max_mb: None,
     };
 
     let test_result = async {

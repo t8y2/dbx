@@ -7,8 +7,10 @@ import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { createApp, nextTick, reactive } from "vue";
 import EditorGroupTabBar from "../EditorGroupTabBar.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import type { ConnectionConfig } from "@/types/database";
 
 vi.mock("@/components/ui/tooltip", () => ({
   Tooltip: { name: "TooltipStub", template: `<div><slot /></div>` },
@@ -171,6 +173,8 @@ describe("EditorGroupTabBar semantic tab groups", () => {
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after");
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\) \.tab-group-header::after\s*\{[^}]*bottom:\s*0;/s);
     expect(sharedStyles).toContain(".app-tab-bar:not(.vertical-tab-layout) .tab-group-header--collapsed::after");
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\) \.tab-group-tab::after\s*\{[^}]*bottom:\s*-0\.5px;[^}]*background:\s*var\(--tab-group-color\);/s);
+    expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):has\(\.wrap-mode\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;[^}]*bottom:\s*auto;/s);
     expect(sharedStyles).toMatch(/\.app-tab-bar:not\(\.vertical-tab-layout\):not\(:has\(\.wrap-mode\)\)\[data-placement="bottom"\] \.tab-group-tab::after\s*\{[^}]*top:\s*-0\.5px;/s);
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode.classic-wrap .tab-section--horizontal > .app-tab-pill");
     expect(sharedStyles).toContain(".app-tab-scroll.wrap-mode:not(.classic-wrap) .tab-section--horizontal > .app-tab-pill");
@@ -434,6 +438,70 @@ describe("EditorGroupTabBar group behavior", () => {
     host.remove();
   });
 
+  it("only reveals a right-edge group when expansion leaves every member offscreen", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    settings.editorSettings.tabLayout = "scroll";
+    const mysql = store.createTab("mysql-1", "app", "MY 1", "query");
+    store.createTab("pg-1", "app", "PG 1", "query");
+    store.createTab("pg-1", "app", "PG 2", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), mysql, pinia);
+    await settle();
+
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    const pgHeader = headers.find((header) => header.title === "pg-1")!;
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+
+    const container = host.querySelector<HTMLElement>(".app-tab-scroll")!;
+    container.getBoundingClientRect = () => ({ left: 0, right: 300 }) as DOMRect;
+    const pgEntries = Array.from(host.querySelectorAll<HTMLElement>('[data-tab-group-id="regular:connection:pg-1"]'));
+    const pgPills = pgEntries.map((entry) => entry.querySelector<HTMLElement>(".tab-group-tab")!);
+    pgPills.forEach((pill, index) => {
+      pill.getBoundingClientRect = () => ({ left: 320 + index * 100, right: 420 + index * 100 }) as DOMRect;
+    });
+    const scrollBy = vi.fn();
+    container.scrollBy = scrollBy;
+
+    const transitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(transitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(transitionEnd);
+
+    expect(scrollBy).toHaveBeenCalledWith({ left: 124, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 250, right: 350 }) as DOMRect;
+    const partialScrollBy = vi.fn();
+    container.scrollBy = partialScrollBy;
+    const visibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(visibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(visibleTransitionEnd);
+
+    expect(partialScrollBy).toHaveBeenCalledWith({ left: 54, behavior: "smooth" });
+
+    pgHeader.click();
+    await settle();
+    pgHeader.click();
+    await settle();
+    pgPills[0]!.getBoundingClientRect = () => ({ left: 100, right: 200 }) as DOMRect;
+    const fullyVisibleScrollBy = vi.fn();
+    container.scrollBy = fullyVisibleScrollBy;
+    const fullyVisibleTransitionEnd = new Event("transitionend", { bubbles: true });
+    Object.defineProperty(fullyVisibleTransitionEnd, "propertyName", { value: "max-width" });
+    pgEntries[0]!.dispatchEvent(fullyVisibleTransitionEnd);
+
+    expect(fullyVisibleScrollBy).not.toHaveBeenCalled();
+
+    app.unmount();
+    host.remove();
+  });
+
   it("groups by database identity, disambiguating same-name databases across connections", async () => {
     const store = useQueryStore();
     const settings = useSettingsStore();
@@ -459,6 +527,80 @@ describe("EditorGroupTabBar group behavior", () => {
 
     app.unmount();
     host.remove();
+  });
+
+  it("keeps Redis logical databases in one database group", async () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "redis-1", name: "Redis Cache", db_type: "redis", driver_profile: "redis", host: "127.0.0.1", port: 6379, color: "" } as ConnectionConfig];
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "database";
+    const db0 = store.createTab("redis-1", "0", "Redis 0", "redis");
+    const db1 = store.createTab("redis-1", "1", "Redis 1", "redis");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), db0, pinia);
+    await settle();
+
+    // db0 and db1 are logical databases of one connection, so a single header
+    // labeled by the connection owns both pills instead of one cluster per db.
+    const headers = Array.from(host.querySelectorAll<HTMLButtonElement>(".tab-group-header"));
+    expect(headers.map((header) => header.title)).toEqual(["Redis Cache"]);
+    const groupIds = new Set(Array.from(host.querySelectorAll("[data-tab-group-id]"), (entry) => entry.getAttribute("data-tab-group-id")));
+    expect(groupIds.size).toBe(1);
+    expect(host.querySelectorAll("[data-tab-id]")).toHaveLength(2);
+    expect(host.querySelector(`[data-tab-id="${db0}"]`)?.textContent).toContain("db0");
+    expect(host.querySelector(`[data-tab-id="${db1}"]`)?.textContent).toContain("db1");
+
+    // Collapsing the cluster folds both logical databases into one count badge.
+    headers[0]!.click();
+    await settle();
+    expect(host.querySelector(".tab-group-count")?.textContent).toBe("2");
+
+    app.unmount();
+    host.remove();
+  });
+
+  it("sizes the header chevron and rotates it only while the cluster is collapsed", async () => {
+    const store = useQueryStore();
+    const settings = useSettingsStore();
+    settings.editorSettings.tabGroupMode = "connection";
+    const tabId = store.createTab("pg-1", "app", "PG 1", "query");
+    const { app, host } = mountBar(store.groups[0]!.id, store.tabs.slice(), tabId, pinia);
+    const styles = document.createElement("style");
+    styles.textContent = `html { font-size: 16px; }\n${sharedStyles}`;
+    document.head.appendChild(styles);
+
+    try {
+      await settle();
+      const header = host.querySelector<HTMLButtonElement>(".tab-group-header")!;
+      // Horizontal headers lead with the database glyph; the rail marker stays vertical-only.
+      expect(header.querySelector(".tab-group-database-icon")).not.toBeNull();
+      expect(header.querySelector(".tab-group-marker")).toBeNull();
+      const chevron = header.querySelector<HTMLElement>(".tab-group-chevron")!;
+      expect(getComputedStyle(chevron).width).toBe("14px");
+      expect(getComputedStyle(chevron).height).toBe("14px");
+      expect(getComputedStyle(chevron).transition).toContain("transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1)");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(true);
+      expect(header.getAttribute("aria-expanded")).toBe("false");
+      expect(getComputedStyle(chevron).transform).toBe("rotate(-90deg)");
+
+      header.click();
+      await settle();
+      expect(chevron.classList.contains("tab-group-chevron--collapsed")).toBe(false);
+      expect(getComputedStyle(chevron).transform).toBe("rotate(0deg)");
+
+      // The rail marker appears only under a vertical placement.
+      settings.editorSettings.tabPlacement = "left";
+      await settle();
+      expect(host.querySelector(".tab-group-header .tab-group-marker")).not.toBeNull();
+    } finally {
+      app.unmount();
+      host.remove();
+      styles.remove();
+    }
   });
 
   it("exposes the drag-back hit-test anchor and highlights itself as the detached drop target", async () => {

@@ -48,6 +48,7 @@ pub mod docs;
 pub mod document_ops;
 pub mod driver_runtime;
 pub mod export_runtime;
+pub mod export_split_zip;
 pub mod external;
 pub mod hbase_ops;
 pub mod history;

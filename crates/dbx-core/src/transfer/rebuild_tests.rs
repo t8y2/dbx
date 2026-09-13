@@ -114,3 +114,60 @@ async fn transfer_rebuild_preview_plans_without_executing_ddl() {
         assert_eq!(rows.unwrap().rows[0][0], json!("original"));
     }
 }
+
+#[tokio::test]
+async fn transfer_keyset_pagination_copies_every_row_across_many_batches() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = crate::storage::Storage::open(&directory.path().join("storage.db")).await.unwrap();
+    let state = Arc::new(AppState::new_with_plugin_dir(storage, directory.path().join("plugins")));
+    for id in ["source", "target"] {
+        let path = directory.path().join(format!("{id}.db"));
+        crate::db::sqlite::connect_path_create_if_missing(path.to_str().unwrap()).await.unwrap();
+        let config: ConnectionConfig = serde_json::from_value(json!({
+            "id": id, "name": id, "db_type": "sqlite", "host": path.to_str().unwrap(),
+            "port": 0, "username": "", "password": "", "database": null,
+            "one_time": false, "save_password": false, "read_only": false
+        }))
+        .unwrap();
+        state.configs.write().await.insert(id.to_string(), config);
+    }
+    let source_pool = ensure_transfer_pool(&state, "source", "main", None).await.unwrap();
+    let target_pool = ensure_transfer_pool(&state, "target", "main", None).await.unwrap();
+
+    execute_on_pool(&state, &source_pool, "CREATE TABLE big(id INTEGER PRIMARY KEY, name TEXT)").await.unwrap();
+    for id in 1..=25 {
+        execute_on_pool(&state, &source_pool, &format!("INSERT INTO big VALUES({id}, 'row-{id}')")).await.unwrap();
+    }
+
+    let request: TransferRequest = serde_json::from_value(json!({
+        "transferId": uuid::Uuid::new_v4().to_string(),
+        "sourceConnectionId": "source", "sourceDatabase": "main", "sourceSchema": "main",
+        "targetConnectionId": "target", "targetDatabase": "main", "targetSchema": "main",
+        "tables": ["big"], "createTable": true, "content": "structureAndData",
+        "mode": "append", "batchSize": 3, "dropTargetBeforeCreate": false,
+        "dropTargetConfirmed": false
+    }))
+    .unwrap();
+
+    let transferred = transfer_table(
+        &state,
+        &request,
+        "big",
+        0,
+        &DatabaseType::Sqlite,
+        &DatabaseType::Sqlite,
+        &source_pool,
+        &target_pool,
+        &HashMap::new(),
+        &mut Vec::new(),
+        None,
+        |_| {},
+    )
+    .await
+    .unwrap();
+    assert_eq!(transferred, 25, "the whole table must be transferred");
+
+    let ids = execute_read_on_pool(&state, &target_pool, "SELECT id FROM big ORDER BY id").await.unwrap();
+    let collected: Vec<i64> = ids.rows.iter().map(|row| row[0].as_i64().unwrap()).collect();
+    assert_eq!(collected, (1..=25).collect::<Vec<i64>>(), "keyset pagination must not drop or duplicate rows");
+}

@@ -83,6 +83,12 @@ pub struct TableExportRequest {
     pub column_comments: Option<Vec<Option<String>>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_filter: Option<bool>,
+    /// SQL format only: when set, the export is packaged as a `.zip` archive
+    /// containing multiple `part-N.sql` entries (plus a `manifest.json`)
+    /// capped at this many megabytes each, instead of one unbounded `.sql`
+    /// file. Ignored for every other format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_max_mb: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -976,6 +982,53 @@ async fn stream_native_table_rows(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Output writer for the single-table SQL export. `Plain` is the historical
+/// unbounded `.sql` file; `SplitZip` packages the SQL into multiple
+/// `part-N.sql` entries inside a `.zip` when `TableExportRequest::split_max_mb`
+/// is set.
+enum TableExportSqlWriter {
+    Plain(BufWriter<std::fs::File>),
+    SplitZip(Box<crate::export_split_zip::SplitZipExportWriter>),
+}
+
+impl Write for TableExportSqlWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(writer) => writer.write(buffer),
+            Self::SplitZip(writer) => writer.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(writer) => writer.flush(),
+            Self::SplitZip(writer) => writer.flush(),
+        }
+    }
+}
+
+impl TableExportSqlWriter {
+    fn finish(self, source_file_name: &str) -> Result<(), String> {
+        match self {
+            Self::Plain(mut writer) => writer.flush().map_err(|error| format!("Failed to flush export file: {error}")),
+            Self::SplitZip(writer) => writer.finish(source_file_name),
+        }
+    }
+}
+
+fn create_table_export_sql_writer(request: &TableExportRequest) -> Result<TableExportSqlWriter, String> {
+    if let Some(max_mb) = request.split_max_mb {
+        let zip_path = std::path::Path::new(&request.file_path);
+        let stem = zip_path.file_stem().and_then(|stem| stem.to_str()).unwrap_or(&request.table_name);
+        let writer = crate::export_split_zip::SplitZipExportWriter::create(zip_path, max_mb, stem, "sql")?;
+        return Ok(TableExportSqlWriter::SplitZip(Box::new(writer)));
+    }
+    Ok(TableExportSqlWriter::Plain(BufWriter::new(
+        std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn try_export_native_table_stream(
     state: &AppState,
     pool_key: &str,
@@ -1254,13 +1307,11 @@ async fn try_export_native_table_stream(
             result
         }
         "sql" => {
-            let mut file = BufWriter::new(
-                std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
-            );
+            let mut file = create_table_export_sql_writer(request)?;
             let mut pending_rows: Vec<Vec<Value>> = Vec::new();
             let mut wrote_statements = false;
             let mut flush_pending =
-                |file: &mut BufWriter<std::fs::File>, pending_rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
+                |file: &mut TableExportSqlWriter, pending_rows: &mut Vec<Vec<Value>>| -> Result<(), String> {
                     if pending_rows.is_empty() {
                         return Ok(());
                     }
@@ -1321,7 +1372,7 @@ async fn try_export_native_table_stream(
                 if wrote_statements {
                     file.write_all(b"\n").map_err(|e| format!("Failed to write SQL: {e}"))?;
                 }
-                file.flush().map_err(|e| format!("Failed to flush export file: {e}"))?;
+                file.finish(&format!("{}.sql", request.table_name))?;
             }
             result
         }
@@ -1562,8 +1613,13 @@ async fn export_table_data_core_inner(
     }
 
     // 8. Create output file
-    let file = std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?;
-    let mut file = BufWriter::new(file);
+    let mut file = if request.format.eq_ignore_ascii_case("sql") {
+        create_table_export_sql_writer(request)?
+    } else {
+        TableExportSqlWriter::Plain(BufWriter::new(
+            std::fs::File::create(&request.file_path).map_err(|e| format!("Failed to create file: {e}"))?,
+        ))
+    };
     let mut text_buffer = String::new();
 
     let mut rows_exported: u64 = 0;
@@ -2154,7 +2210,7 @@ async fn export_table_data_core_inner(
     }
 
     close_table_export_cursor_if_open(state, &pool_key, request, &mut cursor_session).await;
-    file.flush().map_err(|e| format!("Failed to flush export file: {e}"))?;
+    file.finish(&format!("{}.sql", request.table_name))?;
 
     // 8. Emit Done progress
     on_progress(TableExportProgress {
@@ -2304,6 +2360,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
 
         ExternalDriverExportFixture { state, request, calls, output, dir }
@@ -2466,6 +2523,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
 
         export_table_data_core(&state, &request, |_| {}).await.unwrap();
@@ -2631,6 +2689,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["Time".to_string(), "root.test.device2.temperature".to_string()];
@@ -2689,6 +2748,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec!["tImE".to_string(), "temperature".to_string()];
@@ -2725,6 +2785,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let error = table_export_query_columns(&request, &context, &["TIME".to_string()]).unwrap_err();
@@ -2756,6 +2817,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Iotdb, None, request.schema.as_deref());
         let columns = vec![
@@ -2795,6 +2857,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let columns = vec!["Time".to_string(), "value".to_string()];
 
@@ -2846,6 +2909,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
 
@@ -2891,6 +2955,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let columns = vec!["id".to_string(), "payload".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -2964,6 +3029,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let columns = vec!["id".to_string(), "DisplayName".to_string()];
         let primary_keys = vec!["id".to_string()];
@@ -3019,6 +3085,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let columns = vec!["id".to_string(), "geom".to_string(), "name".to_string()];
         let column_types = vec![Some("int".to_string()), Some("geometry".to_string()), Some("varchar".to_string())];
@@ -3076,6 +3143,7 @@ mod tests {
             numeric_column_right_align: false,
             column_comments: None,
             auto_filter: None,
+            split_max_mb: None,
         };
         let context = table_export_sql_context(DatabaseType::Oracle, None, request.schema.as_deref());
         let sql = table_cursor_sql(&request, &context, &columns, &[], &primary_keys);
@@ -3196,6 +3264,187 @@ mod tests {
         assert_eq!(progress.last().and_then(|event| event.total_rows), Some(3));
         assert!(matches!(progress.last().map(|event| &event.status), Some(ExportStatus::Done)));
         assert!(fixture.state.with_connection_pools(|pools| pools.is_empty()).await);
+
+        cleanup_external_driver_export_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_driver_sql_export_without_split_writes_plain_sql() {
+        // The fallback export future is too large for the default test-thread
+        // stack in debug builds; mirror the dedicated-thread pattern used by
+        // the other fallback-path tests.
+        let handle = std::thread::Builder::new()
+            .name("table-export-plain-sql".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build table export plain SQL test runtime")
+                    .block_on(run_external_driver_sql_export_without_split_writes_plain_sql());
+            })
+            .expect("spawn table export plain SQL test thread");
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn run_external_driver_sql_export_without_split_writes_plain_sql() {
+        let fixture = external_driver_export_fixture(
+            r#"  case "$line" in
+    *'"method":"executeQueryPage"'*)
+      echo executeQueryPage >> "$CALLS"
+      printf '{"id":%s,"result":{"columns":["id","name"],"rows":[[1,"Ada"],[2,"Grace"]],"affected_rows":0,"execution_time_ms":1,"session_id":null,"has_more":false}}\n' "$id"
+      ;;
+  esac"#,
+            2,
+            None,
+            true,
+        )
+        .await;
+        let output = fixture.dir.join("export.sql");
+        let mut request = fixture.request.clone();
+        request.format = "sql".to_string();
+        request.file_path = output.to_string_lossy().into_owned();
+
+        let terminal = Arc::new(std::sync::Mutex::new(None::<ExportStatus>));
+        let captured = terminal.clone();
+        export_table_data_core(&fixture.state, &request, move |event| {
+            *captured.lock().unwrap() = Some(event.status);
+        })
+        .await
+        .expect("plain JDBC SQL export should succeed");
+
+        let sql = std::fs::read_to_string(&output).unwrap();
+        // Default batch insert mode emits one multi-row INSERT statement.
+        assert_eq!(sql.matches("INSERT INTO").count(), 1, "both rows should be exported: {sql}");
+        assert!(sql.contains("Ada"));
+        assert!(sql.contains("Grace"));
+        assert!(sql.ends_with(";\n"));
+        // Without `split_max_mb` the fallback arm must keep producing a plain
+        // SQL file, not a zip archive.
+        assert!(!sql.starts_with("PK"));
+        assert_eq!(std::fs::read_to_string(&fixture.calls).unwrap(), "executeQueryPage\n");
+        assert!(matches!(*terminal.lock().unwrap(), Some(ExportStatus::Done)));
+
+        cleanup_external_driver_export_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_driver_sql_export_honors_split_max_mb_into_zip_parts() {
+        // See external_driver_sql_export_without_split_writes_plain_sql: the
+        // fallback export future needs a larger-than-default test stack.
+        let handle = std::thread::Builder::new()
+            .name("table-export-split-sql".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build table export split SQL test runtime")
+                    .block_on(run_external_driver_sql_export_honors_split_max_mb_into_zip_parts());
+            })
+            .expect("spawn table export split SQL test thread");
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn run_external_driver_sql_export_honors_split_max_mb_into_zip_parts() {
+        // Two cursor pages: 200 wide rows (~1.2MB of INSERT statements) then a
+        // short 100-row page. The first page alone must exceed the 1MB part
+        // threshold, forcing the second page into a new zip part, and every
+        // part must still contain only complete statements.
+        let fixture = external_driver_export_fixture(
+            r#"LONG=$(head -c 6000 /dev/zero | tr '\0' 'x')
+ROWS=''
+i=1
+while [ $i -le 100 ]; do ROWS="$ROWS,[$i,\"$LONG\"]"; i=$((i+1)); done
+ROWS=${ROWS#,}
+case "$line" in
+  *'"method":"executeQueryPage"'*)
+    echo executeQueryPage >> "$CALLS"
+    printf '{"id":%s,"result":{"columns":["id","name"],"rows":[%s,%s],"affected_rows":0,"execution_time_ms":1,"session_id":"cursor-1","has_more":true}}\n' "$id" "$ROWS" "$ROWS"
+    ;;
+  *'"method":"fetchQueryPage"'*)
+    echo fetchQueryPage >> "$CALLS"
+    printf '{"id":%s,"result":{"columns":["id","name"],"rows":[%s],"affected_rows":0,"execution_time_ms":1,"session_id":null,"has_more":false}}\n' "$id" "$ROWS"
+    ;;
+  *'"method":"closeQuerySession"'*)
+    echo closeQuerySession >> "$CALLS"
+    printf '{"id":%s,"result":{"ok":true}}\n' "$id"
+    ;;
+esac"#,
+            200,
+            None,
+            true,
+        )
+        .await;
+        let zip_path = fixture.dir.join("export.zip");
+        let mut request = fixture.request.clone();
+        request.format = "sql".to_string();
+        request.file_path = zip_path.to_string_lossy().into_owned();
+        request.split_max_mb = Some(crate::export_split_zip::MIN_SPLIT_PART_MAX_MB);
+
+        let terminal = Arc::new(std::sync::Mutex::new(None::<ExportStatus>));
+        let captured = terminal.clone();
+        export_table_data_core(&fixture.state, &request, move |event| {
+            *captured.lock().unwrap() = Some(event.status);
+        })
+        .await
+        .expect("split JDBC SQL export should succeed");
+
+        // The final page reports `has_more: false` with no session id, so the
+        // cursor is closed implicitly and no closeQuerySession RPC is issued.
+        assert_eq!(std::fs::read_to_string(&fixture.calls).unwrap(), "executeQueryPage\nfetchQueryPage\n");
+        let file = std::fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut sql_parts = Vec::new();
+        let mut manifest = None;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            if entry.name() == "manifest.json" {
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).unwrap();
+                manifest = Some(serde_json::from_slice::<serde_json::Value>(&contents).unwrap());
+                continue;
+            }
+            let mut contents = String::new();
+            entry.read_to_string(&mut contents).unwrap();
+            sql_parts.push((entry.name().to_string(), contents));
+        }
+        sql_parts.sort_by(|a, b| a.0.cmp(&b.0));
+
+        assert!(
+            sql_parts.len() >= 2,
+            "expected the fallback SQL export to be split into multiple parts, got {}",
+            sql_parts.len()
+        );
+        for (name, contents) in &sql_parts {
+            assert!(!contents.is_empty(), "{name} must not be empty");
+            // Every non-blank line must be a complete statement -- the part
+            // boundary may only land between the fallback arm's per-batch
+            // writes, never inside a statement.
+            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                assert!(
+                    line.trim_start().starts_with("INSERT INTO") && line.trim_end().ends_with(';'),
+                    "{name} has a malformed line from a mid-statement cut"
+                );
+            }
+        }
+        // All 300 rows must be present across the parts: every row value is
+        // `(n, 'xxxx…')`, so one `, '` occurrence per row.
+        let combined: String = sql_parts.iter().map(|(_, contents)| contents.as_str()).collect();
+        assert_eq!(combined.matches(", '").count(), 300);
+
+        let manifest = manifest.expect("split export must contain a manifest");
+        assert_eq!(manifest["totalParts"].as_u64().unwrap() as usize, sql_parts.len());
+        assert_eq!(manifest["sourceFileName"], "EXPORT_SAMPLE.sql");
+        assert!(matches!(*terminal.lock().unwrap(), Some(ExportStatus::Done)));
 
         cleanup_external_driver_export_fixture(fixture);
     }

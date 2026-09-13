@@ -353,9 +353,36 @@ export const VALUE_SNIPPETS: MongoOperatorSpec[] = specs([
   ["ISODate", "MongoDB ISODate value", 'ISODate("${date}")'],
   ["new Date", "JavaScript date value", 'new Date("${date}")'],
   ["NumberLong", "64-bit integer value", 'NumberLong("${value}")'],
+  ["NumberInt", "32-bit integer value", "NumberInt(${value})"],
+  ["NumberDecimal", "128-bit decimal value", 'NumberDecimal("${value}")'],
+  ["UUID", "UUID value", 'UUID("${uuid}")'],
+  ["BinData", "Binary value", 'BinData(0, "${base64}")'],
+  ["Timestamp", "Internal timestamp value", "Timestamp(${seconds}, ${ordinal})"],
+  ["MinKey", "Sorts before every other value", "MinKey"],
+  ["MaxKey", "Sorts after every other value", "MaxKey"],
   ["null", "Null value", "null"],
   ["true", "Boolean true", "true"],
   ["false", "Boolean false", "false"],
+]);
+
+/**
+ * Extended JSON spellings of the same values, as the driver returns them and
+ * as they may be typed directly. Each entry is the wrapper's body; in a bare
+ * value position the completion adds the surrounding braces.
+ */
+export const EXTENDED_JSON_VALUES: MongoOperatorSpec[] = specs([
+  ["$oid", "ObjectId as extended JSON", '$oid: "${id}"'],
+  ["$date", "Date as extended JSON", '$date: "${date}"'],
+  ["$numberLong", "64-bit integer as extended JSON", '$numberLong: "${value}"'],
+  ["$numberInt", "32-bit integer as extended JSON", '$numberInt: "${value}"'],
+  ["$numberDouble", "Double as extended JSON", '$numberDouble: "${value}"'],
+  ["$numberDecimal", "128-bit decimal as extended JSON", '$numberDecimal: "${value}"'],
+  ["$uuid", "UUID as extended JSON", '$uuid: "${uuid}"'],
+  ["$binary", "Binary as extended JSON", '$binary: { base64: "${base64}", subType: "00" }'],
+  ["$timestamp", "Internal timestamp as extended JSON", "$timestamp: { t: ${seconds}, i: ${ordinal} }"],
+  ["$regularExpression", "Regular expression as extended JSON", '$regularExpression: { pattern: "${pattern}", options: "" }'],
+  ["$minKey", "MinKey as extended JSON", "$minKey: 1"],
+  ["$maxKey", "MaxKey as extended JSON", "$maxKey: 1"],
 ]);
 
 /**
@@ -382,6 +409,9 @@ export const COMMON_OPERATORS: ReadonlySet<string> = new Set([
   "$regex",
   "$elemMatch",
   "$expr",
+  // extended JSON values
+  "$oid",
+  "$date",
   // update
   "$set",
   "$unset",

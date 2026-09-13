@@ -1,5 +1,5 @@
 dependencies {
-    implementation 'com.gbasedbt:jdbc:3.6.3.2'
+    implementation 'com.gbasedbt:jdbc:3.6.5.21'
 }
 
 tasks.named('shadowJar') {

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   listenSqlFileProgress: vi.fn(),
   openFileDialog: vi.fn(),
   previewSqlFile: vi.fn(),
+  inspectSqlFileTables: vi.fn(),
   progressHandler: undefined as undefined | ((progress: Record<string, unknown>) => void),
   refreshDatabaseTreeNode: vi.fn(),
   requestConfirmation: vi.fn(),
@@ -41,7 +42,7 @@ vi.mock("@/composables/useExportTracker", () => ({
   useExportTracker: () => ({ addSqlFileTask: mocks.addSqlFileTask, updateSqlFileTask: mocks.updateSqlFileTask }),
 }));
 vi.mock("@/composables/useDatabaseOptions", () => ({ fetchSqlFileTargetOptions: mocks.fetchSqlFileTargetOptions }));
-vi.mock("@/lib/connection/connectionLevelDatabaseBootstrap", () => ({ requiresSqlFileTargetDatabaseSelection: () => false }));
+vi.mock("@/lib/connection/connectionLevelDatabaseBootstrap", () => ({ requiresSqlFileTargetDatabaseSelection: () => false, supportsConnectionLevelDatabaseBootstrap: (connection: any) => connection?.db_type === "mysql" }));
 vi.mock("@/lib/database/productionSafety", () => ({ productionContextForDatabase: () => ({ active: false, databases: [] }) }));
 vi.mock("@/stores/productionSafetyStore", () => ({
   useProductionSafetyStore: () => ({ requestConfirmation: mocks.requestConfirmation }),
@@ -59,6 +60,7 @@ vi.mock("@/lib/backend/api", () => ({
   executeSqlFiles: mocks.executeSqlFiles,
   listenSqlFileProgress: mocks.listenSqlFileProgress,
   previewSqlFile: mocks.previewSqlFile,
+  inspectSqlFileTables: mocks.inspectSqlFileTables,
 }));
 vi.mock("@lucide/vue", () => {
   const Icon = passthrough("span");
@@ -77,7 +79,15 @@ vi.mock("@/components/ui/tooltip", () => ({
   TooltipTrigger: passthrough("div"),
 }));
 vi.mock("@/components/ui/button", () => ({ Button: passthrough("button") }));
-vi.mock("@/components/ui/input", () => ({ Input: passthrough("input") }));
+vi.mock("@/components/ui/input", () => ({
+  Input: defineComponent({
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+    setup(props, { emit }) {
+      return () => h("input", { value: props.modelValue, onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value) });
+    },
+  }),
+}));
 vi.mock("@/components/ui/label", () => ({ Label: passthrough("label") }));
 vi.mock("@/components/ui/select", () => ({
   Select: passthrough("div"),
@@ -181,6 +191,11 @@ beforeEach(() => {
     }
   });
   mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.inspectSqlFileTables.mockResolvedValue([
+    { database: "app", name: "users" },
+    { database: "app", name: "orders" },
+    { database: "archive", name: "users" },
+  ]);
   mocks.fetchSqlFileTargetOptions.mockResolvedValue([]);
   mocks.openFileDialog.mockResolvedValue(["/tmp/first.sql", "/tmp/second.sql"]);
   mocks.previewSqlFile.mockImplementation(async (filePath: string) => ({
@@ -294,5 +309,95 @@ describe("SqlFileExecutionDialog retries", () => {
 
     await vi.waitFor(() => expect(root!.textContent).toContain("retry connection failed"));
     expect(root!.textContent).not.toContain("stale statement failure");
+  });
+});
+
+describe("SqlFileExecutionDialog selected-table restore", () => {
+  async function mountBackup() {
+    root = document.createElement("div");
+    document.body.append(root);
+    app = createApp(SqlFileExecutionDialog, { open: true, prefillConnectionId: "mysql-1", prefillDatabase: "app", prefillFilePath: "/tmp/backup.sql.gz" });
+    app.mount(root);
+    await vi.waitFor(() => expect(findButton("sqlFile.execute").disabled).toBe(false));
+    root.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1]!.click();
+    await nextTick();
+  }
+
+  it("scans the backup and sends only checked table identities", async () => {
+    await mountBackup();
+    await vi.waitFor(() => expect(root!.textContent).toContain("archive.users"));
+    expect(mocks.inspectSqlFileTables).toHaveBeenCalledWith("/tmp/backup.sql.gz");
+    expect(findButton("sqlFile.execute").disabled).toBe(true);
+    const label = Array.from(root!.querySelectorAll("label")).find((label) => label.textContent === "app.users")!;
+    label.querySelector<HTMLInputElement>("input")!.click();
+    await nextTick();
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done", { successCount: 2 }));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalledWith(expect.objectContaining({ selectedTables: [{ database: "app", name: "users" }] }), ["/tmp/backup.sql.gz"]));
+  });
+
+  it("selects only search matches and preserves selections outside the search", async () => {
+    await mountBackup();
+    await vi.waitFor(() => expect(root!.textContent).toContain("archive.users"));
+    const search = root!.querySelector<HTMLInputElement>('[aria-label="sqlFile.searchBackupTables"]')!;
+    search.value = "app.";
+    search.dispatchEvent(new Event("input"));
+    await nextTick();
+    root!.querySelector<HTMLInputElement>('[data-table-restore] input[type="checkbox"]')!.click();
+    await nextTick();
+    search.value = "archive";
+    search.dispatchEvent(new Event("input"));
+    await nextTick();
+    expect(root!.querySelector<HTMLInputElement>('[data-table-restore] input[type="checkbox"]')!.checked).toBe(false);
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done"));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() =>
+      expect(mocks.executeSqlFiles).toHaveBeenCalledWith(
+        expect.objectContaining({
+          selectedTables: [
+            { database: "app", name: "users" },
+            { database: "app", name: "orders" },
+          ],
+        }),
+        expect.any(Array),
+      ),
+    );
+  });
+
+  it("blocks execution on scan failure and allows switching back to full restore", async () => {
+    mocks.inspectSqlFileTables.mockRejectedValueOnce(new Error("unsupported dump statement"));
+    await mountBackup();
+    await vi.waitFor(() => expect(root!.querySelector('[role="alert"]')?.textContent).toContain("unsupported dump statement"));
+    expect(findButton("sqlFile.execute").disabled).toBe(true);
+    root!.querySelector<HTMLInputElement>('input[type="radio"]')!.click();
+    await nextTick();
+    expect(findButton("sqlFile.execute").disabled).toBe(false);
+  });
+
+  it("ignores a scan result after switching back to all contents", async () => {
+    let finish!: (tables: any[]) => void;
+    mocks.inspectSqlFileTables.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await mountBackup();
+    expect(findButton("sqlFile.execute").disabled).toBe(true);
+    root!.querySelector<HTMLInputElement>('input[type="radio"]')!.click();
+    await nextTick();
+    finish([{ database: null, name: "stale" }]);
+    await nextTick();
+    expect(root!.textContent).not.toContain("stale");
+    mocks.executeSqlFiles.mockImplementationOnce(async (request) => {
+      mocks.progressHandler?.(progress(request.executionId, "done"));
+    });
+    findButton("sqlFile.execute").click();
+    await vi.waitFor(() => expect(mocks.executeSqlFiles).toHaveBeenCalled());
+    expect(mocks.executeSqlFiles.mock.calls[0]![0]).not.toHaveProperty("selectedTables");
   });
 });

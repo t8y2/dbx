@@ -1,8 +1,13 @@
 // @vitest-environment happy-dom
-import { createApp, nextTick } from "vue";
+import { createApp, defineComponent, h, nextTick, ref } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { createI18n } from "vue-i18n";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const lifecycle = vi.hoisted(() => ({
+  surfaceCreated: 0,
+  surfaceUnmounted: 0,
+}));
 
 vi.mock("@/components/layout/EditorGroupTabBar.vue", () => ({
   default: {
@@ -23,6 +28,12 @@ vi.mock("@/components/layout/QueryEditorSurface.vue", () => ({
   default: {
     name: "QueryEditorSurfaceStub",
     props: ["activeTab", "autoFocus"],
+    created() {
+      lifecycle.surfaceCreated += 1;
+    },
+    unmounted() {
+      lifecycle.surfaceUnmounted += 1;
+    },
     template: `<div data-test="query-editor">{{ activeTab.id }}</div>`,
   },
 }));
@@ -30,6 +41,12 @@ vi.mock("@/components/layout/QueryEditorSurface.vue", () => ({
 vi.mock("@/components/layout/ContentArea.vue", () => ({
   default: {
     name: "ContentAreaStub",
+    created() {
+      lifecycle.surfaceCreated += 1;
+    },
+    unmounted() {
+      lifecycle.surfaceUnmounted += 1;
+    },
     template: `<div data-test="content-area" />`,
   },
 }));
@@ -43,14 +60,14 @@ import EditorGroup from "../EditorGroup.vue";
 import { createNoopEditorToolbarActions, EDITOR_TOOLBAR_ACTIONS, type EditorToolbarActions } from "../editorToolbarActions";
 import { useQueryStore } from "@/stores/queryStore";
 
-function tab(id: string) {
+function tab(id: string, mode: "query" | "data" = "query") {
   return {
     id,
     title: id,
     connectionId: "conn-1",
     database: "db",
     sql: "SELECT 1",
-    mode: "query",
+    mode,
   } as const;
 }
 
@@ -66,6 +83,8 @@ describe("EditorGroup mount contract", () => {
 
   beforeEach(() => {
     document.body.innerHTML = "";
+    lifecycle.surfaceCreated = 0;
+    lifecycle.surfaceUnmounted = 0;
     pinia = createPinia();
     setActivePinia(pinia);
     i18n = createI18n({
@@ -73,6 +92,70 @@ describe("EditorGroup mount contract", () => {
       locale: "en",
       messages: { en: {} },
     });
+  });
+
+  it.each(["query", "data"] as const)("reuses hot %s tabs and remounts evicted surfaces", async (mode) => {
+    const store = useQueryStore();
+    const tabIds = ["tab-a", "tab-b", "tab-c", "tab-d"];
+    store.tabs = tabIds.map((tabId) => tab(tabId, mode));
+    const activeTabId = ref("tab-a");
+    const host = createHost();
+    const root = defineComponent({
+      setup() {
+        return () =>
+          h(EditorGroup, {
+            groupId: "group-1",
+            tabIds,
+            activeTabId: activeTabId.value,
+            activeTab: tab(activeTabId.value, mode),
+            activeConnection: undefined,
+            executableSql: "SELECT 1",
+            activeOutputView: "result",
+            formatSqlRequest: null,
+            compressSqlRequest: null,
+            selectedSql: "",
+            cursorPos: 0,
+            blockDangerousRedisCommands: false,
+          });
+      },
+    });
+    const app = createApp(root);
+    app.use(pinia);
+    app.use(i18n);
+    app.mount(host);
+    await nextTick();
+
+    activeTabId.value = "tab-b";
+    await nextTick();
+    activeTabId.value = "tab-a";
+    await nextTick();
+
+    expect(lifecycle.surfaceCreated).toBe(2);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
+    activeTabId.value = "tab-c";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(3);
+    expect(lifecycle.surfaceUnmounted).toBe(0);
+
+    activeTabId.value = "tab-d";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceUnmounted).toBe(1);
+
+    activeTabId.value = "tab-a";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(4);
+    expect(lifecycle.surfaceUnmounted).toBe(1);
+
+    activeTabId.value = "tab-b";
+    await nextTick();
+    expect(lifecycle.surfaceCreated).toBe(5);
+    expect(lifecycle.surfaceUnmounted).toBe(2);
+
+    app.unmount();
+    expect(lifecycle.surfaceUnmounted).toBe(5);
+    host.remove();
   });
 
   it("passes the group active tab to the query editor surface instead of the global active tab", async () => {

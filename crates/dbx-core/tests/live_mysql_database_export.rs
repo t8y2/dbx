@@ -41,6 +41,74 @@ fn live_mysql_config(id: &str) -> ConnectionConfig {
 
 #[tokio::test]
 #[ignore = "requires a disposable MySQL endpoint"]
+async fn live_mysql_selected_table_restore_preserves_unselected_tables() {
+    use dbx_core::sql_file_import::{inspect_sql_file_tables, SqlFileTable};
+    use futures::FutureExt;
+    use std::io::Write;
+
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let connection_id = format!("selected-restore-{suffix}");
+    let database = format!("dbx_restore_{suffix}");
+    let dir = std::env::temp_dir().join(format!("dbx-selected-restore-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+    let state = AppState::new(storage);
+    state.configs.write().await.insert(connection_id.clone(), live_mysql_config(&connection_id));
+    execute_sql_statement(&state, &connection_id, "", &format!("CREATE DATABASE `{database}`"), None, None)
+        .await
+        .unwrap();
+
+    let outcome = std::panic::AssertUnwindSafe(async {
+        execute_sql_statement(&state, &connection_id, &database, "CREATE TABLE untouched (id INT PRIMARY KEY)", None, None).await?;
+        execute_sql_statement(&state, &connection_id, &database, "INSERT INTO untouched VALUES (99)", None, None).await?;
+        let script = format!("CREATE DATABASE IF NOT EXISTS `{database}`; USE `{database}`; SET FOREIGN_KEY_CHECKS=0; DROP TABLE IF EXISTS chosen, untouched; CREATE TABLE chosen (id INT PRIMARY KEY, body LONGTEXT); INSERT INTO chosen VALUES (7, '{}'); CREATE TABLE untouched (id INT PRIMARY KEY); INSERT INTO untouched VALUES (1); CREATE VIEW skipped_view AS SELECT id FROM chosen; SET FOREIGN_KEY_CHECKS=1;", "x".repeat(400_000));
+        for compressed in [false, true] {
+            let path = dir.join(if compressed { "backup.sql.gz" } else { "backup.sql" });
+            if compressed {
+                let mut writer = flate2::write::GzEncoder::new(std::fs::File::create(&path).map_err(|e| e.to_string())?, flate2::Compression::default());
+                writer.write_all(script.as_bytes()).map_err(|e| e.to_string())?;
+                writer.finish().map_err(|e| e.to_string())?;
+            } else {
+                std::fs::write(&path, &script).map_err(|e| e.to_string())?;
+            }
+            let tables = inspect_sql_file_tables(&path).await?;
+            assert_eq!(tables.len(), 2);
+            let request = SqlFileRequest {
+                execution_id: format!("restore-{suffix}-{compressed}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: false,
+                selected_tables: Some(vec![SqlFileTable { database: Some(database.clone()), name: "chosen".into() }]),
+            };
+            execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |_| {}).await?;
+            let rows = execute_sql_statement(&state, &connection_id, &database, "SELECT id, LENGTH(body) FROM chosen", None, None).await?;
+            assert_eq!(rows.rows, vec![vec![serde_json::json!("7"), serde_json::json!("400000")]]);
+            let untouched = execute_sql_statement(&state, &connection_id, &database, "SELECT id FROM untouched", None, None).await?;
+            assert_eq!(untouched.rows, vec![vec![serde_json::json!("99")]]);
+            let views = execute_sql_statement(&state, &connection_id, &database, "SHOW FULL TABLES WHERE Table_type = 'VIEW'", None, None).await?;
+            assert!(views.rows.is_empty());
+        }
+        let path = dir.join("unsupported.sql");
+        std::fs::write(&path, "DROP TABLE chosen; INSERT INTO chosen VALUES (1, 'bad'); CALL unexpected();").map_err(|e| e.to_string())?;
+        let request = SqlFileRequest {
+            execution_id: format!("invalid-{suffix}"), connection_id: connection_id.clone(), database: database.clone(), file_path: path.display().to_string(), continue_on_error: true,
+            selected_tables: Some(vec![SqlFileTable { database: None, name: "chosen".into() }]),
+        };
+        let mut events = Vec::new();
+        assert!(execute_sql_file_path(&state, &request, &path, CancellationToken::new(), std::time::Instant::now(), |event| events.push(event)).await.is_err());
+        assert_eq!(events.last().unwrap().success_count, 0);
+        let rows = execute_sql_statement(&state, &connection_id, &database, "SELECT id FROM chosen", None, None).await?;
+        assert_eq!(rows.rows, vec![vec![serde_json::json!("7")]]);
+        Ok::<_, String>(())
+    }).catch_unwind().await;
+
+    let cleanup =
+        execute_sql_statement(&state, &connection_id, "", &format!("DROP DATABASE `{database}`"), None, None).await;
+    drop(state);
+    std::fs::remove_dir_all(&dir).unwrap();
+    cleanup.unwrap();
+    outcome.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable MySQL endpoint"]
 async fn live_mysql_database_export_restores_dependent_views() {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
     let connection_id = format!("live-mysql-export-{suffix}");
@@ -82,6 +150,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
         output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
+        split_max_mb: None,
     };
     let test_result = async {
         export_database_sql_core(&state, &export_request, |_| {}).await?;
@@ -101,6 +170,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             database: String::new(),
             file_path: file_path.to_string_lossy().to_string(),
             continue_on_error: false,
+            selected_tables: None,
         };
         execute_sql_file_path(
             &state,
@@ -217,6 +287,7 @@ async fn run_live_mysql_database_export_handles_many_tables_including_empty_tabl
                 output_compression: Default::default(),
                 snapshot_session_id: None,
                 batch_size: 1000,
+                split_max_mb: None,
             };
 
             export_database_sql_core(&state, &request, |_| {}).await?;
@@ -311,6 +382,7 @@ async fn live_mysql_database_export_creates_missing_destination_directory() {
         output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
+        split_max_mb: None,
     };
 
     let result = export_database_sql_core(&state, &export_request, |_| {}).await;
@@ -377,6 +449,7 @@ async fn live_mysql_database_export_refuses_to_recreate_a_destination_that_disap
         output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
+        split_max_mb: None,
     };
 
     export_database_sql_core(&state, &export_request, |_| {}).await.expect("first export should succeed");
@@ -464,6 +537,7 @@ async fn live_mysql_database_export_refuses_a_destination_that_vanished_before_i
         output_compression: Default::default(),
         snapshot_session_id: None,
         batch_size: 1000,
+        split_max_mb: None,
     };
 
     // The mount disappears before the scheduler ever runs this schedule for

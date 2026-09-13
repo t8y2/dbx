@@ -317,6 +317,10 @@ function openReplace(): boolean {
 
 function closeSearch() {
   const wasVisible = searchVisible.value;
+  // Escape also reaches this command while editing. A hidden panel must not
+  // dispatch a selection reset, which would dismiss completion before its
+  // Escape handler can consume the key and preserve snippet navigation.
+  if (!wasVisible) return false;
   searchVisible.value = false;
   showReplace.value = false;
   clearDocumentSearchUpdate();

@@ -31,9 +31,10 @@ where
                 buf.push(src.read_u8().await?);
             }
 
-            codec
-                .decode(buf.as_ref())
-                .ok_or_else(|| Error::Encoding("invalid sequence".into()))?
+            // Lossy: a row holding bytes that are invalid in its declared
+            // collation must stay readable instead of failing the result set.
+            let (text, _) = codec.decode_lossy(buf.as_ref());
+            text
         }
         // NTEXT
         None => {

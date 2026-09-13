@@ -1470,15 +1470,33 @@ fn postgres_transaction_statement_error(
 pub(crate) struct StreamProgressClock {
     started_at: tokio::time::Instant,
     last_progress_ms: AtomicU64,
+    #[cfg(test)]
+    marked: std::sync::atomic::AtomicBool,
 }
 
 impl StreamProgressClock {
     pub(crate) fn new() -> Self {
-        Self { started_at: tokio::time::Instant::now(), last_progress_ms: AtomicU64::new(0) }
+        Self {
+            started_at: tokio::time::Instant::now(),
+            last_progress_ms: AtomicU64::new(0),
+            #[cfg(test)]
+            marked: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     pub(crate) fn mark(&self) {
         self.last_progress_ms.store(self.started_at.elapsed().as_millis() as u64, Ordering::Relaxed);
+        #[cfg(test)]
+        self.marked.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether any progress has been recorded yet. Test-only: production code
+    /// only needs the derived inactivity window. A row read within the first
+    /// millisecond records a zero timestamp, so this cannot be derived from
+    /// `last_progress_ms`.
+    #[cfg(test)]
+    pub(crate) fn marked(&self) -> bool {
+        self.marked.load(Ordering::Relaxed)
     }
 
     fn elapsed_since_progress(&self) -> Duration {
@@ -5986,6 +6004,48 @@ mod tests {
         let mut budget = DbOperationBudget::with_defaults();
         apply_query_timeout_override(&mut budget, Some(0));
         assert_eq!(budget.query_timeout, None);
+    }
+
+    #[tokio::test]
+    async fn stream_progress_timeout_survives_steady_progress_past_the_budget() {
+        // The timeout is an inactivity window, not a wall clock: a stream that keeps
+        // marking progress survives well past the budget, as long as each gap between
+        // marks is shorter than the timeout.
+        let clock = Arc::new(StreamProgressClock::new());
+        let clock_for_rows = clock.clone();
+        let result = await_stream_with_progress_timeout(
+            async move {
+                for _ in 0..20 {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    clock_for_rows.mark();
+                }
+                Ok::<_, String>(42)
+            },
+            Some(Duration::from_millis(200)),
+            clock,
+            None,
+            "timed out".to_string(),
+        )
+        .await;
+        assert_eq!(result, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn stream_progress_timeout_fires_when_no_progress_arrives() {
+        // A genuine stall — no progress for the whole budget — must still time out.
+        let clock = Arc::new(StreamProgressClock::new());
+        let result = await_stream_with_progress_timeout(
+            async {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                Ok::<_, String>(42)
+            },
+            Some(Duration::from_millis(200)),
+            clock,
+            None,
+            "timed out".to_string(),
+        )
+        .await;
+        assert_eq!(result, Err("timed out".to_string()));
     }
 
     #[tokio::test]

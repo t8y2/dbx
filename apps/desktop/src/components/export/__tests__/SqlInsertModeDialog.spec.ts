@@ -37,13 +37,13 @@ afterEach(() => {
   i18n.global.locale.value = "en";
 });
 
-async function mountDialog(onConfirm = () => {}, onCancel = () => {}) {
+async function mountDialog(onConfirm = () => {}, onCancel = () => {}, allowSplit = false) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const app = createApp(
     defineComponent({
       setup() {
-        return () => h(SqlInsertModeDialog, { open: true, onConfirm, onCancel });
+        return () => h(SqlInsertModeDialog, { open: true, allowSplit, onConfirm, onCancel });
       },
     }),
   );
@@ -68,7 +68,24 @@ describe("SqlInsertModeDialog", () => {
     document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
 
     expect(onConfirm).toHaveBeenCalledOnce();
-    expect(onConfirm).toHaveBeenCalledWith("single");
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "single", splitMaxMb: undefined });
+  });
+
+  it("enables split ZIP output only when the caller supports it", async () => {
+    const onConfirm = vi.fn();
+    await mountDialog(onConfirm, () => {}, true);
+
+    const split = document.querySelector<HTMLInputElement>("input[data-sql-split-output]");
+    expect(split).not.toBeNull();
+    split?.click();
+    await nextTick();
+    const size = document.querySelector<HTMLInputElement>("input[data-sql-split-max-mb]");
+    expect(size?.value).toBe("100");
+    if (size) size.value = "256";
+    size?.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("[data-sql-insert-mode-confirm]")?.click();
+
+    expect(onConfirm).toHaveBeenCalledWith({ insertMode: "batch", splitMaxMb: 256 });
   });
 
   it("renders the batch and single-row explanations", async () => {

@@ -5,7 +5,6 @@ use std::time::Duration;
 use axum::extract::{Multipart, Path as AxumPath, State};
 use axum::response::sse::{Event, Sse};
 use axum::Json;
-use dbx_core::sql;
 use dbx_core::sql::{SqlFileProgress, SqlFileRequest, SqlFileStatus};
 use dbx_core::sql_file_import::{
     execute_sql_file_paths, sql_file_error_progress, sql_file_progress as build_sql_file_progress,
@@ -63,6 +62,20 @@ pub struct CancelSqlFileRequest {
     pub execution_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectSqlFileTablesRequest {
+    pub file_path: String,
+}
+
+pub async fn inspect_sql_file_tables(
+    State(state): State<Arc<WebState>>,
+    Json(body): Json<InspectSqlFileTablesRequest>,
+) -> Result<Json<Vec<dbx_core::sql_file_import::SqlFileTable>>, AppError> {
+    let path = validated_uploaded_sql_path(&state.data_dir, &body.file_path)?;
+    Ok(Json(dbx_core::sql_file_import::inspect_sql_file_tables(&path).await.map_err(AppError::from)?))
+}
+
 pub async fn preview_sql_file(
     State(state): State<Arc<WebState>>,
     mut multipart: Multipart,
@@ -83,7 +96,8 @@ pub async fn preview_sql_file(
         std::fs::write(&file_path, &data).map_err(|e| AppError::from(e.to_string()))?;
 
         let size_bytes = data.len() as u64;
-        let content = sql::decode_sql_file_bytes(&data).map_err(AppError::from)?;
+        let content =
+            dbx_core::sql_file_import::read_sql_file_preview(&file_path, 1_000_000).await.map_err(AppError::from)?;
         let preview: String = content.chars().take(20_000).collect();
         let bootstrap_analysis = dbx_core::sql_file_import::mysql_like_sql_file_bootstrap_analysis(&content);
 
@@ -212,6 +226,9 @@ fn safe_uploaded_sql_path(tmp_dir: &Path, file_name: &str) -> Result<PathBuf, Ap
     let extension =
         file_name.extension().and_then(|extension| extension.to_str()).filter(|extension| !extension.is_empty());
     let unique_name = match extension {
+        Some(extension) if extension.eq_ignore_ascii_case("gz") && stem.to_ascii_lowercase().ends_with(".sql") => {
+            format!("{}-{}.sql.gz", &stem[..stem.len() - 4], Uuid::new_v4())
+        }
         Some(extension) => format!("{stem}-{}.{}", Uuid::new_v4(), extension),
         None => format!("{stem}-{}", Uuid::new_v4()),
     };
@@ -334,6 +351,8 @@ mod tests {
         assert!(second.starts_with(&tmp_dir));
         assert_ne!(first, second);
         assert_eq!(first.extension().and_then(|extension| extension.to_str()), Some("sql"));
+        let compressed = safe_uploaded_sql_path(&tmp_dir, "backup.sql.gz").unwrap();
+        assert!(compressed.file_name().unwrap().to_string_lossy().ends_with(".sql.gz"));
         let _ = std::fs::remove_dir_all(data_dir);
     }
 

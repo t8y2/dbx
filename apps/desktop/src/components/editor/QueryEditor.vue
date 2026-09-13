@@ -1,3 +1,18 @@
+<script lang="ts">
+// Replay guard for the toolbar format/compress requests. The ids are global
+// monotonic counters shared by every tab, and ContentArea delivers them by
+// gating the inactive tab's prop back to `undefined`; returning to the tab
+// re-arms the same stale id on the reused editor instance (a replay, not a new
+// command). The cursors live at module scope — not in `<script setup>` — so
+// they also survive an editor unmount/remount (data-page switches), letting a
+// freshly mounted editor consume the stale id instead of replaying it. The
+// check is strictly monotonic (`>`), not `!==`: because ids are shared across
+// tabs, a lower id is always an already-handled request from an active tab
+// (delivery is same-tick), never a pending undelivered one.
+let lastHandledFormatRequestId = 0;
+let lastHandledCompressRequestId = 0;
+</script>
+
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, onDeactivated, watch, shallowRef, computed, nextTick } from "vue";
 import { AlignLeft, Camera, CaseLower, CaseSensitive, CaseUpper, ClipboardPaste, Code2, Download, Eye, FileCode, MessageSquareText, Minimize2, Pencil, PencilRuler, Play, Copy, List, Scissors, Search, Sparkles, Table2, TextSelect, Trash2 } from "@lucide/vue";
@@ -18,6 +33,7 @@ import { completionMatchRanges } from "@/lib/common/completionMatch";
 import { executionCandidateForMode, resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sql/sqlExecutionTarget";
 import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeAtCursor, executableStatementRangeCacheForDoc, executableStatementRangeStartingAt as executableStatementRangeStartingAtLine, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
+import { createDeferredEditorTask } from "@/lib/editor/deferredEditorTask";
 import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { looksLikeDmlStatement } from "@/lib/sql/dmlChangePreview";
 import { expandToSqlStatementWindow } from "@/lib/sql/insertValueHints";
@@ -120,6 +136,7 @@ import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, editorDiagnosticC
 import { createStatementGutterMarkerDom, shouldShowStatementGutter } from "@/lib/editor/codemirrorStatementGutter";
 import { createQueryEditorSqlShortcutDomHandler, isCharacterProducingShortcut } from "@/lib/editor/queryEditorSqlShortcut";
 import { createQueryEditorReplaceShortcutBindings, createQueryEditorReplaceShortcutHandler, createQueryEditorSearchKeymap } from "@/lib/editor/queryEditorSearchKeymap";
+import { createQueryEditorEscapeHandler } from "@/lib/editor/queryEditorEscape";
 import { buildQueryEditorLineNumbersExtension, createQueryEditorLineNumberAlignmentExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { searchKeymapWithoutModD } from "@/lib/editor/codemirrorSearchKeymap";
 import { defaultKeymapForGlobalShortcuts } from "@/lib/editor/codemirrorDefaultKeymap";
@@ -132,6 +149,7 @@ import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/editor
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { selectionMatchOccurrences } from "@/lib/editor/codemirrorSelectionMatches";
+import { createSqlAliasHighlights } from "@/lib/editor/codemirrorSqlAliasHighlights";
 import { createInsertValueHintsExtension, requestInsertValueHintsRefresh, supportsInsertValueHints } from "@/lib/editor/codemirrorInsertValueHints";
 import { sqlBlockFoldService } from "@/lib/editor/codemirrorSqlBlockFolding";
 import { focusEditorView } from "@/lib/editor/queryEditorFocus";
@@ -247,7 +265,7 @@ const emit = defineEmits<{
   openObjectSource: [target: SqlObjectNavigationTarget, initialEditing: boolean];
   clickColumn: [columns: Array<{ name: string; table: string; schema?: string }>, error?: string | undefined];
   closeColumnPanel: [];
-  viewportChange: [viewport: { scrollTop: number; scrollLeft: number }];
+  viewportChange: [viewport: { scrollTop: number; scrollLeft: number }, tabId?: string];
   selectionStateChange: [selection: { anchor: number; head: number }];
   editorStateFlushed: [];
   sendSelectionToAi: [sql: string];
@@ -257,7 +275,10 @@ const editorRef = ref<HTMLDivElement>();
 const view = shallowRef<EditorViewType | null>(null);
 const contextMenuOpen = ref(false);
 let contextMenuPointerCleanup: (() => void) | null = null;
-let viewportEmitFrame: number | null = null;
+let viewportOwnerTabId = props.tabId;
+const viewportEmitTask = createDeferredEditorTask(() => {
+  if (latestViewport) emitEditorViewport(latestViewport);
+}, 150);
 let viewportRestoreFrame: number | null = null;
 let latestViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
 let lastEmittedViewport: { scrollTop: number; scrollLeft: number } | undefined = props.initialViewport;
@@ -872,7 +893,12 @@ function editorIndentUnit(): string {
 }
 
 function handleTab(view: EditorViewType): boolean {
-  if (view.state.selection.ranges.some((range) => !range.empty)) return codeMirrorIndentMore?.(view) ?? false;
+  if (isEditorComposing(view)) return false;
+  if (view.state.selection.ranges.some((range) => !range.empty)) {
+    // Snippet navigation selects the whole field, including after Shift+Tab.
+    // Give that active session priority over ordinary selected-text indentation.
+    return (codeMirrorNextSnippetField?.(view) ?? false) || (codeMirrorIndentMore?.(view) ?? false);
+  }
   if (tabKeyAcceptsCompletion()) {
     return acceptCompletionOrNextSnippetField(view) || performNormalTab(view);
   }
@@ -2373,9 +2399,8 @@ function selectAllSelectionOccurrencesFromContextMenu() {
 }
 
 function acceptCompletionOrNextSnippetField(view: EditorViewType): boolean {
-  // Any non-empty selection range means Tab is being used for block indent,
-  // not word completion. A completion popup can still appear as a side effect
-  // of the indent edit itself, so it must never hijack this or a following Tab.
+  // A non-empty selection belongs to snippet navigation or block indentation,
+  // not word completion. A popup opened by an indent edit must not hijack Tab.
   if (isEditorComposing(view)) return false;
   if (view.state.selection.ranges.every((range) => range.empty)) {
     const completionStatus = codeMirrorCompletionStatus?.(view.state) ?? null;
@@ -6055,10 +6080,13 @@ onMounted(async () => {
   const SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS = 100;
   const refreshSqlSemanticHighlightEffect = StateEffect.define<null>();
   buildSqlSemanticHighlightExtension = () => [
+    createSqlAliasHighlights({ databaseType: props.databaseType, dialect: sqlBehaviorDialect(), enabled: queryEditorSelectionLanguage() === "sql" }),
     ViewPlugin.fromClass(
       class {
         decorations: import("@codemirror/view").DecorationSet;
-        private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+        private refreshTask = createDeferredEditorTask(() => {
+          if (this.currentView.dom.isConnected) this.currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
+        }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
         private cachedDoc: import("@codemirror/state").Text | null = null;
         private cachedSql = "";
         private cachedDialectId = "";
@@ -6069,7 +6097,7 @@ onMounted(async () => {
           spans: Array<{ start: number; end: number }>;
         }> = [];
 
-        constructor(currentView: import("@codemirror/view").EditorView) {
+        constructor(private currentView: import("@codemirror/view").EditorView) {
           this.decorations = this.buildDecorations(currentView);
         }
 
@@ -6080,24 +6108,23 @@ onMounted(async () => {
             this.scheduleRefresh(update.view);
             return;
           }
-          if (refreshRequested || update.viewportChanged) {
+          if (refreshRequested) {
             this.cancelRefresh();
             this.decorations = this.buildDecorations(update.view);
+          } else if (update.viewportChanged) {
+            // Keep existing decorations while scrolling. Parse only after the
+            // viewport settles instead of blocking CodeMirror's layout update.
+            this.scheduleRefresh(update.view);
           }
         }
 
         scheduleRefresh(currentView: import("@codemirror/view").EditorView) {
-          if (this.refreshTimer !== null) return;
-          this.refreshTimer = setTimeout(() => {
-            this.refreshTimer = null;
-            if (currentView.dom.isConnected) currentView.dispatch({ effects: refreshSqlSemanticHighlightEffect.of(null) });
-          }, SQL_SEMANTIC_HIGHLIGHT_DEBOUNCE_MS);
+          this.currentView = currentView;
+          this.refreshTask.schedule();
         }
 
         cancelRefresh() {
-          if (this.refreshTimer === null) return;
-          clearTimeout(this.refreshTimer);
-          this.refreshTimer = null;
+          this.refreshTask.cancel();
         }
 
         destroy() {
@@ -6362,10 +6389,15 @@ onMounted(async () => {
           { key: "Tab", run: handleTab },
           {
             key: "Escape",
-            run: () => {
-              clearBatchColumnSelectionSession();
-              return searchPanelRef.value?.closeSearch() ?? false;
-            },
+            run: createQueryEditorEscapeHandler({
+              clearBatchSelection: clearBatchColumnSelectionSession,
+              cancelPendingAcceptance: () => {
+                clearPendingCompletionEnter();
+                clearPendingCompletionTab();
+              },
+              closeSearch: () => searchPanelRef.value?.closeSearch() ?? false,
+              closeCompletion: (currentView) => codeMirrorCloseCompletion?.(currentView) ?? false,
+            }),
           },
         ]),
       ),
@@ -6841,6 +6873,12 @@ function swapEditorDocument(doc: string) {
 function activateTabDocument(prevTabId: string | undefined, tabId: string | undefined, doc: string) {
   const currentView = view.value;
   if (!currentView) return;
+  // Flush the outgoing document before props and restored scroll positions
+  // become the new tab's state. The event carries its original owner.
+  flushEditorViewport();
+  viewportOwnerTabId = tabId;
+  latestViewport = props.initialViewport ?? { scrollTop: 0, scrollLeft: 0 };
+  lastEmittedViewport = undefined;
   clearScheduledPreviewContextRefresh();
   if (prevTabId !== undefined) {
     tabStateCache.set(prevTabId, currentView.state);
@@ -6909,15 +6947,21 @@ watch([() => props.tabId, () => props.modelValue], ([tabId, val], [prevTabId]) =
 
 watch(
   () => props.formatRequestId,
-  (val, oldVal) => {
-    if (val && val !== oldVal) formatCurrentSql();
+  (val) => {
+    if (val && val > lastHandledFormatRequestId) {
+      lastHandledFormatRequestId = val;
+      formatCurrentSql();
+    }
   },
 );
 
 watch(
   () => props.compressRequestId,
-  (val, oldVal) => {
-    if (val && val !== oldVal) compressCurrentSql();
+  (val) => {
+    if (val && val > lastHandledCompressRequestId) {
+      lastHandledCompressRequestId = val;
+      compressCurrentSql();
+    }
   },
 );
 
@@ -7168,10 +7212,7 @@ onDeactivated(pauseQueryEditorBackgroundWork);
 
 onBeforeUnmount(() => {
   pauseQueryEditorBackgroundWork();
-  if (viewportEmitFrame !== null) {
-    cancelAnimationFrame(viewportEmitFrame);
-    viewportEmitFrame = null;
-  }
+  viewportEmitTask.cancel();
   if (viewportRestoreFrame !== null) {
     cancelAnimationFrame(viewportRestoreFrame);
     viewportRestoreFrame = null;
@@ -7244,25 +7285,19 @@ function restoreEditorFocus() {
 function emitEditorViewport(viewport: { scrollTop: number; scrollLeft: number }) {
   if (sameEditorViewport(lastEmittedViewport, viewport)) return;
   lastEmittedViewport = { ...viewport };
-  emit("viewportChange", viewport);
+  emit("viewportChange", viewport, viewportOwnerTabId);
 }
 
 function scheduleEditorViewportEmit() {
   if (!view.value || !editorIsActive) return;
   latestViewport = readEditorViewport(view.value);
   scheduleSemanticDiagnostics(700, { preserveOutsideRanges: true });
-  if (viewportEmitFrame !== null) return;
-  viewportEmitFrame = requestAnimationFrame(() => {
-    viewportEmitFrame = null;
-    if (latestViewport) emitEditorViewport(latestViewport);
-  });
+  viewportEmitTask.schedule();
 }
 
 function flushEditorViewport() {
-  if (viewportEmitFrame !== null) {
-    cancelAnimationFrame(viewportEmitFrame);
-    viewportEmitFrame = null;
-  }
+  if (view.value) latestViewport = readEditorViewport(view.value);
+  viewportEmitTask.flush();
   if (latestViewport) emitEditorViewport(latestViewport);
 }
 
@@ -7405,6 +7440,33 @@ defineExpose({
 </template>
 
 <style scoped>
+[data-query-editor-root] > :deep(.cm-editor) {
+  /* The host supplies both dimensions. Keep viewport DOM changes from
+     invalidating intrinsic sizes throughout the surrounding flex layout;
+     WebKit otherwise spends a frame recomputing it on each viewport change.
+     Leave paint uncontained so editor overlays retain their overflow. */
+  contain: size layout style;
+}
+
+[data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar) {
+  width: 5px;
+}
+
+[data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-track) {
+  background: rgba(127, 127, 127, 0.1);
+}
+
+[data-query-editor-root] :deep(.cm-scroller::-webkit-scrollbar-thumb) {
+  background: rgba(127, 127, 127, 0.7);
+  border-radius: 999px;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  [data-query-editor-root] :deep(.cm-scroller) {
+    scrollbar-width: thin;
+  }
+}
+
 .query-editor--table-navigation-hover :deep(.cm-content),
 .query-editor--table-navigation-hover :deep(.cm-line) {
   cursor: pointer;

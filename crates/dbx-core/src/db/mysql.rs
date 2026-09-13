@@ -4427,6 +4427,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
     result_key_columns: &[String],
     diagnostic_trace_id: Option<&str>,
     start: Instant,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
 ) -> Result<MySqlQueryResult, String> {
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
@@ -4517,6 +4518,9 @@ async fn execute_result_set_with_text_protocol_on_conn(
         }
         let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
@@ -4816,6 +4820,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
     result_key_columns: &[String],
     diagnostic_trace_id: Option<&str>,
     start: Instant,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
 ) -> Result<MySqlQueryResult, String> {
     let diagnostics_enabled = diagnostic_trace_id.is_some() && log::log_enabled!(log::Level::Info);
     let dispatch_started_at = diagnostics_enabled.then(Instant::now);
@@ -4848,6 +4853,9 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
         }
         let Some(row) = next_row else { break };
         let row = row.map_err(|e| e.to_string())?;
+        if let Some(progress_clock) = progress_clock {
+            progress_clock.mark();
+        }
         if result_rows.len() >= row_limit {
             truncated = true;
             break;
@@ -4956,6 +4964,54 @@ where
 {
     let mut conn = get_conn_with_health_check(pool).await?;
     execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, dialect).await
+}
+
+/// Progress-aware variant of [`execute_query_with_max_rows`] for long transfers.
+///
+/// The statement runs under an inactivity budget: the clock is reset for every
+/// row MySQL delivers, so a large table that keeps streaming is never cancelled
+/// merely for exceeding the timeout in total — only a genuine stall is.
+///
+/// Unlike the Postgres/SQL Server variants there is no returns-rows gate here:
+/// a write delivers no rows, so no progress mark ever resets the clock and the
+/// budget degrades to the same plain wall-clock timeout anyway.
+pub(crate) async fn execute_query_with_max_rows_progress<P>(
+    pool: &P,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    dialect: MySqlQueryDialect,
+    progress_clock: std::sync::Arc<crate::query::StreamProgressClock>,
+    timeout: Option<std::time::Duration>,
+) -> Result<QueryResult, String>
+where
+    P: MySqlPoolAccess + ?Sized,
+{
+    let mut conn = get_conn_with_health_check(pool).await?;
+    let timeout_error = format!("Query timed out after {} seconds", timeout.map_or(0, |timeout| timeout.as_secs()));
+    let clock_for_query = progress_clock.clone();
+    crate::query::await_stream_with_progress_timeout(
+        async move {
+            execute_query_on_conn_with_limits_progress(
+                &mut conn,
+                sql,
+                bare,
+                max_rows,
+                None,
+                &[],
+                dialect,
+                None,
+                Some(&clock_for_query),
+            )
+            .await
+            .map(|result| result.result)
+        },
+        timeout,
+        progress_clock,
+        None,
+        timeout_error,
+    )
+    .await
 }
 
 pub async fn stream_query_rows(
@@ -5164,6 +5220,37 @@ pub async fn execute_query_on_conn_with_limits(
     dialect: MySqlQueryDialect,
     diagnostic_trace_id: Option<&str>,
 ) -> Result<MySqlQueryResult, String> {
+    execute_query_on_conn_with_limits_progress(
+        conn,
+        sql,
+        bare,
+        max_rows,
+        max_result_bytes,
+        result_key_columns,
+        dialect,
+        diagnostic_trace_id,
+        None,
+    )
+    .await
+}
+
+/// [`execute_query_on_conn_with_limits`] with an optional progress clock.
+///
+/// The clock is marked for every row the server delivers, so a caller wrapping
+/// this in an inactivity budget (see [`crate::query::await_stream_with_progress_timeout`])
+/// only times out on a genuine stall, not on a long-but-steady stream — which is
+/// what lets a transfer of a large table survive the configured timeout.
+pub(crate) async fn execute_query_on_conn_with_limits_progress(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    bare: bool,
+    max_rows: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: &[String],
+    dialect: MySqlQueryDialect,
+    diagnostic_trace_id: Option<&str>,
+    progress_clock: Option<&crate::query::StreamProgressClock>,
+) -> Result<MySqlQueryResult, String> {
     let start = Instant::now();
     let row_limit = query_result_row_limit(max_rows);
 
@@ -5178,6 +5265,7 @@ pub async fn execute_query_on_conn_with_limits(
                 result_key_columns,
                 diagnostic_trace_id,
                 start,
+                progress_clock,
             )
             .await
         } else {
@@ -5189,6 +5277,7 @@ pub async fn execute_query_on_conn_with_limits(
                 result_key_columns,
                 diagnostic_trace_id,
                 start,
+                progress_clock,
             )
             .await
             {
@@ -5203,6 +5292,7 @@ pub async fn execute_query_on_conn_with_limits(
                         result_key_columns,
                         diagnostic_trace_id,
                         start,
+                        progress_clock,
                     )
                     .await
                 }
@@ -5920,6 +6010,53 @@ mod tests {
 
     fn mysql_test_row_with_columns(values: Vec<Value>, columns: Vec<Column>) -> mysql_async::Row {
         new_row(values, columns.into())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable MySQL reachable via DBX_LIVE_MYSQL_TRANSFER_{HOST,PORT,USER,PASSWORD}"]
+    async fn live_mysql_progress_read_survives_a_total_duration_beyond_the_timeout() {
+        let Ok(host) = std::env::var("DBX_LIVE_MYSQL_TRANSFER_HOST") else {
+            return;
+        };
+        let port = std::env::var("DBX_LIVE_MYSQL_TRANSFER_PORT").unwrap_or_else(|_| "3306".to_string());
+        let user = std::env::var("DBX_LIVE_MYSQL_TRANSFER_USER").unwrap_or_else(|_| "root".to_string());
+        let password = std::env::var("DBX_LIVE_MYSQL_TRANSFER_PASSWORD").unwrap_or_default();
+        let database = std::env::var("DBX_LIVE_MYSQL_TRANSFER_DATABASE").unwrap_or_else(|_| "test".to_string());
+        let url = format!("mysql://{user}:{password}@{host}:{port}/{database}");
+        let pool = connect(&url, Duration::from_secs(5)).await.unwrap();
+
+        // 20 rows produced ~50 ms apart, each carrying >8 KB so the server flushes
+        // it per row instead of buffering the small result set. The SLEEP sits in
+        // the WHERE clause so MySQL evaluates it per row — in the SELECT list the
+        // planner folds the constant call and the whole statement returns at once.
+        let sql = "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 20) \
+                   SELECT REPEAT('x', 20000) AS payload, n FROM seq WHERE SLEEP(0.05) = 0";
+
+        let progress_clock = std::sync::Arc::new(crate::query::StreamProgressClock::new());
+        let result = execute_query_with_max_rows_progress(
+            &pool,
+            sql,
+            false,
+            None,
+            Default::default(),
+            progress_clock,
+            Some(Duration::from_millis(200)),
+        )
+        .await;
+        assert!(result.is_ok(), "progress-aware read must survive a total duration beyond the timeout: {result:?}");
+        assert_eq!(result.unwrap().rows.len(), 20);
+
+        // Contrast: the same statement under a never-reset wall-clock budget must
+        // time out, proving this test actually exercises the difference.
+        let wall_clock = crate::query::await_stream_with_progress_timeout(
+            execute_query_with_max_rows(&pool, sql, false, None, Default::default()),
+            Some(Duration::from_millis(200)),
+            std::sync::Arc::new(crate::query::StreamProgressClock::new()),
+            None,
+            "Query timed out after 0 seconds".to_string(),
+        )
+        .await;
+        assert!(wall_clock.is_err(), "the wall-clock path must still time out");
     }
 
     #[test]

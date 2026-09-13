@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern, isElasticsearchProtocolIndex, isPartialElasticsearchClear, matchesElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
+import { elasticsearchClearIndexPreview, elasticsearchIndexAliasLabel, isElasticsearchClearConfirmed, isElasticsearchIndexPattern, isElasticsearchProtocolIndex, isPartialElasticsearchClear, matchesElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import type { ElasticsearchDeleteByQueryResult } from "@/lib/backend/tauri";
 
 function clearResult(overrides: Partial<ElasticsearchDeleteByQueryResult> = {}): ElasticsearchDeleteByQueryResult {
@@ -14,6 +14,12 @@ describe("Elasticsearch index actions", () => {
     expect(isElasticsearchProtocolIndex("elasticsearch-index", "meilisearch")).toBe(false);
     expect(isElasticsearchProtocolIndex("vector-collection", "elasticsearch")).toBe(false);
     expect(isElasticsearchProtocolIndex("elasticsearch-index", undefined)).toBe(false);
+  });
+
+  it("renders aliases on the same row as the index name", () => {
+    expect(elasticsearchIndexAliasLabel({ searchAliases: ["orders-write", "orders-read"] })).toBe("orders-write, orders-read");
+    expect(elasticsearchIndexAliasLabel({ searchAliases: ["", "  "] })).toBeUndefined();
+    expect(elasticsearchIndexAliasLabel({})).toBeUndefined();
   });
 
   it("previews the exact request the clear action sends", () => {

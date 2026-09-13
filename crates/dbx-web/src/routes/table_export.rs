@@ -46,6 +46,7 @@ pub async fn start_table_export(
         "xlsx" => "xlsx",
         "json" => "json",
         "markdown" | "md" => "md",
+        "sql" if req.split_max_mb.is_some() => "zip",
         "sql" => "sql",
         _ => return Err(AppError::from(format!("Unsupported export format: {}", req.format))),
     };
@@ -59,7 +60,7 @@ pub async fn start_table_export(
         .export_files
         .write()
         .await
-        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: req.format.clone() });
+        .insert(export_id.clone(), WebExportFile { file_path, download_filename, format: ext.to_string() });
 
     let tx = {
         let mut channels = state.sse_channels.write().await;
@@ -152,6 +153,7 @@ pub async fn table_export_download(
         "json" => "application/json; charset=utf-8",
         "markdown" | "md" => "text/markdown; charset=utf-8",
         "sql" => "application/sql; charset=utf-8",
+        "zip" => "application/zip",
         format => return Err(AppError::from(format!("Unknown format: {format}"))),
     };
 

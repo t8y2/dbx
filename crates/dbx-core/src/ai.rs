@@ -16,6 +16,24 @@ use uuid::Uuid;
 pub const DEFAULT_MAX_RETRIES: u32 = 2;
 pub const MAX_MAX_RETRIES: u32 = 10;
 
+/// How many links of a transport failure's source chain are kept when building
+/// an error message. Deep enough to reach the DNS/TCP/TLS cause, short enough
+/// to keep the message readable.
+const MAX_TRANSPORT_ERROR_CAUSES: usize = 4;
+
+/// Upper bound for the rendered transport-failure cause chain.
+const MAX_TRANSPORT_ERROR_CHARS: usize = 400;
+
+/// Upper bound for the detail portion of a provider error string. Without it a
+/// proxy that answers with a full HTML error page would flood the UI message and
+/// the on-disk log.
+const MAX_ERROR_DETAIL_CHARS: usize = 500;
+
+/// Shortest value still treated as a credential. Anything shorter would match
+/// ordinary words inside an upstream error message and mangle the diagnostic,
+/// so it is left alone — real API keys and gateway tokens are far longer.
+const MIN_SECRET_CHARS: usize = 8;
+
 /// Clamp a user-provided max-retries value into the supported range.
 pub fn clamp_max_retries(value: u32) -> u32 {
     value.clamp(0, MAX_MAX_RETRIES)
@@ -794,10 +812,29 @@ fn ensure_anthropic_version_prefix(endpoint: &str) -> String {
 /// requests. Keep these tweaks scoped to that endpoint so other providers
 /// retain the standard request shape.
 ///
-/// TODO(Agens): Remove `is_agens_endpoint` and all Agens-specific branches
-/// below if api.agnes-ai.cn is discontinued or no longer needs this workaround.
+/// TODO(Agens, tracked by #8144 and #8658): Remove `is_agens_endpoint` and all
+/// Agens-specific branches below once the Agens gateway no longer needs this
+/// workaround — either because its Responses input deserializer accepts a
+/// replayed `function_call` without `id`/`status`, or because the hosts below
+/// are discontinued.
 fn is_agens_endpoint(config: &AiConfig) -> bool {
-    config.endpoint.to_ascii_lowercase().contains("agnes-ai.cn")
+    // Match on the parsed host instead of a substring of the raw endpoint:
+    // Agens publishes more than one host (`.cn` and `.com`, including
+    // `apihub.*`), and the old `contains("agnes-ai.cn")` check silently skipped
+    // every `apihub.agnes-ai.com` user (#8658). Suffix matching keeps the patch
+    // scoped to Agens hosts and rejects look-alikes such as
+    // `agnes-ai.com.evil.example`.
+    const AGENS_HOST_SUFFIXES: [&str; 2] = ["agnes-ai.cn", "agnes-ai.com"];
+    let Ok(url) = reqwest::Url::parse(config.endpoint.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    AGENS_HOST_SUFFIXES
+        .iter()
+        .any(|suffix| host == *suffix || host.strip_suffix(suffix).is_some_and(|prefix| prefix.ends_with('.')))
 }
 
 pub fn resolve_endpoint(config: &AiConfig) -> String {
@@ -822,7 +859,23 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
             format!("{base}/chat/completions")
         };
     }
-    if ep.ends_with("/chat/completions") || ep.ends_with("/responses") || ep.ends_with("/messages") {
+    // An OpenAI-style path typed in full is normally respected, but for the
+    // providers whose route is derived from `api_style` it must track the
+    // selected style: keeping a stale `/chat/completions` is what sent a
+    // Responses payload to the chat route. `/messages` is the Anthropic endpoint
+    // and has no OpenAI-style sibling, so it is always kept verbatim.
+    if let Some(base) = ep.strip_suffix("/chat/completions").or_else(|| ep.strip_suffix("/responses")) {
+        if uses_openai_style_api(config) {
+            let base = base.trim_end_matches('/');
+            return if config.api_style == AiApiStyle::Responses {
+                format!("{base}/responses")
+            } else {
+                format!("{base}/chat/completions")
+            };
+        }
+        return ep.to_string();
+    }
+    if ep.ends_with("/messages") {
         return ep.to_string();
     }
     if uses_anthropic_messages_api(config) {
@@ -862,6 +915,26 @@ pub fn resolve_endpoint(config: &AiConfig) -> String {
 pub fn uses_anthropic_messages_api(config: &AiConfig) -> bool {
     matches!(config.provider, AiProvider::Claude | AiProvider::AnthropicCompatible)
         || matches!(config.provider, AiProvider::Custom) && config.api_style == AiApiStyle::AnthropicMessages
+}
+
+/// Whether the request route is derived from `api_style` (`/chat/completions`
+/// vs `/responses`) instead of an Anthropic-style `/messages` endpoint.
+///
+/// `Custom` counts only while it is not itself set to `anthropic-messages`, so an
+/// explicitly Anthropic-configured endpoint keeps its path untouched.
+fn uses_openai_style_api(config: &AiConfig) -> bool {
+    !uses_anthropic_messages_api(config)
+        && matches!(
+            config.provider,
+            AiProvider::Openai
+                | AiProvider::Deepseek
+                | AiProvider::Kimi
+                | AiProvider::Qwen
+                | AiProvider::MiniMax
+                | AiProvider::Ollama
+                | AiProvider::OpenaiCompatible
+                | AiProvider::Custom
+        )
 }
 
 fn resolve_gemini_stream_endpoint(config: &AiConfig) -> String {
@@ -926,7 +999,7 @@ fn stream_event_name(line: &str) -> Option<&str> {
     line.trim().strip_prefix("event:").map(str::trim).filter(|event| !event.is_empty())
 }
 
-fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value) -> Option<String> {
+fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value, secrets: &[String]) -> Option<String> {
     if event_name != Some("error") && event["type"].as_str() != Some("error") {
         return None;
     }
@@ -939,8 +1012,11 @@ fn anthropic_stream_error(event_name: Option<&str>, event: &serde_json::Value) -
         (Some(error_type), Some(message)) => format!("{error_type}: {message}"),
         (Some(error_type), None) => error_type.to_string(),
         (None, Some(message)) => message.to_string(),
-        (None, None) => truncate_diagnostic(&event.to_string(), 500),
+        (None, None) => truncate_diagnostic(&event.to_string(), MAX_ERROR_DETAIL_CHARS),
     };
+    // An SSE `error` frame is provider-authored text; scrub it the same way as
+    // an HTTP body so it cannot smuggle a credential into the retry log.
+    let detail = truncate_diagnostic(&redact_secrets(&detail, secrets), MAX_ERROR_DETAIL_CHARS);
     let category = classify_error(&detail);
     Some(format!("[{category}] Anthropic stream error ({detail})"))
 }
@@ -1882,7 +1958,7 @@ async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Resu
         if let Some(after_id) = after_id.as_deref() {
             request = request.query(&[("after_id", after_id)]);
         }
-        let res = request.send().await.map_err(|e| format!("Claude model list request failed: {e}"))?;
+        let res = request.send().await.map_err(|e| format_request_error("Claude model list", e))?;
 
         let status = res.status();
         if !status.is_success() {
@@ -1893,11 +1969,11 @@ async fn list_claude_models(client: &reqwest::Client, config: &AiConfig) -> Resu
                     "[modelDiscoveryUnsupported] The provider does not expose a model list at {endpoint}. Save the provider and enter a model ID manually."
                 ));
             }
-            return Err(categorized_http_error(res, "Claude model list", &config.api_key).await);
+            return Err(categorized_http_error(res, "Claude model list", &sensitive_values(config)).await);
         }
 
         let data: serde_json::Value =
-            res.json().await.map_err(|e| format!("Claude model list returned invalid JSON (HTTP {status}): {e}"))?;
+            res.json().await.map_err(|e| format_response_body_error("Claude model list", e))?;
         for model in parse_model_list_response(&data)? {
             if seen_models.insert(model.id.clone()) {
                 models.push(model);
@@ -1935,11 +2011,16 @@ async fn list_gemini_models(client: &reqwest::Client, config: &AiConfig) -> Resu
             request = request.query(&[("pageToken", token)]);
         }
 
-        let res = request.send().await.map_err(|e| format!("Gemini model list request failed: {e}"))?;
+        let res = request.send().await.map_err(|e| format_request_error("Gemini model list", e))?;
         let status = res.status();
-        let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value =
+            res.json().await.map_err(|e| format_response_body_error("Gemini model list", e))?;
         if !status.is_success() {
-            return Err(extract_error(&data).unwrap_or_else(|| format!("Gemini model list API error: {status}")));
+            return Err(redacted_http_detail(
+                &data,
+                format!("Gemini model list API error: {status}"),
+                &sensitive_values(config),
+            ));
         }
 
         for model in parse_gemini_model_list_response(&data)? {
@@ -1966,12 +2047,12 @@ async fn list_openai_compatible_models(
         .headers(maybe_bearer_headers(config)?)
         .send()
         .await
-        .map_err(|e| format!("AI model list request failed: {e}"))?;
+        .map_err(|e| format_request_error("AI model list", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("AI model list", e))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Model list API error: {status}")));
+        return Err(redacted_http_detail(&data, format!("Model list API error: {status}"), &sensitive_values(config)));
     }
 
     parse_model_list_response(&data)
@@ -2003,11 +2084,18 @@ async fn fetch_ollama_model_details(
         .json(&json!({ "model": model_id }))
         .send()
         .await
-        .map_err(|error| format!("Ollama model capability request failed for {model_id}: {error}"))?;
+        .map_err(|error| format_request_error(&format!("Ollama model capability ({model_id})"), error))?;
     let status = response.status();
-    let data: serde_json::Value = response.json().await.map_err(|error| error.to_string())?;
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format_response_body_error(&format!("Ollama model capability ({model_id})"), error))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Ollama model capability API error: {status}")));
+        return Err(redacted_http_detail(
+            &data,
+            format!("Ollama model capability API error: {status}"),
+            &sensitive_values(config),
+        ));
     }
     Ok(data)
 }
@@ -2163,11 +2251,16 @@ pub async fn resolve_model_effort_core(config: &AiConfig, model_id: &str) -> Res
             .headers(claude_headers(config)?)
             .send()
             .await
-            .map_err(|e| format!("Claude model capability request failed: {e}"))?;
+            .map_err(|e| format_request_error("Claude model capability", e))?;
         let status = response.status();
-        let data: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        let data: serde_json::Value =
+            response.json().await.map_err(|e| format_response_body_error("Claude model capability", e))?;
         if !status.is_success() {
-            return Err(extract_error(&data).unwrap_or_else(|| format!("Claude model capability API error: {status}")));
+            return Err(redacted_http_detail(
+                &data,
+                format!("Claude model capability API error: {status}"),
+                &sensitive_values(config),
+            ));
         }
         if let Some(capability) = parse_dynamic_effort_capability(&data, AiCapabilitySource::ProviderApi) {
             return Ok(capability);
@@ -2196,12 +2289,16 @@ pub async fn call_claude(client: &reqwest::Client, request: AiCompletionRequest)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Claude request failed: {e}"))?;
+        .map_err(|e| format_request_error("Claude", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("Claude", e))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Claude API error: {status}")));
+        return Err(redacted_http_detail(
+            &data,
+            format!("Claude API error: {status}"),
+            &sensitive_values(&request.config),
+        ));
     }
 
     Ok(data["content"]
@@ -2280,12 +2377,12 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
         .json(&body_obj)
         .send()
         .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+        .map_err(|e| format_request_error("AI", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("AI", e))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("API error: {status}")));
+        return Err(redacted_http_detail(&data, format!("API error: {status}"), &sensitive_values(&request.config)));
     }
 
     Ok(openai_response_text(&data))
@@ -2307,12 +2404,12 @@ pub async fn call_responses_api(client: &reqwest::Client, request: AiCompletionR
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("AI request failed: {e}"))?;
+        .map_err(|e| format_request_error("AI", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("AI", e))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("API error: {status}")));
+        return Err(redacted_http_detail(&data, format!("API error: {status}"), &sensitive_values(&request.config)));
     }
 
     Ok(responses_text(&data))
@@ -2340,12 +2437,16 @@ pub async fn call_gemini(client: &reqwest::Client, request: AiCompletionRequest)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format_transport_error("Gemini", e))?;
+        .map_err(|e| format_request_error("Gemini", e))?;
 
     let status = res.status();
-    let data: serde_json::Value = res.json().await.map_err(|e| format_transport_error("Gemini", e))?;
+    let data: serde_json::Value = res.json().await.map_err(|e| format_response_body_error("Gemini", e))?;
     if !status.is_success() {
-        return Err(extract_error(&data).unwrap_or_else(|| format!("Gemini API error: {status}")));
+        return Err(redacted_http_detail(
+            &data,
+            format!("Gemini API error: {status}"),
+            &sensitive_values(&request.config),
+        ));
     }
 
     Ok(gemini_text(&data))
@@ -2540,17 +2641,20 @@ fn probe_stream_payload(
     is_minimax: bool,
     minimax_state: &mut MiniMaxStreamState,
     diagnostics: &mut StreamProbeDiagnostics,
+    secrets: &[String],
 ) -> Result<Option<String>, String> {
     diagnostics.data_events += 1;
     if data == "[DONE]" {
         return Ok(None);
     }
 
-    let parsed: serde_json::Value = serde_json::from_str(data)
-        .map_err(|e| format!("AI stream JSON parse error: {e}; payload={}", truncate_diagnostic(data, 240)))?;
+    let parsed: serde_json::Value = serde_json::from_str(data).map_err(|e| {
+        let payload = truncate_diagnostic(&redact_secrets(data, secrets), 240);
+        format!("AI stream JSON parse error: {e}; payload={payload}")
+    })?;
     diagnostics.json_events += 1;
     if is_claude {
-        if let Some(error) = anthropic_stream_error(event_name, &parsed) {
+        if let Some(error) = anthropic_stream_error(event_name, &parsed, secrets) {
             return Err(error);
         }
     }
@@ -2587,7 +2691,84 @@ fn truncate_diagnostic(value: &str, max_chars: usize) -> String {
     }
 }
 
-async fn categorized_http_error(response: reqwest::Response, provider: &str, api_key: &str) -> String {
+/// Collects every credential-bearing value that must never appear in a
+/// diagnostic string.
+///
+/// `api_key` covers the primary token — including short development keys. For
+/// custom headers, credential-shaped names are always collected; an
+/// `Authorization` header additionally contributes the bare credentials after
+/// its scheme because proxies often echo that token without `Bearer`/`Basic`.
+/// Other custom header values retain the [`MIN_SECRET_CHARS`] guard so ordinary
+/// diagnostics are not mangled by short values such as a version marker.
+pub(crate) fn sensitive_values(config: &AiConfig) -> Vec<String> {
+    let mut secrets: Vec<String> = Vec::new();
+    push_secret(&mut secrets, normalized_api_key(config), true);
+    for (name, value) in &config.custom_headers {
+        let credential_header = is_credential_header(name);
+        push_secret(&mut secrets, value, credential_header);
+        if name.trim().eq_ignore_ascii_case("authorization") {
+            if let Some((_, credentials)) = value.trim().split_once(|character: char| character.is_ascii_whitespace()) {
+                push_secret(&mut secrets, credentials, true);
+            }
+        }
+    }
+    secrets
+}
+
+/// Whether a custom header name conventionally carries a credential rather
+/// than ordinary request metadata. DBX lets users override `Authorization`, so
+/// these values must be redacted even when a development gateway uses a short
+/// token.
+fn is_credential_header(name: &str) -> bool {
+    name.trim().split(|character: char| !character.is_ascii_alphanumeric()).any(|part| {
+        part.eq_ignore_ascii_case("authorization")
+            || part.eq_ignore_ascii_case("auth")
+            || part.eq_ignore_ascii_case("token")
+            || part.eq_ignore_ascii_case("secret")
+            || part.eq_ignore_ascii_case("credential")
+            || part.eq_ignore_ascii_case("key")
+    })
+}
+
+fn push_secret(secrets: &mut Vec<String>, value: &str, allow_short: bool) {
+    let value = value.trim();
+    if !value.is_empty()
+        && (allow_short || value.chars().count() >= MIN_SECRET_CHARS)
+        && !secrets.iter().any(|existing| existing == value)
+    {
+        secrets.push(value.to_string());
+    }
+}
+
+/// Removes credential values from a free-form diagnostic string.
+///
+/// Every sensitive value becomes `***`, and any URL embedded in the text has its
+/// user-info, query string, and fragment stripped by [`redact_url_query`], so a
+/// body that echoes `?key=…` cannot leak either. This is the single gate every
+/// provider error string must pass through before it reaches the UI, a log
+/// target, or a shared report; callers truncate the result as needed.
+pub(crate) fn redact_secrets(value: &str, secrets: &[String]) -> String {
+    let mut redacted = value.to_string();
+    for secret in secrets {
+        if redacted.contains(secret.as_str()) {
+            redacted = redacted.replace(secret.as_str(), "***");
+        }
+    }
+    redact_url_query(&redacted)
+}
+
+/// Renders the error detail of an already-parsed response body.
+///
+/// Non-streaming callers parse the body before checking the status, so they
+/// cannot reuse [`categorized_http_error`]; this applies the same two guards —
+/// credential scrubbing and a length bound — to keep them from becoming the
+/// leak the streaming path used to be.
+fn redacted_http_detail(data: &serde_json::Value, fallback: String, secrets: &[String]) -> String {
+    let detail = extract_error(data).unwrap_or(fallback);
+    truncate_diagnostic(&redact_secrets(&detail, secrets), MAX_ERROR_DETAIL_CHARS)
+}
+
+async fn categorized_http_error(response: reqwest::Response, provider: &str, secrets: &[String]) -> String {
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.text().await.unwrap_or_default();
@@ -2601,16 +2782,150 @@ async fn categorized_http_error(response: reqwest::Response, provider: &str, api
                 body.trim().to_string()
             }
         });
-    let api_key = api_key.trim();
-    let detail = if api_key.is_empty() { detail } else { detail.replace(api_key, "***") };
-    let detail = truncate_diagnostic(&detail, 500);
+    // A proxy may echo the request (including its credentials) into the body,
+    // so every error detail is scrubbed before it can reach a log or the UI.
+    let detail = truncate_diagnostic(&redact_secrets(&detail, secrets), MAX_ERROR_DETAIL_CHARS);
     let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
     maybe_tag_retry_after(&headers, format!("[{}] {provider} API error ({diagnostic})", classify_error(&diagnostic)))
 }
 
-fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
-    // Request URLs may contain credentials in query parameters, notably Gemini API keys.
-    format!("{provider} request failed: {}", error.without_url())
+/// Retry category for a transport-level request failure.
+///
+/// A request that never produced an HTTP status is either a timeout or a
+/// connection/DNS/TLS problem; both are transient by nature.
+fn transport_error_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else {
+        "network"
+    }
+}
+
+/// Renders the root cause of a transport-level request failure.
+///
+/// `reqwest::Error`'s `Display` only prints the failing phase plus the URL, so
+/// the actionable cause (DNS lookup, TCP connect, TLS handshake, reset
+/// connection) is only reachable through the error source chain. Dropping it
+/// made every transport failure look identical and impossible to classify or
+/// report upstream (#8658).
+fn transport_error_cause(error: reqwest::Error) -> String {
+    // Read the chain first: walking it borrows `error`, while the URL redaction
+    // below consumes it (`reqwest::Error::without_url` takes `self`).
+    let mut causes: Vec<String> = Vec::new();
+    {
+        let mut source = std::error::Error::source(&error);
+        while let Some(cause) = source {
+            let text = cause.to_string();
+            let text = text.trim();
+            if !text.is_empty() {
+                causes.push(text.to_string());
+            }
+            if causes.len() >= MAX_TRANSPORT_ERROR_CAUSES.saturating_sub(1) {
+                break;
+            }
+            source = cause.source();
+        }
+    }
+
+    let mut parts = vec![error.without_url().to_string()];
+    for cause in causes {
+        if !parts.iter().any(|part| part.contains(&cause)) {
+            parts.push(cause);
+        }
+    }
+    truncate_diagnostic(&redact_url_query(&parts.join(" -> ")), MAX_TRANSPORT_ERROR_CHARS)
+}
+
+/// Builds the transport-failure string carried through the AI pipeline.
+///
+/// The `[category]` prefix keeps the failure classifiable by [`classify_error`]
+/// — so transient transport failures are retried (see [`is_retryable_error`])
+/// and the UI can show a localized summary — while the appended source chain
+/// makes the failure diagnosable.
+fn format_transport_error(label: &str, phase: &str, error: reqwest::Error) -> String {
+    let category = transport_error_category(&error);
+    let cause = transport_error_cause(error);
+    format!("[{category}] {label} {phase}: {cause}")
+}
+
+/// A failure of the initial HTTP request (`send`): the response never arrived.
+fn format_request_error(label: &str, error: reqwest::Error) -> String {
+    format_transport_error(label, "request failed", error)
+}
+
+/// A failure that happened *after* the response headers arrived, while the body
+/// was being read or decoded (`json` / `chunk` / `text`). The request itself
+/// succeeded, so reporting it as a request failure would misreport what happened.
+fn format_response_body_error(label: &str, error: reqwest::Error) -> String {
+    format_transport_error(label, "response body failed", error)
+}
+
+/// Strips credentials from every URL embedded in a diagnostic.
+///
+/// Providers pass credentials as URL user-info (`https://user:password@host`) or
+/// as query parameters (`?key=`), and transport errors can echo the request URL,
+/// so nothing credential-bearing may reach the UI, the debug log, or a shared
+/// report. Only the URL spans are rewritten: the surrounding free text — which
+/// may itself contain `?`, `#`, or `@` — is preserved verbatim, and no URL is
+/// re-serialized, so hosts, ports, and paths keep their original spelling.
+fn redact_url_query(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(offset) = url_start_offset(rest) {
+        let (head, tail) = rest.split_at(offset);
+        output.push_str(head);
+        let end = url_token_end(tail);
+        let (url, remainder) = tail.split_at(end);
+        push_redacted_url(&mut output, url);
+        rest = remainder;
+    }
+    output.push_str(rest);
+    output
+}
+
+/// Byte offset of the first `http://` or `https://` occurrence in `value`.
+///
+/// URL schemes are case-insensitive (RFC 3986 §3.1), so `HTTPS://` has to be found
+/// as well — otherwise a credentialed URL slips past [`redact_url_query`]. The
+/// search runs on an ASCII-lowercased copy: only `A`–`Z` are rewritten and each
+/// stays one byte, so the offsets stay valid for the original string while the
+/// emitted text keeps its original scheme spelling.
+fn url_start_offset(value: &str) -> Option<usize> {
+    let lowered = value.to_ascii_lowercase();
+    match (lowered.find("http://"), lowered.find("https://")) {
+        (Some(http), Some(https)) => Some(http.min(https)),
+        (Some(offset), None) | (None, Some(offset)) => Some(offset),
+        (None, None) => None,
+    }
+}
+
+/// Byte offset just past the URL token starting at `value[0]`.
+///
+/// A URL ends at the first character that cannot appear in one — whitespace or
+/// one of `"`, `'`, `)`, `,`, `;`, `>` — which is what lets a URL sit inside prose
+/// such as `error for url (https://…)` without swallowing the closing bracket.
+fn url_token_end(value: &str) -> usize {
+    value
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace() || matches!(character, '"' | '\'' | ')' | ',' | ';' | '>'))
+        .map_or_else(|| value.len(), |(index, _)| index)
+}
+
+/// Appends `url` with its user-info, query string, and fragment removed.
+fn push_redacted_url(output: &mut String, url: &str) {
+    // The authority is everything between `://` and the first `/`, `?`, or `#`.
+    // Only inside it does `@` separate credentials from the host, so scanning
+    // the authority first keeps a legitimate `@` in a path untouched.
+    let authority_start = url.find("://").map_or(0, |index| index + 3);
+    let authority_end =
+        url[authority_start..].find(['/', '?', '#']).map_or_else(|| url.len(), |offset| authority_start + offset);
+    let authority = &url[authority_start..authority_end];
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let tail_end = url[authority_end..].find(['?', '#']).map_or_else(|| url.len(), |offset| authority_end + offset);
+
+    output.push_str(&url[..authority_start]);
+    output.push_str(host);
+    output.push_str(&url[authority_end..tail_end]);
 }
 
 /// Extract an error string from a non-2xx streaming response, preserving any
@@ -2619,7 +2934,7 @@ fn format_transport_error(provider: &str, error: reqwest::Error) -> String {
 /// Mirrors [`categorized_http_error`]: always embeds `HTTP <status>` in the
 /// diagnostic so that [`classify_error`] works correctly on empty-body or
 /// non-JSON responses (e.g. a bare 429 from a proxy).
-async fn stream_error(response: reqwest::Response, fallback: &str) -> String {
+async fn stream_error(response: reqwest::Response, fallback: &str, secrets: &[String]) -> String {
     let status = response.status();
     let headers = response.headers().clone();
     // Read the body as text first so we still have it when JSON parsing fails.
@@ -2635,6 +2950,10 @@ async fn stream_error(response: reqwest::Response, fallback: &str) -> String {
                 trimmed.to_string()
             }
         });
+    // Mirrors `categorized_http_error`: the streaming path must not become a
+    // side door for the same body, since this string is persisted by the retry
+    // and agent-loop log lines.
+    let detail = truncate_diagnostic(&redact_secrets(&detail, secrets), MAX_ERROR_DETAIL_CHARS);
     let diagnostic = format!("HTTP {}: {detail}", status.as_u16());
     maybe_tag_retry_after(&headers, format!("[{}] {fallback} API error ({diagnostic})", classify_error(&diagnostic)))
 }
@@ -2645,13 +2964,25 @@ async fn measure_first_stream_chunk(
     is_claude: bool,
     is_gemini: bool,
     is_minimax: bool,
+    secrets: &[String],
 ) -> Result<(u64, String), String> {
     let mut buf = Vec::new();
     let mut diagnostics = StreamProbeDiagnostics::default();
     let mut event_name: Option<String> = None;
     let mut minimax_state = MiniMaxStreamState::default();
     while let Some(chunk) = byte_stream.next().await {
-        let chunk = chunk.map_err(|e| format!("stream read error: {}", e.without_url()))?;
+        let chunk = chunk.map_err(|e| {
+            format_response_body_error(
+                if is_claude {
+                    "Claude"
+                } else if is_gemini {
+                    "Gemini"
+                } else {
+                    "AI"
+                },
+                e,
+            )
+        })?;
         diagnostics.bytes_received += chunk.len();
         buf.extend_from_slice(&chunk);
 
@@ -2677,6 +3008,7 @@ async fn measure_first_stream_chunk(
                 is_minimax,
                 &mut minimax_state,
                 &mut diagnostics,
+                secrets,
             )? {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
@@ -2695,6 +3027,7 @@ async fn measure_first_stream_chunk(
                 is_minimax,
                 &mut minimax_state,
                 &mut diagnostics,
+                secrets,
             )? {
                 let latency = start.elapsed().as_millis() as u64;
                 return Ok((latency, text));
@@ -2724,44 +3057,52 @@ fn claude_system_prompt(system_prompt: &str) -> &str {
     }
 }
 
+/// Probes a CLI-backed provider through the sibling module that owns it.
+///
+/// Returns `None` for HTTP providers, which use the shared probe in
+/// [`test_connection_core`]. Extracted to keep that function within the
+/// repository's function-length limit.
+async fn test_cli_provider_connection(config: &AiConfig) -> Option<Result<AiTestConnectionResult, String>> {
+    match config.provider {
+        AiProvider::CodexCli => Some(crate::ai_codex_cli::test_codex_connection(config).await),
+        AiProvider::ClaudeCodeCli => Some(crate::ai_claude_code_cli::test_claude_code_connection(config).await),
+        AiProvider::PiAgentCli => Some(crate::ai_pi_agent_cli::test_pi_agent_connection(config).await),
+        AiProvider::OpenCodeCli => Some(crate::ai_opencode_cli::test_opencode_connection(config).await),
+        AiProvider::CursorCli => Some(crate::ai_cursor_cli::test_cursor_connection(config).await),
+        AiProvider::GrokCli => Some(crate::ai_grok_cli::test_grok_connection(config).await),
+        AiProvider::CodeBuddyCli => Some(crate::ai_codebuddy_cli::test_codebuddy_connection(config).await),
+        AiProvider::QoderCli => Some(crate::ai_qoder_cli::test_qoder_connection(config).await),
+        _ => None,
+    }
+}
+
+/// Fills in a model via provider discovery when the user left the field empty.
+///
+/// Extracted from [`test_connection_core`] to keep that function within the
+/// repository's function-length limit.
+async fn resolve_test_connection_model(config: &mut AiConfig) -> Result<(), String> {
+    if !config.model.trim().is_empty() {
+        return Ok(());
+    }
+    let model = list_models_core(config)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            "[modelDiscoveryUnsupported] Model discovery returned no models. Save the provider and enter a model ID manually."
+                .to_string()
+        })?;
+    config.model = model.id;
+    Ok(())
+}
+
 pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionResult, String> {
-    if matches!(config.provider, AiProvider::CodexCli) {
-        return crate::ai_codex_cli::test_codex_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::ClaudeCodeCli) {
-        return crate::ai_claude_code_cli::test_claude_code_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::PiAgentCli) {
-        return crate::ai_pi_agent_cli::test_pi_agent_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::OpenCodeCli) {
-        return crate::ai_opencode_cli::test_opencode_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::CursorCli) {
-        return crate::ai_cursor_cli::test_cursor_connection(config).await;
+    if let Some(result) = test_cli_provider_connection(config).await {
+        return result;
     }
 
-    if matches!(config.provider, AiProvider::GrokCli) {
-        return crate::ai_grok_cli::test_grok_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::CodeBuddyCli) {
-        return crate::ai_codebuddy_cli::test_codebuddy_connection(config).await;
-    }
-    if matches!(config.provider, AiProvider::QoderCli) {
-        return crate::ai_qoder_cli::test_qoder_connection(config).await;
-    }
     let mut resolved_config = config.clone();
-    if resolved_config.model.trim().is_empty() {
-        let model = list_models_core(&resolved_config)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                "[modelDiscoveryUnsupported] Model discovery returned no models. Save the provider and enter a model ID manually."
-                    .to_string()
-            })?;
-        resolved_config.model = model.id;
-    }
+    resolve_test_connection_model(&mut resolved_config).await?;
     let config = &resolved_config;
     validate_config(config)?;
 
@@ -2772,13 +3113,22 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
     let is_gemini = matches!(config.provider, AiProvider::Gemini);
     let is_minimax = matches!(config.provider, AiProvider::MiniMax);
     let api_key = normalized_api_key(config).to_string();
+    let secrets = sensitive_values(config);
     let endpoint = resolve_endpoint(config);
     let gemini_ep = resolve_gemini_stream_endpoint(config);
     let api_style = config.api_style.clone();
     let config_ref = config.clone();
     let config_inner = config.clone();
 
-    with_retry(&config_ref, || {
+    log::debug!(
+        "[ai][test] start provider={:?} api_style={:?} model={} endpoint={}",
+        config.provider,
+        config.api_style,
+        config.model,
+        redact_url_query(&endpoint)
+    );
+
+    let result = with_retry(&config_ref, || {
         let client = client.clone();
         let model = model.clone();
         let provider = provider.clone();
@@ -2787,6 +3137,7 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
         let gemini_ep = gemini_ep.clone();
         let api_style = api_style.clone();
         let config_inner = config_inner.clone();
+        let secrets = secrets.clone();
         async move {
             let start = std::time::Instant::now();
 
@@ -2805,9 +3156,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| format!("Claude request failed: {e}"))?;
+                    .map_err(|e| format_request_error("Claude", e))?;
                 if !res.status().is_success() {
-                    return Err(categorized_http_error(res, "Claude", &api_key).await);
+                    return Err(categorized_http_error(res, "Claude", &secrets).await);
                 }
                 res.bytes_stream()
             } else {
@@ -2824,9 +3175,9 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                             }))
                             .send()
                             .await
-                            .map_err(|e| format_transport_error("Gemini", e))?;
+                            .map_err(|e| format_request_error("Gemini", e))?;
                         if !res.status().is_success() {
-                            return Err(categorized_http_error(res, "Gemini", &api_key).await);
+                            return Err(categorized_http_error(res, "Gemini", &secrets).await);
                         }
                         res.bytes_stream()
                     }
@@ -2856,16 +3207,16 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                             .json(&body_obj)
                             .send()
                             .await
-                            .map_err(|e| format!("AI request failed: {e}"))?;
+                            .map_err(|e| format_request_error("AI", e))?;
                         if !res.status().is_success() {
-                            return Err(categorized_http_error(res, "AI", &api_key).await);
+                            return Err(categorized_http_error(res, "AI", &secrets).await);
                         }
                         res.bytes_stream()
                     }
                 }
             };
 
-            match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini, is_minimax).await {
+            match measure_first_stream_chunk(byte_stream, start, is_claude, is_gemini, is_minimax, &secrets).await {
                 Ok((latency, _delta)) => Ok(AiTestConnectionResult {
                     success: true,
                     message: format!("OK — {}ms", latency),
@@ -2885,10 +3236,43 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
             }
         }
     })
-    .await
+    .await;
+
+    log_test_connection_result(&resolved_config, &result);
+    result
+}
+
+/// Records the outcome of a connection test.
+///
+/// Extracted from [`test_connection_core`] to keep that function reviewable: a
+/// failed test used to leave no evidence behind beyond the transient on-screen
+/// message (#8658).
+fn log_test_connection_result(config: &AiConfig, result: &Result<AiTestConnectionResult, String>) {
+    match result {
+        Ok(response) => log::debug!(
+            "[ai][test] ok provider={:?} api_style={:?} model={} latency_ms={:?}",
+            config.provider,
+            config.api_style,
+            config.model,
+            response.latency_ms
+        ),
+        Err(error) => log::warn!(
+            "[ai][test] failed provider={:?} api_style={:?} model={} endpoint={} error={error}",
+            config.provider,
+            config.api_style,
+            config.model,
+            redact_url_query(&resolve_endpoint(config))
+        ),
+    }
 }
 
 fn classify_error(msg: &str) -> &'static str {
+    // An explicit `[category]` tag wins over keyword matching: its producer
+    // inspected the underlying error (e.g. `reqwest::Error::is_dns`) instead of
+    // guessing from the rendered text.
+    if let Some(category) = explicit_error_category(msg) {
+        return category;
+    }
     let lower = msg.to_ascii_lowercase();
     if lower.contains("401")
         || lower.contains("403")
@@ -2938,6 +3322,7 @@ fn classify_error(msg: &str) -> &'static str {
     } else if lower.contains("connect")
         || lower.contains("dns")
         || lower.contains("resolve")
+        || TRANSPORT_FAILURE_KEYWORDS.iter().any(|keyword| lower.contains(keyword))
         || lower.contains("502")
         || lower.contains("503")
         || lower.contains("api_error")
@@ -2954,6 +3339,65 @@ fn classify_error(msg: &str) -> &'static str {
 /// authentication failures, missing models, safety blocks, and token limits are not.
 fn is_retryable_error(error: &str) -> bool {
     matches!(classify_error(error), "rateLimit" | "timeout" | "network" | "emptyResponse")
+}
+
+/// Markers of a request that died before an HTTP status existed, as emitted by
+/// `reqwest`/`hyper`/`tokio` or by the operating system.
+///
+/// Keywords alone are not enough to classify a transport failure — the
+/// `Display` of a `reqwest::Error` is only `error sending request for url (…)`,
+/// which contains none of the older network markers, so such failures used to
+/// fall through to `unknown` and were never retried (#8658). [`format_request_error`]
+/// and [`format_response_body_error`] tag them explicitly; this keyword list keeps
+/// legacy and third-party strings classifiable too.
+const TRANSPORT_FAILURE_KEYWORDS: [&str; 12] = [
+    "error sending request",
+    "connection reset",
+    "connection closed",
+    "connection aborted",
+    "broken pipe",
+    "unexpected eof",
+    "incomplete message",
+    "tls handshake",
+    "network is unreachable",
+    "no route to host",
+    // A response body that is truncated or dropped mid-stream surfaces as
+    // `reqwest`'s generic `error decoding response body`, whose real cause
+    // (`error reading a body from connection` / `end of file before message
+    // length reached`) only lives on the source chain. Without these markers a
+    // mid-stream transport failure was classified `unknown` and never retried
+    // (the shape users hit as "Agent stream stopped before completion").
+    "error decoding response body",
+    "error reading a body from connection",
+];
+
+/// Reads an explicit `[category]` tag from the start of an error message.
+///
+/// `maybe_tag_retry_after` can prepend `[retry-after:N]`, so the category is not
+/// always the first bracket group.
+fn explicit_error_category(msg: &str) -> Option<&'static str> {
+    let mut rest = msg.trim_start();
+    if let Some(tail) = rest.strip_prefix("[retry-after:") {
+        rest = tail.split_once(']').map(|(_, after)| after.trim_start())?;
+    }
+    known_error_category(rest.strip_prefix('[')?.split_once(']')?.0)
+}
+
+/// Categories understood by `classify_error` and rendered by the frontend's
+/// localized summary map (`aiTestErrorCategoryKeys`).
+fn known_error_category(tag: &str) -> Option<&'static str> {
+    match tag {
+        "auth" => Some("auth"),
+        "modelNotFound" => Some("modelNotFound"),
+        "rateLimit" => Some("rateLimit"),
+        "timeout" => Some("timeout"),
+        "tokenLimit" => Some("tokenLimit"),
+        "safety" => Some("safety"),
+        "emptyResponse" => Some("emptyResponse"),
+        "network" => Some("network"),
+        "unknown" => Some("unknown"),
+        _ => None,
+    }
 }
 
 /// Extract Retry-After seconds from HTTP response headers.
@@ -3009,6 +3453,10 @@ where
     Fut: std::future::Future<Output = Result<T, String>>,
 {
     let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
+    // Defence in depth: error strings are scrubbed at their source, but a log
+    // line is the last place a credential could be persisted, so it is re-checked
+    // here before anything is written.
+    let secrets = sensitive_values(config);
     let mut last_err: Option<String> = None;
 
     for attempt in 0..=max {
@@ -3031,10 +3479,23 @@ where
         match op().await {
             Ok(result) => return Ok(result),
             Err(err) if attempt < max && is_retryable_error(&err) => {
-                log::warn!("[ai][retry] transient error, will retry: {err}");
+                log::warn!("[ai][retry] transient error, will retry: {}", redact_secrets(&err, &secrets));
                 last_err = Some(err);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                // Record the terminal failure: without this, a non-retryable or
+                // retry-exhausted request left no trace anywhere once the user
+                // dismissed the on-screen message (#8658).
+                log::warn!(
+                    "[ai][retry] giving up after {} attempt(s); provider={:?} api_style={:?} endpoint={} error={}",
+                    attempt + 1,
+                    config.provider,
+                    config.api_style,
+                    redact_url_query(&resolve_endpoint(config)),
+                    redact_secrets(&err, &secrets)
+                );
+                return Err(err);
+            }
         }
     }
 
@@ -3062,6 +3523,7 @@ where
     Fut: std::future::Future<Output = Result<T, String>>,
 {
     let max = config.max_retries.unwrap_or(DEFAULT_MAX_RETRIES).min(MAX_MAX_RETRIES);
+    let secrets = sensitive_values(config);
     let mut last_err: Option<String> = None;
 
     for attempt in 0..=max {
@@ -3091,10 +3553,27 @@ where
             Err(err)
                 if attempt < max && is_retryable_error(&err) && !emitted.load(std::sync::atomic::Ordering::Relaxed) =>
             {
-                log::warn!("[ai][stream_retry] transient error before content, will retry: {err}");
+                log::warn!(
+                    "[ai][stream_retry] transient error before content, will retry: {}",
+                    redact_secrets(&err, &secrets)
+                );
                 last_err = Some(err);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                // Cancellation is a user action, not a failure worth logging.
+                if err != AGENT_CANCELLED_ERROR {
+                    log::warn!(
+                        "[ai][stream_retry] giving up after {} attempt(s); provider={:?} api_style={:?} endpoint={} emitted={} error={}",
+                        attempt + 1,
+                        config.provider,
+                        config.api_style,
+                        redact_url_query(&resolve_endpoint(config)),
+                        emitted.load(std::sync::atomic::Ordering::Relaxed),
+                        redact_secrets(&err, &secrets)
+                    );
+                }
+                return Err(err);
+            }
         }
     }
 
@@ -3236,6 +3715,7 @@ async fn stream_claude(
     let headers = claude_headers(&request.config)?;
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -3243,6 +3723,7 @@ async fn stream_claude(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -3251,9 +3732,9 @@ async fn stream_claude(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Claude request failed: {e}"))?;
+                .map_err(|e| format_request_error("Claude", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "Claude API error").await);
+                return Err(stream_error(res, "Claude API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -3264,7 +3745,7 @@ async fn stream_claude(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("Claude", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -3284,7 +3765,7 @@ async fn stream_claude(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event, &secrets) {
                                     return Err(error);
                                 }
                                 if let Some(text) = claude_stream_text(&event) {
@@ -3338,6 +3819,7 @@ async fn stream_openai(
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let is_minimax = matches!(request.config.provider, AiProvider::MiniMax);
     let minimax_semantics = minimax_stream_semantics(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3347,6 +3829,7 @@ async fn stream_openai(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
@@ -3356,9 +3839,9 @@ async fn stream_openai(
                 .json(&body_obj)
                 .send()
                 .await
-                .map_err(|e| format!("AI request failed: {e}"))?;
+                .map_err(|e| format_request_error("AI", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "API error").await);
+                return Err(stream_error(res, "API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -3369,7 +3852,7 @@ async fn stream_openai(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("AI", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -3472,6 +3955,7 @@ async fn stream_responses_api(
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -3479,6 +3963,7 @@ async fn stream_responses_api(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -3487,9 +3972,9 @@ async fn stream_responses_api(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("AI request failed: {e}"))?;
+                .map_err(|e| format_request_error("AI", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "API error").await);
+                return Err(stream_error(res, "API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -3499,7 +3984,7 @@ async fn stream_responses_api(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("AI", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -3566,6 +4051,7 @@ async fn stream_gemini(
     let api_key = normalized_api_key(&request.config).to_string();
     let headers = custom_headers(&request.config)?;
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -3574,6 +4060,7 @@ async fn stream_gemini(
         let api_key = api_key.clone();
         let headers = headers.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -3584,9 +4071,9 @@ async fn stream_gemini(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format_transport_error("Gemini", e))?;
+                .map_err(|e| format_request_error("Gemini", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "Gemini API error").await);
+                return Err(stream_error(res, "Gemini API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -3596,7 +4083,7 @@ async fn stream_gemini(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.without_url().to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("Gemini", e))?;
                         buf.extend_from_slice(&chunk);
 
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -3803,6 +4290,7 @@ async fn stream_claude_with_tools(
     let headers = claude_headers(&request.config)?;
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -3810,6 +4298,7 @@ async fn stream_claude_with_tools(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -3818,9 +4307,9 @@ async fn stream_claude_with_tools(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("Claude request failed: {e}"))?;
+                .map_err(|e| format_request_error("Claude", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "Claude API error").await);
+                return Err(stream_error(res, "Claude API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -3835,7 +4324,7 @@ async fn stream_claude_with_tools(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("Claude", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -3855,7 +4344,7 @@ async fn stream_claude_with_tools(
                             }
 
                             if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event) {
+                                if let Some(error) = anthropic_stream_error(event_name.as_deref(), &event, &secrets) {
                                     return Err(error);
                                 }
                                 let event_type = event["type"].as_str().unwrap_or("");
@@ -3992,6 +4481,7 @@ async fn stream_openai_with_tools(
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let is_minimax = matches!(request.config.provider, AiProvider::MiniMax);
     let minimax_semantics = minimax_stream_semantics(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4001,6 +4491,7 @@ async fn stream_openai_with_tools(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let mut minimax_state = MiniMaxStreamState::new(minimax_semantics);
@@ -4011,9 +4502,9 @@ async fn stream_openai_with_tools(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("AI request failed: {e}"))?;
+                .map_err(|e| format_request_error("AI", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "API error").await);
+                return Err(stream_error(res, "API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -4025,7 +4516,7 @@ async fn stream_openai_with_tools(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("AI", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -4166,6 +4657,7 @@ async fn stream_responses_with_tools(
 
     let endpoint = resolve_endpoint(&request.config);
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -4173,6 +4665,7 @@ async fn stream_responses_with_tools(
         let headers = headers.clone();
         let endpoint = endpoint.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -4181,9 +4674,9 @@ async fn stream_responses_with_tools(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format!("AI request failed: {e}"))?;
+                .map_err(|e| format_request_error("AI", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "API error").await);
+                return Err(stream_error(res, "API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -4198,7 +4691,7 @@ async fn stream_responses_with_tools(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("AI", e))?;
                         buf.extend_from_slice(&chunk);
 
                         let mut finished = false;
@@ -4418,6 +4911,7 @@ async fn stream_gemini_with_tools(
     let api_key = normalized_api_key(&request.config).to_string();
     let headers = custom_headers(&request.config)?;
     let config = request.config.clone();
+    let secrets = sensitive_values(&request.config);
     let emitted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     with_stream_retry(&config, &emitted, Some(cancelled), || {
@@ -4426,6 +4920,7 @@ async fn stream_gemini_with_tools(
         let api_key = api_key.clone();
         let headers = headers.clone();
         let session_id = session_id.to_string();
+        let secrets = secrets.clone();
         let emitted = emitted.clone();
         async move {
             let res = client
@@ -4436,9 +4931,9 @@ async fn stream_gemini_with_tools(
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| format_transport_error("Gemini", e))?;
+                .map_err(|e| format_request_error("Gemini", e))?;
             if !res.status().is_success() {
-                return Err(stream_error(res, "Gemini API error").await);
+                return Err(stream_error(res, "Gemini API error", &secrets).await);
             }
 
             let mut byte_stream = res.bytes_stream();
@@ -4450,7 +4945,7 @@ async fn stream_gemini_with_tools(
                 tokio::select! {
                     chunk = byte_stream.next() => {
                         let Some(chunk) = chunk else { break };
-                        let chunk = chunk.map_err(|e| e.without_url().to_string())?;
+                        let chunk = chunk.map_err(|e| format_response_body_error("Gemini", e))?;
                         buf.extend_from_slice(&chunk);
 
                         while let Some(line) = drain_next_stream_line(&mut buf)? {
@@ -4617,12 +5112,13 @@ mod tests {
         build_openai_chat_messages, build_responses_input_with_tools, build_responses_input_with_tools_variant,
         call_claude, call_openai_compatible, classify_error, claude_headers, claude_system_prompt, complete,
         decorate_chat_completion_body, drain_next_stream_line, emit_gemini_tool_call_parts,
-        emit_responses_function_call_item, format_transport_error, gemini_text, is_agens_endpoint, is_kimi_model,
-        is_retryable_error, list_models_core, maybe_bearer_headers, maybe_tag_retry_after, measure_first_stream_chunk,
-        merge_global_max_retries, minimax_stream_semantics, ollama_selected_model_tool_support, openai_message_content,
-        openai_response_text, openai_stream_reasoning, openai_stream_text, parse_dynamic_effort_capability,
-        parse_gemini_model_list_response, parse_model_list_response, parse_retry_after, parse_retry_after_secs,
-        provider_requires_api_key, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core,
+        emit_responses_function_call_item, explicit_error_category, format_request_error, format_response_body_error,
+        gemini_text, is_agens_endpoint, is_kimi_model, is_retryable_error, list_models_core, maybe_bearer_headers,
+        maybe_tag_retry_after, measure_first_stream_chunk, merge_global_max_retries, minimax_stream_semantics,
+        ollama_selected_model_tool_support, openai_message_content, openai_response_text, openai_stream_reasoning,
+        openai_stream_text, parse_dynamic_effort_capability, parse_gemini_model_list_response,
+        parse_model_list_response, parse_retry_after, parse_retry_after_secs, provider_requires_api_key,
+        redact_secrets, redact_url_query, resolve_endpoint, resolve_gemini_stream_endpoint, resolve_model_effort_core,
         resolve_model_list_endpoint, resolve_ollama_show_endpoint, responses_function_tool,
         responses_max_output_tokens, responses_stream_text, responses_text, responses_token_usage,
         retain_ollama_completion_models, retry_after_secs, set_chat_completion_token_limit, stream, stream_claude,
@@ -4634,6 +5130,7 @@ mod tests {
         StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, CONTENT_TYPE,
         MINIMAX_REASONING_DETAILS_PAYLOAD_KEY, TEST_PROMPT,
     };
+    use super::{redacted_http_detail, sensitive_values};
 
     #[test]
     fn structured_image_attachment_becomes_openai_image_content() {
@@ -5461,7 +5958,7 @@ mod tests {
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
 
         let error =
-            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap_err();
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false, &[]).await.unwrap_err();
 
         assert!(error.contains("finishReason=MAX_TOKENS"));
         assert!(error.contains("thoughts=256"));
@@ -5484,7 +5981,7 @@ mod tests {
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
 
         let error =
-            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap_err();
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false, &[]).await.unwrap_err();
 
         assert!(error.contains("blockReason=SAFETY"));
         assert!(error.contains("HARM_CATEGORY_DANGEROUS_CONTENT:HIGH:blocked"));
@@ -5504,23 +6001,28 @@ mod tests {
             .unwrap_err();
 
         assert!(error.url().is_some_and(|url| url.as_str().contains(secret)));
-        let message = format_transport_error("Gemini", error);
+        let message = format_request_error("Gemini", error);
         assert!(!message.contains(secret));
         assert!(!message.contains("?key="));
+        // The failure is tagged for classification and carries the source chain
+        // that `reqwest::Error`'s `Display` alone never exposed (#8658).
+        assert!(message.starts_with("[network] Gemini request failed: "), "unexpected shape: {message}");
+        assert!(message.contains(" -> "), "cause chain missing: {message}");
+        assert!(is_retryable_error(&message), "transport failure must be retryable: {message}");
     }
 
     #[tokio::test]
     async fn connection_probe_distinguishes_empty_body_from_non_sse_proxy_response() {
         let empty = futures::stream::empty::<Result<bytes::Bytes, reqwest::Error>>();
         let empty_error =
-            measure_first_stream_chunk(empty, std::time::Instant::now(), false, true, false).await.unwrap_err();
+            measure_first_stream_chunk(empty, std::time::Instant::now(), false, true, false, &[]).await.unwrap_err();
         assert!(empty_error.contains("response body was empty"));
         assert!(empty_error.contains("endpoint or proxy"));
         assert_eq!(classify_error(&empty_error), "emptyResponse");
 
         let proxy = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from_static(b"proxy response"))]);
         let proxy_error =
-            measure_first_stream_chunk(proxy, std::time::Instant::now(), false, true, false).await.unwrap_err();
+            measure_first_stream_chunk(proxy, std::time::Instant::now(), false, true, false, &[]).await.unwrap_err();
         assert!(proxy_error.contains("14 bytes but no SSE data events"));
         assert!(proxy_error.contains("proxy streaming support"));
         assert_eq!(classify_error(&proxy_error), "emptyResponse");
@@ -5534,7 +6036,7 @@ mod tests {
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}")))]);
 
         let (_, text) =
-            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false).await.unwrap();
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, true, false, &[]).await.unwrap();
 
         assert_eq!(text, "OK");
     }
@@ -6190,6 +6692,37 @@ mod tests {
             AiConfig { max_output_tokens: None, endpoint: "https://api.example.com/v2".to_string(), ..config.clone() };
         assert_eq!(resolve_endpoint(&config_v2), "https://api.example.com/v2/chat/completions");
 
+        // An explicit OpenAI-style path follows the selected API style, so a
+        // Responses payload can never be posted to the chat route (and vice
+        // versa) — the misconfiguration behind the reported connection failure.
+        let explicit_chat = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://api.example.com/v1/chat/completions".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(resolve_endpoint(&explicit_chat), "https://api.example.com/v1/chat/completions");
+        let explicit_chat_responses = AiConfig { api_style: AiApiStyle::Responses, ..explicit_chat.clone() };
+        assert_eq!(resolve_endpoint(&explicit_chat_responses), "https://api.example.com/v1/responses");
+
+        let explicit_responses = AiConfig {
+            max_output_tokens: None,
+            api_style: AiApiStyle::Responses,
+            endpoint: "https://api.example.com/v1/responses".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(resolve_endpoint(&explicit_responses), "https://api.example.com/v1/responses");
+        let explicit_responses_completions =
+            AiConfig { api_style: AiApiStyle::Completions, ..explicit_responses.clone() };
+        assert_eq!(resolve_endpoint(&explicit_responses_completions), "https://api.example.com/v1/chat/completions");
+
+        // `/messages` is not an OpenAI route, so it is kept verbatim.
+        let explicit_messages = AiConfig {
+            max_output_tokens: None,
+            endpoint: "https://api.example.com/v1/messages".to_string(),
+            ..config.clone()
+        };
+        assert_eq!(resolve_endpoint(&explicit_messages), "https://api.example.com/v1/messages");
+
         // Full path already specified — no change
         let config_full = AiConfig {
             max_output_tokens: None,
@@ -6783,6 +7316,30 @@ mod tests {
 
         assert!(is_agens_endpoint(&agens));
         assert!(!is_agens_endpoint(&other));
+
+        // #8658: `apihub.agnes-ai.com` is one of the published Agens hosts and
+        // must receive the same compatibility treatment as `api.agnes-ai.cn`.
+        for endpoint in [
+            "https://apihub.agnes-ai.com/v1",
+            "https://apihub.agnes-ai.com/v1/responses",
+            "https://api.agnes-ai.com/v1",
+            "https://agnes-ai.com/v1",
+            "https://API.AGNES-AI.CN/v1",
+            "https://api.agnes-ai.cn.",
+        ] {
+            let config = AiConfig { endpoint: endpoint.to_string(), ..agens.clone() };
+            assert!(is_agens_endpoint(&config), "{endpoint} must be treated as an Agens host");
+        }
+
+        // Host suffix matching must not be spoofed by look-alike hosts.
+        for endpoint in [
+            "https://agnes-ai.com.evil.example/v1",
+            "https://notagnes-ai.com/v1",
+            "https://apihub.agnes-ai.com.evil.example/v1",
+        ] {
+            let config = AiConfig { endpoint: endpoint.to_string(), ..agens.clone() };
+            assert!(!is_agens_endpoint(&config), "{endpoint} must not be treated as an Agens host");
+        }
     }
 
     #[test]
@@ -7644,7 +8201,7 @@ mod tests {
         let stream = futures::stream::iter([Ok::<_, reqwest::Error>(bytes::Bytes::from(format!("data: {event}\n\n")))]);
 
         let (_, text) =
-            measure_first_stream_chunk(stream, std::time::Instant::now(), false, false, true).await.unwrap();
+            measure_first_stream_chunk(stream, std::time::Instant::now(), false, false, true, &[]).await.unwrap();
 
         assert_eq!(text, "Ready");
     }
@@ -8041,6 +8598,45 @@ mod tests {
         assert_eq!(calls, 2);
     }
 
+    /// End-to-end proof for #8658: a **real** transport failure (connection
+    /// refused) must be tagged, classified as retryable, and retried.
+    /// `transport_failures_are_classified_and_retryable` covers classification in
+    /// isolation; this test proves the retry actually happens.
+    #[tokio::test]
+    async fn retry_recovers_from_a_real_transport_failure() {
+        let cfg = retry_config(Some(2));
+        // Reserve a port, then drop the listener so the connection is refused.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let client = reqwest::Client::new();
+        let mut attempts = 0;
+        let result = with_retry(&cfg, || {
+            attempts += 1;
+            let client = client.clone();
+            async move {
+                if attempts == 1 {
+                    let error = client
+                        .post(format!("http://127.0.0.1:{port}/v1/responses"))
+                        .json(&serde_json::json!({ "model": "test" }))
+                        .send()
+                        .await
+                        .map_err(|error| format_request_error("AI", error))
+                        .unwrap_err();
+                    assert!(error.starts_with("[network] AI request failed: "), "unexpected error: {error}");
+                    Err(error)
+                } else {
+                    Ok::<&str, String>("recovered")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result, Ok("recovered"));
+        assert_eq!(attempts, 2, "the transport failure must have been retried once");
+    }
+
     #[tokio::test]
     async fn retry_exhausts_and_returns_last_error() {
         let cfg = retry_config(Some(1)); // max 1 → 2 attempts total
@@ -8244,6 +8840,151 @@ mod tests {
         assert!(!is_retryable_error("[auth] Claude API error (HTTP 403: forbidden)"));
     }
 
+    /// Regression for #8658: a transport failure renders as
+    /// `error sending request for url (…)`, which matched none of the network
+    /// keywords, so it was classified `unknown` and never retried.
+    #[test]
+    fn transport_failures_are_classified_and_retryable() {
+        // Untagged form, produced by builds before this change and by providers
+        // that forward raw reqwest messages.
+        let legacy = "AI request failed: error sending request for url (https://apihub.agnes-ai.com/v1/responses)";
+        assert_eq!(classify_error(legacy), "network");
+        assert!(is_retryable_error(legacy), "transport failure must be retryable: {legacy}");
+
+        // Tagged form produced by `format_request_error`.
+        let tagged = "[network] AI request failed: error sending request -> client error (Connect)";
+        assert_eq!(classify_error(tagged), "network");
+        assert!(is_retryable_error(tagged));
+
+        // Other transport-level markers are retryable as well.
+        assert_eq!(classify_error("unexpected eof while reading response"), "network");
+        assert_eq!(classify_error("connection closed before message completed"), "network");
+        assert_eq!(classify_error("broken pipe"), "network");
+
+        // Non-transport failures keep their classification.
+        assert_eq!(classify_error("AI request failed: invalid api key"), "auth");
+        assert_eq!(classify_error("AI request failed: model not found"), "modelNotFound");
+        assert!(!is_retryable_error("AI request failed: invalid api key"));
+
+        // Mid-stream body truncation, surfaced to users as "Agent stream
+        // stopped before completion". reqwest's Display is only
+        // `error decoding response body`, so it used to be `unknown` and was
+        // never retried.
+        assert_eq!(classify_error("error decoding response body"), "network");
+        assert!(is_retryable_error("error decoding response body"));
+        assert_eq!(classify_error("error reading a body from connection"), "network");
+        assert_eq!(classify_error("Agent stream stopped before completion: error decoding response body."), "network");
+    }
+
+    /// End-to-end proof that a mid-stream body truncation keeps its real cause
+    /// and is classified as a retryable network failure.
+    ///
+    /// The server advertises a longer body than it sends and then closes, so the
+    /// client only sees `error decoding response body`; the actionable cause
+    /// lives on the error's source chain and must survive into the diagnostic.
+    #[tokio::test]
+    async fn truncated_stream_body_keeps_cause_chain_and_is_retryable() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = std::io::Read::read(&mut socket, &mut buf);
+                let _ = std::io::Write::write_all(
+                    &mut socket,
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n",
+                );
+                let _ = std::io::Write::write_all(&mut socket, b"data: {\"delta\":\"par");
+                let _ = std::io::Write::flush(&mut socket);
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        let error = reqwest::Client::new()
+            .get(format!("http://{addr}/v1/responses"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap_err();
+        let message = format_response_body_error("AI", error);
+        server.join().ok();
+
+        assert!(message.starts_with("[network] AI response body failed: "), "unexpected shape: {message}");
+        assert!(message.contains("error decoding response body"), "top-level cause lost: {message}");
+        assert!(message.contains("error reading a body from connection"), "real cause lost: {message}");
+        assert!(message.contains(" -> "), "cause chain missing: {message}");
+        assert!(is_retryable_error(&message), "mid-stream truncation must be retryable: {message}");
+    }
+
+    /// An explicit `[category]` tag is authoritative because its producer
+    /// inspected the underlying error instead of guessing from the text.
+    #[test]
+    fn explicit_category_prefixes_win_over_keyword_matching() {
+        assert_eq!(explicit_error_category("[network] boom"), Some("network"));
+        assert_eq!(explicit_error_category("  [timeout] boom"), Some("timeout"));
+        assert_eq!(explicit_error_category("[retry-after:12][network] boom"), Some("network"));
+        // Tags owned by other producers fall through to keyword matching.
+        assert_eq!(explicit_error_category("[claudeCodeNotInstalled] boom"), None);
+        assert_eq!(explicit_error_category("[modelDiscoveryUnsupported] boom"), None);
+        assert_eq!(explicit_error_category("no tag"), None);
+
+        // `maybe_tag_retry_after` prepends its own bracket group.
+        assert_eq!(classify_error("[retry-after:30][auth] Claude API error (HTTP 401)"), "auth");
+        assert!(!is_retryable_error("[retry-after:30][auth] Claude API error (HTTP 401)"));
+    }
+
+    #[test]
+    fn redact_url_query_strips_credentials_and_keeps_surrounding_text() {
+        assert_eq!(
+            redact_url_query("error for url (https://example.com/v1/models?key=secret)"),
+            "error for url (https://example.com/v1/models)"
+        );
+        assert_eq!(
+            redact_url_query("http://127.0.0.1:9/x?token=abc then api.openai.com"),
+            "http://127.0.0.1:9/x then api.openai.com"
+        );
+        assert_eq!(redact_url_query("https://example.com/v1#fragment"), "https://example.com/v1");
+        // Text without a URL is returned unchanged, including bare question marks.
+        assert_eq!(redact_url_query("why? because"), "why? because");
+
+        // Credentials in the URL user-info must not survive either: the four
+        // `[ai][test]` / `[ai][retry]` / `[ai][stream_retry]` log sites pass the
+        // resolved endpoint straight into this function.
+        assert_eq!(redact_url_query("https://user:password@gateway.example/v1"), "https://gateway.example/v1");
+        assert_eq!(redact_url_query("https://token@gateway.example/v1/models"), "https://gateway.example/v1/models");
+        assert_eq!(
+            redact_url_query("https://user:password@gateway.example/v1/models?key=secret#top"),
+            "https://gateway.example/v1/models"
+        );
+        // A `@` after the authority is a path character, not a credential.
+        assert_eq!(redact_url_query("https://gateway.example/v1/@me"), "https://gateway.example/v1/@me");
+        // Every URL in a longer diagnostic is redacted in place.
+        assert_eq!(
+            redact_url_query(
+                "tried https://user:password@one.example/v1?key=secret then http://two.example:8080/v2#frag"
+            ),
+            "tried https://one.example/v1 then http://two.example:8080/v2"
+        );
+        // URL schemes are case-insensitive (RFC 3986 §3.1), so an upper-case scheme
+        // must be redacted exactly like a lower-case one.
+        assert_eq!(
+            redact_url_query("HTTPS://user:password@gateway.example/v1/models?key=secret"),
+            "HTTPS://gateway.example/v1/models"
+        );
+        assert_eq!(redact_url_query("HTTP://token@gateway.example/v1"), "HTTP://gateway.example/v1");
+        // `resolve_endpoint` output is what the log sites actually redact, so a
+        // credentialed endpoint must come out clean once resolved too.
+        let credentialed = AiConfig {
+            max_output_tokens: None,
+            provider: AiProvider::OpenaiCompatible,
+            endpoint: "https://user:password@gateway.example/v1".to_string(),
+            ..test_config(AiProvider::OpenaiCompatible)
+        };
+        assert_eq!(redact_url_query(&resolve_endpoint(&credentialed)), "https://gateway.example/v1/chat/completions");
+    }
+
     // ------------------------------------------------------------------
     // stream_error integration tests (real reqwest::Response)
     // ------------------------------------------------------------------
@@ -8264,7 +9005,7 @@ mod tests {
             .send()
             .await
             .expect("request to test server failed");
-        stream_error(resp, "TestProvider").await
+        stream_error(resp, "TestProvider", &[]).await
     }
 
     #[tokio::test]
@@ -8295,7 +9036,7 @@ mod tests {
                         .send()
                         .await
                         .expect("request failed");
-                    Err(stream_error(resp, "TestProvider").await)
+                    Err(stream_error(resp, "TestProvider", &[]).await)
                 } else {
                     Ok::<(), String>(())
                 }
@@ -8339,7 +9080,7 @@ mod tests {
                         .send()
                         .await
                         .expect("request failed");
-                    Err(stream_error(resp, "TestProvider").await)
+                    Err(stream_error(resp, "TestProvider", &[]).await)
                 } else {
                     Ok::<(), String>(())
                 }
@@ -8369,6 +9110,91 @@ mod tests {
         let err = call_stream_error(401, "Unauthorized", r#"{"error":{"message":"invalid api key"}}"#, None).await;
         assert!(err.contains("[auth]"), "got: {err}");
         assert!(err.contains("HTTP 401"), "got: {err}");
+        assert!(!is_retryable_error(&err), "401 must not be retryable");
+    }
+
+    // ------------------------------------------------------------------
+    // credential redaction (stream + non-stream + retry logs)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sensitive_values_collects_api_key_and_custom_header_values() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4",
+            "apiKey": "short",
+            "customHeaders": {
+                "X-Gateway-Token": "gateway-token-1234",
+                "Authorization": "Bearer gateway-token-1234",
+                "X-Api-Key": "tiny",
+                "X-Short": "abc",
+            },
+        }))
+        .unwrap();
+
+        let secrets = sensitive_values(&config);
+        assert!(secrets.iter().any(|value| value == "short"), "got: {secrets:?}");
+        assert!(secrets.iter().any(|value| value == "gateway-token-1234"), "got: {secrets:?}");
+        assert!(secrets.iter().any(|value| value == "Bearer gateway-token-1234"), "got: {secrets:?}");
+        assert!(secrets.iter().any(|value| value == "tiny"), "got: {secrets:?}");
+        // Values below the minimum length are ignored so ordinary prose is not mangled.
+        assert!(!secrets.iter().any(|value| value == "abc"), "got: {secrets:?}");
+    }
+
+    #[test]
+    fn redact_secrets_removes_bare_custom_authorization_credentials() {
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4",
+            "apiKey": "short",
+            "customHeaders": { "Authorization": "Bearer gateway-token-1234" },
+        }))
+        .unwrap();
+
+        let detail = redact_secrets("upstream rejected token gateway-token-1234", &sensitive_values(&config));
+        assert!(!detail.contains("gateway-token-1234"), "credential leaked: {detail}");
+        assert!(detail.contains("***"), "redaction marker missing: {detail}");
+    }
+
+    #[test]
+    fn redact_secrets_scrubs_keys_headers_and_credentialed_urls() {
+        let secrets = vec!["sk-super-secret-key".to_string(), "gateway-token-1234".to_string()];
+        let body = serde_json::json!({
+            "error": {
+                "message": "invalid key sk-super-secret-key; Authorization: Bearer gateway-token-1234; see https://gw.example.com/v1?key=sk-super-secret-key"
+            }
+        });
+
+        let detail = redacted_http_detail(&body, "fallback".to_string(), &secrets);
+        assert!(!detail.contains("sk-super-secret-key"), "api key leaked: {detail}");
+        assert!(!detail.contains("gateway-token-1234"), "custom header value leaked: {detail}");
+        assert!(!detail.contains("key=sk-super-secret-key"), "credentialed URL query leaked: {detail}");
+        assert!(detail.contains("***"), "redaction marker missing: {detail}");
+
+        // Detail length is bounded so a proxy HTML page cannot flood the log.
+        let huge = serde_json::json!({ "error": { "message": "y".repeat(4000) } });
+        let bounded = redacted_http_detail(&huge, "fallback".to_string(), &[]);
+        assert!(
+            bounded.chars().count() <= super::MAX_ERROR_DETAIL_CHARS + 3,
+            "detail must be bounded, got {} chars",
+            bounded.chars().count()
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_redacts_credentials_echoed_by_upstream() {
+        // An upstream that echoes the request (proxy / misconfigured gateway) must
+        // not turn the error body into a credential leak in the retry log.
+        let body = r#"{"error":{"message":"invalid key sk-live-secret-9999 for https://api.example.com/v1?key=sk-live-secret-9999"}}"#;
+        let (url, _server) = spawn_error_server_with_body(401, "Unauthorized", body, None).await;
+        let resp = reqwest::Client::new().post(&url).send().await.expect("request to test server failed");
+
+        let secrets = vec!["sk-live-secret-9999".to_string()];
+        let err = stream_error(resp, "TestProvider", &secrets).await;
+
+        assert!(!err.contains("sk-live-secret-9999"), "credential leaked in stream error: {err}");
+        assert!(err.contains("***"), "redaction marker missing: {err}");
+        assert!(err.contains("HTTP 401"), "status must be preserved: {err}");
         assert!(!is_retryable_error(&err), "401 must not be retryable");
     }
 
@@ -8476,5 +9302,189 @@ mod tests {
         server.abort();
         let requests = count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(requests, 1, "max_retries=0 should mean exactly 1 request, got {requests}");
+    }
+
+    // ------------------------------------------------------------------
+    // #8658 verification: what the connection test does with the two failure
+    // shapes shown in the report (transport failure / stream without text).
+    // ------------------------------------------------------------------
+
+    /// Spawns a TCP server that plays one scripted reply per connection.
+    ///
+    /// `None` drops the connection without any HTTP reply (a transport
+    /// failure); `Some(body)` answers `200 text/event-stream` with that body and
+    /// then closes the socket (EOF). The last script entry is reused for any
+    /// further connection. Returns `(base_url, request_count, request_lines,
+    /// handle)`; `request_lines` holds the request line of every connection
+    /// (`POST /v1/responses HTTP/1.1`), so a test can assert which route the
+    /// payload was actually sent to.
+    async fn spawn_scripted_stream_server(
+        replies: Vec<Option<String>>,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::atomic::AtomicU32>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count2 = count.clone();
+        let request_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_lines2 = request_lines.clone();
+
+        let handle = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let index = count2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as usize;
+                let mut buf = vec![0u8; 8192];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request_line = String::from_utf8_lossy(&buf[..read]).lines().next().unwrap_or_default().to_string();
+                if let Ok(mut seen) = request_lines2.lock() {
+                    seen.push(request_line);
+                }
+                if let Some(Some(body)) = replies.get(index).or_else(|| replies.last()) {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body.as_bytes()).await;
+                }
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        (url, count, request_lines, handle)
+    }
+
+    /// The five events the Agens gateway streamed before it closed the stream
+    /// in the report, with the last one carrying the visible text delta in the
+    /// standard Responses streaming shape.
+    const RESPONSES_STREAM_WITH_TEXT: &str = concat!(
+        "data: {\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.in_progress\"}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0}\n\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"OK\"}\n\n",
+    );
+
+    /// Same event count, but no event carries any text field at all — the shape
+    /// the report shows (`5 data event(s) and 5 JSON event(s)`, then EOF).
+    const RESPONSES_STREAM_WITHOUT_TEXT: &str = concat!(
+        "data: {\"type\":\"response.created\"}\n\n",
+        "data: {\"type\":\"response.in_progress\"}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0}\n\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0}\n\n",
+        "data: {\"type\":\"response.completed\",\"output_index\":0}\n\n",
+    );
+
+    /// Control shape: Chat Completions streaming delta, which the probe already
+    /// understands.
+    const CHAT_STREAM_WITH_TEXT: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
+
+    fn responses_test_config(url: &str, max_retries: u32) -> AiConfig {
+        serde_json::from_value(serde_json::json!({
+            "provider": "openai",
+            "apiKey": "sk-test",
+            "model": "agnes-2.5-flash",
+            "endpoint": url,
+            "apiStyle": "responses",
+            "maxRetries": max_retries,
+        }))
+        .unwrap()
+    }
+
+    /// `apiStyle=responses` + a normal Responses streaming reply must be a
+    /// successful connection test.
+    #[tokio::test]
+    async fn test_connection_core_accepts_responses_stream_text_delta() {
+        let (url, count, _request_lines, server) =
+            spawn_scripted_stream_server(vec![Some(RESPONSES_STREAM_WITH_TEXT.to_string())]).await;
+        let config = responses_test_config(&url, 0);
+
+        let result = test_connection_core(&config).await;
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        server.abort();
+
+        assert!(result.is_ok(), "a Responses stream carrying text must connect (requests={requests}): {result:?}");
+    }
+
+    /// Control: the Chat Completions delta shape is recognised today.
+    #[tokio::test]
+    async fn test_connection_core_accepts_chat_stream_text_delta() {
+        let (url, count, _request_lines, server) =
+            spawn_scripted_stream_server(vec![Some(CHAT_STREAM_WITH_TEXT.to_string())]).await;
+        let config = responses_test_config(&url, 0);
+
+        let result = test_connection_core(&config).await;
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        server.abort();
+
+        assert!(result.is_ok(), "the Chat delta shape must connect (requests={requests}): {result:?}");
+    }
+
+    /// Regression for the reported misconfiguration: a provider whose endpoint was
+    /// saved as `/chat/completions` while `apiStyle=responses` must still POST the
+    /// Responses payload to `/responses`. The old resolution kept the chat path,
+    /// so the gateway answered in a shape the probe could not read.
+    #[tokio::test]
+    async fn test_connection_core_sends_responses_payload_to_the_responses_route() {
+        let (url, _count, request_lines, server) =
+            spawn_scripted_stream_server(vec![Some(RESPONSES_STREAM_WITH_TEXT.to_string())]).await;
+        let config: AiConfig = serde_json::from_value(serde_json::json!({
+            "provider": "openai-compatible",
+            "apiKey": "sk-test",
+            "model": "agnes-2.5-flash",
+            "endpoint": format!("{url}/v1/chat/completions"),
+            "apiStyle": "responses",
+            "maxRetries": 0,
+        }))
+        .unwrap();
+
+        let result = test_connection_core(&config).await;
+        server.abort();
+
+        let seen = request_lines.lock().map(|guard| guard.clone()).unwrap_or_default();
+        assert_eq!(seen.len(), 1, "expected exactly one request, saw {seen:?}");
+        assert!(
+            seen[0].starts_with("POST /v1/responses "),
+            "a Responses payload must not be sent to the chat route: {:?}",
+            seen[0]
+        );
+        assert!(result.is_ok(), "the Responses stream must connect: {result:?}");
+    }
+
+    /// A dropped connection must be retried and must recover on the next
+    /// attempt (mode A of the report).
+    #[tokio::test]
+    async fn test_connection_core_recovers_from_dropped_connection() {
+        let (url, count, _request_lines, server) =
+            spawn_scripted_stream_server(vec![None, Some(CHAT_STREAM_WITH_TEXT.to_string())]).await;
+        let config = responses_test_config(&url, 2);
+
+        let result = test_connection_core(&config).await;
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        server.abort();
+
+        assert!(result.is_ok(), "the retry must recover from one dropped connection: {result:?}");
+        assert_eq!(requests, 2, "expected exactly 2 attempts, got {requests}");
+    }
+
+    /// A stream that never yields visible text is retried but still fails —
+    /// retrying cannot repair a persistently text-less stream (mode B).
+    #[tokio::test]
+    async fn test_connection_core_retries_but_cannot_repair_text_less_stream() {
+        let (url, count, _request_lines, server) =
+            spawn_scripted_stream_server(vec![Some(RESPONSES_STREAM_WITHOUT_TEXT.to_string())]).await;
+        let config = responses_test_config(&url, 2);
+
+        let result = test_connection_core(&config).await;
+        let requests = count.load(std::sync::atomic::Ordering::SeqCst);
+        server.abort();
+
+        let error = result.expect_err("a text-less stream cannot succeed");
+        assert!(error.contains("without text"), "unexpected error: {error}");
+        assert!(error.contains("[emptyResponse]"), "unexpected category: {error}");
+        assert_eq!(requests, 3, "expected 1 attempt + 2 retries, got {requests}");
     }
 }

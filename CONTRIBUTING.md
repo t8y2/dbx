@@ -104,6 +104,13 @@ pnpm test
 
 For frontend or package changes, run the relevant package tests under `packages/` or `packages/app-tests/`.
 
+Test quality matters more than test count:
+
+- Exercise production functions or mounted components and assert observable results, state changes, errors, or emitted events. Mock external boundaries, not the behavior under test.
+- Do not copy the implementation into a test or use source-string matching to pin class names, local variable names, template fragments, or helper-call spelling. These checks break on harmless refactors without proving runtime behavior. Check layout in a browser rather than inferring it from CSS strings.
+- Extend the existing behavior suite for a regression instead of adding a second source-wiring snapshot. Use table-driven cases when only the inputs and expected outputs differ.
+- File-content checks are appropriate for shipped artifacts, permissions, compatibility rules, and cross-runtime contracts. Keep safety guards until equivalent behavior coverage exists; do not delete a test merely because it reads files, uses mocks, or runs slowly.
+
 ### Documentation
 
 User-facing docs live in two places:

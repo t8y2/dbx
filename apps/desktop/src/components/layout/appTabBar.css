@@ -483,10 +483,24 @@
 }
 
 .tab-group-chevron {
-  width: 0.75rem;
-  height: 0.75rem;
+  width: 0.875rem;
+  height: 0.875rem;
   flex: none;
-  transition: transform 150ms ease;
+  transform: rotate(0deg);
+  transform-origin: center;
+  transition:
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    color 150ms ease;
+}
+
+.tab-group-chevron--collapsed {
+  transform: rotate(-90deg);
+}
+
+.tab-group-database-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex: none;
 }
 
 .tab-group-pin {
@@ -611,6 +625,11 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tab-group-color) 35%, transparent);
 }
 
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header:hover .tab-group-chevron,
+.app-tab-bar:not(.vertical-tab-layout) .tab-group-header--active .tab-group-chevron {
+  color: var(--tab-group-color);
+}
+
 .app-tab-bar:not(.vertical-tab-layout) .tab-group-header::after {
   content: "";
   position: absolute;
@@ -674,6 +693,29 @@
   background: var(--tab-group-color);
   pointer-events: none;
   opacity: 0.82;
+}
+
+/* Wrapped group entries can span multiple flex rows. Draw the accent on each
+ * member pill as well so every row keeps its own bottom rule when the entry's
+ * bounding box does not cover the pill's painted height. */
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode) .tab-group-tab::after {
+  content: "";
+  display: block;
+  position: absolute;
+  z-index: 1;
+  right: 0;
+  bottom: -0.5px;
+  left: 0;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+  opacity: 0.82;
+}
+
+.app-tab-bar:not(.vertical-tab-layout):has(.wrap-mode)[data-placement="bottom"] .tab-group-tab::after {
+  top: -0.5px;
+  bottom: auto;
 }
 
 /* Single-row entries clip their contents while animating group expansion.

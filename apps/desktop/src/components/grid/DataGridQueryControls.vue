@@ -41,6 +41,7 @@ const props = defineProps<{
   filteredColumns: string[];
   modeOptions: Array<{ value: DataGridContextFilterMode; labelKey: string }>;
   columnSearch: string;
+  applyOnlyBusy?: boolean;
   applyWhere: (value?: string) => void | boolean | Promise<void | boolean>;
   applyOrderBy: (value?: string) => void | boolean | Promise<void | boolean>;
   clearOrderBy: () => void | Promise<void>;
@@ -53,6 +54,7 @@ const emit = defineEmits<{
   "update:columnSearch": [value: string];
   ensureRule: [];
   addRule: [];
+  applyOnly: [id: string];
   applyFilters: [];
   resetFilters: [];
   clearFilters: [];
@@ -202,6 +204,8 @@ onUnmounted(onResizeEnd);
             <DataGridFilterBuilder
               ref="filterBuilderRef"
               :rules="rules"
+              :show-apply-only="true"
+              :apply-only-busy="applyOnlyBusy"
               :columns="[...columns]"
               :filtered-columns="filteredColumns"
               :mode-options="modeOptions"
@@ -209,6 +213,7 @@ onUnmounted(onResizeEnd);
               :disabled="!canUseWhereSearch"
               :show-header="false"
               @add="emit('addRule')"
+              @apply-only="emit('applyOnly', $event)"
               @apply="emit('applyFilters')"
               @reset="emit('resetFilters')"
               @clear="emit('clearFilters')"

@@ -29,6 +29,7 @@ const translations: Record<string, string> = {
   "tabs.tooltipDatabase": "Database:",
   "tabs.tooltipTable": "Table:",
   "tabs.tooltipTableComment": "Table Comment:",
+  "tree.events": "Events",
   "connectionGroup.ungroupedLabel": "Ungrouped",
   "editor.noDatabase": "No database",
 };
@@ -174,6 +175,11 @@ describe("tab group presentation", () => {
 
     expect(tabDisplayTitle(queryTab({ mode: "objects", title: "app objects" }), translate)).toBe("db");
     expect(tabDisplayTitle(queryTab({ mode: "objects", title: "public objects", objectBrowser: { schema: "public" } }), translate)).toBe("public@db");
+  });
+
+  it("uses the selected MySQL event name for event editor tabs", () => {
+    expect(tabDisplayTitle(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events", eventName: "cleanup_sessions" } }), translate)).toBe("cleanup_sessions@db");
+    expect(tabDisplayTitle(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events" } }), translate)).toBe("Events@db");
   });
 
   it("uses the live database and branch context for Dolt version control tabs", () => {
@@ -429,9 +435,37 @@ describe("statement execution markers", () => {
 
 describe("shared tab presentation helpers", () => {
   it("classifies tab icon colors without MQ special-casing", () => {
-    expect(tabIconClass(queryTab({ mode: "data" }))).toContain("text-emerald-600");
+    expect(tabIconClass(queryTab({ mode: "data" }))).toContain("text-green-500");
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "dynamodb-1", name: "DynamoDB", db_type: "dynamodb", driver_profile: "dynamodb", color: "" } as ConnectionConfig];
+    expect(tabIconClass(queryTab({ connectionId: "dynamodb-1", mode: "data" }))).toContain("text-amber-500");
     expect(tabIconClass(queryTab({ mode: "mq" }))).toBe("");
     expect(tabIconClass(queryTab({ externalSqlFileMissing: true }))).toContain("text-amber-600");
+    expect(tabIconClass(queryTab({ mode: "users" }))).toBe("text-primary");
+    expect(tabIconClass(queryTab({ mode: "objects", objectBrowser: { objectType: "tables", initialObjectFilter: "events", eventName: "cleanup_sessions" } }))).toBe("text-orange-400");
+  });
+
+  it("uses logical Redis database labels instead of the connection title", () => {
+    const connectionStore = useConnectionStore();
+    connectionStore.connections = [{ id: "redis-1", name: "Redis", db_type: "redis", driver_profile: "redis", color: "" } as ConnectionConfig];
+    expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "0", mode: "redis", sql: "" }), translate)).toBe("db0");
+    expect(tabDisplayTitle(queryTab({ connectionId: "redis-1", database: "1", mode: "redis", sql: "" }), translate)).toBe("db1");
+  });
+
+  it("keeps source tab colors aligned with the sidebar object palette", () => {
+    const colors = [
+      ["PROCEDURE", "text-blue-500"],
+      ["FUNCTION", "text-amber-500"],
+      ["SEQUENCE", "text-emerald-500"],
+      ["SYNONYM", "text-sky-500"],
+      ["PACKAGE", "text-cyan-500"],
+      ["PACKAGE_BODY", "text-cyan-400"],
+      ["TYPE", "text-violet-500"],
+      ["TYPE_BODY", "text-violet-400"],
+    ] as const;
+    for (const [objectType, color] of colors) {
+      expect(tabIconClass(queryTab({ objectSource: { name: "object", objectType } }))).toContain(color);
+    }
   });
 
   it("builds active/inactive color styles for classic and non-classic layouts", () => {

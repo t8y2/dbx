@@ -1381,4 +1381,41 @@ describe("select alias visibility", () => {
 
     expect(items.some((item) => item.label === "cnt")).toBe(true);
   });
+
+  it("does not prioritize HAVING aliases for dialects that reject them", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["postgres", "sqlserver", "db2", "oracle"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(false);
+      expect(context.selectAliases, databaseType).toEqual([]);
+    }
+  });
+
+  it("keeps HAVING alias priority for SQLite-family and DuckDB dialects", () => {
+    const sql = "SELECT COUNT(*) AS cnt, g FROM orders GROUP BY g HAVING cnt > ";
+    for (const databaseType of ["duckdb", "sqlite", "doris", "bigquery"] as const) {
+      const context = getSqlCompletionContext(sql, sql.length, { databaseType });
+
+      expect(context.prioritizeSelectAliases, databaseType).toBe(true);
+      expect(context.selectAliases, databaseType).toContain("cnt");
+    }
+  });
+
+  it("does not anchor alias visibility on identifiers containing HAVING", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE having_count > 1";
+    const context = getSqlCompletionContext(sql, sql.length, { databaseType: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(false);
+    expect(context.selectAliases).toEqual([]);
+  });
+
+  it("keeps alias visibility in ORDER BY after an identifier containing HAVING", () => {
+    const sql = "SELECT id AS uid FROM orders WHERE having_count > 1 ORDER BY uid";
+    const cursor = sql.length;
+    const context = getSqlCompletionContext(sql, cursor, { databaseType: "mysql" });
+
+    expect(context.prioritizeSelectAliases).toBe(true);
+    expect(context.selectAliases).toContain("uid");
+  });
 });

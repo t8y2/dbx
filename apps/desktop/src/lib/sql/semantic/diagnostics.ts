@@ -286,7 +286,7 @@ export function buildSqlSemanticDiagnostics(analysis: SqlReferenceAnalysis, sche
     // would otherwise show a false "Unknown column" diagnostic. Reuse the
     // completion context, which already extracts aliases and knows when they
     // are visible, to keep diagnostics aligned with executable SQL semantics.
-    if (schema.sql && isVisibleProjectionAlias(schema.sql, column.span, column.name)) continue;
+    if (schema.sql && isVisibleProjectionAlias(schema.sql, column.span, column.name, schema.databaseType)) continue;
 
     const displayName = column.qualifier ? `${column.qualifier}.${column.name}` : column.name;
     diagnostics.push({
@@ -327,10 +327,10 @@ export function isSqlVirtualTableReference(table: { name: string; schema?: strin
   return databaseType === "mysql" && !table.schema && normalizeName(table.name) === "dual";
 }
 
-function isVisibleProjectionAlias(sql: string, span: SqlTextSpan, name: string): boolean {
+function isVisibleProjectionAlias(sql: string, span: SqlTextSpan, name: string, databaseType?: DatabaseType): boolean {
   const range = sqlTextSpanToOffsetRange(sql, span);
   if (!range) return false;
-  const context = getSqlCompletionContext(sql, range.to);
+  const context = getSqlCompletionContext(sql, range.to, { databaseType });
   if (!context.prioritizeSelectAliases) return false;
   return context.selectAliases.some((alias) => normalizeName(alias) === normalizeName(name));
 }

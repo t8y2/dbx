@@ -19,6 +19,7 @@ import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/c
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
 import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
+import { supportsAliasReferenceInHaving } from "@/lib/database/databaseFeatureSupport";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -2303,9 +2304,9 @@ export function getSqlCompletionContext(sql: string, cursor: number, options: Sq
 
   // Check if we're in a context where columns are expected
   const selectListColumnContext = isInSelectListContext(beforeCursor);
-  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor) || !!insertInfo;
+  const inColumnContext = selectListColumnContext || isInColumnContext(beforeCursor, options.databaseType) || !!insertInfo;
   const inJoinConditionContext = isInJoinConditionContext(beforeCursor);
-  const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor);
+  const prioritizeSelectAliases = isInOrderOrGroupByContext(beforeCursor, options.databaseType);
   const inCallRoutineContext = isCallRoutineContext(beforeCursor);
   const inPotentialPackageMemberContext = !!qualifier && !exclusiveTableSuggestions && !insertInfo && !updateInfo?.inSetClause && !oracleTableFunctionContext;
   const suggestColumns = !!qualifier || !!updateInfo?.inSetClause || !!insertInfo || (inColumnContext && referencedTables.length > 0);
@@ -2531,11 +2532,11 @@ function parseTrailingIdentifierPart(input: string, endExclusive: number): { sta
 /**
  * Check if the content before cursor is in a column-expected context.
  */
-function isInColumnContext(beforeCursor: string): boolean {
+function isInColumnContext(beforeCursor: string, databaseType?: DatabaseType): boolean {
   if (!beforeCursor) return false;
 
   if (isInSelectListContext(beforeCursor)) return true;
-  if (isInOrderOrGroupByContext(beforeCursor)) return true;
+  if (isInOrderOrGroupByContext(beforeCursor, databaseType)) return true;
 
   // Strip string literals
   const cleaned = beforeCursor.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, "''");
@@ -2645,7 +2646,18 @@ function isInJoinConditionContext(beforeCursor: string): boolean {
   return /\b(?:on|and)\s+[a-z0-9_$]*$/i.test(currentJoinSegment);
 }
 
-function isInOrderOrGroupByContext(beforeCursor: string): boolean {
+function lastStandaloneKeywordIndex(cleaned: string, keyword: string): number {
+  // `\bhaving\b` — a bare `lastIndexOf("having")` also anchors on identifiers
+  // like `having_count` (t8y2/dbx#8953 review).
+  const pattern = new RegExp(`\\b${keyword}\\b`, "g");
+  let last = -1;
+  for (let match = pattern.exec(cleaned); match; match = pattern.exec(cleaned)) {
+    last = match.index;
+  }
+  return last;
+}
+
+function isInOrderOrGroupByContext(beforeCursor: string, databaseType?: DatabaseType): boolean {
   const cleaned = beforeCursor
     .replace(/'[^']*'/g, "''")
     .replace(/"[^"]*"/g, '""')
@@ -2653,13 +2665,20 @@ function isInOrderOrGroupByContext(beforeCursor: string): boolean {
   const lastOrderBy = cleaned.lastIndexOf("order by");
   const lastGroupBy = cleaned.lastIndexOf("group by");
   // MySQL (and DuckDB-like engines) also resolve SELECT aliases inside HAVING,
-  // so aliases stay visible there just like in ORDER BY/GROUP BY.
-  const lastHaving = cleaned.lastIndexOf("having");
+  // so aliases stay visible there just like in ORDER BY/GROUP BY — but only
+  // for dialects that accept them: PostgreSQL, SQL Server, and DB2 reject
+  // HAVING alias references, and their "Unknown column" diagnostic must keep
+  // flagging those (t8y2/dbx#8953 review).
+  const lastHaving = lastStandaloneKeywordIndex(cleaned, "having");
   const lastContext = Math.max(lastOrderBy, lastGroupBy, lastHaving);
   if (lastContext < 0) return false;
 
   const segment = cleaned.slice(lastContext);
-  return !/\b(?:where|limit|offset|union|intersect|except|join|from)\b/.test(segment);
+  if (/\b(?:where|limit|offset|union|intersect|except|join|from)\b/.test(segment)) return false;
+  // An unknown database type keeps the permissive legacy behavior; only
+  // dialects known to reject HAVING aliases lose the alias visibility.
+  if (lastContext === lastHaving && databaseType !== undefined && !supportsAliasReferenceInHaving(databaseType)) return false;
+  return true;
 }
 
 function isInGroupByContext(beforeCursor: string): boolean {
@@ -4365,7 +4384,7 @@ function isFollowedByJoin(beforeToken: string): boolean {
 }
 
 function isInTableListContext(beforeToken: string, databaseType: DatabaseType | undefined): boolean {
-  if (isInOrderOrGroupByContext(beforeToken)) return false;
+  if (isInOrderOrGroupByContext(beforeToken, databaseType)) return false;
   const cleaned = activeQueryBlockSql(maskSqlLiteralsAndComments(beforeToken, databaseType).trimEnd());
   if (!/,\s*$/.test(cleaned)) return false;
 

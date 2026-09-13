@@ -268,6 +268,23 @@ export function supportsTransaction(dbType?: string): boolean {
   return !!dbType && TRANSACTION_SUPPORTED_TYPES.includes(dbType);
 }
 
+// Engines that resolve SELECT projection aliases inside HAVING just like they
+// do in ORDER BY: the MySQL family (MySQL, Doris, StarRocks, GoldenDB,
+// ClickHouse, Databend, Manticore), the SQLite family (SQLite, rqlite, Turso,
+// Cloudflare D1), DuckDB, and BigQuery. Standard engines (PostgreSQL and its
+// relatives, SQL Server, DB2, Oracle) reject aliases there, so semantic
+// diagnostics must keep flagging such references for them.
+const HAVING_ALIAS_DATABASE_TYPES: readonly string[] = ["mysql", "doris", "starrocks", "goldendb", "clickhouse", "databend", "manticoresearch", "duckdb", "sqlite", "rqlite", "turso", "cloudflare-d1", "bigquery"];
+
+/**
+ * Returns true when SELECT aliases may be referenced from the HAVING clause,
+ * so alias completion applies there and the "Unknown column" diagnostic stays
+ * silent for a projected alias used in HAVING.
+ */
+export function supportsAliasReferenceInHaving(dbType?: string): boolean {
+  return !!dbType && HAVING_ALIAS_DATABASE_TYPES.includes(dbType);
+}
+
 /**
  * Default auto-commit mode when opening a query tab for the given database type.
  * Query tabs default to auto-commit; users can explicitly switch to manual transactions.

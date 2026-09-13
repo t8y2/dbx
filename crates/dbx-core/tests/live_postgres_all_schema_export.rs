@@ -150,6 +150,7 @@ async fn live_postgres_all_schema_export_restores_one_sql_file() {
             file_path: export_path.display().to_string(),
             continue_on_error: false,
             selected_tables: None,
+            part_cooldown_ms: 0,
         },
         &export_path,
         CancellationToken::new(),

@@ -6238,6 +6238,7 @@ export default withEnglishFallback({
     selectDatabase: "Verilənlər bazası seç",
     databasePlaceholder: "Verilənlər bazasının adı",
     options: "Seçimlər",
+    packageParts: "{count} SQL hissəsi",
     continueOnError: "Xəta olduqda davam et",
     runInBackground: "Arxa planda işlət",
     cancelling: "Ləğv edilir...",

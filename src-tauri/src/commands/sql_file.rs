@@ -41,6 +41,39 @@ pub async fn inspect_sql_file_tables(
 pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, String> {
     let path = PathBuf::from(&file_path);
     let metadata = tokio::fs::metadata(&path).await.map_err(|e| e.to_string())?;
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+    {
+        let extraction_dir = std::env::temp_dir().join(format!("dbx-sql-package-{}", uuid::Uuid::new_v4()));
+        let (package, extracted_paths) = tokio::task::spawn_blocking({
+            let path = path.clone();
+            let extraction_dir = extraction_dir.clone();
+            move || {
+                let package = dbx_core::sql_file_zip_package::extract_sql_file_zip_package(&path, &extraction_dir)?;
+                let paths = dbx_core::sql_file_zip_package::extracted_sql_zip_paths(&extraction_dir, &package)
+                    .into_iter()
+                    .map(|part| part.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
+                Ok::<_, String>((package, paths))
+            }
+        })
+        .await
+        .map_err(|error| format!("Failed to extract SQL ZIP package: {error}"))??;
+        let prefix = read_sql_file_preview(PathBuf::from(&extracted_paths[0]).as_path(), 1_000_000).await?;
+        let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
+        return Ok(SqlFilePreview {
+            file_name: path.file_name().and_then(|name| name.to_str()).unwrap_or("package.zip").to_string(),
+            file_path,
+            size_bytes: metadata.len(),
+            preview: prefix.chars().take(20_000).collect(),
+            can_execute_without_selected_database: bootstrap_analysis.can_execute_without_selected_database,
+            establishes_database_context: bootstrap_analysis.establishes_database_context,
+            package_file_paths: Some(extracted_paths),
+            package_part_count: Some(package.part_names.len()),
+        });
+    }
     let prefix = read_sql_file_preview(&path, 1_000_000).await?;
     let bootstrap_analysis = mysql_like_sql_file_bootstrap_analysis(&prefix);
     let preview = prefix.chars().take(20_000).collect();
@@ -52,6 +85,8 @@ pub async fn preview_sql_file(file_path: String) -> Result<SqlFilePreview, Strin
         preview,
         can_execute_without_selected_database: bootstrap_analysis.can_execute_without_selected_database,
         establishes_database_context: bootstrap_analysis.establishes_database_context,
+        package_file_paths: None,
+        package_part_count: None,
     })
 }
 
@@ -84,11 +119,28 @@ pub async fn execute_sql_files(
 
     let started_at = Instant::now();
     let result = execute_sql_files_inner(&app, &state, &request, &file_paths, token, started_at).await;
+    cleanup_sql_zip_package_paths(&file_paths);
     {
         let mut executions = sql_file_executions().write().await;
         remove_sql_file_execution(&mut executions, &request.execution_id);
     }
     result
+}
+
+fn cleanup_sql_zip_package_paths(file_paths: &[String]) {
+    let mut directories = std::collections::HashSet::new();
+    for path in file_paths {
+        let path = PathBuf::from(path);
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if parent.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("dbx-sql-package-")) {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    for directory in directories {
+        let _ = std::fs::remove_dir_all(directory);
+    }
 }
 
 #[tauri::command]

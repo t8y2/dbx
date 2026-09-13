@@ -171,6 +171,7 @@ async fn live_mysql_database_export_restores_dependent_views() {
             file_path: file_path.to_string_lossy().to_string(),
             continue_on_error: false,
             selected_tables: None,
+            part_cooldown_ms: 0,
         };
         execute_sql_file_path(
             &state,

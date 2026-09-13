@@ -4737,6 +4737,7 @@ export interface SqlFileRequest {
   filePath: string;
   continueOnError: boolean;
   selectedTables?: SqlFileTable[];
+  partCooldownMs?: number;
 }
 
 export interface SqlFileTable {
@@ -4747,6 +4748,7 @@ export interface SqlFileTable {
 export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
   return invoke("inspect_sql_file_tables", { filePath });
 }
+}
 
 export interface SqlFilePreview {
   fileName: string;
@@ -4755,6 +4757,8 @@ export interface SqlFilePreview {
   preview: string;
   canExecuteWithoutSelectedDatabase: boolean;
   establishesDatabaseContext?: boolean;
+  packageFilePaths?: string[];
+  packagePartCount?: number;
 }
 
 export interface SqlFileProgress {

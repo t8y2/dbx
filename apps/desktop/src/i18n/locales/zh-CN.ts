@@ -6346,6 +6346,7 @@ export default withEnglishFallback({
     selectDatabase: "选择数据库",
     databasePlaceholder: "数据库名称",
     options: "选项",
+    packageParts: "{count} 个 SQL 分片",
     continueOnError: "出错后继续",
     runInBackground: "后台运行",
     cancelling: "正在取消...",

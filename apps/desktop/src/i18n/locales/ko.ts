@@ -5703,6 +5703,7 @@ export default withEnglishFallback({
     selectDatabase: "데이터베이스 선택",
     databasePlaceholder: "데이터베이스 이름",
     options: "옵션",
+    packageParts: "SQL 파트 {count}개",
     continueOnError: "오류 시 계속",
     runInBackground: "백그라운드에서 실행",
     cancelling: "취소하는 중...",

@@ -5988,6 +5988,7 @@ export default withEnglishFallback({
     selectDatabase: "Seleccionar base de datos",
     databasePlaceholder: "Nombre de la base de datos",
     options: "Opciones",
+    packageParts: "{count} partes SQL",
     continueOnError: "Continuar en caso de error",
     runInBackground: "Ejecutar en segundo plano",
     cancelling: "Cancelando...",

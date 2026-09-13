@@ -6025,6 +6025,7 @@ export default withEnglishFallback({
     selectDatabase: "データベースを選択",
     databasePlaceholder: "データベース名",
     options: "オプション",
+    packageParts: "{count} 個のSQLパート",
     continueOnError: "エラー時に続行",
     cancelling: "キャンセル中...",
     cancel: "キャンセル",

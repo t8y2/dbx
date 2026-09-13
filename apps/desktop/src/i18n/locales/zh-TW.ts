@@ -5308,6 +5308,7 @@ export default withEnglishFallback({
     selectDatabase: "選擇資料庫",
     databasePlaceholder: "資料庫名稱",
     options: "選項",
+    packageParts: "{count} 個 SQL 分片",
     continueOnError: "錯誤後繼續",
     cancelling: "正在取消……",
     cancel: "取消",

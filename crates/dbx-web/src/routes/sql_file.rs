@@ -95,6 +95,31 @@ pub async fn preview_sql_file(
         let file_path = safe_uploaded_sql_path(&tmp_dir, &file_name)?;
         std::fs::write(&file_path, &data).map_err(|e| AppError::from(e.to_string()))?;
 
+        if file_name.to_ascii_lowercase().ends_with(".zip") {
+            let extraction_dir = tmp_dir.join(format!("package-{}", Uuid::new_v4()));
+            let package = dbx_core::sql_file_zip_package::extract_sql_file_zip_package(&file_path, &extraction_dir)
+                .map_err(AppError::from)?;
+            let paths = dbx_core::sql_file_zip_package::extracted_sql_zip_paths(&extraction_dir, &package)
+                .into_iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let content =
+                sql::decode_sql_file_bytes(&std::fs::read(&paths[0]).map_err(|e| AppError::from(e.to_string()))?)
+                    .map_err(AppError::from)?;
+            let preview: String = content.chars().take(20_000).collect();
+            let bootstrap_analysis = dbx_core::sql_file_import::mysql_like_sql_file_bootstrap_analysis(&content);
+            return Ok(Json(serde_json::json!({
+                "fileName": file_name,
+                "filePath": file_path.to_string_lossy(),
+                "sizeBytes": data.len(),
+                "preview": preview,
+                "canExecuteWithoutSelectedDatabase": bootstrap_analysis.can_execute_without_selected_database,
+                "establishesDatabaseContext": bootstrap_analysis.establishes_database_context,
+                "packageFilePaths": paths,
+                "packagePartCount": package.part_names.len(),
+            })));
+        }
+
         let size_bytes = data.len() as u64;
         let content =
             dbx_core::sql_file_import::read_sql_file_preview(&file_path, 1_000_000).await.map_err(AppError::from)?;
@@ -199,6 +224,7 @@ pub async fn execute_sql_file(
         })
         .await;
 
+        cleanup_sql_file_package_paths(&file_paths);
         cleanup_sql_file_execution(&state_clone, &req.execution_id).await;
     });
 
@@ -208,6 +234,21 @@ pub async fn execute_sql_file(
 fn send_sql_file_progress(tx: &broadcast::Sender<String>, progress: SqlFileProgress) {
     if let Ok(json) = serde_json::to_string(&progress) {
         let _ = tx.send(json);
+    }
+}
+
+fn cleanup_sql_file_package_paths(file_paths: &[PathBuf]) {
+    let mut directories = std::collections::HashSet::new();
+    for path in file_paths {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if parent.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("package-")) {
+            directories.insert(parent.to_path_buf());
+        }
+    }
+    for directory in directories {
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
 

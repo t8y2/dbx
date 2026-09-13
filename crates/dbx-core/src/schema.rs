@@ -3640,8 +3640,10 @@ done
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..PluginManifest::default()
             },
             path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility { compatible: true, ..Default::default() },
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),

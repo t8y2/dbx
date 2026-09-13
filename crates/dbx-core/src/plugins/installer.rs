@@ -843,6 +843,7 @@ fn open_install_lock(root_dir: &Path) -> Result<File, String> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(root_dir.join(INSTALL_LOCK_FILE))
         .map_err(|error| error.to_string())
 }

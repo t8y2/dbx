@@ -242,6 +242,7 @@ impl PluginRepositoryStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(self.root_dir.join(REPOSITORIES_LOCK_FILE))
             .map_err(|error| error.to_string())
     }

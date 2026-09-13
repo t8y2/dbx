@@ -3835,10 +3835,10 @@ impl AppState {
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
-                | PoolKind::PluginConnection(_)
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => false,
+                PoolKind::PluginConnection(handle) => !handle.is_running(),
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => false,
             }
@@ -4870,10 +4870,10 @@ impl AppState {
                 PoolKind::Sqlite(_)
                 | PoolKind::DuckDbWorker(_)
                 | PoolKind::ExternalDriver { .. }
-                | PoolKind::PluginConnection(_)
                 | PoolKind::MessageQueue
                 | PoolKind::Nacos
                 | PoolKind::Consul(_) => true,
+                PoolKind::PluginConnection(handle) => handle.is_running(),
                 #[cfg(feature = "mq-admin")]
                 PoolKind::Mqtt(_) => true,
                 PoolKind::Redis(redis) => match db::redis_driver::test_connection(redis).await {
@@ -6164,6 +6164,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,

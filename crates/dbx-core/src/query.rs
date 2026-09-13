@@ -6480,7 +6480,8 @@ mod tests {
     use crate::models::connection::{default_redis_key_separator, ConnectionConfig, DatabaseType};
     #[cfg(unix)]
     use crate::plugins::{
-        InstalledPlugin, PluginDriverManifest, PluginDriverSession, PluginManifest, PluginRuntimeEnv,
+        InstalledPlugin, PluginCompatibility, PluginDriverManifest, PluginDriverSession, PluginManifest,
+        PluginRuntimeEnv,
     };
     use crate::storage::Storage;
 
@@ -6807,6 +6808,10 @@ for line in sys.stdin:
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -8598,8 +8603,10 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility { compatible: true, ..Default::default() },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -8698,8 +8705,10 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility { compatible: true, ..Default::default() },
         };
         let session = Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
@@ -8808,8 +8817,10 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility { compatible: true, ..Default::default() },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -8866,8 +8877,10 @@ for line in sys.stdin:
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..Default::default()
             },
             path: dir.clone(),
+            compatibility: PluginCompatibility { compatible: true, ..Default::default() },
         };
         let session = PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default())
             .await
@@ -9327,6 +9340,10 @@ for line in sys.stdin:
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,

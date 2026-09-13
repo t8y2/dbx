@@ -18,7 +18,7 @@ use crate::connection_secrets::{
     CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TLS_SECRET_PREFIX, CASSANDRA_TRUSTSTORE_PASSWORD_KEY,
     MQ_AUTH_API_KEY_VALUE_KEY, MQ_AUTH_CLIENT_SECRET_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_SECRET_PREFIX,
     MQ_AUTH_TOKEN_KEY, MQ_TOKEN_SIGNING_KEY, MQ_TOKEN_SIGNING_SECRET_PREFIX, NACOS_AUTH_PASSWORD_KEY,
-    NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY,
+    NACOS_AUTH_SECRET_PREFIX, NACOS_RNACOS_CONSOLE_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
 };
 use crate::db::sqlite::{connect_path_create_if_missing, SqliteHandle};
 use crate::history::{
@@ -3203,6 +3203,7 @@ fn sanitized_connection_config(config: &ConnectionConfig) -> ConnectionConfig {
     scrub_mq_token_signing_secret(&mut sanitized);
     scrub_nacos_auth_secrets(&mut sanitized);
     scrub_cassandra_tls_secrets(&mut sanitized);
+    sanitized.connection_secrets.clear();
     sanitized
 }
 
@@ -3280,7 +3281,39 @@ fn persist_connection_in_tx(tx: &rusqlite::Transaction<'_>, config: &ConnectionC
     persist_mq_token_signing_secret_in_tx(tx, &config)?;
     persist_nacos_auth_secrets_in_tx(tx, &config)?;
     persist_cassandra_tls_secrets_in_tx(tx, &config)?;
+    delete_secret_prefix_in_tx(tx, &config.id, PLUGIN_CONNECTION_SECRET_PREFIX)?;
+    for (key, secret) in &config.connection_secrets {
+        if !key.is_empty() {
+            persist_secret_in_tx(tx, &config.id, &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"), secret)?;
+        }
+    }
     Ok(())
+}
+
+async fn load_plugin_connection_secrets(
+    storage: &Storage,
+    connection_id: &str,
+) -> Result<HashMap<String, String>, String> {
+    let connection_id = connection_id.to_string();
+    storage
+        .with_conn(move |conn| {
+            let like = format!("{PLUGIN_CONNECTION_SECRET_PREFIX}%");
+            let mut statement = conn
+                .prepare("SELECT key, secret FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2")
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map(params![connection_id, like], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|error| error.to_string())?;
+            let mut secrets = HashMap::new();
+            for row in rows {
+                let (key, secret) = row.map_err(|error| error.to_string())?;
+                if let Some(key) = key.strip_prefix(PLUGIN_CONNECTION_SECRET_PREFIX) {
+                    secrets.insert(key.to_string(), secret);
+                }
+            }
+            Ok(secrets)
+        })
+        .await
 }
 
 fn insert_connection_copy_next_to_source(entries: &mut Vec<serde_json::Value>, source_id: &str, copy_id: &str) -> bool {
@@ -3416,6 +3449,7 @@ impl Storage {
                 scrub_mq_token_signing_secret(&mut sanitized);
                 scrub_nacos_auth_secrets(&mut sanitized);
                 scrub_cassandra_tls_secrets(&mut sanitized);
+                sanitized.connection_secrets.clear();
                 let json = serde_json::to_string(&sanitized).map_err(|e| e.to_string())?;
 
                 tx.execute("INSERT INTO connections (id, config_json) VALUES (?1, ?2)", params![config_id, json])
@@ -3734,6 +3768,10 @@ impl Storage {
             config.redis_sentinel_password = self.get_secret(&id, "redis_sentinel_password").await?.unwrap_or_default();
             config.connection_string = self.get_secret(&id, "connection_string").await?;
             config.init_script = self.get_secret(&id, "init_script").await?;
+            let stored_plugin_secrets = load_plugin_connection_secrets(self, &id).await?;
+            if !stored_plugin_secrets.is_empty() {
+                config.connection_secrets = stored_plugin_secrets;
+            }
             let needs_mq_auth_rewrite = self.hydrate_mq_auth_secrets(&id, &mut config).await?;
             let needs_mq_token_signing_rewrite = self.hydrate_mq_token_signing_secret(&id, &mut config).await?;
             let needs_nacos_auth_rewrite = self.hydrate_nacos_auth_secret(&id, &mut config).await?;
@@ -4274,6 +4312,21 @@ impl Storage {
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    pub async fn delete_secret_prefix(&self, connection_id: &str, key_prefix: &str) -> Result<(), String> {
+        let connection_id = connection_id.to_string();
+        let key_prefix = key_prefix.to_string();
+        self.with_conn(move |conn| {
+            let like = format!("{key_prefix}%");
+            conn.execute(
+                "DELETE FROM connection_secrets WHERE connection_id = ?1 AND key LIKE ?2",
+                params![connection_id, like],
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
         })
         .await
     }
@@ -5301,7 +5354,7 @@ mod tests {
     use crate::connection_secrets::NACOS_RNACOS_CONSOLE_PASSWORD_KEY;
     use crate::connection_secrets::{
         CASSANDRA_KEYSTORE_PASSWORD_KEY, CASSANDRA_TRUSTSTORE_PASSWORD_KEY, MQ_AUTH_PASSWORD_KEY, MQ_AUTH_TOKEN_KEY,
-        MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY,
+        MQ_TOKEN_SIGNING_KEY, NACOS_AUTH_PASSWORD_KEY, PLUGIN_CONNECTION_SECRET_PREFIX,
     };
     use crate::history::{HistoryConnectionFilter, HistoryDatabaseFilter, HistoryEntry, HistorySearchRequest};
     use crate::models::connection::{
@@ -6031,6 +6084,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn save_connections_moves_plugin_secrets_to_secret_table_and_restores_them() {
+        let path = temp_db_path("plugin-secrets");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut config = plain_connection("plugin", "");
+        config.db_type = DatabaseType::Plugin;
+        config.plugin_id = Some("example.plugin".to_string());
+        config.plugin_connection_provider = Some("example.connection".to_string());
+        config.connection_secrets.insert("api_token".to_string(), "plugin-secret".to_string());
+
+        storage.save_connections(std::slice::from_ref(&config)).await.unwrap();
+
+        let raw_json = raw_connection_json(&storage, &config.id).await;
+        assert!(!raw_json.contains("plugin-secret"));
+        assert_eq!(
+            storage
+                .get_secret(&config.id, &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}api_token"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("plugin-secret")
+        );
+        assert_eq!(storage.load_connections().await.unwrap()[0].connection_secrets, config.connection_secrets);
+
+        let mut cleared = config;
+        cleared.connection_secrets.clear();
+        storage.save_connections(std::slice::from_ref(&cleared)).await.unwrap();
+        assert_eq!(
+            storage.get_secret(&cleared.id, &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}api_token")).await.unwrap(),
+            None
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn switching_save_password_off_removes_stored_password() {
         let path = temp_db_path("save-password-switch-off");
         let storage = Storage::open(&path).await.unwrap();
@@ -6108,6 +6196,10 @@ mod tests {
                     "token": token
                 }
             })),
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -6179,6 +6271,10 @@ mod tests {
                     "password": password
                 }
             })),
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: Default::default(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,

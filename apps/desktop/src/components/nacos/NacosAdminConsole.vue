@@ -48,7 +48,7 @@ import {
 import { createNacosNamespaceRequestGuard, subscribeNacosNamespacesChanged, type NacosNamespacesChangedDetail } from "@/lib/nacos/nacosNamespaceCache";
 import { nacosInstanceMatchesPatch, nacosInstanceRefIdentity, nacosIpAddressIsValid, nacosServiceDetailMatches } from "@/lib/nacos/nacosServiceManagement";
 import { loadReadableNacosNamespaces, nacosNamespaceIdentity } from "@/lib/nacos/nacosNamespaceVisibility";
-import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
+import { clipboardLineEndings, copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { trimmedSelectionLayer } from "@/lib/editor/codemirrorTrimmedSelectionLayer";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
@@ -1188,7 +1188,8 @@ async function copyConfigIdentity() {
     await copyToClipboard(text);
     try {
       const copiedText = await readTextFromClipboard();
-      if (copiedText !== text) {
+      // The clipboard holds the platform-normalized text (CRLF on Windows).
+      if (copiedText !== text && copiedText !== clipboardLineEndings(text)) {
         throw new Error(t("nacos.copyVerifyFailed"));
       }
     } catch (verifyError) {

@@ -1444,7 +1444,7 @@ watch(driverStoreTab, (tab) => {
       <div class="driver-store-container max-w-4xl mx-auto px-6 py-6">
         <Tabs v-model="driverStoreTab" default-value="agent" class="driver-store-tabs-root">
           <div class="driver-store-header flex items-center justify-between">
-            <TabsList class="driver-store-tabs grid w-[380px] grid-cols-3">
+            <TabsList class="driver-store-tabs grid w-[360px] grid-cols-3">
               <TabsTrigger value="agent" class="gap-1.5 relative">
                 {{ t("driverStore.agentDrivers") }}
                 <span v-if="agentTabUpdateCount > 0" class="inline-block h-2 w-2 rounded-full bg-red-500" />
@@ -2263,8 +2263,8 @@ watch(driverStoreTab, (tab) => {
 
 .driver-store-tabs {
   display: grid !important;
-  width: 480px !important;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+  width: 360px !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
 }
 
 .driver-store-tabs-root {

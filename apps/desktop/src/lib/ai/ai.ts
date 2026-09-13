@@ -220,8 +220,9 @@ export async function runAiStream(input: AiRequestInput, history: api.AiMessage[
 export async function runAgentStream(input: AiRequestInput, history: api.AiMessage[] | undefined, onEvent: (event: AgentEvent) => void, sessionId?: string, custom?: CustomPromptContext): Promise<string> {
   const { messages, systemPrompt, taskContract, maxTokens } = buildAgentRequest(input, history, custom);
   const sid = sessionId || uuid();
+  let terminalError: string | undefined;
 
-  return api.aiAgentStream(
+  const result = await api.aiAgentStream(
     sid,
     {
       config: input.config,
@@ -234,7 +235,10 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.context.database,
     input.context.schema,
     input.context.databaseType,
-    onEvent,
+    (event) => {
+      if (event.type === "error") terminalError ??= event.message;
+      onEvent(event);
+    },
     input.mode || "ask",
     input.allowWriteSql || false,
     input.confirmedWriteSql,
@@ -242,6 +246,8 @@ export async function runAgentStream(input: AiRequestInput, history: api.AiMessa
     input.confirmedDatabase,
     input.confirmedSchema,
   );
+  if (terminalError !== undefined) throw new Error(terminalError);
+  return result;
 }
 
 export function buildUserPrompt(action: AiAction, context: AiContext, instruction: string, isZh: boolean): string {

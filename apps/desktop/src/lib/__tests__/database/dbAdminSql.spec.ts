@@ -23,6 +23,8 @@ import {
   damengDuplicateTableCreateOptions,
   duplicateTableStructureRequiresScript,
   oracleDuplicateTableCreateOptions,
+  sqlServerClonePrimaryKeyConstraintName,
+  SQLSERVER_IDENTIFIER_MAX_LENGTH,
   supportsNativeMysqlAutoIncrement,
 } from "@/lib/database/dbAdminSql";
 
@@ -442,8 +444,50 @@ describe("buildDuplicateTableStructurePlan", () => {
     });
 
     expect(apiMock.listIndexes).toHaveBeenCalledWith("mssql-1", "app", "dbo", "orders", undefined);
-    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "sqlserver", primaryKeyColumns: ["ID", "SEQ"] }));
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ databaseType: "sqlserver", primaryKeyColumns: ["ID", "SEQ"], primaryKeyConstraintName: "PK_orders_copy" }));
     expect(plan.executeAsScript).toBe(true);
+  });
+
+  it("renames the SQL Server clone PK when it would collide with a source index", async () => {
+    apiMock.listIndexes.mockResolvedValue([
+      { name: "PK_ORDERS", columns: ["ID"], is_unique: true, is_primary: true },
+      { name: "PK_orders_copy", columns: ["FLAG"], is_unique: false, is_primary: false },
+    ]);
+    apiMock.buildDuplicateTableStructureSql.mockResolvedValue("");
+
+    await buildDuplicateTableStructurePlan({
+      connectionId: "mssql-1",
+      database: "app",
+      databaseType: "sqlserver",
+      schema: "dbo",
+      sourceName: "orders",
+      targetName: "orders_copy",
+    });
+
+    expect(apiMock.buildDuplicateTableStructureSql).toHaveBeenCalledWith(expect.objectContaining({ primaryKeyConstraintName: "PK_orders_copy_2" }));
+  });
+
+  it("caps the SQL Server clone PK name at the 128-character identifier limit", () => {
+    const indexes = [{ name: "IDX", columns: ["ID"], is_unique: false, is_primary: false }];
+    const longTarget = `orders_${"x".repeat(200)}`;
+    const name = sqlServerClonePrimaryKeyConstraintName(indexes, longTarget);
+
+    expect(name.length).toBeLessThanOrEqual(SQLSERVER_IDENTIFIER_MAX_LENGTH);
+    expect(name.startsWith("PK_orders_")).toBe(true);
+  });
+
+  it("keeps the dedup suffix within the identifier limit for long targets", () => {
+    const longTarget = `orders_${"x".repeat(200)}`;
+    const colliding = `PK_${longTarget}`.slice(0, SQLSERVER_IDENTIFIER_MAX_LENGTH);
+    const indexes = [
+      { name: "IDX", columns: ["ID"], is_unique: false, is_primary: false },
+      { name: colliding, columns: ["FLAG"], is_unique: false, is_primary: false },
+    ];
+
+    const name = sqlServerClonePrimaryKeyConstraintName(indexes as never, longTarget);
+
+    expect(name.length).toBeLessThanOrEqual(SQLSERVER_IDENTIFIER_MAX_LENGTH);
+    expect(name.endsWith("_2")).toBe(true);
   });
 
   it("keeps primary-key-free SQL Server clones on a single statement", async () => {

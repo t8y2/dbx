@@ -208,6 +208,12 @@ pub struct DuplicateTableStructureSqlOptions {
     /// needs an explicit `ALTER TABLE ... ADD CONSTRAINT ... PRIMARY KEY`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub primary_key_columns: Vec<String>,
+    /// Pre-computed primary-key constraint name for the clone. Callers derive
+    /// it from the source index names so the generated `PK_{target}` respects
+    /// SQL Server's 128-character identifier limit and avoids a name that
+    /// already exists on the source table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key_constraint_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier_quote: Option<String>,
 }
@@ -785,7 +791,11 @@ pub fn build_duplicate_table_structure_sql(options: DuplicateTableStructureSqlOp
     // would silently lose its primary key (t8y2/dbx#8931). Recreate it from the source metadata.
     let mut constraint_sql = Vec::new();
     if options.database_type == Some(DatabaseType::SqlServer) && !options.primary_key_columns.is_empty() {
-        let constraint_name = quote_table_identifier(options.database_type, &format!("PK_{}", options.target_name));
+        let raw_constraint_name: String = match options.primary_key_constraint_name.as_deref() {
+            Some(name) => name.to_string(),
+            None => format!("PK_{}", options.target_name),
+        };
+        let constraint_name = quote_table_identifier(options.database_type, &raw_constraint_name);
         let key_columns = options
             .primary_key_columns
             .iter()
@@ -2144,6 +2154,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE `users_copy` LIKE `users`;"
@@ -2157,6 +2168,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
@@ -2170,6 +2182,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE `dbx_demo`.`connection_test_copy` LIKE `dbx_demo`.`connection_test`;"
@@ -2183,6 +2196,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE `dbx_demo`.`orders_copy` LIKE `dbx_demo`.`orders`;"
@@ -2196,6 +2210,7 @@ mod tests {
                 table_comment: Some("  Customer's orders; archive  ".to_string()),
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"customer_orders_copy\" (LIKE \"public\".\"customer_orders\" INCLUDING ALL);\nCOMMENT ON TABLE \"public\".\"customer_orders_copy\" IS '  Customer''s orders; archive  ';"
@@ -2209,6 +2224,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"public\".\"users_copy\" (LIKE \"public\".\"users\" INCLUDING ALL);"
@@ -2222,6 +2238,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "SELECT TOP 0 * INTO [dbo].[users_copy] FROM [dbo].[users];"
@@ -2235,6 +2252,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"HR\".USERS_COPY AS SELECT * FROM \"HR\".\"USERS\" WHERE 1=0"
@@ -2248,6 +2266,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "SELECT TOP 0 * INTO [dbo].[users_copy] FROM [dbo].[users];"
@@ -2261,9 +2280,24 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec!["id".to_string(), "seq no".to_string()],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "SELECT TOP 0 * INTO [users_copy] FROM [users];\nALTER TABLE [users_copy] ADD CONSTRAINT [PK_users_copy] PRIMARY KEY ([id], [seq no]);"
+        );
+        assert_eq!(
+            build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                schema: None,
+                source_name: "users".to_string(),
+                target_name: "users_copy".to_string(),
+                table_comment: None,
+                column_comments: vec![],
+                primary_key_columns: vec!["id".to_string()],
+                primary_key_constraint_name: Some("PK_users_copy_2".to_string()),
+                identifier_quote: None,
+            }),
+            "SELECT TOP 0 * INTO [users_copy] FROM [users];\nALTER TABLE [users_copy] ADD CONSTRAINT [PK_users_copy_2] PRIMARY KEY ([id]);"
         );
         let dameng_sql = build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
             database_type: Some(DatabaseType::Dameng),
@@ -2280,6 +2314,7 @@ mod tests {
                 DuplicateTableColumnComment { name: "EMPTY".to_string(), comment: " \t\n".to_string() },
             ],
             primary_key_columns: vec![],
+            primary_key_constraint_name: None,
             identifier_quote: None,
         });
         assert_eq!(
@@ -2304,6 +2339,7 @@ mod tests {
             table_comment: Some("line1\\path\nline2".to_string()),
             column_comments: vec![],
             primary_key_columns: vec![],
+            primary_key_constraint_name: None,
             identifier_quote: None,
         });
         assert_eq!(
@@ -2320,6 +2356,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"APP\".\"UsersCopy\" AS SELECT * FROM \"APP\".\"USERS\" WHERE 1=0"
@@ -2339,6 +2376,7 @@ mod tests {
                 table_comment: Some("owner\\'s; archive".to_string()),
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             });
             let expected_literal = if database_type == DatabaseType::Redshift {
@@ -2364,6 +2402,7 @@ mod tests {
                 table_comment: None,
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE \"SQLUSER\".\"tb_a_copy\" AS SELECT * FROM \"SQLUSER\".\"tb_a\" WHERE 1=0"
@@ -2377,6 +2416,7 @@ mod tests {
                 table_comment: Some("ignored by QuestDB".to_string()),
                 column_comments: vec![],
                 primary_key_columns: vec![],
+                primary_key_constraint_name: None,
                 identifier_quote: None,
             }),
             "CREATE TABLE `users_copy` (LIKE `users`);"

@@ -7,6 +7,7 @@ import type { TreeNode } from "../../apps/desktop/src/types/database.ts";
 const treeItem = readFileSync("apps/desktop/src/components/sidebar/TreeItem.vue", "utf8");
 const runtimeHost = readFileSync("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue", "utf8");
 const connectionTree = readFileSync("apps/desktop/src/components/sidebar/ConnectionTree.vue", "utf8");
+const sidebarSearchTree = readFileSync("apps/desktop/src/lib/sidebar/sidebarSearchTree.ts", "utf8");
 const connectionStore = readFileSync("apps/desktop/src/stores/connectionStore.ts", "utf8");
 
 test("sidebar rows retain database-specific node affordances", () => {
@@ -87,8 +88,8 @@ test("async tree expansion does not restore a stale rendered clone state", () =>
 });
 
 test("tree filters retain a temporary expansion state", () => {
-  assert.match(connectionTree, /return \{ \.\.\.node, children: matchingChildren \};/);
-  assert.doesNotMatch(connectionTree, /children: matchingChildren,\s*isExpanded:\s*true/);
+  assert.match(sidebarSearchTree, /return \{ \.\.\.node, children: matchingChildren \};/);
+  assert.doesNotMatch(sidebarSearchTree, /children: matchingChildren,\s*isExpanded:\s*true/);
   assert.match(connectionTree, /function onSearchToggle\(node: TreeNode\) \{\s*if \(!isTreeSearchFiltering\.value \|\| !node\.children\) return;/);
   // The search guard must stay the first thing in onNodeToggled (filter toggles
   // must never sync back to the live tree); side-effect-free diagnostics may be

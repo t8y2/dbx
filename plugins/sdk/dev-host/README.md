@@ -42,6 +42,8 @@ When `ui_watch` is configured, its stdout must emit a standalone `DBX_UI_BUILD_S
 
 Workbench contributions can be opened without a connection, including frontend-only plugins. Connection providers generate forms from declared fields, defaults, options and bindings. Port zero remains valid at the framework layer; plugins validate their own connection semantics.
 
+Workbench entries, tabs and connection rows display their contribution's `icon`, falling back to the plugin-level `icon`. Icon paths are local to the plugin project (not the UI root); remote URLs and paths escaping the project are rejected. Missing or unreadable icons retain the generic host icons. Custom connection icons retain a separate connection-status dot.
+
 Connection testing, connecting and disconnecting use the standard lifecycle methods. Custom RPC methods and results are forwarded without interpreting their business meaning. Workbench tabs are keyed by contribution and optional connection ID, retain their iframe when switched, and reuse an existing tab when opened again. Closing the last tab for a connection disconnects it after confirmation.
 
 Lifecycle replies with `success: false` are failures, matching the real host. Browser pages have independent workbench ownership. After a page's event stream disconnects, its frames remain for a 30-second reconnect grace period, then are removed; connections still used by another page remain open. Saved connection configuration is unaffected. Manifest localization is performed only by the shell; bootstrap returns one unmodified Manifest.

@@ -119,7 +119,7 @@ dependencies = [
 
 [[package]]
 name = "dbx-plugin-cli"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "dbx-plugin-packager",
  "semver",

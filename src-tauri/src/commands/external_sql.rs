@@ -156,7 +156,7 @@ fn sql_file_path_from_arg(arg: &str, cwd: &Path) -> Option<String> {
         return None;
     }
 
-    let path = PathBuf::from(arg);
+    let path = PathBuf::from(super::launch_args::normalize_launch_path_arg(arg)?);
     if !is_sql_file_path(&path) {
         return None;
     }
@@ -366,6 +366,13 @@ mod tests {
         let paths = sql_file_paths_from_args(["queries/report.sql"], Path::new("/work"));
 
         assert_eq!(paths, vec!["/work/queries/report.sql"]);
+    }
+
+    #[test]
+    fn accepts_sql_file_args_passed_as_file_urls() {
+        let paths = sql_file_paths_from_args(["file:///tmp/a.sql", "file:///tmp/my%20report.sql"], Path::new("/work"));
+
+        assert_eq!(paths, vec!["/tmp/a.sql", "/tmp/my report.sql"]);
     }
 
     #[test]
